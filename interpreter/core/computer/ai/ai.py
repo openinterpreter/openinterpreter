@@ -78,16 +78,36 @@ def chunk_responses(responses, tokens, llm):
 
 
 def fast_llm(llm, system_message, user_message):
+    """
+    Creates a temporary chat context to process a single query, then restores the original chat state.
+
+    This is used for auxiliary queries (like summarization) that shouldn't affect the main conversation.
+    Particularly important for local LLMs where creating new instances is expensive.
+
+    Args:
+        llm: The LLM instance to use (typically computer.interpreter.llm)
+        system_message: The system prompt for this specific query
+        user_message: The user message/content to process
+
+    Returns:
+        str: The LLM's response content
+
+    Note:
+        This function temporarily replaces the LLM's conversation state (messages and system prompt),
+        runs the query, then restores the original state. This allows us to run one-off queries
+        without disrupting the main conversation context.
+    """
     old_messages = llm.interpreter.messages
     old_system_message = llm.interpreter.system_message
     try:
         llm.interpreter.system_message = system_message
         llm.interpreter.messages = []
         response = llm.interpreter.chat(user_message)
+        return response[-1].get("content")
     finally:
+        # Always restore the old state (before returning)
         llm.interpreter.messages = old_messages
         llm.interpreter.system_message = old_system_message
-        return response[-1].get("content")
 
 
 def query_map_chunks(chunks, llm, query):
