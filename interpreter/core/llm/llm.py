@@ -307,11 +307,12 @@ Continuing...
         # Forward reasoning effort if set
         if self.reasoning_effort:
             # OpenAI-compatible shape (e.g., o4)
-            params["reasoning"] = {"effort": self.reasoning_effort}
+            #params["reasoning"] = {"effort": self.reasoning_effort}
             # LiteLLM also accepts flat 'reasoning_effort' for some routes
             params["reasoning_effort"] = self.reasoning_effort
             # Tell LiteLLM it's allowed to forward these to OpenAI
-            params["allowed_openai_params"] = ["reasoning_effort", "reasoning"]
+            #params["allowed_openai_params"] = ["reasoning_effort", "reasoning"]
+            params["allowed_openai_params"] = ["reasoning_effort"]
 
         # Set some params directly on LiteLLM
         if self.max_budget:
@@ -443,9 +444,10 @@ def fixed_litellm_completions(**params):
         )
         # preserve custom params for hosted 'i' model (needs conversation_id)
         litellm.drop_params = False
-    elif any(k in params for k in ("reasoning_effort", "reasoning")):
+    #elif any(k in params for k in ("reasoning_effort", "reasoning")):
+    elif any(k in params for k in ("reasoning_effort",)):
         # keep custom reasoning-related params
-        litellm.drop_params = False
+        #litellm.drop_params = False
     else:
         litellm.drop_params = True
 
