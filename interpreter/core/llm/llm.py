@@ -1,5 +1,7 @@
 import os
 
+from fastapi import params
+
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 import sys
 
@@ -308,6 +310,8 @@ Continuing...
             params["reasoning"] = {"effort": self.reasoning_effort}
             # LiteLLM also accepts flat 'reasoning_effort' for some routes
             params["reasoning_effort"] = self.reasoning_effort
+            # Tell LiteLLM it's allowed to forward these to OpenAI
+            params["allowed_openai_params"] = ["reasoning_effort", "reasoning"]
 
         # Set some params directly on LiteLLM
         if self.max_budget:
