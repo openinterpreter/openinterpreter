@@ -445,7 +445,7 @@ def fixed_litellm_completions(**params):
         # preserve custom params for hosted 'i' model (needs conversation_id)
         litellm.drop_params = False
     #elif any(k in params for k in ("reasoning_effort", "reasoning")):
-    elif any(k in params for k in ("reasoning_effort",)):
+    #elif any(k in params for k in ("reasoning_effort",)):
         # keep custom reasoning-related params
         #litellm.drop_params = False
     else:
