@@ -73,6 +73,9 @@ class Llm:
         # Budget manager powered by LiteLLM
         self.max_budget = None
 
+        # Reasoning effort passthrough (providers that support it: e.g., OpenAI o4)
+        self.reasoning_effort = None  # "low" | "medium" | "high"
+
     def run(self, messages):
         """
         We're responsible for formatting the call into the llm.completions object,
@@ -299,6 +302,13 @@ Continuing...
         if hasattr(self.interpreter, "conversation_id"):
             params["conversation_id"] = self.interpreter.conversation_id
 
+        # Forward reasoning effort if set
+        if self.reasoning_effort:
+            # OpenAI-compatible shape (e.g., o4)
+            params["reasoning"] = {"effort": self.reasoning_effort}
+            # LiteLLM also accepts flat 'reasoning_effort' for some routes
+            params["reasoning_effort"] = self.reasoning_effort
+
         # Set some params directly on LiteLLM
         if self.max_budget:
             litellm.max_budget = self.max_budget
@@ -427,6 +437,11 @@ def fixed_litellm_completions(**params):
         litellm.drop_params = (
             False  # If we don't do this, litellm will drop this param!
         )
+        # preserve custom params for hosted 'i' model (needs conversation_id)
+        litellm.drop_params = False
+    elif any(k in params for k in ("reasoning_effort", "reasoning")):
+        # keep custom reasoning-related params
+        litellm.drop_params = False
     else:
         litellm.drop_params = True
 

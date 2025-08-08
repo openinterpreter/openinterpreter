@@ -80,6 +80,7 @@ class OpenInterpreter:
         multi_line=True,
         contribute_conversation=False,
         plain_text_display=False,
+        reasoning_effort=None,  # "minimal" |"low" | "medium" | "high"
     ):
         # State
         self.messages = [] if messages is None else messages
@@ -128,6 +129,10 @@ class OpenInterpreter:
 
         # LLM
         self.llm = Llm(self) if llm is None else llm
+
+        # Forward reasoning_effort to LLM
+        if reasoning_effort is not None and hasattr(self.llm, "reasoning_effort"):
+            self.llm.reasoning_effort = reasoning_effort
 
         # These are LLM related
         self.system_message = system_message
