@@ -1,7 +1,5 @@
 import os
 
-#from fastapi import params
-
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 import sys
 
