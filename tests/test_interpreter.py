@@ -645,11 +645,13 @@ def test_server():
 
     # Get the current event loop and run the test function
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(test_fastapi_server())
-    # Kill server process
-    process.terminate()
-    os.kill(process.pid, signal.SIGKILL)  # Send SIGKILL signal
-    process.join()
+    try:
+        loop.run_until_complete(test_fastapi_server())
+    finally:
+        # Kill server process
+        process.terminate()
+        os.kill(process.pid, signal.SIGKILL)  # Send SIGKILL signal
+        process.join()
 
 
 @pytest.mark.skip(reason="Mac only")

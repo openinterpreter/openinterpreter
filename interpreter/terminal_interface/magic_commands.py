@@ -314,6 +314,18 @@ def handle_magic_command(self, user_input):
     # Handle shell
     if user_input.startswith("%%"):
         code = user_input[2:].strip()
+        
+        # Validate and sanitize shell command input
+        if not code:
+            self.display_message("> Error: Empty shell command")
+            return
+        
+        # Block dangerous commands
+        dangerous_patterns = ['rm -rf', 'format', 'del /f', 'shutdown', 'reboot', 'mkfs']
+        if any(pattern in code.lower() for pattern in dangerous_patterns):
+            self.display_message("> Error: Potentially dangerous command blocked")
+            return
+            
         self.computer.run("shell", code, stream=False, display=True)
         print("")
         return

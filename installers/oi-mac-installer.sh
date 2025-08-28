@@ -42,7 +42,7 @@ else
         Darwin)
             echo "Installing Git on macOS..."
             # Install Git using Xcode Command Line Tools
-            xcode-select --install
+            xcode-select --install || echo "Xcode Command Line Tools installation failed or already installed"
             ;;
         *)
             echo "Unsupported OS: $OS"
