@@ -101,6 +101,11 @@ def handle_verbose(self, arguments=None):
 
 
 def handle_debug(self, arguments=None):
+    # Check if debug access is authorized
+    if not getattr(self, 'allow_debug', False):
+        self.display_message("> Error: Debug mode access not authorized")
+        return
+        
     if arguments == "" or arguments == "true":
         self.display_message("> Entered debug mode")
         print("\n\nCurrent messages:\n")

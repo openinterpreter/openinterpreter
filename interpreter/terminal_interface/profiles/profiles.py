@@ -572,7 +572,16 @@ def apply_profile_to_object(obj, profile):
 
 
 def open_storage_dir(directory):
+    # Validate directory parameter to prevent command injection
+    import re
+    if not re.match(r'^[a-zA-Z0-9._-]+$', directory):
+        raise ValueError(f"Invalid directory name: {directory}")
+        
     dir = os.path.join(oi_dir, directory)
+    
+    # Ensure the directory exists and is within the expected path
+    if not os.path.exists(dir) or not dir.startswith(oi_dir):
+        raise ValueError(f"Directory does not exist or is outside allowed path: {dir}")
 
     print(f"Opening {directory} directory ({dir})...")
 
