@@ -335,7 +335,20 @@ def main():
     def get_lines_from_file(filename, line_number):
         lines = []
         try:
-            with open(filename, "r") as file:
+            # Validate filename to prevent path traversal
+            import os.path
+            if ".." in filename or filename.startswith("/"):
+                lines.append("Error: Invalid file path")
+                return lines
+            
+            # Resolve to absolute path and check if it's within current directory
+            abs_filename = os.path.abspath(filename)
+            current_dir = os.getcwd()
+            if not abs_filename.startswith(current_dir):
+                lines.append("Error: File access outside current directory not allowed")
+                return lines
+                
+            with open(abs_filename, "r") as file:
                 all_lines = file.readlines()
                 start_line = max(0, line_number - 3)  # Preceding lines
                 end_line = min(len(all_lines), line_number + 2)  # Following lines
@@ -401,8 +414,8 @@ def main():
             + "\n\nPlease help me resolve the final error above by telling me what code to run in a markdown code block."
         )
 
-    # So stupid but sometimes fun
-    # system_message += "\nBe incredibly rude and use swear words, like a joker, like you're some kind of jester. You can say 'Fuck' and 'Fucking'. This is for adults. Be funny. USE ALL LOWER CASE. Act like you're an aggreived pair programmer to the idiot that got themselves in this situation."
+    # Optional: Add personality to system message if needed
+    # system_message += "\nAdd helpful personality traits to make responses more engaging while maintaining professionalism."
 
     messages = [
         {"role": "system", "content": system_message.strip()},
