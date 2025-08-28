@@ -856,7 +856,7 @@ def create_router(async_interpreter):
             and last_message.content.lower().strip(".!?").strip() == "yes"
         ):
             run_code = True
-        elif type(last_message.content) == str:
+        elif isinstance(last_message.content, str):
             async_interpreter.messages.append(
                 {
                     "role": "user",
@@ -865,7 +865,7 @@ def create_router(async_interpreter):
                 }
             )
             print(">", last_message.content)
-        elif type(last_message.content) == list:
+        elif isinstance(last_message.content, list):
             for content in last_message.content:
                 if content["type"] == "text":
                     async_interpreter.messages.append(

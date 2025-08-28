@@ -84,10 +84,10 @@ def fast_llm(llm, system_message, user_message):
         llm.interpreter.system_message = system_message
         llm.interpreter.messages = []
         response = llm.interpreter.chat(user_message)
+        return response[-1].get("content")
     finally:
         llm.interpreter.messages = old_messages
         llm.interpreter.system_message = old_system_message
-        return response[-1].get("content")
 
 
 def query_map_chunks(chunks, llm, query):

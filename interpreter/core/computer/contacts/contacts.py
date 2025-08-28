@@ -33,10 +33,10 @@ class Contacts:
         if "Can’t get person" in stderr or not stout:
             names = self.get_full_names_from_first_name(contact_name)
             if "No contacts found" in names or not names:
-                raise Exception("Contact not found")
+                raise ValueError("Contact not found")
             else:
                 # Language model friendly error message
-                raise Exception(
+                raise ValueError(
                     f"A contact for '{contact_name}' was not found, perhaps one of these similar contacts might be what you are looking for? {names} \n Please try again and provide a more specific contact name."
                 )
         else:

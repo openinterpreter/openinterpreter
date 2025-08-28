@@ -269,7 +269,7 @@ class Display:
                     )
                     return response.json()
                 except Exception as e:
-                    raise Exception(
+                    raise ConnectionError(
                         str(e)
                         + "\n\nIcon locating API not available, or we were unable to find the icon. Please try another method to find this icon."
                     )
@@ -334,7 +334,7 @@ class Display:
         try:
             return pytesseract_get_text(screenshot)
         except:
-            raise Exception(
+            raise RuntimeError(
                 "Failed to find text locally.\n\nTo find text in order to use the mouse, please make sure you've installed `pytesseract` along with the Tesseract executable (see this Stack Overflow answer for help installing Tesseract: https://stackoverflow.com/questions/50951955/pytesseract-tesseractnotfound-error-tesseract-is-not-installed-or-its-not-i)."
             )
 

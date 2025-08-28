@@ -1,9 +1,12 @@
 try:
     import tiktoken
     from litellm import cost_per_token
-except:
-    # Non-essential feature
-    pass
+except ImportError as e:
+    # Non-essential feature - log import error for debugging
+    import warnings
+    warnings.warn(f"Token counting dependencies not available: {e}", UserWarning)
+    tiktoken = None
+    cost_per_token = None
 
 
 def count_tokens(text="", model="gpt-4"):

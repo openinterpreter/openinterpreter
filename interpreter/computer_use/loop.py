@@ -110,6 +110,39 @@ if platform.system() == "Darwin":
 </IMPORTANT>"""
 
 
+async def _process_response_chunks(raw_response, response_content):
+    """Process response chunks and yield formatted output."""
+    current_block = None
+    
+    for chunk in raw_response:
+        if isinstance(chunk, BetaRawContentBlockStartEvent):
+            current_block = chunk.content_block
+        elif isinstance(chunk, BetaRawContentBlockDeltaEvent):
+            if chunk.delta.type == "text_delta":
+                print(f"{chunk.delta.text}", end="", flush=True)
+                yield {"type": "chunk", "chunk": chunk.delta.text}
+                await asyncio.sleep(0)
+                if current_block and current_block.type == "text":
+                    current_block.text += chunk.delta.text
+            elif chunk.delta.type == "input_json_delta":
+                print(f"{chunk.delta.partial_json}", end="", flush=True)
+                if current_block and current_block.type == "tool_use":
+                    if not hasattr(current_block, "partial_json"):
+                        current_block.partial_json = ""
+                    current_block.partial_json += chunk.delta.partial_json
+        elif isinstance(chunk, BetaRawContentBlockStopEvent):
+            if current_block:
+                if hasattr(current_block, "partial_json"):
+                    current_block.input = json.loads(current_block.partial_json)
+                    delattr(current_block, "partial_json")
+                else:
+                    print("\n")
+                    yield {"type": "chunk", "chunk": "\n"}
+                    await asyncio.sleep(0)
+                response_content.append(current_block)
+                current_block = None
+
+
 async def sampling_loop(
     *,
     model: str,
@@ -162,37 +195,8 @@ async def sampling_loop(
         response_content = []
         current_block = None
 
-        for chunk in raw_response:
-            if isinstance(chunk, BetaRawContentBlockStartEvent):
-                current_block = chunk.content_block
-            elif isinstance(chunk, BetaRawContentBlockDeltaEvent):
-                if chunk.delta.type == "text_delta":
-                    print(f"{chunk.delta.text}", end="", flush=True)
-                    yield {"type": "chunk", "chunk": chunk.delta.text}
-                    await asyncio.sleep(0)
-                    if current_block and current_block.type == "text":
-                        current_block.text += chunk.delta.text
-                elif chunk.delta.type == "input_json_delta":
-                    print(f"{chunk.delta.partial_json}", end="", flush=True)
-                    if current_block and current_block.type == "tool_use":
-                        if not hasattr(current_block, "partial_json"):
-                            current_block.partial_json = ""
-                        current_block.partial_json += chunk.delta.partial_json
-            elif isinstance(chunk, BetaRawContentBlockStopEvent):
-                if current_block:
-                    if hasattr(current_block, "partial_json"):
-                        # Finished a tool call
-                        # print()
-                        current_block.input = json.loads(current_block.partial_json)
-                        # yield {"type": "chunk", "chunk": current_block.input}
-                        delattr(current_block, "partial_json")
-                    else:
-                        # Finished a message
-                        print("\n")
-                        yield {"type": "chunk", "chunk": "\n"}
-                        await asyncio.sleep(0)
-                    response_content.append(current_block)
-                    current_block = None
+        async for processed_chunk in _process_response_chunks(raw_response, response_content):
+            yield processed_chunk
 
         response = BetaMessage(
             id=str(uuid.uuid4()),
