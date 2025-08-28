@@ -342,6 +342,11 @@ class Display:
 def take_screenshot_to_pil(screen=0, combine_screens=True):
     # Get information about all screens
     monitors = screeninfo.get_monitors()
+    
+    # Validate screen parameter to prevent unauthorized access
+    if screen < -1 or screen >= len(monitors):
+        raise ValueError(f"Invalid screen index: {screen}. Valid range: -1 to {len(monitors)-1}")
+    
     if screen == -1:  # All screens
         # Take a screenshot of each screen and save them in a list
         screenshots = [

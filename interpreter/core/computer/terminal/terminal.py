@@ -48,6 +48,12 @@ class Terminal:
         self._active_languages = {}
 
     def sudo_install(self, package):
+        # Validate package name to prevent command injection
+        import re
+        if not re.match(r'^[a-zA-Z0-9._+-]+$', package):
+            print(f"Invalid package name: {package}")
+            return False
+            
         try:
             # First, try to install without sudo
             subprocess.run(['apt', 'install', '-y', package], check=True)
