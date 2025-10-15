@@ -46,9 +46,9 @@ def detect_complete_block(markdown_text):
         line_begin, line_end = first_token.map
         next_line_begin = second_token.map[0]
 
-        # Include the block content AND any blank lines between this block and the next
-        # This preserves the original markdown spacing
-        block_lines = lines[line_begin:next_line_begin]
+        # Extract just the block content WITHOUT trailing blank lines
+        # Rich's Markdown renderer will add its own spacing
+        block_lines = lines[line_begin:line_end]
         block_text = '\n'.join(block_lines)
         return block_text, next_line_begin
 

@@ -81,7 +81,9 @@ class MessageBlock(BaseBlock):
                 # If it's a Group with ellipsis, add cursor to the text part
                 formatted_buffer.renderables[-1] += "●"
 
-            self.live.update(formatted_buffer)
+            # Wrap streaming content in a panel to match rendered content indentation
+            streaming_panel = Panel(formatted_buffer, box=MINIMAL)
+            self.live.update(streaming_panel)
         else:
             # Clear the live display if no buffer content
             self.live.update("")
