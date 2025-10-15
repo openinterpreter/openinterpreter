@@ -298,49 +298,55 @@ def terminal_interface(interpreter, message):
                         render_cursor = True
 
                     if "content" in chunk:
-                        active_block.message += chunk["content"]
+                        if active_block:
+                            active_block.add_content(chunk["content"])
 
-                    if "end" in chunk and interpreter.os:
-                        last_message = interpreter.messages[-1]["content"]
+                    if "end" in chunk:
+                        # Finalize the message block
+                        if active_block:
+                            active_block.finalize()
 
-                        # Remove markdown lists and the line above markdown lists
-                        lines = last_message.split("\n")
-                        i = 0
-                        while i < len(lines):
-                            # Match markdown lists starting with hyphen, asterisk or number
-                            if re.match(r"^\s*([-*]|\d+\.)\s", lines[i]):
-                                del lines[i]
-                                if i > 0:
-                                    del lines[i - 1]
-                                    i -= 1
-                            else:
-                                i += 1
-                        message = "\n".join(lines)
-                        # Replace newlines with spaces, escape double quotes and backslashes
-                        sanitized_message = (
-                            message.replace("\\", "\\\\")
-                            .replace("\n", " ")
-                            .replace('"', '\\"')
-                        )
+                        if interpreter.os:
+                            last_message = interpreter.messages[-1]["content"]
 
-                        # Display notification in OS mode
-                        interpreter.computer.os.notify(sanitized_message)
-
-                        # Speak message aloud
-                        if platform.system() == "Darwin" and interpreter.speak_messages:
-                            if voice_subprocess:
-                                voice_subprocess.terminate()
-                            voice_subprocess = subprocess.Popen(
-                                [
-                                    "osascript",
-                                    "-e",
-                                    f'say "{sanitized_message}" using "Fred"',
-                                ]
+                            # Remove markdown lists and the line above markdown lists
+                            lines = last_message.split("\n")
+                            i = 0
+                            while i < len(lines):
+                                # Match markdown lists starting with hyphen, asterisk or number
+                                if re.match(r"^\s*([-*]|\d+\.)\s", lines[i]):
+                                    del lines[i]
+                                    if i > 0:
+                                        del lines[i - 1]
+                                        i -= 1
+                                else:
+                                    i += 1
+                            message = "\n".join(lines)
+                            # Replace newlines with spaces, escape double quotes and backslashes
+                            sanitized_message = (
+                                message.replace("\\", "\\\\")
+                                .replace("\n", " ")
+                                .replace('"', '\\"')
                             )
-                        else:
-                            pass
-                            # User isn't on a Mac, so we can't do this. You should tell them something about that when they first set this up.
-                            # Or use a universal TTS library.
+
+                            # Display notification in OS mode
+                            interpreter.computer.os.notify(sanitized_message)
+
+                            # Speak message aloud
+                            if platform.system() == "Darwin" and interpreter.speak_messages:
+                                if voice_subprocess:
+                                    voice_subprocess.terminate()
+                                voice_subprocess = subprocess.Popen(
+                                    [
+                                        "osascript",
+                                        "-e",
+                                        f'say "{sanitized_message}" using "Fred"',
+                                    ]
+                                )
+                            else:
+                                pass
+                                # User isn't on a Mac, so we can't do this. You should tell them something about that when they first set this up.
+                                # Or use a universal TTS library.
 
                 # Assistant code blocks
                 elif chunk["role"] == "assistant" and chunk["type"] == "code":
@@ -510,7 +516,8 @@ def terminal_interface(interpreter, message):
                                 active_block.end()
                             active_block = CodeBlock()
 
-                if active_block:
+                if active_block and not isinstance(active_block, MessageBlock):
+                    # MessageBlock handles its own refresh internally
                     active_block.refresh(cursor=render_cursor)
 
             # (Sometimes -- like if they CTRL-C quickly -- active_block is still None here)
