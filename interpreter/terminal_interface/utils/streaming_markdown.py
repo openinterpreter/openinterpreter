@@ -6,6 +6,7 @@ similar to the approach demonstrated in dev_examples/rich_markdown_example.py.
 """
 
 import re
+import textwrap
 from markdown_it import MarkdownIt
 from rich.align import Align
 from rich.console import Console, Group
@@ -75,19 +76,30 @@ def create_sliding_window_display(console, current_lines, viewport_lines, debug=
     Args:
         console: Rich Console instance
         current_lines: List of all current text lines
-        viewport_lines: Maximum number of lines to display
+        viewport_lines: Maximum number of logical lines to display
         debug: If True, wrap content in a bordered panel to show Live area boundaries
 
     Returns:
         Rich Text, Group, or Panel renderable showing the viewport
     """
+    # Terminal width for wrapping calculations
+    terminal_width = console.size.width
+
+    # Convert text lines to logical display lines accounting for wrapping
+    logical_lines = []
+    for line in current_lines:
+        # Use textwrap to split long lines into wrapped lines
+        wrapped = textwrap.wrap(line, width=terminal_width) if line.strip() else [line]
+        logical_lines.extend(wrapped)
+
     # Get last N lines (or all lines if fewer than N)
-    display_lines = current_lines[-viewport_lines:]
+    display_lines = logical_lines[-viewport_lines:]
     text = Text('\n'.join(display_lines))
 
     # Wrap with red ellipsis at top if content was truncated, mimicking
     # the bottom red ellipsis in a rich Live display in `ellipsis` mode.
-    if len(current_lines) > viewport_lines:
+    # https://rich.readthedocs.io/en/latest/live.html#vertical-overflow
+    if len(logical_lines) > viewport_lines:
         text = Group(
             Align.center(Text("...", style="red"), width=console.size.width),
             text
