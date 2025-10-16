@@ -282,7 +282,11 @@ def terminal_interface(interpreter, message):
                     continue
 
                 if "end" in chunk and active_block:
-                    active_block.refresh(cursor=False)
+                    # For message blocks, finalize before ending (skip refresh to avoid duplication)
+                    if chunk["type"] == "message" and hasattr(active_block, 'finalize'):
+                        active_block.finalize()
+                    else:
+                        active_block.refresh(cursor=False)
 
                     if chunk["type"] in [
                         "message",
@@ -301,12 +305,7 @@ def terminal_interface(interpreter, message):
                         if active_block:
                             active_block.add_content(chunk["content"])
 
-                    if "end" in chunk:
-                        # Finalize the message block
-                        if active_block:
-                            active_block.finalize()
-
-                        if interpreter.os:
+                    if "end" in chunk and interpreter.os:
                             last_message = interpreter.messages[-1]["content"]
 
                             # Remove markdown lists and the line above markdown lists

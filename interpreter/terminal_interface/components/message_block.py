@@ -95,6 +95,10 @@ class MessageBlock(BaseBlock):
 
     def finalize(self):
         """Render any remaining content when the message is complete."""
+        # Clear the live display to remove the streaming raw text
+        self.live.update("")
+
+        # Render any remaining buffer content as markdown
         if self.buffer.strip():
             try:
                 # De-stylize any code blocks in markdown
@@ -106,7 +110,5 @@ class MessageBlock(BaseBlock):
                 # Fallback to plain text if markdown parsing fails
                 self.live.console.print(self.buffer)
 
-        # Clear the live display
-        self.live.update("")
-
-
+        # Ensure no further streaming occurs during end()'s refresh
+        self.buffer = ""
