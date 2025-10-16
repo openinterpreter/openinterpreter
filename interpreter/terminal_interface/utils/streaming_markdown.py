@@ -21,39 +21,44 @@ def detect_complete_block(markdown_text):
     Detect complete blocks by finding when a new top-level block starts.
     Returns (block_text, next_line_begin) when a complete block is found, or None.
     """
-    # Enable non-default features to match Rich's parser configuration
-    md = MarkdownIt().enable("strikethrough").enable("table")
-    md_tokens = md.parse(markdown_text)
+    try:
+        # Enable non-default features to match Rich's parser configuration
+        md = MarkdownIt().enable("strikethrough").enable("table")
+        md_tokens = md.parse(markdown_text)
 
-    lines = markdown_text.split('\n')
+        lines = markdown_text.split('\n')
 
-    # Find all top-level block tokens (level 0)
-    top_level_tokens = []
+        # Find all top-level block tokens (level 0)
+        top_level_tokens = []
 
-    for md_token in md_tokens:
-        # Only collect top-level structural blocks
-        # (paragraph_open, heading_open, fence, etc.)
-        if md_token.block and md_token.level == 0:
-            # Only count opening (nesting=1) or self-closing (nesting=0) blocks
-            if md_token.nesting in (0, 1):
-                top_level_tokens.append(md_token)
+        for md_token in md_tokens:
+            # Only collect top-level structural blocks
+            # (paragraph_open, heading_open, fence, etc.)
+            if md_token.block and md_token.level == 0:
+                # Only count opening (nesting=1) or self-closing (nesting=0) blocks
+                if md_token.nesting in (0, 1):
+                    top_level_tokens.append(md_token)
 
-    # If we have at least 2 top-level opening tokens, the first
-    # opening-closing token pair is a complete block.
-    if len(top_level_tokens) >= 2:
-        first_token = top_level_tokens[0]
-        second_token = top_level_tokens[1]
+        # If we have at least 2 top-level opening tokens, the first
+        # opening-closing token pair is a complete block.
+        if len(top_level_tokens) >= 2:
+            first_token = top_level_tokens[0]
+            second_token = top_level_tokens[1]
 
-        line_begin, line_end = first_token.map
-        next_line_begin = second_token.map[0]
+            line_begin, line_end = first_token.map
+            next_line_begin = second_token.map[0]
 
-        # Extract just the block content WITHOUT trailing blank lines
-        # Rich's Markdown renderer will add its own spacing
-        block_lines = lines[line_begin:line_end]
-        block_text = '\n'.join(block_lines)
-        return block_text, next_line_begin
+            # Extract just the block content WITHOUT trailing blank lines
+            # Rich's Markdown renderer will add its own spacing
+            block_lines = lines[line_begin:line_end]
+            block_text = '\n'.join(block_lines)
+            return block_text, next_line_begin
 
-    return None
+        return None
+
+    except (IndexError, ValueError, TypeError, AttributeError):
+        # If parsing fails, the markdown is incomplete - no complete block yet
+        return None
 
 
 def calculate_window_size(console, viewport_fraction):
