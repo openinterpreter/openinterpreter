@@ -52,7 +52,7 @@ class MessageBlock(BaseBlock):
                 self.live.console.print(panel)
             else:
                 # Print markdown directly with horizontal padding only (2 chars left/right)
-                padded_markdown = Padding(markdown, (0, 2))
+                padded_markdown = Padding(markdown, (1, 2, 0, 2))
                 self.live.console.print(padded_markdown)
 
             # Store the completed block
@@ -94,7 +94,7 @@ class MessageBlock(BaseBlock):
                 self.live.update(streaming_panel)
             else:
                 # Print streaming content directly with horizontal padding only (2 chars left/right)
-                padded_buffer = Padding(formatted_buffer, (0, 2))
+                padded_buffer = Padding(formatted_buffer, (1, 2, 0, 2))
                 self.live.update(padded_buffer)
         else:
             # Clear the live display if no buffer content
@@ -121,7 +121,7 @@ class MessageBlock(BaseBlock):
                     self.live.console.print(panel)
                 else:
                     # Print markdown directly with horizontal padding only (2 chars left/right)
-                    padded_markdown = Padding(markdown, (0, 2))
+                    padded_markdown = Padding(markdown, (1, 2, 0, 2))
                     self.live.console.print(padded_markdown)
             except (IndexError, ValueError, TypeError):
                 # Fallback to plain text if markdown parsing fails
