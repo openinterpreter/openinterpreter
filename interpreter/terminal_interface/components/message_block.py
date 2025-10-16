@@ -5,6 +5,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 from rich.console import Group
+from rich.padding import Padding
 
 from .base_block import BaseBlock
 from ..utils.streaming_markdown import (
@@ -46,10 +47,13 @@ class MessageBlock(BaseBlock):
             # Render the complete block directly to console (above the Live viewport)
             markdown = Markdown(content.strip())
             if self.debug:
+                # In debug mode, still use panel for visual distinction
                 panel = Panel(markdown, box=ROUNDED, border_style="green")
+                self.live.console.print(panel)
             else:
-                panel = Panel(markdown, box=MINIMAL)
-            self.live.console.print(panel)
+                # Print markdown directly with horizontal padding only (2 chars left/right)
+                padded_markdown = Padding(markdown, (0, 2))
+                self.live.console.print(padded_markdown)
 
             # Store the completed block
             self.completed_blocks.append(content)
@@ -87,9 +91,11 @@ class MessageBlock(BaseBlock):
             # Wrap streaming content in a panel to match rendered content indentation
             if self.debug:
                 streaming_panel = Panel(formatted_buffer, box=ROUNDED, border_style="blue")
+                self.live.update(streaming_panel)
             else:
-                streaming_panel = Panel(formatted_buffer, box=MINIMAL)
-            self.live.update(streaming_panel)
+                # Print streaming content directly with horizontal padding only (2 chars left/right)
+                padded_buffer = Padding(formatted_buffer, (0, 2))
+                self.live.update(padded_buffer)
         else:
             # Clear the live display if no buffer content
             self.live.update("")
@@ -112,9 +118,11 @@ class MessageBlock(BaseBlock):
                 markdown = Markdown(content.strip())
                 if self.debug:
                     panel = Panel(markdown, box=ROUNDED, border_style="red")
+                    self.live.console.print(panel)
                 else:
-                    panel = Panel(markdown, box=MINIMAL)
-                self.live.console.print(panel)
+                    # Print markdown directly with horizontal padding only (2 chars left/right)
+                    padded_markdown = Padding(markdown, (0, 2))
+                    self.live.console.print(padded_markdown)
             except (IndexError, ValueError, TypeError):
                 # Fallback to plain text if markdown parsing fails
                 self.live.console.print(self.buffer)
