@@ -299,6 +299,8 @@ def terminal_interface(interpreter, message):
                 if chunk["type"] == "message":
                     if "start" in chunk:
                         active_block = MessageBlock()
+                        # Enable debug mode if environment variable is set
+                        active_block.debug = os.environ.get("OI_DEBUG_MARKDOWN", "").lower() in ("1", "true", "yes")
                         render_cursor = True
 
                     if "content" in chunk:

@@ -1,6 +1,6 @@
 import re
 
-from rich.box import MINIMAL
+from rich.box import MINIMAL, ROUNDED
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
@@ -30,7 +30,7 @@ class MessageBlock(BaseBlock):
         self.buffer = ""
         self.completed_blocks = []
         self.viewport_fraction = 0.3  # Increase from 0.2 to 0.3 for better visibility
-        self.debug = False  # Disable debug mode
+        self.debug = False  # Enable debug mode to show colored borders
 
     def refresh(self, cursor=True):
         """Process new content and render complete blocks incrementally."""
@@ -45,7 +45,10 @@ class MessageBlock(BaseBlock):
 
             # Render the complete block directly to console (above the Live viewport)
             markdown = Markdown(content.strip())
-            panel = Panel(markdown, box=MINIMAL)
+            if self.debug:
+                panel = Panel(markdown, box=ROUNDED, border_style="green")
+            else:
+                panel = Panel(markdown, box=MINIMAL)
             self.live.console.print(panel)
 
             # Store the completed block
@@ -82,7 +85,10 @@ class MessageBlock(BaseBlock):
                 formatted_buffer.renderables[-1] += "●"
 
             # Wrap streaming content in a panel to match rendered content indentation
-            streaming_panel = Panel(formatted_buffer, box=MINIMAL)
+            if self.debug:
+                streaming_panel = Panel(formatted_buffer, box=ROUNDED, border_style="blue")
+            else:
+                streaming_panel = Panel(formatted_buffer, box=MINIMAL)
             self.live.update(streaming_panel)
         else:
             # Clear the live display if no buffer content
@@ -104,7 +110,10 @@ class MessageBlock(BaseBlock):
                 # De-stylize any code blocks in markdown
                 content = textify_markdown_code_blocks(self.buffer)
                 markdown = Markdown(content.strip())
-                panel = Panel(markdown, box=MINIMAL)
+                if self.debug:
+                    panel = Panel(markdown, box=ROUNDED, border_style="red")
+                else:
+                    panel = Panel(markdown, box=MINIMAL)
                 self.live.console.print(panel)
             except (IndexError, ValueError, TypeError):
                 # Fallback to plain text if markdown parsing fails
