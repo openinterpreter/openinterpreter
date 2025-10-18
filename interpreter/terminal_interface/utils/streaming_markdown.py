@@ -23,7 +23,7 @@ def detect_complete_block(markdown_text):
     """
     try:
         # Enable non-default features to match Rich's parser configuration
-        md = MarkdownIt().enable("strikethrough").enable("table")
+        md = MarkdownIt().enable("strikethrough").enable("table")  # TODO: move to file-level instead of defining in each call?
         md_tokens = md.parse(markdown_text)
 
         lines = markdown_text.split('\n')
