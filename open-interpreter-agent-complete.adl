@@ -1,0 +1,840 @@
+# open-interpreter-agent.adl
+apiVersion: adl.dev/v1
+kind: Agent
+metadata:
+  name: open-interpreter
+  description: "AI agent for general-purpose computing tasks through natural language to code execution"
+  version: "0.4.3"
+  namespace: "open-interpreter"
+  labels:
+    app: "open-interpreter"
+    type: "general-purpose-agent"
+    category: "code-execution"
+  annotations:
+    author: "Open Interpreter Team"
+    license: "MIT"
+    repository: "https://github.com/OpenInterpreter/open-interpreter"
+
+spec:
+  # Core capabilities
+  capabilities:
+    - name: "code-execution"
+      description: "Execute code in multiple programming languages"
+      version: "1.0"
+    - name: "natural-language-processing"
+      description: "Process and understand natural language commands"
+      version: "1.0"
+    - name: "computer-control"
+      description: "Control mouse, keyboard, and GUI elements"
+      version: "1.0"
+    - name: "file-operations"
+      description: "Read, write, edit, and manage files"
+      version: "1.0"
+    - name: "web-browsing"
+      description: "Search web and navigate URLs"
+      version: "1.0"
+    - name: "vision-processing"
+      description: "Analyze images and screenshots"
+      version: "1.0"
+    - name: "communication"
+      description: "Send emails, SMS, and manage contacts"
+      version: "1.0"
+    - name: "system-integration"
+      description: "Control operating system and applications"
+      version: "1.0"
+
+  # Agent configuration
+  agent:
+    provider: "multi"
+    model: "configurable"
+    systemPrompt: |
+      You are Open Interpreter, a world-class programmer that can complete any goal by executing code.
+      
+      When you execute code, it will be executed **on the user's machine**.
+      
+      You can access the internet. Run **any code** to achieve the goal.
+      
+      For advanced requests, start by writing a plan.
+      
+      You can use the computer API to:
+      - Control the mouse and keyboard
+      - Take screenshots and analyze images
+      - Browse the web
+      - Manage files and folders
+      - Send emails and SMS
+      - Control the operating system
+      - And much more
+      
+      Always explain what you're doing and why.
+    maxTokens: 4096
+    temperature: 0.1
+    supportsVision: true
+    supportsFunctionCalling: true
+    streaming: true
+
+  # Tool definitions
+  tools:
+    # Code Execution Tools
+    - name: "execute_python"
+      description: "Execute Python code on the user's machine"
+      category: "code-execution"
+      schema:
+        type: "object"
+        properties:
+          code:
+            type: "string"
+            description: "Python code to execute"
+          timeout:
+            type: "integer"
+            description: "Execution timeout in seconds"
+            default: 30
+        required: ["code"]
+
+    - name: "execute_javascript"
+      description: "Execute JavaScript code using Node.js"
+      category: "code-execution"
+      schema:
+        type: "object"
+        properties:
+          code:
+            type: "string"
+            description: "JavaScript code to execute"
+          timeout:
+            type: "integer"
+            description: "Execution timeout in seconds"
+            default: 30
+        required: ["code"]
+
+    - name: "execute_shell"
+      description: "Execute shell commands"
+      category: "code-execution"
+      schema:
+        type: "object"
+        properties:
+          command:
+            type: "string"
+            description: "Shell command to execute"
+          timeout:
+            type: "integer"
+            description: "Execution timeout in seconds"
+            default: 30
+        required: ["command"]
+
+    - name: "execute_ruby"
+      description: "Execute Ruby code"
+      category: "code-execution"
+      schema:
+        type: "object"
+        properties:
+          code:
+            type: "string"
+            description: "Ruby code to execute"
+        required: ["code"]
+
+    - name: "execute_r"
+      description: "Execute R code for data analysis"
+      category: "code-execution"
+      schema:
+        type: "object"
+        properties:
+          code:
+            type: "string"
+            description: "R code to execute"
+        required: ["code"]
+
+    - name: "execute_powershell"
+      description: "Execute PowerShell commands"
+      category: "code-execution"
+      schema:
+        type: "object"
+        properties:
+          command:
+            type: "string"
+            description: "PowerShell command to execute"
+        required: ["command"]
+
+    - name: "execute_java"
+      description: "Execute Java code"
+      category: "code-execution"
+      schema:
+        type: "object"
+        properties:
+          code:
+            type: "string"
+            description: "Java code to execute"
+        required: ["code"]
+
+    - name: "execute_html"
+      description: "Execute HTML code and display in browser"
+      category: "code-execution"
+      schema:
+        type: "object"
+        properties:
+          html:
+            type: "string"
+            description: "HTML code to execute"
+        required: ["html"]
+
+    - name: "execute_applescript"
+      description: "Execute AppleScript commands (macOS only)"
+      category: "code-execution"
+      schema:
+        type: "object"
+        properties:
+          script:
+            type: "string"
+            description: "AppleScript to execute"
+        required: ["script"]
+
+    - name: "execute_react"
+      description: "Execute React code"
+      category: "code-execution"
+      schema:
+        type: "object"
+        properties:
+          code:
+            type: "string"
+            description: "React code to execute"
+        required: ["code"]
+
+    # File Operations Tools
+    - name: "search_files"
+      description: "Search for files matching criteria"
+      category: "file-operations"
+      schema:
+        type: "object"
+        properties:
+          pattern:
+            type: "string"
+            description: "File search pattern (glob)"
+          directory:
+            type: "string"
+            description: "Directory to search in"
+            default: "."
+        required: ["pattern"]
+
+    - name: "read_file"
+      description: "Read contents of a file"
+      category: "file-operations"
+      schema:
+        type: "object"
+        properties:
+          path:
+            type: "string"
+            description: "Path to the file"
+          encoding:
+            type: "string"
+            description: "File encoding"
+            default: "utf-8"
+        required: ["path"]
+
+    - name: "write_file"
+      description: "Write content to a file"
+      category: "file-operations"
+      schema:
+        type: "object"
+        properties:
+          path:
+            type: "string"
+            description: "Path to the file"
+          content:
+            type: "string"
+            description: "Content to write"
+          encoding:
+            type: "string"
+            description: "File encoding"
+            default: "utf-8"
+        required: ["path", "content"]
+
+    - name: "edit_file"
+      description: "Edit a file by replacing text"
+      category: "file-operations"
+      schema:
+        type: "object"
+        properties:
+          path:
+            type: "string"
+            description: "Path to the file"
+          old_text:
+            type: "string"
+            description: "Text to replace"
+          new_text:
+            type: "string"
+            description: "Replacement text"
+        required: ["path", "old_text", "new_text"]
+
+    - name: "delete_file"
+      description: "Delete a file"
+      category: "file-operations"
+      schema:
+        type: "object"
+        properties:
+          path:
+            type: "string"
+            description: "Path to the file to delete"
+        required: ["path"]
+
+    # GUI Control Tools
+    - name: "mouse_click"
+      description: "Click with the mouse"
+      category: "computer-control"
+      schema:
+        type: "object"
+        properties:
+          x:
+            type: "integer"
+            description: "X coordinate"
+          y:
+            type: "integer"
+            description: "Y coordinate"
+          button:
+            type: "string"
+            description: "Mouse button"
+            enum: ["left", "right", "middle"]
+            default: "left"
+          text:
+            type: "string"
+            description: "Text to click on screen"
+          icon:
+            type: "string"
+            description: "Icon to click on screen"
+        required: []
+
+    - name: "mouse_move"
+      description: "Move mouse cursor"
+      category: "computer-control"
+      schema:
+        type: "object"
+        properties:
+          x:
+            type: "integer"
+            description: "X coordinate"
+          y:
+            type: "integer"
+            description: "Y coordinate"
+        required: ["x", "y"]
+
+    - name: "mouse_drag"
+      description: "Drag mouse from one point to another"
+      category: "computer-control"
+      schema:
+        type: "object"
+        properties:
+          start_x:
+            type: "integer"
+            description: "Start X coordinate"
+          start_y:
+            type: "integer"
+            description: "Start Y coordinate"
+          end_x:
+            type: "integer"
+            description: "End X coordinate"
+          end_y:
+            type: "integer"
+            description: "End Y coordinate"
+        required: ["start_x", "start_y", "end_x", "end_y"]
+
+    - name: "mouse_scroll"
+      description: "Scroll mouse wheel"
+      category: "computer-control"
+      schema:
+        type: "object"
+        properties:
+          x:
+            type: "integer"
+            description: "X coordinate"
+          y:
+            type: "integer"
+            description: "Y coordinate"
+          clicks:
+            type: "integer"
+            description: "Number of scroll clicks"
+            default: 3
+        required: ["x", "y"]
+
+    - name: "keyboard_write"
+      description: "Type text using keyboard"
+      category: "computer-control"
+      schema:
+        type: "object"
+        properties:
+          text:
+            type: "string"
+            description: "Text to type"
+        required: ["text"]
+
+    - name: "keyboard_press"
+      description: "Press keyboard keys"
+      category: "computer-control"
+      schema:
+        type: "object"
+        properties:
+          keys:
+            type: "array"
+            items:
+              type: "string"
+            description: "Keys to press"
+        required: ["keys"]
+
+    - name: "keyboard_hotkey"
+      description: "Press keyboard hotkey combination"
+      category: "computer-control"
+      schema:
+        type: "object"
+        properties:
+          keys:
+            type: "array"
+            items:
+              type: "string"
+            description: "Keys for hotkey combination"
+        required: ["keys"]
+
+    # Vision and Display Tools
+    - name: "take_screenshot"
+      description: "Take a screenshot of the screen"
+      category: "vision-processing"
+      schema:
+        type: "object"
+        properties:
+          region:
+            type: "object"
+            properties:
+              x:
+                type: "integer"
+                description: "X coordinate"
+              y:
+                type: "integer"
+                description: "Y coordinate"
+              width:
+                type: "integer"
+                description: "Width"
+              height:
+                type: "integer"
+                description: "Height"
+            description: "Screen region to capture"
+        required: []
+
+    - name: "analyze_image"
+      description: "Analyze an image using computer vision"
+      category: "vision-processing"
+      schema:
+        type: "object"
+        properties:
+          image_path:
+            type: "string"
+            description: "Path to image file"
+          analysis_type:
+            type: "string"
+            description: "Type of analysis"
+            enum: ["objects", "text", "faces", "general"]
+            default: "general"
+        required: ["image_path"]
+
+    # Web Browsing Tools
+    - name: "web_search"
+      description: "Search the web"
+      category: "web-browsing"
+      schema:
+        type: "object"
+        properties:
+          query:
+            type: "string"
+            description: "Search query"
+          engine:
+            type: "string"
+            description: "Search engine"
+            enum: ["google", "bing", "duckduckgo"]
+            default: "google"
+        required: ["query"]
+
+    - name: "navigate_to_url"
+      description: "Navigate to a URL"
+      category: "web-browsing"
+      schema:
+        type: "object"
+        properties:
+          url:
+            type: "string"
+            description: "URL to navigate to"
+        required: ["url"]
+
+    - name: "extract_page_content"
+      description: "Extract content from a web page"
+      category: "web-browsing"
+      schema:
+        type: "object"
+        properties:
+          url:
+            type: "string"
+            description: "URL to extract content from"
+          selector:
+            type: "string"
+            description: "CSS selector for specific content"
+        required: ["url"]
+
+    # Communication Tools
+    - name: "send_email"
+      description: "Send an email"
+      category: "communication"
+      schema:
+        type: "object"
+        properties:
+          to:
+            type: "string"
+            description: "Recipient email address"
+          subject:
+            type: "string"
+            description: "Email subject"
+          body:
+            type: "string"
+            description: "Email body"
+          attachments:
+            type: "array"
+            items:
+              type: "string"
+            description: "File paths for attachments"
+        required: ["to", "subject", "body"]
+
+    - name: "send_sms"
+      description: "Send an SMS message"
+      category: "communication"
+      schema:
+        type: "object"
+        properties:
+          to:
+            type: "string"
+            description: "Recipient phone number"
+          message:
+            type: "string"
+            description: "SMS message"
+        required: ["to", "message"]
+
+    # Calendar and Contacts Tools
+    - name: "create_calendar_event"
+      description: "Create a calendar event"
+      category: "communication"
+      schema:
+        type: "object"
+        properties:
+          title:
+            type: "string"
+            description: "Event title"
+          start_time:
+            type: "string"
+            description: "Start time (ISO format)"
+          end_time:
+            type: "string"
+            description: "End time (ISO format)"
+          description:
+            type: "string"
+            description: "Event description"
+        required: ["title", "start_time", "end_time"]
+
+    - name: "get_contact_info"
+      description: "Get contact information"
+      category: "communication"
+      schema:
+        type: "object"
+        properties:
+          name:
+            type: "string"
+            description: "Contact name"
+          phone:
+            type: "boolean"
+            description: "Include phone number"
+            default: true
+          email:
+            type: "boolean"
+            description: "Include email address"
+            default: true
+        required: ["name"]
+
+    # AI and Skills Tools
+    - name: "generate_image"
+      description: "Generate an image using AI"
+      category: "ai-services"
+      schema:
+        type: "object"
+        properties:
+          prompt:
+            type: "string"
+            description: "Image generation prompt"
+          style:
+            type: "string"
+            description: "Image style"
+            enum: ["realistic", "artistic", "cartoon", "abstract"]
+            default: "realistic"
+        required: ["prompt"]
+
+    - name: "run_custom_skill"
+      description: "Run a custom skill/function"
+      category: "ai-services"
+      schema:
+        type: "object"
+        properties:
+          skill_name:
+            type: "string"
+            description: "Name of the custom skill"
+          parameters:
+            type: "object"
+            description: "Parameters for the skill"
+        required: ["skill_name"]
+
+    # System Control Tools
+    - name: "get_system_info"
+      description: "Get system information"
+      category: "system-integration"
+      schema:
+        type: "object"
+        properties:
+          info_type:
+            type: "string"
+            description: "Type of system info"
+            enum: ["os", "cpu", "memory", "disk", "network"]
+            default: "os"
+        required: []
+
+    - name: "run_system_command"
+      description: "Run a system command"
+      category: "system-integration"
+      schema:
+        type: "object"
+        properties:
+          command:
+            type: "string"
+            description: "System command to run"
+          timeout:
+            type: "integer"
+            description: "Command timeout in seconds"
+            default: 30
+        required: ["command"]
+
+  # Interfaces
+  interfaces:
+    - name: "terminal"
+      description: "Command-line terminal interface"
+      type: "cli"
+      port: null
+    - name: "api"
+      description: "RESTful API for programmatic access"
+      type: "http"
+      port: 8080
+    - name: "websocket"
+      description: "WebSocket interface for real-time communication"
+      type: "websocket"
+      port: 8081
+
+  # Dependencies
+  dependencies:
+    - name: "python"
+      version: ">=3.8"
+      description: "Python runtime for code execution"
+    - name: "node"
+      version: ">=18.0.0"
+      description: "Node.js runtime for JavaScript execution"
+    - name: "openai"
+      version: ">=1.0.0"
+      description: "OpenAI API client"
+    - name: "anthropic"
+      version: ">=0.3.0"
+      description: "Anthropic API client"
+    - name: "groq"
+      version: ">=0.4.0"
+      description: "Groq API client"
+    - name: "pyautogui"
+      version: ">=0.9.54"
+      description: "GUI automation library"
+    - name: "selenium"
+      version: ">=4.0.0"
+      description: "Web browser automation"
+    - name: "pillow"
+      version: ">=9.0.0"
+      description: "Image processing library"
+
+  # Resource requirements
+  resources:
+    cpu: "1000m"
+    memory: "2Gi"
+    storage: "10Gi"
+    gpu: "optional"
+
+  # Configuration
+  configuration:
+    environmentVariables:
+      - name: "OPENAI_API_KEY"
+        description: "API key for accessing OpenAI services"
+        required: false
+      - name: "ANTHROPIC_API_KEY"
+        description: "API key for accessing Anthropic services"
+        required: false
+      - name: "GROQ_API_KEY"
+        description: "API key for accessing Groq services"
+        required: false
+      - name: "EXECUTION_TIMEOUT"
+        description: "Maximum time allowed for code execution"
+        default: "30s"
+      - name: "MAX_OUTPUT_LENGTH"
+        description: "Maximum length of execution output"
+        default: "2800"
+      - name: "SAFE_MODE"
+        description: "Enable safe mode for code execution"
+        default: "off"
+        enum: ["off", "ask", "auto"]
+
+  # Security configuration
+  security:
+    permissions:
+      - name: "execute-code"
+        description: "Allows the agent to execute generated code"
+        level: "high"
+      - name: "access-internet"
+        description: "Allows the agent to access the internet"
+        level: "medium"
+      - name: "file-operations"
+        description: "Allows the agent to perform file operations"
+        level: "high"
+      - name: "gui-control"
+        description: "Allows the agent to control GUI elements"
+        level: "high"
+      - name: "system-control"
+        description: "Allows the agent to control system functions"
+        level: "critical"
+    inputValidation: true
+    outputSanitization: true
+    codeExecutionSandbox: true
+    resourceLimits:
+      maxExecutionTime: 300
+      maxMemoryUsage: "1GB"
+      maxFileSize: "100MB"
+    safeMode:
+      enabled: true
+      requireConfirmation: true
+      blockedOperations:
+        - "file_deletion"
+        - "system_shutdown"
+        - "network_access"
+        - "registry_modification"
+
+  # Logging configuration
+  logging:
+    level: "info"
+    format: "json"
+    outputs:
+      - "console"
+      - "file"
+    file:
+      path: "/var/log/open-interpreter.log"
+      maxSize: "100MB"
+      maxFiles: 5
+
+  # Monitoring configuration
+  monitoring:
+    metrics:
+      enabled: true
+      endpoint: "/metrics"
+      interval: "30s"
+    healthCheck:
+      enabled: true
+      endpoint: "/health"
+      interval: "10s"
+    tracing:
+      enabled: true
+      provider: "jaeger"
+      endpoint: "http://jaeger:14268/api/traces"
+
+  # Server configuration
+  server:
+    port: 8080
+    debug: false
+    auth:
+      enabled: true
+      methods:
+        - "api-key"
+        - "oauth2"
+        - "jwt"
+    cors:
+      enabled: true
+      origins: ["*"]
+      methods: ["GET", "POST", "PUT", "DELETE"]
+      headers: ["Content-Type", "Authorization"]
+    rateLimit:
+      enabled: true
+      requestsPerMinute: 60
+      burstSize: 10
+
+  # Language support
+  language:
+    python:
+      module: "open_interpreter"
+      version: "0.4.3"
+      runtime: "python3"
+    typescript:
+      module: "@open-interpreter/core"
+      version: "0.4.3"
+      runtime: "node"
+    go:
+      module: "github.com/open-interpreter/agent"
+      version: "0.4.3"
+      runtime: "go"
+
+  # Deployment configuration
+  deployment:
+    docker:
+      enabled: true
+      baseImage: "python:3.10-slim"
+      ports:
+        - "8080:8080"
+        - "8081:8081"
+      volumes:
+        - "/tmp:/tmp"
+        - "/var/log:/var/log"
+    kubernetes:
+      enabled: true
+      namespace: "open-interpreter"
+      replicas: 3
+      service:
+        type: "ClusterIP"
+        ports:
+          - name: "http"
+            port: 8080
+            targetPort: 8080
+          - name: "websocket"
+            port: 8081
+            targetPort: 8081
+    cloud:
+      providers: ["aws", "gcp", "azure"]
+      scaling:
+        minReplicas: 1
+        maxReplicas: 10
+        targetCPUUtilization: 70
+        targetMemoryUtilization: 80
+
+  # Testing configuration
+  testing:
+    unit:
+      enabled: true
+      framework: "pytest"
+      coverage: 80
+    integration:
+      enabled: true
+      framework: "pytest"
+      timeout: "300s"
+    e2e:
+      enabled: true
+      framework: "playwright"
+      browsers: ["chromium", "firefox", "webkit"]
+
+  # Documentation
+  documentation:
+    api:
+      enabled: true
+      format: "openapi"
+      version: "3.0.0"
+    user:
+      enabled: true
+      format: "markdown"
+      path: "/docs"
+    examples:
+      enabled: true
+      format: "jupyter"
+      path: "/examples"

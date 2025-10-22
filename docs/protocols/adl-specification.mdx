@@ -1,0 +1,175 @@
+---
+title: ADL Specification
+description: Agent Definition Language specification for Open Interpreter
+---
+
+# ADL Specification for Open Interpreter
+
+This document provides a comprehensive Agent Definition Language (ADL) specification for Open Interpreter, enabling standardized, declarative agent definitions across platforms.
+
+## Overview
+
+The ADL specification transforms Open Interpreter from a Python-specific implementation into a standardized, platform-agnostic agent definition that can be implemented in any language or framework while maintaining all its powerful capabilities.
+
+## Core Philosophy
+
+- **Agent-Centric**: Everything revolves around agent behavior and interaction
+- **Language-Agnostic**: Can be implemented in any programming language
+- **Framework-Independent**: Works with any agent platform or system
+- **Declarative**: Focus on "what" rather than "how"
+- **Composable**: Agents can be combined and orchestrated easily
+
+## Specification
+
+### Metadata
+
+```yaml
+apiVersion: adl.dev/v1
+kind: Agent
+metadata:
+  name: open-interpreter
+  description: "AI agent for general-purpose computing tasks through natural language to code execution"
+  version: "0.4.3"
+  namespace: "open-interpreter"
+  labels:
+    app: "open-interpreter"
+    type: "general-purpose-agent"
+    category: "code-execution"
+  annotations:
+    author: "Open Interpreter Team"
+    license: "MIT"
+    repository: "https://github.com/OpenInterpreter/open-interpreter"
+```
+
+### Capabilities
+
+Open Interpreter provides eight core capabilities:
+
+1. **Code Execution**: Execute code in multiple programming languages
+2. **Natural Language Processing**: Process and understand natural language commands
+3. **Computer Control**: Control mouse, keyboard, and GUI elements
+4. **File Operations**: Read, write, edit, and manage files
+5. **Web Browsing**: Search web and navigate URLs
+6. **Vision Processing**: Analyze images and screenshots
+7. **Communication**: Send emails, SMS, and manage contacts
+8. **System Integration**: Control operating system and applications
+
+### Tool Categories
+
+#### Code Execution Tools (10 languages)
+- Python, JavaScript, Shell, Ruby, R, PowerShell, Java, HTML, AppleScript, React
+
+#### File Operations
+- Search, read, write, edit, delete files with encoding support
+
+#### Computer Control
+- Mouse: click, move, drag, scroll
+- Keyboard: write, press, hotkey combinations
+
+#### Vision Processing
+- Screenshot capture with region selection
+- Image analysis (objects, text, faces, general)
+
+#### Web Browsing
+- Web search (Google, Bing, DuckDuckGo)
+- URL navigation and content extraction
+
+#### Communication
+- Email sending with attachments
+- SMS messaging
+- Calendar event creation
+- Contact information retrieval
+
+#### AI Services
+- Image generation with style options
+- Custom skill execution
+
+#### System Integration
+- System information retrieval
+- System command execution
+
+### Multi-Interface Support
+
+```yaml
+interfaces:
+  - name: "terminal"
+    description: "Command-line terminal interface"
+    type: "cli"
+  - name: "api"
+    description: "RESTful API for programmatic access"
+    type: "http"
+    port: 8080
+  - name: "websocket"
+    description: "WebSocket interface for real-time communication"
+    type: "websocket"
+    port: 8081
+```
+
+### Security & Safety
+
+The specification includes comprehensive security measures:
+
+- **Input Validation**: All inputs are validated before processing
+- **Output Sanitization**: All outputs are sanitized for safety
+- **Code Execution Sandbox**: Isolated execution environment
+- **Resource Limits**: CPU, memory, and file size constraints
+- **Safe Mode**: User confirmation for dangerous operations
+
+### Deployment Options
+
+Supports multiple deployment scenarios:
+
+- **Docker**: Containerized deployment with Python 3.10-slim base
+- **Kubernetes**: Cloud-native deployment with auto-scaling
+- **Cloud Providers**: AWS, GCP, Azure support
+- **Local Development**: Poetry-based development environment
+
+### Testing Framework
+
+Comprehensive testing support:
+
+- **Unit Tests**: pytest framework with 80% coverage requirement
+- **Integration Tests**: End-to-end testing with 300s timeout
+- **E2E Tests**: Playwright with multi-browser support
+
+## Benefits
+
+### Standardization
+- **Unified Interface**: Consistent agent definition across platforms
+- **Vendor Agnostic**: Works with any AI provider or framework
+- **Interoperability**: Easy integration with other agent systems
+
+### Code Generation
+- **Production-Ready Code**: Generate implementations in Python, TypeScript, Go
+- **API Documentation**: Automatic OpenAPI specification generation
+- **Configuration Files**: Docker, Kubernetes, cloud deployment configs
+- **Test Suites**: Automated testing with conversation flows
+
+### Enterprise Features
+- **Security**: Comprehensive safety and validation mechanisms
+- **Monitoring**: Built-in metrics, logging, and tracing
+- **Scaling**: Cloud-native deployment with auto-scaling
+- **Compliance**: Standardized security practices
+
+## Implementation
+
+The complete ADL specification can be found in the repository as `open-interpreter-agent-complete.adl`. This file contains:
+
+- Complete tool definitions with JSON schemas
+- Security and safety configurations
+- Deployment and infrastructure settings
+- Testing and documentation specifications
+
+## Future Extensions
+
+The ADL specification enables future enhancements:
+
+- **Enhanced Learning**: User preference learning and adaptive behavior
+- **Advanced Coordination**: Swarm intelligence and emergent behavior
+- **Extended Capabilities**: Quantum computing, neuromorphic computing, edge computing
+
+## Conclusion
+
+This ADL specification demonstrates how Open Interpreter can be understood purely in terms of agent behaviors, interactions, and cognitive architectures, independent of its Python implementation details. The language-agnostic description enables developers to understand the system's agent-centric design and potentially implement it in other languages or frameworks.
+
+The specification provides a powerful lens for understanding complex agent systems like Open Interpreter, focusing on the essential agent behaviors rather than implementation details.
