@@ -144,8 +144,8 @@ class Mail:
             return round(
                 max(0.2, estimated_time_seconds + 1), 1
             )  # Add 1 second buffer, ensure a minimum delay of 1.2 seconds, rounded to one decimal place
-        except:
-            # Return a default delay of 5 seconds if an error occurs
+        except Exception:
+            # Return a default delay of 5 seconds if an error occurs (e.g., file not found)
             return 5
 
     def format_path_for_applescript(self, file_path):

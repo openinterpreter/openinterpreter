@@ -192,7 +192,8 @@ def respond(interpreter):
                         interpreter.messages[-1][
                             "format"
                         ] = language  # So the LLM can see it.
-                    except:
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        # Failed to parse or update message, continue with original code
                         pass
 
                 # print(code)
@@ -205,7 +206,8 @@ def respond(interpreter):
                         interpreter.messages[-1][
                             "content"
                         ] = code  # So the LLM can see it.
-                    except:
+                    except (KeyError, IndexError):
+                        # Failed to update message, continue with original code
                         pass
 
                 if code.replace("\n", "").replace(" ", "").startswith('{"language":'):
@@ -220,7 +222,8 @@ def respond(interpreter):
                             interpreter.messages[-1][
                                 "format"
                             ] = language  # So the LLM can see it.
-                    except:
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        # Failed to parse JSON or update message
                         pass
 
                 if code.replace("\n", "").replace(" ", "").startswith("{language:"):
@@ -238,7 +241,8 @@ def respond(interpreter):
                             interpreter.messages[-1][
                                 "format"
                             ] = language  # So the LLM can see it.
-                    except:
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        # Failed to parse JSON or update message
                         pass
 
                 if (
@@ -402,7 +406,8 @@ def respond(interpreter):
 
             except KeyboardInterrupt:
                 break  # It's fine.
-            except:
+            except Exception:
+                # Catch and report all other exceptions during code execution
                 yield {
                     "role": "computer",
                     "type": "console",

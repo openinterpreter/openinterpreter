@@ -71,8 +71,8 @@ class Os:
                     import plyer
 
                     plyer.notification.notify(title=title, message=text)
-                except:
-                    # Optional package
+                except (ImportError, Exception):
+                    # Optional package - plyer may not be installed
                     pass
         except Exception as e:
             # Notifications should be non-blocking

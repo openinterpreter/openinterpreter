@@ -22,8 +22,8 @@ from ..utils.recipient_utils import format_to_recipient
 # Lazy import of optional packages
 try:
     cv2 = lazy_import("cv2")
-except:
-    cv2 = None  # Fixes colab error
+except ImportError:
+    cv2 = None  # Fixes colab error - cv2 is optional
 
 pyautogui = lazy_import("pyautogui")
 
@@ -31,7 +31,8 @@ pyautogui = lazy_import("pyautogui")
 try:
     # Attempt to get the screen size
     pyautogui.size()
-except:
+except Exception:
+    # No display available (headless environment)
     pyautogui = None
 
 np = lazy_import("numpy")
@@ -238,7 +239,8 @@ class Display:
                 )
 
                 return result
-            except:
+            except Exception:
+                # Local icon finding failed, try API if not in debug/offline mode
                 if self.computer.debug:
                     # We want to know these bugs lmao
                     raise
@@ -294,7 +296,8 @@ class Display:
                 )
                 response = response.json()
                 return response
-            except:
+            except Exception:
+                # API request failed, fall back to local text finding
                 print("Attempting to find the text locally.")
 
         # We'll only get here if 1) self.computer.offline = True, or the API failed
@@ -326,14 +329,16 @@ class Display:
                 )
                 response = response.json()
                 return response
-            except:
+            except Exception:
+                # API request failed, fall back to local OCR
                 print("Attempting to get the text locally.")
 
         # We'll only get here if 1) self.computer.offline = True, or the API failed
 
         try:
             return pytesseract_get_text(screenshot)
-        except:
+        except Exception:
+            # pytesseract failed, provide helpful error message
             raise Exception(
                 "Failed to find text locally.\n\nTo find text in order to use the mouse, please make sure you've installed `pytesseract` along with the Tesseract executable (see this Stack Overflow answer for help installing Tesseract: https://stackoverflow.com/questions/50951955/pytesseract-tesseractnotfound-error-tesseract-is-not-installed-or-its-not-i)."
             )

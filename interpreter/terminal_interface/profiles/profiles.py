@@ -53,9 +53,10 @@ def profile(interpreter, filename_or_url):
     if profile == None:
         try:
             profile = get_profile(filename_or_url, profile_path)
-        except:
+        except Exception:
+            # Profile loading failed
             if filename_or_url in ["default", "default.yaml"]:
-                # Literally this just happens to default.yaml
+                # Reset and retry for default profile
                 reset_profile(filename_or_url)
                 profile = get_profile(filename_or_url, profile_path)
             else:
@@ -175,9 +176,9 @@ def apply_profile(interpreter, profile, profile_path):
                     elif profile["llm"]["model"] == "gpt-4-turbo-preview":
                         text = text.replace("gpt-4-turbo-preview", "gpt-4o")
                         profile["llm"]["model"] = "gpt-4o"
-                except:
-                    raise
-                    pass  # fine
+                except KeyError:
+                    # Model key not in profile, that's fine
+                    pass
 
                 with open(profile_path, "w") as file:
                     file.write(text)

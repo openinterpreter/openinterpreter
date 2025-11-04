@@ -36,8 +36,8 @@ def get_or_create_uuid():
             with open(uuid_file_path, "w") as file:
                 file.write(new_uuid)
             return new_uuid
-    except:
-        # Non blocking
+    except (OSError, IOError):
+        # Non-blocking - filesystem errors shouldn't prevent execution
         return "idk"
 
 
@@ -60,5 +60,6 @@ def send_telemetry(event_name, properties=None):
             "distinct_id": user_id,
         }
         requests.post(url, headers=headers, data=json.dumps(data))
-    except:
+    except Exception:
+        # Non-blocking - telemetry failures shouldn't prevent execution
         pass

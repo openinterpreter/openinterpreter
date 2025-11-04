@@ -22,9 +22,11 @@ from .run_text_llm import run_text_llm
 # from .run_function_calling_llm import run_function_calling_llm
 from .run_tool_calling_llm import run_tool_calling_llm
 from .utils.convert_to_openai_messages import convert_to_openai_messages
+from ..utils.logging_config import get_logger as get_oi_logger
 
 # Create or get the logger
 logger = logging.getLogger("LiteLLM")
+oi_logger = get_oi_logger(__name__)
 
 
 class SuppressDebugFilter(logging.Filter):
@@ -130,7 +132,8 @@ class Llm:
                     self.supports_functions = True
                 else:
                     self.supports_functions = False
-            except:
+            except Exception:
+                # litellm may fail to detect function support for unknown models
                 self.supports_functions = False
 
         # Detect vision support
@@ -140,7 +143,8 @@ class Llm:
                     self.supports_vision = True
                 else:
                     self.supports_vision = False
-            except:
+            except Exception:
+                # litellm may fail to detect vision support for unknown models
                 self.supports_vision = False
 
         # Trim image messages if they're there
@@ -234,7 +238,8 @@ class Llm:
                     messages = tt.trim(
                         messages, system_message=system_message, model=model
                     )
-                except:
+                except Exception:
+                    # Unable to determine context window, fallback to default
                     if len(messages) == 1:
                         if self.interpreter.in_terminal_interface:
                             self.interpreter.display_message(
@@ -261,15 +266,13 @@ Continuing...
                     messages = tt.trim(
                         messages, system_message=system_message, max_tokens=8000
                     )
-        except:
+        except Exception:
             # If we're trimming messages, this won't work.
             # If we're trimming from a model we don't know, this won't work.
             # Better not to fail until `messages` is too big, just for frustrations sake, I suppose.
 
             # Reunite system message with messages
             messages = [{"role": "system", "content": system_message}] + messages
-
-            pass
 
         # If there should be a system message, there should be a system message!
         # Empty system messages appear to be deleted :(
@@ -409,7 +412,8 @@ Continuing...
                     self.max_tokens = min(
                         int(self.context_window * 0.2), model_info["max_output_tokens"]
                     )
-            except:
+            except Exception:
+                # Model info not available, context_window will remain None
                 pass
 
 

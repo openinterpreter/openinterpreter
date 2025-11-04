@@ -226,7 +226,8 @@ Do not import the computer module, or any of its sub-modules. They are already i
             try:
                 json.dumps(obj)
                 return True
-            except:
+            except (TypeError, ValueError):
+                # Object cannot be serialized to JSON
                 return False
 
         return {k: v for k, v in self.__dict__.items() if json_serializable(v)}

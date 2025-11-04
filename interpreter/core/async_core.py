@@ -33,7 +33,7 @@ try:
     )
     from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
     from starlette.status import HTTP_403_FORBIDDEN
-except:
+except ImportError:
     # Server dependencies are not required by the main package.
     pass
 

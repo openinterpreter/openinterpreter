@@ -90,7 +90,8 @@ class AsyncInterpreter:
         else:
             try:
                 chunk = json.loads(chunk)
-            except:
+            except json.JSONDecodeError:
+                # Not valid JSON, skip parsing
                 pass
 
             if "start" in chunk:

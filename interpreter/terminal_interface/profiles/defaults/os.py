@@ -140,8 +140,8 @@ try:
                 + "\n(If you need to be in another active application to help the user, you need to switch to it.)"
             )
 
-except:
-    # Non blocking
+except Exception:
+    # Non-blocking - active app detection failures shouldn't prevent execution
     pass
     
 }}

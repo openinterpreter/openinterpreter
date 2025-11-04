@@ -117,7 +117,7 @@ import matplotlib.pyplot as plt
         try:
             try:
                 preprocessed_code = self.preprocess_code(code)
-            except:
+            except Exception:
                 # Any errors produced here are our fault.
                 # Also, for python, you don't need them! It's just for active_line and stuff. Just looks pretty.
                 preprocessed_code = code
@@ -126,7 +126,8 @@ import matplotlib.pyplot as plt
             yield from self._capture_output(message_queue)
         except GeneratorExit:
             raise  # gotta pass this up!
-        except:
+        except Exception:
+            # Code execution failed, return traceback to user
             content = traceback.format_exc()
             yield {"type": "console", "format": "output", "content": content}
 
@@ -310,7 +311,8 @@ import matplotlib.pyplot as plt
             # Split the last active line by "##" and grab the first element
             try:
                 active_line = int(last_active_line.split("##")[0])
-            except:
+            except (ValueError, IndexError):
+                # Failed to parse active line number
                 active_line = 0
             # Remove all ##active_line{number}##\n
             line = re.sub(r"##active_line\d+##\n", "", line)
@@ -403,7 +405,7 @@ def add_active_line_prints(code):
     processed_code = "\n".join(code_lines)
     try:
         tree = ast.parse(processed_code)
-    except:
+    except SyntaxError:
         # If you can't parse the processed version, try the unprocessed version before giving up
         tree = ast.parse(code)
     transformer = AddLinePrints()

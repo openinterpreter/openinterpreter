@@ -188,6 +188,6 @@ def contribute_conversations(
 
     try:
         requests.post(url, json=payload)
-    except:
-        # Non blocking
+    except Exception:
+        # Non-blocking - contribution upload failures shouldn't prevent execution
         pass

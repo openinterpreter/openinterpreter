@@ -79,7 +79,8 @@ class SubprocessLanguage(BaseLanguage):
             code = self.preprocess_code(code)
             if not self.process:
                 self.start_process()
-        except:
+        except Exception:
+            # Failed to preprocess code or start process
             yield {
                 "type": "console",
                 "format": "output",
@@ -97,7 +98,8 @@ class SubprocessLanguage(BaseLanguage):
                 self.process.stdin.write(code + "\n")
                 self.process.stdin.flush()
                 break
-            except:
+            except (BrokenPipeError, OSError):
+                # Process died, need to restart
                 if retry_count != 0:
                     # For UX, I like to hide this if it happens once. Obviously feels better to not see errors
                     # Most of the time it doesn't matter, but we should figure out why it happens frequently with:

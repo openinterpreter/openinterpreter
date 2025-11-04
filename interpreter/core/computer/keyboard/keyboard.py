@@ -25,7 +25,8 @@ class Keyboard:
         else:
             try:
                 clipboard_history = self.computer.clipboard.view()
-            except:
+            except Exception:
+                # Failed to get clipboard history, continue without it
                 pass
 
             ends_in_enter = False
@@ -51,7 +52,8 @@ class Keyboard:
 
             try:
                 self.computer.clipboard.copy(clipboard_history)
-            except:
+            except Exception:
+                # Failed to restore clipboard history, that's okay
                 pass
 
         time.sleep(delay / 2)
