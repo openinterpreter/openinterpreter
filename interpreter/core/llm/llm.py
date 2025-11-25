@@ -19,6 +19,7 @@ import uuid
 
 import requests
 import tokentrim as tt
+import httpx
 
 from .run_text_llm import run_text_llm
 
@@ -448,6 +449,14 @@ def fixed_litellm_completions(**params):
         except KeyboardInterrupt:
             print("Exiting...")
             sys.exit(0)
+        except httpx.RemoteProtocolError as e:
+            print(
+                "\n\n---",
+                "Warning: Encountered a remote protocol error. This is likely due to a bug in the local LLM server. We will attempt to reconnect and continue.",
+                "---\n\n",
+            )
+            time.sleep(1)
+            continue
         except Exception as e:
             if attempt == 0:
                 # Store the first error

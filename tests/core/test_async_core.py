@@ -1,9 +1,11 @@
 import os
 from unittest import TestCase, mock
+import pytest
 
-from interpreter.core.async_core import AsyncInterpreter, Server
+from interpreter.core.async_core import AsyncInterpreter, Server, _server_dependencies_installed
 
 
+@pytest.mark.skipif(not _server_dependencies_installed, reason="Server dependencies not installed")
 class TestServerConstruction(TestCase):
     """
     Tests to make sure that the underlying server is configured correctly when constructing

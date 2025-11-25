@@ -18,6 +18,7 @@ from .core import OpenInterpreter
 
 last_start_time = 0
 
+_server_dependencies_installed = False
 try:
     import janus
     import uvicorn
@@ -33,7 +34,8 @@ try:
     )
     from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
     from starlette.status import HTTP_403_FORBIDDEN
-except:
+    _server_dependencies_installed = True
+except ImportError:
     # Server dependencies are not required by the main package.
     pass
 
@@ -952,51 +954,63 @@ class Server:
     DEFAULT_HOST = "127.0.0.1"
     DEFAULT_PORT = 8000
 
-    def __init__(self, async_interpreter, host=None, port=None):
-        self.app = FastAPI()
-        router = create_router(async_interpreter)
-        self.authenticate = authenticate_function
+    if _server_dependencies_installed:
+        def __init__(self, async_interpreter, host=None, port=None):
+            self.app = FastAPI()
+            router = create_router(async_interpreter)
+            self.authenticate = authenticate_function
 
-        # Add authentication middleware
-        @self.app.middleware("http")
-        async def validate_api_key(request: Request, call_next):
-            # Ignore authentication for the /heartbeat route
-            if request.url.path == "/heartbeat":
-                return await call_next(request)
+            # Add authentication middleware
+            @self.app.middleware("http")
+            async def validate_api_key(request: Request, call_next):
+                # Ignore authentication for the /heartbeat route
+                if request.url.path == "/heartbeat":
+                    return await call_next(request)
 
-            api_key = request.headers.get("X-API-KEY")
-            if self.authenticate(api_key):
-                response = await call_next(request)
-                return response
-            else:
-                return JSONResponse(
-                    status_code=HTTP_403_FORBIDDEN,
-                    content={"detail": "Authentication failed"},
-                )
+                api_key = request.headers.get("X-API-KEY")
+                if self.authenticate(api_key):
+                    response = await call_next(request)
+                    return response
+                else:
+                    return JSONResponse(
+                        status_code=HTTP_403_FORBIDDEN,
+                        content={"detail": "Authentication failed"},
+                    )
 
-        self.app.include_router(router)
-        h = host or os.getenv("INTERPRETER_HOST", Server.DEFAULT_HOST)
-        p = port or int(os.getenv("INTERPRETER_PORT", Server.DEFAULT_PORT))
-        self.config = uvicorn.Config(app=self.app, host=h, port=p)
-        self.uvicorn_server = uvicorn.Server(self.config)
+            self.app.include_router(router)
+            h = host or os.getenv("INTERPRETER_HOST", Server.DEFAULT_HOST)
+            p = port or int(os.getenv("INTERPRETER_PORT", Server.DEFAULT_PORT))
+            self.config = uvicorn.Config(app=self.app, host=h, port=p)
+            self.uvicorn_server = uvicorn.Server(self.config)
+    else:
+        def __init__(self, *args, **kwargs):
+            pass
 
     @property
     def host(self):
-        return self.config.host
+        if _server_dependencies_installed:
+            return self.config.host
+        else:
+            return Server.DEFAULT_HOST
 
     @host.setter
     def host(self, value):
-        self.config.host = value
-        self.uvicorn_server = uvicorn.Server(self.config)
+        if _server_dependencies_installed:
+            self.config.host = value
+            self.uvicorn_server = uvicorn.Server(self.config)
 
     @property
     def port(self):
-        return self.config.port
+        if _server_dependencies_installed:
+            return self.config.port
+        else:
+            return Server.DEFAULT_PORT
 
     @port.setter
     def port(self, value):
-        self.config.port = value
-        self.uvicorn_server = uvicorn.Server(self.config)
+        if _server_dependencies_installed:
+            self.config.port = value
+            self.uvicorn_server = uvicorn.Server(self.config)
 
     def run(self, host=None, port=None, retries=5):
         if host is not None:
