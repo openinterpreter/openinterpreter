@@ -1,100 +1,98 @@
-[tool.poetry]
+[project]
 name = "open-interpreter"
-packages = [
-    {include = "interpreter"},
-    {include = "scripts"},
-]
 version = "0.4.3" # Use "-rc1", "-rc2", etc. for pre-release versions
 description = "Let language models run code"
-authors = ["Killian Lucas <killian@openinterpreter.com>"]
 readme = "README.md"
+authors = [{ name = "Killian Lucas", email = "killian@openinterpreter.com" }]
+requires-python = ">=3.9,<3.13"
+dependencies = [
+    "setuptools>=0",
+    "astor>=0.8.1,<0.9.0",
+    "git-python>=1.0.3,<2.0.0",
+    "inquirer>=3.1.3,<4.0.0",
+    "pyyaml>=6.0.1,<7.0.0",
+    "rich>=13.4.2,<14.0.0",
+    "six>=1.16.0,<2.0.0",
+    "tokentrim>=0.1.13,<0.2.0",
+    "wget>=3.2,<4.0",
+    "psutil>=5.9.6,<6.0.0",
+    'pyreadline3>=3.4.1,<4.0.0; sys_platform == "win32"',
+    "html2image>=2.0.4.3,<3.0.0",
+    "send2trash>=1.8.2,<2.0.0",
+    "ipykernel>=6.26.0,<7.0.0",
+    "jupyter-client>=8.6.0,<9.0.0",
+    "matplotlib>=3.8.2,<4.0.0",
+    "toml>=0.10.2,<0.11.0",
+    "tiktoken>=0.7.0,<0.8.0",
+    "packaging>=23.0,<24.0",
+    "platformdirs>=4.2.0,<5.0.0",
+    "pydantic>=2.6.4,<3.0.0",
+    "google-generativeai>=0.7.1,<0.8.0",
+    "pyperclip>=1.9.0,<2.0.0",
+    "yaspin>=3.0.2,<4.0.0",
+    "shortuuid>=1.0.13,<2.0.0",
+    "litellm>=1.41.26,<2.0.0",
+    "starlette>=0.37.2,<0.38.0",
+    "html2text>=2024.2.26,<2025.0.0",
+    "selenium>=4.24.0,<5.0.0",
+    "webdriver-manager>=4.0.2,<5.0.0",
+    "anthropic>=0.37.1,<0.38.0",
+    "pyautogui>=0.9.54,<0.10.0",
+    "typer>=0.12.5,<0.13.0",
+    "fastapi>=0.111.0,<0.112.0",
+    "uvicorn>=0.30.1,<0.31.0",
+]
 
-[tool.poetry.dependencies]
+[project.optional-dependencies]
+os = [
+    "opencv-python>=4.8.1.78,<5.0.0",
+    "pyautogui>=0.9.54,<0.10.0",
+    "plyer>=2.1.0,<3.0.0",
+    "pywinctl>=0.3,<0.4",
+    "pytesseract>=0.3.10,<0.4.0",
+    "sentence-transformers>=2.5.1,<3.0.0",
+    "ipywidgets>=8.1.2,<9.0.0",
+    "timm>=0.9.16,<0.10.0",
+    "screeninfo>=0.8.1,<0.9.0",
+]
+safe = ["semgrep>=1.52.0,<2.0.0"]
+local = [
+    "opencv-python>=4.8.1.78,<5.0.0",
+    "pytesseract>=0.3.10,<0.4.0",
+    "torch>=2.2.1,<3.0.0",
+    "transformers==4.41.2",
+    "einops>=0.8.0,<0.9.0",
+    "torchvision>=0.18.0,<0.19.0",
+    "easyocr>=1.7.1,<2.0.0",
+]
+server = [
+    "fastapi>=0.111.0,<0.112.0",
+    "janus>=1.0.0,<2.0.0",
+    "uvicorn>=0.30.1,<0.31.0",
+]
 
-# Optional [os] dependencies
-opencv-python = { version = "^4.8.1.78", optional = true }
-plyer = { version = "^2.1.0", optional = true }
-pywinctl = { version = "^0.3", optional = true }
-pytesseract = { version = "^0.3.10", optional = true }
-sentence-transformers = { version = "^2.5.1", optional = true }
-nltk = { version = "^3.8.1", optional = true }
-ipywidgets = { version = "^8.1.2", optional = true }
-torch = { version = "^2.2.1", optional = true }
-timm = { version = "^0.9.16", optional = true }
-screeninfo = { version = "^0.8.1", optional = true }
-
-# Optional [safe] dependencies
-semgrep = { version = "^1.52.0", optional = true }
-
-# Optional [local] dependencies
-transformers = { version = "4.41.2", optional = true }
-einops = { version = "^0.8.0", optional = true }
-torchvision = { version = "^0.18.0", optional = true }
-easyocr = { version = "^1.7.1", optional = true }
-
-# Optional [server] dependencies
-janus = { version = "^1.0.0", optional = true }
-
-# Required dependencies
-python = ">=3.9,<3.13"
-setuptools = "*"
-astor = "^0.8.1"
-git-python = "^1.0.3"
-inquirer = "^3.1.3"
-pyyaml = "^6.0.1"
-rich = "^13.4.2"
-six = "^1.16.0"
-tokentrim = "^0.1.13"
-wget = "^3.2"
-psutil = "^5.9.6"
-pyreadline3 = {version = "^3.4.1", markers = "sys_platform == 'win32'"}
-html2image = "^2.0.4.3"
-send2trash = "^1.8.2"
-ipykernel = "^6.26.0"
-jupyter-client = "^8.6.0"
-matplotlib = "^3.8.2"
-toml = "^0.10.2"
-tiktoken = "^0.7.0"
-platformdirs = "^4.2.0"
-pydantic = "^2.6.4"
-google-generativeai = "^0.7.1"
-pyperclip = "^1.9.0"
-yaspin = "^3.0.2"
-shortuuid = "^1.0.13"
-litellm = "^1.41.26"
-starlette = "^0.37.2"
-html2text = "^2024.2.26"
-selenium = "^4.24.0"
-webdriver-manager = "^4.0.2"
-anthropic = "^0.37.1"
-pyautogui = "^0.9.54"
-typer = "^0.12.5"
-fastapi = "^0.111.0"
-uvicorn = "^0.30.1"
-
-[tool.poetry.extras]
-os = ["opencv-python", "pyautogui", "plyer", "pywinctl", "pytesseract", "sentence-transformers", "ipywidgets", "timm", "screeninfo"]
-safe = ["semgrep"]
-local = ["opencv-python", "pytesseract", "torch", "transformers", "einops", "torchvision", "easyocr"]
-server = ["fastapi", "janus", "uvicorn"]
-
-[tool.poetry.group.dev.dependencies]
-black = "^23.10.1"
-isort = "^5.12.0"
-pre-commit = "^3.5.0"
-pytest = "^7.4.0"
-sniffio = "^1.3.0"
-websockets = "^13.1"
-
-[build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
-
-[tool.poetry.scripts]
+[project.scripts]
 i = "interpreter.terminal_interface.start_terminal_interface:main"
 interpreter = "interpreter.terminal_interface.start_terminal_interface:main"
 wtf = "scripts.wtf:main"
 interpreter-classic = "interpreter.terminal_interface.start_terminal_interface:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["interpreter", "scripts"]
+
+[dependency-groups]
+dev = [
+    "black>=23.10.1,<24.0.0",
+    "isort>=5.12.0,<6.0.0",
+    "pre-commit>=3.5.0,<4.0.0",
+    "pytest>=7.4.0,<8.0.0",
+    "sniffio>=1.3.0,<2.0.0",
+    "websockets>=13.1,<14.0",
+]
 
 [tool.black]
 target-version = ['py311']

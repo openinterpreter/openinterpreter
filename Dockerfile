@@ -12,16 +12,18 @@ ENV HOST 0.0.0.0
 # ^ Sets the server host to 0.0.0.0, Required for the server to be accessible outside the container
 
 # Copy required files into container
+WORKDIR /app
+RUN pip install --no-cache-dir uv
 RUN mkdir -p interpreter scripts
 COPY interpreter/ interpreter/
 COPY scripts/ scripts/
-COPY poetry.lock pyproject.toml README.md ./
+COPY pyproject.toml README.md ./
 
 # Expose port 8000
 EXPOSE 8000
 
 # Install server dependencies
-RUN pip install ".[server]"
+RUN uv pip install --system ".[server]"
 
 # Start the server
 ENTRYPOINT ["interpreter", "--server"]

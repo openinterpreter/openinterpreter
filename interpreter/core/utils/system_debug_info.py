@@ -3,6 +3,8 @@ import subprocess
 
 from importlib.metadata import version, PackageNotFoundError
 from importlib.metadata import distributions
+from packaging.requirements import Requirement
+from packaging.version import Version
 import psutil
 import toml
 
@@ -53,27 +55,39 @@ def get_ram_info():
 def get_package_mismatches(file_path="pyproject.toml"):
     with open(file_path, "r") as file:
         pyproject = toml.load(file)
-    dependencies = pyproject["tool"]["poetry"]["dependencies"]
-    dev_dependencies = pyproject["tool"]["poetry"]["group"]["dev"]["dependencies"]
-    dependencies.update(dev_dependencies)
+
+    project_dependencies = pyproject.get("project", {}).get("dependencies", [])
+    dev_dependencies = pyproject.get("dependency-groups", {}).get("dev", [])
+
+    requirements = []
+    unparsable = []
+    for raw_requirement in project_dependencies + dev_dependencies:
+        try:
+            requirements.append(Requirement(raw_requirement))
+        except Exception:
+            unparsable.append(raw_requirement)
 
     installed_packages = {
         dist.metadata["Name"].lower(): dist.version
         for dist in distributions()
     }
     mismatches = []
-    for package, version_info in dependencies.items():
-        if isinstance(version_info, dict):
-            version_info = version_info["version"]
-        installed_version = installed_packages.get(package)
-        if installed_version and version_info.startswith("^"):
-            expected_version = version_info[1:]
-            if not installed_version.startswith(expected_version):
-                mismatches.append(
-                    f"\t  {package}: Mismatch, pyproject.toml={expected_version}, pip={installed_version}"
-                )
-        else:
-            mismatches.append(f"\t  {package}: Not found in pip list")
+    for requirement in requirements:
+        installed_version = installed_packages.get(requirement.name.lower())
+        if not installed_version:
+            mismatches.append(f"\t  {requirement.name}: Not found in pip list")
+            continue
+
+        if requirement.specifier and not requirement.specifier.contains(
+            Version(installed_version), prereleases=True
+        ):
+            mismatches.append(
+                f"\t  {requirement.name}: Mismatch, pyproject.toml={requirement.specifier}, pip={installed_version}"
+            )
+
+    mismatches.extend(
+        [f"\t  {requirement}: Unable to parse requirement" for requirement in unparsable]
+    )
 
     return "\n" + "\n".join(mismatches)
 

@@ -29,32 +29,24 @@ We will review PRs when possible and work with you to integrate your contributio
 
 ## Running Your Local Fork
 
-**Note: for anyone testing the new `--local`, `--os`, and `--local --os` modes: When you run `poetry install` you aren't installing the optional dependencies and it'll throw errors. To test `--local` mode, run `poetry install -E local`. To test `--os` mode, run `poetry install -E os`. To test `--local --os` mode, run `poetry install -E local -E os`. You can edit the system messages for these modes in `interpreter/terminal_interface/profiles/defaults`.**
+**Note: optional dependencies for the `--local`, `--os`, and `--local --os` modes are not installed by default. Use `uv sync --extra local`, `uv sync --extra os`, or `uv sync --extra local --extra os` to include them. You can edit the system messages for these modes in `interpreter/terminal_interface/profiles/defaults`.**
 
 Once you've forked the code and created a new branch for your work, you can run the fork in CLI mode by following these steps:
 
 1. CD into the project folder by running `cd open-interpreter`.
-2. Install `poetry` [according to their documentation](https://python-poetry.org/docs/#installing-with-pipx), which will create a virtual environment for development + handle dependencies.
-3. Install dependencies by running `poetry install`.
-4. Run the program with `poetry run interpreter`. Run tests with `poetry run pytest -s -x`.
+2. Install `uv` [according to their documentation](https://docs.astral.sh/uv/getting-started/installation/).
+3. Install dependencies (including dev tools) with `uv sync --group dev`. Add `--extra <name>` flags if you need optional extras.
+4. Run the program with `uv run interpreter`. Run tests with `uv run pytest -s -x`.
 
 **Note**: This project uses [`black`](https://black.readthedocs.io/en/stable/index.html) and [`isort`](https://pypi.org/project/isort/) via a [`pre-commit`](https://pre-commit.com/) hook to ensure consistent code style. If you need to bypass it for some reason, you can `git commit` with the `--no-verify` flag.
 
 ### Installing New Dependencies
 
-If you wish to install new dependencies into the project, please use `poetry add package-name`.
+If you wish to install new dependencies into the project, please use `uv add package-name`.
 
 ### Installing Developer Dependencies
 
-If you need to install dependencies specific to development, like testing tools, formatting tools, etc. please use `poetry add package-name --group dev`.
-
-### Known Issues
-
-For some, `poetry install` might hang on some dependencies. As a first step, try to run the following command in your terminal:
-
-`export PYTHON_KEYRING_BACKEND=keyring.backends.fail.Keyring`
-
-Then run `poetry install` again. If this doesn't work, please join our [Discord community](https://discord.gg/6p3fD6rBVm) for help.
+If you need to install dependencies specific to development, like testing tools, formatting tools, etc. please use `uv add package-name --group dev`.
 
 ## Code Formatting and Linting
 
