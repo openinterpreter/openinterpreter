@@ -1,5 +1,5 @@
 import asyncio
-import json
+import orjson as json  # 10x faster JSON
 import os
 import shutil
 import socket
@@ -26,7 +26,6 @@ try:
         FastAPI,
         File,
         Form,
-        HTTPException,
         Request,
         UploadFile,
         WebSocket,
@@ -116,9 +115,7 @@ class AsyncInterpreter(OpenInterpreter):
                 sent_chunks = False
 
                 for chunk_og in self._respond_and_store():
-                    chunk = (
-                        chunk_og.copy()
-                    )  # This fixes weird double token chunks. Probably a deeper problem?
+                    chunk = chunk_og.copy()  # This fixes weird double token chunks. Probably a deeper problem?
 
                     if chunk["type"] == "confirmation":
                         if run_code:

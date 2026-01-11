@@ -2,7 +2,7 @@
 This file defines the Interpreter class.
 It's the main file. `from interpreter import interpreter` will import an instance of this class.
 """
-import json
+
 import os
 import threading
 import time
@@ -285,9 +285,9 @@ class OpenInterpreter:
                     os.path.join(
                         self.conversation_history_path, self.conversation_filename
                     ),
-                    "w",
+                    "wb",
                 ) as f:
-                    json.dump(self.messages, f)
+                    f.write(orjson.dumps(self.messages))
             return
 
         raise Exception(

@@ -1,7 +1,6 @@
-import json
+import orjson as json  # 10x faster JSON
 import os
 import re
-import time
 import traceback
 
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
@@ -76,9 +75,9 @@ def respond(interpreter):
 
         ### RUN THE LLM ###
 
-        assert (
-            len(interpreter.messages) > 0
-        ), "User message was not passed in. You need to pass in at least one message."
+        assert len(interpreter.messages) > 0, (
+            "User message was not passed in. You need to pass in at least one message."
+        )
 
         if (
             interpreter.messages[-1]["type"] != "code"
@@ -101,10 +100,8 @@ def respond(interpreter):
 
             except Exception as e:
                 error_message = str(e).lower()
-                if (
-                    interpreter.offline == False
-                    and ("auth" in error_message or
-                         "api key" in error_message)
+                if interpreter.offline == False and (
+                    "auth" in error_message or "api key" in error_message
                 ):
                     # Provide extra information on how to change API keys, if
                     # we encounter that error (Many people writing GitHub
@@ -113,13 +110,12 @@ def respond(interpreter):
                     raise Exception(
                         f"{output}\n\nThere might be an issue with your API key(s).\n\nTo reset your API key (we'll use OPENAI_API_KEY for this example, but you may need to reset your ANTHROPIC_API_KEY, HUGGINGFACE_API_KEY, etc):\n        Mac/Linux: 'export OPENAI_API_KEY=your-key-here'. Update your ~/.zshrc on MacOS or ~/.bashrc on Linux with the new key if it has already been persisted there.,\n        Windows: 'setx OPENAI_API_KEY your-key-here' then restart terminal.\n\n"
                     )
-                elif (
-                    isinstance(e, litellm.exceptions.RateLimitError)
-                    and ("exceeded" in str(e).lower() or
-                         "insufficient_quota" in str(e).lower())
+                elif isinstance(e, litellm.exceptions.RateLimitError) and (
+                    "exceeded" in str(e).lower()
+                    or "insufficient_quota" in str(e).lower()
                 ):
                     display_markdown_message(
-                        f""" > You ran out of current quota for OpenAI's API, please check your plan and billing details. You can either wait for the quota to reset or upgrade your plan.
+                        """ > You ran out of current quota for OpenAI's API, please check your plan and billing details. You can either wait for the quota to reset or upgrade your plan.
 
                         To check your current usage and billing details, visit the [OpenAI billing page](https://platform.openai.com/settings/organization/billing/overview).
 
@@ -148,7 +144,7 @@ def respond(interpreter):
 
                     if response.strip().lower() == "y":
                         interpreter.llm.model = "i"
-                        interpreter.display_message(f"> Model set to `i`")
+                        interpreter.display_message("> Model set to `i`")
                         interpreter.display_message(
                             "***Note:*** *Conversations with this model will be used to train our open-source model.*\n"
                         )
@@ -184,12 +180,12 @@ def respond(interpreter):
                         code_dict = json.loads(edited_code)
                         language = code_dict.get("language", language)
                         code = code_dict.get("code", code)
-                        interpreter.messages[-1][
-                            "content"
-                        ] = code  # So the LLM can see it.
-                        interpreter.messages[-1][
-                            "format"
-                        ] = language  # So the LLM can see it.
+                        interpreter.messages[-1]["content"] = (
+                            code  # So the LLM can see it.
+                        )
+                        interpreter.messages[-1]["format"] = (
+                            language  # So the LLM can see it.
+                        )
                     except:
                         pass
 
@@ -200,9 +196,9 @@ def respond(interpreter):
                 if code.strip().endswith("executeexecute"):
                     code = code.replace("executeexecute", "")
                     try:
-                        interpreter.messages[-1][
-                            "content"
-                        ] = code  # So the LLM can see it.
+                        interpreter.messages[-1]["content"] = (
+                            code  # So the LLM can see it.
+                        )
                     except:
                         pass
 
@@ -212,12 +208,12 @@ def respond(interpreter):
                         if set(code_dict.keys()) == {"language", "code"}:
                             language = code_dict["language"]
                             code = code_dict["code"]
-                            interpreter.messages[-1][
-                                "content"
-                            ] = code  # So the LLM can see it.
-                            interpreter.messages[-1][
-                                "format"
-                            ] = language  # So the LLM can see it.
+                            interpreter.messages[-1]["content"] = (
+                                code  # So the LLM can see it.
+                            )
+                            interpreter.messages[-1]["format"] = (
+                                language  # So the LLM can see it.
+                            )
                     except:
                         pass
 
@@ -230,12 +226,12 @@ def respond(interpreter):
                         if set(code_dict.keys()) == {"language", "code"}:
                             language = code_dict["language"]
                             code = code_dict["code"]
-                            interpreter.messages[-1][
-                                "content"
-                            ] = code  # So the LLM can see it.
-                            interpreter.messages[-1][
-                                "format"
-                            ] = language  # So the LLM can see it.
+                            interpreter.messages[-1]["content"] = (
+                                code  # So the LLM can see it.
+                            )
+                            interpreter.messages[-1]["format"] = (
+                                language  # So the LLM can see it.
+                            )
                     except:
                         pass
 
