@@ -3,6 +3,7 @@ This file defines the Interpreter class.
 It's the main file. `from interpreter import interpreter` will import an instance of this class.
 """
 
+import orjson
 import os
 import threading
 import time
