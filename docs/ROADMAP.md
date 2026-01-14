@@ -1,23 +1,25 @@
 # Roadmap
 
 ## Documentation
+
 - [ ] Work with Mintlify to translate docs. How does Mintlify let us translate our documentation automatically? I know there's a way.
 - [ ] Better comments throughout the package (they're like docs for contributors)
 - [ ] Show how to replace interpreter.llm so you can use a custom llm
 
 ## New features
+
 - [ ] Figure out how to get OI to answer to user input requests like python's `input()`. Do we somehow detect a delay in the output..? Is there some universal flag that TUIs emit when they expect user input? Should we do this semantically with embeddings, then ask OI to review it and respond..?
 - [ ] Placeholder text that gives a compelling example OI request. Probably use `textual`
 - [ ] Everything else `textual` offers, like could we make it easier to select text? Copy paste in and out? Code editing interface?
 - [x] Let people turn off the active line highlighting
-- [ ] Add a --plain flag which doesn't use rich, just prints stuff in plain text
+- [x] Add a --plain flag which doesn't use rich, just prints stuff in plain text
 - [ ] Use iPython stuff to track the active line, instead of inserting print statements, which makes debugging weird (From ChatGPT: For deeper insights into what's happening behind the scenes, including which line of code is being executed, you can increase the logging level of the IPython kernel. You can configure the kernel's logger to a more verbose setting, which logs each execution request. However, this requires modifying the kernel's startup settings, which might involve changing logging configurations in the IPython kernel source or when launching the kernel.)
 - [ ] Let people edit the code OI writes. Could just open it in the user's preferred editor. Simple. [Full description of how to implement this here.](https://github.com/OpenInterpreter/open-interpreter/pull/830#issuecomment-1854989795)
 - [ ] Display images in the terminal interface
-- [ ] There should be a function that just renders messages to the terminal, so we can revive conversation navigator, and let people look at their conversations
-- [ ] ^ This function should also render the last like 5 messages once input() is about to be run, so we don't get those weird stuttering `rich` artifacts
-- [ ] Let OI use OI, add `interpreter.chat(async=True)` bool. OI can use this to open OI on a new thread
-  - [ ] Also add `interpreter.await()` which waits for `interpreter.running` (?) to = False, and `interpreter.result()` which returns the last assistant messages content.
+- [x] There should be a function that just renders messages to the terminal, so we can revive conversation navigator, and let people look at their conversations
+- [x] ^ This function should also render the last like 5 messages once input() is about to be run, so we don't get those weird stuttering `rich` artifacts
+- [x] Let OI use OI, add `interpreter.chat(async=True)` bool. OI can use this to open OI on a new thread (Implemented as `blocking=False`)
+  - [x] Also add `interpreter.await()` (Implemented as `interpreter.wait()`)
 - [ ] Allow for limited functions (`interpreter.functions`) using regex
   - [ ] If `interpreter.functions != []`:
     - [ ] set `interpreter.computer.languages` to only use Python
@@ -25,10 +27,20 @@
 - [ ] (Maybe) Allow for a custom embedding function (`interpreter.embed` or `computer.ai.embed`) which will let us do semantic search
 - [ ] (Maybe) if a git is detected, switch to a mode that's good for developers, like showing nested file structure in dynamic system message, searching for relevant functions (use computer.files.search)
 - [x] Allow for integrations somehow (you can replace interpreter.llm.completions with a wrapped completions endpoint for any kind of logging. need to document this tho)
-  - [ ] Document this^
-- [ ] Expand "safe mode" to have proper, simple Docker support, or maybe Cosmopolitan LibC
+  - [x] Document this^
+- [ ] Expand "safe mode" to have proper, simple Docker support, or maybe Cosmopolitan LibC (Partially implemented in docs/integrations/docker.mdx)
 - [ ] Make it so core can be run elsewhere from terminal package — perhaps split over HTTP (this would make docker easier too)
 - [ ] For OS mode, experiment with screenshot just returning active window, experiment with it just showing the changes, or showing changes in addition to the whole thing, etc. GAIA should be your guide
+- [x] Support for Mistral's "Ministral" models (Added `--ministral` flag and profile)
+- [x] Integration of "Ultron" models via Ollama (Added `--ultron` flag and profile)
+- [x] Secured local-first defaults (Removed OpenRouter dependency from default profiles)
+
+## 2026 Milestones
+
+- [ ] **Advanced OS Control**: Deep integration with Linux DBus (GNOME/KDE) for window management without OCR lag.
+- [ ] **Persistent Memory**: Implementation of a local vector database for long-term memory and skill retrieval.
+- [ ] **Multi-Agent Swarms**: Ability for one interpreter instance to spawn and manage sub-instances for parallel task execution.
+- [ ] **Native Desktop App**: A cross-platform GUI that retains the speed of the terminal but adds rich visualization (Charts, Images, Interactive UI).
 
 ## Future-proofing
 
@@ -69,7 +81,7 @@ This roadmap gets pretty rough from here. More like working notes.
 
 # Working Notes
 
-## \* Roughly, how to build `computer.browser`:
+## \* Roughly, how to build `computer.browser`
 
 First I think we should have a part, like `computer.browser.ask(query)` which just hits up [perplexity](https://www.perplexity.ai/) for fast answers to questions.
 
@@ -166,6 +178,6 @@ if __name__ == "__main__":
     main()
 ```
 
-This script will launch Chrome, connect to it, navigate to "https://www.example.com", and then print the accessibility tree to the console.
+This script will launch Chrome, connect to it, navigate to "<https://www.example.com>", and then print the accessibility tree to the console.
 
 **Note**: The script to launch Chrome assumes a typical installation path on Windows. You will need to modify this path according to your Chrome installation location and operating system. Additionally, handling different operating systems requires conditional checks and respective commands for each OS.

@@ -3,7 +3,7 @@ import os
 import sys
 import time
 
-from importlib.metadata import version, PackageNotFoundError
+from importlib.metadata import version
 
 from interpreter.terminal_interface.contributing_conversations import (
     contribute_conversation_launch_logic,
@@ -234,6 +234,21 @@ def start_terminal_interface(interpreter):
             "type": bool,
         },
         {
+            "name": "ministral-ultron",
+            "help_text": "shortcut for `interpreter --profile ministral-ultron.py`",
+            "type": bool,
+        },
+        {
+            "name": "ultron",
+            "help_text": "shortcut for `interpreter --profile ultron.py` (ollama/devstral-ultron)",
+            "type": bool,
+        },
+        {
+            "name": "ministral",
+            "help_text": "shortcut for `interpreter --profile ministral.py`",
+            "type": bool,
+        },
+        {
             "name": "vision",
             "nickname": "vi",
             "help_text": "experimentally use vision for supported languages (shortcut for `interpreter --profile vision`)",
@@ -354,13 +369,13 @@ Use """ to write multi-line messages.
         action = arg.get("action", "store_true")
         nickname = arg.get("nickname")
 
-        name_or_flags = [f'--{arg["name"]}']
+        name_or_flags = [f"--{arg['name']}"]
         if nickname:
             name_or_flags.append(f"-{nickname}")
 
         # Construct argument name flags
         flags = (
-            [f"-{nickname}", f'--{arg["name"]}'] if nickname else [f'--{arg["name"]}']
+            [f"-{nickname}", f"--{arg['name']}"] if nickname else [f"--{arg['name']}"]
         )
 
         if arg["type"] == bool:
@@ -467,6 +482,15 @@ Use """ to write multi-line messages.
 
     if args.groq:
         args.profile = "groq.py"
+
+    if args.ministral:
+        args.profile = "ministral.py"
+
+    if args.ministral_ultron:
+        args.profile = "ministral-ultron.py"
+
+    if args.ultron:
+        args.profile = "ultron.py"
 
     interpreter = profile(
         interpreter,

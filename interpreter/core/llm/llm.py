@@ -11,10 +11,7 @@ import litellm
 litellm.suppress_debug_info = True
 litellm.REPEATED_STREAMING_CHUNK_LIMIT = 99999999
 
-import json
 import logging
-import subprocess
-import time
 import uuid
 
 import requests
@@ -54,7 +51,7 @@ class Llm:
         self.completions = fixed_litellm_completions
 
         # Settings
-        self.model = "gpt-4o"
+        self.model = "ollama/ministral-ultron"
         self.temperature = 0.0
 
         self.supports_vision = None  # Will try to auto-detect
@@ -99,13 +96,13 @@ class Llm:
             self.max_tokens = int(0.2 * self.context_window)
 
         # Assertions
-        assert (
-            messages[0]["role"] == "system"
-        ), "First message must have the role 'system'"
+        assert messages[0]["role"] == "system", (
+            "First message must have the role 'system'"
+        )
         for msg in messages[1:]:
-            assert (
-                msg["role"] != "system"
-            ), "No message after the first can have the role 'system'"
+            assert msg["role"] != "system", (
+                "No message after the first can have the role 'system'"
+            )
 
         model = self.model
         if model in [
@@ -340,7 +337,7 @@ Continuing...
         if self._is_loaded:
             return
 
-        if self.model.startswith("ollama/") and not ":" in self.model:
+        if self.model.startswith("ollama/") and ":" not in self.model:
             self.model = self.model + ":latest"
 
         self._is_loaded = True
