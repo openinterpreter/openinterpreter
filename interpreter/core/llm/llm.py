@@ -6,6 +6,12 @@ import sys
 # Note: litellm in DEV mode will load .env files from the current directory
 # and all parent directories. This can lead to unexpected API keys being loaded
 # if there are .env files in parent folders.
+import warnings
+
+warnings.filterwarnings(
+    "ignore", message="Pydantic serializer warnings.*", category=UserWarning
+)
+
 import litellm
 
 litellm.suppress_debug_info = True
