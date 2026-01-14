@@ -8,6 +8,7 @@ from interpreter import interpreter
 interpreter.llm.model = "ollama/ministral-ultron"
 interpreter.llm.context_window = 32000
 interpreter.llm.max_tokens = 4096
+interpreter.llm.supports_functions = False
 
 # Final message
 interpreter.display_message(
