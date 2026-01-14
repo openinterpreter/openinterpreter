@@ -234,7 +234,7 @@ def start_terminal_interface(interpreter):
             "type": bool,
         },
         {
-            "name": "ministral_ultron",
+            "name": "ministral-ultron",
             "help_text": "shortcut for `interpreter --profile ministral-ultron.py`",
             "type": bool,
         },
@@ -381,7 +381,7 @@ Use """ to write multi-line messages.
         if arg["type"] is bool:
             parser.add_argument(
                 *flags,
-                dest=arg["name"],
+                dest=arg["name"].replace("-", "_"),
                 help=arg["help_text"],
                 action=action,
                 default=default,
@@ -390,7 +390,7 @@ Use """ to write multi-line messages.
             choices = arg.get("choices")
             parser.add_argument(
                 *flags,
-                dest=arg["name"],
+                dest=arg["name"].replace("-", "_"),
                 help=arg["help_text"],
                 type=arg["type"],
                 choices=choices,
