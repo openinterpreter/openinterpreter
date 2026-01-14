@@ -156,6 +156,32 @@ def respond(interpreter):
                 else:
                     raise
 
+        # PATCH: Convert JSON tool calls (text) into code messages so they are executed
+        if interpreter.messages[-1]["type"] == "message" and (
+            '"name": "execute"' in interpreter.messages[-1]["content"]
+            or '"name":"execute"' in interpreter.messages[-1]["content"]
+        ):
+            try:
+                content = interpreter.messages[-1]["content"]
+                # It might be wrapped in other text, but usually it's the whole message or at end?
+                # Let's try to parse the whole content or find the JSON object.
+                # Heuristic: find first { and last }
+                start = content.find("{")
+                end = content.rfind("}") + 1
+                if start != -1 and end != -1:
+                    json_str = content[start:end]
+                    code_dict = json.loads(json_str)
+                    if code_dict.get("name") == "execute" and "arguments" in code_dict:
+                        args = code_dict["arguments"]
+                        real_code = args.get("code", "")
+                        real_language = args.get("language", "python")
+
+                        interpreter.messages[-1]["type"] = "code"
+                        interpreter.messages[-1]["content"] = real_code
+                        interpreter.messages[-1]["format"] = real_language
+            except:
+                pass
+
         ### RUN CODE (if it's there) ###
 
         if interpreter.messages[-1]["type"] == "code":
@@ -232,6 +258,25 @@ def respond(interpreter):
                             interpreter.messages[-1]["format"] = (
                                 language  # So the LLM can see it.
                             )
+                    except:
+                        pass
+
+                # PATCH: Handle "name": "execute" / "tool_calls" JSON format
+                if '"name": "execute"' in code or '"name":"execute"' in code:
+                    try:
+                        code_dict = json.loads(code)
+                        # Handle {"name": "execute", "arguments": ...}
+                        if (
+                            code_dict.get("name") == "execute"
+                            and "arguments" in code_dict
+                        ):
+                            if "code" in code_dict["arguments"]:
+                                code = code_dict["arguments"]["code"]
+                                language = code_dict["arguments"].get(
+                                    "language", language
+                                )
+                                interpreter.messages[-1]["content"] = code
+                                interpreter.messages[-1]["format"] = language
                     except:
                         pass
 

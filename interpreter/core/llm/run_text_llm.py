@@ -4,9 +4,7 @@ def run_text_llm(llm, params):
     if llm.execution_instructions:
         try:
             # Add the system message
-            params["messages"][0][
-                "content"
-            ] += "\n" + llm.execution_instructions
+            params["messages"][0]["content"] += "\n" + llm.execution_instructions
         except:
             print('params["messages"][0]', params["messages"][0])
             raise
@@ -40,6 +38,18 @@ def run_text_llm(llm, params):
         if "```" in accumulated_block and not inside_code_block:
             inside_code_block = True
             accumulated_block = accumulated_block.split("```")[1]
+
+        # PATCH: Detect JSON tool call start for models that refuse to use Markdown
+        # We check for {"name": "execute" or similar patterns at the START of the block
+        if (
+            not inside_code_block
+            and '{"name":' in accumulated_block
+            and '"execute"' in accumulated_block
+        ):
+            inside_code_block = True
+            # We don't split because the JSON braces are part of the content we need to parse
+            # We just assume language is "json" implicitly if not specified
+            language = "json"
 
         # Did we just exit a code block?
         if inside_code_block and "```" in accumulated_block:
