@@ -1,4 +1,8 @@
 import sys
+import warnings
+
+# Suppress Pydantic serialization warnings often caused by Litellm streaming
+warnings.filterwarnings("ignore", message=".*PydanticSerializationUnexpectedValue.*")
 
 if "--os" in sys.argv:
     from rich import print as rich_print
