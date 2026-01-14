@@ -548,7 +548,7 @@ Use """ to write multi-line messages.
                 interpreter.display_message(
                     "> **A new version of Open Interpreter is available.**\n>Please run: `pip install --upgrade open-interpreter`\n\n---"
                 )
-    except:
+    except Exception:
         # Doesn't matter
         pass
 

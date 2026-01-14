@@ -34,6 +34,7 @@
 - [x] Support for Mistral's "Ministral" models (Added `--ministral` flag and profile)
 - [x] Integration of "Ultron" models via Ollama (Added `--ultron` flag and profile)
 - [x] Secured local-first defaults (Removed OpenRouter dependency from default profiles)
+- [x] Switched to lightweight `ministral-ultron` (7B) as the system-wide default for speed/reliability
 
 ## 2026 Milestones
 
