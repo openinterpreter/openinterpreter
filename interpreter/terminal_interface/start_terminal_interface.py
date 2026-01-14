@@ -2,6 +2,10 @@ import argparse
 import os
 import sys
 import time
+import warnings
+
+# Suppress Pydantic serialization warnings often caused by Litellm streaming
+warnings.filterwarnings("ignore", message=".*PydanticSerializationUnexpectedValue.*")
 
 from importlib.metadata import version
 
