@@ -234,7 +234,7 @@ def start_terminal_interface(interpreter):
             "type": bool,
         },
         {
-            "name": "ministral-ultron",
+            "name": "ministral_ultron",
             "help_text": "shortcut for `interpreter --profile ministral-ultron.py`",
             "type": bool,
         },
@@ -378,7 +378,7 @@ Use """ to write multi-line messages.
             [f"-{nickname}", f"--{arg['name']}"] if nickname else [f"--{arg['name']}"]
         )
 
-        if arg["type"] == bool:
+        if arg["type"] is bool:
             parser.add_argument(
                 *flags,
                 dest=arg["name"],
@@ -652,7 +652,7 @@ def main():
                         feedback = False
                     else:
                         feedback = None
-                    if feedback != None and not interpreter.contribute_conversation:
+                    if feedback is not None and not interpreter.contribute_conversation:
                         if interpreter.llm.model == "i":
                             contribute = "y"
                         else:
