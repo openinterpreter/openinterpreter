@@ -9,7 +9,6 @@ llm:
   # api_key: ...  # Your API key, if the API requires it
   # api_base: ...  # The URL where an OpenAI-compatible server is running to handle LLM API requests
   # api_version: ...  # The version of the API (this is primarily for Azure)
-  # max_output: 2500  # The maximum characters of code output visible to the LLM
 
 # Computer Settings
 computer:
@@ -34,7 +33,7 @@ If this doesnt work, you may need to run the following commands to install snowp
 !pip install "snowflake-connector-python[pandas]"
 ```
 
-Then, you can create a dictionary with the necessary connection parameters and create a session. You will access these values from the 
+Then, you can create a dictionary with the necessary connection parameters and create a session. You will access these values from the
 environment variables:
 ```python
 # Retrieve environment variables
@@ -43,7 +42,7 @@ snowflake_user = os.getenv("SNOWFLAKE_USER")
 snowflake_password = os.getenv("SNOWFLAKE_PASSWORD")
 snowflake_role = os.getenv("SNOWFLAKE_ROLE")
 snowflake_warehouse = os.getenv("SNOWFLAKE_WAREHOUSE")
-snowflake_database = os.getenv("SNOWFLAKE_DATABASE") 
+snowflake_database = os.getenv("SNOWFLAKE_DATABASE")
 snowflake_schema = os.getenv("SNOWFLAKE_SCHEMA")
 
 # Create connection parameters dictionary
@@ -52,15 +51,15 @@ connection_parameters = {
     "user": snowflake_user,
     "password": snowflake_password,
     "role": snowflake_role,
-    "warehouse": snowflake_warehouse, 
-    "database": snowflake_database, 
+    "warehouse": snowflake_warehouse,
+    "database": snowflake_database,
     "schema": snowflake_schema,
 }
 
 # Create a session
 session = Session.builder.configs(connection_parameters).create()
 ```
-You should assume that the environment variables have already been set. 
+You should assume that the environment variables have already been set.
 You can run a query against the snowflake data by using the session.sql() method. Then, you can turn the snowpark dataframe
 that is created into a pandas dataframe for use in other processes. Here is an example of how you can run a query:
 ```python
@@ -82,6 +81,7 @@ You can now use this dataframe to do whatever you need to do with the data.
 # offline: False  # If True, will disable some online features like checking for updates
 # verbose: False  # If True, will print detailed logs
 # multi_line: False # If True, you can input multiple lines starting and ending with ```
+# max_output: 2500  # The maximum characters of code output visible to the LLM
 
 # Documentation
 # All options: https://docs.openinterpreter.com/settings

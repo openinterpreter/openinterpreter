@@ -511,10 +511,13 @@ You are capable of **any** task.""",
 # Be sure to remove the "#" before the following settings to use them.
 
 # custom_instructions: ""  # This will be appended to the system message
+
+# General Configuration
 # auto_run: False  # If True, code will run without asking for confirmation
 # safe_mode: "off"  # The safety mode (see https://docs.openinterpreter.com/usage/safe-mode)
 # offline: False  # If True, will disable some online features like checking for updates
 # verbose: False  # If True, will print detailed logs
+# max_output: 2800  # The maximum characters of code output visible to the LLM
 
 # computer
     # languages: ["javascript", "shell"]  # Restrict to certain languages
@@ -523,7 +526,6 @@ You are capable of **any** task.""",
     # api_key: ...  # Your API key, if the API requires it
     # api_base: ...  # The URL where an OpenAI-compatible server is running
     # api_version: ...  # The version of the API (this is primarily for Azure)
-    # max_output: 2800  # The maximum characters of code output visible to the LLM
 
 # All options: https://docs.openinterpreter.com/settings
 

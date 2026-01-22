@@ -9,7 +9,6 @@ llm:
   # api_key: ...  # Your API key, if the API requires it
   # api_base: ...  # The URL where an OpenAI-compatible server is running to handle LLM API requests
   # api_version: ...  # The version of the API (this is primarily for Azure)
-  # max_output: 2500  # The maximum characters of code output visible to the LLM
 
 # Computer Settings
 computer:
@@ -23,6 +22,7 @@ computer:
 # safe_mode: "off"  # The safety mode for the LLM — one of "off", "ask", "auto"
 # offline: False  # If True, will disable some online features like checking for updates
 # verbose: False  # If True, will print detailed logs
+# max_output: 2500  # The maximum characters of code output visible to the LLM
 
 # To use a separate model for the `wtf` command:
 # wtf:

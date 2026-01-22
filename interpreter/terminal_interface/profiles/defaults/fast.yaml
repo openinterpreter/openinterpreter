@@ -8,18 +8,20 @@ llm:
   # api_key: ...  # Your API key, if the API requires it
   # api_base: ...  # The URL where an OpenAI-compatible server is running to handle LLM API requests
   # api_version: ...  # The version of the API (this is primarily for Azure)
-  # max_output: 2500  # The maximum characters of code output visible to the LLM
 
 # Computer Settings
 computer:
   import_computer_api: True # Gives OI a helpful Computer API designed for code interpreting language models
 
 custom_instructions: "The user has set you to FAST mode. **No talk, just code.** Be as brief as possible. No comments, no unnecessary messages. Assume as much as possible, rarely ask the user for clarification. Once the task has been completed, say 'The task is done.'" # This will be appended to the system message
+
+# General Configuration
 # auto_run: False  # If True, code will run without asking for confirmation
 # safe_mode: "off"  # The safety mode for the LLM — one of "off", "ask", "auto"
 # offline: False  # If True, will disable some online features like checking for updates
 # verbose: False  # If True, will print detailed logs
 # multi_line: False # If True, you can input multiple lines starting and ending with ```
+# max_output: 2500  # The maximum characters of code output visible to the LLM
 
 # All options: https://docs.openinterpreter.com/settings
 
