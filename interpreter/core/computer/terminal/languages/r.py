@@ -22,7 +22,21 @@ class R(SubprocessLanguage):
         processed_lines = []
 
         for i, line in enumerate(lines, 1):
-            # Add active line print
+            stripped = line.strip()
+            lstripped = line.lstrip()
+
+            # Skip injecting markers on non-executable structural lines.
+            # Otherwise the trailing cat() becomes the last expression in a block
+            # and implicit returns become NULL instead of the actual value.
+            # This affects blank lines, comments, and closing tokens like }, ), ]
+            if not stripped or lstripped.startswith("#"):
+                processed_lines.append(line)
+                continue
+            if lstripped and lstripped[0] in ")]}":
+                processed_lines.append(line)
+                continue
+
+            # Add active line print for executable lines
             processed_lines.append(f'cat("##active_line{i}##\\n");{line}')
 
         # Join lines to form the processed code
