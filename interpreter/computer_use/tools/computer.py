@@ -12,14 +12,35 @@ from pathlib import Path
 from typing import Literal, TypedDict
 from uuid import uuid4
 
-# Add import for PyAutoGUI
-import pyautogui
+# Add import for PyAutoGUI with graceful handling of missing DISPLAY
+try:
+    import pyautogui
+except Exception as e:
+    # pyautogui may fail to import when DISPLAY is not set (e.g., SSH sessions)
+    pyautogui = None
+    _pyautogui_import_error = e
+else:
+    _pyautogui_import_error = None
+
 from anthropic.types.beta import BetaToolComputerUse20241022Param
 
 from .base import BaseAnthropicTool, ToolError, ToolResult
 from .run import run
 
 OUTPUT_DIR = "/tmp/outputs"
+
+# Fallback screen size when pyautogui is unavailable
+_FALLBACK_SCREEN_SIZE = (1024, 768)
+
+
+def _require_pyautogui():
+    """Raise ToolError if pyautogui is not available."""
+    if pyautogui is None:
+        raise ToolError(
+            "PyAutoGUI is unavailable because no display is attached (DISPLAY not set). "
+            "If you're using SSH, enable X11 forwarding or use a virtual display (e.g., xvfb)."
+        ) from _pyautogui_import_error
+
 
 TYPING_DELAY_MS = 12
 TYPING_GROUP_SIZE = 50
@@ -68,6 +89,7 @@ def chunks(s: str, chunk_size: int) -> list[str]:
 
 
 def smooth_move_to(x, y, duration=1.2):
+    _require_pyautogui()
     start_x, start_y = pyautogui.position()
     dx = x - start_x
     dy = y - start_y
@@ -101,7 +123,9 @@ class ComputerTool(BaseAnthropicTool):
     api_type: Literal["computer_20241022"] = "computer_20241022"
     width: int
     height: int
-    display_num: None  # Simplified to always be None since we're only using primary display
+    display_num: (
+        None  # Simplified to always be None since we're only using primary display
+    )
 
     _screenshot_delay = 2.0
     _scaling_enabled = True
@@ -122,7 +146,10 @@ class ComputerTool(BaseAnthropicTool):
 
     def __init__(self):
         super().__init__()
-        self.width, self.height = pyautogui.size()
+        if pyautogui is None:
+            self.width, self.height = _FALLBACK_SCREEN_SIZE
+        else:
+            self.width, self.height = pyautogui.size()
         self.display_num = None
 
     async def __call__(
@@ -133,6 +160,7 @@ class ComputerTool(BaseAnthropicTool):
         coordinate: tuple[int, int] | None = None,
         **kwargs,
     ):
+        _require_pyautogui()
         if action in ("mouse_move", "left_click_drag"):
             if coordinate is None:
                 raise ToolError(f"coordinate is required for {action}")
@@ -221,6 +249,7 @@ class ComputerTool(BaseAnthropicTool):
 
     async def screenshot(self):
         """Take a screenshot of the current screen and return the base64 encoded image."""
+        _require_pyautogui()
         temp_dir = Path(tempfile.gettempdir())
         path = temp_dir / f"screenshot_{uuid4().hex}.png"
 

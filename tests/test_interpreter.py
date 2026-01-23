@@ -930,7 +930,9 @@ def test_display_api():
     say("1")
     time.sleep(1)
 
-    import pyautogui
+    if platform.system() == "Linux" and not os.environ.get("DISPLAY"):
+        pytest.skip("DISPLAY not set; pyautogui requires a GUI.")
+    pyautogui = pytest.importorskip("pyautogui")
 
     pyautogui.mouseDown()
 

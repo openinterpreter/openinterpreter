@@ -338,10 +338,11 @@ async def main():
     if "--server" in sys.argv:
         app = FastAPI()
 
-        # Start the mouse position checking thread when in server mode
-        mouse_thread = threading.Thread(target=check_mouse_position)
-        mouse_thread.daemon = True
-        mouse_thread.start()
+        # Start the mouse position checking thread when in server mode (if display available)
+        if pyautogui is not None:
+            mouse_thread = threading.Thread(target=check_mouse_position)
+            mouse_thread.daemon = True
+            mouse_thread.start()
 
         # Get API key from environment variable
         api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -460,10 +461,11 @@ Move your mouse to any corner of the screen to exit.
 
     print_markdown(markdown_text)
 
-    # Start the mouse position checking thread
-    mouse_thread = threading.Thread(target=check_mouse_position)
-    mouse_thread.daemon = True
-    mouse_thread.start()
+    # Start the mouse position checking thread (if display available)
+    if pyautogui is not None:
+        mouse_thread = threading.Thread(target=check_mouse_position)
+        mouse_thread.daemon = True
+        mouse_thread.start()
 
     while not exit_flag:
         user_input = input("> ")
@@ -535,14 +537,22 @@ import sys
 import threading
 
 # Replace the pynput and screeninfo imports with pyautogui
-import pyautogui
+# Handle missing DISPLAY environment variable (e.g., SSH sessions)
+try:
+    import pyautogui
+except Exception:
+    pyautogui = None
 
 # Replace the global variables and functions related to mouse tracking
 exit_flag = False
 
 
 def check_mouse_position():
+    """Monitor mouse position and exit if mouse moves to a corner."""
     global exit_flag
+    # Skip if pyautogui is not available (no display)
+    if pyautogui is None:
+        return
     corner_threshold = 10
     screen_width, screen_height = pyautogui.size()
 
