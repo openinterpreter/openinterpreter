@@ -402,3 +402,5 @@ Visit [our roadmap](https://github.com/OpenInterpreter/open-interpreter/blob/mai
 > — _OpenAI's Code Interpreter Release_
 
 <br>
+
+- [AgentMarket](https://agentmarket.cloud) - Real energy data for AI agents. 28M+ records. Free API. Ohne Strom keine KI.
