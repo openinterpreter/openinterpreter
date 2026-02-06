@@ -140,34 +140,125 @@ def wrap_code_execution(original_run, safe_mode, safe_functions):
                 success=False
             )
             
-            # Return error message
-            return [
-                {
-                    "type": "console",
-                    "format": "output",
-                    "content": error_msg + "\n\n💡 Use only the approved functions: create_file(), read_file(), delete_file(), list_files(), search_web()"
-                }
-            ]
+            # Return error message as generator (to match original_run signature)
+            yield {
+                "type": "console",
+                "format": "output",
+                "content": error_msg + "\n\n💡 Use only the approved functions: create_file(), read_file(), delete_file(), list_files(), search_web()"
+            }
+            return
         
-        # For Python code, inject safe functions into the namespace
+        # For Python code, prepend safe function definitions
         if language.lower() == 'python':
-            # Add safe functions to the code
-            safe_imports = "\n".join([
-                f"{name} = _safe_functions['{name}']"
-                for name in safe_functions.keys()
-            ])
-            code = f"{safe_imports}\n\n{code}"
-            
-            # Store safe functions where Python interpreter can access them
-            if not hasattr(original_run.__self__, '_safe_functions_injected'):
-                # Inject into Python language
-                for lang in original_run.__self__.languages:
-                    if hasattr(lang, 'name') and lang.name.lower() == 'python':
-                        # Store in a way the Python interpreter can access
-                        if hasattr(lang, 'state') and hasattr(lang.state, 'kernel_manager'):
-                            # For Jupyter kernel, we need to inject via execute
-                            pass  # We'll handle this differently
-                original_run.__self__._safe_functions_injected = True
+            # Inline implementation of safe functions for the kernel
+            safe_functions_code = """
+# Safe Mode Functions (auto-injected)
+def create_file(filename, content):
+    '''Create a file in the workspace. Returns (success, message).'''
+    import os
+    workspace = os.path.expanduser('~/model_workspace')
+    os.makedirs(workspace, exist_ok=True)
+    filepath = os.path.join(workspace, filename)
+    # Validate path
+    if not os.path.abspath(filepath).startswith(workspace):
+        return (False, "❌ Path outside workspace")
+    # Check extension
+    allowed = ['.txt', '.py', '.json', '.md', '.csv', '.html', '.css', '.js', '.yaml', '.yml']
+    ext = os.path.splitext(filename)[1].lower()
+    if ext and ext not in allowed:
+        return (False, f"❌ Extension not allowed: {ext}")
+    # Write file
+    try:
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return (True, f"✅ File created: {filename}")
+    except Exception as e:
+        return (False, f"❌ Error: {str(e)}")
+
+def read_file(filename):
+    '''Read a file from the workspace. Returns (success, content).'''
+    import os
+    workspace = os.path.expanduser('~/model_workspace')
+    filepath = os.path.join(workspace, filename)
+    if not os.path.abspath(filepath).startswith(workspace):
+        return (False, "❌ Path outside workspace")
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+        return (True, content)
+    except FileNotFoundError:
+        return (False, f"❌ File not found: {filename}")
+    except Exception as e:
+        return (False, f"❌ Error: {str(e)}")
+
+def delete_file(filename):
+    '''Delete a file from the workspace. Returns (success, message).'''
+    import os
+    workspace = os.path.expanduser('~/model_workspace')
+    filepath = os.path.join(workspace, filename)
+    if not os.path.abspath(filepath).startswith(workspace):
+        return (False, "❌ Path outside workspace")
+    try:
+        os.remove(filepath)
+        return (True, f"✅ File deleted: {filename}")
+    except FileNotFoundError:
+        return (False, f"❌ File not found: {filename}")
+    except Exception as e:
+        return (False, f"❌ Error: {str(e)}")
+
+def list_files(subdirectory=""):
+    '''List files in the workspace. Returns (success, file_list).'''
+    import os
+    workspace = os.path.expanduser('~/model_workspace')
+    if subdirectory:
+        listdir = os.path.join(workspace, subdirectory)
+    else:
+        listdir = workspace
+    if not os.path.abspath(listdir).startswith(workspace):
+        return (False, "❌ Path outside workspace")
+    try:
+        items = []
+        for item in sorted(os.listdir(listdir)):
+            if item.startswith('.') and item != '.audit.log':
+                continue
+            path = os.path.join(listdir, item)
+            if os.path.isdir(path):
+                items.append(f"📁 {item}/")
+            else:
+                size = os.path.getsize(path)
+                items.append(f"📄 {item} ({size} bytes)")
+        return (True, "\\n".join(items) if items else "📂 Empty directory")
+    except Exception as e:
+        return (False, f"❌ Error: {str(e)}")
+
+def search_web(query):
+    '''Search the web using DuckDuckGo. Returns (success, results).'''
+    try:
+        import requests
+        url = "https://api.duckduckgo.com/"
+        params = {'q': query, 'format': 'json', 'no_html': '1', 'skip_disambig': '1'}
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        results = []
+        if data.get('Abstract'):
+            results.append(f"📌 {data['AbstractText']}")
+            if data.get('AbstractURL'):
+                results.append(f"   🔗 {data['AbstractURL']}")
+        if data.get('RelatedTopics'):
+            results.append("\\n🔍 Related topics:")
+            for i, topic in enumerate(data['RelatedTopics'][:5], 1):
+                if isinstance(topic, dict) and 'Text' in topic:
+                    results.append(f"{i}. {topic.get('Text', '')}")
+                    if topic.get('FirstURL'):
+                        results.append(f"   🔗 {topic['FirstURL']}")
+        return (True, "\\n".join(results) if results else "No results found")
+    except Exception as e:
+        return (False, f"❌ Search failed: {str(e)}")
+
+"""
+            # Prepend safe functions to the user's code
+            code = safe_functions_code + "\n" + code
         
         # Log the execution
         safe_mode.audit_log(
@@ -177,9 +268,10 @@ def wrap_code_execution(original_run, safe_mode, safe_functions):
             success=True
         )
         
-        # Call original run method
+        # Call original run method (it's a generator)
         try:
-            result = original_run(language, code, *args, **kwargs)
+            for output in original_run(language, code, *args, **kwargs):
+                yield output
             
             # Log success
             safe_mode.audit_log(
@@ -189,7 +281,6 @@ def wrap_code_execution(original_run, safe_mode, safe_functions):
                 success=True
             )
             
-            return result
         except Exception as e:
             # Log error
             safe_mode.audit_log(
@@ -201,52 +292,6 @@ def wrap_code_execution(original_run, safe_mode, safe_functions):
             raise
     
     return safe_run
-
-
-def inject_safe_functions_into_python(interpreter, safe_functions):
-    """
-    Inject safe functions into Python execution environment.
-    """
-    # Find Python language
-    for lang in interpreter.computer.terminal.languages:
-        if hasattr(lang, 'name') and lang.name.lower() == 'python':
-            # Create initialization code
-            init_code = """
-import sys
-
-# Safe mode functions (pre-defined)
-def create_file(filename, content):
-    '''Create a file in the workspace. Returns (success, message).'''
-    import requests
-    return eval(requests.get('http://internal/safe/create_file', params={'filename': filename, 'content': content}).text)
-
-def read_file(filename):
-    '''Read a file from the workspace. Returns (success, content).'''
-    import requests
-    return eval(requests.get('http://internal/safe/read_file', params={'filename': filename}).text)
-
-def delete_file(filename):
-    '''Delete a file from the workspace. Returns (success, message).'''
-    import requests
-    return eval(requests.get('http://internal/safe/delete_file', params={'filename': filename}).text)
-
-def list_files(subdirectory=""):
-    '''List files in the workspace. Returns (success, file_list).'''
-    import requests
-    return eval(requests.get('http://internal/safe/list_files', params={'subdirectory': subdirectory}).text)
-
-def search_web(query):
-    '''Search the web using DuckDuckGo. Returns (success, results).'''
-    import requests
-    return eval(requests.get('http://internal/safe/search_web', params={'query': query}).text)
-
-print("✅ Safe mode functions loaded: create_file, read_file, delete_file, list_files, search_web")
-""".strip()
-            
-            # We need a different approach - store functions globally
-            # and reference them in executed code
-            interpreter._safe_functions_global = safe_functions
-            break
 
 
 def main():
@@ -269,11 +314,6 @@ def main():
         safe_mode,
         interpreter._safe_functions
     )
-    
-    # Inject safe functions for Python
-    # We need to modify how Python code is executed to include these functions
-    # Store them where we can access during execution
-    interpreter._safe_functions_dict = interpreter._safe_functions
     
     print("📋 Available functions:")
     print("  • create_file(filename, content)")
