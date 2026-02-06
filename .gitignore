@@ -241,3 +241,6 @@ litellm_uuid.txt
 file.txt
 numbers.txt
 poetry.lock
+# Safe mode virtual environment
+venv_safe/
+start_safe.sh
