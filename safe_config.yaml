@@ -1,0 +1,71 @@
+# Safe Mode Configuration for Open Interpreter
+
+# Workspace directory - all file operations restricted to this directory
+workspace: ~/model_workspace
+
+# Allowed file extensions for create/read/delete operations
+allowed_extensions:
+  - .txt
+  - .py
+  - .json
+  - .md
+  - .csv
+  - .html
+  - .css
+  - .js
+  - .yaml
+  - .yml
+
+# Allowed operations (whitelist)
+allowed_operations:
+  - create_file
+  - read_file
+  - delete_file
+  - list_files
+  - search_web
+
+# Blocked Python modules (blacklist)
+blocked_modules:
+  - subprocess
+  - os.system
+  - shutil.rmtree
+  - socket
+  - urllib.request
+  - http.client
+  - ftplib
+  - telnetlib
+  - pty
+  - paramiko
+  - fabric
+
+# Blocked keywords/functions in Python code
+blocked_keywords:
+  - eval
+  - exec
+  - compile
+  - __import__
+  - system
+  - popen
+  - spawn
+  - chmod
+  - chown
+  - sudo
+  - rm -rf
+  - curl
+  - wget
+
+# Ollama configuration
+ollama:
+  model: qwen3:14b
+  api_url: http://localhost:11434
+  api_base: http://localhost:11434
+
+# Execution settings
+execution:
+  auto_run: false  # Always ask before executing code
+  safe_mode: ask   # Ask before running any code
+  
+# Audit logging
+audit:
+  enabled: true
+  log_file: .audit.log  # Relative to workspace
