@@ -50,9 +50,11 @@ success, message = delete_file("test.txt")
 success, file_list = list_files()
 success, file_list = list_files("subdir")
 
-# Поиск в интернете
+# Поиск в интернете (только чтение, без взаимодействия с сайтами)
 success, results = search_web("Python tutorials")
 ```
+
+> **⚠️ Важно:** `search_web()` только **ищет информацию** (HTTP GET), но **НЕ взаимодействует** с сайтами (нет браузера, кликов, форм). Подробнее: [WEB_SEARCH_LIMITS_RU.md](WEB_SEARCH_LIMITS_RU.md)
 
 ### 4. Аудит лог
 
