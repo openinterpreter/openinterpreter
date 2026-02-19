@@ -1,11 +1,30 @@
-import os
 import platform
+import subprocess
 import time
 
 from ...utils.lazy_import import lazy_import
 
 # Lazy import of pyautogui
 pyautogui = lazy_import("pyautogui")
+
+MACOS_MODIFIER_ALIASES = {
+    "alt": "option",
+    "cmd": "command",
+    "command": "command",
+    "control": "control",
+    "ctrl": "control",
+    "option": "option",
+    "shift": "shift",
+    "super": "command",
+}
+
+
+def _escape_applescript_string(value):
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _normalize_macos_modifier(modifier):
+    return MACOS_MODIFIER_ALIASES.get(modifier.strip().lower())
 
 
 class Keyboard:
@@ -81,35 +100,41 @@ class Keyboard:
         Press a sequence of keys in the order they are provided, and then release them in reverse order.
         """
         time.sleep(0.15)
-        modifiers = ["command", "option", "alt", "ctrl", "shift"]
         if "darwin" in platform.system().lower() and len(args) == 2:
             # pyautogui.hotkey seems to not work, so we use applescript
-            # Determine which argument is the keystroke and which is the modifier
-            keystroke, modifier = (
-                args if args[0].lower() not in modifiers else args[::-1]
-            )
+            normalized_args = [str(arg).strip().lower() for arg in args]
+            modifier = None
+            keystroke = None
 
-            modifier = modifier.lower()
+            first_modifier = _normalize_macos_modifier(normalized_args[0])
+            second_modifier = _normalize_macos_modifier(normalized_args[1])
 
-            # Map the modifier to the one that AppleScript expects
-            if " down" not in modifier:
-                modifier = modifier + " down"
+            if first_modifier and not second_modifier:
+                modifier = first_modifier
+                keystroke = str(args[1])
+            elif second_modifier and not first_modifier:
+                modifier = second_modifier
+                keystroke = str(args[0])
 
-            if keystroke.lower() == "space":
-                keystroke = " "
+            if modifier and keystroke is not None:
+                if keystroke.lower() == "space":
+                    keystroke = " "
+                elif keystroke.lower() in {"enter", "return"}:
+                    keystroke = "\n"
 
-            if keystroke.lower() == "enter":
-                keystroke = "\n"
+                escaped_keystroke = _escape_applescript_string(keystroke)
+                script = f"""
+                tell application "System Events"
+                    keystroke "{escaped_keystroke}" using {modifier} down
+                end tell
+                """
 
-            # Create the AppleScript
-            script = f"""
-            tell application "System Events"
-                keystroke "{keystroke}" using {modifier}
-            end tell
-            """
-
-            # Execute the AppleScript
-            os.system("osascript -e '{}'".format(script))
+                try:
+                    subprocess.run(["osascript", "-e", script], check=False)
+                except OSError:
+                    pyautogui.hotkey(*args, interval=interval)
+            else:
+                pyautogui.hotkey(*args, interval=interval)
         else:
             pyautogui.hotkey(*args, interval=interval)
         time.sleep(0.15)

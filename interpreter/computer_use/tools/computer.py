@@ -1,10 +1,8 @@
 import asyncio
 import base64
 import math
-import os
 import platform
-import shlex
-import shutil
+import subprocess
 import tempfile
 import time
 from enum import StrEnum
@@ -65,6 +63,55 @@ class ComputerToolOptions(TypedDict):
 
 def chunks(s: str, chunk_size: int) -> list[str]:
     return [s[i : i + chunk_size] for i in range(0, len(s), chunk_size)]
+
+
+MACOS_MODIFIER_ALIASES = {
+    "alt": "option",
+    "cmd": "command",
+    "command": "command",
+    "control": "control",
+    "ctrl": "control",
+    "option": "option",
+    "shift": "shift",
+    "super": "command",
+}
+
+
+def _escape_applescript_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _normalize_macos_modifier(modifier: str) -> str | None:
+    return MACOS_MODIFIER_ALIASES.get(modifier.strip().lower())
+
+
+def _run_macos_hotkey(keystroke: str, modifiers: list[str]) -> bool:
+    applescript_modifiers = []
+    for modifier in modifiers:
+        normalized_modifier = _normalize_macos_modifier(modifier)
+        if not normalized_modifier:
+            return False
+        applescript_modifiers.append(f"{normalized_modifier} down")
+
+    if not applescript_modifiers:
+        return False
+
+    escaped_keystroke = _escape_applescript_string(keystroke)
+    using_clause = applescript_modifiers[0]
+    if len(applescript_modifiers) > 1:
+        using_clause = "{" + ", ".join(applescript_modifiers) + "}"
+
+    script = f"""
+    tell application "System Events"
+        keystroke "{escaped_keystroke}" using {using_clause}
+    end tell
+    """
+
+    try:
+        subprocess.run(["osascript", "-e", script], check=False)
+        return True
+    except OSError:
+        return False
 
 
 def smooth_move_to(x, y, duration=1.2):
@@ -171,18 +218,14 @@ class ComputerTool(BaseAnthropicTool):
                 if len(keys) > 1:
                     if "darwin" in platform.system().lower():
                         # Use AppleScript for hotkey on macOS
-                        keystroke, modifier = (keys[-1], "+".join(keys[:-1]))
-                        modifier = modifier.lower() + " down"
+                        keystroke = keys[-1]
+                        modifiers = keys[:-1]
                         if keystroke.lower() == "space":
                             keystroke = " "
-                        elif keystroke.lower() == "enter":
+                        elif keystroke.lower() in {"enter", "return"}:
                             keystroke = "\n"
-                        script = f"""
-                        tell application "System Events"
-                            keystroke "{keystroke}" using {modifier}
-                        end tell
-                        """
-                        os.system("osascript -e '{}'".format(script))
+                        if not _run_macos_hotkey(keystroke, modifiers):
+                            pyautogui.hotkey(*keys)
                     else:
                         pyautogui.hotkey(*keys)
                 else:
