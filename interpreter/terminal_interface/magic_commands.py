@@ -6,6 +6,9 @@ import time
 from datetime import datetime
 
 from ..core.utils.system_debug_info import system_info
+from ..legal import SKILLS_DIR
+from ..legal.document_parser import extract_text
+from ..legal.playbook import load_playbook
 from .utils.count_tokens import count_messages_tokens
 from .utils.export_to_markdown import export_to_markdown
 
@@ -59,6 +62,14 @@ def handle_help(self, arguments):
         "%info": "Show system and interpreter information",
         "%jupyter": "Export the conversation to a Jupyter notebook file",
         "%markdown [path]": "Export the conversation to a specified Markdown path. If no path is provided, it will be saved to the Downloads folder with a generated conversation name.",
+        # Legal commands
+        "%review-contract [file]": "Review a contract with clause-by-clause GREEN/YELLOW/RED analysis",
+        "%triage-nda [file]": "Quick NDA triage with sign/negotiate/reject recommendation",
+        "%compliance-check [framework]": "Check compliance against GDPR, CCPA, HIPAA, SOX, etc.",
+        "%risk-assess [context]": "Perform a structured legal risk assessment",
+        "%brief [context]": "Prepare a meeting briefing document",
+        "%respond [context]": "Draft a professional legal communication",
+        "%playbook [init]": "View or initialize your legal playbook",
     }
 
     base_message = ["> **Available Commands:**\n\n"]
@@ -310,6 +321,150 @@ def markdown(self, export_path: str):
     export_to_markdown(self.messages, export_path)
 
 
+def _load_skill(skill_name):
+    """Load a legal skill markdown file by name."""
+    skill_path = os.path.join(SKILLS_DIR, f"{skill_name}.md")
+    if os.path.exists(skill_path):
+        with open(skill_path, "r", encoding="utf-8") as f:
+            return f.read()
+    return ""
+
+
+def _build_legal_prompt(skill_name, task_description, arguments=""):
+    """Build a prompt that combines a legal skill with user input."""
+    skill_content = _load_skill(skill_name)
+    playbook = load_playbook()
+
+    prompt_parts = [task_description]
+
+    if arguments.strip():
+        prompt_parts.append(f"\n\n## User Input\n\n{arguments}")
+
+    # If arguments reference a file path, try to extract text
+    if arguments.strip():
+        potential_path = arguments.strip().strip("'\"")
+        if os.path.isfile(potential_path):
+            try:
+                doc_text = extract_text(potential_path)
+                prompt_parts.append(
+                    f"\n\n## Document Content\n\n```\n{doc_text}\n```"
+                )
+            except (ValueError, ImportError) as e:
+                prompt_parts.append(f"\n\n(Could not extract document text: {e})")
+
+    if playbook:
+        prompt_parts.append(f"\n\n## Playbook\n\n{playbook}")
+
+    if skill_content:
+        prompt_parts.append(f"\n\n## Skill Reference\n\n{skill_content}")
+
+    return "\n".join(prompt_parts)
+
+
+def handle_review_contract(self, arguments):
+    """Handle /review-contract command."""
+    prompt = _build_legal_prompt(
+        "contract_review",
+        "Please perform a comprehensive contract review on the following document. "
+        "Provide a clause-by-clause analysis with GREEN/YELLOW/RED risk flags, "
+        "an executive summary, and priority negotiation items.",
+        arguments,
+    )
+    self.messages.append({"role": "user", "type": "message", "content": prompt})
+    # Let the interpreter process this message
+    for chunk in self.chat(prompt, display=True, stream=True):
+        pass
+
+
+def handle_triage_nda(self, arguments):
+    """Handle /triage-nda command."""
+    prompt = _build_legal_prompt(
+        "nda_triage",
+        "Please triage this NDA. Classify it (mutual/one-way), assess key risk areas, "
+        "and provide a triage decision (SIGN AS-IS / SIGN WITH MINOR EDITS / NEGOTIATE / REJECT).",
+        arguments,
+    )
+    self.messages.append({"role": "user", "type": "message", "content": prompt})
+    for chunk in self.chat(prompt, display=True, stream=True):
+        pass
+
+
+def handle_compliance_check(self, arguments):
+    """Handle /compliance-check command."""
+    prompt = _build_legal_prompt(
+        "compliance",
+        "Please perform a compliance review. Identify applicable regulatory frameworks "
+        "and assess the document/practice against each requirement. "
+        "Provide a gap analysis with compliance scores and priority actions.",
+        arguments,
+    )
+    self.messages.append({"role": "user", "type": "message", "content": prompt})
+    for chunk in self.chat(prompt, display=True, stream=True):
+        pass
+
+
+def handle_risk_assess(self, arguments):
+    """Handle /risk-assess command."""
+    prompt = _build_legal_prompt(
+        "legal_risk_assessment",
+        "Please perform a legal risk assessment. Identify risks across all relevant categories, "
+        "score them by likelihood and impact, and provide a mitigation roadmap with a decision recommendation.",
+        arguments,
+    )
+    self.messages.append({"role": "user", "type": "message", "content": prompt})
+    for chunk in self.chat(prompt, display=True, stream=True):
+        pass
+
+
+def handle_brief(self, arguments):
+    """Handle /brief command for meeting preparation."""
+    prompt = _build_legal_prompt(
+        "meeting_briefing",
+        "Please prepare a comprehensive meeting briefing document. "
+        "Include key issues, talking points, questions to ask, fallback positions, and follow-up actions.",
+        arguments,
+    )
+    self.messages.append({"role": "user", "type": "message", "content": prompt})
+    for chunk in self.chat(prompt, display=True, stream=True):
+        pass
+
+
+def handle_respond(self, arguments):
+    """Handle /respond command for drafting legal communications."""
+    prompt = _build_legal_prompt(
+        "canned_responses",
+        "Please draft a professional legal communication based on the following context. "
+        "Use an appropriate template and customize it with the specific details provided.",
+        arguments,
+    )
+    self.messages.append({"role": "user", "type": "message", "content": prompt})
+    for chunk in self.chat(prompt, display=True, stream=True):
+        pass
+
+
+def handle_playbook(self, arguments):
+    """Handle /playbook command to view or initialize the playbook."""
+    from ..legal.playbook import find_playbook, get_default_playbook_template, save_playbook
+
+    existing = find_playbook()
+    if existing:
+        self.display_message(f"> Playbook found at: `{existing}`")
+        playbook_content = load_playbook(existing)
+        # Show first few lines as preview
+        lines = playbook_content.split("\n")[:10]
+        preview = "\n".join(lines)
+        self.display_message(f"```\n{preview}\n...\n```")
+        self.display_message("> Edit the file above to customize your legal positions.")
+    else:
+        if arguments.strip() == "init":
+            template = get_default_playbook_template()
+            path = save_playbook(template)
+            self.display_message(f"> Playbook created at: `{path}`")
+            self.display_message("> Edit this file to customize your organization's legal positions.")
+        else:
+            self.display_message("> No playbook found. Run `/playbook init` to create one from the default template.")
+
+
 def handle_magic_command(self, user_input):
     # Handle shell
     if user_input.startswith("%%"):
@@ -332,6 +487,14 @@ def handle_magic_command(self, user_input):
         "info": handle_info,
         "jupyter": jupyter,
         "markdown": markdown,
+        # Legal commands
+        "review-contract": handle_review_contract,
+        "triage-nda": handle_triage_nda,
+        "compliance-check": handle_compliance_check,
+        "risk-assess": handle_risk_assess,
+        "brief": handle_brief,
+        "respond": handle_respond,
+        "playbook": handle_playbook,
     }
 
     user_input = user_input[1:].strip()  # Capture the part after the `%`
