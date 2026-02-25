@@ -22,7 +22,7 @@ class SMS:
             else:
                 home_directory = os.path.expanduser("~")
             return f"{home_directory}/Library/Messages/chat.db"
-        except:
+        except Exception:
             home_directory = os.path.expanduser("~")
             return f"{home_directory}/Library/Messages/chat.db"
 
@@ -83,7 +83,7 @@ LEFT JOIN handle ON message.handle_id = handle.ROWID
                         # Try to parse as plist
                         plist_data = plistlib.loads(text_data)
                         text = plist_data.get("NS.string", "")
-                    except:
+                    except Exception:
                         # If plist parsing fails, use the raw string
                         text = text_data
                     if text:  # Only add messages with content

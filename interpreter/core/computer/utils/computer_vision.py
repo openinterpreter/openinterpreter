@@ -6,7 +6,7 @@ from ...utils.lazy_import import lazy_import
 np = lazy_import("numpy")
 try:
     cv2 = lazy_import("cv2")
-except:
+except Exception:
     cv2 = None  # Fixes colab error
 PIL = lazy_import("PIL")
 pytesseract = lazy_import("pytesseract")

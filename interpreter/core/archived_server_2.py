@@ -90,7 +90,7 @@ class AsyncInterpreter:
         else:
             try:
                 chunk = json.loads(chunk)
-            except:
+            except Exception:
                 pass
 
             if "start" in chunk:

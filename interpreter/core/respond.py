@@ -190,7 +190,7 @@ def respond(interpreter):
                         interpreter.messages[-1][
                             "format"
                         ] = language  # So the LLM can see it.
-                    except:
+                    except Exception:
                         pass
 
                 # print(code)
@@ -203,7 +203,7 @@ def respond(interpreter):
                         interpreter.messages[-1][
                             "content"
                         ] = code  # So the LLM can see it.
-                    except:
+                    except Exception:
                         pass
 
                 if code.replace("\n", "").replace(" ", "").startswith('{"language":'):
@@ -218,7 +218,7 @@ def respond(interpreter):
                             interpreter.messages[-1][
                                 "format"
                             ] = language  # So the LLM can see it.
-                    except:
+                    except Exception:
                         pass
 
                 if code.replace("\n", "").replace(" ", "").startswith("{language:"):
@@ -236,7 +236,7 @@ def respond(interpreter):
                             interpreter.messages[-1][
                                 "format"
                             ] = language  # So the LLM can see it.
-                    except:
+                    except Exception:
                         pass
 
                 if (
@@ -398,7 +398,7 @@ def respond(interpreter):
 
             except KeyboardInterrupt:
                 break  # It's fine.
-            except:
+            except Exception:
                 yield {
                     "role": "computer",
                     "type": "console",

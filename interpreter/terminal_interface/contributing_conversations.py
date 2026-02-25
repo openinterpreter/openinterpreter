@@ -188,6 +188,6 @@ def contribute_conversations(
 
     try:
         requests.post(url, json=payload)
-    except:
+    except Exception:
         # Non blocking
         pass

@@ -133,7 +133,7 @@ class Llm:
                     self.supports_functions = True
                 else:
                     self.supports_functions = False
-            except:
+            except Exception:
                 self.supports_functions = False
 
         # Detect vision support
@@ -143,7 +143,7 @@ class Llm:
                     self.supports_vision = True
                 else:
                     self.supports_vision = False
-            except:
+            except Exception:
                 self.supports_vision = False
 
         # Trim image messages if they're there
@@ -237,7 +237,7 @@ class Llm:
                     messages = tt.trim(
                         messages, system_message=system_message, model=model
                     )
-                except:
+                except Exception:
                     if len(messages) == 1:
                         if self.interpreter.in_terminal_interface:
                             self.interpreter.display_message(
@@ -264,7 +264,7 @@ Continuing...
                     messages = tt.trim(
                         messages, system_message=system_message, max_tokens=8000
                     )
-        except:
+        except Exception:
             # If we're trimming messages, this won't work.
             # If we're trimming from a model we don't know, this won't work.
             # Better not to fail until `messages` is too big, just for frustrations sake, I suppose.
@@ -412,7 +412,7 @@ Continuing...
                     self.max_tokens = min(
                         int(self.context_window * 0.2), model_info["max_output_tokens"]
                     )
-            except:
+            except Exception:
                 pass
 
 

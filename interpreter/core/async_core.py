@@ -33,7 +33,7 @@ try:
     )
     from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
     from starlette.status import HTTP_403_FORBIDDEN
-except:
+except Exception:
     # Server dependencies are not required by the main package.
     pass
 
@@ -1030,6 +1030,6 @@ class Server:
         #                 str(e)
         #                 + """\n\nPlease ensure you have run `pip install "open-interpreter[server]"` to install server dependencies."""
         #             )
-        #     except:
+        #     except Exception:
         #         print("An unexpected error occurred:", traceback.format_exc())
         #         print("Server restarting.")

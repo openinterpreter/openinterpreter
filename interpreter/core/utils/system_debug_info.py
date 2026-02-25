@@ -122,7 +122,7 @@ def interpreter_info(interpreter):
         """ + "\n\n".join(
             [str(m) for m in messages_to_display]
         )
-    except:
+    except Exception:
         return "Error, couldn't get interpreter info"
 
 

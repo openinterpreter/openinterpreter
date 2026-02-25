@@ -25,7 +25,7 @@ class Keyboard:
         else:
             try:
                 clipboard_history = self.computer.clipboard.view()
-            except:
+            except Exception:
                 pass
 
             ends_in_enter = False
@@ -51,7 +51,7 @@ class Keyboard:
 
             try:
                 self.computer.clipboard.copy(clipboard_history)
-            except:
+            except Exception:
                 pass
 
         time.sleep(delay / 2)

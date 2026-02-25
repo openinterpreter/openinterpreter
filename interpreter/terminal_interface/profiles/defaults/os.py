@@ -140,7 +140,7 @@ try:
                 + "\n(If you need to be in another active application to help the user, you need to switch to it.)"
             )
 
-except:
+except Exception:
     # Non blocking
     pass
     

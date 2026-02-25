@@ -6,7 +6,7 @@ def parse_partial_json(s):
     # Attempt to parse the string as-is.
     try:
         return json.loads(s)
-    except:
+    except Exception:
         pass
 
     # Initialize variables.
@@ -55,6 +55,6 @@ def parse_partial_json(s):
     # Attempt to parse the modified string as JSON.
     try:
         return json.loads(new_s)
-    except:
+    except Exception:
         # If we still can't parse the string as JSON, return None to indicate failure.
         return None

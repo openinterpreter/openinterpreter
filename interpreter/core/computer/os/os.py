@@ -71,7 +71,7 @@ class Os:
                     import plyer
 
                     plyer.notification.notify(title=title, message=text)
-                except:
+                except Exception:
                     # Optional package
                     pass
         except Exception as e:

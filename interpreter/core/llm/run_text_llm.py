@@ -7,7 +7,7 @@ def run_text_llm(llm, params):
             params["messages"][0][
                 "content"
             ] += "\n" + llm.execution_instructions
-        except:
+        except Exception:
             print('params["messages"][0]', params["messages"][0])
             raise
 

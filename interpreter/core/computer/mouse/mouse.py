@@ -10,7 +10,7 @@ from ..utils.recipient_utils import format_to_recipient
 # Lazy import of optional packages
 try:
     cv2 = lazy_import("cv2")
-except:
+except Exception:
     cv2 = None  # Fixes colab error
 np = lazy_import("numpy")
 pyautogui = lazy_import("pyautogui")

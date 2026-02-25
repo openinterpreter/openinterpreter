@@ -39,7 +39,7 @@ random.shuffle(examples)
 try:
     for example in examples:
         readline.add_history(example)
-except:
+except Exception:
     # If they don't have readline, that's fine
     pass
 
@@ -106,7 +106,7 @@ def terminal_interface(interpreter, message):
             try:
                 # This lets users hit the up arrow key for past messages
                 readline.add_history(message)
-            except:
+            except Exception:
                 # If the user doesn't have readline (may be the case on windows), that's fine
                 pass
 
@@ -535,7 +535,7 @@ def terminal_interface(interpreter, message):
                 continue
             else:
                 break
-        except:
+        except Exception:
             if interpreter.debug:
                 system_info(interpreter)
             raise

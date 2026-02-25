@@ -4,5 +4,5 @@ def in_jupyter_notebook():
 
         if "IPKernelApp" in get_ipython().config:
             return True
-    except:
+    except Exception:
         return False
