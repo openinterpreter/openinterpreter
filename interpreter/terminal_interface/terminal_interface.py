@@ -185,7 +185,13 @@ def terminal_interface(interpreter, message):
 
                 # Execution notice
                 if chunk["type"] == "confirmation":
-                    if not interpreter.auto_run:
+                    _code_content = chunk["content"]["content"]
+                    _should_auto_run = (
+                        interpreter.auto_run(_code_content)
+                        if callable(interpreter.auto_run)
+                        else interpreter.auto_run
+                    )
+                    if not _should_auto_run:
                         # OI is about to execute code. The user wants to approve this
 
                         # End the active code block so you can run input() below it

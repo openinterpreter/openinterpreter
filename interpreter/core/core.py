@@ -347,7 +347,7 @@ class OpenInterpreter:
                         yield {**last_flag_base, "end": True}
                         last_flag_base = None
 
-                    if self.auto_run == False:
+                    if self.auto_run == False or callable(self.auto_run):
                         yield chunk
 
                     # We want to append this now, so even if content is never filled, we know that the execution didn't produce output.
