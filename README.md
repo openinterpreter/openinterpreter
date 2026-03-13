@@ -193,6 +193,32 @@ interpreter.llm.model = "gpt-3.5-turbo"
 
 [Find the appropriate "model" string for your language model here.](https://docs.litellm.ai/docs/providers/)
 
+### Using MiniMax
+
+To use [MiniMax](https://platform.minimax.io/) models, set your API key and use the built-in profile:
+
+```shell
+export MINIMAX_API_KEY=your_api_key
+interpreter --profile minimax.py
+```
+
+Or configure it in Python:
+
+```python
+from interpreter import interpreter
+
+interpreter.llm.model = "openai/MiniMax-M2.5"
+interpreter.llm.api_key = "your_api_key"
+interpreter.llm.api_base = "https://api.minimax.io/v1"
+interpreter.llm.context_window = 204800
+interpreter.llm.max_tokens = 4096
+interpreter.llm.temperature = 1.0
+
+interpreter.chat()
+```
+
+Available models: `MiniMax-M2.5` (default) and `MiniMax-M2.5-highspeed` (faster).
+
 ### Running Open Interpreter locally
 
 #### Terminal
