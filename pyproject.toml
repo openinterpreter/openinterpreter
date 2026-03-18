@@ -35,6 +35,10 @@ easyocr = { version = "^1.7.1", optional = true }
 # Optional [server] dependencies
 janus = { version = "^1.0.0", optional = true }
 
+# Optional [sandbox] dependencies
+opensandbox = { version = ">=0.1.0", optional = true }
+opensandbox-code-interpreter = { version = ">=0.1.0", optional = true }
+
 # Required dependencies
 python = ">=3.9,<3.13"
 setuptools = "*"
@@ -77,6 +81,7 @@ os = ["opencv-python", "pyautogui", "plyer", "pywinctl", "pytesseract", "sentenc
 safe = ["semgrep"]
 local = ["opencv-python", "pytesseract", "torch", "transformers", "einops", "torchvision", "easyocr"]
 server = ["fastapi", "janus", "uvicorn"]
+sandbox = ["opensandbox", "opensandbox-code-interpreter"]
 
 [tool.poetry.group.dev.dependencies]
 black = "^23.10.1"

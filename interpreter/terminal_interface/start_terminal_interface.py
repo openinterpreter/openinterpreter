@@ -245,6 +245,28 @@ def start_terminal_interface(interpreter):
             "help_text": "experimentally let Open Interpreter control your mouse and keyboard (shortcut for `interpreter --profile os`)",
             "type": bool,
         },
+        # Sandbox settings
+        {
+            "name": "sandbox",
+            "nickname": "sb",
+            "help_text": "run code in a secure OpenSandbox container instead of locally",
+            "type": bool,
+            "attribute": {"object": interpreter, "attr_name": "sandbox_mode"},
+        },
+        {
+            "name": "sandbox_api_key",
+            "nickname": "sbk",
+            "help_text": "API key for OpenSandbox (or set OPEN_SANDBOX_API_KEY env var)",
+            "type": str,
+            "attribute": {"object": interpreter, "attr_name": "sandbox_api_key"},
+        },
+        {
+            "name": "sandbox_domain",
+            "nickname": "sbd",
+            "help_text": "domain for OpenSandbox server (or set OPEN_SANDBOX_DOMAIN env var)",
+            "type": str,
+            "attribute": {"object": interpreter, "attr_name": "sandbox_domain"},
+        },
         # Special commands
         {
             "name": "reset_profile",

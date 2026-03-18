@@ -80,6 +80,9 @@ class OpenInterpreter:
         multi_line=True,
         contribute_conversation=False,
         plain_text_display=False,
+        sandbox_mode=False,
+        sandbox_api_key=None,
+        sandbox_domain=None,
     ):
         # State
         self.messages = [] if messages is None else messages
@@ -100,6 +103,11 @@ class OpenInterpreter:
         self.contribute_conversation = contribute_conversation
         self.plain_text_display = plain_text_display
         self.highlight_active_line = True  # additional setting to toggle active line highlighting. Defaults to True
+
+        # Sandbox settings
+        self.sandbox_mode = sandbox_mode
+        self.sandbox_api_key = sandbox_api_key
+        self.sandbox_domain = sandbox_domain
 
         # Loop messages
         self.loop = loop

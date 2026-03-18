@@ -33,18 +33,42 @@ computer = interpreter.computer
 class Terminal:
     def __init__(self, computer):
         self.computer = computer
-        self.languages = [
-            Ruby,
-            Python,
-            Shell,
-            JavaScript,
-            HTML,
-            AppleScript,
-            R,
-            PowerShell,
-            React,
-            Java,
-        ]
+        self._sandbox_manager = None
+
+        if getattr(computer.interpreter, "sandbox_mode", False):
+            from .languages.sandbox import SandboxPython, SandboxShell, SandboxJavaScript
+            from .languages.sandbox.sandbox_manager import SandboxManager
+
+            self._sandbox_manager = SandboxManager(
+                api_key=getattr(computer.interpreter, "sandbox_api_key", None),
+                domain=getattr(computer.interpreter, "sandbox_domain", None),
+            )
+            self.languages = [
+                Ruby,
+                SandboxPython,
+                SandboxShell,
+                SandboxJavaScript,
+                HTML,
+                AppleScript,
+                R,
+                PowerShell,
+                React,
+                Java,
+            ]
+        else:
+            self.languages = [
+                Ruby,
+                Python,
+                Shell,
+                JavaScript,
+                HTML,
+                AppleScript,
+                R,
+                PowerShell,
+                React,
+                Java,
+            ]
+
         self._active_languages = {}
 
     def sudo_install(self, package):
@@ -88,7 +112,7 @@ class Terminal:
             else:
                 return [{"type": "console", "format": "output", "content": f"Failed to install package {package}."}]
 
-        if language == "python":
+        if language == "python" and not self._sandbox_manager:
             if (
                 self.computer.import_computer_api
                 and not self.computer._has_imported_computer_api
@@ -155,10 +179,10 @@ class Terminal:
 
     def _streaming_run(self, language, code, display=False):
         if language not in self._active_languages:
-            # Get the language. Pass in self.computer *if it takes a single argument*
-            # but pass in nothing if not. This makes custom languages easier to add / understand.
             lang_class = self.get_language(language)
-            if lang_class.__init__.__code__.co_argcount > 1:
+            if hasattr(lang_class, '_is_sandbox_language') and lang_class._is_sandbox_language:
+                self._active_languages[language] = lang_class(self._sandbox_manager)
+            elif lang_class.__init__.__code__.co_argcount > 1:
                 self._active_languages[language] = lang_class(self.computer)
             else:
                 self._active_languages[language] = lang_class()
@@ -205,3 +229,6 @@ class Terminal:
             ):  # Not sure why this is None sometimes. We should look into this
                 language.terminate()
             del self._active_languages[language_name]
+
+        if self._sandbox_manager:
+            self._sandbox_manager.terminate()
