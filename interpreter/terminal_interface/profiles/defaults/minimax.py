@@ -5,7 +5,9 @@ Please set the MINIMAX_API_KEY environment variable.
 
 MiniMax provides powerful language models with a 204,800 token context window.
 Available models:
-  - MiniMax-M2.5 (default): Peak Performance. Ultimate Value.
+  - MiniMax-M2.7 (default): Latest flagship model with enhanced reasoning and coding.
+  - MiniMax-M2.7-highspeed: High-speed version of M2.7 for low-latency scenarios.
+  - MiniMax-M2.5: Peak Performance. Ultimate Value.
   - MiniMax-M2.5-highspeed: Same performance, faster and more agile.
 
 See https://platform.minimax.io/docs/api-reference/text-openai-api for more information.
@@ -15,7 +17,7 @@ from interpreter import interpreter
 import os
 
 # LLM settings
-interpreter.llm.model = "openai/MiniMax-M2.5"
+interpreter.llm.model = "openai/MiniMax-M2.7"
 interpreter.llm.api_key = os.environ.get("MINIMAX_API_KEY")
 interpreter.llm.api_base = "https://api.minimax.io/v1"
 interpreter.llm.supports_functions = True
