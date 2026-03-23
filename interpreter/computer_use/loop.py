@@ -139,11 +139,11 @@ async def sampling_loop(
             _maybe_filter_to_n_most_recent_images(messages, only_n_most_recent_images)
 
         if provider == APIProvider.ANTHROPIC:
-            client = Anthropic(api_key=api_key)
+            client = Anthropic(api_key=api_key, timeout=60.0)
         elif provider == APIProvider.VERTEX:
-            client = AnthropicVertex()
+            client = AnthropicVertex(timeout=60.0)
         elif provider == APIProvider.BEDROCK:
-            client = AnthropicBedrock()
+            client = AnthropicBedrock(timeout=60.0)
 
         # Call the API
         # we use raw_response to provide debug information to streamlit. Your
