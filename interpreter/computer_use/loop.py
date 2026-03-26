@@ -139,7 +139,7 @@ async def sampling_loop(
             _maybe_filter_to_n_most_recent_images(messages, only_n_most_recent_images)
 
         if provider == APIProvider.ANTHROPIC:
-            client = Anthropic(api_key=api_key)
+            client = Anthropic(api_key=api_key, timeout=60.0, max_retries=3)
         elif provider == APIProvider.VERTEX:
             client = AnthropicVertex()
         elif provider == APIProvider.BEDROCK:
