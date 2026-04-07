@@ -1,0 +1,41 @@
+---
+title: Rapid-MLX
+---
+
+[Rapid-MLX](https://github.com/raullenchai/Rapid-MLX) is an OpenAI-compatible
+inference server for Apple Silicon that runs MLX-quantized models natively,
+with streaming and tool calling.
+
+## Setup
+
+Install and start the server:
+
+```shell
+pip install rapid-mlx
+rapid-mlx serve mlx-community/Qwen3.5-4B-MLX-4bit
+```
+
+The server listens on `http://localhost:8000/v1`.
+
+## Terminal usage
+
+```shell
+interpreter --api_base "http://localhost:8000/v1" --api_key "fake_key" --model "openai/mlx-community/Qwen3.5-4B-MLX-4bit"
+```
+
+## Python usage
+
+```python
+from interpreter import interpreter
+
+interpreter.offline = True
+interpreter.llm.model = "openai/mlx-community/Qwen3.5-4B-MLX-4bit"
+interpreter.llm.api_key = "fake_key"
+interpreter.llm.api_base = "http://localhost:8000/v1"
+
+interpreter.chat()
+```
+
+Rapid-MLX includes 18 built-in tool-call parsers (hermes, llama3, qwen,
+glm47, minimax, gemma4, etc.), so function calling works with Open
+Interpreter's tool-driven workflow for the supported open-weight models.

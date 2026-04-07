@@ -91,6 +91,7 @@
             "language-models/local-models/llamafile",
             "language-models/local-models/janai",
             "language-models/local-models/lm-studio",
+            "language-models/local-models/rapid-mlx",
             "language-models/local-models/custom-endpoint",
             "language-models/local-models/best-practices"
           ]
