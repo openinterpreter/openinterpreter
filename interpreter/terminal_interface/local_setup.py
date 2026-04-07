@@ -11,6 +11,8 @@ import psutil
 import requests
 import wget
 
+from interpreter.terminal_interface.download_security import verify_model_integrity
+
 
 def local_setup(interpreter, provider=None, model=None):
     def download_model(models_dir, models, interpreter):
@@ -51,72 +53,84 @@ def local_setup(interpreter, provider=None, model=None):
                     "file_name": "Meta-Llama-3-8B-Instruct.Q4_K_M.llamafile",
                     "size": 4.95,
                     "url": "https://huggingface.co/Mozilla/Meta-Llama-3.1-8B-Instruct-llamafile/resolve/main/Meta-Llama-3.1-8B-Instruct.Q4_K_M.llamafile?download=true",
+                    "sha256": None,  # TODO: populate with verified hash from HuggingFace
                 },
                 {
                     "name": "Gemma-2-9b",
                     "file_name": "gemma-2-9b-it.Q4_K_M.llamafile",
                     "size": 5.79,
                     "url": "https://huggingface.co/jartine/gemma-2-9b-it-llamafile/resolve/main/gemma-2-9b-it.Q4_K_M.llamafile?download=true",
+                    "sha256": None,
                 },
                 {
                     "name": "Phi-3-mini",
                     "file_name": "Phi-3-mini-4k-instruct.Q4_K_M.llamafile",
                     "size": 2.42,
                     "url": "https://huggingface.co/Mozilla/Phi-3-mini-4k-instruct-llamafile/resolve/main/Phi-3-mini-4k-instruct.Q4_K_M.llamafile?download=true",
+                    "sha256": None,
                 },
                 {
                     "name": "Moondream2 (vision)",
                     "file_name": "moondream2-q5km-050824.llamafile",
                     "size": 1.98,
                     "url": "https://huggingface.co/cjpais/moondream2-llamafile/resolve/main/moondream2-q5km-050824.llamafile?download=true",
+                    "sha256": None,
                 },
                 {
                     "name": "Mistral-7B-Instruct",
                     "file_name": "Mistral-7B-Instruct-v0.3.Q4_K_M.llamafile",
                     "size": 4.40,
                     "url": "https://huggingface.co/Mozilla/Mistral-7B-Instruct-v0.3-llamafile/resolve/main/Mistral-7B-Instruct-v0.3.Q4_K_M.llamafile?download=true",
+                    "sha256": None,
                 },
                 {
                     "name": "Gemma-2-27b",
                     "file_name": "gemma-2-27b-it.Q4_K_M.llamafile",
                     "size": 16.7,
                     "url": "https://huggingface.co/jartine/gemma-2-27b-it-llamafile/resolve/main/gemma-2-27b-it.Q4_K_M.llamafile?download=true",
+                    "sha256": None,
                 },
                 {
                     "name": "TinyLlama-1.1B",
                     "file_name": "TinyLlama-1.1B-Chat-v1.0.Q4_K_M.llamafile",
                     "size": 0.70,
                     "url": "https://huggingface.co/Mozilla/TinyLlama-1.1B-Chat-v1.0-llamafile/resolve/main/TinyLlama-1.1B-Chat-v1.0.Q4_K_M.llamafile?download=true",
+                    "sha256": None,
                 },
                 {
                     "name": "Rocket-3B",
                     "file_name": "rocket-3b.Q4_K_M.llamafile",
                     "size": 1.74,
                     "url": "https://huggingface.co/Mozilla/rocket-3B-llamafile/resolve/main/rocket-3b.Q4_K_M.llamafile?download=true",
+                    "sha256": None,
                 },
                 {
                     "name": "LLaVA 1.5 (vision)",
                     "file_name": "llava-v1.5-7b-q4.llamafile",
                     "size": 4.29,
                     "url": "https://huggingface.co/Mozilla/llava-v1.5-7b-llamafile/resolve/main/llava-v1.5-7b-q4.llamafile?download=true",
+                    "sha256": None,
                 },
                 {
                     "name": "WizardCoder-Python-13B",
                     "file_name": "wizardcoder-python-13b.llamafile",
                     "size": 7.33,
                     "url": "https://huggingface.co/jartine/wizardcoder-13b-python/resolve/main/wizardcoder-python-13b.llamafile?download=true",
+                    "sha256": None,
                 },
                 {
                     "name": "WizardCoder-Python-34B",
                     "file_name": "wizardcoder-python-34b-v1.0.Q4_K_M.llamafile",
                     "size": 20.22,
                     "url": "https://huggingface.co/Mozilla/WizardCoder-Python-34B-V1.0-llamafile/resolve/main/wizardcoder-python-34b-v1.0.Q4_K_M.llamafile?download=true",
+                    "sha256": None,
                 },
                 {
                     "name": "Mixtral-8x7B-Instruct",
                     "file_name": "mixtral-8x7b-instruct-v0.1.Q5_K_M.llamafile",
                     "size": 30.03,
                     "url": "https://huggingface.co/jartine/Mixtral-8x7B-Instruct-v0.1-llamafile/resolve/main/mixtral-8x7b-instruct-v0.1.Q5_K_M.llamafile?download=true",
+                    "sha256": None,
                 },
             ]
 
@@ -163,6 +177,12 @@ def local_setup(interpreter, provider=None, model=None):
 
                 print(f"\nDownloading {selected_model['name']}...\n")
                 wget.download(model_url, model_path)
+
+                # Verify downloaded model integrity
+                expected_hash = selected_model.get("sha256")
+                if not verify_model_integrity(model_path, expected_hash, selected_model["name"]):
+                    print("\nDownload integrity check failed. Please try again.\n")
+                    return None
 
                 # Make the model executable if not on Windows
                 if platform.system() != "Windows":
