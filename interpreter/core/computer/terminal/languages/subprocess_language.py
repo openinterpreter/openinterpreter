@@ -148,6 +148,20 @@ class SubprocessLanguage(BaseLanguage):
                 if line is None:
                     continue  # `line = None` is the postprocessor's signal to discard completely
 
+                if "[sudo] password for" in line:
+                    self.output_queue.put(
+                        {
+                            "type": "console",
+                            "format": "output",
+                            "content": (
+                                "[sudo] password prompt detected — OI cannot provide a password "
+                                "through a pipe. Please run this command manually in your terminal.\n"
+                            ),
+                        }
+                    )
+                    self.done.set()
+                    return
+
                 if self.detect_active_line(line):
                     active_line = self.detect_active_line(line)
                     self.output_queue.put(
