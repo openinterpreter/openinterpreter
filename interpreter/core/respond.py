@@ -118,14 +118,31 @@ def respond(interpreter):
                     and ("exceeded" in str(e).lower() or
                          "insufficient_quota" in str(e).lower())
                 ):
-                    display_markdown_message(
-                        f""" > You ran out of current quota for OpenAI's API, please check your plan and billing details. You can either wait for the quota to reset or upgrade your plan.
+                    model = getattr(interpreter.llm, "model", "") or ""
+                    # Derive provider name from model prefix (e.g. "groq/llama3" → "Groq")
+                    if "/" in model:
+                        provider = model.split("/")[0].title()
+                        if provider.lower() == "openai":
+                            provider = "OpenAI"
+                    else:
+                        provider = "OpenAI"
 
-                        To check your current usage and billing details, visit the [OpenAI billing page](https://platform.openai.com/settings/organization/billing/overview).
+                    if provider == "OpenAI":
+                        display_markdown_message(
+                            f""" > You ran out of current quota for OpenAI's API, please check your plan and billing details. You can either wait for the quota to reset or upgrade your plan.
 
-                        You can also use `interpreter --max_budget [higher USD amount]` to set a budget for your sessions.
-                        """
-                    )
+                            To check your current usage and billing details, visit the [OpenAI billing page](https://platform.openai.com/settings/organization/billing/overview).
+
+                            You can also use `interpreter --max_budget [higher USD amount]` to set a budget for your sessions.
+                            """
+                        )
+                    else:
+                        display_markdown_message(
+                            f""" > You have exceeded your quota for {provider}'s API. Please check your plan and billing details with {provider}, or wait for the quota to reset.
+
+                            You can also use `interpreter --max_budget [higher USD amount]` to set a budget for your sessions.
+                            """
+                        )
 
                 elif (
                     interpreter.offline == False and "not have access" in str(e).lower()
