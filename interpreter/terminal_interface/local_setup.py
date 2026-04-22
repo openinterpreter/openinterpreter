@@ -444,6 +444,12 @@ def local_setup(interpreter, provider=None, model=None):
                     print(e)
                     print("Model process terminated.")
 
+        if model_path is None:
+            print(
+                "\nNo model was downloaded. Cannot start Llamafile. Please try again or choose a different provider.\n"
+            )
+            return interpreter
+
         # Set flags for Llamafile to work with interpreter
         interpreter.llm.model = "openai/local"
         interpreter.llm.api_key = "dummy"
