@@ -16,6 +16,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_tools::Harness;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
@@ -31,6 +32,7 @@ fn test_model_client(session_source: SessionSource) -> ModelClient {
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
+        Harness::default(),
     )
 }
 

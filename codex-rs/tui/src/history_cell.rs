@@ -23,12 +23,14 @@ use crate::legacy_core::config::Config;
 use crate::legacy_core::web_search_detail;
 use crate::live_wrap::take_prefix_by_width;
 use crate::markdown::append_markdown;
+use crate::product_branding::ProductBranding;
 use crate::render::line_utils::line_to_static;
 use crate::render::line_utils::prefix_lines;
 use crate::render::line_utils::push_owned_lines;
 use crate::render::renderable::Renderable;
 use crate::style::proposed_plan_style;
 use crate::style::user_message_style;
+use crate::telemetry::RuntimeMetricsSummary;
 #[cfg(test)]
 use crate::test_support::PathBufExt;
 #[cfg(test)]
@@ -42,13 +44,13 @@ use crate::version::CODEX_CLI_VERSION;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_line;
 use crate::wrapping::adaptive_wrap_lines;
+#[cfg(all(feature = "rich-media", feature = "structured-mcp-content"))]
 use base64::Engine;
 use codex_app_server_protocol::McpServerStatus;
 use codex_app_server_protocol::McpServerStatusDetail;
 use codex_config::types::McpServerTransportConfig;
 #[cfg(test)]
 use codex_mcp::qualified_mcp_tool_name_prefix;
-use codex_otel::RuntimeMetricsSummary;
 use codex_protocol::account::PlanType;
 use codex_protocol::config_types::ServiceTier;
 #[cfg(test)]
@@ -72,7 +74,9 @@ use codex_protocol::request_user_input::RequestUserInputQuestion;
 use codex_protocol::user_input::TextElement;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cli::format_env_display;
+#[cfg(all(feature = "rich-media", feature = "structured-mcp-content"))]
 use image::DynamicImage;
+#[cfg(all(feature = "rich-media", feature = "structured-mcp-content"))]
 use image::ImageReader;
 use ratatui::prelude::*;
 use ratatui::style::Color;
@@ -84,11 +88,13 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 use std::any::Any;
 use std::collections::HashMap;
+#[cfg(all(feature = "rich-media", feature = "structured-mcp-content"))]
 use std::io::Cursor;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
+#[cfg(all(feature = "rich-media", feature = "structured-mcp-content"))]
 use tracing::error;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -816,6 +822,9 @@ pub fn new_approval_decision_cell(
     use codex_protocol::protocol::NetworkPolicyRuleAction;
     use codex_protocol::protocol::ReviewDecision::*;
 
+    let branding = ProductBranding::current();
+    let agent_name = branding.agent_name();
+    let agent_name_lowercase = branding.agent_name_lowercase();
     let (symbol, summary): (Span<'static>, Vec<Span<'static>>) = match decision {
         Approved => {
             let snippet = Span::from(exec_snippet(&command)).dim();
@@ -824,7 +833,7 @@ pub fn new_approval_decision_cell(
                 vec![
                     actor.subject().into(),
                     "approved".bold(),
-                    " codex to run ".into(),
+                    format!(" {agent_name_lowercase} to run ").into(),
                     snippet,
                     " this time".bold(),
                 ],
@@ -839,7 +848,8 @@ pub fn new_approval_decision_cell(
                 vec![
                     actor.subject().into(),
                     "approved".bold(),
-                    " codex to always run commands that start with ".into(),
+                    format!(" {agent_name_lowercase} to always run commands that start with ")
+                        .into(),
                     snippet,
                 ],
             )
@@ -851,7 +861,7 @@ pub fn new_approval_decision_cell(
                 vec![
                     actor.subject().into(),
                     "approved".bold(),
-                    " codex to run ".into(),
+                    format!(" {agent_name_lowercase} to run ").into(),
                     snippet,
                     " every time this session".bold(),
                 ],
@@ -865,7 +875,7 @@ pub fn new_approval_decision_cell(
                 vec![
                     actor.subject().into(),
                     "persisted".bold(),
-                    " Codex network access to ".into(),
+                    format!(" {agent_name} network access to ").into(),
                     Span::from(network_policy_amendment.host).dim(),
                 ],
             ),
@@ -874,7 +884,7 @@ pub fn new_approval_decision_cell(
                 vec![
                     actor.subject().into(),
                     "denied".bold(),
-                    " codex network access to ".into(),
+                    format!(" {agent_name_lowercase} network access to ").into(),
                     Span::from(network_policy_amendment.host).dim(),
                     " and saved that rule".into(),
                 ],
@@ -886,13 +896,13 @@ pub fn new_approval_decision_cell(
                 ApprovalDecisionActor::User => vec![
                     actor.subject().into(),
                     "did not approve".bold(),
-                    " codex to run ".into(),
+                    format!(" {agent_name_lowercase} to run ").into(),
                     snippet,
                 ],
                 ApprovalDecisionActor::Guardian => vec![
                     "Request ".into(),
                     "denied".bold(),
-                    " for codex to run ".into(),
+                    format!(" for {agent_name_lowercase} to run ").into(),
                     snippet,
                 ],
             };
@@ -905,7 +915,7 @@ pub fn new_approval_decision_cell(
                 vec![
                     "Review ".into(),
                     "timed out".bold(),
-                    " before codex could run ".into(),
+                    format!(" before {agent_name_lowercase} could run ").into(),
                     snippet,
                 ],
             )
@@ -947,10 +957,11 @@ impl ApprovalDecisionActor {
 }
 
 pub fn new_guardian_denied_patch_request(files: Vec<String>) -> Box<dyn HistoryCell> {
+    let agent_name_lowercase = ProductBranding::current().agent_name_lowercase();
     let mut summary = vec![
         "Request ".into(),
         "denied".bold(),
-        " for codex to apply ".into(),
+        format!(" for {agent_name_lowercase} to apply ").into(),
     ];
     if files.len() == 1 {
         summary.push("a patch touching ".into());
@@ -989,10 +1000,11 @@ pub fn new_guardian_approved_action_request(summary: String) -> Box<dyn HistoryC
 }
 
 pub fn new_guardian_timed_out_patch_request(files: Vec<String>) -> Box<dyn HistoryCell> {
+    let agent_name_lowercase = ProductBranding::current().agent_name_lowercase();
     let mut summary = vec![
         "Review ".into(),
         "timed out".bold(),
-        " before codex could apply ".into(),
+        format!(" before {agent_name_lowercase} could apply ").into(),
     ];
     if files.len() == 1 {
         summary.push("a patch touching ".into());
@@ -1041,6 +1053,7 @@ impl HistoryCell for PatchHistoryCell {
 
 #[derive(Debug)]
 struct CompletedMcpToolCallWithImageOutput {
+    #[cfg(all(feature = "rich-media", feature = "structured-mcp-content"))]
     _image: DynamicImage,
 }
 impl HistoryCell for CompletedMcpToolCallWithImageOutput {
@@ -1192,6 +1205,7 @@ pub(crate) fn new_session_info(
         sandbox_policy,
         ..
     } = event;
+    let branding = ProductBranding::current();
     // Header box rendered as history (so it appears at the very top)
     let header = SessionHeaderHistoryCell::new(
         model.clone(),
@@ -1213,7 +1227,11 @@ pub(crate) fn new_session_info(
             Line::from(vec![
                 "  ".into(),
                 "/init".into(),
-                " - create an AGENTS.md file with instructions for Codex".dim(),
+                format!(
+                    " - create an AGENTS.md file with instructions for {}",
+                    branding.agent_name()
+                )
+                .dim(),
             ]),
             Line::from(vec![
                 "  ".into(),
@@ -1223,7 +1241,7 @@ pub(crate) fn new_session_info(
             Line::from(vec![
                 "  ".into(),
                 "/permissions".into(),
-                " - choose what Codex is allowed to do".dim(),
+                format!(" - choose what {} is allowed to do", branding.agent_name()).dim(),
             ]),
             Line::from(vec![
                 "  ".into(),
@@ -1386,13 +1404,14 @@ impl HistoryCell for SessionHeaderHistoryCell {
         let Some(inner_width) = card_inner_width(width, SESSION_HEADER_MAX_INNER_WIDTH) else {
             return Vec::new();
         };
+        let branding = ProductBranding::current();
 
         let make_row = |spans: Vec<Span<'static>>| Line::from(spans);
 
-        // Title line rendered inside the box: ">_ OpenAI Codex (vX)"
+        // Title line rendered inside the box: ">_ <product> (vX)"
         let title_spans: Vec<Span<'static>> = vec![
             Span::from(">_ ").dim(),
-            Span::from("OpenAI Codex").bold(),
+            Span::from(branding.session_header_name()).bold(),
             Span::from(" ").dim(),
             Span::from(format!("(v{})", self.version)).dim(),
         ];
@@ -1544,31 +1563,10 @@ impl McpToolCallCell {
     }
 
     fn render_content_block(block: &serde_json::Value, width: usize) -> String {
-        let content = match serde_json::from_value::<rmcp::model::Content>(block.clone()) {
-            Ok(content) => content,
-            Err(_) => {
-                return format_and_truncate_tool_result(
-                    &block.to_string(),
-                    TOOL_CALL_MAX_LINES,
-                    width,
-                );
-            }
-        };
-
-        match content.raw {
-            rmcp::model::RawContent::Text(text) => {
-                format_and_truncate_tool_result(&text.text, TOOL_CALL_MAX_LINES, width)
-            }
-            rmcp::model::RawContent::Image(_) => "<image content>".to_string(),
-            rmcp::model::RawContent::Audio(_) => "<audio content>".to_string(),
-            rmcp::model::RawContent::Resource(resource) => {
-                let uri = match resource.resource {
-                    rmcp::model::ResourceContents::TextResourceContents { uri, .. } => uri,
-                    rmcp::model::ResourceContents::BlobResourceContents { uri, .. } => uri,
-                };
-                format!("embedded resource: {uri}")
-            }
-            rmcp::model::RawContent::ResourceLink(link) => format!("link: {}", link.uri),
+        if let Some(rendered) = render_structured_content_block(block, width) {
+            rendered
+        } else {
+            format_and_truncate_tool_result(&block.to_string(), TOOL_CALL_MAX_LINES, width)
         }
     }
 }
@@ -1785,6 +1783,13 @@ pub(crate) fn new_web_search_call(
 fn try_new_completed_mcp_tool_call_with_image_output(
     result: &Result<codex_protocol::mcp::CallToolResult, String>,
 ) -> Option<CompletedMcpToolCallWithImageOutput> {
+    #[cfg(not(all(feature = "rich-media", feature = "structured-mcp-content")))]
+    {
+        let _ = result;
+        return None;
+    }
+
+    #[cfg(all(feature = "rich-media", feature = "structured-mcp-content"))]
     let image = result
         .as_ref()
         .ok()?
@@ -1792,13 +1797,40 @@ fn try_new_completed_mcp_tool_call_with_image_output(
         .iter()
         .find_map(decode_mcp_image)?;
 
+    #[cfg(all(feature = "rich-media", feature = "structured-mcp-content"))]
     Some(CompletedMcpToolCallWithImageOutput { _image: image })
+}
+
+#[cfg(feature = "structured-mcp-content")]
+fn render_structured_content_block(block: &serde_json::Value, width: usize) -> Option<String> {
+    let content = serde_json::from_value::<rmcp::model::Content>(block.clone()).ok()?;
+    Some(match content.raw {
+        rmcp::model::RawContent::Text(text) => {
+            format_and_truncate_tool_result(&text.text, TOOL_CALL_MAX_LINES, width)
+        }
+        rmcp::model::RawContent::Image(_) => "<image content>".to_string(),
+        rmcp::model::RawContent::Audio(_) => "<audio content>".to_string(),
+        rmcp::model::RawContent::Resource(resource) => {
+            let uri = match resource.resource {
+                rmcp::model::ResourceContents::TextResourceContents { uri, .. } => uri,
+                rmcp::model::ResourceContents::BlobResourceContents { uri, .. } => uri,
+            };
+            format!("embedded resource: {uri}")
+        }
+        rmcp::model::RawContent::ResourceLink(link) => format!("link: {}", link.uri),
+    })
+}
+
+#[cfg(not(feature = "structured-mcp-content"))]
+fn render_structured_content_block(_block: &serde_json::Value, _width: usize) -> Option<String> {
+    None
 }
 
 /// Decodes an MCP `ImageContent` block into an in-memory image.
 ///
 /// Returns `None` when the block is not an image, when base64 decoding fails, when the format
 /// cannot be inferred, or when the image decoder rejects the bytes.
+#[cfg(all(feature = "rich-media", feature = "structured-mcp-content"))]
 fn decode_mcp_image(block: &serde_json::Value) -> Option<DynamicImage> {
     let content = serde_json::from_value::<rmcp::model::Content>(block.clone()).ok()?;
     let rmcp::model::RawContent::Image(image) = content.raw else {
@@ -1831,6 +1863,11 @@ fn decode_mcp_image(block: &serde_json::Value) -> Option<DynamicImage> {
             e
         })
         .ok()
+}
+
+#[cfg(not(all(feature = "rich-media", feature = "structured-mcp-content")))]
+fn decode_mcp_image(_block: &serde_json::Value) -> Option<()> {
+    None
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -3455,10 +3492,13 @@ mod tests {
 
     #[test]
     fn prefixed_wrapped_history_cell_indents_wrapped_lines() {
+        let agent_name_lowercase =
+            ProductBranding::for_open_interpreter(/*is_open_interpreter*/ true)
+                .agent_name_lowercase();
         let summary = Line::from(vec![
             "You ".into(),
             "approved".bold(),
-            " codex to run ".into(),
+            format!(" {agent_name_lowercase} to run ").into(),
             "echo something really long to ensure wrapping happens".dim(),
             " this time".bold(),
         ]);
@@ -3467,9 +3507,10 @@ mod tests {
         assert_eq!(
             rendered,
             vec![
-                "✔ You approved codex to".to_string(),
-                "  run echo something".to_string(),
-                "  really long to ensure".to_string(),
+                "✔ You approved".to_string(),
+                format!("  {agent_name_lowercase} to run"),
+                "  echo something really".to_string(),
+                "  long to ensure".to_string(),
                 "  wrapping happens this".to_string(),
                 "  time".to_string(),
             ]

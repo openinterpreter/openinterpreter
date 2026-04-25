@@ -1,0 +1,17 @@
+---
+source: tui/src/status/tests.rs
+expression: sanitized
+---
+/status
+
+╭───────────────────────────────────────────────────────────────╮
+│  • Open Interpreter (v0.0.0)                                  │
+│                                                               │
+│  Model:         gpt-5.4-mini (reasoning none, summaries auto) │
+│  Directory: [[workspace]]                                     │
+│  Permissions:   Custom (read-only, on-request)                │
+│  Agents.md:                                                   │
+│                                                               │
+│  Token usage:   0 total  (0 input + 0 output)                 │
+│  Limits:        data not available yet                        │
+╰───────────────────────────────────────────────────────────────╯

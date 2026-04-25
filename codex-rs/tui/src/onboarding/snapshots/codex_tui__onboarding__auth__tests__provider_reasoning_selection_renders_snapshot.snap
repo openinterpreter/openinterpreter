@@ -1,0 +1,16 @@
+---
+source: tui/src/onboarding/auth.rs
+expression: terminal.backend()
+---
+> OpenRouter / google/gemini-2.5-flash
+
+  Choose a reasoning level for this new chat.
+
+  1. Low
+     Low reasoning
+
+> 2. Medium (default)
+     Balanced reasoning
+
+  Press Enter to continue
+  Press Esc to go back

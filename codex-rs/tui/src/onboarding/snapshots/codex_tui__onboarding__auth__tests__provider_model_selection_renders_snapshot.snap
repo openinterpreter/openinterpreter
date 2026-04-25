@@ -1,0 +1,23 @@
+---
+source: tui/src/onboarding/auth.rs
+expression: terminal.backend()
+---
+> OpenRouter
+
+  Choose a model for this new chat.
+  Filter models: type to search
+
+> 1. google/gemini-2.5-flash
+     google/gemini-2.5-flash description
+
+
+
+
+
+
+
+
+
+
+  Press Enter to continue
+  Type to filter • Backspace clears • Esc goes back

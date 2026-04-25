@@ -13,6 +13,7 @@ members = [
     "arg0",
     "feedback",
     "features",
+    "chat-wire-compat",
     "install-context",
     "codex-backend-openapi-models",
     "code-mode",
@@ -56,6 +57,7 @@ members = [
     "responses-api-proxy",
     "response-debug-context",
     "sandboxing",
+    "server-cli",
     "stdio-to-uds",
     "otel",
     "tui",
@@ -120,6 +122,7 @@ codex-arg0 = { path = "arg0" }
 codex-async-utils = { path = "async-utils" }
 codex-backend-client = { path = "backend-client" }
 codex-chatgpt = { path = "chatgpt" }
+codex-chat-wire-compat = { path = "chat-wire-compat" }
 codex-cli = { path = "cli" }
 codex-client = { path = "codex-client" }
 codex-collaboration-mode-templates = { path = "collaboration-mode-templates" }
@@ -165,6 +168,7 @@ codex-rmcp-client = { path = "rmcp-client" }
 codex-rollout = { path = "rollout" }
 codex-sandboxing = { path = "sandboxing" }
 codex-secrets = { path = "secrets" }
+codex-server-cli = { path = "server-cli" }
 codex-shell-command = { path = "shell-command" }
 codex-shell-escalation = { path = "shell-escalation" }
 codex-skills = { path = "skills" }
@@ -328,6 +332,7 @@ starlark = "0.13.0"
 strum = "0.27.2"
 strum_macros = "0.28.0"
 supports-color = "3.0.2"
+sysinfo = "0.37.2"
 syntect = "5"
 sys-locale = "0.3.2"
 tempfile = "3.23.0"
@@ -434,6 +439,11 @@ strip = "symbols"
 
 # See https://github.com/openai/codex/issues/1411 for details.
 codegen-units = 1
+
+[profile.interpreter-release]
+inherits = "release"
+lto = "thin"
+codegen-units = 8
 
 [profile.ci-test]
 debug = 1         # Reduce debug symbol size

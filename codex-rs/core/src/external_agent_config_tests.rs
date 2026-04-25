@@ -359,6 +359,8 @@ async fn import_local_plugins_returns_completed_status() {
 
     assert_eq!(outcome, Vec::<PendingPluginImport>::new());
     let config = fs::read_to_string(codex_home.join("config.toml")).expect("read config");
+    assert!(config.contains("[features]"));
+    assert!(config.contains("plugins = true"));
     assert!(config.contains(r#"[plugins."cloudflare@my-plugins"]"#));
     assert!(config.contains("enabled = true"));
 }
@@ -1212,6 +1214,8 @@ async fn import_plugins_supports_external_agent_plugin_marketplace_layout() {
         }
     );
     let config = fs::read_to_string(codex_home.join("config.toml")).expect("read config");
+    assert!(config.contains("[features]"));
+    assert!(config.contains("plugins = true"));
     assert!(config.contains(r#"[plugins."cloudflare@my-plugins"]"#));
     assert!(config.contains("enabled = true"));
 }

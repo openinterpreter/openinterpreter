@@ -3,6 +3,8 @@ use crate::config::test_config;
 use crate::rollout::RolloutRecorder;
 use crate::session::tests::make_session_and_context;
 use crate::tasks::interrupted_turn_history_marker;
+use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::WireApi;
 use codex_models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::models::ContentItem;
@@ -193,6 +195,75 @@ fn out_of_range_truncation_drops_pre_user_active_turn_prefix() {
         serde_json::to_value(truncated.get_rollout_items()).unwrap(),
         serde_json::to_value(items[..2].to_vec()).unwrap()
     );
+}
+
+#[tokio::test]
+async fn start_thread_uses_models_manager_for_selected_provider() {
+    let base_config = test_config().await;
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+    let manager = ThreadManager::new(
+        &base_config,
+        auth_manager.clone(),
+        SessionSource::Exec,
+        CollaborationModesConfig::default(),
+        Arc::new(codex_exec_server::EnvironmentManager::new(
+            /*exec_server_url*/ None,
+        )),
+        /*analytics_events_client*/ None,
+    );
+    let mut anthropic_config = base_config.clone();
+    anthropic_config.model_provider_id = "anthropic".to_string();
+    anthropic_config.model = Some("claude-opus-4-7".to_string());
+    anthropic_config.model_provider = ModelProviderInfo {
+        name: "Anthropic".to_string(),
+        base_url: Some("https://api.anthropic.com".to_string()),
+        env_key: Some("ANTHROPIC_API_KEY".to_string()),
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        auth: None,
+        wire_api: WireApi::Messages,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: None,
+        stream_max_retries: None,
+        stream_idle_timeout_ms: None,
+        websocket_connect_timeout_ms: None,
+        requires_openai_auth: false,
+        supports_websockets: false,
+    };
+    anthropic_config.model_providers.insert(
+        "anthropic".to_string(),
+        anthropic_config.model_provider.clone(),
+    );
+
+    let thread = manager
+        .start_thread(anthropic_config.clone())
+        .await
+        .expect("start anthropic thread");
+    let model_info = thread
+        .thread
+        .codex
+        .session
+        .services
+        .models_manager
+        .get_model_info(
+            "claude-opus-4-7",
+            &anthropic_config.to_models_manager_config(),
+        )
+        .await;
+
+    assert!(
+        !model_info.used_fallback_model_metadata,
+        "selected provider should supply Anthropic model metadata"
+    );
+
+    thread
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown thread");
+    manager.remove_thread(&thread.thread_id).await;
 }
 
 #[tokio::test]

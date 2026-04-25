@@ -1,0 +1,12 @@
+---
+source: tui/src/history_cell.rs
+expression: rendered
+---
+╭──────────────────────────────────────────────╮
+│ • Open Interpreter (v0.0.0)                  │
+│                                              │
+│ model:     gpt-5.4 medium   /model to change │
+│ directory: /tmp/project                      │
+╰──────────────────────────────────────────────╯
+
+  Tip: Use /model to switch providers, models, or reasoning effort.

@@ -1,0 +1,17 @@
+---
+source: tui/src/onboarding/auth.rs
+expression: terminal.backend()
+---
+> OpenAI (API key)
+
+  Use an OpenAI API key with the OpenAI model catalog.
+
+  Detected OPENAI_API_KEY in your environment.
+  Paste or type a different key if you want to use another account.
+
+  Base URL: https://api.openai.com/v1
+╭API key───────────────────────────────────────────────────────────────────────────────────────╮
+│sk-test-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+  Press Enter to continue
+  Press Esc to go back

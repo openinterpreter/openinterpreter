@@ -6548,6 +6548,12 @@
               }
             ]
           },
+          "harness": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "instructions": {
             "type": [
               "string",
@@ -9848,6 +9854,13 @@
               "integer",
               "null"
             ]
+          },
+          "modelProvider": {
+            "description": "Optional provider override; when set, list models for that configured provider instead of the active default provider.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "title": "ModelListParams",
@@ -10773,6 +10786,12 @@
             "description": "[UNSTABLE] Optional profile-level override for where approval requests are routed for review. If omitted, the enclosing config default is used."
           },
           "chatgpt_base_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "harness": {
             "type": [
               "string",
               "null"
@@ -13018,6 +13037,13 @@
           },
           "id": {
             "type": "string"
+          },
+          "model": {
+            "description": "Latest observed model for this thread, when known.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "modelProvider": {
             "description": "Model provider used for this thread (for example, 'openai').",

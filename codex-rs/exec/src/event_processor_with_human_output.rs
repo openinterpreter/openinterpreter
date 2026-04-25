@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
@@ -19,6 +20,8 @@ use owo_colors::Style;
 use crate::event_processor::CodexStatus;
 use crate::event_processor::EventProcessor;
 use crate::event_processor::handle_last_message;
+
+const OPEN_INTERPRETER_BRAND_ENV_VAR: &str = "OPEN_INTERPRETER_BRAND";
 
 pub(crate) struct EventProcessorWithHumanOutput {
     bold: Style,
@@ -100,7 +103,11 @@ impl EventProcessorWithHumanOutput {
             ThreadItem::AgentMessage { text, .. } => {
                 eprintln!(
                     "{}\n{}",
-                    "codex".style(self.italic).style(self.magenta),
+                    assistant_speaker_label(
+                        std::env::var_os(OPEN_INTERPRETER_BRAND_ENV_VAR).as_deref()
+                    )
+                    .style(self.italic)
+                    .style(self.magenta),
                     text
                 );
                 self.final_message = Some(text);
@@ -216,7 +223,10 @@ impl EventProcessor for EventProcessorWithHumanOutput {
         session_configured_event: &SessionConfiguredEvent,
     ) {
         const VERSION: &str = env!("CARGO_PKG_VERSION");
-        eprintln!("OpenAI Codex v{VERSION} (research preview)\n--------");
+        eprintln!(
+            "{} v{VERSION} (research preview)\n--------",
+            human_output_brand(std::env::var_os(OPEN_INTERPRETER_BRAND_ENV_VAR).as_deref())
+        );
         for (key, value) in config_summary_entries(config, session_configured_event) {
             eprintln!("{} {}", format!("{key}:").style(self.bold), value);
         }
@@ -408,7 +418,11 @@ impl EventProcessor for EventProcessorWithHumanOutput {
         {
             eprintln!(
                 "{}\n{}",
-                "codex".style(self.italic).style(self.magenta),
+                assistant_speaker_label(
+                    std::env::var_os(OPEN_INTERPRETER_BRAND_ENV_VAR).as_deref()
+                )
+                .style(self.italic)
+                .style(self.magenta),
                 message
             );
         }
@@ -544,6 +558,16 @@ fn blended_total(usage: &ThreadTokenUsage) -> i64 {
     let cached_input = usage.total.cached_input_tokens.max(0);
     let non_cached_input = (usage.total.input_tokens - cached_input).max(0);
     (non_cached_input + usage.total.output_tokens.max(0)).max(0)
+}
+
+fn human_output_brand(value: Option<&OsStr>) -> &'static str {
+    let _ = value;
+    "Open Interpreter"
+}
+
+fn assistant_speaker_label(value: Option<&OsStr>) -> &'static str {
+    let _ = value;
+    "interpreter"
 }
 
 fn should_print_final_message_to_stdout(

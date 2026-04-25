@@ -1,18 +1,22 @@
 ---
-source: tui/src/chatwidget/tests.rs
+source: tui/src/chatwidget/tests/popups_and_settings.rs
 expression: popup
 ---
-  Select Model and Effort
-  Access legacy models by running codex -m <model_name> or in your config.toml
+  Select Provider
+  Choose a provider for the next chat. Unconfigured providers will be added to
 
-› 1. gpt-5.3-codex (default)  Latest frontier agentic coding model.
-  2. gpt-5.4                  Latest frontier agentic coding model.
-  3. gpt-5.2-codex            Frontier agentic coding model.
-  4. gpt-5.1-codex-max        Codex-optimized flagship for deep and fast
-                              reasoning.
-  5. gpt-5.2                  Latest frontier model with improvements across
-                              knowledge, reasoning and coding
-  6. gpt-5.1-codex-mini       Optimized for codex. Cheaper, faster, but less
-                              capable.
+  Filter providers
+› OpenAI (API key)                    Use OPENAI_API_KEY or paste a key ·
+                                      Ready
+  Anthropic                           Use ANTHROPIC_API_KEY or paste a key |
+                                      Harness: claude-code · Ready
+  Groq                                Use GROQ_API_KEY or paste a key · Ready
+  Ollama                              Connect to localhost:11434 · Installed
+  OpenCode Zen                        Use OPENCODE_API_KEY or paste a key ·
+                                      Installed
+  OpenCode Go                         Use OPENCODE_API_KEY or paste a key ·
+                                      Installed
+  OpenAI (ChatGPT sign-in) (current)  Sign in with ChatGPT
+  OpenRouter                          Use OPENROUTER_API_KEY or paste a key
 
-  Press enter to select reasoning effort, or esc to dismiss.
+  Type to filter • Enter to continue • Esc to dismiss

@@ -15,6 +15,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_tools::Harness;
 use core_test_support::load_default_config_for_test;
 use core_test_support::responses;
 use core_test_support::test_codex::test_codex;
@@ -107,6 +108,7 @@ async fn responses_stream_includes_subagent_header_on_review() {
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
+        Harness::Native,
     );
     let mut client_session = client.new_session();
 
@@ -232,6 +234,7 @@ async fn responses_stream_includes_subagent_header_on_other() {
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
+        Harness::Native,
     );
     let mut client_session = client.new_session();
 
@@ -346,6 +349,7 @@ async fn responses_respects_model_info_overrides_from_config() {
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
+        Harness::Native,
     );
     let mut client_session = client.new_session();
 

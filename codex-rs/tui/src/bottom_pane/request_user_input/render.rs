@@ -18,6 +18,7 @@ use crate::bottom_pane::selection_popup_common::render_menu_surface;
 use crate::bottom_pane::selection_popup_common::render_rows;
 use crate::bottom_pane::selection_popup_common::wrap_styled_line;
 use crate::render::renderable::Renderable;
+use crate::style::app_accent_color;
 
 use super::DESIRED_SPACERS_BETWEEN_SECTIONS;
 use super::RequestUserInputOverlay;
@@ -291,7 +292,7 @@ impl RequestUserInputOverlay {
             let question_line = if answered {
                 Line::from(line.clone())
             } else {
-                Line::from(line.clone()).cyan()
+                Line::from(line.clone()).fg(app_accent_color())
             };
             Paragraph::new(question_line).render(
                 Rect {
@@ -366,7 +367,7 @@ impl RequestUserInputOverlay {
                     spans.push(TIP_SEPARATOR.into());
                 }
                 if tip.highlight {
-                    spans.push(tip.text.cyan().bold().not_dim());
+                    spans.push(tip.text.fg(app_accent_color()).bold().not_dim());
                 } else {
                     spans.push(tip.text.into());
                 }

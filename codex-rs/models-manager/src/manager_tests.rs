@@ -8,7 +8,9 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider_info::WireApi;
 use codex_protocol::config_types::ModelProviderAuthInfo;
+use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelsResponse;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use core_test_support::responses::mount_models_once;
 use http::HeaderMap;
@@ -405,6 +407,141 @@ async fn refresh_available_models_sorts_by_priority() {
 }
 
 #[tokio::test]
+async fn apply_remote_models_preserves_seed_priority_for_provider_catalog_entries() {
+    let codex_home = tempdir().expect("temp dir");
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+    let provider = ModelProviderInfo {
+        name: "Anthropic".to_string(),
+        base_url: Some("https://api.anthropic.com".to_string()),
+        env_key: Some("ANTHROPIC_API_KEY".to_string()),
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        auth: None,
+        wire_api: WireApi::Messages,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: Some(0),
+        stream_max_retries: Some(0),
+        stream_idle_timeout_ms: Some(5_000),
+        websocket_connect_timeout_ms: None,
+        requires_openai_auth: false,
+        supports_websockets: false,
+    };
+    let manager = ModelsManager::with_provider_for_tests(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        provider,
+    );
+
+    manager
+        .apply_remote_models(vec![remote_model(
+            "claude-sonnet-4-20250514",
+            "Claude Sonnet 4",
+            /*priority*/ 40,
+        )])
+        .await;
+
+    let remote_models = manager.get_remote_models().await;
+    let sonnet = remote_models
+        .iter()
+        .find(|model| model.slug == "claude-sonnet-4-20250514")
+        .expect("seeded Anthropic model should remain present");
+    assert_eq!(sonnet.priority, 18);
+}
+
+#[tokio::test]
+async fn anthropic_provider_catalog_uses_live_model_capabilities() {
+    let server = MockServer::start().await;
+    let codex_home = tempdir().expect("temp dir");
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({
+                    "data": [
+                        {
+                            "id": "claude-haiku-4-5-20251001",
+                            "display_name": "Claude Haiku 4.5",
+                            "max_input_tokens": 200000,
+                            "capabilities": {
+                                "effort": {
+                                    "supported": false,
+                                    "low": { "supported": false },
+                                    "medium": { "supported": false },
+                                    "high": { "supported": false },
+                                    "max": { "supported": false }
+                                },
+                                "image_input": { "supported": true },
+                                "pdf_input": { "supported": true },
+                                "structured_outputs": { "supported": true },
+                                "thinking": {
+                                    "supported": true,
+                                    "types": {
+                                        "enabled": { "supported": true },
+                                        "adaptive": { "supported": false }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = ModelProviderInfo {
+        name: "Anthropic".to_string(),
+        base_url: Some(server.uri()),
+        env_key: Some("ANTHROPIC_API_KEY".to_string()),
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        auth: None,
+        wire_api: WireApi::Messages,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: Some(0),
+        stream_max_retries: Some(0),
+        stream_idle_timeout_ms: Some(5_000),
+        websocket_connect_timeout_ms: None,
+        requires_openai_auth: false,
+        supports_websockets: false,
+    };
+    let manager = ModelsManager::with_provider_for_tests(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        provider,
+    );
+
+    let models = manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+    let haiku = models
+        .iter()
+        .find(|preset| preset.model == "claude-haiku-4-5-20251001")
+        .expect("expected live haiku model to be listed");
+
+    assert!(
+        models
+            .iter()
+            .any(|preset| preset.model == "claude-haiku-4-5-20251001"),
+        "expected Anthropic providers to use the live provider catalog"
+    );
+    assert_eq!(haiku.default_reasoning_effort, ReasoningEffort::Medium);
+    assert!(haiku.supported_reasoning_efforts.is_empty());
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("received requests")
+            .len(),
+        1,
+        "Anthropic model refresh should hit provider /v1/models"
+    );
+}
+
+#[tokio::test]
 async fn refresh_available_models_uses_provider_auth_token() {
     let server = MockServer::start().await;
     let auth_script = ProviderAuthScript::new(&["provider-token"]).unwrap();
@@ -690,7 +827,516 @@ async fn refresh_available_models_drops_removed_remote_models() {
 }
 
 #[tokio::test]
-async fn refresh_available_models_skips_network_without_chatgpt_auth() {
+async fn refresh_available_models_fetches_for_compatible_provider_without_chatgpt_auth() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "llama-3.3-70b-versatile",
+                            "object": "model",
+                            "context_window": 131072
+                        }
+                    ]
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let codex_home = tempdir().expect("temp dir");
+    let auth_manager = Arc::new(AuthManager::new(
+        codex_home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+    ));
+    let provider = provider_for(server.uri());
+    let manager = ModelsManager::with_provider_for_tests(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        provider,
+    );
+
+    manager
+        .refresh_available_models(RefreshStrategy::OnlineIfUncached)
+        .await
+        .expect("compatible provider refresh succeeds");
+    let cached_remote = manager.get_remote_models().await;
+    let compatible = cached_remote
+        .iter()
+        .find(|candidate| candidate.slug == "llama-3.3-70b-versatile")
+        .expect("compatible provider model should be cached");
+    assert!(compatible.used_fallback_model_metadata);
+    assert!(
+        !compatible.base_instructions.is_empty(),
+        "compatible models should be hydrated with fallback metadata"
+    );
+}
+
+#[tokio::test]
+async fn compatible_provider_offline_list_starts_without_bundled_codex_models() {
+    let codex_home = tempdir().expect("temp dir");
+    let auth_manager = Arc::new(AuthManager::new(
+        codex_home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+    ));
+    let manager = ModelsManager::with_provider_for_tests(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        provider_for("https://example.com/v1".to_string()),
+    );
+
+    let models = manager.list_models(RefreshStrategy::Offline).await;
+
+    assert!(
+        models.is_empty(),
+        "compatible providers should not seed the bundled Codex catalog"
+    );
+}
+
+#[tokio::test]
+async fn compatible_provider_list_models_only_returns_provider_catalog() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "llama-3.3-70b-versatile",
+                            "object": "model",
+                            "context_window": 131072
+                        }
+                    ]
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let codex_home = tempdir().expect("temp dir");
+    let auth_manager = Arc::new(AuthManager::new(
+        codex_home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+    ));
+    let manager = ModelsManager::with_provider_for_tests(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        provider_for(server.uri()),
+    );
+
+    let models = manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+
+    assert_eq!(
+        models
+            .iter()
+            .map(|preset| preset.model.as_str())
+            .collect::<Vec<_>>(),
+        vec!["llama-3.3-70b-versatile"]
+    );
+}
+
+#[tokio::test]
+async fn compatible_provider_refresh_drops_seeded_models_missing_from_live_catalog() {
+    let codex_home = tempdir().expect("temp dir");
+    let auth_manager = Arc::new(AuthManager::new(
+        codex_home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+    ));
+    let manager = ModelsManager::with_provider_for_tests(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        provider_for("https://api.groq.com/openai/v1".to_string()),
+    );
+
+    manager
+        .apply_remote_models(vec![remote_model(
+            "llama-3.3-70b-versatile",
+            "Llama 3.3 70B Versatile",
+            1,
+        )])
+        .await;
+
+    let models = manager.get_remote_models().await;
+
+    assert_eq!(
+        models
+            .iter()
+            .map(|model| model.slug.as_str())
+            .collect::<Vec<_>>(),
+        vec!["llama-3.3-70b-versatile"]
+    );
+}
+
+#[tokio::test]
+async fn compatible_provider_preserves_capability_metadata_from_richer_model_endpoints() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({
+                    "data": [
+                        {
+                            "id": "openai/gpt-5.4-mini",
+                            "name": "OpenAI: GPT-5.4 Mini",
+                            "description": "Fast model for coding",
+                            "context_length": 400000,
+                            "supported_parameters": [
+                                "tools",
+                                "tool_choice",
+                                "reasoning_effort",
+                                "web_search_options"
+                            ],
+                            "architecture": {
+                                "input_modalities": ["text"]
+                            }
+                        }
+                    ]
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let codex_home = tempdir().expect("temp dir");
+    let auth_manager = Arc::new(AuthManager::new(
+        codex_home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+    ));
+    let manager = ModelsManager::with_provider_for_tests(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        provider_for(server.uri()),
+    );
+
+    manager
+        .refresh_available_models(RefreshStrategy::OnlineIfUncached)
+        .await
+        .expect("compatible provider refresh succeeds");
+
+    let remote = manager
+        .get_remote_models()
+        .await
+        .into_iter()
+        .find(|candidate| candidate.slug == "openai/gpt-5.4-mini")
+        .expect("compatible model should be cached");
+
+    assert_eq!(remote.display_name, "OpenAI: GPT-5.4 Mini".to_string());
+    assert!(
+        remote
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("Tool calling"))
+    );
+    assert_eq!(
+        remote.default_reasoning_level,
+        Some(ReasoningEffort::Medium)
+    );
+    assert_eq!(
+        remote
+            .supported_reasoning_levels
+            .iter()
+            .map(|preset| preset.effort)
+            .collect::<Vec<_>>(),
+        vec![
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+        ]
+    );
+    assert_eq!(remote.input_modalities, vec![InputModality::Text]);
+    assert!(remote.supports_search_tool);
+}
+
+#[tokio::test]
+async fn compatible_provider_hides_models_that_explicitly_lack_tool_support() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({
+                    "data": [
+                        {
+                            "id": "groq/compound-mini",
+                            "supported_parameters": ["max_tokens", "temperature"]
+                        }
+                    ]
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let codex_home = tempdir().expect("temp dir");
+    let auth_manager = Arc::new(AuthManager::new(
+        codex_home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+    ));
+    let manager = ModelsManager::with_provider_for_tests(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        provider_for(server.uri()),
+    );
+
+    let models = manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].model, "groq/compound-mini".to_string());
+    assert!(
+        !models[0].show_in_picker,
+        "tool-less compatible models should stay out of the normal picker"
+    );
+}
+
+#[tokio::test]
+async fn provider_catalog_fetch_allows_public_models_without_provider_env_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({
+                    "data": [
+                        {
+                            "id": "anthropic/claude-sonnet-4.6",
+                            "name": "Anthropic: Claude Sonnet 4.6",
+                            "description": "High-end Anthropic reasoning model",
+                            "supported_parameters": [
+                                "tools",
+                                "tool_choice",
+                                "reasoning",
+                                "temperature"
+                            ],
+                            "architecture": {
+                                "input_modalities": ["text", "image"]
+                            }
+                        }
+                    ]
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let codex_home = tempdir().expect("temp dir");
+    let auth_manager = Arc::new(AuthManager::new(
+        codex_home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+    ));
+    let mut provider = provider_for(server.uri());
+    provider.name = "OpenRouter".to_string();
+    provider.env_key = Some("OPENROUTER_API_KEY".to_string());
+    provider.env_key_instructions = Some("Set OPENROUTER_API_KEY".to_string());
+    let manager = ModelsManager::with_provider_for_tests(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        provider,
+    );
+
+    let models = manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].model, "anthropic/claude-sonnet-4.6".to_string());
+    assert!(models[0].show_in_picker);
+}
+
+#[tokio::test]
+async fn moonshot_sparse_live_models_are_visible_without_manual_catalog_entries() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({
+                    "data": [
+                        {
+                            "id": "kimi-k2.6"
+                        }
+                    ]
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let codex_home = tempdir().expect("temp dir");
+    let auth_manager = Arc::new(AuthManager::new(
+        codex_home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+    ));
+    let mut provider = provider_for(server.uri());
+    provider.name = "Moonshot AI".to_string();
+    provider.env_key = Some("MOONSHOT_API_KEY".to_string());
+    let manager = ModelsManager::with_provider_for_tests(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        provider,
+    );
+
+    let models = manager.list_models(RefreshStrategy::OnlineIfUncached).await;
+
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].model, "kimi-k2.6".to_string());
+    assert_eq!(models[0].display_name, "kimi-k2.6".to_string());
+    assert!(
+        models[0].show_in_picker,
+        "Moonshot sparse live source models should be picker-visible without hand-editing the bundled provider catalog"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires live network access"]
+async fn live_openrouter_provider_catalog_lists_picker_models_without_api_key() {
+    let codex_home = tempdir().expect("temp dir");
+    let auth_manager = Arc::new(AuthManager::new(
+        codex_home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+    ));
+    let mut provider = provider_for("https://openrouter.ai/api/v1".to_string());
+    provider.name = "OpenRouter".to_string();
+    provider.env_key = Some("OPENROUTER_API_KEY".to_string());
+    provider.env_key_instructions = Some("Set OPENROUTER_API_KEY".to_string());
+    let manager = ModelsManager::with_provider_for_tests(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        provider,
+    );
+
+    let models = manager.list_models(RefreshStrategy::Online).await;
+
+    assert!(
+        !models.is_empty(),
+        "live OpenRouter provider should expose at least one model without an API key"
+    );
+    assert!(
+        models
+            .iter()
+            .filter(|preset| preset.show_in_picker)
+            .any(|preset| {
+                preset.model.contains("anthropic") || preset.display_name.contains("Anthropic")
+            }),
+        "live OpenRouter picker should include Anthropic models from the public catalog"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires GROQ_API_KEY and live network access"]
+async fn live_groq_provider_catalog_avoids_bundled_codex_models() {
+    let Some(api_key) = std::env::var("GROQ_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        eprintln!("skipping live Groq manager test because GROQ_API_KEY is not set");
+        return;
+    };
+
+    let codex_home = tempdir().expect("temp dir");
+    let auth_manager = Arc::new(AuthManager::new(
+        codex_home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+    ));
+    let mut provider = provider_for("https://api.groq.com/openai/v1".to_string());
+    provider.experimental_bearer_token = Some(api_key);
+    let manager = ModelsManager::with_provider_for_tests(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        provider,
+    );
+
+    let models = manager.list_models(RefreshStrategy::Online).await;
+
+    assert!(
+        !models.is_empty(),
+        "live Groq provider should expose at least one picker model"
+    );
+    assert!(
+        !models.iter().any(|preset| preset.model.contains("codex")),
+        "live Groq provider should not inherit bundled Codex models"
+    );
+    assert!(
+        !models
+            .iter()
+            .filter(|preset| preset.show_in_picker)
+            .any(|preset| {
+                preset.model.contains("compound")
+                    || preset.model.contains("whisper")
+                    || preset.model.contains("guard")
+            }),
+        "obviously non-interactive Groq models should not appear in the picker"
+    );
+    assert!(
+        !models
+            .iter()
+            .any(|preset| preset.model == "deepseek-r1-distill-llama-70b"),
+        "decommissioned Groq models must not survive from bundled fallback metadata"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires OPENAI_API_KEY and live network access"]
+async fn live_openai_provider_catalog_hides_sora_family_models() {
+    let Some(api_key) = std::env::var("OPENAI_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        eprintln!("skipping live OpenAI manager test because OPENAI_API_KEY is not set");
+        return;
+    };
+
+    let codex_home = tempdir().expect("temp dir");
+    let auth_manager = Arc::new(AuthManager::new(
+        codex_home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+    ));
+    let mut provider = provider_for("https://api.openai.com/v1".to_string());
+    provider.experimental_bearer_token = Some(api_key);
+    let manager = ModelsManager::with_provider_for_tests(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        provider,
+    );
+
+    let models = manager.list_models(RefreshStrategy::Online).await;
+
+    assert!(
+        !models.is_empty(),
+        "live OpenAI provider should expose at least one picker model"
+    );
+    assert!(
+        !models
+            .iter()
+            .filter(|preset| preset.show_in_picker)
+            .any(|preset| preset.model.contains("sora")),
+        "video-generation models should not appear in the interactive picker"
+    );
+}
+
+#[tokio::test]
+async fn refresh_available_models_skips_network_without_required_openai_auth() {
     let server = MockServer::start().await;
     let dynamic_slug = "dynamic-model-only-for-test-noauth";
     let models_mock = mount_models_once(
@@ -707,7 +1353,10 @@ async fn refresh_available_models_skips_network_without_chatgpt_auth() {
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
     ));
-    let provider = provider_for(server.uri());
+    let provider = ModelProviderInfo {
+        requires_openai_auth: true,
+        ..provider_for(server.uri())
+    };
     let manager = ModelsManager::with_provider_for_tests(
         codex_home.path().to_path_buf(),
         auth_manager,

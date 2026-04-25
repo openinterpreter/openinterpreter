@@ -3,6 +3,7 @@ use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::with_border_with_inner_width;
 use crate::legacy_core::config::Config;
+use crate::product_branding::ProductBranding;
 use crate::version::CODEX_CLI_VERSION;
 use chrono::DateTime;
 use chrono::Local;
@@ -550,9 +551,10 @@ impl StatusHistoryCell {
 impl HistoryCell for StatusHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
+        let branding = ProductBranding::current();
         lines.push(Line::from(vec![
             Span::from(format!("{}>_ ", FieldFormatter::INDENT)).dim(),
-            Span::from("OpenAI Codex").bold(),
+            Span::from(branding.session_header_name()).bold(),
             Span::from(" ").dim(),
             Span::from(format!("(v{CODEX_CLI_VERSION})")).dim(),
         ]));
@@ -571,7 +573,14 @@ impl HistoryCell for StatusHistoryCell {
                 (None, None) => "ChatGPT".to_string(),
             },
             StatusAccountDisplay::ApiKey => {
-                "API key configured (run codex login to use ChatGPT)".to_string()
+                if branding.is_open_interpreter {
+                    "API key configured".to_string()
+                } else {
+                    format!(
+                        "API key configured (run {} login to use ChatGPT)",
+                        branding.command_name()
+                    )
+                }
             }
         });
 
@@ -621,22 +630,24 @@ impl HistoryCell for StatusHistoryCell {
         let formatter = FieldFormatter::from_labels(labels.iter().map(String::as_str));
         let value_width = formatter.value_width(available_inner_width);
 
-        let note_first_line = Line::from(vec![
-            Span::from("Visit ").cyan(),
-            "https://chatgpt.com/codex/settings/usage"
-                .cyan()
-                .underlined(),
-            Span::from(" for up-to-date").cyan(),
-        ]);
-        let note_second_line = Line::from(vec![
-            Span::from("information on rate limits and credits").cyan(),
-        ]);
-        let note_lines = adaptive_wrap_lines(
-            [note_first_line, note_second_line],
-            RtOptions::new(available_inner_width),
-        );
-        lines.extend(note_lines);
-        lines.push(Line::from(Vec::<Span<'static>>::new()));
+        if !branding.is_open_interpreter {
+            let note_first_line = Line::from(vec![
+                Span::from("Visit ").cyan(),
+                "https://chatgpt.com/codex/settings/usage"
+                    .cyan()
+                    .underlined(),
+                Span::from(" for up-to-date").cyan(),
+            ]);
+            let note_second_line = Line::from(vec![
+                Span::from("information on rate limits and credits").cyan(),
+            ]);
+            let note_lines = adaptive_wrap_lines(
+                [note_first_line, note_second_line],
+                RtOptions::new(available_inner_width),
+            );
+            lines.extend(note_lines);
+            lines.push(Line::from(Vec::<Span<'static>>::new()));
+        }
 
         let mut model_spans = vec![Span::from(self.model_name.clone())];
         if !self.model_details.is_empty() {

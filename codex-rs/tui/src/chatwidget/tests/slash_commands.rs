@@ -344,7 +344,7 @@ async fn assert_cancelled_queued_menu_drains_next_input(command: &str, expected_
 
 #[tokio::test]
 async fn queued_slash_menu_cancel_drains_next_input() {
-    assert_cancelled_queued_menu_drains_next_input("/model", "Select Model").await;
+    assert_cancelled_queued_menu_drains_next_input("/model", "Select Provider").await;
     assert_cancelled_queued_menu_drains_next_input("/permissions", "Update Model Permissions")
         .await;
 }

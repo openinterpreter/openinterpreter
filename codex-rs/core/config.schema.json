@@ -542,6 +542,10 @@
           },
           "type": "object"
         },
+        "harness": {
+          "description": "Optional harness family to emulate for this profile, such as `claude-code`.",
+          "type": "string"
+        },
         "include_apply_patch_tool": {
           "type": "boolean"
         },
@@ -1034,7 +1038,7 @@
           "description": "Command-backed bearer-token configuration for this provider."
         },
         "base_url": {
-          "description": "Base URL for the provider's OpenAI-compatible API.",
+          "description": "Base URL for the provider API.",
           "type": "string"
         },
         "env_http_headers": {
@@ -2162,6 +2166,20 @@
             "responses"
           ],
           "type": "string"
+        },
+        {
+          "description": "OpenAI-compatible Chat Completions exposed at `/v1/chat/completions`.",
+          "enum": [
+            "chat"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Anthropic Messages exposed at `/v1/messages`.",
+          "enum": [
+            "messages"
+          ],
+          "type": "string"
         }
       ]
     }
@@ -2548,6 +2566,10 @@
       ],
       "default": null,
       "description": "Settings for ghost snapshots (used for undo)."
+    },
+    "harness": {
+      "description": "Optional default harness family to emulate, such as `claude-code`.",
+      "type": "string"
     },
     "hide_agent_reasoning": {
       "description": "When set to `true`, `AgentReasoning` events will be hidden from the UI/output. Defaults to `false`.",

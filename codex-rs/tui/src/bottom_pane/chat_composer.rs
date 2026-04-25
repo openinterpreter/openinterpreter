@@ -204,6 +204,7 @@ use crate::bottom_pane::MentionBinding;
 use crate::bottom_pane::textarea::TextArea;
 use crate::bottom_pane::textarea::TextAreaState;
 use crate::clipboard_paste::normalize_pasted_path;
+#[cfg(feature = "rich-media")]
 use crate::clipboard_paste::pasted_image_format;
 use crate::history_cell;
 use crate::legacy_core::plugins::PluginCapabilitySummary;
@@ -788,19 +789,31 @@ impl ChatComposer {
             return false;
         };
 
-        // normalize_pasted_path already handles Windows → WSL path conversion,
-        // so we can directly try to read the image dimensions.
-        match image::image_dimensions(&path_buf) {
-            Ok((width, height)) => {
+        #[cfg(feature = "rich-media")]
+        {
+            match image::image_dimensions(&path_buf) {
+                Ok((width, height)) => {
+                    tracing::info!("OK: {pasted}");
+                    tracing::debug!("image dimensions={}x{}", width, height);
+                    let format = pasted_image_format(&path_buf);
+                    tracing::debug!("attached image format={}", format.label());
+                    self.attach_image(path_buf);
+                    true
+                }
+                Err(err) => {
+                    tracing::trace!("ERR: {err}");
+                    false
+                }
+            }
+        }
+        #[cfg(not(feature = "rich-media"))]
+        {
+            let path_string = path_buf.to_string_lossy().to_string();
+            if path_buf.is_file() && Self::is_image_path(path_string.as_str()) {
                 tracing::info!("OK: {pasted}");
-                tracing::debug!("image dimensions={}x{}", width, height);
-                let format = pasted_image_format(&path_buf);
-                tracing::debug!("attached image format={}", format.label());
                 self.attach_image(path_buf);
                 true
-            }
-            Err(err) => {
-                tracing::trace!("ERR: {err}");
+            } else {
                 false
             }
         }
@@ -1657,45 +1670,51 @@ impl ChatComposer {
                 // If selected path looks like an image (png/jpeg), attach as image instead of inserting text.
                 let is_image = Self::is_image_path(&sel_path);
                 if is_image {
-                    // Determine dimensions; if that fails fall back to normal path insertion.
                     let path_buf = PathBuf::from(&sel_path);
-                    match image::image_dimensions(&path_buf) {
+                    #[cfg(feature = "rich-media")]
+                    let can_attach_image = match image::image_dimensions(&path_buf) {
                         Ok((width, height)) => {
                             tracing::debug!("selected image dimensions={}x{}", width, height);
-                            // Remove the current @token (mirror logic from insert_selected_path without inserting text)
-                            // using the flat text and byte-offset cursor API.
-                            let cursor_offset = self.textarea.cursor();
-                            let text = self.textarea.text();
-                            // Clamp to a valid char boundary to avoid panics when slicing.
-                            let safe_cursor = Self::clamp_to_char_boundary(text, cursor_offset);
-                            let before_cursor = &text[..safe_cursor];
-                            let after_cursor = &text[safe_cursor..];
-
-                            // Determine token boundaries in the full text.
-                            let start_idx = before_cursor
-                                .char_indices()
-                                .rfind(|(_, c)| c.is_whitespace())
-                                .map(|(idx, c)| idx + c.len_utf8())
-                                .unwrap_or(0);
-                            let end_rel_idx = after_cursor
-                                .char_indices()
-                                .find(|(_, c)| c.is_whitespace())
-                                .map(|(idx, _)| idx)
-                                .unwrap_or(after_cursor.len());
-                            let end_idx = safe_cursor + end_rel_idx;
-
-                            self.textarea.replace_range(start_idx..end_idx, "");
-                            self.textarea.set_cursor(start_idx);
-
-                            self.attach_image(path_buf);
-                            // Add a trailing space to keep typing fluid.
-                            self.textarea.insert_str(" ");
+                            true
                         }
                         Err(err) => {
                             tracing::trace!("image dimensions lookup failed: {err}");
-                            // Fallback to plain path insertion if metadata read fails.
-                            self.insert_selected_path(&sel_path);
+                            false
                         }
+                    };
+                    #[cfg(not(feature = "rich-media"))]
+                    let can_attach_image = true;
+
+                    if can_attach_image {
+                        // Remove the current @token (mirror logic from insert_selected_path without inserting text)
+                        // using the flat text and byte-offset cursor API.
+                        let cursor_offset = self.textarea.cursor();
+                        let text = self.textarea.text();
+                        // Clamp to a valid char boundary to avoid panics when slicing.
+                        let safe_cursor = Self::clamp_to_char_boundary(text, cursor_offset);
+                        let before_cursor = &text[..safe_cursor];
+                        let after_cursor = &text[safe_cursor..];
+
+                        // Determine token boundaries in the full text.
+                        let start_idx = before_cursor
+                            .char_indices()
+                            .rfind(|(_, c)| c.is_whitespace())
+                            .map(|(idx, c)| idx + c.len_utf8())
+                            .unwrap_or(0);
+                        let end_rel_idx = after_cursor
+                            .char_indices()
+                            .find(|(_, c)| c.is_whitespace())
+                            .map(|(idx, _)| idx)
+                            .unwrap_or(after_cursor.len());
+                        let end_idx = safe_cursor + end_rel_idx;
+
+                        self.textarea.replace_range(start_idx..end_idx, "");
+                        self.textarea.set_cursor(start_idx);
+
+                        self.attach_image(path_buf);
+                        self.textarea.insert_str(" ");
+                    } else {
+                        self.insert_selected_path(&sel_path);
                     }
                 } else {
                     // Non-image: inserting file path.
@@ -8148,6 +8167,25 @@ mod tests {
 
         let imgs = composer.take_recent_submission_images();
         assert_eq!(imgs, vec![tmp_path]);
+    }
+
+    #[test]
+    fn short_non_path_paste_stays_plain_text() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ false,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ false,
+        );
+
+        let needs_redraw = composer.handle_paste("hi".to_string());
+        assert!(needs_redraw);
+        assert_eq!(composer.textarea.text(), "hi");
+        assert!(composer.attached_images.is_empty());
+        assert!(composer.take_recent_submission_images().is_empty());
     }
 
     #[test]

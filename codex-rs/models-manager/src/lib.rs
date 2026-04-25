@@ -4,6 +4,7 @@ pub(crate) mod config;
 pub mod manager;
 pub mod model_info;
 pub mod model_presets;
+mod provider_catalog_models;
 
 pub use codex_app_server_protocol::AuthMode;
 pub use codex_login::AuthManager;

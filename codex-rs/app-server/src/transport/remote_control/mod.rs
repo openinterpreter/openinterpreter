@@ -4,6 +4,7 @@ mod protocol;
 mod websocket;
 
 use crate::transport::remote_control::websocket::RemoteControlWebsocket;
+use crate::transport::remote_control::websocket::load_remote_control_auth;
 
 pub use self::protocol::ClientId;
 use self::protocol::ServerEvent;
@@ -82,5 +83,41 @@ pub(crate) async fn start_remote_control(
     ))
 }
 
+#[cfg(test)]
+pub(crate) async fn persist_remote_control_enrollment_for_tests(
+    state_db: Option<&StateRuntime>,
+    remote_control_url: &str,
+    account_id: &str,
+    app_server_client_name: Option<&str>,
+    server_id: &str,
+    environment_id: &str,
+    server_name: &str,
+) -> io::Result<()> {
+    let remote_control_target = normalize_remote_control_url(remote_control_url)?;
+    let enrollment = enroll::RemoteControlEnrollment {
+        account_id: account_id.to_string(),
+        environment_id: environment_id.to_string(),
+        server_id: server_id.to_string(),
+        server_name: server_name.to_string(),
+    };
+    enroll::update_persisted_remote_control_enrollment(
+        state_db,
+        &remote_control_target,
+        account_id,
+        app_server_client_name,
+        Some(&enrollment),
+    )
+    .await
+}
+
+pub(crate) async fn validate_remote_control_auth(
+    auth_manager: &Arc<AuthManager>,
+) -> io::Result<()> {
+    match load_remote_control_auth(auth_manager).await {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(()),
+        Err(err) => Err(err),
+    }
+}
 #[cfg(test)]
 mod tests;

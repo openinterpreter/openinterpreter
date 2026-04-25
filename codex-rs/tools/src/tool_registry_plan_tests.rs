@@ -22,6 +22,7 @@ use crate::mcp_call_tool_result_output_schema;
 use codex_app_server_protocol::AppInfo;
 use codex_features::Feature;
 use codex_features::Features;
+use codex_protocol::ThreadId;
 use codex_protocol::config_types::WebSearchConfig;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -184,6 +185,295 @@ fn test_build_specs_collab_tools_enabled() {
     let (properties, _) = expect_object_schema(parameters);
     assert!(properties.contains_key("fork_context"));
     assert!(!properties.contains_key("fork_turns"));
+}
+
+#[test]
+fn test_claude_code_harness_uses_native_claude_tool_surface() {
+    let model_info = model_info();
+    let features = Features::with_defaults();
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    })
+    .with_harness(Some("claude-code"));
+    let (tools, handlers) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*deferred_mcp_tools*/ None,
+        &[],
+    );
+
+    let actual_tool_names = tools
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_tool_names,
+        vec![
+            "Agent".to_string(),
+            "AskUserQuestion".to_string(),
+            "Bash".to_string(),
+            "Edit".to_string(),
+            "Glob".to_string(),
+            "Grep".to_string(),
+            "LSP".to_string(),
+            "Read".to_string(),
+            "TodoWrite".to_string(),
+            "WebFetch".to_string(),
+            "WebSearch".to_string(),
+            "Write".to_string(),
+        ]
+    );
+    assert_lacks_tool_name(&tools, "shell");
+    assert_lacks_tool_name(&tools, "exec_command");
+    assert_lacks_tool_name(&tools, "write_stdin");
+    assert_lacks_tool_name(&tools, "apply_patch");
+    assert_lacks_tool_name(&tools, "view_image");
+
+    let handler_kinds = handlers
+        .iter()
+        .map(|handler| (handler.name.to_string(), handler.kind))
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(
+        handler_kinds.get("CronCreate"),
+        Some(&ToolHandlerKind::ClaudeCronCreate)
+    );
+    assert_eq!(
+        handler_kinds.get("CronDelete"),
+        Some(&ToolHandlerKind::ClaudeCronDelete)
+    );
+    assert_eq!(
+        handler_kinds.get("CronList"),
+        Some(&ToolHandlerKind::ClaudeCronList)
+    );
+    assert_eq!(
+        handler_kinds.get("ScheduleWakeup"),
+        Some(&ToolHandlerKind::ClaudeScheduleWakeup)
+    );
+}
+
+#[test]
+fn test_claude_code_subagents_hide_agent_tool() {
+    let model_info = model_info();
+    let features = Features::with_defaults();
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        }),
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    })
+    .with_harness(Some("claude-code"));
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*deferred_mcp_tools*/ None,
+        &[],
+    );
+
+    let actual_tool_names = tools
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_tool_names,
+        vec![
+            "AskUserQuestion".to_string(),
+            "Bash".to_string(),
+            "Edit".to_string(),
+            "Glob".to_string(),
+            "Grep".to_string(),
+            "LSP".to_string(),
+            "Read".to_string(),
+            "TodoWrite".to_string(),
+            "WebFetch".to_string(),
+            "WebSearch".to_string(),
+            "Write".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn test_claude_code_harness_can_filter_tool_surface() {
+    let model_info = model_info();
+    let features = Features::with_defaults();
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    })
+    .with_harness(Some("claude-code"))
+    .with_tool_name_filters(
+        Some(vec![
+            "Agent".to_string(),
+            "Bash".to_string(),
+            "LSP".to_string(),
+            "Read".to_string(),
+            "TodoWrite".to_string(),
+            "Write".to_string(),
+        ]),
+        /*disallowed_tool_names*/ None,
+    );
+    assert_eq!(
+        tools_config
+            .allowed_tool_names
+            .as_ref()
+            .map(|names| names.iter().cloned().collect::<Vec<_>>()),
+        Some(vec![
+            "Agent".to_string(),
+            "Bash".to_string(),
+            "LSP".to_string(),
+            "Read".to_string(),
+            "TodoWrite".to_string(),
+            "Write".to_string(),
+        ])
+    );
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*deferred_mcp_tools*/ None,
+        &[],
+    );
+
+    let actual_tool_names = tools
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_tool_names,
+        vec![
+            "Agent".to_string(),
+            "Bash".to_string(),
+            "LSP".to_string(),
+            "Read".to_string(),
+            "TodoWrite".to_string(),
+            "Write".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn test_kimi_cli_harness_uses_core_kimi_tool_surface() {
+    let model_info = model_info();
+    let features = Features::with_defaults();
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    })
+    .with_harness(Some("kimi-cli"));
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*deferred_mcp_tools*/ None,
+        &[],
+    );
+
+    let actual_tool_names = tools
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_tool_names,
+        vec![
+            "Agent".to_string(),
+            "AskUserQuestion".to_string(),
+            "SetTodoList".to_string(),
+            "Shell".to_string(),
+            "TaskList".to_string(),
+            "TaskOutput".to_string(),
+            "TaskStop".to_string(),
+            "ReadFile".to_string(),
+            "ReadMediaFile".to_string(),
+            "Glob".to_string(),
+            "Grep".to_string(),
+            "WriteFile".to_string(),
+            "StrReplaceFile".to_string(),
+            "SearchWeb".to_string(),
+            "FetchURL".to_string(),
+            "ExitPlanMode".to_string(),
+            "EnterPlanMode".to_string(),
+        ]
+    );
+    assert_lacks_tool_name(&tools, "spawn_agent");
+    assert_lacks_tool_name(&tools, "apply_patch");
+    assert_lacks_tool_name(&tools, "view_image");
+}
+
+#[test]
+fn test_kimi_cli_harness_can_filter_tool_surface() {
+    let model_info = model_info();
+    let features = Features::with_defaults();
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    })
+    .with_harness(Some("kimi-cli"))
+    .with_tool_name_filters(
+        Some(vec![
+            "Shell".to_string(),
+            "TaskList".to_string(),
+            "TaskOutput".to_string(),
+            "TaskStop".to_string(),
+        ]),
+        /*disallowed_tool_names*/ None,
+    );
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*deferred_mcp_tools*/ None,
+        &[],
+    );
+
+    let actual_tool_names = tools
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_tool_names,
+        vec![
+            "Shell".to_string(),
+            "TaskList".to_string(),
+            "TaskOutput".to_string(),
+            "TaskStop".to_string(),
+        ]
+    );
 }
 
 #[test]

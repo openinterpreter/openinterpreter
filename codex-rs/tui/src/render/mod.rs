@@ -1,8 +1,12 @@
 use ratatui::layout::Rect;
 
-pub(crate) mod highlight;
-pub(crate) mod line_utils;
-pub(crate) mod renderable;
+#[cfg(feature = "syntax-highlighting")]
+pub mod highlight;
+#[cfg(not(feature = "syntax-highlighting"))]
+#[path = "highlight_plain.rs"]
+pub mod highlight;
+pub mod line_utils;
+pub mod renderable;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Insets {

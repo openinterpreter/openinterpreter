@@ -1,24 +1,38 @@
+#[cfg(feature = "logging")]
 use std::fs::File;
+#[cfg(feature = "logging")]
 use std::fs::OpenOptions;
+#[cfg(feature = "logging")]
 use std::io::Write;
+#[cfg(feature = "logging")]
 use std::path::PathBuf;
+#[cfg(feature = "logging")]
 use std::sync::LazyLock;
+#[cfg(feature = "logging")]
 use std::sync::Mutex;
+#[cfg(feature = "logging")]
 use std::sync::OnceLock;
 
+#[cfg(feature = "logging")]
 use crate::app_command::AppCommand;
+#[cfg(feature = "logging")]
+use crate::app_event::AppEvent;
+#[cfg(feature = "logging")]
 use crate::legacy_core::config::Config;
+#[cfg(feature = "logging")]
 use serde::Serialize;
+#[cfg(feature = "logging")]
 use serde_json::json;
 
-use crate::app_event::AppEvent;
-
+#[cfg(feature = "logging")]
 static LOGGER: LazyLock<SessionLogger> = LazyLock::new(SessionLogger::new);
 
+#[cfg(feature = "logging")]
 struct SessionLogger {
     file: OnceLock<Mutex<File>>,
 }
 
+#[cfg(feature = "logging")]
 impl SessionLogger {
     fn new() -> Self {
         Self {
@@ -72,11 +86,16 @@ impl SessionLogger {
     }
 }
 
+#[cfg(feature = "logging")]
 fn now_ts() -> String {
     // RFC3339 for readability; consumers can parse as needed.
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+#[cfg(not(feature = "logging"))]
+pub(crate) fn maybe_init<T>(_config: &T) {}
+
+#[cfg(feature = "logging")]
 pub(crate) fn maybe_init(config: &Config) {
     let enabled = std::env::var("CODEX_TUI_RECORD_SESSION")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
@@ -118,6 +137,10 @@ pub(crate) fn maybe_init(config: &Config) {
     LOGGER.write_json_line(header);
 }
 
+#[cfg(not(feature = "logging"))]
+pub(crate) fn log_inbound_app_event<T>(_event: &T) {}
+
+#[cfg(feature = "logging")]
 pub(crate) fn log_inbound_app_event(event: &AppEvent) {
     // Log only if enabled
     if !LOGGER.is_enabled() {
@@ -182,6 +205,10 @@ pub(crate) fn log_inbound_app_event(event: &AppEvent) {
     }
 }
 
+#[cfg(not(feature = "logging"))]
+pub(crate) fn log_outbound_op<T>(_op: &T) {}
+
+#[cfg(feature = "logging")]
 pub(crate) fn log_outbound_op(op: &AppCommand) {
     if !LOGGER.is_enabled() {
         return;
@@ -189,6 +216,10 @@ pub(crate) fn log_outbound_op(op: &AppCommand) {
     write_record("from_tui", "op", op);
 }
 
+#[cfg(not(feature = "logging"))]
+pub(crate) fn log_session_end() {}
+
+#[cfg(feature = "logging")]
 pub(crate) fn log_session_end() {
     if !LOGGER.is_enabled() {
         return;
@@ -201,6 +232,7 @@ pub(crate) fn log_session_end() {
     LOGGER.write_json_line(value);
 }
 
+#[cfg(feature = "logging")]
 fn write_record<T>(dir: &str, kind: &str, obj: &T)
 where
     T: Serialize,

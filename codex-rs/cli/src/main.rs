@@ -27,8 +27,10 @@ use codex_state::state_db_path;
 use codex_tui::AppExitInfo;
 use codex_tui::Cli as TuiCli;
 use codex_tui::ExitReason;
-use codex_tui::UpdateAction;
+use codex_tui::record_startup_trace_event;
+use codex_tui::update_action::UpdateAction;
 use codex_utils_cli::CliConfigOverrides;
+use codex_utils_cli::resume_command;
 use owo_colors::OwoColorize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -488,9 +490,12 @@ fn format_exit_messages(exit_info: AppExitInfo, color_enabled: bool) -> Vec<Stri
         ));
     }
 
-    if let Some(resume_cmd) =
-        codex_core::util::resume_command(thread_name.as_deref(), conversation_id)
-    {
+    let mut lines = vec![format!(
+        "{}",
+        codex_protocol::protocol::FinalOutput::from(token_usage)
+    )];
+
+    if let Some(resume_cmd) = resume_command(thread_name.as_deref(), conversation_id) {
         let command = if color_enabled {
             resume_cmd.cyan().to_string()
         } else {
@@ -661,6 +666,7 @@ fn stage_str(stage: Stage) -> &'static str {
 }
 
 fn main() -> anyhow::Result<()> {
+    record_startup_trace_event("codex.main.enter");
     arg0_dispatch_or_else(|arg0_paths: Arg0DispatchPaths| async move {
         cli_main(arg0_paths).await?;
         Ok(())
@@ -668,6 +674,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
+    record_startup_trace_event("codex.cli_main.enter");
     let MultitoolCli {
         config_overrides: mut root_config_overrides,
         feature_toggles,
@@ -675,6 +682,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
         mut interactive,
         subcommand,
     } = MultitoolCli::parse();
+    record_startup_trace_event("codex.cli.parsed");
 
     // Fold --enable/--disable into config overrides so they flow to all subcommands.
     let toggle_overrides = feature_toggles.to_overrides()?;
@@ -779,9 +787,12 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                         arg0_paths.clone(),
                         root_config_overrides,
                         codex_core::config_loader::LoaderOverrides::default(),
-                        analytics_default_enabled,
-                        transport,
-                        codex_protocol::protocol::SessionSource::VSCode,
+                        codex_app_server::RunMainOptions {
+                            default_analytics_enabled: analytics_default_enabled,
+                            transport,
+                            session_source: codex_protocol::protocol::SessionSource::VSCode,
+                            ..codex_app_server::RunMainOptions::default()
+                        },
                         auth,
                     )
                     .await?;

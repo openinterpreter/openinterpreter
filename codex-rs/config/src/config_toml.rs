@@ -74,6 +74,9 @@ pub struct ConfigToml {
     /// Provider to use from the model_providers map.
     pub model_provider: Option<String>,
 
+    /// Optional default harness family to emulate, such as `claude-code`.
+    pub harness: Option<String>,
+
     /// Size of the context window for the model, in tokens.
     pub model_context_window: Option<i64>,
 
@@ -410,6 +413,7 @@ impl From<ConfigToml> for UserSavedConfig {
             forced_chatgpt_workspace_id: config_toml.forced_chatgpt_workspace_id,
             forced_login_method: config_toml.forced_login_method,
             model: config_toml.model,
+            harness: config_toml.harness,
             model_reasoning_effort: config_toml.model_reasoning_effort,
             model_reasoning_summary: config_toml.model_reasoning_summary,
             model_verbosity: config_toml.model_verbosity,

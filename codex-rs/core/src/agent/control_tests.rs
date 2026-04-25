@@ -2,6 +2,7 @@ use super::*;
 use crate::CodexThread;
 use crate::ThreadManager;
 use crate::agent::agent_status_from_event;
+use crate::agent::claude_agent_external_id;
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
 use crate::config::ConfigBuilder;
@@ -1454,6 +1455,40 @@ async fn spawn_thread_subagent_gets_random_nickname_in_session_source() {
     assert_eq!(depth, 1);
     assert!(agent_nickname.is_some());
     assert_eq!(agent_role, Some("explorer".to_string()));
+}
+
+#[tokio::test]
+async fn resolve_agent_reference_accepts_claude_external_id() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+
+    let child_thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("hello child"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("explorer".to_string()),
+            })),
+        )
+        .await
+        .expect("child spawn should succeed");
+
+    let resolved = harness
+        .control
+        .resolve_agent_reference(
+            parent_thread_id,
+            &SessionSource::Cli,
+            &claude_agent_external_id(child_thread_id),
+        )
+        .await
+        .expect("claude external id should resolve");
+
+    assert_eq!(resolved, child_thread_id);
 }
 
 #[tokio::test]

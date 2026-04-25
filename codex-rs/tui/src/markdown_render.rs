@@ -7,6 +7,8 @@
 
 use crate::render::highlight::highlight_code_to_lines;
 use crate::render::line_utils::line_to_static;
+use crate::style::app_accent_style;
+use crate::style::app_accent_underlined_style;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_line;
 use codex_utils_string::normalize_markdown_hash_location_suffix;
@@ -46,25 +48,33 @@ struct MarkdownStyles {
     blockquote: Style,
 }
 
+fn canonical_markdown_accent_style() -> Style {
+    app_accent_style()
+}
+
 impl Default for MarkdownStyles {
     fn default() -> Self {
-        use ratatui::style::Stylize;
+        let accent = canonical_markdown_accent_style();
 
         Self {
-            h1: Style::new().bold().underlined(),
-            h2: Style::new().bold(),
-            h3: Style::new().bold().italic(),
-            h4: Style::new().italic(),
-            h5: Style::new().italic(),
-            h6: Style::new().italic(),
-            code: Style::new().cyan(),
-            emphasis: Style::new().italic(),
-            strong: Style::new().bold(),
-            strikethrough: Style::new().crossed_out(),
-            ordered_list_marker: Style::new().light_blue(),
-            unordered_list_marker: Style::new(),
-            link: Style::new().cyan().underlined(),
-            blockquote: Style::new().green(),
+            h1: Style::new()
+                .add_modifier(ratatui::style::Modifier::BOLD)
+                .add_modifier(ratatui::style::Modifier::UNDERLINED),
+            h2: Style::new().add_modifier(ratatui::style::Modifier::BOLD),
+            h3: Style::new()
+                .add_modifier(ratatui::style::Modifier::BOLD)
+                .add_modifier(ratatui::style::Modifier::ITALIC),
+            h4: Style::new().add_modifier(ratatui::style::Modifier::ITALIC),
+            h5: Style::new().add_modifier(ratatui::style::Modifier::ITALIC),
+            h6: Style::new().add_modifier(ratatui::style::Modifier::ITALIC),
+            code: accent,
+            emphasis: Style::new().add_modifier(ratatui::style::Modifier::ITALIC),
+            strong: Style::new().add_modifier(ratatui::style::Modifier::BOLD),
+            strikethrough: Style::new().add_modifier(ratatui::style::Modifier::CROSSED_OUT),
+            ordered_list_marker: accent,
+            unordered_list_marker: accent,
+            link: app_accent_underlined_style(),
+            blockquote: accent,
         }
     }
 }

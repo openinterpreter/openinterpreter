@@ -45,6 +45,7 @@ use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
+use codex_tools::Harness;
 use core_test_support::PathBufExt;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::load_default_config_for_test;
@@ -889,6 +890,7 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
+        Harness::Native,
     );
     let mut client_session = client.new_session();
     let mut prompt = Prompt::default();
@@ -2187,6 +2189,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
+        Harness::Native,
     );
     let mut client_session = client.new_session();
 

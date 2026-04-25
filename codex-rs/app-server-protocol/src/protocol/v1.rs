@@ -201,6 +201,7 @@ pub struct UserSavedConfig {
     pub forced_chatgpt_workspace_id: Option<String>,
     pub forced_login_method: Option<ForcedLoginMethod>,
     pub model: Option<String>,
+    pub harness: Option<String>,
     pub model_reasoning_effort: Option<ReasoningEffort>,
     pub model_reasoning_summary: Option<ReasoningSummary>,
     pub model_verbosity: Option<Verbosity>,
@@ -214,6 +215,7 @@ pub struct UserSavedConfig {
 pub struct Profile {
     pub model: Option<String>,
     pub model_provider: Option<String>,
+    pub harness: Option<String>,
     pub approval_policy: Option<AskForApproval>,
     pub model_reasoning_effort: Option<ReasoningEffort>,
     pub model_reasoning_summary: Option<ReasoningSummary>,

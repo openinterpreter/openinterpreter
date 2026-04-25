@@ -1,4 +1,5 @@
 use super::*;
+use codex_app_server_protocol::AuthMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
 use pretty_assertions::assert_eq;
@@ -104,7 +105,7 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
 }
 
 #[test]
-fn test_deserialize_chat_wire_api_shows_helpful_error() {
+fn test_deserialize_chat_wire_api() {
     let provider_toml = r#"
 name = "OpenAI using Chat Completions"
 base_url = "https://api.openai.com/v1"
@@ -112,8 +113,21 @@ env_key = "OPENAI_API_KEY"
 wire_api = "chat"
         "#;
 
-    let err = toml::from_str::<ModelProviderInfo>(provider_toml).unwrap_err();
-    assert!(err.to_string().contains(CHAT_WIRE_API_REMOVED_ERROR));
+    let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+    assert_eq!(provider.wire_api, WireApi::Chat);
+}
+
+#[test]
+fn test_deserialize_messages_wire_api() {
+    let provider_toml = r#"
+name = "Anthropic"
+base_url = "https://api.anthropic.com"
+env_key = "ANTHROPIC_API_KEY"
+wire_api = "messages"
+        "#;
+
+    let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+    assert_eq!(provider.wire_api, WireApi::Messages);
 }
 
 #[test]
@@ -231,4 +245,36 @@ refresh_interval_ms = 0
     let auth = provider.auth.expect("auth config should deserialize");
     assert_eq!(auth.refresh_interval_ms, 0);
     assert_eq!(auth.refresh_interval(), None);
+}
+
+#[test]
+fn anthropic_provider_uses_x_api_key_auth_without_bearer_prefix() {
+    let provider = ModelProviderInfo {
+        name: "Anthropic".into(),
+        base_url: Some("https://api.anthropic.com".into()),
+        env_key: Some("ANTHROPIC_API_KEY".into()),
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        auth: None,
+        wire_api: WireApi::Messages,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: None,
+        stream_max_retries: None,
+        stream_idle_timeout_ms: None,
+        websocket_connect_timeout_ms: None,
+        requires_openai_auth: false,
+        supports_websockets: false,
+    };
+
+    assert_eq!(provider.auth_header_name(), "x-api-key");
+    assert_eq!(provider.auth_header_prefix(), None);
+    let api_provider = provider
+        .to_api_provider(Some(AuthMode::ApiKey))
+        .expect("Anthropic provider should convert to API provider");
+    assert_eq!(
+        api_provider.headers.get("anthropic-version"),
+        Some(&http::HeaderValue::from_static("2023-06-01"))
+    );
 }

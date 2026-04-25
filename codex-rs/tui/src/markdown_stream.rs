@@ -137,6 +137,10 @@ mod tests {
     use super::*;
     use ratatui::style::Color;
 
+    fn accent_color() -> Color {
+        crate::style::app_accent_color()
+    }
+
     #[tokio::test]
     async fn no_commit_until_newline() {
         let mut c = super::MarkdownStreamCollector::new(/*width*/ None, &super::test_cwd());
@@ -157,20 +161,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_stream_blockquote_simple_is_green() {
+    async fn e2e_stream_blockquote_simple_uses_app_accent() {
         let out = super::simulate_stream_markdown_for_tests(&["> Hello\n"], /*finalize*/ true);
         assert_eq!(out.len(), 1);
         let l = &out[0];
         assert_eq!(
             l.style.fg,
-            Some(Color::Green),
-            "expected blockquote line fg green, got {:?}",
+            Some(accent_color()),
+            "expected blockquote line fg accent, got {:?}",
             l.style.fg
         );
     }
 
     #[tokio::test]
-    async fn e2e_stream_blockquote_nested_is_green() {
+    async fn e2e_stream_blockquote_nested_uses_app_accent() {
         let out = super::simulate_stream_markdown_for_tests(
             &["> Level 1\n>> Level 2\n"],
             /*finalize*/ true,
@@ -191,23 +195,23 @@ mod tests {
             })
             .collect();
         assert_eq!(non_blank.len(), 2);
-        assert_eq!(non_blank[0].style.fg, Some(Color::Green));
-        assert_eq!(non_blank[1].style.fg, Some(Color::Green));
+        assert_eq!(non_blank[0].style.fg, Some(accent_color()));
+        assert_eq!(non_blank[1].style.fg, Some(accent_color()));
     }
 
     #[tokio::test]
-    async fn e2e_stream_blockquote_with_list_items_is_green() {
+    async fn e2e_stream_blockquote_with_list_items_uses_app_accent() {
         let out = super::simulate_stream_markdown_for_tests(
             &["> - item 1\n> - item 2\n"],
             /*finalize*/ true,
         );
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].style.fg, Some(Color::Green));
-        assert_eq!(out[1].style.fg, Some(Color::Green));
+        assert_eq!(out[0].style.fg, Some(accent_color()));
+        assert_eq!(out[1].style.fg, Some(accent_color()));
     }
 
     #[tokio::test]
-    async fn e2e_stream_nested_mixed_lists_ordered_marker_is_light_blue() {
+    async fn e2e_stream_nested_mixed_lists_ordered_marker_uses_app_accent() {
         let md = [
             "1. First\n",
             "   - Second level\n",
@@ -226,19 +230,19 @@ mod tests {
         });
         let idx = find_idx.expect("expected third-level ordered line");
         let line = &out[idx];
-        // Expect at least one span on this line to be styled light blue
-        let has_light_blue = line
+        // Expect at least one span on this line to be styled with the shared accent.
+        let has_accent = line
             .spans
             .iter()
-            .any(|s| s.style.fg == Some(ratatui::style::Color::LightBlue));
+            .any(|s| s.style.fg == Some(accent_color()));
         assert!(
-            has_light_blue,
-            "expected an ordered-list marker span with light blue fg on: {line:?}"
+            has_accent,
+            "expected an ordered-list marker span with accent fg on: {line:?}"
         );
     }
 
     #[tokio::test]
-    async fn e2e_stream_blockquote_wrap_preserves_green_style() {
+    async fn e2e_stream_blockquote_wrap_preserves_accent_style() {
         let long = "> This is a very long quoted line that should wrap across multiple columns to verify style preservation.";
         let out = super::simulate_stream_markdown_for_tests(&[long, "\n"], /*finalize*/ true);
         // Wrap to a narrow width to force multiple output lines.
@@ -266,8 +270,8 @@ mod tests {
         for (i, l) in non_blank.iter().enumerate() {
             assert_eq!(
                 l.spans[0].style.fg,
-                Some(Color::Green),
-                "wrapped line {} should preserve green style, got {:?}",
+                Some(accent_color()),
+                "wrapped line {} should preserve accent style, got {:?}",
                 i,
                 l.spans[0].style.fg
             );
@@ -461,7 +465,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_stream_deep_nested_third_level_marker_is_light_blue() {
+    async fn e2e_stream_deep_nested_third_level_marker_uses_app_accent() {
         let md = "1. First\n   - Second level\n     1. Third level (ordered)\n        - Fourth level (bullet)\n          - Fifth level to test indent consistency\n";
         let streamed = super::simulate_stream_markdown_for_tests(&[md], /*finalize*/ true);
         let streamed_strs = lines_to_plain_strings(&streamed);
@@ -481,7 +485,7 @@ mod tests {
         });
 
         // The marker (including indent and "1.") is expected to be in the first span
-        // and colored LightBlue; following content should be default color.
+        // and colored with the shared accent; following content should be default color.
         assert!(
             !line.spans.is_empty(),
             "expected non-empty spans for the third-level line"
@@ -489,8 +493,8 @@ mod tests {
         let marker_span = &line.spans[0];
         assert_eq!(
             marker_span.style.fg,
-            Some(Color::LightBlue),
-            "expected LightBlue 3rd-level ordered marker, got {:?}",
+            Some(accent_color()),
+            "expected accent 3rd-level ordered marker, got {:?}",
             marker_span.style.fg
         );
         // Find the first non-empty non-space content span and verify it is default color.

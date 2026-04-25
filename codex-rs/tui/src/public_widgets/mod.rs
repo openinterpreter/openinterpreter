@@ -1,1 +1,2 @@
-pub(crate) mod composer_input;
+pub mod composer_input;
+pub mod session_header;

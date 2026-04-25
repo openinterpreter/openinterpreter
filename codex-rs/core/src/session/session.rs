@@ -1,4 +1,5 @@
 use super::*;
+use codex_tools::Harness;
 
 /// Context for an initialized model agent
 ///
@@ -673,6 +674,7 @@ impl Session {
                 config.features.enabled(Feature::EnableRequestCompression),
                 config.features.enabled(Feature::RuntimeMetrics),
                 Self::build_model_client_beta_features_header(config.as_ref()),
+                Harness::from_config_name(config.harness.as_deref()),
             ),
             code_mode_service: crate::tools::code_mode::CodeModeService::new(
                 config.js_repl_node_path.clone(),

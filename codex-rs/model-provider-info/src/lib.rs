@@ -5,9 +5,18 @@
 //!   2. User-defined entries inside `~/.codex/config.toml` under the `model_providers`
 //!      key. These override or extend the defaults at runtime.
 
+mod bundled_provider_catalog;
+
+pub use bundled_provider_catalog::BundledProviderCatalogEntry;
+pub use bundled_provider_catalog::BundledProviderModelEntry;
+pub use bundled_provider_catalog::bundled_provider_catalog;
+pub use bundled_provider_catalog::bundled_provider_catalog_entry;
+pub use bundled_provider_catalog::bundled_provider_catalog_entry_for_base_url;
+
 use codex_api::Provider as ApiProvider;
 use codex_api::RetryConfig as ApiRetryConfig;
 use codex_api::is_azure_responses_provider;
+use codex_api::provider::is_anthropic_provider;
 use codex_app_server_protocol::AuthMode;
 use codex_protocol::config_types::ModelProviderAuthInfo;
 use codex_protocol::error::CodexErr;
@@ -27,6 +36,7 @@ const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
 const DEFAULT_STREAM_MAX_RETRIES: u64 = 5;
 const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
 pub const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
+const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 /// Hard cap for user-configured `stream_max_retries`.
 const MAX_STREAM_MAX_RETRIES: u64 = 100;
 /// Hard cap for user-configured `request_max_retries`.
@@ -34,7 +44,6 @@ const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
 pub const OPENAI_PROVIDER_ID: &str = "openai";
-const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer supported.\nHow to fix: set `wire_api = \"responses\"` in your provider config.\nMore info: https://github.com/openai/codex/discussions/7782";
 pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
 
@@ -45,12 +54,18 @@ pub enum WireApi {
     /// The Responses API exposed by OpenAI at `/v1/responses`.
     #[default]
     Responses,
+    /// OpenAI-compatible Chat Completions exposed at `/v1/chat/completions`.
+    Chat,
+    /// Anthropic Messages exposed at `/v1/messages`.
+    Messages,
 }
 
 impl fmt::Display for WireApi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::Responses => "responses",
+            Self::Chat => "chat",
+            Self::Messages => "messages",
         };
         f.write_str(value)
     }
@@ -64,8 +79,12 @@ impl<'de> Deserialize<'de> for WireApi {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
             "responses" => Ok(Self::Responses),
-            "chat" => Err(serde::de::Error::custom(CHAT_WIRE_API_REMOVED_ERROR)),
-            _ => Err(serde::de::Error::unknown_variant(&value, &["responses"])),
+            "chat" => Ok(Self::Chat),
+            "messages" => Ok(Self::Messages),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &["responses", "chat", "messages"],
+            )),
         }
     }
 }
@@ -76,7 +95,7 @@ impl<'de> Deserialize<'de> for WireApi {
 pub struct ModelProviderInfo {
     /// Friendly display name.
     pub name: String,
-    /// Base URL for the provider's OpenAI-compatible API.
+    /// Base URL for the provider API.
     pub base_url: Option<String>,
     /// Environment variable that stores the user's API key for this provider.
     pub env_key: Option<String>,
@@ -179,7 +198,38 @@ impl ModelProviderInfo {
             }
         }
 
+        if self.uses_anthropic_api_key_auth() {
+            headers.insert(
+                HeaderName::from_static("anthropic-version"),
+                HeaderValue::from_static(ANTHROPIC_API_VERSION),
+            );
+        }
+
         Ok(headers)
+    }
+
+    pub fn auth_header_name(&self) -> &'static str {
+        if self.uses_anthropic_api_key_auth() {
+            "x-api-key"
+        } else {
+            "authorization"
+        }
+    }
+
+    pub fn auth_header_prefix(&self) -> Option<&'static str> {
+        if self.uses_anthropic_api_key_auth() {
+            None
+        } else {
+            Some("Bearer")
+        }
+    }
+
+    fn uses_anthropic_api_key_auth(&self) -> bool {
+        self.is_anthropic_provider()
+    }
+
+    pub fn is_anthropic_provider(&self) -> bool {
+        is_anthropic_provider(self.name.as_str(), self.base_url.as_deref())
     }
 
     pub fn to_api_provider(&self, auth_mode: Option<AuthMode>) -> CodexResult<ApiProvider> {

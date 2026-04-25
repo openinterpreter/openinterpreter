@@ -967,6 +967,7 @@ pub(crate) fn build_prompt(
 
     Prompt {
         input,
+        cwd: Some(turn_context.cwd.to_path_buf()),
         tools,
         parallel_tool_calls: turn_context.model_info.supports_parallel_tool_calls,
         base_instructions,
@@ -1975,10 +1976,18 @@ async fn try_run_sampling_request(
                 if let Some(tool_future) = output_result.tool_future {
                     in_flight.push_back(tool_future);
                 }
+                let had_last_agent_message = output_result.last_agent_message.is_some();
                 if let Some(agent_message) = output_result.last_agent_message {
                     last_agent_message = Some(agent_message);
                 }
-                needs_follow_up |= output_result.needs_follow_up;
+                if output_result.needs_follow_up {
+                    needs_follow_up = true;
+                } else if had_last_agent_message {
+                    // Claude-style harnesses can emit a tool call and then finish the same
+                    // response with a terminal assistant message. In that case the follow-up
+                    // loop must stop instead of resubmitting the pre-terminal tool-result state.
+                    needs_follow_up = false;
+                }
                 // todo: remove before stabilizing multi-agent v2
                 if preempt_for_mailbox_mail && sess.mailbox_rx.lock().await.has_pending() {
                     break Ok(SamplingRequestResult {

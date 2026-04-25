@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["cloud-requirements"]
+cloud-requirements = ["dep:codex-cloud-requirements"]
+
 [[bin]]
 name = "codex-app-server"
 path = "src/main.rs"
@@ -31,7 +35,7 @@ axum = { workspace = true, default-features = false, features = [
 ] }
 codex-analytics = { workspace = true }
 codex-arg0 = { workspace = true }
-codex-cloud-requirements = { workspace = true }
+codex-cloud-requirements = { workspace = true, optional = true }
 codex-config = { workspace = true }
 codex-core = { workspace = true }
 codex-core-plugins = { workspace = true }

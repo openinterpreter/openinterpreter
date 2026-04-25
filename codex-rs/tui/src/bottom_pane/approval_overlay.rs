@@ -14,9 +14,11 @@ use crate::exec_command::strip_bash_lc_and_escape;
 use crate::history_cell;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
+use crate::product_branding::ProductBranding;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
+use crate::style::app_accent_color;
 use codex_features::Features;
 use codex_protocol::ThreadId;
 use codex_protocol::mcp::RequestId;
@@ -577,7 +579,7 @@ fn build_header(request: &ApprovalRequest) -> Box<dyn Renderable> {
             {
                 header.push(Line::from(vec![
                     "Permission rule: ".into(),
-                    rule_line.cyan(),
+                    rule_line.fg(app_accent_color()),
                 ]));
                 header.push(Line::from(""));
             }
@@ -612,7 +614,7 @@ fn build_header(request: &ApprovalRequest) -> Box<dyn Renderable> {
             if let Some(rule_line) = format_requested_permissions_rule(permissions) {
                 header.push(Line::from(vec![
                     "Permission rule: ".into(),
-                    rule_line.cyan(),
+                    rule_line.fg(app_accent_color()),
                 ]));
             }
             Box::new(Paragraph::new(header).wrap(Wrap { trim: false }))
@@ -699,6 +701,7 @@ fn exec_options(
     network_approval_context: Option<&NetworkApprovalContext>,
     additional_permissions: Option<&PermissionProfile>,
 ) -> Vec<ApprovalOption> {
+    let agent_name = ProductBranding::current().agent_name();
     available_decisions
         .iter()
         .filter_map(|decision| match decision {
@@ -776,7 +779,7 @@ fn exec_options(
             }),
             ReviewDecision::TimedOut => None,
             ReviewDecision::Abort => Some(ApprovalOption {
-                label: "No, and tell Codex what to do differently".to_string(),
+                label: format!("No, and tell {agent_name} what to do differently"),
                 decision: ApprovalDecision::Review(ReviewDecision::Abort),
                 display_shortcut: Some(key_hint::plain(KeyCode::Esc)),
                 additional_shortcuts: vec![key_hint::plain(KeyCode::Char('n'))],
@@ -829,6 +832,7 @@ pub(crate) fn format_requested_permissions_rule(
 }
 
 fn patch_options() -> Vec<ApprovalOption> {
+    let agent_name = ProductBranding::current().agent_name();
     vec![
         ApprovalOption {
             label: "Yes, proceed".to_string(),
@@ -843,7 +847,7 @@ fn patch_options() -> Vec<ApprovalOption> {
             additional_shortcuts: vec![key_hint::plain(KeyCode::Char('a'))],
         },
         ApprovalOption {
-            label: "No, and tell Codex what to do differently".to_string(),
+            label: format!("No, and tell {agent_name} what to do differently"),
             decision: ApprovalDecision::Review(ReviewDecision::Abort),
             display_shortcut: Some(key_hint::plain(KeyCode::Esc)),
             additional_shortcuts: vec![key_hint::plain(KeyCode::Char('n'))],
@@ -1235,7 +1239,7 @@ mod tests {
                 "Yes, just this once".to_string(),
                 "Yes, and allow this host for this conversation".to_string(),
                 "Yes, and allow this host in the future".to_string(),
-                "No, and tell Codex what to do differently".to_string(),
+                "No, and tell Interpreter what to do differently".to_string(),
             ]
         );
     }
@@ -1258,7 +1262,7 @@ mod tests {
             vec![
                 "Yes, proceed".to_string(),
                 "Yes, and don't ask again for this command in this session".to_string(),
-                "No, and tell Codex what to do differently".to_string(),
+                "No, and tell Interpreter what to do differently".to_string(),
             ]
         );
     }
@@ -1283,7 +1287,7 @@ mod tests {
             labels,
             vec![
                 "Yes, proceed".to_string(),
-                "No, and tell Codex what to do differently".to_string(),
+                "No, and tell Interpreter what to do differently".to_string(),
             ]
         );
     }
@@ -1505,10 +1509,11 @@ mod tests {
             })
             .collect();
         let expected = vec![
-            "✔ You approved codex to run".to_string(),
-            "  git add tui/src/render/".to_string(),
-            "  mod.rs tui/src/render/".to_string(),
-            "  renderable.rs this time".to_string(),
+            "✔ You approved interpreter".to_string(),
+            "  to run git add tui/src/".to_string(),
+            "  render/mod.rs tui/src/".to_string(),
+            "  render/renderable.rs this".to_string(),
+            "  time".to_string(),
         ];
         assert_eq!(rendered, expected);
     }

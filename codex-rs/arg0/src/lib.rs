@@ -177,6 +177,35 @@ where
     F: FnOnce(Arg0DispatchPaths) -> Fut,
     Fut: Future<Output = anyhow::Result<()>>,
 {
+    arg0_dispatch_with_runtime(main_fn, build_multi_thread_runtime)
+}
+
+pub fn arg0_dispatch_or_else_current_thread<F, Fut>(main_fn: F) -> anyhow::Result<()>
+where
+    F: FnOnce(Arg0DispatchPaths) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    arg0_dispatch_with_runtime(main_fn, build_current_thread_runtime)
+}
+
+fn linux_sandbox_exe_path(
+    path_entry_guard: Option<&Arg0PathEntryGuard>,
+    current_exe: Option<PathBuf>,
+) -> Option<PathBuf> {
+    // Prefer the `codex-linux-sandbox` alias when available so callers can
+    // re-exec through a path whose basename still triggers arg0 dispatch on
+    // bubblewrap builds that do not support `--argv0`.
+    path_entry_guard
+        .and_then(|path_entry| path_entry.paths().codex_linux_sandbox_exe.clone())
+        .or(current_exe)
+}
+
+fn arg0_dispatch_with_runtime<F, Fut, R>(main_fn: F, build_runtime: R) -> anyhow::Result<()>
+where
+    F: FnOnce(Arg0DispatchPaths) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+    R: FnOnce() -> anyhow::Result<tokio::runtime::Runtime>,
+{
     // Retain the TempDir so it exists for the lifetime of the invocation of
     // this executable. Admittedly, we could invoke `keep()` on it, but it
     // would be nice to avoid leaving temporary directories behind, if possible.
@@ -203,22 +232,16 @@ where
     })
 }
 
-fn linux_sandbox_exe_path(
-    path_entry_guard: Option<&Arg0PathEntryGuard>,
-    current_exe: Option<PathBuf>,
-) -> Option<PathBuf> {
-    // Prefer the `codex-linux-sandbox` alias when available so callers can
-    // re-exec through a path whose basename still triggers arg0 dispatch on
-    // bubblewrap builds that do not support `--argv0`.
-    path_entry_guard
-        .and_then(|path_entry| path_entry.paths().codex_linux_sandbox_exe.clone())
-        .or(current_exe)
-}
-
-fn build_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
+fn build_multi_thread_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
     builder.thread_stack_size(TOKIO_WORKER_STACK_SIZE_BYTES);
+    Ok(builder.build()?)
+}
+
+fn build_current_thread_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    builder.enable_all();
     Ok(builder.build()?)
 }
 

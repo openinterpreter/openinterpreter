@@ -1,7 +1,6 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 use codex_arg0::Arg0DispatchPaths;
-use codex_cloud_requirements::cloud_requirements_loader;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config_loader::CloudRequirementsLoader;
@@ -12,18 +11,24 @@ use codex_login::AuthManager;
 use codex_utils_cli::CliConfigOverrides;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::io::ErrorKind;
 use std::io::Result as IoResult;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
+use crate::cloud_requirements_loader::build_cloud_requirements_loader;
 use crate::message_processor::MessageProcessor;
 use crate::message_processor::MessageProcessorArgs;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::OutgoingEnvelope;
 use crate::outgoing_message::OutgoingMessageSender;
 use crate::outgoing_message::QueuedOutgoingMessage;
+use crate::startup_trace::record_startup_trace_event;
 use crate::transport::CHANNEL_CAPACITY;
 use crate::transport::ConnectionState;
 use crate::transport::OutboundConnectionState;
@@ -66,6 +71,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 mod app_server_tracing;
 mod bespoke_event_handling;
+mod cli_startup;
+mod cloud_requirements_loader;
 mod codex_message_processor;
 mod command_exec;
 mod config_api;
@@ -81,10 +88,12 @@ mod message_processor;
 mod models;
 mod outgoing_message;
 mod server_request_error;
+mod startup_trace;
 mod thread_state;
 mod thread_status;
 mod transport;
 
+pub use crate::cli_startup::run_main_from_cli_args;
 pub use crate::error_code::INPUT_TOO_LARGE_ERROR_CODE;
 pub use crate::error_code::INVALID_PARAMS_ERROR_CODE;
 pub use crate::transport::AppServerTransport;
@@ -274,31 +283,15 @@ fn app_text_range(range: &CoreTextRange) -> AppTextRange {
 }
 
 fn project_config_warning(config: &Config) -> Option<ConfigWarningNotification> {
-    let mut disabled_folders = Vec::new();
-
-    for layer in config.config_layer_stack.get_layers(
-        ConfigLayerStackOrdering::LowestPrecedenceFirst,
-        /*include_disabled*/ true,
-    ) {
-        let ConfigLayerSource::Project { dot_codex_folder } = &layer.name else {
-            continue;
-        };
-        let Some(disabled_reason) = &layer.disabled_reason else {
-            continue;
-        };
-        disabled_folders.push((
-            dot_codex_folder.as_path().display().to_string(),
-            disabled_reason.clone(),
-        ));
-    }
+    let disabled_folders = disabled_project_config_warning_entries(config);
 
     if disabled_folders.is_empty() {
         return None;
     }
 
     let mut message = concat!(
-        "Project-local config, hooks, and exec policies are disabled in the following folders ",
-        "until the project is trusted, but skills still load.\n",
+        "Project-local config, hooks, and exec policies are disabled for the following projects ",
+        "until they are trusted, but skills still load.\n",
     )
     .to_string();
     for (index, (folder, reason)) in disabled_folders.iter().enumerate() {
@@ -315,6 +308,92 @@ fn project_config_warning(config: &Config) -> Option<ConfigWarningNotification> 
     })
 }
 
+fn disabled_project_config_warning_entries(config: &Config) -> Vec<(String, String)> {
+    disabled_project_config_warning_entries_with_home(config, home_dir().as_deref())
+}
+
+fn disabled_project_config_warning_entries_with_home(
+    config: &Config,
+    home_dir_override: Option<&Path>,
+) -> Vec<(String, String)> {
+    let legacy_codex_home = home_dir_override.map(|home| home.join(".codex"));
+    let mut disabled_folders = Vec::new();
+
+    for layer in config.config_layer_stack.get_layers(
+        ConfigLayerStackOrdering::LowestPrecedenceFirst,
+        /*include_disabled*/ true,
+    ) {
+        let ConfigLayerSource::Project { dot_codex_folder } = &layer.name else {
+            continue;
+        };
+        if layer.disabled_reason.is_none() {
+            continue;
+        }
+        if legacy_codex_home.as_deref() == Some(dot_codex_folder.as_path())
+            && config.codex_home.as_path() != dot_codex_folder.as_path()
+        {
+            continue;
+        }
+        disabled_folders.push((
+            project_warning_display_path(dot_codex_folder.as_path()),
+            layer
+                .disabled_reason
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "config.toml is disabled.".to_string()),
+        ));
+    }
+
+    disabled_folders
+}
+
+fn project_warning_display_path(path: &Path) -> String {
+    for ancestor in path.ancestors() {
+        if ancestor.file_name() == Some(OsStr::new(".codex"))
+            && let Some(parent) = ancestor.parent()
+        {
+            return parent.display().to_string();
+        }
+    }
+
+    path.display().to_string()
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+}
+
+fn runtime_auth_manager(config: &Config, enable_codex_api_key_env: bool) -> Arc<AuthManager> {
+    AuthManager::shared_from_config(config, enable_codex_api_key_env)
+}
+
+async fn start_runtime_remote_control(
+    config: &Config,
+    state_db: Option<Arc<codex_state::StateRuntime>>,
+    auth_manager: Arc<AuthManager>,
+    transport_event_tx: mpsc::Sender<TransportEvent>,
+    shutdown_token: CancellationToken,
+    app_server_client_name_rx: Option<oneshot::Receiver<String>>,
+) -> IoResult<(JoinHandle<()>, crate::transport::RemoteControlHandle)> {
+    start_remote_control(
+        config.chatgpt_base_url.clone(),
+        state_db,
+        auth_manager,
+        transport_event_tx,
+        shutdown_token,
+        app_server_client_name_rx,
+        config.features.enabled(Feature::RemoteControl),
+    )
+    .await
+}
+
 impl LogFormat {
     fn from_env_value(value: Option<&str>) -> Self {
         match value.map(str::trim).map(str::to_ascii_lowercase) {
@@ -329,6 +408,14 @@ fn log_format_from_env() -> LogFormat {
     LogFormat::from_env_value(value.as_deref())
 }
 
+fn should_arm_idle_shutdown(
+    has_seen_connection: bool,
+    connection_count: usize,
+    running_turn_count: usize,
+) -> bool {
+    has_seen_connection && connection_count == 0 && running_turn_count == 0
+}
+
 pub async fn run_main(
     arg0_paths: Arg0DispatchPaths,
     cli_config_overrides: CliConfigOverrides,
@@ -339,23 +426,53 @@ pub async fn run_main(
         arg0_paths,
         cli_config_overrides,
         loader_overrides,
-        default_analytics_enabled,
-        AppServerTransport::Stdio,
-        SessionSource::VSCode,
+        RunMainOptions {
+            default_analytics_enabled,
+            transport: AppServerTransport::Stdio,
+            session_source: SessionSource::VSCode,
+            ..RunMainOptions::default()
+        },
         AppServerWebsocketAuthSettings::default(),
     )
     .await
+}
+
+#[derive(Debug)]
+pub struct RunMainOptions {
+    pub default_analytics_enabled: bool,
+    pub enable_codex_api_key_env: bool,
+    pub shutdown_idle_timeout: Option<Duration>,
+    pub transport: AppServerTransport,
+    pub session_source: SessionSource,
+}
+
+impl Default for RunMainOptions {
+    fn default() -> Self {
+        Self {
+            default_analytics_enabled: false,
+            enable_codex_api_key_env: false,
+            shutdown_idle_timeout: None,
+            transport: AppServerTransport::Stdio,
+            session_source: SessionSource::VSCode,
+        }
+    }
 }
 
 pub async fn run_main_with_transport(
     arg0_paths: Arg0DispatchPaths,
     cli_config_overrides: CliConfigOverrides,
     loader_overrides: LoaderOverrides,
-    default_analytics_enabled: bool,
-    transport: AppServerTransport,
-    session_source: SessionSource,
+    options: RunMainOptions,
     auth: AppServerWebsocketAuthSettings,
 ) -> IoResult<()> {
+    record_startup_trace_event("app_server.run_main.enter");
+    let RunMainOptions {
+        default_analytics_enabled,
+        enable_codex_api_key_env,
+        shutdown_idle_timeout,
+        transport,
+        session_source,
+    } = options;
     let environment_manager = Arc::new(EnvironmentManager::from_env_with_runtime_paths(Some(
         ExecServerRuntimePaths::from_optional_paths(
             arg0_paths.codex_self_exe.clone(),
@@ -370,12 +487,47 @@ pub async fn run_main_with_transport(
 
     // Parse CLI overrides once and derive the base Config eagerly so later
     // components do not need to work with raw TOML values.
+    record_startup_trace_event("app_server.cli_overrides.parse.begin");
     let cli_kv_overrides = cli_config_overrides.parse_overrides().map_err(|e| {
         std::io::Error::new(
             ErrorKind::InvalidInput,
             format!("error parsing -c overrides: {e}"),
         )
     })?;
+    record_startup_trace_event("app_server.cli_overrides.parse.ready");
+    let transport_shutdown_token = CancellationToken::new();
+    let mut transport_accept_handles = Vec::<JoinHandle<()>>::new();
+
+    let single_client_mode = matches!(&transport, AppServerTransport::Stdio);
+    let shutdown_when_no_connections = single_client_mode;
+    let shutdown_idle_timeout = if single_client_mode {
+        None
+    } else {
+        shutdown_idle_timeout
+    };
+    let graceful_signal_restart_enabled = !single_client_mode;
+    let (mut initialize_client_name_tx, initialize_client_name_rx) = match transport {
+        AppServerTransport::Stdio => {
+            let (tx, rx) = oneshot::channel::<String>();
+            (Some(tx), Some(rx))
+        }
+        AppServerTransport::WebSocket { .. } | AppServerTransport::Off => (None, None),
+    };
+
+    if let AppServerTransport::WebSocket { bind_address } = transport {
+        record_startup_trace_event("app_server.websocket_acceptor.start");
+        let accept_handle = start_websocket_acceptor(
+            bind_address,
+            transport_event_tx.clone(),
+            transport_shutdown_token.clone(),
+            policy_from_settings(&auth)?,
+        )
+        .await?;
+        transport_accept_handles.push(accept_handle);
+        record_startup_trace_event("app_server.websocket_acceptor.ready");
+    }
+
+    record_startup_trace_event("app_server.config_preload.begin");
     let cloud_requirements = match ConfigBuilder::default()
         .cli_overrides(cli_kv_overrides.clone())
         .loader_overrides(loader_overrides.clone())
@@ -400,9 +552,12 @@ pub async fn run_main_with_transport(
                 }
             }
 
-            let auth_manager =
-                AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false);
-            cloud_requirements_loader(
+            let auth_manager = AuthManager::shared(
+                config.codex_home.clone().to_path_buf(),
+                enable_codex_api_key_env,
+                config.cli_auth_credentials_store_mode,
+            );
+            build_cloud_requirements_loader(
                 auth_manager,
                 config.chatgpt_base_url,
                 config.codex_home.to_path_buf(),
@@ -414,8 +569,10 @@ pub async fn run_main_with_transport(
             CloudRequirementsLoader::default()
         }
     };
+    record_startup_trace_event("app_server.config_preload.ready");
     let loader_overrides_for_config_api = loader_overrides.clone();
     let mut config_warnings = Vec::new();
+    record_startup_trace_event("app_server.config.begin");
     let config = match ConfigBuilder::default()
         .cli_overrides(cli_kv_overrides.clone())
         .loader_overrides(loader_overrides)
@@ -437,6 +594,7 @@ pub async fn run_main_with_transport(
                 })?
         }
     };
+    record_startup_trace_event("app_server.config.ready");
 
     if let Ok(Some(err)) = check_execpolicy_for_warnings(&config.config_layer_stack).await {
         let (path, range) = exec_policy_warning_location(&err);
@@ -473,6 +631,7 @@ pub async fn run_main_with_transport(
 
     let feedback = CodexFeedback::new();
 
+    record_startup_trace_event("app_server.observability.begin");
     let otel = codex_core::otel_init::build_provider(
         &config,
         env!("CARGO_PKG_VERSION"),
@@ -531,62 +690,39 @@ pub async fn run_main_with_transport(
             None => error!("{}", warning.summary),
         }
     }
+    record_startup_trace_event("app_server.observability.ready");
 
-    let transport_shutdown_token = CancellationToken::new();
-    let mut transport_accept_handles = Vec::<JoinHandle<()>>::new();
-
-    let single_client_mode = matches!(&transport, AppServerTransport::Stdio);
-    let shutdown_when_no_connections = single_client_mode;
-    let graceful_signal_restart_enabled = !single_client_mode;
-    let mut app_server_client_name_rx = None;
-
-    match transport {
-        AppServerTransport::Stdio => {
-            let (stdio_client_name_tx, stdio_client_name_rx) = oneshot::channel::<String>();
-            app_server_client_name_rx = Some(stdio_client_name_rx);
-            start_stdio_connection(
-                transport_event_tx.clone(),
-                &mut transport_accept_handles,
-                stdio_client_name_tx,
-            )
-            .await?;
-        }
-        AppServerTransport::WebSocket { bind_address } => {
-            let accept_handle = start_websocket_acceptor(
-                bind_address,
-                transport_event_tx.clone(),
-                transport_shutdown_token.clone(),
-                policy_from_settings(&auth)?,
-            )
-            .await?;
-            transport_accept_handles.push(accept_handle);
-        }
-        AppServerTransport::Off => {}
-    }
-
-    let auth_manager =
-        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false);
-
-    let remote_control_enabled = config.features.enabled(Feature::RemoteControl);
-    if transport_accept_handles.is_empty() && !remote_control_enabled {
-        return Err(std::io::Error::new(
-            ErrorKind::InvalidInput,
-            "no transport configured; use --listen or enable remote control",
-        ));
-    }
-
-    let (remote_control_accept_handle, remote_control_handle) = start_remote_control(
-        config.chatgpt_base_url.clone(),
+    let auth_manager = runtime_auth_manager(&config, enable_codex_api_key_env);
+    let (remote_control_task, remote_control_handle) = start_runtime_remote_control(
+        &config,
         state_db.clone(),
         auth_manager.clone(),
         transport_event_tx.clone(),
         transport_shutdown_token.clone(),
-        app_server_client_name_rx,
-        remote_control_enabled,
+        initialize_client_name_rx,
     )
     .await?;
-    transport_accept_handles.push(remote_control_accept_handle);
+    transport_accept_handles.push(remote_control_task);
 
+    match transport {
+        AppServerTransport::Stdio => {
+            record_startup_trace_event("app_server.stdio_connection.start");
+            let initialize_client_name_tx = initialize_client_name_tx.take().ok_or_else(|| {
+                std::io::Error::other("stdio transport missing client-name sender")
+            })?;
+            start_stdio_connection(
+                transport_event_tx.clone(),
+                &mut transport_accept_handles,
+                initialize_client_name_tx,
+            )
+            .await?;
+            record_startup_trace_event("app_server.stdio_connection.ready");
+        }
+        AppServerTransport::WebSocket { .. } => {}
+        AppServerTransport::Off => {}
+    }
+
+    record_startup_trace_event("app_server.outbound_router.start");
     let outbound_handle = tokio::spawn(async move {
         let mut outbound_connections = HashMap::<ConnectionId, OutboundConnectionState>::new();
         loop {
@@ -641,12 +777,12 @@ pub async fn run_main_with_transport(
         }
         info!("outbound router task exited (channel closed)");
     });
+    record_startup_trace_event("app_server.outbound_router.ready");
 
+    record_startup_trace_event("app_server.processor.start");
     let processor_handle = tokio::spawn({
         let outgoing_message_sender = Arc::new(OutgoingMessageSender::new(outgoing_tx));
         let outbound_control_tx = outbound_control_tx;
-        let auth_manager =
-            AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false);
         let cli_overrides: Vec<(String, TomlValue)> = cli_kv_overrides.clone();
         let loader_overrides = loader_overrides_for_config_api;
         let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
@@ -672,11 +808,26 @@ pub async fn run_main_with_transport(
         async move {
             let mut listen_for_threads = true;
             let mut shutdown_state = ShutdownState::default();
+            let mut has_seen_connection = false;
+            let mut shutdown_idle_deadline =
+                shutdown_idle_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
             loop {
                 let running_turn_count = {
                     let running_turn_count = running_turn_count_rx.borrow();
                     *running_turn_count
                 };
+                if should_arm_idle_shutdown(
+                    has_seen_connection,
+                    connections.len(),
+                    running_turn_count,
+                ) {
+                    if shutdown_idle_deadline.is_none() {
+                        shutdown_idle_deadline = shutdown_idle_timeout
+                            .map(|timeout| tokio::time::Instant::now() + timeout);
+                    }
+                } else if has_seen_connection {
+                    shutdown_idle_deadline = None;
+                }
                 if matches!(
                     shutdown_state.update(running_turn_count, connections.len()),
                     ShutdownAction::Finish
@@ -696,10 +847,34 @@ pub async fn run_main_with_transport(
                         let running_turn_count = *running_turn_count_rx.borrow();
                         shutdown_state.on_signal(connections.len(), running_turn_count);
                     }
-                    changed = running_turn_count_rx.changed(), if graceful_signal_restart_enabled && shutdown_state.requested() => {
+                    changed = running_turn_count_rx.changed(), if graceful_signal_restart_enabled && (shutdown_state.requested() || shutdown_idle_timeout.is_some()) => {
                         if changed.is_err() {
                             warn!("running-turn watcher closed during graceful restart drain");
                         }
+                    }
+                    _ = async {
+                        if let Some(deadline) = shutdown_idle_deadline {
+                            tokio::time::sleep_until(deadline).await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } => {
+                        if !has_seen_connection
+                            && connections.is_empty()
+                            && *running_turn_count_rx.borrow() == 0
+                        {
+                            info!("shutting down websocket app-server after startup grace timeout without any connected clients");
+                            break;
+                        }
+                        if should_arm_idle_shutdown(
+                            has_seen_connection,
+                            connections.len(),
+                            *running_turn_count_rx.borrow(),
+                        ) {
+                            info!("shutting down websocket app-server after idle timeout with no active connections or running assistant turns");
+                            break;
+                        }
+                        shutdown_idle_deadline = None;
                     }
                     event = transport_event_rx.recv() => {
                         let Some(event) = event else {
@@ -711,6 +886,8 @@ pub async fn run_main_with_transport(
                                 writer,
                                 disconnect_sender,
                             } => {
+                                has_seen_connection = true;
+                                shutdown_idle_deadline = None;
                                 let outbound_initialized = Arc::new(AtomicBool::new(false));
                                 let outbound_experimental_api_enabled =
                                     Arc::new(AtomicBool::new(false));
@@ -874,6 +1051,7 @@ pub async fn run_main_with_transport(
             info!("processor task exited (channel closed)");
         }
     });
+    record_startup_trace_event("app_server.processor.ready");
 
     drop(transport_event_tx);
 
@@ -904,7 +1082,39 @@ fn analytics_rpc_transport(transport: AppServerTransport) -> AppServerRpcTranspo
 #[cfg(test)]
 mod tests {
     use super::LogFormat;
+    use super::disabled_project_config_warning_entries_with_home;
+    use super::project_warning_display_path;
+    use super::runtime_auth_manager;
+    use super::should_arm_idle_shutdown;
+    use super::start_runtime_remote_control;
+    use crate::transport::CHANNEL_CAPACITY;
+    use crate::transport::TransportEvent;
+    use crate::transport::persist_remote_control_enrollment_for_tests;
+    use codex_app_server_protocol::ConfigLayerSource;
+    use codex_config::ConfigLayerEntry;
+    use codex_config::ConfigLayerStack;
+    use codex_config::LoaderOverrides;
+    use codex_core::config::ConfigBuilder;
+    use codex_core::config::ConfigOverrides;
+    use codex_core::test_support::auth_manager_from_auth_with_home;
+    use codex_login::CodexAuth;
+    use codex_state::StateRuntime;
+    use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use tokio::net::TcpListener;
+    use tokio::net::TcpStream;
+    use tokio::sync::mpsc;
+    use tokio::sync::oneshot;
+    use tokio::time::Duration;
+    use tokio::time::timeout;
+    use tokio_tungstenite::WebSocketStream;
+    use tokio_tungstenite::accept_hdr_async;
+    use tokio_tungstenite::tungstenite;
+    use tokio_util::sync::CancellationToken;
+    use toml::Value as TomlValue;
 
     #[test]
     fn log_format_from_env_value_matches_json_values_case_insensitively() {
@@ -922,5 +1132,260 @@ mod tests {
         assert_eq!(LogFormat::from_env_value(Some("")), LogFormat::Default);
         assert_eq!(LogFormat::from_env_value(Some("text")), LogFormat::Default);
         assert_eq!(LogFormat::from_env_value(Some("jsonl")), LogFormat::Default);
+    }
+
+    #[test]
+    fn idle_shutdown_only_arms_after_first_connection_and_without_running_turns() {
+        assert!(should_arm_idle_shutdown(
+            /*has_seen_connection*/ true, /*connection_count*/ 0,
+            /*running_turn_count*/ 0,
+        ));
+        assert!(!should_arm_idle_shutdown(
+            /*has_seen_connection*/ true, /*connection_count*/ 1,
+            /*running_turn_count*/ 0,
+        ));
+        assert!(!should_arm_idle_shutdown(
+            /*has_seen_connection*/ true, /*connection_count*/ 0,
+            /*running_turn_count*/ 1,
+        ));
+        assert!(!should_arm_idle_shutdown(
+            /*has_seen_connection*/ false, /*connection_count*/ 0,
+            /*running_turn_count*/ 0,
+        ));
+    }
+
+    #[test]
+    fn project_warning_display_path_collapses_any_path_inside_dot_codex() {
+        let dot_codex_folder = tempdir().expect("temp dir");
+        let config_path = dot_codex_folder.path().join("project/.codex/config.toml");
+        std::fs::create_dir_all(
+            config_path
+                .parent()
+                .expect("config path should have a parent"),
+        )
+        .expect("create project .codex");
+
+        assert_eq!(
+            project_warning_display_path(&config_path),
+            dot_codex_folder
+                .path()
+                .join("project")
+                .display()
+                .to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_project_config_warning_entries_skip_legacy_codex_home() {
+        let home = tempdir().expect("temp home");
+        let codex_home = home.path().join(".openinterpreter");
+        let legacy_codex_home = home.path().join(".codex");
+        std::fs::create_dir_all(&codex_home).expect("create interpreter home");
+        std::fs::create_dir_all(&legacy_codex_home).expect("create legacy codex home");
+        std::fs::create_dir_all(home.path().join("project").join(".codex"))
+            .expect("create project codex");
+
+        let mut config = ConfigBuilder::default()
+            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+            .codex_home(codex_home.clone())
+            .harness_overrides(ConfigOverrides {
+                cwd: Some(home.path().join("project")),
+                ..Default::default()
+            })
+            .build()
+            .await
+            .expect("build config");
+
+        let legacy_layer = ConfigLayerEntry::new_disabled(
+            ConfigLayerSource::Project {
+                dot_codex_folder: AbsolutePathBuf::try_from(legacy_codex_home.clone())
+                    .expect("absolute legacy codex home"),
+            },
+            TomlValue::Table(Default::default()),
+            "legacy disabled",
+        );
+        let project_layer = ConfigLayerEntry::new_disabled(
+            ConfigLayerSource::Project {
+                dot_codex_folder: AbsolutePathBuf::try_from(home.path().join("project/.codex"))
+                    .expect("absolute project .codex"),
+            },
+            TomlValue::Table(Default::default()),
+            "project disabled",
+        );
+        config.config_layer_stack = ConfigLayerStack::new(
+            vec![legacy_layer, project_layer],
+            Default::default(),
+            Default::default(),
+        )
+        .expect("config layer stack");
+
+        let entries = disabled_project_config_warning_entries_with_home(&config, Some(home.path()));
+
+        assert_eq!(
+            entries,
+            vec![(
+                home.path().join("project").display().to_string(),
+                "project disabled".to_string(),
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_auth_manager_honors_enable_codex_api_key_env() {
+        let codex_home = tempdir().expect("temp codex home");
+        let config = ConfigBuilder::default()
+            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+            .await
+            .expect("build config");
+
+        assert!(
+            runtime_auth_manager(&config, /*enable_codex_api_key_env*/ true)
+                .codex_api_key_env_enabled()
+        );
+        assert!(
+            !runtime_auth_manager(&config, /*enable_codex_api_key_env*/ false)
+                .codex_api_key_env_enabled()
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_remote_control_waits_for_stdio_client_name() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let remote_control_url = runtime_remote_control_url_for_listener(&listener);
+        let codex_home = tempdir().expect("temp codex home");
+        let config = ConfigBuilder::default()
+            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+            .codex_home(codex_home.path().to_path_buf())
+            .cli_overrides(vec![
+                (
+                    "chatgpt_base_url".to_string(),
+                    TomlValue::String(remote_control_url.clone()),
+                ),
+                (
+                    "features.remote_control".to_string(),
+                    TomlValue::Boolean(true),
+                ),
+            ])
+            .build()
+            .await
+            .expect("build config");
+        let state_db =
+            StateRuntime::init(config.sqlite_home.clone(), config.model_provider_id.clone())
+                .await
+                .expect("state runtime should initialize");
+        let app_server_client_name = "stdio-client";
+        let expected_server_id = "srv_e_persisted".to_string();
+        persist_remote_control_enrollment_for_tests(
+            Some(state_db.as_ref()),
+            &remote_control_url,
+            "account_id",
+            Some(app_server_client_name),
+            expected_server_id.as_str(),
+            "env_persisted",
+            "persisted-server",
+        )
+        .await
+        .expect("persisted enrollment should save");
+
+        let auth_manager = auth_manager_from_auth_with_home(
+            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+            codex_home.path().to_path_buf(),
+        );
+        let (transport_event_tx, _transport_event_rx) =
+            mpsc::channel::<TransportEvent>(CHANNEL_CAPACITY);
+        let (app_server_client_name_tx, app_server_client_name_rx) = oneshot::channel::<String>();
+        let shutdown_token = CancellationToken::new();
+        let (remote_task, _remote_control_handle) = start_runtime_remote_control(
+            &config,
+            Some(state_db.clone()),
+            auth_manager,
+            transport_event_tx,
+            shutdown_token.clone(),
+            Some(app_server_client_name_rx),
+        )
+        .await
+        .expect("remote control should start");
+
+        timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .expect_err("remote control should wait for the stdio client name");
+
+        let _ = app_server_client_name_tx.send(app_server_client_name.to_string());
+        let (handshake_request, backend_websocket) =
+            accept_runtime_remote_control_backend_connection(&listener).await;
+        assert_eq!(
+            handshake_request.path,
+            "/backend-api/wham/remote/control/server"
+        );
+        assert_eq!(
+            handshake_request.headers.get("x-codex-server-id"),
+            Some(&expected_server_id)
+        );
+        let _backend_websocket = backend_websocket;
+
+        shutdown_token.cancel();
+        let _ = remote_task.await;
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct CapturedWebSocketRequest {
+        path: String,
+        headers: BTreeMap<String, String>,
+    }
+
+    fn runtime_remote_control_url_for_listener(listener: &TcpListener) -> String {
+        let addr = listener
+            .local_addr()
+            .expect("listener should have a local address");
+        format!("http://{addr}/backend-api/")
+    }
+
+    async fn accept_runtime_remote_control_backend_connection(
+        listener: &TcpListener,
+    ) -> (CapturedWebSocketRequest, WebSocketStream<TcpStream>) {
+        let (stream, _) = timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("websocket request should arrive in time")
+            .expect("listener accept should succeed");
+        let captured_request = Arc::new(std::sync::Mutex::new(None::<CapturedWebSocketRequest>));
+        let captured_request_for_callback = captured_request.clone();
+        let websocket = accept_hdr_async(
+            stream,
+            move |request: &tungstenite::handshake::server::Request,
+                  response: tungstenite::handshake::server::Response| {
+                let headers = request
+                    .headers()
+                    .iter()
+                    .map(|(name, value)| {
+                        (
+                            name.as_str().to_ascii_lowercase(),
+                            value
+                                .to_str()
+                                .expect("header should be valid utf-8")
+                                .to_string(),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                *captured_request_for_callback
+                    .lock()
+                    .expect("capture lock should acquire") = Some(CapturedWebSocketRequest {
+                    path: request.uri().path().to_string(),
+                    headers,
+                });
+                Ok(response)
+            },
+        )
+        .await
+        .expect("websocket handshake should succeed");
+        let captured_request = captured_request
+            .lock()
+            .expect("capture lock should acquire")
+            .clone()
+            .expect("websocket request should be captured");
+        (captured_request, websocket)
     }
 }

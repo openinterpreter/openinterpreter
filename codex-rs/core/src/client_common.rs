@@ -9,6 +9,7 @@ use futures::Stream;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
@@ -27,6 +28,9 @@ pub const REVIEW_EXIT_INTERRUPTED_TMPL: &str =
 pub struct Prompt {
     /// Conversation context input items.
     pub input: Vec<ResponseItem>,
+
+    /// Turn working directory for harness-specific request shaping.
+    pub cwd: Option<PathBuf>,
 
     /// Tools available to the model, including additional tools sourced from
     /// external MCP servers.

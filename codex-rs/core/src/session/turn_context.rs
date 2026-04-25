@@ -1,12 +1,33 @@
 use super::*;
+use codex_features::Feature;
 use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
+use codex_tools::Harness;
 
 pub(super) fn image_generation_tool_auth_allowed(auth_manager: Option<&AuthManager>) -> bool {
     matches!(
         auth_manager.and_then(AuthManager::auth_mode),
         Some(AuthMode::Chatgpt)
     )
+}
+
+fn effective_truncation_policy(model_info: &ModelInfo, harness: &Harness) -> TruncationPolicy {
+    if harness.is_claude_code()
+        && let Some(effective_context_window) =
+            model_info
+                .resolved_context_window()
+                .and_then(|context_window| {
+                    usize::try_from(
+                        context_window.saturating_mul(model_info.effective_context_window_percent)
+                            / 100,
+                    )
+                    .ok()
+                })
+    {
+        return TruncationPolicy::Tokens(effective_context_window);
+    }
+
+    model_info.truncation_policy.into()
 }
 
 #[derive(Clone, Debug)]
@@ -89,7 +110,7 @@ impl TurnContext {
             .and_then(AuthManager::auth_cached)
             .as_ref()
             .is_some_and(CodexAuth::is_chatgpt_auth);
-        self.features.apps_enabled_for_auth(is_chatgpt_auth)
+        self.features.enabled(Feature::Apps) && is_chatgpt_auth
     }
 
     pub(crate) async fn with_model(&self, model: String, models_manager: &ModelsManager) -> Self {
@@ -98,7 +119,6 @@ impl TurnContext {
         let model_info = models_manager
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
-        let truncation_policy = model_info.truncation_policy.into();
         let supported_reasoning_levels = model_info
             .supported_reasoning_levels
             .iter()
@@ -141,6 +161,7 @@ impl TurnContext {
             sandbox_policy: self.sandbox_policy.get(),
             windows_sandbox_level: self.windows_sandbox_level,
         })
+        .with_harness(config.harness.as_deref())
         .with_unified_exec_shell_mode(self.tools_config.unified_exec_shell_mode.clone())
         .with_web_search_config(self.tools_config.web_search_config.clone())
         .with_allow_login_shell(self.tools_config.allow_login_shell)
@@ -151,6 +172,7 @@ impl TurnContext {
         .with_agent_type_description(crate::agent::role::spawn_tool_spec::build(
             &config.agent_roles,
         ));
+        let truncation_policy = effective_truncation_policy(&model_info, &tools_config.harness);
 
         Self {
             sub_id: self.sub_id.clone(),
@@ -374,6 +396,7 @@ impl Session {
             sandbox_policy: session_configuration.sandbox_policy.get(),
             windows_sandbox_level: session_configuration.windows_sandbox_level,
         })
+        .with_harness(per_turn_config.harness.as_deref())
         .with_unified_exec_shell_mode_for_session(
             crate::tools::spec::tool_user_shell_type(user_shell),
             shell_zsh_path,
@@ -388,6 +411,7 @@ impl Session {
         .with_agent_type_description(crate::agent::role::spawn_tool_spec::build(
             &per_turn_config.agent_roles,
         ));
+        let truncation_policy = effective_truncation_policy(&model_info, &tools_config.harness);
 
         let cwd = session_configuration.cwd.clone();
 
@@ -407,7 +431,7 @@ impl Session {
             realtime_active: false,
             config: per_turn_config.clone(),
             auth_manager: auth_manager_for_context,
-            model_info: model_info.clone(),
+            model_info,
             session_telemetry: session_telemetry_for_context,
             provider: provider_for_context,
             reasoning_effort,
@@ -437,7 +461,7 @@ impl Session {
             codex_self_exe: per_turn_config.codex_self_exe.clone(),
             codex_linux_sandbox_exe: per_turn_config.codex_linux_sandbox_exe.clone(),
             tool_call_gate: Arc::new(ReadinessFlag::new()),
-            truncation_policy: model_info.truncation_policy.into(),
+            truncation_policy,
             js_repl,
             dynamic_tools: session_configuration.dynamic_tools.clone(),
             turn_metadata_state,

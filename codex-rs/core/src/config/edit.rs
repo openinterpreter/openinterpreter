@@ -955,6 +955,43 @@ impl ConfigEditsBuilder {
         self
     }
 
+    pub fn set_model_provider(mut self, provider_id: &str) -> Self {
+        let segments = if let Some(profile) = self.profile.as_ref() {
+            vec![
+                "profiles".to_string(),
+                profile.clone(),
+                "model_provider".to_string(),
+            ]
+        } else {
+            vec!["model_provider".to_string()]
+        };
+        self.edits.push(ConfigEdit::SetPath {
+            segments,
+            value: value(provider_id),
+        });
+        self
+    }
+
+    pub fn set_harness(mut self, harness: Option<&str>) -> Self {
+        let segments = if let Some(profile) = self.profile.as_ref() {
+            vec![
+                "profiles".to_string(),
+                profile.clone(),
+                "harness".to_string(),
+            ]
+        } else {
+            vec!["harness".to_string()]
+        };
+        match harness {
+            Some(harness) => self.edits.push(ConfigEdit::SetPath {
+                segments,
+                value: value(harness),
+            }),
+            None => self.edits.push(ConfigEdit::ClearPath { segments }),
+        }
+        self
+    }
+
     pub fn set_service_tier(mut self, service_tier: Option<ServiceTier>) -> Self {
         self.edits.push(ConfigEdit::SetServiceTier { service_tier });
         self

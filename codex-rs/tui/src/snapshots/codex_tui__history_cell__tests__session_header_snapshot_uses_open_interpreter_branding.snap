@@ -1,0 +1,10 @@
+---
+source: tui/src/history_cell.rs
+expression: rendered
+---
+╭──────────────────────────────────────────────────╮
+│ • Open Interpreter (vtest)                       │
+│                                                  │
+│ model:     gpt-4o high   fast   /model to change │
+│ directory: /tmp/project                          │
+╰──────────────────────────────────────────────────╯

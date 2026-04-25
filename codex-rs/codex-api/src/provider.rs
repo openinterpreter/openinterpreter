@@ -103,6 +103,20 @@ impl Provider {
     }
 }
 
+pub fn is_anthropic_api_base_url(base_url: Option<&str>) -> bool {
+    let Some(base_url) = base_url else {
+        return false;
+    };
+    Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host == "api.anthropic.com")
+}
+
+pub fn is_anthropic_provider(name: &str, base_url: Option<&str>) -> bool {
+    name.eq_ignore_ascii_case("Anthropic") || is_anthropic_api_base_url(base_url)
+}
+
 pub fn is_azure_responses_provider(name: &str, base_url: Option<&str>) -> bool {
     if name.eq_ignore_ascii_case("azure") {
         true
@@ -165,5 +179,50 @@ mod tests {
                 "expected {base_url} not to be detected as Azure"
             );
         }
+    }
+
+    #[test]
+    fn detects_anthropic_api_base_urls() {
+        let positive_cases = [
+            "https://api.anthropic.com",
+            "https://api.anthropic.com/",
+            "https://api.anthropic.com/v1",
+        ];
+
+        for base_url in positive_cases {
+            assert!(
+                is_anthropic_api_base_url(Some(base_url)),
+                "expected {base_url} to be detected as Anthropic"
+            );
+        }
+
+        let negative_cases = [
+            "https://api.minimax.io/anthropic/v1",
+            "https://example.com/v1",
+            "https://anthropic.com/api",
+        ];
+
+        for base_url in negative_cases {
+            assert!(
+                !is_anthropic_api_base_url(Some(base_url)),
+                "expected {base_url} not to be detected as Anthropic"
+            );
+        }
+    }
+
+    #[test]
+    fn detects_anthropic_providers_by_name_for_local_proxies() {
+        assert!(is_anthropic_provider(
+            "Anthropic",
+            Some("http://127.0.0.1:8080")
+        ));
+        assert!(is_anthropic_provider(
+            "anthropic",
+            Some("https://example.com")
+        ));
+        assert!(!is_anthropic_provider(
+            "Compatible",
+            Some("http://127.0.0.1:8080")
+        ));
     }
 }

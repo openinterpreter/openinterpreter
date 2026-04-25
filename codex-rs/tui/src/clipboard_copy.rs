@@ -55,12 +55,12 @@ pub(crate) fn copy_to_clipboard(text: &str) -> Result<Option<ClipboardLease>, St
 /// paths the lease is `None` — those backends do not require process-lifetime
 /// ownership.
 pub(crate) struct ClipboardLease {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "clipboard"))]
     _clipboard: Option<arboard::Clipboard>,
 }
 
 impl ClipboardLease {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "clipboard"))]
     fn native_linux(clipboard: arboard::Clipboard) -> Self {
         Self {
             _clipboard: Some(clipboard),
@@ -146,7 +146,11 @@ fn is_wsl_session() -> bool {
 /// triggers `os_log` / `NSLog` output on stderr. Because the TUI owns the
 /// terminal, that stray output corrupts the display. We temporarily redirect
 /// fd 2 to `/dev/null` around the call to keep the screen clean.
-#[cfg(all(not(target_os = "android"), not(target_os = "linux")))]
+#[cfg(all(
+    not(target_os = "android"),
+    not(target_os = "linux"),
+    feature = "clipboard"
+))]
 fn arboard_copy(text: &str) -> Result<Option<ClipboardLease>, String> {
     #[cfg(target_os = "macos")]
     let _stderr_lock = STDERR_SUPPRESSION_MUTEX
@@ -167,7 +171,7 @@ fn arboard_copy(text: &str) -> Result<Option<ClipboardLease>, String> {
 /// On Linux/X11 and some Wayland setups, clipboard contents are served by the
 /// process that last wrote them. Keep the `Clipboard` alive so the copied text
 /// remains pasteable while the TUI is running.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "clipboard"))]
 fn arboard_copy(text: &str) -> Result<Option<ClipboardLease>, String> {
     let _guard = SuppressStderr::new();
     let mut clipboard =
@@ -181,6 +185,11 @@ fn arboard_copy(text: &str) -> Result<Option<ClipboardLease>, String> {
 #[cfg(target_os = "android")]
 fn arboard_copy(_text: &str) -> Result<Option<ClipboardLease>, String> {
     Err("native clipboard unavailable on Android".to_string())
+}
+
+#[cfg(all(not(target_os = "android"), not(feature = "clipboard")))]
+fn arboard_copy(_text: &str) -> Result<Option<ClipboardLease>, String> {
+    Err("native clipboard unavailable in this build".to_string())
 }
 
 /// Copy text into the Windows clipboard from a WSL process.

@@ -10,6 +10,12 @@ pub trait AuthProvider: Send + Sync {
     fn add_auth_headers(&self, headers: &mut HeaderMap);
 }
 
+impl<T: AuthProvider + ?Sized> AuthProvider for Arc<T> {
+    fn add_auth_headers(&self, headers: &mut HeaderMap) {
+        (**self).add_auth_headers(headers);
+    }
+}
+
 /// Shared auth handle passed through API clients.
 pub type SharedAuthProvider = Arc<dyn AuthProvider>;
 
@@ -22,9 +28,13 @@ pub struct AuthHeaderTelemetry {
 pub fn auth_header_telemetry(auth: &dyn AuthProvider) -> AuthHeaderTelemetry {
     let mut headers = HeaderMap::new();
     auth.add_auth_headers(&mut headers);
-    let name = headers
-        .contains_key(http::header::AUTHORIZATION)
-        .then_some("authorization");
+    let name = if headers.contains_key(http::header::AUTHORIZATION) {
+        Some("authorization")
+    } else if headers.contains_key("x-api-key") {
+        Some("x-api-key")
+    } else {
+        None
+    };
     AuthHeaderTelemetry {
         attached: name.is_some(),
         name,

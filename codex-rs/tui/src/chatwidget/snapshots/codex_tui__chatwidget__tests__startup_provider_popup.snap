@@ -1,0 +1,20 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 1552
+expression: popup
+---
+  Welcome to Open Interpreter.
+  Choose a provider to get started.
+
+  Filter providers
+› OpenAI (ChatGPT sign-in)  Sign in with ChatGPT
+  OpenAI (API key)          Use OPENAI_API_KEY or paste a key
+  Anthropic                 Use ANTHROPIC_API_KEY or paste a key | Harness:
+                            claude-code
+  OpenRouter                Use OPENROUTER_API_KEY or paste a key
+  Groq                      Use GROQ_API_KEY or paste a key
+  LM Studio                 Connect to localhost:1234
+  Ollama                    Connect to localhost:11434
+  GitHub Models             Use GITHUB_TOKEN or paste a key
+
+  Type to filter • Enter to continue • Esc to dismiss

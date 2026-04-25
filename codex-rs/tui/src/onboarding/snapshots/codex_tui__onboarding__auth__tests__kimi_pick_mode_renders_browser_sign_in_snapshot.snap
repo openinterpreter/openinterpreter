@@ -1,0 +1,11 @@
+---
+source: tui/src/onboarding/auth.rs
+expression: terminal.backend()
+---
+  Choose how Kimi Code should authenticate.
+  Use browser sign-in to access Kimi Code models.
+
+> 1. Sign in with Kimi Code
+     Opens a browser and stores refreshable credentials locally
+
+  Press Enter to continue

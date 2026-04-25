@@ -29,6 +29,8 @@ fn bearer_auth_provider_from_auth(
             token: Some(api_key),
             account_id: None,
             is_fedramp_account: false,
+            token_header_name: Some(provider.auth_header_name()),
+            use_bearer_prefix: provider.auth_header_prefix().is_some(),
         });
     }
 
@@ -37,6 +39,8 @@ fn bearer_auth_provider_from_auth(
             token: Some(token),
             account_id: None,
             is_fedramp_account: false,
+            token_header_name: Some(provider.auth_header_name()),
+            use_bearer_prefix: provider.auth_header_prefix().is_some(),
         });
     }
 
@@ -46,12 +50,16 @@ fn bearer_auth_provider_from_auth(
             token: Some(token),
             account_id: auth.get_account_id(),
             is_fedramp_account: auth.is_fedramp_account(),
+            token_header_name: Some(provider.auth_header_name()),
+            use_bearer_prefix: provider.auth_header_prefix().is_some(),
         })
     } else {
         Ok(BearerAuthProvider {
             token: None,
             account_id: None,
             is_fedramp_account: false,
+            token_header_name: Some(provider.auth_header_name()),
+            use_bearer_prefix: provider.auth_header_prefix().is_some(),
         })
     }
 }

@@ -9,6 +9,7 @@ use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::line_utils::prefix_lines;
 use crate::render::line_utils::push_owned_lines;
 use crate::shimmer::shimmer_spans;
+use crate::style::app_accent_color;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_line;
 use crate::wrapping::adaptive_wrap_lines;
@@ -346,7 +347,7 @@ impl ExecCell {
 
             for (title, line) in call_lines {
                 let line = Line::from(line);
-                let initial_indent = Line::from(vec![title.cyan(), " ".into()]);
+                let initial_indent = Line::from(vec![title.fg(app_accent_color()), " ".into()]);
                 let subsequent_indent = " ".repeat(initial_indent.width()).into();
                 let wrapped = adaptive_wrap_line(
                     &line,

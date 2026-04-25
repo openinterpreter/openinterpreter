@@ -1,4 +1,4 @@
-#![cfg(not(debug_assertions))]
+#![cfg(all(not(debug_assertions), feature = "startup-network"))]
 
 use crate::legacy_core::config::Config;
 use crate::update_action;

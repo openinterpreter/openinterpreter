@@ -36,6 +36,7 @@ use codex_config::types::McpServerDisabledReason;
 use codex_config::types::McpServerTransportConfig;
 use codex_config::types::MemoriesConfig;
 use codex_config::types::ModelAvailabilityNuxConfig;
+use codex_config::types::ModelsManagerConfig;
 use codex_config::types::Notice;
 use codex_config::types::OAuthCredentialsStoreMode;
 use codex_config::types::OtelConfig;
@@ -63,7 +64,6 @@ use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
 use codex_model_provider_info::built_in_model_providers;
-use codex_models_manager::ModelsManagerConfig;
 use codex_protocol::config_types::AltScreenMode;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::Personality;
@@ -102,9 +102,9 @@ pub mod edit;
 mod managed_features;
 mod network_proxy_spec;
 mod permissions;
-#[cfg(test)]
-mod schema;
-pub(crate) mod service;
+pub mod schema;
+pub mod service;
+mod startup_display;
 pub use codex_config::Constrained;
 pub use codex_config::ConstraintError;
 pub use codex_config::ConstraintResult;
@@ -173,12 +173,11 @@ fn resolve_mcp_oauth_credentials_store_mode(
 #[cfg(test)]
 pub(crate) async fn test_config() -> Config {
     let codex_home = tempfile::tempdir().expect("create temp dir");
-    Config::load_from_base_config_with_overrides(
+    Config::load_for_startup_display(
         ConfigToml::default(),
         ConfigOverrides::default(),
         AbsolutePathBuf::from_absolute_path(codex_home.path()).expect("temp dir should resolve"),
     )
-    .await
     .expect("load default test config")
 }
 
@@ -245,6 +244,9 @@ pub struct Config {
 
     /// Info needed to make an API request to the model.
     pub model_provider: ModelProviderInfo,
+
+    /// Optional harness family to emulate for this session.
+    pub harness: Option<String>,
 
     /// Optionally specify the personality of the model
     pub personality: Option<Personality>,
@@ -826,6 +828,39 @@ impl Config {
         .await
     }
 
+    #[cfg(test)]
+    pub(crate) fn load_from_base_config_with_overrides(
+        cfg: ConfigToml,
+        overrides: ConfigOverrides,
+        codex_home: PathBuf,
+    ) -> std::io::Result<Self> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(std::io::Error::other)?;
+        runtime.block_on(Self::load_from_base_config_with_overrides_async(
+            cfg, overrides, codex_home,
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn load_from_base_config_with_overrides_async(
+        cfg: ConfigToml,
+        overrides: ConfigOverrides,
+        codex_home: PathBuf,
+    ) -> std::io::Result<Self> {
+        let codex_home = AbsolutePathBuf::from_absolute_path_checked(codex_home)?;
+        let config_layer_stack = ConfigLayerStack::default();
+        Self::load_config_with_layer_stack(
+            LOCAL_FS.as_ref(),
+            cfg,
+            overrides,
+            codex_home,
+            config_layer_stack,
+        )
+        .await
+    }
+
     /// This is a secondary way of creating [Config], which is appropriate when
     /// the harness is meant to be used with a specific configuration that
     /// ignores user settings. For example, the `codex exec` subcommand is
@@ -1357,6 +1392,37 @@ fn resolve_web_search_mode(
     None
 }
 
+fn default_harness_for_model_provider(
+    model_provider_id: &str,
+    model_provider: &ModelProviderInfo,
+) -> Option<String> {
+    let provider_id = model_provider_id.to_ascii_lowercase();
+    let provider_name = model_provider.name.to_ascii_lowercase();
+    let base_url = model_provider
+        .base_url
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if provider_id.contains("kimi")
+        || provider_id.contains("moonshot")
+        || provider_name.contains("kimi")
+        || provider_name.contains("moonshot")
+        || base_url.contains("api.kimi.com")
+        || base_url.contains("api.moonshot.ai")
+        || base_url.contains("api.moonshot.cn")
+    {
+        return Some("kimi-cli".to_string());
+    }
+    if provider_id.contains("anthropic")
+        || provider_name.contains("anthropic")
+        || base_url.contains("api.anthropic.com")
+    {
+        Some("claude-code".to_string())
+    } else {
+        None
+    }
+}
+
 fn resolve_web_search_config(
     config_toml: &ConfigToml,
     config_profile: &ConfigProfile,
@@ -1451,22 +1517,23 @@ pub(crate) fn resolve_web_search_mode_for_turn(
 }
 
 impl Config {
-    #[cfg(test)]
-    async fn load_from_base_config_with_overrides(
+    /// Build a display-only config from an already merged `ConfigToml`.
+    ///
+    /// This intentionally skips requirements and cloud-requirements resolution so
+    /// callers can render UI immediately while the full config is still loading.
+    pub fn load_for_startup_display(
         cfg: ConfigToml,
         overrides: ConfigOverrides,
         codex_home: AbsolutePathBuf,
     ) -> std::io::Result<Self> {
-        // Note this ignores requirements.toml enforcement for tests.
-        let config_layer_stack = ConfigLayerStack::default();
-        Self::load_config_with_layer_stack(
-            LOCAL_FS.as_ref(),
-            cfg,
-            overrides,
-            codex_home,
-            config_layer_stack,
-        )
-        .await
+        startup_display::build_startup_display_config(cfg, overrides, codex_home)
+    }
+
+    pub fn load_fast_tui_startup_config_toml(
+        codex_home: &Path,
+        cli_overrides: &[(String, TomlValue)],
+    ) -> std::io::Result<ConfigToml> {
+        startup_display::load_fast_tui_startup_config_toml(codex_home, cli_overrides)
     }
 
     pub(crate) async fn load_config_with_layer_stack(
@@ -1792,6 +1859,11 @@ impl Config {
                 std::io::Error::new(std::io::ErrorKind::NotFound, message)
             })?
             .clone();
+        let harness = config_profile
+            .harness
+            .clone()
+            .or(cfg.harness.clone())
+            .or_else(|| default_harness_for_model_provider(&model_provider_id, &model_provider));
 
         let shell_environment_policy = cfg.shell_environment_policy.into();
         let allow_login_shell = cfg.allow_login_shell.unwrap_or(true);
@@ -2119,6 +2191,7 @@ impl Config {
             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
             model_provider_id,
             model_provider,
+            harness,
             cwd: resolved_cwd,
             startup_warnings,
             permissions: Permissions {

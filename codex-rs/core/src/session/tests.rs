@@ -50,6 +50,7 @@ use codex_protocol::protocol::ReadOnlyAccess;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
+use codex_tools::Harness;
 use tracing::Span;
 
 use crate::RolloutRecorderParams;
@@ -354,6 +355,7 @@ fn test_model_client_session() -> crate::client::ModelClientSession {
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
+        Harness::Native,
     )
     .new_session()
 }
@@ -2573,6 +2575,51 @@ async fn turn_context_with_model_updates_model_fields() {
     ));
 }
 
+#[tokio::test]
+async fn make_turn_context_preserves_configured_harness_in_tools_config() {
+    let (_session, turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |config| {
+            config.harness = Some("claude-code".to_string());
+        },
+    )
+    .await;
+
+    assert_eq!(turn_context.tools_config.harness, Harness::ClaudeCode);
+    assert_eq!(
+        turn_context.truncation_policy,
+        codex_protocol::protocol::TruncationPolicy::Tokens(
+            usize::try_from(turn_context.model_context_window().unwrap()).unwrap()
+        )
+    );
+}
+
+#[tokio::test]
+async fn turn_context_with_model_preserves_configured_harness_in_tools_config() {
+    let (session, mut turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |config| {
+            config.harness = Some("claude-code".to_string());
+        },
+    )
+    .await;
+    turn_context.reasoning_effort = Some(ReasoningEffortConfig::Minimal);
+
+    let updated = turn_context
+        .with_model("gpt-5.1".to_string(), &session.services.models_manager)
+        .await;
+
+    assert_eq!(updated.tools_config.harness, Harness::ClaudeCode);
+    assert_eq!(
+        updated.truncation_policy,
+        codex_protocol::protocol::TruncationPolicy::Tokens(
+            usize::try_from(updated.model_context_window().unwrap()).unwrap()
+        )
+    );
+}
+
 #[test]
 fn falls_back_to_content_when_structured_is_null() {
     let ctr = McpCallToolResult {
@@ -3242,6 +3289,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             config.features.enabled(Feature::EnableRequestCompression),
             config.features.enabled(Feature::RuntimeMetrics),
             Session::build_model_client_beta_features_header(config.as_ref()),
+            Harness::Native,
         ),
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
             config.js_repl_node_path.clone(),
@@ -4212,6 +4260,7 @@ where
             config.features.enabled(Feature::EnableRequestCompression),
             config.features.enabled(Feature::RuntimeMetrics),
             Session::build_model_client_beta_features_header(config.as_ref()),
+            Harness::Native,
         ),
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
             config.js_repl_node_path.clone(),

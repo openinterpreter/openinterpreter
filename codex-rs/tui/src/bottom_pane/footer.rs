@@ -45,6 +45,7 @@ use crate::key_hint;
 use crate::key_hint::KeyBinding;
 use crate::render::line_utils::prefix_lines;
 use crate::status::format_tokens_compact;
+use crate::style::app_accent_color;
 use crate::ui_consts::FOOTER_INDENT_COLS;
 use crossterm::event::KeyCode;
 use ratatui::buffer::Buffer;
@@ -118,7 +119,7 @@ impl CollaborationModeIndicator {
         let label = self.label(show_cycle_hint);
         match self {
             CollaborationModeIndicator::Plan => Span::from(label).magenta(),
-            CollaborationModeIndicator::PairProgramming => Span::from(label).cyan(),
+            CollaborationModeIndicator::PairProgramming => Span::from(label).fg(app_accent_color()),
             CollaborationModeIndicator::Execute => Span::from(label).dim(),
         }
     }

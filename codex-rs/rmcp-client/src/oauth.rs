@@ -19,7 +19,6 @@
 use anyhow::Context;
 use anyhow::Error;
 use anyhow::Result;
-use codex_config::types::OAuthCredentialsStoreMode;
 use oauth2::AccessToken;
 use oauth2::EmptyExtraTokenFields;
 use oauth2::RefreshToken;
@@ -43,6 +42,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use tracing::warn;
 
+pub use codex_config::types::OAuthCredentialsStoreMode;
 use codex_keyring_store::DefaultKeyringStore;
 use codex_keyring_store::KeyringStore;
 use rmcp::transport::auth::AuthorizationManager;

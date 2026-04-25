@@ -1,4 +1,5 @@
 use crate::agent::AgentStatus;
+use crate::agent::claude_agent_external_id;
 use crate::agent::registry::AgentMetadata;
 use crate::agent::registry::AgentRegistry;
 use crate::agent::role::DEFAULT_ROLE_NAME;
@@ -59,6 +60,12 @@ pub(crate) struct LiveAgent {
     pub(crate) thread_id: ThreadId,
     pub(crate) metadata: AgentMetadata,
     pub(crate) status: AgentStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AgentObservableUsage {
+    pub(crate) tool_uses: i64,
+    pub(crate) duration_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -309,7 +316,7 @@ impl AgentControl {
                 .agent_path
                 .as_ref()
                 .map(ToString::to_string)
-                .unwrap_or_else(|| new_thread.thread_id.to_string());
+                .unwrap_or_else(|| claude_agent_external_id(new_thread.thread_id));
             self.maybe_start_completion_watcher(
                 new_thread.thread_id,
                 notification_source,
@@ -560,7 +567,7 @@ impl AgentControl {
                 .agent_path
                 .as_ref()
                 .map(ToString::to_string)
-                .unwrap_or_else(|| resumed_thread.thread_id.to_string());
+                .unwrap_or_else(|| claude_agent_external_id(resumed_thread.thread_id));
             self.maybe_start_completion_watcher(
                 resumed_thread.thread_id,
                 Some(notification_source.clone()),
@@ -769,6 +776,13 @@ impl AgentControl {
         if let Some(thread_id) = self.state.agent_id_for_path(&agent_path) {
             return Ok(thread_id);
         }
+        if let Some(thread_id) = self.state.live_agents().into_iter().find_map(|metadata| {
+            metadata.agent_id.and_then(|thread_id| {
+                (claude_agent_external_id(thread_id) == agent_reference).then_some(thread_id)
+            })
+        }) {
+            return Ok(thread_id);
+        }
         Err(CodexErr::UnsupportedOperation(format!(
             "live agent path `{}` not found",
             agent_path.as_str()
@@ -795,6 +809,67 @@ impl AgentControl {
         thread.total_token_usage().await
     }
 
+    pub(crate) async fn get_last_token_usage(&self, agent_id: ThreadId) -> Option<TokenUsage> {
+        let Ok(state) = self.upgrade() else {
+            return None;
+        };
+        let Ok(thread) = state.get_thread(agent_id).await else {
+            return None;
+        };
+        thread
+            .codex
+            .session
+            .token_usage_info()
+            .await
+            .map(|info| info.last_token_usage)
+    }
+
+    pub(crate) async fn get_observable_usage(
+        &self,
+        agent_id: ThreadId,
+    ) -> Option<AgentObservableUsage> {
+        let Ok(state) = self.upgrade() else {
+            return None;
+        };
+        let Ok(thread) = state.get_thread(agent_id).await else {
+            return None;
+        };
+
+        thread.codex.session.ensure_rollout_materialized().await;
+        if thread.codex.session.flush_rollout().await.is_err() {
+            return None;
+        }
+        let rollout_path = thread.rollout_path()?;
+        let rollout_items = RolloutRecorder::get_rollout_history(&rollout_path)
+            .await
+            .ok()?
+            .get_rollout_items();
+        let tool_uses = rollout_items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    RolloutItem::ResponseItem(
+                        ResponseItem::FunctionCall { .. }
+                            | ResponseItem::ToolSearchCall { .. }
+                            | ResponseItem::CustomToolCall { .. }
+                            | ResponseItem::WebSearchCall { .. }
+                    )
+                )
+            })
+            .count() as i64;
+        let duration_ms = rollout_items.iter().rev().find_map(|item| match item {
+            RolloutItem::EventMsg(codex_protocol::protocol::EventMsg::TurnComplete(event)) => {
+                event.duration_ms
+            }
+            _ => None,
+        });
+        Some(AgentObservableUsage {
+            tool_uses,
+            duration_ms,
+        })
+    }
+
     pub(crate) async fn format_environment_context_subagents(
         &self,
         parent_thread_id: ThreadId,
@@ -810,7 +885,7 @@ impl AgentControl {
                     .agent_path
                     .as_ref()
                     .map(|agent_path| agent_path.name().to_string())
-                    .unwrap_or_else(|| thread_id.to_string());
+                    .unwrap_or_else(|| claude_agent_external_id(thread_id));
                 format_subagent_context_line(reference.as_str(), metadata.agent_nickname.as_deref())
             })
             .collect::<Vec<_>>()
@@ -880,7 +955,7 @@ impl AgentControl {
                 .agent_path
                 .as_ref()
                 .map(ToString::to_string)
-                .unwrap_or_else(|| thread_id.to_string());
+                .unwrap_or_else(|| claude_agent_external_id(thread_id));
             let last_task_message = metadata.last_task_message.clone();
             agents.push(ListedAgent {
                 agent_name,

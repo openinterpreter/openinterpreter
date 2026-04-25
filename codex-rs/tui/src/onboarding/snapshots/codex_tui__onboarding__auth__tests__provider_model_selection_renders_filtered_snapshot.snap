@@ -1,0 +1,19 @@
+---
+source: tui/src/onboarding/auth.rs
+expression: terminal.backend()
+---
+> Groq
+
+  Choose a model for this new chat.
+  Filter models: kimi
+
+> 1. moonshotai/kimi-k2-instruct
+     moonshotai/kimi-k2-instruct description
+
+
+
+
+
+
+  Press Enter to continue
+  Type to filter • Backspace clears • Esc goes back

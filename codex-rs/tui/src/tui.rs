@@ -67,37 +67,6 @@ fn should_emit_notification(condition: NotificationCondition, terminal_focused: 
         NotificationCondition::Always => true,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::should_emit_notification;
-    use codex_config::types::NotificationCondition;
-
-    #[test]
-    fn unfocused_notification_condition_is_suppressed_when_focused() {
-        assert!(!should_emit_notification(
-            NotificationCondition::Unfocused,
-            /*terminal_focused*/ true
-        ));
-    }
-
-    #[test]
-    fn always_notification_condition_emits_when_focused() {
-        assert!(should_emit_notification(
-            NotificationCondition::Always,
-            /*terminal_focused*/ true
-        ));
-    }
-
-    #[test]
-    fn unfocused_notification_condition_emits_when_unfocused() {
-        assert!(should_emit_notification(
-            NotificationCondition::Unfocused,
-            /*terminal_focused*/ false
-        ));
-    }
-}
-
 pub fn set_modes() -> Result<()> {
     execute!(stdout(), EnableBracketedPaste)?;
 
@@ -305,14 +274,32 @@ impl Tui {
 
         // Detect keyboard enhancement support before any EventStream is created so the
         // crossterm poller can acquire its lock without contention.
+        crate::record_startup_trace_event("tui.keyboard_enhancement_probe.begin");
         let enhanced_keys_supported = supports_keyboard_enhancement().unwrap_or(false);
+        crate::record_startup_trace_event("tui.keyboard_enhancement_probe.ready");
         // Cache this to avoid contention with the event reader.
+        crate::record_startup_trace_event("tui.stdout_color_cache.begin");
         supports_color::on_cached(supports_color::Stream::Stdout);
-        let _ = crate::terminal_palette::default_colors();
-        let is_zellij = matches!(
-            codex_terminal_detection::terminal_info().multiplexer,
-            Some(codex_terminal_detection::Multiplexer::Zellij {})
-        );
+        crate::record_startup_trace_event("tui.stdout_color_cache.ready");
+        #[cfg(feature = "terminal-default-color-probe")]
+        {
+            // Upstream Codex keeps the terminal-theme probe for adaptive styling. The thin
+            // Open Interpreter build skips it entirely because unsupported terminals can stall
+            // here for ~2 seconds before the first ready prompt.
+            crate::record_startup_trace_event("tui.default_colors_probe.begin");
+            let _ = crate::terminal_palette::default_colors();
+            crate::record_startup_trace_event("tui.default_colors_probe.ready");
+        }
+        #[cfg(not(feature = "terminal-default-color-probe"))]
+        crate::record_startup_trace_event("tui.default_colors_probe.begin");
+        #[cfg(not(feature = "terminal-default-color-probe"))]
+        crate::record_startup_trace_event("tui.default_colors_probe.ready");
+        crate::record_startup_trace_event("tui.terminal_info.begin");
+        let is_zellij = codex_terminal_detection::terminal_info().is_zellij();
+        crate::record_startup_trace_event("tui.terminal_info.ready");
+        crate::record_startup_trace_event("tui.notification_backend.begin");
+        let notification_backend = detect_backend(NotificationMethod::default());
+        crate::record_startup_trace_event("tui.notification_backend.ready");
 
         Self {
             frame_requester,
@@ -326,7 +313,7 @@ impl Tui {
             alt_screen_active: Arc::new(AtomicBool::new(false)),
             terminal_focused: Arc::new(AtomicBool::new(true)),
             enhanced_keys_supported,
-            notification_backend: Some(detect_backend(NotificationMethod::default())),
+            notification_backend: Some(notification_backend),
             notification_condition: NotificationCondition::default(),
             is_zellij,
             alt_screen_enabled: true,

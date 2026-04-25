@@ -12,6 +12,7 @@ use app_test_support::format_with_current_shell_display;
 use app_test_support::to_response;
 use app_test_support::write_mock_responses_config_toml_with_chatgpt_base_url;
 use app_test_support::write_models_cache;
+use app_test_support::write_models_cache_with_models;
 use codex_app_server::INPUT_TOO_LARGE_ERROR_CODE;
 use codex_app_server::INVALID_PARAMS_ERROR_CODE;
 use codex_app_server_protocol::ByteRange;
@@ -31,6 +32,7 @@ use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCResponse;
+use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::PatchApplyStatus;
 use codex_app_server_protocol::PatchChangeKind;
 use codex_app_server_protocol::RequestId;
@@ -51,6 +53,7 @@ use codex_config::config_toml::ConfigToml;
 use codex_core::personality_migration::PERSONALITY_MIGRATION_FILENAME;
 use codex_features::FEATURES;
 use codex_features::Feature;
+use codex_models_manager::bundled_models_response;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Personality;
@@ -98,7 +101,7 @@ async fn turn_start_sends_originator_header() -> Result<()> {
         &BTreeMap::from([(Feature::Personality, true)]),
     )?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = McpProcess::new_without_managed_config(codex_home.path()).await?;
     timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.initialize_with_client_info(ClientInfo {
@@ -173,7 +176,7 @@ async fn turn_start_emits_user_message_item_with_text_elements() -> Result<()> {
         &BTreeMap::from([(Feature::Personality, true)]),
     )?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = McpProcess::new_without_managed_config(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
@@ -266,8 +269,9 @@ async fn turn_start_emits_thread_scoped_warning_notification_for_trimmed_skills(
         .as_array_mut()
         .expect("models_cache.json models should be an array");
     let entry = models
-        .first_mut()
-        .expect("models cache should not be empty");
+        .iter_mut()
+        .find(|entry| entry["slug"].as_str() == Some("gpt-5.2-codex"))
+        .expect("models cache should contain gpt-5.2-codex");
     let model = entry["slug"]
         .as_str()
         .expect("model slug should be present")
@@ -278,13 +282,17 @@ async fn turn_start_emits_thread_scoped_warning_notification_for_trimmed_skills(
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
         &config_path,
-        config.replace("model = \"mock-model\"", &format!("model = \"{model}\"")),
+        config.replace(
+            "model = \"mock-model\"",
+            &format!("model = \"{model}\"\nmodel_context_window = 100"),
+        ),
     )?;
     write_test_skill(codex_home.path(), "alpha-skill")?;
     write_test_skill(codex_home.path(), "beta-skill")?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = McpProcess::new_without_managed_config(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    warm_model_catalog(&mut mcp).await?;
 
     let thread_req = mcp
         .send_thread_start_request(ThreadStartParams::default())
@@ -314,7 +322,17 @@ async fn turn_start_emits_thread_scoped_warning_notification_for_trimmed_skills(
 
     let notification = timeout(
         DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("warning"),
+        mcp.read_stream_until_matching_notification("trimmed skills warning", |notification| {
+            notification.method == "warning"
+                && notification
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.get("message"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(
+                        "Some enabled skills were not included in the model-visible skills list for this session. Mention a skill by name or path if you need it.",
+                    )
+        }),
     )
     .await??;
     let params = notification.params.expect("warning params");
@@ -369,8 +387,9 @@ async fn thread_start_omits_empty_instruction_overrides_from_model_request() -> 
         &BTreeMap::default(),
     )?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = McpProcess::new_without_managed_config(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    warm_model_catalog(&mut mcp).await?;
 
     let thread_req = mcp
         .send_thread_start_request(ThreadStartParams {
@@ -611,8 +630,9 @@ async fn turn_start_accepts_text_at_limit_with_mention_item() -> Result<()> {
         &BTreeMap::from([(Feature::Personality, true)]),
     )?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = McpProcess::new_without_managed_config(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    warm_model_catalog(&mut mcp).await?;
 
     let thread_req = mcp
         .send_thread_start_request(ThreadStartParams {
@@ -670,8 +690,9 @@ async fn turn_start_rejects_combined_oversized_text_input() -> Result<()> {
         &BTreeMap::from([(Feature::Personality, true)]),
     )?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = McpProcess::new_without_managed_config(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    warm_model_catalog(&mut mcp).await?;
 
     let thread_req = mcp
         .send_thread_start_request(ThreadStartParams {
@@ -2076,15 +2097,15 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
     .await;
 
     let codex_home = TempDir::new()?;
-    create_config_toml(
+    create_openai_mock_config_toml(
         codex_home.path(),
         &server.uri(),
-        "never",
         &BTreeMap::from([(Feature::Collab, true)]),
     )?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = McpProcess::new_without_managed_config(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    warm_model_catalog(&mut mcp).await?;
 
     let thread_req = mcp
         .send_thread_start_request(ThreadStartParams {
@@ -2273,10 +2294,9 @@ async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2
     .await;
 
     let codex_home = TempDir::new()?;
-    create_config_toml(
+    create_openai_mock_config_toml(
         codex_home.path(),
         &server.uri(),
-        "never",
         &BTreeMap::from([(Feature::Collab, true)]),
     )?;
     std::fs::write(
@@ -2297,8 +2317,9 @@ config_file = "./custom-role.toml"
         ),
     )?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = McpProcess::new_without_managed_config(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    warm_model_catalog(&mut mcp).await?;
 
     let thread_req = mcp
         .send_thread_start_request(ThreadStartParams {
@@ -3008,6 +3029,40 @@ stream_max_retries = 0
 "#
         ),
     )
+}
+
+fn create_openai_mock_config_toml(
+    codex_home: &Path,
+    server_uri: &str,
+    feature_flags: &BTreeMap<Feature, bool>,
+) -> Result<()> {
+    create_config_toml(codex_home, server_uri, "never", feature_flags)?;
+    write_models_cache_with_models(codex_home, bundled_models_response()?.models)?;
+
+    let provider_cache_dir = codex_home.join("models-cache").join("mock_provider");
+    std::fs::create_dir_all(&provider_cache_dir)?;
+    std::fs::copy(
+        codex_home.join("models_cache.json"),
+        provider_cache_dir.join("models_cache.json"),
+    )?;
+    Ok(())
+}
+
+async fn warm_model_catalog(mcp: &mut McpProcess) -> Result<()> {
+    let request_id = mcp
+        .send_list_models_request(ModelListParams {
+            limit: Some(100),
+            cursor: None,
+            include_hidden: Some(true),
+            model_provider: None,
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    Ok(())
 }
 
 fn write_test_skill(codex_home: &Path, name: &str) -> std::io::Result<()> {

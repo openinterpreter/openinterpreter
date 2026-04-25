@@ -2,6 +2,10 @@ use std::io;
 use std::sync::LazyLock;
 
 use crate::legacy_core::config::set_default_oss_provider;
+use crate::style::app_accent_color;
+use crate::style::app_surface_bg;
+use crate::style::selected_option_style;
+use crate::style::unselected_option_style;
 use codex_model_provider_info::DEFAULT_LMSTUDIO_PORT;
 use codex_model_provider_info::DEFAULT_OLLAMA_PORT;
 use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
@@ -110,7 +114,7 @@ impl OssSelectionWidget<'_> {
 
         let mut contents: Vec<Line> = vec![
             Line::from(vec![
-                "? ".fg(Color::Blue),
+                "? ".fg(app_accent_color()),
                 "Select an open-source provider".bold(),
             ]),
             Line::from(""),
@@ -243,9 +247,13 @@ impl WidgetRef for &OssSelectionWidget<'_> {
             .enumerate()
             .map(|(idx, opt)| {
                 let style = if idx == self.selected_option {
-                    Style::new().bg(Color::Cyan).fg(Color::Black)
+                    Style::new()
+                        .bg(app_surface_bg())
+                        .patch(selected_option_style())
                 } else {
-                    Style::new().bg(Color::DarkGray)
+                    Style::new()
+                        .bg(app_surface_bg())
+                        .patch(unselected_option_style())
                 };
                 opt.label.clone().alignment(Alignment::Center).style(style)
             })
@@ -359,15 +367,13 @@ async fn check_ollama_status() -> ProviderStatus {
 }
 
 async fn check_port_status(port: u16) -> io::Result<bool> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .map_err(io::Error::other)?;
-
-    let url = format!("http://localhost:{port}");
-
-    match client.get(&url).send().await {
-        Ok(response) => Ok(response.status().is_success()),
-        Err(_) => Ok(false), // Connection failed = not running
+    match tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    {
+        Ok(Ok(_stream)) => Ok(true),
+        Ok(Err(_)) | Err(_) => Ok(false),
     }
 }

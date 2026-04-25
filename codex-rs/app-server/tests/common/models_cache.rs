@@ -85,6 +85,27 @@ pub fn write_models_cache_with_models(
     models: Vec<ModelInfo>,
 ) -> std::io::Result<()> {
     let cache_path = codex_home.join("models_cache.json");
+    write_cache(cache_path, models)
+}
+
+/// Write a provider-scoped models cache file.
+/// Useful when tests exercise provider-specific model resolution.
+pub fn write_provider_models_cache_with_models(
+    codex_home: &Path,
+    provider_id: &str,
+    models: Vec<ModelInfo>,
+) -> std::io::Result<()> {
+    let cache_path = codex_home
+        .join("models-cache")
+        .join(provider_id)
+        .join("models_cache.json");
+    if let Some(parent) = cache_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    write_cache(cache_path, models)
+}
+
+fn write_cache(cache_path: std::path::PathBuf, models: Vec<ModelInfo>) -> std::io::Result<()> {
     // DateTime<Utc> serializes to RFC3339 format by default with serde
     let fetched_at: DateTime<Utc> = Utc::now();
     let client_version = client_version_to_whole();

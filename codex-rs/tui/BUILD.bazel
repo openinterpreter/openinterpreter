@@ -3,6 +3,13 @@ load("//:defs.bzl", "MACOS_WEBRTC_RUSTC_LINK_FLAGS", "codex_rust_crate")
 codex_rust_crate(
     name = "tui",
     crate_name = "codex_tui",
+    crate_features = [
+        "cloud-requirements",
+        "embedded-app-server",
+        "realtime-audio",
+        "syntax-highlighting",
+        "system-browser",
+    ],
     compile_data = glob(
         include = ["**"],
         exclude = [

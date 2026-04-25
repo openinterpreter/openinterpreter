@@ -44,9 +44,36 @@ approval_mode = "prompt"
 
 ## Apps (Connectors)
 
-Use `$` in the composer to insert a ChatGPT connector; the popover lists accessible
-apps. The `/apps` command lists available and installed apps. Connected apps appear first
-and are labeled as connected; others are marked as can be installed.
+Apps/connectors are disabled by default so the base configuration stays provider-neutral.
+Enable them in `config.toml` if you specifically want the ChatGPT/OpenAI connector surface
+such as `$` mentions and `/apps`:
+
+```toml
+[features]
+apps = true
+```
+
+With `apps = true`, `$` in the composer inserts a ChatGPT connector and `/apps` lists
+available and installed apps. Connected apps appear first and are labeled as connected;
+others are marked as can be installed.
+
+## Plugins
+
+Plugins are also disabled by default. Enable them in `config.toml` if you want plugin
+bundles that can contribute skills, MCP servers, and app connectors:
+
+```toml
+[features]
+plugins = true
+```
+
+If you want the full app/plugin suggestion surface, enable both flags:
+
+```toml
+[features]
+apps = true
+plugins = true
+```
 
 ## Notify
 

@@ -1,0 +1,7 @@
+{
+  "force_hide_ids": [
+    "bedrock_mantle/openai.gpt-oss-safeguard-120b",
+    "bedrock_mantle/openai.gpt-oss-safeguard-20b",
+    "groq/openai/gpt-oss-safeguard-20b"
+  ]
+}

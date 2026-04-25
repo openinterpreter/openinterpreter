@@ -39,6 +39,7 @@ pub(super) async fn spawn_review_thread(
         sandbox_policy: parent_turn_context.sandbox_policy.get(),
         windows_sandbox_level: parent_turn_context.windows_sandbox_level,
     })
+    .with_harness(config.harness.as_deref())
     .with_unified_exec_shell_mode_for_session(
         crate::tools::spec::tool_user_shell_type(sess.services.user_shell.as_ref()),
         sess.services.shell_zsh_path.as_ref(),

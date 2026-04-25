@@ -11,6 +11,7 @@ use crate::fuzzy_file_search::FuzzyFileSearchSession;
 use crate::fuzzy_file_search::run_fuzzy_file_search;
 use crate::fuzzy_file_search::start_fuzzy_file_search_session;
 use crate::models::supported_models;
+use crate::models::supported_models_for_provider;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
 use crate::outgoing_message::OutgoingMessageSender;
@@ -210,7 +211,6 @@ use codex_arg0::Arg0DispatchPaths;
 use codex_backend_client::AddCreditsNudgeCreditType as BackendAddCreditsNudgeCreditType;
 use codex_backend_client::Client as BackendClient;
 use codex_chatgpt::connectors;
-use codex_cloud_requirements::cloud_requirements_loader;
 use codex_config::types::McpServerTransportConfig;
 use codex_core::CodexThread;
 use codex_core::ForkSnapshot;
@@ -341,6 +341,7 @@ use codex_thread_store::ThreadSortKey as StoreThreadSortKey;
 use codex_thread_store::ThreadStore;
 use codex_thread_store::ThreadStoreError;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_cli::normalize_thread_name;
 use codex_utils_json_to_toml::json_to_toml;
 use codex_utils_pty::DEFAULT_OUTPUT_BYTES_CAP;
 use std::collections::BTreeMap;
@@ -473,6 +474,7 @@ pub(crate) struct CodexMessageProcessor {
     thread_store: LocalThreadStore,
     cli_overrides: Arc<RwLock<Vec<(String, TomlValue)>>>,
     runtime_feature_enablement: Arc<RwLock<BTreeMap<String, bool>>>,
+    loader_overrides: LoaderOverrides,
     cloud_requirements: Arc<RwLock<CloudRequirementsLoader>>,
     active_login: Arc<Mutex<Option<ActiveLogin>>>,
     pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
@@ -633,6 +635,7 @@ pub(crate) struct CodexMessageProcessorArgs {
     pub(crate) config: Arc<Config>,
     pub(crate) cli_overrides: Arc<RwLock<Vec<(String, TomlValue)>>>,
     pub(crate) runtime_feature_enablement: Arc<RwLock<BTreeMap<String, bool>>>,
+    pub(crate) loader_overrides: LoaderOverrides,
     pub(crate) cloud_requirements: Arc<RwLock<CloudRequirementsLoader>>,
     pub(crate) feedback: CodexFeedback,
     pub(crate) log_db: Option<LogDbLayer>,
@@ -660,6 +663,16 @@ impl CodexMessageProcessor {
             auth_mode: auth.as_ref().map(CodexAuth::api_auth_mode),
             plan_type: auth.as_ref().and_then(CodexAuth::account_plan_type),
         }
+    }
+
+    async fn apps_enabled_for_config(&self, config: &Config) -> bool {
+        config.features.enabled(Feature::Apps)
+            && self
+                .auth_manager
+                .auth()
+                .await
+                .as_ref()
+                .is_some_and(CodexAuth::is_chatgpt_auth)
     }
 
     fn track_error_response(
@@ -711,6 +724,7 @@ impl CodexMessageProcessor {
             config,
             cli_overrides,
             runtime_feature_enablement,
+            loader_overrides,
             cloud_requirements,
             feedback,
             log_db,
@@ -725,6 +739,7 @@ impl CodexMessageProcessor {
             config,
             cli_overrides,
             runtime_feature_enablement,
+            loader_overrides,
             cloud_requirements,
             active_login: Arc::new(Mutex::new(None)),
             pending_thread_unloads: Arc::new(Mutex::new(HashSet::new())),
@@ -745,7 +760,9 @@ impl CodexMessageProcessor {
     ) -> Result<Config, JSONRPCErrorError> {
         let cloud_requirements = self.current_cloud_requirements();
         let mut config = codex_core::config::ConfigBuilder::default()
+            .codex_home(self.config.codex_home.clone().to_path_buf())
             .cli_overrides(self.current_cli_overrides())
+            .loader_overrides(self.loader_overrides.clone())
             .fallback_cwd(fallback_cwd)
             .cloud_requirements(cloud_requirements)
             .build()
@@ -1054,12 +1071,21 @@ impl CodexMessageProcessor {
                     .await;
             }
             ClientRequest::ModelList { request_id, params } => {
+                let config = match self.load_latest_config(/*fallback_cwd*/ None).await {
+                    Ok(config) => Arc::new(config),
+                    Err(error) => {
+                        self.outgoing
+                            .send_error(to_connection_request_id(request_id), error)
+                            .await;
+                        return;
+                    }
+                };
                 let outgoing = self.outgoing.clone();
-                let thread_manager = self.thread_manager.clone();
+                let auth_manager = self.auth_manager.clone();
                 let request_id = to_connection_request_id(request_id);
 
                 tokio::spawn(async move {
-                    Self::list_models(outgoing, thread_manager, request_id, params).await;
+                    Self::list_models(outgoing, config, auth_manager, request_id, params).await;
                 });
             }
             ClientRequest::ExperimentalFeatureList { request_id, params } => {
@@ -2950,7 +2976,7 @@ impl CodexMessageProcessor {
                 return;
             }
         };
-        let Some(name) = codex_core::util::normalize_thread_name(&name) else {
+        let Some(name) = normalize_thread_name(&name) else {
             self.send_invalid_request_error(
                 request_id,
                 "thread name must not be empty".to_string(),
@@ -5333,7 +5359,8 @@ impl CodexMessageProcessor {
 
     async fn list_models(
         outgoing: Arc<OutgoingMessageSender>,
-        thread_manager: Arc<ThreadManager>,
+        config: Arc<Config>,
+        auth_manager: Arc<AuthManager>,
         request_id: ConnectionRequestId,
         params: ModelListParams,
     ) {
@@ -5341,8 +5368,31 @@ impl CodexMessageProcessor {
             limit,
             cursor,
             include_hidden,
+            model_provider,
         } = params;
-        let models = supported_models(thread_manager, include_hidden.unwrap_or(false)).await;
+        let include_hidden = include_hidden.unwrap_or(false);
+        let models = match model_provider {
+            Some(provider_id) => match supported_models_for_provider(
+                &config,
+                auth_manager,
+                provider_id.as_str(),
+                include_hidden,
+            )
+            .await
+            {
+                Ok(models) => models,
+                Err(message) => {
+                    let error = JSONRPCErrorError {
+                        code: INVALID_PARAMS_ERROR_CODE,
+                        message,
+                        data: None,
+                    };
+                    outgoing.send_error(request_id, error).await;
+                    return;
+                }
+            },
+            None => supported_models(&config, auth_manager, include_hidden).await,
+        };
         let total = models.len();
 
         if total == 0 {
@@ -6184,11 +6234,7 @@ impl CodexMessageProcessor {
                 .set_enabled(Feature::Apps, thread.enabled(Feature::Apps));
         }
 
-        let auth = self.auth_manager.auth().await;
-        if !config
-            .features
-            .apps_enabled_for_auth(auth.as_ref().is_some_and(CodexAuth::is_chatgpt_auth))
-        {
+        if !self.apps_enabled_for_config(&config).await {
             self.outgoing
                 .send_response(
                     request_id,
@@ -6917,11 +6963,9 @@ impl CodexMessageProcessor {
                 }
 
                 let plugin_apps = load_plugin_apps(result.installed_path.as_path()).await;
-                let auth = self.auth_manager.auth().await;
                 let apps_needing_auth = if plugin_apps.is_empty()
-                    || !config.features.apps_enabled_for_auth(
-                        auth.as_ref().is_some_and(CodexAuth::is_chatgpt_auth),
-                    ) {
+                    || !self.apps_enabled_for_config(&config).await
+                {
                     Vec::new()
                 } else {
                     let (all_connectors_result, accessible_connectors_result) = tokio::join!(
@@ -9333,7 +9377,11 @@ fn replace_cloud_requirements_loader(
     chatgpt_base_url: String,
     codex_home: PathBuf,
 ) {
-    let loader = cloud_requirements_loader(auth_manager, chatgpt_base_url, codex_home);
+    let loader = crate::cloud_requirements_loader::build_cloud_requirements_loader(
+        auth_manager,
+        chatgpt_base_url,
+        codex_home,
+    );
     if let Ok(mut guard) = cloud_requirements.write() {
         *guard = loader;
     } else {
@@ -9587,6 +9635,7 @@ fn thread_from_stored_thread(
         forked_from_id: thread.forked_from_id.map(|id| id.to_string()),
         preview: thread.first_user_message.unwrap_or(thread.preview),
         ephemeral: false,
+        model: thread.model,
         model_provider: if thread.model_provider.is_empty() {
             fallback_provider.to_string()
         } else {
@@ -10006,6 +10055,7 @@ fn build_thread_from_snapshot(
         forked_from_id: None,
         preview: String::new(),
         ephemeral: config_snapshot.ephemeral,
+        model: Some(config_snapshot.model.clone()),
         model_provider: config_snapshot.model_provider_id.clone(),
         created_at: now,
         updated_at: now,
@@ -10061,6 +10111,7 @@ pub(crate) fn summary_to_thread(
         forked_from_id: None,
         preview,
         ephemeral: false,
+        model: None,
         model_provider,
         created_at: created_at.map(|dt| dt.timestamp()).unwrap_or(0),
         updated_at: updated_at.map(|dt| dt.timestamp()).unwrap_or(0),

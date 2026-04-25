@@ -1433,6 +1433,13 @@
             "integer",
             "null"
           ]
+        },
+        "modelProvider": {
+          "description": "Optional provider override; when set, list models for that configured provider instead of the active default provider.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"

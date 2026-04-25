@@ -11,6 +11,7 @@ workspace = true
 clap = { workspace = true, features = ["derive", "wrap_help"] }
 codex-protocol = { workspace = true }
 serde = { workspace = true }
+shlex = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]

@@ -1,5 +1,10 @@
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(all(
+    not(target_os = "android"),
+    feature = "clipboard",
+    feature = "rich-media"
+))]
 use tempfile::Builder;
 
 #[derive(Debug, Clone)]
@@ -47,7 +52,11 @@ pub struct PastedImageInfo {
 }
 
 /// Capture image from system clipboard, encode to PNG, and return bytes + info.
-#[cfg(not(target_os = "android"))]
+#[cfg(all(
+    not(target_os = "android"),
+    feature = "clipboard",
+    feature = "rich-media"
+))]
 pub fn paste_image_as_png() -> Result<(Vec<u8>, PastedImageInfo), PasteImageError> {
     let _span = tracing::debug_span!("paste_image_as_png").entered();
     tracing::debug!("attempting clipboard image read");
@@ -108,6 +117,17 @@ pub fn paste_image_as_png() -> Result<(Vec<u8>, PastedImageInfo), PasteImageErro
     ))
 }
 
+#[cfg(all(
+    not(target_os = "android"),
+    feature = "clipboard",
+    not(feature = "rich-media")
+))]
+pub fn paste_image_as_png() -> Result<(Vec<u8>, PastedImageInfo), PasteImageError> {
+    Err(PasteImageError::ClipboardUnavailable(
+        "clipboard image paste is unavailable in this build".into(),
+    ))
+}
+
 /// Android/Termux does not support arboard; return a clear error.
 #[cfg(target_os = "android")]
 pub fn paste_image_as_png() -> Result<(Vec<u8>, PastedImageInfo), PasteImageError> {
@@ -117,7 +137,11 @@ pub fn paste_image_as_png() -> Result<(Vec<u8>, PastedImageInfo), PasteImageErro
 }
 
 /// Convenience: write to a temp file and return its path + info.
-#[cfg(not(target_os = "android"))]
+#[cfg(all(
+    not(target_os = "android"),
+    feature = "clipboard",
+    feature = "rich-media"
+))]
 pub fn paste_image_to_temp_png() -> Result<(PathBuf, PastedImageInfo), PasteImageError> {
     // First attempt: read image from system clipboard via arboard (native paths or image data).
     match paste_image_as_png() {
@@ -149,13 +173,24 @@ pub fn paste_image_to_temp_png() -> Result<(PathBuf, PastedImageInfo), PasteImag
     }
 }
 
+#[cfg(all(
+    not(target_os = "android"),
+    feature = "clipboard",
+    not(feature = "rich-media")
+))]
+pub fn paste_image_to_temp_png() -> Result<(PathBuf, PastedImageInfo), PasteImageError> {
+    Err(PasteImageError::ClipboardUnavailable(
+        "clipboard image paste is unavailable in this build".into(),
+    ))
+}
+
 /// Attempt WSL fallback for clipboard image paste.
 ///
 /// If clipboard is unavailable (common under WSL because arboard cannot access
 /// the Windows clipboard), attempt a WSL fallback that calls PowerShell on the
 /// Windows side to write the clipboard image to a temporary file, then return
 /// the corresponding WSL path.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "rich-media"))]
 fn try_wsl_clipboard_fallback(
     error: &PasteImageError,
 ) -> Result<(PathBuf, PastedImageInfo), PasteImageError> {
@@ -195,7 +230,7 @@ fn try_wsl_clipboard_fallback(
 /// Try to call a Windows PowerShell command (several common names) to save the
 /// clipboard image to a temporary PNG and return the Windows path to that file.
 /// Returns None if no command succeeded or no image was present.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "rich-media"))]
 fn try_dump_windows_clipboard_image() -> Option<String> {
     // Powershell script: save image from clipboard to a temp png and print the path.
     // Force UTF-8 output to avoid encoding issues between powershell.exe (UTF-16LE default)
@@ -546,4 +581,17 @@ mod pasted_paths_tests {
             PathBuf::from("/mnt/c/Users/Alice/Pictures/example image.png")
         );
     }
+}
+#[cfg(all(not(target_os = "android"), not(feature = "clipboard")))]
+pub fn paste_image_as_png() -> Result<(Vec<u8>, PastedImageInfo), PasteImageError> {
+    Err(PasteImageError::ClipboardUnavailable(
+        "clipboard image paste is disabled in this build".into(),
+    ))
+}
+
+#[cfg(all(not(target_os = "android"), not(feature = "clipboard")))]
+pub fn paste_image_to_temp_png() -> Result<(PathBuf, PastedImageInfo), PasteImageError> {
+    Err(PasteImageError::ClipboardUnavailable(
+        "clipboard image paste is disabled in this build".into(),
+    ))
 }

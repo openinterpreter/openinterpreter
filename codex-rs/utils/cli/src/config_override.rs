@@ -18,9 +18,11 @@ use toml::Value;
 #[derive(Parser, Debug, Default, Clone)]
 pub struct CliConfigOverrides {
     /// Override a configuration value that would otherwise be loaded from
-    /// `~/.codex/config.toml`. Use a dotted path (`foo.bar.baz`) to override
-    /// nested values. The `value` portion is parsed as TOML. If it fails to
-    /// parse as TOML, the raw string is used as a literal.
+    /// the active CLI home `config.toml` (for example
+    /// `~/.codex/config.toml` or `~/.openinterpreter/config.toml`). Use a
+    /// dotted path (`foo.bar.baz`) to override nested values. The `value`
+    /// portion is parsed as TOML. If it fails to parse as TOML, the raw
+    /// string is used as a literal.
     ///
     /// Examples:
     ///   - `-c model="o3"`
@@ -32,6 +34,8 @@ pub struct CliConfigOverrides {
         value_name = "key=value",
         action = ArgAction::Append,
         global = true,
+        help = "Override a configuration value loaded from the active CLI home config.toml",
+        long_help = "Override a configuration value that would otherwise be loaded from the active CLI home `config.toml` (for example `~/.codex/config.toml` or `~/.openinterpreter/config.toml`). Use a dotted path (`foo.bar.baz`) to override nested values. The `value` portion is parsed as TOML. If it fails to parse as TOML, the raw string is used as a literal.\n\nExamples:\n  - `-c model=\"o3\"`\n  - `-c 'sandbox_permissions=[\"disk-full-read-access\"]'`\n  - `-c shell_environment_policy.inherit=all`",
     )]
     pub raw_overrides: Vec<String>,
 }

@@ -1,9 +1,9 @@
 ---
-source: tui/src/chatwidget/tests.rs
+source: tui/src/chatwidget/tests/popups_and_settings.rs
 expression: popup
 ---
   Select Personality
-  Choose a communication style for Codex.
+  Choose a communication style for Interpreter.
 
   1. Friendly             Warm, collaborative, and helpful.
 › 2. Pragmatic (current)  Concise, task-focused, and direct.

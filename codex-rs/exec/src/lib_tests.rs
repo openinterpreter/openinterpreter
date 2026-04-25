@@ -202,7 +202,7 @@ fn prompt_with_stdin_context_preserves_trailing_newline() {
 fn lagged_event_warning_message_is_explicit() {
     assert_eq!(
         lagged_event_warning_message(/*skipped*/ 7),
-        "in-process app-server event stream lagged; dropped 7 events".to_string()
+        "app-server event stream lagged; dropped 7 events".to_string()
     );
 }
 
@@ -247,6 +247,7 @@ fn turn_items_for_thread_returns_matching_turn_items() {
         forked_from_id: None,
         preview: String::new(),
         ephemeral: false,
+        model: Some("gpt-5.4".to_string()),
         model_provider: "openai".to_string(),
         created_at: 0,
         updated_at: 0,
@@ -386,6 +387,85 @@ async fn thread_start_params_include_review_policy_when_auto_review_is_enabled()
     );
 }
 
+#[tokio::test]
+async fn thread_start_params_forward_harness_and_selected_provider_config() {
+    let codex_home = tempdir().expect("create temp codex home");
+    let cwd = tempdir().expect("create temp cwd");
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        r#"
+model_provider = "anthropic"
+harness = "claude-code"
+
+[model_providers.anthropic]
+name = "Anthropic"
+base_url = "https://api.anthropic.com"
+env_key = "ANTHROPIC_API_KEY"
+wire_api = "responses"
+"#,
+    )
+    .expect("write config.toml");
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(cwd.path().to_path_buf()))
+        .build()
+        .await
+        .expect("build config with harness and provider config");
+
+    let params = thread_start_params_from_config(&config);
+    let overrides = params.config.expect("thread start config overrides");
+
+    assert_eq!(
+        overrides.get("harness"),
+        Some(&serde_json::Value::String("claude-code".to_string()))
+    );
+    assert_eq!(
+        overrides
+            .get("model_providers.anthropic")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|provider| provider.get("base_url"))
+            .and_then(serde_json::Value::as_str),
+        Some("https://api.anthropic.com")
+    );
+    assert_eq!(
+        overrides
+            .get("model_providers.anthropic")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|provider| provider.get("auth")),
+        None
+    );
+}
+
+#[tokio::test]
+async fn thread_start_params_forward_openai_base_url_without_provider_override() {
+    let codex_home = tempdir().expect("create temp codex home");
+    let cwd = tempdir().expect("create temp cwd");
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .cli_overrides(vec![
+            ("model_provider".to_string(), "openai".into()),
+            (
+                "openai_base_url".to_string(),
+                "http://127.0.0.1:4444/v1".into(),
+            ),
+        ])
+        .fallback_cwd(Some(cwd.path().to_path_buf()))
+        .build()
+        .await
+        .expect("build config with openai base url override");
+
+    let params = thread_start_params_from_config(&config);
+    let overrides = params.config.expect("thread start config overrides");
+
+    assert_eq!(
+        overrides.get("openai_base_url"),
+        Some(&serde_json::Value::String(
+            "http://127.0.0.1:4444/v1".to_string()
+        ))
+    );
+    assert_eq!(overrides.get("model_providers.openai"), None);
+}
+
 #[test]
 fn session_configured_from_thread_response_uses_review_policy_from_response() {
     let response = ThreadStartResponse {
@@ -394,6 +474,7 @@ fn session_configured_from_thread_response_uses_review_policy_from_response() {
             forked_from_id: None,
             preview: String::new(),
             ephemeral: false,
+            model: Some("gpt-5.4".to_string()),
             model_provider: "openai".to_string(),
             created_at: 0,
             updated_at: 0,

@@ -1,6 +1,4 @@
-use codex_app_server_protocol::ClientRequest;
-use codex_app_server_protocol::LoginAccountParams;
-use codex_app_server_protocol::LoginAccountResponse;
+use crate::style::app_accent_color;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::Widget;
@@ -8,78 +6,12 @@ use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
-use uuid::Uuid;
 
 use crate::shimmer::shimmer_spans;
 
 use super::AuthModeWidget;
 use super::ContinueWithDeviceCodeState;
-use super::SignInState;
-use super::cancel_login_attempt;
 use super::mark_url_hyperlink;
-use super::onboarding_request_id;
-
-pub(super) fn start_headless_chatgpt_login(widget: &mut AuthModeWidget) {
-    let request_id = Uuid::new_v4().to_string();
-    *widget.sign_in_state.write().unwrap() =
-        SignInState::ChatGptDeviceCode(ContinueWithDeviceCodeState::pending(request_id.clone()));
-    widget.request_frame.schedule_frame();
-
-    let request_handle = widget.app_server_request_handle.clone();
-    let sign_in_state = widget.sign_in_state.clone();
-    let request_frame = widget.request_frame.clone();
-    let error = widget.error.clone();
-    tokio::spawn(async move {
-        match request_handle
-            .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
-                request_id: onboarding_request_id(),
-                params: LoginAccountParams::ChatgptDeviceCode,
-            })
-            .await
-        {
-            Ok(LoginAccountResponse::ChatgptDeviceCode {
-                login_id,
-                verification_url,
-                user_code,
-            }) => {
-                let updated = set_device_code_state_for_active_attempt(
-                    &sign_in_state,
-                    &request_frame,
-                    &request_id,
-                    ContinueWithDeviceCodeState::ready(
-                        request_id.clone(),
-                        login_id.clone(),
-                        verification_url,
-                        user_code,
-                    ),
-                );
-                if updated {
-                    *error.write().unwrap() = None;
-                } else {
-                    cancel_login_attempt(&request_handle, login_id).await;
-                }
-            }
-            Ok(other) => {
-                let _updated = set_device_code_error_for_active_attempt(
-                    &sign_in_state,
-                    &request_frame,
-                    &error,
-                    &request_id,
-                    format!("Unexpected account/login/start response: {other:?}"),
-                );
-            }
-            Err(err) => {
-                let _updated = set_device_code_error_for_active_attempt(
-                    &sign_in_state,
-                    &request_frame,
-                    &error,
-                    &request_id,
-                    err.to_string(),
-                );
-            }
-        }
-    });
-}
 
 pub(super) fn render_device_code_login(
     widget: &AuthModeWidget,
@@ -87,14 +19,14 @@ pub(super) fn render_device_code_login(
     buf: &mut Buffer,
     state: &ContinueWithDeviceCodeState,
 ) {
-    let banner = if state.is_showing_copyable_auth() {
+    let banner = if state.user_code.is_some() {
         "Finish signing in via your browser"
     } else {
         "Preparing device code login"
     };
 
     let mut spans = vec!["  ".into()];
-    if widget.animations_enabled && !widget.animations_suppressed.get() {
+    if widget.animations_enabled {
         widget
             .request_frame
             .schedule_frame_in(std::time::Duration::from_millis(100));
@@ -112,7 +44,10 @@ pub(super) fn render_device_code_login(
         lines.push("".into());
         lines.push(Line::from(vec![
             "  ".into(),
-            verification_url.as_str().cyan().underlined(),
+            verification_url
+                .as_str()
+                .fg(app_accent_color())
+                .underlined(),
         ]));
         lines.push("".into());
         lines.push(
@@ -121,7 +56,7 @@ pub(super) fn render_device_code_login(
         lines.push("".into());
         lines.push(Line::from(vec![
             "  ".into(),
-            user_code.as_str().cyan().bold(),
+            user_code.as_str().fg(app_accent_color()).bold(),
         ]));
         lines.push("".into());
         lines.push(
@@ -144,165 +79,5 @@ pub(super) fn render_device_code_login(
 
     if let Some(url) = &verification_url {
         mark_url_hyperlink(buf, area, url);
-    }
-}
-
-fn device_code_attempt_matches(state: &SignInState, request_id: &str) -> bool {
-    matches!(
-        state,
-        SignInState::ChatGptDeviceCode(state) if state.request_id == request_id
-    )
-}
-
-fn set_device_code_state_for_active_attempt(
-    sign_in_state: &std::sync::Arc<std::sync::RwLock<SignInState>>,
-    request_frame: &crate::tui::FrameRequester,
-    request_id: &str,
-    next_state: ContinueWithDeviceCodeState,
-) -> bool {
-    let mut guard = sign_in_state.write().unwrap();
-    if !device_code_attempt_matches(&guard, request_id) {
-        return false;
-    }
-
-    *guard = SignInState::ChatGptDeviceCode(next_state);
-    drop(guard);
-    request_frame.schedule_frame();
-    true
-}
-
-fn set_device_code_error_for_active_attempt(
-    sign_in_state: &std::sync::Arc<std::sync::RwLock<SignInState>>,
-    request_frame: &crate::tui::FrameRequester,
-    error: &std::sync::Arc<std::sync::RwLock<Option<String>>>,
-    request_id: &str,
-    message: String,
-) -> bool {
-    let mut guard = sign_in_state.write().unwrap();
-    if !device_code_attempt_matches(&guard, request_id) {
-        return false;
-    }
-
-    *guard = SignInState::PickMode;
-    drop(guard);
-    *error.write().unwrap() = Some(message);
-    request_frame.schedule_frame();
-    true
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use pretty_assertions::assert_eq;
-    use std::sync::Arc;
-    use std::sync::RwLock;
-
-    fn pending_device_code_state(request_id: &str) -> Arc<RwLock<SignInState>> {
-        Arc::new(RwLock::new(SignInState::ChatGptDeviceCode(
-            ContinueWithDeviceCodeState::pending(request_id.to_string()),
-        )))
-    }
-
-    #[test]
-    fn device_code_attempt_matches_only_for_matching_request_id() {
-        let state = SignInState::ChatGptDeviceCode(ContinueWithDeviceCodeState::pending(
-            "request-1".to_string(),
-        ));
-
-        assert_eq!(device_code_attempt_matches(&state, "request-1"), true);
-        assert_eq!(device_code_attempt_matches(&state, "request-2"), false);
-        assert_eq!(
-            device_code_attempt_matches(&SignInState::PickMode, "request-1"),
-            false
-        );
-    }
-
-    #[test]
-    fn set_device_code_state_for_active_attempt_updates_only_when_active() {
-        let request_frame = crate::tui::FrameRequester::test_dummy();
-        let sign_in_state = pending_device_code_state("request-1");
-
-        assert_eq!(
-            set_device_code_state_for_active_attempt(
-                &sign_in_state,
-                &request_frame,
-                "request-1",
-                ContinueWithDeviceCodeState::ready(
-                    "request-1".to_string(),
-                    "login-1".to_string(),
-                    "https://example.com/device".to_string(),
-                    "ABCD-EFGH".to_string(),
-                ),
-            ),
-            true
-        );
-        assert!(matches!(
-            &*sign_in_state.read().unwrap(),
-            SignInState::ChatGptDeviceCode(state) if state.login_id() == Some("login-1")
-        ));
-
-        let sign_in_state = pending_device_code_state("request-2");
-        assert_eq!(
-            set_device_code_state_for_active_attempt(
-                &sign_in_state,
-                &request_frame,
-                "request-1",
-                ContinueWithDeviceCodeState::ready(
-                    "request-1".to_string(),
-                    "login-1".to_string(),
-                    "https://example.com/device".to_string(),
-                    "ABCD-EFGH".to_string(),
-                ),
-            ),
-            false
-        );
-        assert!(matches!(
-            &*sign_in_state.read().unwrap(),
-            SignInState::ChatGptDeviceCode(state) if state.login_id.is_none()
-        ));
-    }
-
-    #[test]
-    fn set_device_code_error_for_active_attempt_updates_only_when_active() {
-        let request_frame = crate::tui::FrameRequester::test_dummy();
-        let error = Arc::new(RwLock::new(None));
-        let sign_in_state = pending_device_code_state("request-1");
-
-        assert_eq!(
-            set_device_code_error_for_active_attempt(
-                &sign_in_state,
-                &request_frame,
-                &error,
-                "request-1",
-                "device code unavailable".to_string(),
-            ),
-            true
-        );
-        assert!(matches!(
-            &*sign_in_state.read().unwrap(),
-            SignInState::PickMode
-        ));
-        assert_eq!(
-            error.read().unwrap().as_deref(),
-            Some("device code unavailable")
-        );
-
-        let error = Arc::new(RwLock::new(None));
-        let sign_in_state = pending_device_code_state("request-2");
-        assert_eq!(
-            set_device_code_error_for_active_attempt(
-                &sign_in_state,
-                &request_frame,
-                &error,
-                "request-1",
-                "device code unavailable".to_string(),
-            ),
-            false
-        );
-        assert!(matches!(
-            &*sign_in_state.read().unwrap(),
-            SignInState::ChatGptDeviceCode(_)
-        ));
-        assert_eq!(*error.read().unwrap(), None);
     }
 }

@@ -1,0 +1,11 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+expression: popup
+---
+  Select Thinking Mode for claude-haiku-4-5-20251001
+
+› 1. On (default)  Use the model's default thinking behavior without forcing
+                   an effort level.
+  2. Off           Disable thinking explicitly for this model.
+
+  Press enter to confirm or esc to go back

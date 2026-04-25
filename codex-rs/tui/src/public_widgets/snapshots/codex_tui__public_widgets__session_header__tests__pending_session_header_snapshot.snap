@@ -1,0 +1,10 @@
+---
+source: tui/src/public_widgets/session_header.rs
+expression: rendered
+---
+╭───────────────────────────────────────╮
+│ >_ Open Interpreter (v0.0.0)          │
+│                                       │
+│ model:     loading   /model to change │
+│ directory: /tmp/project               │
+╰───────────────────────────────────────╯

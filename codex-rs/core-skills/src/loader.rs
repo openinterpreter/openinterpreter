@@ -104,6 +104,7 @@ struct DependencyTool {
 
 const SKILLS_FILENAME: &str = "SKILL.md";
 const AGENTS_DIR_NAME: &str = ".agents";
+const EXTERNAL_AGENT_DIR_NAME: &str = ".claude";
 const SKILLS_METADATA_DIR: &str = "agents";
 const SKILLS_METADATA_FILENAME: &str = "openai.yaml";
 const SKILLS_DIR_NAME: &str = "skills";
@@ -120,6 +121,13 @@ const MAX_DEPENDENCY_URL_LEN: usize = MAX_DESCRIPTION_LEN;
 // Traversal depth from the skills root.
 const MAX_SCAN_DEPTH: usize = 6;
 const MAX_SKILLS_DIRS_PER_ROOT: usize = 2000;
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum SkillsDiscoveryMode {
+    #[default]
+    Codex,
+    ClaudeCode,
+}
 
 #[derive(Debug)]
 enum SkillParseError {
@@ -209,6 +217,7 @@ pub(crate) async fn skill_roots(
     config_layer_stack: &ConfigLayerStack,
     cwd: &AbsolutePathBuf,
     plugin_skill_roots: Vec<AbsolutePathBuf>,
+    discovery_mode: SkillsDiscoveryMode,
 ) -> Vec<SkillRoot> {
     let home_dir =
         home_dir().and_then(|path| AbsolutePathBuf::from_absolute_path_checked(path).ok());
@@ -218,6 +227,7 @@ pub(crate) async fn skill_roots(
         cwd,
         home_dir.as_ref(),
         plugin_skill_roots,
+        discovery_mode,
     )
     .await
 }
@@ -228,14 +238,20 @@ async fn skill_roots_with_home_dir(
     cwd: &AbsolutePathBuf,
     home_dir: Option<&AbsolutePathBuf>,
     plugin_skill_roots: Vec<AbsolutePathBuf>,
+    discovery_mode: SkillsDiscoveryMode,
 ) -> Vec<SkillRoot> {
-    let mut roots = skill_roots_from_layer_stack_inner(config_layer_stack, home_dir, fs.clone());
+    let mut roots = skill_roots_from_layer_stack_inner(
+        config_layer_stack,
+        home_dir,
+        fs.clone(),
+        discovery_mode,
+    );
     roots.extend(plugin_skill_roots.into_iter().map(|path| SkillRoot {
         path,
         scope: SkillScope::User,
         file_system: Arc::clone(&LOCAL_FS),
     }));
-    roots.extend(repo_agents_skill_roots(fs, config_layer_stack, cwd).await);
+    roots.extend(repo_agents_skill_roots(fs, config_layer_stack, cwd, discovery_mode).await);
     dedupe_skill_roots_by_path(&mut roots);
     roots
 }
@@ -244,6 +260,7 @@ fn skill_roots_from_layer_stack_inner(
     config_layer_stack: &ConfigLayerStack,
     home_dir: Option<&AbsolutePathBuf>,
     repo_fs: Option<Arc<dyn ExecutorFileSystem>>,
+    discovery_mode: SkillsDiscoveryMode,
 ) -> Vec<SkillRoot> {
     let mut roots = Vec::new();
 
@@ -257,7 +274,9 @@ fn skill_roots_from_layer_stack_inner(
 
         match &layer.name {
             ConfigLayerSource::Project { .. } => {
-                if let Some(repo_fs) = &repo_fs {
+                if discovery_mode == SkillsDiscoveryMode::Codex
+                    && let Some(repo_fs) = &repo_fs
+                {
                     roots.push(SkillRoot {
                         path: config_folder.join(SKILLS_DIR_NAME),
                         scope: SkillScope::Repo,
@@ -266,39 +285,54 @@ fn skill_roots_from_layer_stack_inner(
                 }
             }
             ConfigLayerSource::User { .. } => {
-                // Deprecated user skills location (`$CODEX_HOME/skills`), kept for backward
-                // compatibility.
-                roots.push(SkillRoot {
-                    path: config_folder.join(SKILLS_DIR_NAME),
-                    scope: SkillScope::User,
-                    file_system: Arc::clone(&LOCAL_FS),
-                });
+                match discovery_mode {
+                    SkillsDiscoveryMode::Codex => {
+                        // Deprecated user skills location (`$CODEX_HOME/skills`), kept for backward
+                        // compatibility.
+                        roots.push(SkillRoot {
+                            path: config_folder.join(SKILLS_DIR_NAME),
+                            scope: SkillScope::User,
+                            file_system: Arc::clone(&LOCAL_FS),
+                        });
 
-                // `$HOME/.agents/skills` (user-installed skills).
-                if let Some(home_dir) = home_dir {
+                        // `$HOME/.agents/skills` (user-installed skills).
+                        if let Some(home_dir) = home_dir {
+                            roots.push(SkillRoot {
+                                path: home_dir.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME),
+                                scope: SkillScope::User,
+                                file_system: Arc::clone(&LOCAL_FS),
+                            });
+                        }
+
+                        // Embedded system skills are cached under `$CODEX_HOME/skills/.system`
+                        // and are a special case (not a config layer).
+                        roots.push(SkillRoot {
+                            path: system_cache_root_dir(&config_folder),
+                            scope: SkillScope::System,
+                            file_system: Arc::clone(&LOCAL_FS),
+                        });
+                    }
+                    SkillsDiscoveryMode::ClaudeCode => {
+                        if let Some(home_dir) = home_dir {
+                            roots.push(SkillRoot {
+                                path: home_dir.join(EXTERNAL_AGENT_DIR_NAME).join(SKILLS_DIR_NAME),
+                                scope: SkillScope::User,
+                                file_system: Arc::clone(&LOCAL_FS),
+                            });
+                        }
+                    }
+                }
+            }
+            ConfigLayerSource::System { .. } => {
+                if discovery_mode == SkillsDiscoveryMode::Codex {
+                    // The system config layer lives under `/etc/codex/` on Unix, so treat
+                    // `/etc/codex/skills` as admin-scoped skills.
                     roots.push(SkillRoot {
-                        path: home_dir.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME),
-                        scope: SkillScope::User,
+                        path: config_folder.join(SKILLS_DIR_NAME),
+                        scope: SkillScope::Admin,
                         file_system: Arc::clone(&LOCAL_FS),
                     });
                 }
-
-                // Embedded system skills are cached under `$CODEX_HOME/skills/.system` and are a
-                // special case (not a config layer).
-                roots.push(SkillRoot {
-                    path: system_cache_root_dir(&config_folder),
-                    scope: SkillScope::System,
-                    file_system: Arc::clone(&LOCAL_FS),
-                });
-            }
-            ConfigLayerSource::System { .. } => {
-                // The system config layer lives under `/etc/codex/` on Unix, so treat
-                // `/etc/codex/skills` as admin-scoped skills.
-                roots.push(SkillRoot {
-                    path: config_folder.join(SKILLS_DIR_NAME),
-                    scope: SkillScope::Admin,
-                    file_system: Arc::clone(&LOCAL_FS),
-                });
             }
             ConfigLayerSource::Mdm { .. }
             | ConfigLayerSource::SessionFlags
@@ -314,6 +348,7 @@ async fn repo_agents_skill_roots(
     fs: Option<Arc<dyn ExecutorFileSystem>>,
     config_layer_stack: &ConfigLayerStack,
     cwd: &AbsolutePathBuf,
+    discovery_mode: SkillsDiscoveryMode,
 ) -> Vec<SkillRoot> {
     let Some(fs) = fs else {
         return Vec::new();
@@ -322,8 +357,12 @@ async fn repo_agents_skill_roots(
     let project_root = find_project_root(fs.as_ref(), cwd, &project_root_markers).await;
     let dirs = dirs_between_project_root_and_cwd(cwd, &project_root);
     let mut roots = Vec::new();
+    let repo_skills_dir_name = match discovery_mode {
+        SkillsDiscoveryMode::Codex => AGENTS_DIR_NAME,
+        SkillsDiscoveryMode::ClaudeCode => EXTERNAL_AGENT_DIR_NAME,
+    };
     for dir in dirs {
-        let agents_skills = dir.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME);
+        let agents_skills = dir.join(repo_skills_dir_name).join(SKILLS_DIR_NAME);
         match fs.get_metadata(&agents_skills, /*sandbox*/ None).await {
             Ok(metadata) if metadata.is_directory => roots.push(SkillRoot {
                 path: agents_skills,
@@ -950,7 +989,33 @@ pub(crate) async fn skill_roots_from_layer_stack(
     cwd: &AbsolutePathBuf,
     home_dir: Option<&AbsolutePathBuf>,
 ) -> Vec<SkillRoot> {
-    skill_roots_with_home_dir(Some(fs), config_layer_stack, cwd, home_dir, Vec::new()).await
+    skill_roots_from_layer_stack_with_mode(
+        fs,
+        config_layer_stack,
+        cwd,
+        home_dir,
+        SkillsDiscoveryMode::Codex,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn skill_roots_from_layer_stack_with_mode(
+    fs: Arc<dyn ExecutorFileSystem>,
+    config_layer_stack: &ConfigLayerStack,
+    cwd: &AbsolutePathBuf,
+    home_dir: Option<&AbsolutePathBuf>,
+    discovery_mode: SkillsDiscoveryMode,
+) -> Vec<SkillRoot> {
+    skill_roots_with_home_dir(
+        Some(fs),
+        config_layer_stack,
+        cwd,
+        home_dir,
+        Vec::new(),
+        discovery_mode,
+    )
+    .await
 }
 
 #[cfg(test)]

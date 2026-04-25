@@ -1,0 +1,11 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+expression: popup
+---
+  Select Model and Reasoning
+  Pick a listed model, or enter a custom model name for this provider.
+
+  nano
+› gpt-5.4-nano  Fast small model
+
+  Type to filter • Enter to configure reasoning • Esc to dismiss

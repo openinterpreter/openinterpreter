@@ -9,9 +9,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
-use ratatui::widgets::Paragraph;
 use ratatui::widgets::WidgetRef;
-use ratatui::widgets::Wrap;
 
 use crate::key_hint;
 use crate::onboarding::onboarding_screen::KeyboardHandler;
@@ -44,25 +42,16 @@ impl WidgetRef for &TrustDirectoryWidget {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
         let mut column = ColumnRenderable::new();
 
-        column.push(Line::from(vec![
-            "> ".into(),
-            "You are in ".bold(),
-            self.cwd.to_string_lossy().to_string().into(),
-        ]));
         column.push("");
-
+        column.push("  You are in".dim());
         column.push(
-            Paragraph::new(
-                "Do you trust the contents of this directory? Working with untrusted \
-                 contents comes with higher risk of prompt injection. Trusting the \
-                 directory allows project-local config, hooks, and exec policies to load."
-                    .to_string(),
-            )
-            .wrap(Wrap { trim: true })
-            .inset(Insets::tlbr(
+            Line::from(self.cwd.to_string_lossy().to_string()).inset(Insets::tlbr(
                 /*top*/ 0, /*left*/ 2, /*bottom*/ 0, /*right*/ 0,
             )),
         );
+        column.push("");
+        column.push("  Do you trust the contents of this directory?");
+        column.push("  Untrusted directories can contain prompt injection.");
         column.push("");
 
         let options: Vec<(&str, TrustDirectorySelection)> = vec![
@@ -78,20 +67,15 @@ impl WidgetRef for &TrustDirectoryWidget {
             ));
         }
 
-        column.push("");
-
         if let Some(error) = &self.error {
-            column.push(
-                Paragraph::new(error.to_string())
-                    .red()
-                    .wrap(Wrap { trim: true })
-                    .inset(Insets::tlbr(
-                        /*top*/ 0, /*left*/ 2, /*bottom*/ 0, /*right*/ 0,
-                    )),
-            );
+            column.push("");
+            column.push(Line::from(error.to_string()).red().inset(Insets::tlbr(
+                /*top*/ 0, /*left*/ 2, /*bottom*/ 0, /*right*/ 0,
+            )));
             column.push("");
         }
 
+        column.push("");
         column.push(
             Line::from(vec![
                 "Press ".dim(),

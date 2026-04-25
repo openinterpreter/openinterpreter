@@ -13,6 +13,7 @@ use ratatui::widgets::Widget;
 use std::cell::RefCell;
 
 use crate::render::renderable::Renderable;
+use crate::style::app_accent_color;
 
 use super::popup_consts::standard_popup_hint_line;
 
@@ -31,6 +32,7 @@ pub(crate) struct CustomPromptView {
     placeholder: String,
     context_label: Option<String>,
     on_submit: PromptSubmitted,
+    allow_empty_submit: bool,
 
     // UI state
     textarea: TextArea,
@@ -57,10 +59,22 @@ impl CustomPromptView {
             placeholder,
             context_label,
             on_submit,
+            allow_empty_submit: false,
             textarea,
             textarea_state: RefCell::new(TextAreaState::default()),
             completion: None,
         }
+    }
+
+    pub(crate) fn with_initial_text(mut self, text: String) -> Self {
+        self.textarea.set_text_clearing_elements(&text);
+        self.textarea.set_cursor(self.textarea.text().len());
+        self
+    }
+
+    pub(crate) fn allow_empty_submit(mut self) -> Self {
+        self.allow_empty_submit = true;
+        self
     }
 }
 
@@ -78,7 +92,7 @@ impl BottomPaneView for CustomPromptView {
                 ..
             } => {
                 let text = self.textarea.text().trim().to_string();
-                if !text.is_empty() {
+                if self.allow_empty_submit || !text.is_empty() {
                     (self.on_submit)(text);
                     self.completion = Some(ViewCompletion::Accepted);
                 }
@@ -149,7 +163,8 @@ impl Renderable for CustomPromptView {
                 width: area.width,
                 height: 1,
             };
-            let spans: Vec<Span<'static>> = vec![gutter(), context_label.clone().cyan()];
+            let spans: Vec<Span<'static>> =
+                vec![gutter(), context_label.clone().fg(app_accent_color())];
             Paragraph::new(Line::from(spans)).render(context_area, buf);
             input_y = input_y.saturating_add(1);
         }
@@ -255,5 +270,5 @@ impl CustomPromptView {
 }
 
 fn gutter() -> Span<'static> {
-    "▌ ".cyan()
+    "▌ ".fg(app_accent_color())
 }

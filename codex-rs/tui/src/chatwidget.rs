@@ -56,6 +56,7 @@ use crate::bottom_pane::StatusLinePreviewData;
 use crate::bottom_pane::StatusLineSetupView;
 use crate::bottom_pane::TerminalTitleItem;
 use crate::bottom_pane::TerminalTitleSetupView;
+use crate::feedback_support::CodexFeedback;
 use crate::legacy_core::DEFAULT_AGENTS_MD_FILENAME;
 use crate::legacy_core::config::Config;
 use crate::legacy_core::config::Constrained;
@@ -69,16 +70,20 @@ use crate::mention_codec::LinkedMention;
 use crate::mention_codec::encode_history_mentions;
 use crate::model_catalog::ModelCatalog;
 use crate::multi_agents;
+use crate::product_branding::ProductBranding;
 use crate::status::RateLimitWindowDisplay;
 use crate::status::StatusAccountDisplay;
 use crate::status::StatusHistoryHandle;
 use crate::status::format_directory_display;
 use crate::status::format_tokens_compact;
 use crate::status::rate_limit_snapshot_display_for_limit;
+use crate::telemetry::RuntimeMetricsSummary;
+use crate::telemetry::SessionTelemetry;
 use crate::terminal_title::SetTerminalTitleResult;
 use crate::terminal_title::clear_terminal_title;
 use crate::terminal_title::set_terminal_title;
 use crate::text_formatting::proper_join;
+use crate::turn_sleep_inhibitor::SleepInhibitor;
 use crate::version::CODEX_CLI_VERSION;
 use codex_app_server_protocol::AppInfo;
 use codex_app_server_protocol::AppSummary;
@@ -117,8 +122,6 @@ use codex_git_utils::current_branch_name;
 use codex_git_utils::get_git_repo_root;
 use codex_git_utils::local_git_branches;
 use codex_git_utils::recent_commits;
-use codex_otel::RuntimeMetricsSummary;
-use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
 use codex_protocol::account::PlanType;
 use codex_protocol::approvals::ElicitationRequestEvent;
@@ -227,7 +230,6 @@ use codex_terminal_detection::TerminalInfo;
 use codex_terminal_detection::TerminalName;
 use codex_terminal_detection::terminal_info;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use codex_utils_sleep_inhibitor::SleepInhibitor;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -360,6 +362,7 @@ use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
 mod interrupts;
 use self::interrupts::InterruptManager;
+mod model_selection;
 mod session_header;
 use self::session_header::SessionHeader;
 mod skills;
@@ -566,7 +569,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) enhanced_keys_supported: bool,
     pub(crate) has_chatgpt_account: bool,
     pub(crate) model_catalog: Arc<ModelCatalog>,
-    pub(crate) feedback: codex_feedback::CodexFeedback,
+    pub(crate) feedback: CodexFeedback,
     pub(crate) is_first_run: bool,
     pub(crate) status_account_display: Option<StatusAccountDisplay>,
     pub(crate) initial_plan_type: Option<PlanType>,
@@ -957,7 +960,7 @@ pub(crate) struct ChatWidget {
     turn_runtime_metrics: RuntimeMetricsSummary,
     last_rendered_width: std::cell::Cell<Option<usize>>,
     // Feedback sink for /feedback
-    feedback: codex_feedback::CodexFeedback,
+    feedback: CodexFeedback,
     // Current session rollout path (if known)
     current_rollout_path: Option<PathBuf>,
     // Current working directory (if known)
@@ -2951,8 +2954,12 @@ impl ChatWidget {
         self.submit_pending_steers_after_interrupt = false;
         self.finalize_turn();
 
+        let branding = ProductBranding::current();
         let message = if message.trim().is_empty() {
-            "Codex is currently experiencing high load.".to_string()
+            format!(
+                "{} is currently experiencing high load.",
+                branding.agent_name()
+            )
         } else {
             message
         };
@@ -7793,8 +7800,8 @@ impl ChatWidget {
         });
     }
 
-    /// Open a popup to choose a quick auto model. Selecting "All models"
-    /// opens the full picker with every available preset.
+    /// Open the provider-first model flow. Users pick a provider, then a
+    /// provider-specific model, then the reasoning/thinking setting.
     pub(crate) fn open_model_popup(&mut self) {
         if !self.is_session_configured() {
             self.add_info_message(
@@ -7804,17 +7811,7 @@ impl ChatWidget {
             return;
         }
 
-        let presets: Vec<ModelPreset> = match self.model_catalog.try_list_models() {
-            Ok(models) => models,
-            Err(_) => {
-                self.add_info_message(
-                    "Models are being updated; please try /model again in a moment.".to_string(),
-                    /*hint*/ None,
-                );
-                return;
-            }
-        };
-        self.open_model_popup_with_presets(presets);
+        self.open_model_provider_popup();
     }
 
     pub(crate) fn open_personality_popup(&mut self) {
@@ -7878,8 +7875,15 @@ impl ChatWidget {
             .collect();
 
         let mut header = ColumnRenderable::new();
+        let branding = ProductBranding::current();
         header.push(Line::from("Select Personality".bold()));
-        header.push(Line::from("Choose a communication style for Codex.".dim()));
+        header.push(Line::from(
+            format!(
+                "Choose a communication style for {}.",
+                branding.agent_name()
+            )
+            .dim(),
+        ));
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
             header: Box::new(header),
@@ -7913,9 +7917,10 @@ impl ChatWidget {
         })
         .collect();
 
+        let branding = ProductBranding::current();
         self.bottom_pane.show_selection_view(SelectionViewParams {
             title: Some("Settings".to_string()),
-            subtitle: Some("Configure settings for Codex.".to_string()),
+            subtitle: Some(format!("Configure settings for {}.", branding.agent_name())),
             footer_hint: Some(standard_popup_hint_line()),
             items,
             ..Default::default()
@@ -8215,9 +8220,13 @@ impl ChatWidget {
             });
         }
 
+        let branding = ProductBranding::current();
         let header = self.model_menu_header(
             "Select Model and Effort",
-            "Access legacy models by running codex -m <model_name> or in your config.toml",
+            &format!(
+                "Access legacy models by running {} -m <model_name> or in your config.toml",
+                branding.command_name()
+            ),
         );
         self.bottom_pane.show_selection_view(SelectionViewParams {
             footer_hint: Some("Press enter to select reasoning effort, or esc to dismiss.".into()),

@@ -237,6 +237,8 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         prompt,
         output_schema: output_schema_path,
         config_overrides,
+        remote: _,
+        remote_auth_token_env: _,
     } = cli;
 
     let (_stdout_with_ansi, stderr_with_ansi) = match color {

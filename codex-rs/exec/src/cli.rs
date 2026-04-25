@@ -8,7 +8,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(
     version,
-    override_usage = "codex exec [OPTIONS] [PROMPT]\n       codex exec [OPTIONS] <COMMAND> [ARGS]"
+    override_usage = "interpreter exec [OPTIONS] [PROMPT]\n       interpreter exec [OPTIONS] <COMMAND> [ARGS]"
 )]
 pub struct Cli {
     /// Action to perform. If omitted, runs a new non-interactive session.
@@ -66,7 +66,7 @@ pub struct Cli {
     #[clap(long = "cd", short = 'C', value_name = "DIR")]
     pub cwd: Option<PathBuf>,
 
-    /// Allow running Codex outside a Git repository.
+    /// Allow running Interpreter outside a Git repository.
     #[arg(long = "skip-git-repo-check", global = true, default_value_t = false)]
     pub skip_git_repo_check: bool,
 
@@ -84,6 +84,16 @@ pub struct Cli {
 
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
+
+    /// Internal: connect to a remote app server websocket endpoint instead of
+    /// starting an in-process app server.
+    #[arg(long = "remote", value_name = "ADDR", hide = true)]
+    pub remote: Option<String>,
+
+    /// Internal: environment variable containing the bearer token for
+    /// `--remote`.
+    #[arg(long = "remote-auth-token-env", value_name = "ENV_VAR", hide = true)]
+    pub remote_auth_token_env: Option<String>,
 
     /// Specifies color settings for use in the output.
     #[arg(long = "color", value_enum, default_value_t = Color::Auto)]
@@ -126,7 +136,7 @@ pub enum Command {
 #[derive(Args, Debug)]
 struct ResumeArgsRaw {
     // Note: This is the direct clap shape. We reinterpret the positional when --last is set
-    // so "codex resume --last <prompt>" treats the positional as a prompt, not a session id.
+    // so "interpreter resume --last <prompt>" treats the positional as a prompt, not a session id.
     /// Conversation/session id (UUID) or thread name. UUIDs take precedence if it parses.
     /// If omitted, use --last to pick the most recent recorded session.
     #[arg(value_name = "SESSION_ID")]

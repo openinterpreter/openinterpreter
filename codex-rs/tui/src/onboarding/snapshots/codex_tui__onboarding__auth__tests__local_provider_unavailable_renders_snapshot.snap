@@ -1,0 +1,11 @@
+---
+source: tui/src/onboarding/auth.rs
+expression: terminal.backend()
+---
+> Ollama
+
+  Ollama is not running on localhost:11434.
+  Press S to start `ollama serve`.
+
+  Press Enter to type a model manually
+  Press Esc to go back

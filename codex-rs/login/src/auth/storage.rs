@@ -20,7 +20,7 @@ use tracing::warn;
 
 use crate::token_data::TokenData;
 use codex_app_server_protocol::AuthMode;
-use codex_config::types::AuthCredentialsStoreMode;
+pub use codex_config::types::AuthCredentialsStoreMode;
 use codex_keyring_store::DefaultKeyringStore;
 use codex_keyring_store::KeyringStore;
 use once_cell::sync::Lazy;

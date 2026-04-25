@@ -33,6 +33,8 @@ use crate::bottom_pane::TerminalTitleItem;
 use crate::chatwidget::UserMessage;
 use crate::history_cell::HistoryCell;
 use crate::legacy_core::plugins::PluginCapabilitySummary;
+use crate::onboarding::model_selection::LoadingProviderModelsState;
+use crate::onboarding::provider_setup::ProviderPreset;
 
 use codex_config::types::ApprovalsReviewer;
 use codex_features::Feature;
@@ -369,6 +371,71 @@ pub(crate) enum AppEvent {
     PersistModelSelection {
         model: String,
         effort: Option<ReasoningEffort>,
+    },
+
+    /// Configure a provider preset if needed, then load its advertised model list.
+    ConfigureProviderPresetAndLoadModels {
+        preset: ProviderPreset,
+    },
+
+    /// Load the model list for a provider.
+    LoadProviderModels {
+        loading_state: LoadingProviderModelsState,
+    },
+
+    /// Result of loading the model list for a provider.
+    ProviderModelsLoaded {
+        loading_state: LoadingProviderModelsState,
+        result: Result<Vec<ModelPreset>, String>,
+    },
+
+    /// Open the next prompt in the custom compatible-provider flow.
+    OpenCustomProviderBaseUrlPrompt {
+        preset: ProviderPreset,
+        provider_name: String,
+    },
+
+    /// Open the API key prompt in the provider setup flow.
+    OpenCustomProviderApiKeyPrompt {
+        preset: ProviderPreset,
+        provider_name: String,
+        base_url: String,
+    },
+
+    /// Persist a custom compatible-provider definition, then load its models.
+    ConfigureCustomProviderAndLoadModels {
+        preset: ProviderPreset,
+        provider_name: String,
+        base_url: String,
+        api_key: String,
+        api_key_prefilled_from_env: bool,
+    },
+
+    /// Open the manual model entry prompt for a provider.
+    OpenCustomProviderModelPrompt {
+        provider_id: String,
+        provider_name: String,
+        initial_text: Option<String>,
+    },
+
+    /// Open provider-specific reasoning/thinking selection.
+    OpenReasoningPopupForProvider {
+        provider_id: String,
+        provider_name: String,
+        model: ModelPreset,
+    },
+
+    /// Persist provider/model/harness selection and start a fresh chat.
+    PersistProviderModelSelection {
+        provider_id: String,
+        provider_name: String,
+        model: String,
+        effort: Option<ReasoningEffort>,
+    },
+
+    /// Start a local provider, wait for readiness, then load its models.
+    StartLocalProviderAndLoadModels {
+        loading_state: LoadingProviderModelsState,
     },
 
     /// Persist the selected personality to the appropriate config.

@@ -7,15 +7,20 @@ use std::sync::Arc;
 use crate::app_server_session::AppServerSession;
 use crate::diff_render::display_path_for;
 use crate::key_hint;
+#[cfg(not(feature = "thin-client"))]
 use crate::legacy_core::Cursor;
+#[cfg(not(feature = "thin-client"))]
 use crate::legacy_core::INTERACTIVE_SESSION_SOURCES;
+#[cfg(not(feature = "thin-client"))]
 use crate::legacy_core::RolloutRecorder;
+#[cfg(not(feature = "thin-client"))]
 use crate::legacy_core::ThreadItem;
-use crate::legacy_core::ThreadSortKey;
+#[cfg(not(feature = "thin-client"))]
 use crate::legacy_core::ThreadsPage;
 use crate::legacy_core::config::Config;
 use crate::legacy_core::find_thread_names_by_ids;
 use crate::legacy_core::path_utils;
+use crate::style::app_accent_color;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
 use crate::tui::Tui;
@@ -46,6 +51,7 @@ use unicode_width::UnicodeWidthStr;
 
 const PAGE_SIZE: usize = 25;
 const LOAD_NEAR_THRESHOLD: usize = 5;
+type ThreadSortKey = AppServerThreadSortKey;
 
 #[derive(Debug, Clone)]
 pub struct SessionTarget {
@@ -127,6 +133,7 @@ enum BackgroundEvent {
 
 #[derive(Clone)]
 enum PageCursor {
+    #[cfg(not(feature = "thin-client"))]
     #[allow(dead_code)]
     Rollout(Cursor),
     AppServer(String),
@@ -155,6 +162,7 @@ struct PickerPage {
 /// 1. Provider and source filtering at the backend (only interactive CLI sessions
 ///    for the current model provider).
 /// 2. Working-directory filtering at the picker (unless `--all` is passed).
+#[cfg(not(feature = "thin-client"))]
 #[allow(dead_code)]
 pub async fn run_resume_picker(
     tui: &mut Tui,
@@ -217,6 +225,7 @@ pub async fn run_fork_picker_with_app_server(
     .await
 }
 
+#[cfg(not(feature = "thin-client"))]
 #[allow(dead_code)]
 async fn run_session_picker(
     tui: &mut Tui,
@@ -265,6 +274,7 @@ async fn run_session_picker_with_loader(
     let mut state = PickerState::new(
         codex_home.to_path_buf(),
         alt.tui.frame_requester(),
+        is_remote,
         page_loader,
         provider_filter,
         show_all,
@@ -311,6 +321,7 @@ async fn run_session_picker_with_loader(
     Ok(SessionSelection::StartFresh)
 }
 
+#[cfg(not(feature = "thin-client"))]
 #[allow(dead_code)]
 fn spawn_rollout_page_loader(
     config: &Config,
@@ -335,8 +346,8 @@ fn spawn_rollout_page_loader(
                 &config,
                 PAGE_SIZE,
                 cursor,
-                request.sort_key,
-                codex_rollout::SortDirection::Desc,
+                rollout_sort_key(request.sort_key),
+                crate::legacy_core::SortDirection::Desc,
                 INTERACTIVE_SESSION_SOURCES.as_slice(),
                 default_provider.as_ref().map(std::slice::from_ref),
                 default_provider.as_deref().unwrap_or_default(),
@@ -366,6 +377,7 @@ fn spawn_app_server_page_loader(
         while let Some(request) = request_rx.recv().await {
             let cursor = match request.cursor {
                 Some(PageCursor::AppServer(cursor)) => Some(cursor),
+                #[cfg(not(feature = "thin-client"))]
                 Some(PageCursor::Rollout(_)) => None,
                 None => None,
             };
@@ -427,6 +439,7 @@ struct PickerState {
     codex_home: PathBuf,
     requester: FrameRequester,
     relative_time_reference: Option<DateTime<Utc>>,
+    is_remote: bool,
     pagination: PaginationState,
     all_rows: Vec<Row>,
     filtered_rows: Vec<Row>,
@@ -576,6 +589,7 @@ impl PickerState {
     fn new(
         codex_home: PathBuf,
         requester: FrameRequester,
+        is_remote: bool,
         page_loader: PageLoader,
         provider_filter: ProviderFilter,
         show_all: bool,
@@ -586,6 +600,7 @@ impl PickerState {
             codex_home,
             requester,
             relative_time_reference: None,
+            is_remote,
             pagination: PaginationState {
                 next_cursor: None,
                 num_scanned_files: 0,
@@ -853,6 +868,10 @@ impl PickerState {
     }
 
     async fn update_thread_names(&mut self) {
+        if self.is_remote {
+            return;
+        }
+
         let mut missing_ids = HashSet::new();
         for row in &self.all_rows {
             let Some(thread_id) = row.thread_id else {
@@ -1096,6 +1115,7 @@ impl PickerState {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+#[cfg(not(feature = "thin-client"))]
 fn picker_page_from_rollout_page(page: ThreadsPage) -> PickerPage {
     PickerPage {
         rows: rows_from_items(page.items),
@@ -1105,11 +1125,13 @@ fn picker_page_from_rollout_page(page: ThreadsPage) -> PickerPage {
     }
 }
 
+#[cfg(not(feature = "thin-client"))]
 #[cfg_attr(not(test), allow(dead_code))]
 fn rows_from_items(items: Vec<ThreadItem>) -> Vec<Row> {
     items.into_iter().map(|item| head_to_row(&item)).collect()
 }
 
+#[cfg(not(feature = "thin-client"))]
 #[cfg_attr(not(test), allow(dead_code))]
 fn head_to_row(item: &ThreadItem) -> Row {
     let created_at = item.created_at.as_deref().and_then(parse_timestamp_str);
@@ -1166,6 +1188,14 @@ fn row_from_app_server_thread(thread: Thread) -> Option<Row> {
     })
 }
 
+#[cfg(not(feature = "thin-client"))]
+fn rollout_sort_key(sort_key: ThreadSortKey) -> codex_core::ThreadSortKey {
+    match sort_key {
+        ThreadSortKey::CreatedAt => codex_core::ThreadSortKey::CreatedAt,
+        ThreadSortKey::UpdatedAt => codex_core::ThreadSortKey::UpdatedAt,
+    }
+}
+
 fn thread_list_params(
     cursor: Option<String>,
     cwd_filter: Option<&Path>,
@@ -1220,7 +1250,7 @@ fn draw_picker(tui: &mut Tui, state: &PickerState) -> std::io::Result<()> {
 
         // Header
         let header_line: Line = vec![
-            state.action.title().bold().cyan(),
+            state.action.title().bold().fg(app_accent_color()),
             "  ".into(),
             "Sort:".dim(),
             " ".into(),
@@ -1336,7 +1366,7 @@ fn render_list(
                 .dim(),
             )
         } else {
-            Some(Span::from(format!("{branch_label:<max_branch_width$}")).cyan())
+            Some(Span::from(format!("{branch_label:<max_branch_width$}")).fg(app_accent_color()))
         };
         let cwd_span = if !visibility.show_cwd {
             None
@@ -1684,6 +1714,12 @@ fn column_visibility(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(feature = "thin-client"))]
+    use crate::legacy_core::Cursor;
+    #[cfg(not(feature = "thin-client"))]
+    use crate::legacy_core::ThreadItem;
+    #[cfg(not(feature = "thin-client"))]
+    use crate::legacy_core::ThreadsPage;
     use chrono::Duration;
     use codex_protocol::ThreadId;
     use codex_utils_absolute_path::test_support::PathBufExt;
@@ -1695,6 +1731,7 @@ mod tests {
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
     use serde_json::json;
+
     use std::fs::FileTimes;
     use std::fs::OpenOptions;
     use std::path::Path;
@@ -1702,6 +1739,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
 
+    #[cfg(not(feature = "thin-client"))]
     fn make_item(path: &str, ts: &str, preview: &str) -> ThreadItem {
         ThreadItem {
             path: PathBuf::from(path),
@@ -1712,11 +1750,13 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "thin-client"))]
     fn cursor_from_str(repr: &str) -> Cursor {
         serde_json::from_str::<Cursor>(&format!("\"{repr}\""))
             .expect("cursor format should deserialize")
     }
 
+    #[cfg(not(feature = "thin-client"))]
     fn page(
         items: Vec<ThreadItem>,
         next_cursor: Option<Cursor>,
@@ -1732,6 +1772,7 @@ mod tests {
     }
 
     #[allow(dead_code)]
+    #[cfg(not(feature = "thin-client"))]
     fn set_rollout_mtime(path: &Path, updated_at: DateTime<Utc>) {
         let times = FileTimes::new().set_modified(updated_at.into());
         OpenOptions::new()
@@ -1829,6 +1870,7 @@ mod tests {
     //     );
     // }
 
+    #[cfg(not(feature = "thin-client"))]
     #[test]
     fn head_to_row_uses_first_user_message() {
         let item = ThreadItem {
@@ -1842,6 +1884,7 @@ mod tests {
         assert_eq!(row.preview, "real question");
     }
 
+    #[cfg(not(feature = "thin-client"))]
     #[test]
     fn rows_from_items_preserves_backend_order() {
         // Construct two items with different timestamps and real user text.
@@ -1866,6 +1909,7 @@ mod tests {
         assert!(rows[1].preview.contains('B'));
     }
 
+    #[cfg(not(feature = "thin-client"))]
     #[test]
     fn row_uses_tail_timestamp_for_updated_at() {
         let item = ThreadItem {
@@ -1944,6 +1988,7 @@ mod tests {
         let state = PickerState::new(
             PathBuf::from("/tmp"),
             FrameRequester::test_dummy(),
+            /*is_remote*/ true,
             loader,
             ProviderFilter::Any,
             /*show_all*/ false,
@@ -1975,6 +2020,7 @@ mod tests {
         let mut state = PickerState::new(
             PathBuf::from("/tmp"),
             FrameRequester::test_dummy(),
+            /*is_remote*/ false,
             loader,
             ProviderFilter::MatchDefault(String::from("openai")),
             /*show_all*/ true,
@@ -2054,6 +2100,7 @@ mod tests {
         let mut state = PickerState::new(
             PathBuf::from("/tmp"),
             FrameRequester::test_dummy(),
+            /*is_remote*/ false,
             loader,
             ProviderFilter::MatchDefault(String::from("openai")),
             /*show_all*/ true,
@@ -2290,6 +2337,7 @@ mod tests {
         let mut state = PickerState::new(
             tempdir.path().to_path_buf(),
             FrameRequester::test_dummy(),
+            /*is_remote*/ false,
             loader,
             ProviderFilter::MatchDefault(String::from("openai")),
             /*show_all*/ true,
@@ -2372,6 +2420,7 @@ mod tests {
         let mut state = PickerState::new(
             tempdir.path().to_path_buf(),
             FrameRequester::test_dummy(),
+            /*is_remote*/ false,
             loader,
             ProviderFilter::MatchDefault(String::from("openai")),
             /*show_all*/ true,
@@ -2403,12 +2452,14 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "thin-client"))]
     #[test]
     fn pageless_scrolling_deduplicates_and_keeps_order() {
         let loader: PageLoader = Arc::new(|_| {});
         let mut state = PickerState::new(
             PathBuf::from("/tmp"),
             FrameRequester::test_dummy(),
+            /*is_remote*/ false,
             loader,
             ProviderFilter::MatchDefault(String::from("openai")),
             /*show_all*/ true,
@@ -2463,6 +2514,7 @@ mod tests {
         assert_eq!(unique_paths.len(), 4);
     }
 
+    #[cfg(not(feature = "thin-client"))]
     #[test]
     fn ensure_minimum_rows_prefetches_when_underfilled() {
         let recorded_requests: Arc<Mutex<Vec<PageLoadRequest>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2474,6 +2526,7 @@ mod tests {
         let mut state = PickerState::new(
             PathBuf::from("/tmp"),
             FrameRequester::test_dummy(),
+            /*is_remote*/ false,
             loader,
             ProviderFilter::MatchDefault(String::from("openai")),
             /*show_all*/ true,
@@ -2542,6 +2595,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "thin-client"))]
     #[tokio::test]
     async fn toggle_sort_key_reloads_with_new_sort() {
         let recorded_requests: Arc<Mutex<Vec<PageLoadRequest>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2553,6 +2607,7 @@ mod tests {
         let mut state = PickerState::new(
             PathBuf::from("/tmp"),
             FrameRequester::test_dummy(),
+            /*is_remote*/ false,
             loader,
             ProviderFilter::MatchDefault(String::from("openai")),
             /*show_all*/ true,
@@ -2577,12 +2632,14 @@ mod tests {
         assert_eq!(guard[1].sort_key, ThreadSortKey::CreatedAt);
     }
 
+    #[cfg(not(feature = "thin-client"))]
     #[tokio::test]
     async fn page_navigation_uses_view_rows() {
         let loader: PageLoader = Arc::new(|_| {});
         let mut state = PickerState::new(
             PathBuf::from("/tmp"),
             FrameRequester::test_dummy(),
+            /*is_remote*/ false,
             loader,
             ProviderFilter::MatchDefault(String::from("openai")),
             /*show_all*/ true,
@@ -2631,6 +2688,7 @@ mod tests {
         let mut state = PickerState::new(
             PathBuf::from("/tmp"),
             FrameRequester::test_dummy(),
+            /*is_remote*/ false,
             loader,
             ProviderFilter::MatchDefault(String::from("openai")),
             /*show_all*/ true,
@@ -2671,6 +2729,7 @@ mod tests {
         let mut state = PickerState::new(
             PathBuf::from("/tmp"),
             FrameRequester::test_dummy(),
+            /*is_remote*/ false,
             loader,
             ProviderFilter::MatchDefault(String::from("openai")),
             /*show_all*/ true,
@@ -2713,6 +2772,7 @@ mod tests {
             forked_from_id: None,
             preview: String::from("remote thread"),
             ephemeral: false,
+            model: None,
             model_provider: String::from("openai"),
             created_at: 1,
             updated_at: 2,
@@ -2735,12 +2795,14 @@ mod tests {
         assert_eq!(row.thread_name, Some(String::from("Named thread")));
     }
 
+    #[cfg(not(feature = "thin-client"))]
     #[tokio::test]
     async fn up_at_bottom_does_not_scroll_when_visible() {
         let loader: PageLoader = Arc::new(|_| {});
         let mut state = PickerState::new(
             PathBuf::from("/tmp"),
             FrameRequester::test_dummy(),
+            /*is_remote*/ false,
             loader,
             ProviderFilter::MatchDefault(String::from("openai")),
             /*show_all*/ true,
@@ -2778,6 +2840,7 @@ mod tests {
         assert_eq!(state.selected, state.filtered_rows.len().saturating_sub(2));
     }
 
+    #[cfg(not(feature = "thin-client"))]
     #[tokio::test]
     async fn set_query_loads_until_match_and_respects_scan_cap() {
         let recorded_requests: Arc<Mutex<Vec<PageLoadRequest>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2789,6 +2852,7 @@ mod tests {
         let mut state = PickerState::new(
             PathBuf::from("/tmp"),
             FrameRequester::test_dummy(),
+            /*is_remote*/ false,
             loader,
             ProviderFilter::MatchDefault(String::from("openai")),
             /*show_all*/ true,

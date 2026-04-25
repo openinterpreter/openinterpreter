@@ -1,0 +1,37 @@
+[package]
+name = "codex-chat-wire-compat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "codex_chat_wire_compat"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+axum = { workspace = true, default-features = false, features = ["http1", "json", "tokio"] }
+bytes = { workspace = true }
+codex-api = { workspace = true }
+codex-client = { workspace = true }
+codex-protocol = { workspace = true }
+eventsource-stream = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+reqwest = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
+tracing = { workspace = true }
+url = { workspace = true }
+zstd = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+pretty_assertions = { workspace = true }
+wiremock = { workspace = true }

@@ -22,7 +22,6 @@ use codex_exec_server::EnvironmentManager;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
-use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_models_manager::manager::ModelsManager;
 use codex_models_manager::manager::RefreshStrategy;
@@ -222,17 +221,12 @@ impl ThreadManager {
         config: &Config,
         auth_manager: Arc<AuthManager>,
         session_source: SessionSource,
-        collaboration_modes_config: CollaborationModesConfig,
+        _collaboration_modes_config: CollaborationModesConfig,
         environment_manager: Arc<EnvironmentManager>,
         analytics_events_client: Option<AnalyticsEventsClient>,
     ) -> Self {
         let codex_home = config.codex_home.clone();
         let restriction_product = session_source.restriction_product();
-        let openai_models_provider = config
-            .model_providers
-            .get(OPENAI_PROVIDER_ID)
-            .cloned()
-            .unwrap_or_else(|| ModelProviderInfo::create_openai_provider(/*base_url*/ None));
         let (thread_created_tx, _) = broadcast::channel(THREAD_CREATED_CHANNEL_CAPACITY);
         let plugins_manager = Arc::new(PluginsManager::new_with_restriction_product(
             codex_home.to_path_buf(),
@@ -240,7 +234,7 @@ impl ThreadManager {
         ));
         let mcp_manager = Arc::new(McpManager::new(Arc::clone(&plugins_manager)));
         let skills_manager = Arc::new(SkillsManager::new_with_restriction_product(
-            codex_home.clone(),
+            codex_home,
             config.bundled_skills_enabled(),
             restriction_product,
         ));
@@ -249,12 +243,9 @@ impl ThreadManager {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
                 thread_created_tx,
-                models_manager: Arc::new(ModelsManager::new_with_provider(
-                    codex_home.to_path_buf(),
+                models_manager: Arc::new(crate::thread_models_manager::models_manager_for_config(
+                    config,
                     auth_manager.clone(),
-                    config.model_catalog.clone(),
-                    collaboration_modes_config,
-                    openai_models_provider,
                 )),
                 environment_manager,
                 skills_manager,
@@ -927,28 +918,34 @@ impl ThreadManagerState {
         };
         let CodexSpawnOk {
             codex, thread_id, ..
-        } = Codex::spawn(CodexSpawnArgs {
-            config,
-            auth_manager,
-            models_manager: Arc::clone(&self.models_manager),
-            environment_manager: Arc::clone(&self.environment_manager),
-            skills_manager: Arc::clone(&self.skills_manager),
-            plugins_manager: Arc::clone(&self.plugins_manager),
-            mcp_manager: Arc::clone(&self.mcp_manager),
-            skills_watcher: Arc::clone(&self.skills_watcher),
-            conversation_history: initial_history,
-            session_source,
-            agent_control,
-            dynamic_tools,
-            persist_extended_history,
-            metrics_service_name,
-            inherited_shell_snapshot,
-            inherited_exec_policy,
-            user_shell_override,
-            parent_trace,
-            analytics_events_client: self.analytics_events_client.clone(),
-        })
-        .await?;
+        } = {
+            let models_manager = Arc::new(crate::thread_models_manager::models_manager_for_config(
+                &config,
+                auth_manager.clone(),
+            ));
+            let spawn_args = CodexSpawnArgs {
+                config,
+                auth_manager,
+                models_manager,
+                environment_manager: Arc::clone(&self.environment_manager),
+                skills_manager: Arc::clone(&self.skills_manager),
+                plugins_manager: Arc::clone(&self.plugins_manager),
+                mcp_manager: Arc::clone(&self.mcp_manager),
+                skills_watcher: Arc::clone(&self.skills_watcher),
+                conversation_history: initial_history,
+                session_source,
+                agent_control,
+                dynamic_tools,
+                persist_extended_history,
+                metrics_service_name,
+                inherited_shell_snapshot,
+                inherited_exec_policy,
+                user_shell_override,
+                parent_trace,
+                analytics_events_client: self.analytics_events_client.clone(),
+            };
+            Codex::spawn(spawn_args).await?
+        };
         self.finalize_thread_spawn(codex, thread_id, watch_registration)
             .await
     }

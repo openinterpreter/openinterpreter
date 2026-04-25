@@ -19,6 +19,7 @@ pub use codex_core::connectors::list_cached_accessible_connectors_from_mcp_tools
 pub use codex_core::connectors::with_app_enabled_state;
 use codex_core::plugins::AppConnectorId;
 use codex_core::plugins::PluginsManager;
+use codex_features::Feature;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::default_client::originator;
@@ -33,9 +34,7 @@ async fn apps_enabled(config: &Config) -> bool {
         config.cli_auth_credentials_store_mode,
     );
     let auth = auth_manager.auth().await;
-    config
-        .features
-        .apps_enabled_for_auth(auth.as_ref().is_some_and(CodexAuth::is_chatgpt_auth))
+    config.features.enabled(Feature::Apps) && auth.as_ref().is_some_and(CodexAuth::is_chatgpt_auth)
 }
 pub async fn list_connectors(config: &Config) -> anyhow::Result<Vec<AppInfo>> {
     if !apps_enabled(config).await {

@@ -11,6 +11,14 @@ pub struct Cli {
     #[arg(value_name = "PROMPT", value_hint = clap::ValueHint::Other)]
     pub prompt: Option<String>,
 
+    /// Internal: prefill the composer without auto-submitting on startup.
+    #[clap(skip)]
+    pub prefill_prompt: Option<String>,
+
+    /// Internal: submit the prefilled composer content after startup.
+    #[clap(skip)]
+    pub submit_prefill_prompt: bool,
+
     /// Optional image(s) to attach to the initial prompt.
     #[arg(long = "image", short = 'i', value_name = "FILE", value_delimiter = ',', num_args = 1..)]
     pub images: Vec<PathBuf>,
@@ -58,7 +66,7 @@ pub struct Cli {
     pub model: Option<String>,
 
     /// Convenience flag to select the local open source model provider. Equivalent to -c
-    /// model_provider=oss; verifies a local LM Studio or Ollama server is running.
+    /// model_provider=oss; some builds also verify a local LM Studio or Ollama server is ready.
     #[arg(long = "oss", default_value_t = false)]
     pub oss: bool,
 

@@ -29,6 +29,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_protocol::user_input::UserInput;
+use codex_tools::Harness;
 use core_test_support::load_default_config_for_test;
 use core_test_support::responses::WebSocketConnectionConfig;
 use core_test_support::responses::WebSocketTestServer;
@@ -1824,6 +1825,7 @@ async fn websocket_harness_with_provider_options(
         /*enable_request_compression*/ false,
         runtime_metrics_enabled,
         /*beta_features_header*/ None,
+        Harness::Native,
     );
 
     WebsocketTestHarness {

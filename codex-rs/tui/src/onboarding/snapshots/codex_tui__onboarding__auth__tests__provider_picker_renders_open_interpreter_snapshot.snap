@@ -1,0 +1,28 @@
+---
+source: tui/src/onboarding/auth.rs
+expression: terminal.backend()
+---
+
+  Welcome to Open Interpreter.
+  Choose a provider to get started.
+  Filter providers: type to search
+
+> 1. OpenAI (ChatGPT sign-in) (current)
+     Sign in with ChatGPT
+
+  2. OpenAI (API key)
+     Use OPENAI_API_KEY or paste a key
+
+  3. Anthropic
+     Use ANTHROPIC_API_KEY or paste a key | Harness: claude-code
+
+  4. OpenRouter
+     Use OPENROUTER_API_KEY or paste a key
+
+  5. Groq
+     Use GROQ_API_KEY or paste a key
+
+  6. LM Studio
+     Connect to localhost:1234
+
+  7. Ollama

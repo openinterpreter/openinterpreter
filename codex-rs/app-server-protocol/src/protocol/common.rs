@@ -1421,6 +1421,7 @@ mod tests {
                     forked_from_id: None,
                     preview: "first prompt".to_string(),
                     ephemeral: true,
+                    model: Some("gpt-5".to_string()),
                     model_provider: "openai".to_string(),
                     created_at: 1,
                     updated_at: 2,
@@ -1459,6 +1460,7 @@ mod tests {
                         "forkedFromId": null,
                         "preview": "first prompt",
                         "ephemeral": true,
+                        "model": "gpt-5",
                         "modelProvider": "openai",
                         "createdAt": 1,
                         "updatedAt": 2,
@@ -1671,7 +1673,8 @@ mod tests {
                 "params": {
                     "limit": null,
                     "cursor": null,
-                    "includeHidden": null
+                    "includeHidden": null,
+                    "modelProvider": null
                 }
             }),
             serde_json::to_value(&request)?,

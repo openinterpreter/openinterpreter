@@ -334,6 +334,7 @@ mod job {
                 end_turn: None,
                 phase: None,
             }],
+            cwd: Some(rollout_cwd.to_path_buf()),
             tools: Vec::new(),
             parallel_tool_calls: false,
             base_instructions: BaseInstructions {

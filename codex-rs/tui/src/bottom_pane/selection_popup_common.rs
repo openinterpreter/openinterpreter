@@ -2,8 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 // Note: Table-based layout previously used Constraint; the manual renderer
 // below no longer requires it.
-use ratatui::style::Color;
-use ratatui::style::Style;
+use ratatui::style::Modifier;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -17,6 +16,9 @@ use crate::key_hint::KeyBinding;
 use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
 use crate::render::Insets;
 use crate::render::RectExt as _;
+use crate::style::app_accent_style;
+use crate::style::selected_option_style;
+use crate::style::unselected_option_style;
 use crate::style::user_message_style;
 
 use super::scroll_state::ScrollState;
@@ -318,7 +320,16 @@ fn apply_row_state_style(lines: &mut [Line<'static>], selected: bool, is_disable
     if selected {
         for line in lines.iter_mut() {
             line.spans.iter_mut().for_each(|span| {
-                span.style = Style::default().fg(Color::Cyan).bold();
+                span.style = span
+                    .style
+                    .patch(selected_option_style())
+                    .remove_modifier(Modifier::DIM);
+            });
+        }
+    } else {
+        for line in lines.iter_mut() {
+            line.spans.iter_mut().for_each(|span| {
+                span.style = span.style.patch(unselected_option_style());
             });
         }
     }
@@ -461,7 +472,10 @@ fn build_full_line(row: &GenericDisplayRow, desc_col: usize) -> Line<'static> {
 
             if idx_iter.peek().is_some_and(|next| **next == char_idx) {
                 idx_iter.next();
-                name_spans.push(ch.to_string().bold());
+                name_spans.push(Span::styled(
+                    ch.to_string(),
+                    app_accent_style().add_modifier(Modifier::UNDERLINED),
+                ));
             } else {
                 name_spans.push(ch.to_string().into());
             }
@@ -725,7 +739,11 @@ pub(crate) fn render_rows_single_line_with_col_width_mode(
         let mut full_line = build_full_line(row, desc_col);
         if Some(i) == state.selected_idx && !row.is_disabled {
             full_line.spans.iter_mut().for_each(|span| {
-                span.style = Style::default().fg(Color::Cyan).bold();
+                span.style = span.style.patch(selected_option_style());
+            });
+        } else {
+            full_line.spans.iter_mut().for_each(|span| {
+                span.style = span.style.patch(unselected_option_style());
             });
         }
         if row.is_disabled {

@@ -19,6 +19,7 @@ codex-protocol = { workspace = true }
 http = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 codex-utils-absolute-path = { workspace = true }

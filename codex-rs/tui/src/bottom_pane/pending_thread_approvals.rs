@@ -5,6 +5,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use crate::render::renderable::Renderable;
+use crate::style::app_accent_color;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_lines;
 
@@ -60,7 +61,7 @@ impl PendingThreadApprovals {
         lines.push(
             Line::from(vec![
                 "    ".into(),
-                "/agent".cyan().bold(),
+                "/agent".fg(app_accent_color()).bold(),
                 " to switch threads".dim(),
             ])
             .dim(),

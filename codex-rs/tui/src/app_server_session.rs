@@ -5,6 +5,7 @@ use crate::legacy_core::config::Config;
 use crate::legacy_core::message_history_metadata;
 use crate::status::StatusAccountDisplay;
 use crate::status::plan_type_display_name;
+use crate::telemetry::TelemetryAuthMode;
 use codex_app_server_client::AppServerClient;
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_client::AppServerRequestHandle;
@@ -81,7 +82,6 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnSteerResponse;
-use codex_otel::TelemetryAuthMode;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelAvailabilityNux;
@@ -207,6 +207,7 @@ impl AppServerSession {
                     cursor: None,
                     limit: None,
                     include_hidden: Some(true),
+                    model_provider: None,
                 },
             })
             .await
@@ -395,9 +396,10 @@ impl AppServerSession {
     }
 
     fn thread_params_mode(&self) -> ThreadParamsMode {
-        match &self.client {
-            AppServerClient::InProcess(_) => ThreadParamsMode::Embedded,
-            AppServerClient::Remote(_) => ThreadParamsMode::Remote,
+        if self.is_remote() {
+            ThreadParamsMode::Remote
+        } else {
+            ThreadParamsMode::Embedded
         }
     }
 
@@ -890,7 +892,7 @@ pub(crate) fn status_account_display_from_auth_mode(
     }
 }
 
-fn model_preset_from_api_model(model: ApiModel) -> ModelPreset {
+pub(crate) fn model_preset_from_api_model(model: ApiModel) -> ModelPreset {
     let upgrade = model.upgrade.map(|upgrade_id| {
         let upgrade_info = model.upgrade_info.clone();
         ModelUpgrade {
@@ -1422,6 +1424,7 @@ mod tests {
                 forked_from_id: Some(forked_from_id.to_string()),
                 preview: "hello".to_string(),
                 ephemeral: false,
+                model: None,
                 model_provider: "openai".to_string(),
                 created_at: 1,
                 updated_at: 2,

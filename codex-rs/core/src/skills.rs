@@ -22,6 +22,7 @@ pub use codex_core_skills::SkillLoadOutcome;
 pub use codex_core_skills::SkillMetadata;
 pub use codex_core_skills::SkillPolicy;
 pub use codex_core_skills::SkillRenderReport;
+pub use codex_core_skills::SkillsDiscoveryMode;
 pub use codex_core_skills::SkillsLoadInput;
 pub use codex_core_skills::SkillsManager;
 pub use codex_core_skills::build_skill_name_counts;
@@ -53,6 +54,10 @@ pub(crate) fn skills_load_input_from_config(
         config.config_layer_stack.clone(),
         config.bundled_skills_enabled(),
     )
+    .with_discovery_mode(match config.harness.as_deref() {
+        Some("claude-code") => SkillsDiscoveryMode::ClaudeCode,
+        _ => SkillsDiscoveryMode::Codex,
+    })
 }
 
 pub(crate) async fn resolve_skill_dependencies_for_turn(

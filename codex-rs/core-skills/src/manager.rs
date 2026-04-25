@@ -17,6 +17,7 @@ use crate::config_rules::SkillConfigRules;
 use crate::config_rules::resolve_disabled_skill_paths;
 use crate::config_rules::skill_config_rules_from_stack;
 use crate::loader::SkillRoot;
+use crate::loader::SkillsDiscoveryMode;
 use crate::loader::load_skills_from_roots;
 use crate::loader::skill_roots;
 use crate::system::install_system_skills;
@@ -29,6 +30,7 @@ pub struct SkillsLoadInput {
     pub effective_skill_roots: Vec<AbsolutePathBuf>,
     pub config_layer_stack: ConfigLayerStack,
     pub bundled_skills_enabled: bool,
+    pub discovery_mode: SkillsDiscoveryMode,
 }
 
 impl SkillsLoadInput {
@@ -43,7 +45,13 @@ impl SkillsLoadInput {
             effective_skill_roots,
             config_layer_stack,
             bundled_skills_enabled,
+            discovery_mode: SkillsDiscoveryMode::Codex,
         }
+    }
+
+    pub fn with_discovery_mode(mut self, discovery_mode: SkillsDiscoveryMode) -> Self {
+        self.discovery_mode = discovery_mode;
+        self
     }
 }
 
@@ -117,6 +125,7 @@ impl SkillsManager {
             &input.config_layer_stack,
             &input.cwd,
             input.effective_skill_roots.clone(),
+            input.discovery_mode,
         )
         .await;
         if !input.bundled_skills_enabled {
@@ -155,6 +164,7 @@ impl SkillsManager {
             &input.config_layer_stack,
             &input.cwd,
             input.effective_skill_roots.clone(),
+            input.discovery_mode,
         )
         .await;
         if !bundled_skills_enabled_from_stack(&input.config_layer_stack) {

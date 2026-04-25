@@ -39,6 +39,7 @@ mod flags;
 #[cfg(test)]
 mod git_info_tests;
 mod guardian;
+mod harness;
 mod hook_runtime;
 mod installation_id;
 pub(crate) mod instructions;
@@ -59,15 +60,19 @@ pub use codex_mcp::SandboxState;
 mod mcp_openai_file;
 mod mcp_tool_call;
 mod memories;
+pub mod mention_syntax;
+#[cfg(feature = "message-history")]
+pub mod message_history;
 pub use memories::clear_memory_roots_contents;
-pub(crate) mod mention_syntax;
-pub(crate) mod message_history;
 pub(crate) mod utils;
 pub use mention_syntax::PLUGIN_TEXT_MENTION_SIGIL;
 pub use mention_syntax::TOOL_MENTION_SIGIL;
 pub use message_history::HistoryEntry as MessageHistoryEntry;
+#[cfg(feature = "message-history")]
 pub use message_history::append_entry as append_message_history_entry;
+#[cfg(feature = "message-history")]
 pub use message_history::history_metadata as message_history_metadata;
+#[cfg(feature = "message-history")]
 pub use message_history::lookup as lookup_message_history_entry;
 pub use utils::path_utils;
 pub mod personality_migration;
@@ -109,6 +114,7 @@ pub(crate) use skills::skills_load_input_from_config;
 mod skills_watcher;
 mod stream_events_utils;
 pub mod test_support;
+mod thread_models_manager;
 mod unified_exec;
 pub mod windows_sandbox;
 pub use client::X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER;

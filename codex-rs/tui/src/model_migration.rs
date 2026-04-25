@@ -5,6 +5,7 @@ use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
 use crate::render::renderable::RenderableExt as _;
 use crate::selection_list::selection_option_row;
+use crate::style::app_accent_color;
 use crate::tui::FrameRequester;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
@@ -82,7 +83,7 @@ pub(crate) fn migration_copy_for_models(
     }
 
     let heading_text = Span::from(format!(
-        "Codex just got an upgrade. Introducing {target_display_name}."
+        "Interpreter just got an upgrade. Introducing {target_display_name}."
     ))
     .bold();
     let description_line: Line<'static>;
@@ -110,7 +111,7 @@ pub(crate) fn migration_copy_for_models(
     if let Some(model_link) = model_link {
         content.push(Line::from(vec![
             format!("{description_line} Learn more about {target_display_name} at ").into(),
-            model_link.cyan().underlined(),
+            model_link.fg(app_accent_color()).underlined(),
         ]));
         content.push(Line::from(""));
     } else {
@@ -341,7 +342,7 @@ impl ModelMigrationScreen {
     fn render_menu(&self, column: &mut ColumnRenderable) {
         column.push(Line::from(""));
         column.push(
-            Paragraph::new("Choose how you'd like Codex to proceed.")
+            Paragraph::new("Choose how you'd like Interpreter to proceed.")
                 .wrap(Wrap { trim: false })
                 .inset(Insets::tlbr(
                     /*top*/ 0, /*left*/ 2, /*bottom*/ 0, /*right*/ 0,

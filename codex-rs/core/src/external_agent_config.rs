@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::config::ConfigBuilder;
+use crate::config::ConfigService;
 use crate::plugins::MarketplaceAddRequest;
 use crate::plugins::PluginId;
 use crate::plugins::PluginInstallRequest;
@@ -9,9 +10,12 @@ use crate::plugins::configured_plugins_from_stack;
 use crate::plugins::find_marketplace_manifest_path;
 use crate::plugins::is_local_marketplace_source;
 use crate::plugins::parse_marketplace_source;
+use codex_app_server_protocol::ConfigValueWriteParams;
+use codex_app_server_protocol::MergeStrategy;
 use codex_core_plugins::marketplace::MarketplacePluginInstallPolicy;
 use codex_protocol::protocol::Product;
 use serde_json::Value as JsonValue;
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -484,6 +488,22 @@ impl ExternalAgentConfigService {
                         .push(format!("{plugin_name}@{marketplace_name}")),
                 }
             }
+        }
+        if !outcome.succeeded_plugin_ids.is_empty() {
+            ConfigService::new_with_defaults(self.codex_home.clone())
+                .write_value(ConfigValueWriteParams {
+                    key_path: "features.plugins".to_string(),
+                    value: json!(true),
+                    merge_strategy: MergeStrategy::Replace,
+                    file_path: None,
+                    expected_version: None,
+                })
+                .await
+                .map_err(|err| {
+                    io::Error::other(format!(
+                        "failed to enable plugins feature after import: {err}"
+                    ))
+                })?;
         }
 
         Ok(outcome)

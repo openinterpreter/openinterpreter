@@ -77,11 +77,44 @@ pub(crate) fn build_specs_with_discoverable_tools(
     dynamic_tools: &[DynamicToolSpec],
 ) -> ToolRegistryBuilder {
     use crate::tools::handlers::ApplyPatchHandler;
+    use crate::tools::handlers::ClaudeAgentHandler;
+    use crate::tools::handlers::ClaudeAskUserQuestionHandler;
+    use crate::tools::handlers::ClaudeBashHandler;
+    use crate::tools::handlers::ClaudeCronCreateHandler;
+    use crate::tools::handlers::ClaudeCronDeleteHandler;
+    use crate::tools::handlers::ClaudeCronListHandler;
+    use crate::tools::handlers::ClaudeEditHandler;
+    use crate::tools::handlers::ClaudeGlobHandler;
+    use crate::tools::handlers::ClaudeGrepHandler;
+    use crate::tools::handlers::ClaudeLspHandler;
+    use crate::tools::handlers::ClaudeReadHandler;
+    use crate::tools::handlers::ClaudeScheduleWakeupHandler;
+    use crate::tools::handlers::ClaudeTodoWriteHandler;
+    use crate::tools::handlers::ClaudeWebFetchHandler;
+    use crate::tools::handlers::ClaudeWebSearchHandler;
+    use crate::tools::handlers::ClaudeWriteHandler;
     use crate::tools::handlers::CodeModeExecuteHandler;
     use crate::tools::handlers::CodeModeWaitHandler;
     use crate::tools::handlers::DynamicToolHandler;
     use crate::tools::handlers::JsReplHandler;
     use crate::tools::handlers::JsReplResetHandler;
+    use crate::tools::handlers::KimiAgentHandler;
+    use crate::tools::handlers::KimiAskUserQuestionHandler;
+    use crate::tools::handlers::KimiEnterPlanModeHandler;
+    use crate::tools::handlers::KimiExitPlanModeHandler;
+    use crate::tools::handlers::KimiFetchUrlHandler;
+    use crate::tools::handlers::KimiGlobHandler;
+    use crate::tools::handlers::KimiGrepHandler;
+    use crate::tools::handlers::KimiReadFileHandler;
+    use crate::tools::handlers::KimiReadMediaFileHandler;
+    use crate::tools::handlers::KimiSearchWebHandler;
+    use crate::tools::handlers::KimiSetTodoListHandler;
+    use crate::tools::handlers::KimiShellHandler;
+    use crate::tools::handlers::KimiStrReplaceFileHandler;
+    use crate::tools::handlers::KimiTaskListHandler;
+    use crate::tools::handlers::KimiTaskOutputHandler;
+    use crate::tools::handlers::KimiTaskStopHandler;
+    use crate::tools::handlers::KimiWriteFileHandler;
     use crate::tools::handlers::ListDirHandler;
     use crate::tools::handlers::McpHandler;
     use crate::tools::handlers::McpResourceHandler;
@@ -194,6 +227,54 @@ pub(crate) fn build_specs_with_discoverable_tools(
             ToolHandlerKind::ApplyPatch => {
                 builder.register_handler(handler.name, apply_patch_handler.clone());
             }
+            ToolHandlerKind::ClaudeAgent => {
+                builder.register_handler(handler.name, Arc::new(ClaudeAgentHandler));
+            }
+            ToolHandlerKind::ClaudeAskUserQuestion => {
+                builder.register_handler(handler.name, Arc::new(ClaudeAskUserQuestionHandler));
+            }
+            ToolHandlerKind::ClaudeBash => {
+                builder.register_handler(handler.name, Arc::new(ClaudeBashHandler));
+            }
+            ToolHandlerKind::ClaudeCronCreate => {
+                builder.register_handler(handler.name, Arc::new(ClaudeCronCreateHandler));
+            }
+            ToolHandlerKind::ClaudeCronDelete => {
+                builder.register_handler(handler.name, Arc::new(ClaudeCronDeleteHandler));
+            }
+            ToolHandlerKind::ClaudeCronList => {
+                builder.register_handler(handler.name, Arc::new(ClaudeCronListHandler));
+            }
+            ToolHandlerKind::ClaudeEdit => {
+                builder.register_handler(handler.name, Arc::new(ClaudeEditHandler));
+            }
+            ToolHandlerKind::ClaudeGlob => {
+                builder.register_handler(handler.name, Arc::new(ClaudeGlobHandler));
+            }
+            ToolHandlerKind::ClaudeGrep => {
+                builder.register_handler(handler.name, Arc::new(ClaudeGrepHandler));
+            }
+            ToolHandlerKind::ClaudeLsp => {
+                builder.register_handler(handler.name, Arc::new(ClaudeLspHandler));
+            }
+            ToolHandlerKind::ClaudeRead => {
+                builder.register_handler(handler.name, Arc::new(ClaudeReadHandler));
+            }
+            ToolHandlerKind::ClaudeScheduleWakeup => {
+                builder.register_handler(handler.name, Arc::new(ClaudeScheduleWakeupHandler));
+            }
+            ToolHandlerKind::ClaudeTodoWrite => {
+                builder.register_handler(handler.name, Arc::new(ClaudeTodoWriteHandler));
+            }
+            ToolHandlerKind::ClaudeWebFetch => {
+                builder.register_handler(handler.name, Arc::new(ClaudeWebFetchHandler));
+            }
+            ToolHandlerKind::ClaudeWebSearch => {
+                builder.register_handler(handler.name, Arc::new(ClaudeWebSearchHandler));
+            }
+            ToolHandlerKind::ClaudeWrite => {
+                builder.register_handler(handler.name, Arc::new(ClaudeWriteHandler));
+            }
             ToolHandlerKind::CloseAgentV1 => {
                 builder.register_handler(handler.name, Arc::new(CloseAgentHandler));
             }
@@ -217,6 +298,57 @@ pub(crate) fn build_specs_with_discoverable_tools(
             }
             ToolHandlerKind::JsReplReset => {
                 builder.register_handler(handler.name, js_repl_reset_handler.clone());
+            }
+            ToolHandlerKind::KimiAgent => {
+                builder.register_handler(handler.name, Arc::new(KimiAgentHandler));
+            }
+            ToolHandlerKind::KimiAskUserQuestion => {
+                builder.register_handler(handler.name, Arc::new(KimiAskUserQuestionHandler));
+            }
+            ToolHandlerKind::KimiEnterPlanMode => {
+                builder.register_handler(handler.name, Arc::new(KimiEnterPlanModeHandler));
+            }
+            ToolHandlerKind::KimiExitPlanMode => {
+                builder.register_handler(handler.name, Arc::new(KimiExitPlanModeHandler));
+            }
+            ToolHandlerKind::KimiFetchUrl => {
+                builder.register_handler(handler.name, Arc::new(KimiFetchUrlHandler));
+            }
+            ToolHandlerKind::KimiGlob => {
+                builder.register_handler(handler.name, Arc::new(KimiGlobHandler));
+            }
+            ToolHandlerKind::KimiGrep => {
+                builder.register_handler(handler.name, Arc::new(KimiGrepHandler));
+            }
+            ToolHandlerKind::KimiReadFile => {
+                builder.register_handler(handler.name, Arc::new(KimiReadFileHandler));
+            }
+            ToolHandlerKind::KimiReadMediaFile => {
+                builder.register_handler(handler.name, Arc::new(KimiReadMediaFileHandler));
+            }
+            ToolHandlerKind::KimiSearchWeb => {
+                builder.register_handler(handler.name, Arc::new(KimiSearchWebHandler));
+            }
+            ToolHandlerKind::KimiSetTodoList => {
+                builder.register_handler(handler.name, Arc::new(KimiSetTodoListHandler));
+            }
+            ToolHandlerKind::KimiShell => {
+                builder.register_handler(handler.name, Arc::new(KimiShellHandler));
+            }
+            ToolHandlerKind::KimiStrReplaceFile => {
+                builder.register_handler(handler.name, Arc::new(KimiStrReplaceFileHandler));
+            }
+            ToolHandlerKind::KimiTaskList => {
+                builder.register_handler(handler.name, Arc::new(KimiTaskListHandler));
+            }
+            ToolHandlerKind::KimiTaskOutput => {
+                builder.register_handler(handler.name, Arc::new(KimiTaskOutputHandler));
+            }
+            ToolHandlerKind::KimiTaskStop => {
+                builder.register_handler(handler.name, Arc::new(KimiTaskStopHandler));
+            }
+            ToolHandlerKind::KimiWriteFile => {
+                builder.register_handler(handler.name, Arc::new(KimiWriteFileHandler));
             }
             ToolHandlerKind::ListAgentsV2 => {
                 builder.register_handler(handler.name, Arc::new(ListAgentsHandlerV2));

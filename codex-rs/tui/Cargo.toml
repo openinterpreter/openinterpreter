@@ -20,51 +20,104 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+[features]
+default = [
+    "clipboard",
+    "cloud-requirements",
+    "cross-session-history",
+    "direct-login",
+    "embedded-app-server",
+    "extended-mentions",
+    "feedback",
+    "local-state-db",
+    "logging",
+    "oss-local-bootstrap",
+    "realtime-audio",
+    "rich-media",
+    "sleep-inhibitor",
+    "startup-network",
+    "structured-mcp-content",
+    "syntax-highlighting",
+    "system-browser",
+    "terminal-default-color-probe",
+    "telemetry",
+]
+thin-client = ["system-browser"]
+direct-login = ["dep:codex-login"]
+logging = ["dep:tracing-appender", "dep:tracing-subscriber"]
+startup-network = ["dep:reqwest", "direct-login"]
+extended-mentions = ["dep:codex-plugin"]
+clipboard = ["dep:arboard"]
+cloud-requirements = ["dep:codex-cloud-requirements", "direct-login"]
+cross-session-history = ["codex-core/message-history"]
+embedded-app-server = [
+    "codex-app-server-client/in-process",
+    "dep:codex-feedback",
+    "direct-login",
+]
+feedback = ["dep:codex-feedback"]
+local-state-db = ["dep:codex-rollout", "dep:codex-state"]
+oss-local-bootstrap = ["dep:codex-utils-oss"]
+realtime-audio = ["dep:cpal"]
+rich-media = ["dep:image"]
+sleep-inhibitor = ["dep:codex-utils-sleep-inhibitor"]
+structured-mcp-content = ["dep:rmcp"]
+syntax-highlighting = ["dep:syntect", "dep:two-face"]
+system-browser = ["dep:webbrowser"]
+terminal-default-color-probe = []
+telemetry = ["dep:codex-otel"]
+
 [dependencies]
 anyhow = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["derive"] }
 codex-ansi-escape = { workspace = true }
-codex-app-server-client = { workspace = true }
+codex-app-server-client = { path = "../app-server-client", default-features = false }
 codex-app-server-protocol = { workspace = true }
 codex-arg0 = { workspace = true }
-codex-install-context = { workspace = true }
+codex-collaboration-mode-templates = { workspace = true }
+codex-cloud-requirements = { workspace = true, optional = true }
 codex-chatgpt = { workspace = true }
-codex-cloud-requirements = { workspace = true }
 codex-config = { workspace = true }
 codex-connectors = { workspace = true }
+codex-core = { path = "../core", default-features = false }
+codex-install-context = { workspace = true }
 codex-exec-server = { workspace = true }
 codex-features = { workspace = true }
-codex-feedback = { workspace = true }
+codex-feedback = { workspace = true, optional = true }
 codex-file-search = { workspace = true }
 codex-git-utils = { workspace = true }
-codex-login = { workspace = true }
+codex-login = { workspace = true, optional = true }
+codex-plugin = { workspace = true, optional = true }
 codex-model-provider-info = { workspace = true }
 codex-models-manager = { workspace = true }
-codex-otel = { workspace = true }
+codex-otel = { workspace = true, optional = true }
 codex-protocol = { workspace = true }
 codex-realtime-webrtc = { workspace = true }
-codex-rollout = { workspace = true }
+codex-rollout = { workspace = true, optional = true }
 codex-shell-command = { workspace = true }
-codex-state = { workspace = true }
+codex-state = { workspace = true, optional = true }
 codex-terminal-detection = { workspace = true }
 codex-utils-approval-presets = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-cli = { workspace = true }
 codex-utils-elapsed = { workspace = true }
 codex-utils-fuzzy-match = { workspace = true }
-codex-utils-oss = { workspace = true }
+codex-utils-oss = { workspace = true, optional = true }
+codex-utils-path = { workspace = true }
+codex-utils-plugins = { workspace = true }
 codex-utils-sandbox-summary = { workspace = true }
-codex-utils-sleep-inhibitor = { workspace = true }
+codex-utils-sleep-inhibitor = { workspace = true, optional = true }
 codex-utils-string = { workspace = true }
+codex-utils-template = { workspace = true }
 color-eyre = { workspace = true }
 crossterm = { workspace = true, features = ["bracketed-paste", "event-stream"] }
 derive_more = { workspace = true, features = ["is_variant"] }
 diffy = { workspace = true }
 dirs = { workspace = true }
 dunce = { workspace = true }
-image = { workspace = true, features = ["jpeg", "png", "gif", "webp"] }
+image = { workspace = true, features = ["jpeg", "png", "gif", "webp"], optional = true }
 itertools = { workspace = true }
 lazy_static = { workspace = true }
 pathdiff = { workspace = true }
@@ -78,8 +131,8 @@ ratatui = { workspace = true, features = [
 ] }
 ratatui-macros = { workspace = true }
 regex-lite = { workspace = true }
-reqwest = { workspace = true, features = ["json"] }
-rmcp = { workspace = true }
+reqwest = { workspace = true, features = ["json"], optional = true }
+rmcp = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
 shlex = { workspace = true }
@@ -92,6 +145,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = [
     "io-std",
     "macros",
+    "net",
     "process",
     "rt-multi-thread",
     "signal",
@@ -101,22 +155,22 @@ tokio = { workspace = true, features = [
 tokio-stream = { workspace = true, features = ["sync"] }
 toml = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
-tracing-appender = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
-syntect = "5"
-two-face = { version = "0.5", default-features = false, features = ["syntect-default-onig"] }
+tracing-appender = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"], optional = true }
+syntect = { version = "5", optional = true }
+two-face = { version = "0.5", default-features = false, features = ["syntect-default-onig"], optional = true }
 unicode-segmentation = { workspace = true }
 unicode-width = { workspace = true }
 url = { workspace = true }
 urlencoding = { workspace = true }
-webbrowser = { workspace = true }
+webbrowser = { workspace = true, optional = true }
 uuid = { workspace = true }
 
 codex-windows-sandbox = { workspace = true }
 tokio-util = { workspace = true, features = ["time"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-cpal = "0.15"
+cpal = { version = "0.15", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
@@ -132,12 +186,14 @@ winsplit = "0.1"
 # Clipboard support via `arboard` is not available on Android/Termux.
 # Only include it for non-Android targets so the crate builds on Android.
 [target.'cfg(not(target_os = "android"))'.dependencies]
-arboard = { workspace = true }
+arboard = { workspace = true, optional = true }
 
 
 [dev-dependencies]
+codex-chatgpt = { workspace = true }
 codex-cli = { workspace = true }
 codex-mcp = { workspace = true }
+codex-models-manager = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 codex-utils-pty = { workspace = true }
 assert_matches = { workspace = true }

@@ -27,6 +27,9 @@ pub struct ConfigProfile {
     /// The key in the `model_providers` map identifying the
     /// [`ModelProviderInfo`] to use.
     pub model_provider: Option<String>,
+    /// Optional harness family to emulate for this profile, such as
+    /// `claude-code`.
+    pub harness: Option<String>,
     pub approval_policy: Option<AskForApproval>,
     pub approvals_reviewer: Option<ApprovalsReviewer>,
     pub sandbox_mode: Option<SandboxMode>,
@@ -74,6 +77,7 @@ impl From<ConfigProfile> for codex_app_server_protocol::Profile {
         Self {
             model: config_profile.model,
             model_provider: config_profile.model_provider,
+            harness: config_profile.harness,
             approval_policy: config_profile.approval_policy,
             model_reasoning_effort: config_profile.model_reasoning_effort,
             model_reasoning_summary: config_profile.model_reasoning_summary,

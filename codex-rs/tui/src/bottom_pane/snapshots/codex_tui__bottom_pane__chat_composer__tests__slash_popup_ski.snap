@@ -1,0 +1,10 @@
+---
+source: tui/src/bottom_pane/chat_composer.rs
+expression: terminal.backend()
+---
+"                                                            "
+"› /ski                                                      "
+"                                                            "
+"                                                            "
+"  /skills  use skills to improve how the assistant performs "
+"           tasks                                            "

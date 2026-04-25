@@ -23,7 +23,7 @@ expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
   ↳ Hello, world! 13
   ↳ Hello, world! 14
   ↳ Hello, world! 15
-
+ 
 › Ask Codex to do anything
-
+ 
   gpt-5.3-codex default · /tmp/project

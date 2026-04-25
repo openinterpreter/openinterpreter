@@ -3,6 +3,8 @@
 // alternate‑screen mode starts; that file opts‑out locally via `allow`.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 #![deny(clippy::disallowed_methods)]
+use crate::cloud_requirements_loader::build_cloud_requirements_loader;
+use crate::feedback_support::CodexFeedback;
 use crate::legacy_core::check_execpolicy_for_warnings;
 use crate::legacy_core::config::Config;
 use crate::legacy_core::config::ConfigBuilder;
@@ -19,6 +21,8 @@ use crate::legacy_core::format_exec_policy_error_with_source;
 use crate::legacy_core::path_utils;
 use crate::legacy_core::read_session_meta_line;
 use crate::legacy_core::windows_sandbox::WindowsSandboxLevelExt;
+use crate::oss_provider_bootstrap::default_model_for_oss_provider;
+use crate::oss_provider_bootstrap::ensure_oss_provider_ready;
 use additional_dirs::add_dir_warning_message;
 use app::App;
 pub use app::AppExitInfo;
@@ -26,23 +30,22 @@ pub use app::ExitReason;
 use app_server_session::AppServerSession;
 use codex_app_server_client::AppServerClient;
 use codex_app_server_client::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY;
+#[cfg(feature = "embedded-app-server")]
 use codex_app_server_client::InProcessAppServerClient;
+#[cfg(feature = "embedded-app-server")]
 use codex_app_server_client::InProcessClientStartArgs;
 use codex_app_server_client::RemoteAppServerClient;
 use codex_app_server_client::RemoteAppServerConnectArgs;
 use codex_app_server_protocol::Account as AppServerAccount;
 use codex_app_server_protocol::AuthMode as AppServerAuthMode;
+#[cfg(feature = "embedded-app-server")]
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::Thread as AppServerThread;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadSortKey as AppServerThreadSortKey;
 use codex_app_server_protocol::ThreadSourceKind;
-use codex_cloud_requirements::cloud_requirements_loader_for_storage;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecServerRuntimePaths;
-use codex_login::AuthConfig;
-use codex_login::default_client::set_default_client_residency_requirement;
-use codex_login::enforce_login_restrictions;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::AltScreenMode;
 use codex_protocol::config_types::SandboxMode;
@@ -51,33 +54,83 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::TurnContextItem;
+#[cfg(feature = "local-state-db")]
 use codex_rollout::state_db::get_state_db;
+#[cfg(feature = "local-state-db")]
 use codex_state::log_db;
 use codex_terminal_detection::terminal_info;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::canonicalize_existing_preserving_symlinks;
-use codex_utils_oss::ensure_oss_provider_ready;
-use codex_utils_oss::get_default_model_for_oss_provider;
 use color_eyre::eyre::WrapErr;
 use cwd_prompt::CwdPromptAction;
 use cwd_prompt::CwdPromptOutcome;
 use cwd_prompt::CwdSelection;
+#[cfg(feature = "logging")]
 use std::fs::OpenOptions;
 use std::future::Future;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(feature = "logging")]
 use tracing::Level;
 use tracing::error;
 use tracing::warn;
+#[cfg(feature = "logging")]
 use tracing_appender::non_blocking;
+#[cfg(feature = "logging")]
 use tracing_subscriber::EnvFilter;
+#[cfg(feature = "logging")]
 use tracing_subscriber::filter::Targets;
+#[cfg(feature = "logging")]
 use tracing_subscriber::prelude::*;
 use url::Url;
 use uuid::Uuid;
 
-pub(crate) use codex_app_server_client::legacy_core;
+const INTERPRETER_FORCE_PROVIDER_ONBOARDING_ENV_VAR: &str = "INTERPRETER_FORCE_PROVIDER_ONBOARDING";
+const FRESH_HOME_PROVIDER_ONBOARDING_MARKER_FILE: &str = ".fresh_home_provider_onboarding";
+
+#[cfg(not(feature = "local-state-db"))]
+mod log_db {
+    #[derive(Clone, Debug)]
+    pub(crate) struct LogDbLayer;
+
+    impl LogDbLayer {
+        pub(crate) fn with_filter<T>(self, _filter: T) -> Self {
+            self
+        }
+    }
+
+    pub(crate) fn start<T>(_state_db: T) -> LogDbLayer {
+        LogDbLayer
+    }
+}
+
+#[cfg(not(feature = "local-state-db"))]
+struct ThinClientStateDb;
+
+#[cfg(not(feature = "local-state-db"))]
+struct ThinClientThreadMetadata {
+    cwd: PathBuf,
+    model: Option<String>,
+}
+
+#[cfg(not(feature = "local-state-db"))]
+impl ThinClientStateDb {
+    async fn get_thread(
+        &self,
+        _thread_id: ThreadId,
+    ) -> std::io::Result<Option<ThinClientThreadMetadata>> {
+        Ok(None)
+    }
+}
+
+#[cfg(not(feature = "local-state-db"))]
+async fn get_state_db(_config: &Config) -> Option<ThinClientStateDb> {
+    None
+}
+
+pub use startup_trace::STARTUP_TRACE_PATH_ENV_VAR;
+pub use startup_trace::record_startup_trace_event;
 
 mod additional_dirs;
 mod app;
@@ -88,9 +141,9 @@ mod app_event_sender;
 mod app_server_approval_conversions;
 mod app_server_session;
 mod ascii_animation;
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), feature = "realtime-audio"))]
 mod audio_device;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", not(feature = "realtime-audio")))]
 #[allow(dead_code)]
 mod audio_device {
     use crate::app_event::RealtimeAudioDeviceKind;
@@ -109,8 +162,11 @@ mod chatwidget;
 mod cli;
 mod clipboard_copy;
 mod clipboard_paste;
+mod cloud_requirements_loader;
+mod collaboration_mode_presets;
 mod collaboration_modes;
 mod color;
+mod config_write_edits;
 pub(crate) mod custom_terminal;
 pub use custom_terminal::Terminal;
 mod cwd_prompt;
@@ -121,6 +177,7 @@ mod exec_command;
 mod external_agent_config_migration;
 mod external_agent_config_migration_startup;
 mod external_editor;
+mod feedback_support;
 mod file_search;
 mod frames;
 mod get_git_diff;
@@ -128,10 +185,12 @@ mod history_cell;
 pub(crate) mod insert_history;
 pub use insert_history::insert_history_lines;
 mod key_hint;
+pub(crate) mod legacy_core;
 mod line_truncation;
 pub(crate) mod live_wrap;
 pub use live_wrap::RowBuilder;
 mod local_chatgpt_auth;
+mod login_support;
 mod markdown;
 mod markdown_render;
 mod markdown_stream;
@@ -141,35 +200,46 @@ mod model_migration;
 mod multi_agents;
 mod notifications;
 pub(crate) mod onboarding;
+mod oss_provider_bootstrap;
 mod oss_selection;
 mod pager_overlay;
+mod plugin_mentions;
+mod product_branding;
+mod provider_model_flow;
+mod provider_preset_repair;
+mod provider_readiness;
 pub(crate) mod public_widgets;
 mod render;
 mod resume_picker;
+mod review_hints;
 mod selection_list;
 mod session_log;
 mod shimmer;
 mod skills_helpers;
 mod slash_command;
+mod startup_trace;
 mod status;
 mod status_indicator_widget;
 mod streaming;
 mod style;
+mod telemetry;
 mod terminal_palette;
 mod terminal_title;
 mod text_formatting;
 mod theme_picker;
 mod tooltips;
 mod tui;
+mod turn_sleep_inhibitor;
 mod ui_consts;
 pub(crate) mod update_action;
 pub use update_action::UpdateAction;
 mod update_prompt;
 mod updates;
 mod version;
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), feature = "realtime-audio"))]
 mod voice;
-#[cfg(target_os = "linux")]
+mod web_search_detail;
+#[cfg(any(target_os = "linux", not(feature = "realtime-audio")))]
 #[allow(dead_code)]
 mod voice {
     use crate::app_event_sender::AppEventSender;
@@ -248,10 +318,26 @@ async fn start_embedded_app_server(
     cli_kv_overrides: Vec<(String, toml::Value)>,
     loader_overrides: LoaderOverrides,
     cloud_requirements: CloudRequirementsLoader,
-    feedback: codex_feedback::CodexFeedback,
+    feedback: CodexFeedback,
     log_db: Option<log_db::LogDbLayer>,
     environment_manager: Arc<EnvironmentManager>,
-) -> color_eyre::Result<InProcessAppServerClient> {
+) -> color_eyre::Result<AppServerClient> {
+    #[cfg(not(feature = "embedded-app-server"))]
+    {
+        let _ = (
+            arg0_paths,
+            config,
+            cli_kv_overrides,
+            loader_overrides,
+            cloud_requirements,
+            feedback,
+            log_db,
+            environment_manager,
+        );
+        color_eyre::eyre::bail!("embedded app server is unavailable in the thin-client build")
+    }
+
+    #[cfg(feature = "embedded-app-server")]
     start_embedded_app_server_with(
         arg0_paths,
         config,
@@ -264,6 +350,7 @@ async fn start_embedded_app_server(
         InProcessAppServerClient::start,
     )
     .await
+    .map(AppServerClient::InProcess)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -375,23 +462,24 @@ async fn start_app_server(
     cli_kv_overrides: Vec<(String, toml::Value)>,
     loader_overrides: LoaderOverrides,
     cloud_requirements: CloudRequirementsLoader,
-    feedback: codex_feedback::CodexFeedback,
+    feedback: CodexFeedback,
     log_db: Option<log_db::LogDbLayer>,
     environment_manager: Arc<EnvironmentManager>,
 ) -> color_eyre::Result<AppServerClient> {
     match target {
-        AppServerTarget::Embedded => start_embedded_app_server(
-            arg0_paths,
-            config,
-            cli_kv_overrides,
-            loader_overrides,
-            cloud_requirements,
-            feedback,
-            log_db,
-            environment_manager,
-        )
-        .await
-        .map(AppServerClient::InProcess),
+        AppServerTarget::Embedded => {
+            start_embedded_app_server(
+                arg0_paths,
+                config,
+                cli_kv_overrides,
+                loader_overrides,
+                cloud_requirements,
+                feedback,
+                log_db,
+                environment_manager,
+            )
+            .await
+        }
         AppServerTarget::Remote {
             websocket_url,
             auth_token,
@@ -411,7 +499,7 @@ pub(crate) async fn start_app_server_for_picker(
         Vec::new(),
         LoaderOverrides::default(),
         CloudRequirementsLoader::default(),
-        codex_feedback::CodexFeedback::new(),
+        CodexFeedback::new(),
         /*log_db*/ None,
         environment_manager,
     )
@@ -432,13 +520,14 @@ pub(crate) async fn start_embedded_app_server_for_picker(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "embedded-app-server")]
 async fn start_embedded_app_server_with<F, Fut>(
     arg0_paths: Arg0DispatchPaths,
     config: Config,
     cli_kv_overrides: Vec<(String, toml::Value)>,
     loader_overrides: LoaderOverrides,
     cloud_requirements: CloudRequirementsLoader,
-    feedback: codex_feedback::CodexFeedback,
+    feedback: CodexFeedback,
     log_db: Option<log_db::LogDbLayer>,
     environment_manager: Arc<EnvironmentManager>,
     start_client: F,
@@ -672,18 +761,24 @@ pub async fn run_main(
     loader_overrides: LoaderOverrides,
     remote: Option<String>,
     remote_auth_token: Option<String>,
+    local_daemon_remote: bool,
 ) -> std::io::Result<AppExitInfo> {
     let remote_url = remote;
     if let (Some(websocket_url), Some(_)) = (remote_url.as_deref(), remote_auth_token.as_ref()) {
         validate_remote_auth_token_transport(websocket_url).map_err(std::io::Error::other)?;
     }
-    let app_server_target = remote_url
-        .clone()
-        .map(|websocket_url| AppServerTarget::Remote {
+    let app_server_target = if let Some(websocket_url) = remote_url.clone() {
+        AppServerTarget::Remote {
             websocket_url,
             auth_token: remote_auth_token.clone(),
-        })
-        .unwrap_or(AppServerTarget::Embedded);
+        }
+    } else if cfg!(feature = "embedded-app-server") {
+        AppServerTarget::Embedded
+    } else {
+        return Err(std::io::Error::other(
+            "this thin-client build requires a remote app server",
+        ));
+    };
     let remote_cwd_override = cli
         .cwd
         .clone()
@@ -786,9 +881,8 @@ pub async fn run_main(
         .chatgpt_base_url
         .clone()
         .unwrap_or_else(|| "https://chatgpt.com/backend-api/".to_string());
-    let cloud_requirements = cloud_requirements_loader_for_storage(
+    let cloud_requirements = build_cloud_requirements_loader(
         codex_home.to_path_buf(),
-        /*enable_codex_api_key_env*/ false,
         config_toml.cli_auth_credentials_store.unwrap_or_default(),
         chatgpt_base_url,
     );
@@ -823,7 +917,7 @@ pub async fn run_main(
         // Use the provider from model_provider_override
         model_provider_override
             .as_ref()
-            .and_then(|provider_id| get_default_model_for_oss_provider(provider_id))
+            .and_then(|provider_id| default_model_for_oss_provider(provider_id))
             .map(std::borrow::ToOwned::to_owned)
     } else {
         None // No model specified, will use the default.
@@ -869,7 +963,7 @@ pub async fn run_main(
         }
     }
 
-    set_default_client_residency_requirement(config.enforce_residency.value());
+    login_support::configure_default_client_residency(&config);
 
     if let Some(warning) =
         add_dir_warning_message(&cli.add_dir, config.permissions.sandbox_policy.get())
@@ -883,61 +977,13 @@ pub async fn run_main(
 
     if matches!(app_server_target, AppServerTarget::Embedded) {
         #[allow(clippy::print_stderr)]
-        if let Err(err) = enforce_login_restrictions(&AuthConfig {
-            codex_home: config.codex_home.to_path_buf(),
-            auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
-            forced_login_method: config.forced_login_method,
-            forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
-        }) {
+        if let Err(err) = login_support::enforce_embedded_login_restrictions(&config) {
             eprintln!("{err}");
             std::process::exit(1);
         }
     }
 
-    let log_dir = crate::legacy_core::config::log_dir(&config)?;
-    std::fs::create_dir_all(&log_dir)?;
-    // Open (or create) your log file, appending to it.
-    let mut log_file_opts = OpenOptions::new();
-    log_file_opts.create(true).append(true);
-
-    // Ensure the file is only readable and writable by the current user.
-    // Doing the equivalent to `chmod 600` on Windows is quite a bit more code
-    // and requires the Windows API crates, so we can reconsider that when
-    // Codex CLI is officially supported on Windows.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        log_file_opts.mode(0o600);
-    }
-
-    let log_file = log_file_opts.open(log_dir.join("codex-tui.log"))?;
-
-    // Wrap file in non‑blocking writer.
-    let (non_blocking, _guard) = non_blocking(log_file);
-
-    // use RUST_LOG env var, default to info for codex crates.
-    let env_filter = || {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("codex_core=info,codex_tui=info,codex_rmcp_client=info")
-        })
-    };
-
-    let file_layer = tracing_subscriber::fmt::layer()
-        .with_writer(non_blocking)
-        // `with_target(true)` is the default, but we previously disabled it for file output.
-        // Keep it enabled so we can selectively enable targets via `RUST_LOG=...` and then
-        // grep for a specific module/target while troubleshooting.
-        .with_target(true)
-        .with_ansi(false)
-        .with_span_events(
-            tracing_subscriber::fmt::format::FmtSpan::NEW
-                | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
-        )
-        .with_filter(env_filter());
-
-    let feedback = codex_feedback::CodexFeedback::new();
-    let feedback_layer = feedback.logger_layer();
-    let feedback_metadata_layer = feedback.metadata_layer();
+    let feedback = CodexFeedback::new();
 
     if cli.oss && model_provider_override.is_some() {
         // We're in the oss section, so provider_id should be Some
@@ -954,7 +1000,7 @@ pub async fn run_main(
         ensure_oss_provider_ready(provider_id, &config).await?;
     }
 
-    let otel = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _otel = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::legacy_core::otel_init::build_provider(
             &config,
             env!("CARGO_PKG_VERSION"),
@@ -979,29 +1025,61 @@ pub async fn run_main(
         }
     };
 
-    let otel_logger_layer = otel.as_ref().and_then(|o| o.logger_layer());
-
-    let otel_tracing_layer = otel.as_ref().and_then(|o| o.tracing_layer());
-
     let log_db = get_state_db(&config).await.map(log_db::start);
-    let log_db_layer = log_db
-        .clone()
-        .map(|layer| layer.with_filter(Targets::new().with_default(Level::TRACE)));
 
-    let _ = tracing_subscriber::registry()
-        .with(file_layer)
-        .with(feedback_layer)
-        .with(feedback_metadata_layer)
-        .with(log_db_layer)
-        .with(otel_logger_layer)
-        .with(otel_tracing_layer)
-        .try_init();
+    #[cfg(feature = "logging")]
+    {
+        let otel_logger_layer = _otel.as_ref().and_then(|o| o.logger_layer());
+        let otel_tracing_layer = _otel.as_ref().and_then(|o| o.tracing_layer());
+        let log_dir = crate::legacy_core::config::log_dir(&config)?;
+        std::fs::create_dir_all(&log_dir)?;
+        let mut log_file_opts = OpenOptions::new();
+        log_file_opts.create(true).append(true);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            log_file_opts.mode(0o600);
+        }
+
+        let log_file = log_file_opts.open(log_dir.join("codex-tui.log"))?;
+        let (non_blocking, _guard) = non_blocking(log_file);
+        let env_filter = || {
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                EnvFilter::new("codex_core=info,codex_tui=info,codex_rmcp_client=info")
+            })
+        };
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_writer(non_blocking)
+            .with_target(true)
+            .with_ansi(false)
+            .with_span_events(
+                tracing_subscriber::fmt::format::FmtSpan::NEW
+                    | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
+            )
+            .with_filter(env_filter());
+        let feedback_layer = feedback.logger_layer();
+        let feedback_metadata_layer = feedback.metadata_layer();
+        let log_db_layer = log_db
+            .clone()
+            .map(|layer| layer.with_filter(Targets::new().with_default(Level::TRACE)));
+
+        let _ = tracing_subscriber::registry()
+            .with(file_layer)
+            .with(feedback_layer)
+            .with(feedback_metadata_layer)
+            .with(log_db_layer)
+            .with(otel_logger_layer)
+            .with(otel_tracing_layer)
+            .try_init();
+    }
 
     run_ratatui_app(
         cli,
         arg0_paths,
         loader_overrides,
         app_server_target,
+        local_daemon_remote,
         remote_cwd_override,
         config,
         overrides,
@@ -1017,24 +1095,68 @@ pub async fn run_main(
     .map_err(|err| std::io::Error::other(err.to_string()))
 }
 
+pub async fn run_main_with_default_loader_overrides(
+    cli: Cli,
+    arg0_paths: Arg0DispatchPaths,
+    remote: Option<String>,
+    remote_auth_token: Option<String>,
+) -> std::io::Result<AppExitInfo> {
+    run_main(
+        cli,
+        arg0_paths,
+        LoaderOverrides::default(),
+        remote,
+        remote_auth_token,
+        /*local_daemon_remote*/ false,
+    )
+    .await
+}
+
+pub async fn run_main_with_deferred_remote<F, Fut>(
+    cli: Cli,
+    arg0_paths: Arg0DispatchPaths,
+    _startup_model_display: Option<String>,
+    _startup_requires_provider_setup_override: Option<bool>,
+    deferred_remote: F,
+) -> std::io::Result<AppExitInfo>
+where
+    F: Fn() -> Fut + Clone + 'static,
+    Fut: Future<Output = std::io::Result<String>> + 'static,
+{
+    record_startup_trace_event("interpreter.daemon.ensure.start");
+    let remote = deferred_remote().await?;
+    record_startup_trace_event("interpreter.daemon.ensure.end");
+    run_main(
+        cli,
+        arg0_paths,
+        LoaderOverrides::default(),
+        Some(remote),
+        /*remote_auth_token*/ None,
+        /*local_daemon_remote*/ true,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_ratatui_app(
     cli: Cli,
     arg0_paths: Arg0DispatchPaths,
     loader_overrides: LoaderOverrides,
     app_server_target: AppServerTarget,
+    local_daemon_remote: bool,
     remote_cwd_override: Option<PathBuf>,
     initial_config: Config,
     overrides: ConfigOverrides,
     cli_kv_overrides: Vec<(String, toml::Value)>,
     mut cloud_requirements: CloudRequirementsLoader,
-    feedback: codex_feedback::CodexFeedback,
+    feedback: CodexFeedback,
     log_db: Option<log_db::LogDbLayer>,
     remote_url: Option<String>,
     remote_auth_token: Option<String>,
     environment_manager: Arc<EnvironmentManager>,
 ) -> color_eyre::Result<AppExitInfo> {
     let remote_mode = matches!(&app_server_target, AppServerTarget::Remote { .. });
+    let behaves_like_local_startup = !remote_mode || local_daemon_remote;
     color_eyre::install()?;
 
     tooltips::announcement::prewarm();
@@ -1103,7 +1225,8 @@ async fn run_ratatui_app(
         },
     );
 
-    let should_show_trust_screen_flag = !remote_mode && should_show_trust_screen(&initial_config);
+    let should_show_trust_screen_flag =
+        behaves_like_local_startup && should_show_trust_screen(&initial_config);
     let mut trust_decision_was_made = false;
     let login_status = if initial_config.model_provider.requires_openai_auth {
         let Some(app_server) = app_server.as_mut() else {
@@ -1113,14 +1236,18 @@ async fn run_ratatui_app(
     } else {
         LoginStatus::NotAuthenticated
     };
-    let should_show_onboarding =
-        should_show_onboarding(login_status, &initial_config, should_show_trust_screen_flag);
+    let show_provider_step = should_show_provider_step(login_status, &initial_config);
+    let should_show_onboarding = should_show_onboarding(
+        login_status,
+        &initial_config,
+        should_show_trust_screen_flag,
+        show_provider_step,
+    );
 
     let config = if should_show_onboarding {
-        let show_login_screen = should_show_login_screen(login_status, &initial_config);
         let onboarding_result = run_onboarding_app(
             OnboardingScreenArgs {
-                show_login_screen,
+                show_provider_step,
                 show_trust_screen: should_show_trust_screen_flag,
                 login_status,
                 app_server_request_handle: app_server
@@ -1128,11 +1255,12 @@ async fn run_ratatui_app(
                     .map(AppServerSession::request_handle),
                 config: initial_config.clone(),
             },
-            if show_login_screen {
-                app_server.as_mut()
+            if show_provider_step {
+                app_server.take()
             } else {
                 None
             },
+            None,
             &mut tui,
         )
         .await?;
@@ -1153,10 +1281,9 @@ async fn run_ratatui_app(
         // If this onboarding run included the login step, always refresh cloud requirements and
         // rebuild config. This avoids missing newly available cloud requirements due to login
         // status detection edge cases.
-        if show_login_screen && !remote_mode {
-            cloud_requirements = cloud_requirements_loader_for_storage(
+        if show_provider_step && behaves_like_local_startup {
+            cloud_requirements = build_cloud_requirements_loader(
                 initial_config.codex_home.to_path_buf(),
-                /*enable_codex_api_key_env*/ false,
                 initial_config.cli_auth_credentials_store_mode,
                 initial_config.chatgpt_base_url.clone(),
             );
@@ -1165,7 +1292,7 @@ async fn run_ratatui_app(
         // If the user made an explicit trust decision, or we showed the login flow, reload config
         // so current process state reflects persisted trust/auth changes.
         if onboarding_result.directory_trust_decision.is_some()
-            || (show_login_screen && !remote_mode)
+            || (show_provider_step && (!remote_mode || local_daemon_remote))
         {
             load_config_or_exit(
                 cli_kv_overrides.clone(),
@@ -1334,7 +1461,7 @@ async fn run_ratatui_app(
     };
 
     let current_cwd = config.cwd.clone();
-    let allow_prompt = !remote_mode && cli.cwd.is_none();
+    let allow_prompt = behaves_like_local_startup && cli.cwd.is_none();
     let action_and_target_session_if_resume_or_fork = match &session_selection {
         resume_picker::SessionSelection::Resume(target_session) => {
             Some((CwdPromptAction::Resume, target_session))
@@ -1346,7 +1473,7 @@ async fn run_ratatui_app(
     };
     let fallback_cwd = match action_and_target_session_if_resume_or_fork {
         Some((action, target_session)) => {
-            if remote_mode {
+            if !behaves_like_local_startup {
                 Some(current_cwd.to_path_buf())
             } else {
                 match resolve_cwd_for_resume_or_fork(
@@ -1401,7 +1528,7 @@ async fn run_ratatui_app(
         config.startup_warnings.push(w);
     }
 
-    set_default_client_residency_requirement(config.enforce_residency.value());
+    login_support::configure_default_client_residency(&config);
     let active_profile = config.active_profile.clone();
     let should_show_trust_screen = should_show_trust_screen(&config);
     let should_prompt_windows_sandbox_nux_at_startup = cfg!(target_os = "windows")
@@ -1731,16 +1858,37 @@ fn should_show_trust_screen(config: &Config) -> bool {
     config.active_project.trust_level.is_none()
 }
 
+pub(crate) fn should_force_provider_onboarding() -> bool {
+    let force_provider_onboarding = std::env::var_os(INTERPRETER_FORCE_PROVIDER_ONBOARDING_ENV_VAR)
+        .is_some_and(|value| !value.is_empty())
+        || find_codex_home().ok().is_some_and(|codex_home| {
+            codex_home
+                .join(FRESH_HOME_PROVIDER_ONBOARDING_MARKER_FILE)
+                .exists()
+        });
+    record_startup_trace_event(if force_provider_onboarding {
+        "interpreter.tui.force_provider_onboarding.true"
+    } else {
+        "interpreter.tui.force_provider_onboarding.false"
+    });
+    force_provider_onboarding
+}
+
 fn should_show_onboarding(
     login_status: LoginStatus,
     config: &Config,
     show_trust_screen: bool,
+    show_provider_step: bool,
 ) -> bool {
     if show_trust_screen {
         return true;
     }
 
-    should_show_login_screen(login_status, config)
+    show_provider_step || should_show_login_screen(login_status, config)
+}
+
+fn should_show_provider_step(login_status: LoginStatus, config: &Config) -> bool {
+    should_force_provider_onboarding() || should_show_login_screen(login_status, config)
 }
 
 fn should_show_login_screen(login_status: LoginStatus, config: &Config) -> bool {
@@ -1785,17 +1933,23 @@ mod tests {
     async fn start_test_embedded_app_server(
         config: Config,
     ) -> color_eyre::Result<InProcessAppServerClient> {
-        start_embedded_app_server(
+        match start_embedded_app_server(
             Arg0DispatchPaths::default(),
             config,
             Vec::new(),
             LoaderOverrides::default(),
             CloudRequirementsLoader::default(),
-            codex_feedback::CodexFeedback::new(),
+            CodexFeedback::new(),
             /*log_db*/ None,
             Arc::new(EnvironmentManager::new(/*exec_server_url*/ None)),
         )
-        .await
+        .await?
+        {
+            AppServerClient::InProcess(client) => Ok(client),
+            AppServerClient::Remote(_) => {
+                color_eyre::eyre::bail!("expected embedded app server for test helper")
+            }
+        }
     }
 
     #[test]
@@ -2183,7 +2337,7 @@ mod tests {
             Vec::new(),
             LoaderOverrides::default(),
             CloudRequirementsLoader::default(),
-            codex_feedback::CodexFeedback::new(),
+            CodexFeedback::new(),
             /*log_db*/ None,
             Arc::new(EnvironmentManager::new(/*exec_server_url*/ None)),
             |_args| async { Err(std::io::Error::other("boom")) },

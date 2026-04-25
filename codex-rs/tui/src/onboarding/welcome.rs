@@ -1,101 +1,54 @@
-use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
-use crossterm::event::KeyEventKind;
-use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
 use ratatui::prelude::Widget;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
-use ratatui::widgets::Clear;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::WidgetRef;
 use ratatui::widgets::Wrap;
-use std::cell::Cell;
 
-use crate::ascii_animation::AsciiAnimation;
 use crate::onboarding::onboarding_screen::KeyboardHandler;
 use crate::onboarding::onboarding_screen::StepStateProvider;
+use crate::product_branding::ProductBranding;
 use crate::tui::FrameRequester;
 
 use super::onboarding_screen::StepState;
 
-const MIN_ANIMATION_HEIGHT: u16 = 37;
-const MIN_ANIMATION_WIDTH: u16 = 60;
-
 pub(crate) struct WelcomeWidget {
     pub is_logged_in: bool,
-    animation: AsciiAnimation,
-    animations_enabled: bool,
-    animations_suppressed: Cell<bool>,
-    layout_area: Cell<Option<Rect>>,
+    branding: ProductBranding,
 }
 
 impl KeyboardHandler for WelcomeWidget {
-    fn handle_key_event(&mut self, key_event: KeyEvent) {
-        if !self.animations_enabled {
-            return;
-        }
-        if key_event.kind == KeyEventKind::Press
-            && key_event.code == KeyCode::Char('.')
-            && key_event.modifiers.contains(KeyModifiers::CONTROL)
-        {
-            tracing::warn!("Welcome background to press '.'");
-            let _ = self.animation.pick_random_variant();
-        }
-    }
+    fn handle_key_event(&mut self, _key_event: KeyEvent) {}
 }
 
 impl WelcomeWidget {
     pub(crate) fn new(
         is_logged_in: bool,
-        request_frame: FrameRequester,
-        animations_enabled: bool,
+        _request_frame: FrameRequester,
+        _animations_enabled: bool,
     ) -> Self {
         Self {
             is_logged_in,
-            animation: AsciiAnimation::new(request_frame),
-            animations_enabled,
-            animations_suppressed: Cell::new(false),
-            layout_area: Cell::new(None),
+            branding: ProductBranding::current(),
         }
     }
 
-    pub(crate) fn update_layout_area(&self, area: Rect) {
-        self.layout_area.set(Some(area));
-    }
-
-    pub(crate) fn set_animations_suppressed(&self, suppressed: bool) {
-        self.animations_suppressed.set(suppressed);
-    }
+    pub(crate) fn update_layout_area(&self, _area: ratatui::layout::Rect) {}
 }
 
 impl WidgetRef for &WelcomeWidget {
-    fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        Clear.render(area, buf);
-        if self.animations_enabled && !self.animations_suppressed.get() {
-            self.animation.schedule_next_frame();
-        }
-
-        let layout_area = self.layout_area.get().unwrap_or(area);
-        // Skip the animation entirely when the viewport is too small so we don't clip frames.
-        let show_animation = self.animations_enabled
-            && !self.animations_suppressed.get()
-            && layout_area.height >= MIN_ANIMATION_HEIGHT
-            && layout_area.width >= MIN_ANIMATION_WIDTH;
-
-        let mut lines: Vec<Line> = Vec::new();
-        if show_animation {
-            let frame = self.animation.current_frame();
-            lines.extend(frame.lines().map(Into::into));
-            lines.push("".into());
-        }
-        lines.push(Line::from(vec![
-            "  ".into(),
-            "Welcome to ".into(),
-            "Codex".bold(),
-            ", OpenAI's command-line coding agent".into(),
-        ]));
+    fn render_ref(&self, area: ratatui::layout::Rect, buf: &mut Buffer) {
+        let lines = vec![
+            "".into(),
+            Line::from(vec![
+                "  ".into(),
+                "Welcome to ".into(),
+                self.branding.display_name.bold(),
+                self.branding.welcome_suffix.into(),
+            ]),
+        ];
 
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -116,12 +69,11 @@ impl StepStateProvider for WelcomeWidget {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use ratatui::Terminal;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
-    static VARIANT_A: [&str; 1] = ["frame-a"];
-    static VARIANT_B: [&str; 1] = ["frame-b"];
-    static VARIANTS: [&[&str]; 2] = [&VARIANT_A, &VARIANT_B];
+    use crate::test_backend::VT100Backend;
 
     fn row_containing(buf: &Buffer, needle: &str) -> Option<u16> {
         (0..buf.area.height).find(|&y| {
@@ -134,57 +86,48 @@ mod tests {
     }
 
     #[test]
-    fn welcome_renders_animation_on_first_draw() {
+    fn welcome_renders_with_one_blank_row_above() {
         let widget = WelcomeWidget::new(
             /*is_logged_in*/ false,
             FrameRequester::test_dummy(),
             /*animations_enabled*/ true,
         );
-        let area = Rect::new(0, 0, MIN_ANIMATION_WIDTH, MIN_ANIMATION_HEIGHT);
+        let area = Rect::new(0, 0, /*width*/ 70, /*height*/ 6);
         let mut buf = Buffer::empty(area);
-        let frame_lines = widget.animation.current_frame().lines().count() as u16;
         (&widget).render(area, &mut buf);
 
         let welcome_row = row_containing(&buf, "Welcome");
-        assert_eq!(welcome_row, Some(frame_lines + 1));
+        assert_eq!(welcome_row, Some(1));
     }
 
     #[test]
-    fn welcome_skips_animation_below_height_breakpoint() {
+    fn welcome_renders_without_animation_when_enabled() {
         let widget = WelcomeWidget::new(
             /*is_logged_in*/ false,
             FrameRequester::test_dummy(),
             /*animations_enabled*/ true,
         );
-        let area = Rect::new(0, 0, MIN_ANIMATION_WIDTH, MIN_ANIMATION_HEIGHT - 1);
+        let area = Rect::new(0, 0, /*width*/ 70, /*height*/ 6);
         let mut buf = Buffer::empty(area);
         (&widget).render(area, &mut buf);
 
         let welcome_row = row_containing(&buf, "Welcome");
-        assert_eq!(welcome_row, Some(0));
+        assert_eq!(welcome_row, Some(1));
     }
 
     #[test]
-    fn ctrl_dot_changes_animation_variant() {
-        let mut widget = WelcomeWidget {
+    fn renders_open_interpreter_snapshot() {
+        let widget = WelcomeWidget {
             is_logged_in: false,
-            animation: AsciiAnimation::with_variants(
-                FrameRequester::test_dummy(),
-                &VARIANTS,
-                /*variant_idx*/ 0,
-            ),
-            animations_enabled: true,
-            animations_suppressed: Cell::new(false),
-            layout_area: Cell::new(None),
+            branding: ProductBranding::for_open_interpreter(/*is_open_interpreter*/ true),
         };
 
-        let before = widget.animation.current_frame();
-        widget.handle_key_event(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::CONTROL));
-        let after = widget.animation.current_frame();
+        let mut terminal =
+            Terminal::new(VT100Backend::new(/*width*/ 70, /*height*/ 6)).expect("terminal");
+        terminal
+            .draw(|f| (&widget).render_ref(f.area(), f.buffer_mut()))
+            .expect("draw");
 
-        assert_ne!(
-            before, after,
-            "expected ctrl+. to switch welcome animation variant"
-        );
+        insta::assert_snapshot!(terminal.backend());
     }
 }

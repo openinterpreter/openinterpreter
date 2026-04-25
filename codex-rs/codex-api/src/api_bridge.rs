@@ -1,4 +1,5 @@
 use crate::TransportError;
+use crate::auth::AuthProvider as ApiAuthProvider;
 use crate::error::ApiError;
 use crate::rate_limits::parse_promo_message;
 use crate::rate_limits::parse_rate_limit_for_limit;
@@ -31,7 +32,9 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
             identity_authorization_error: None,
             identity_error_code: None,
         }),
-        ApiError::InvalidRequest { message } => CodexErr::InvalidRequest(message),
+        ApiError::InvalidRequest { message } => {
+            CodexErr::InvalidRequest(rewrite_invalid_request_message(message))
+        }
         ApiError::Transport(transport) => match transport {
             TransportError::Http {
                 status,
@@ -60,7 +63,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                     {
                         CodexErr::InvalidImageRequest()
                     } else {
-                        CodexErr::InvalidRequest(body_text)
+                        CodexErr::InvalidRequest(rewrite_invalid_request_message(body_text))
                     }
                 } else if status == http::StatusCode::INTERNAL_SERVER_ERROR {
                     CodexErr::InternalServerError
@@ -119,6 +122,40 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
     }
 }
 
+fn rewrite_invalid_request_message(message: String) -> String {
+    let structured_message = serde_json::from_str::<Value>(&message)
+        .ok()
+        .and_then(|value| {
+            value.get("error").and_then(Value::as_object).map(|error| {
+                let provider_message = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let provider_param = error
+                    .get("param")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                (provider_message, provider_param)
+            })
+        });
+    let (provider_message, provider_param) =
+        structured_message.unwrap_or_else(|| (message.clone(), String::new()));
+    let provider_message_lower = provider_message.to_ascii_lowercase();
+    let provider_param_lower = provider_param.to_ascii_lowercase();
+    if provider_message_lower.contains("tool calling")
+        || provider_message_lower.contains("function calling")
+        || provider_param_lower.contains("tool calling")
+        || provider_param_lower.contains("function calling")
+    {
+        return format!(
+            "The selected model does not support tool calling on this provider. Use /model to choose another model or enter a custom model id.\nProvider said: {provider_message}"
+        );
+    }
+    provider_message
+}
+
 const ACTIVE_LIMIT_HEADER: &str = "x-codex-active-limit";
 const REQUEST_ID_HEADER: &str = "x-request-id";
 const OAI_REQUEST_ID_HEADER: &str = "x-oai-request-id";
@@ -171,4 +208,64 @@ struct UsageErrorBody {
     error_type: Option<String>,
     plan_type: Option<PlanType>,
     resets_at: Option<i64>,
+}
+
+#[derive(Clone, Default)]
+pub struct CoreAuthProvider {
+    pub token: Option<String>,
+    pub account_id: Option<String>,
+    pub token_header_name: Option<&'static str>,
+    pub use_bearer_prefix: bool,
+}
+
+impl CoreAuthProvider {
+    fn auth_header_value(&self) -> Option<String> {
+        self.token.as_ref().map(|token| {
+            if self.use_bearer_prefix {
+                format!("Bearer {token}")
+            } else {
+                token.clone()
+            }
+        })
+    }
+
+    pub fn auth_header_attached(&self) -> bool {
+        self.auth_header_value()
+            .as_ref()
+            .is_some_and(|value| http::HeaderValue::from_str(value).is_ok())
+    }
+
+    pub fn auth_header_name(&self) -> Option<&'static str> {
+        self.auth_header_attached()
+            .then_some(self.token_header_name.unwrap_or("authorization"))
+    }
+
+    pub fn account_id(&self) -> Option<String> {
+        self.account_id.clone()
+    }
+
+    pub fn for_test(token: Option<&str>, account_id: Option<&str>) -> Self {
+        Self {
+            token: token.map(str::to_string),
+            account_id: account_id.map(str::to_string),
+            token_header_name: None,
+            use_bearer_prefix: true,
+        }
+    }
+}
+
+impl ApiAuthProvider for CoreAuthProvider {
+    fn add_auth_headers(&self, headers: &mut HeaderMap) {
+        if let Some(value) = self.auth_header_value()
+            && let Ok(header) = http::HeaderValue::from_str(&value)
+        {
+            let header_name = self.token_header_name.unwrap_or("authorization");
+            let _ = headers.insert(header_name, header);
+        }
+        if let Some(account_id) = self.account_id.as_ref()
+            && let Ok(header) = http::HeaderValue::from_str(account_id)
+        {
+            let _ = headers.insert("ChatGPT-Account-ID", header);
+        }
+    }
 }

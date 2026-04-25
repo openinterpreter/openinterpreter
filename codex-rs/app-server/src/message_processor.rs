@@ -71,6 +71,7 @@ use codex_exec_server::EnvironmentManager;
 use codex_features::Feature;
 use codex_feedback::CodexFeedback;
 use codex_login::AuthManager;
+use codex_login::CodexAuth;
 use codex_login::auth::ExternalAuth;
 use codex_login::auth::ExternalAuthRefreshContext;
 use codex_login::auth::ExternalAuthRefreshReason;
@@ -300,6 +301,7 @@ impl MessageProcessor {
             config: Arc::clone(&config),
             cli_overrides: cli_overrides.clone(),
             runtime_feature_enablement: runtime_feature_enablement.clone(),
+            loader_overrides: loader_overrides.clone(),
             cloud_requirements: cloud_requirements.clone(),
             feedback,
             log_db,
@@ -1025,11 +1027,14 @@ impl MessageProcessor {
                 return;
             }
         };
-        let auth = self.auth_manager.auth().await;
-        if !config.features.apps_enabled_for_auth(
-            auth.as_ref()
-                .is_some_and(codex_login::CodexAuth::is_chatgpt_auth),
-        ) {
+        if !config.features.enabled(Feature::Apps)
+            || !self
+                .auth_manager
+                .auth()
+                .await
+                .as_ref()
+                .is_some_and(CodexAuth::is_chatgpt_auth)
+        {
             return;
         }
 
@@ -1289,5 +1294,7 @@ impl MessageProcessor {
     }
 }
 
+#[cfg(test)]
+mod model_list_tests;
 #[cfg(test)]
 mod tracing_tests;

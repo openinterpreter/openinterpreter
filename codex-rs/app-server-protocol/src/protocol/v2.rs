@@ -654,6 +654,7 @@ impl<'de> Deserialize<'de> for DynamicToolSpec {
 pub struct ProfileV2 {
     pub model: Option<String>,
     pub model_provider: Option<String>,
+    pub harness: Option<String>,
     #[experimental(nested)]
     pub approval_policy: Option<AskForApproval>,
     /// [UNSTABLE] Optional profile-level override for where approval requests
@@ -758,6 +759,7 @@ pub struct Config {
     pub model_context_window: Option<i64>,
     pub model_auto_compact_token_limit: Option<i64>,
     pub model_provider: Option<String>,
+    pub harness: Option<String>,
     #[experimental(nested)]
     pub approval_policy: Option<AskForApproval>,
     /// [UNSTABLE] Optional default for where approval requests are routed for
@@ -1853,6 +1855,10 @@ pub struct ModelListParams {
     /// When true, include models that are hidden from the default picker list.
     #[ts(optional = nullable)]
     pub include_hidden: Option<bool>,
+    /// Optional provider override; when set, list models for that configured
+    /// provider instead of the active default provider.
+    #[ts(optional = nullable)]
+    pub model_provider: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -3885,6 +3891,8 @@ pub struct Thread {
     pub preview: String,
     /// Whether the thread is ephemeral and should not be materialized on disk.
     pub ephemeral: bool,
+    /// Latest observed model for this thread, when known.
+    pub model: Option<String>,
     /// Model provider used for this thread (for example, 'openai').
     pub model_provider: String,
     /// Unix timestamp (in seconds) when the thread was created.
@@ -7674,6 +7682,7 @@ mod tests {
         let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&ProfileV2 {
             model: None,
             model_provider: None,
+            harness: None,
             approval_policy: Some(AskForApproval::Granular {
                 sandbox_approval: true,
                 rules: false,
@@ -7703,6 +7712,7 @@ mod tests {
             model_context_window: None,
             model_auto_compact_token_limit: None,
             model_provider: None,
+            harness: None,
             approval_policy: Some(AskForApproval::Granular {
                 sandbox_approval: false,
                 rules: true,
@@ -7742,6 +7752,7 @@ mod tests {
             model_context_window: None,
             model_auto_compact_token_limit: None,
             model_provider: None,
+            harness: None,
             approval_policy: None,
             approvals_reviewer: Some(ApprovalsReviewer::GuardianSubagent),
             sandbox_mode: None,
@@ -7775,6 +7786,7 @@ mod tests {
             model_context_window: None,
             model_auto_compact_token_limit: None,
             model_provider: None,
+            harness: None,
             approval_policy: None,
             approvals_reviewer: None,
             sandbox_mode: None,
@@ -7789,6 +7801,7 @@ mod tests {
                 ProfileV2 {
                     model: None,
                     model_provider: None,
+                    harness: None,
                     approval_policy: Some(AskForApproval::Granular {
                         sandbox_approval: true,
                         rules: false,
@@ -7830,6 +7843,7 @@ mod tests {
             model_context_window: None,
             model_auto_compact_token_limit: None,
             model_provider: None,
+            harness: None,
             approval_policy: None,
             approvals_reviewer: None,
             sandbox_mode: None,
@@ -7844,6 +7858,7 @@ mod tests {
                 ProfileV2 {
                     model: None,
                     model_provider: None,
+                    harness: None,
                     approval_policy: None,
                     approvals_reviewer: Some(ApprovalsReviewer::GuardianSubagent),
                     service_tier: None,

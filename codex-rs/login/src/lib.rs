@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod auth_env_telemetry;
+pub mod kimi_code;
 pub mod token_data;
 
 mod device_code_auth;
@@ -45,4 +46,5 @@ pub use auth::read_openai_api_key_from_env;
 pub use auth::save_auth;
 pub use auth_env_telemetry::AuthEnvTelemetry;
 pub use auth_env_telemetry::collect_auth_env_telemetry;
+pub use kimi_code::KIMI_CODE_PROVIDER_ID;
 pub use token_data::TokenData;

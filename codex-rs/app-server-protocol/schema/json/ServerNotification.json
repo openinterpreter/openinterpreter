@@ -2538,6 +2538,13 @@
         "id": {
           "type": "string"
         },
+        "model": {
+          "description": "Latest observed model for this thread, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "modelProvider": {
           "description": "Model provider used for this thread (for example, 'openai').",
           "type": "string"

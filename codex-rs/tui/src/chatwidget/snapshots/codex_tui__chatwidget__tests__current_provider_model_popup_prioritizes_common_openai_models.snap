@@ -1,0 +1,16 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+expression: popup
+---
+  Select Model and Reasoning
+  Pick a listed model, or enter a custom model name for this provider.
+
+  Filter models
+› gpt-5.4 (current)  gpt-5.4 description
+  gpt-5.4-mini       gpt-5.4-mini description
+  gpt-5.4-nano       gpt-5.4-nano description
+  gpt-5.3-codex      gpt-5.3-codex description
+  gpt-4.1            gpt-4.1 description
+  Custom model name  Type any model id for the current provider, even if it is not listed here.
+
+  Type to filter • Enter to configure reasoning • Esc to dismiss

@@ -1,3 +1,5 @@
+use std::ffi::OsStr;
+
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::Turn;
@@ -6,7 +8,9 @@ use owo_colors::Style;
 use pretty_assertions::assert_eq;
 
 use super::EventProcessorWithHumanOutput;
+use super::assistant_speaker_label;
 use super::final_message_from_turn_items;
+use super::human_output_brand;
 use super::reasoning_text;
 use super::should_print_final_message_to_stdout;
 use super::should_print_final_message_to_tty;
@@ -132,6 +136,26 @@ fn final_message_from_turn_items_falls_back_to_latest_plan() {
     ]);
 
     assert_eq!(message.as_deref(), Some("final plan"));
+}
+
+#[test]
+fn human_output_brand_is_open_interpreter() {
+    assert_eq!(human_output_brand(/*value*/ None), "Open Interpreter");
+    assert_eq!(human_output_brand(Some(OsStr::new(""))), "Open Interpreter");
+    assert_eq!(
+        human_output_brand(Some(OsStr::new("1"))),
+        "Open Interpreter"
+    );
+}
+
+#[test]
+fn assistant_speaker_label_is_interpreter() {
+    assert_eq!(assistant_speaker_label(/*value*/ None), "interpreter");
+    assert_eq!(assistant_speaker_label(Some(OsStr::new(""))), "interpreter");
+    assert_eq!(
+        assistant_speaker_label(Some(OsStr::new("1"))),
+        "interpreter"
+    );
 }
 
 #[test]

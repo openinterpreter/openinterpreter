@@ -3,19 +3,33 @@ use codex_protocol::account::PlanType;
 use lazy_static::lazy_static;
 use rand::Rng;
 
+use crate::product_branding::ProductBranding;
+
 const ANNOUNCEMENT_TIP_URL: &str =
     "https://raw.githubusercontent.com/openai/codex/main/announcement_tip.toml";
 
 const IS_MACOS: bool = cfg!(target_os = "macos");
 const IS_WINDOWS: bool = cfg!(target_os = "windows");
 
-const APP_TOOLTIP: &str = "Try the **Codex App**. Run 'codex app' or visit https://chatgpt.com/codex?app-landing-page=true";
-const FAST_TOOLTIP: &str =
-    "*New* Use **/fast** to enable our fastest inference with increased plan usage.";
-const OTHER_TOOLTIP: &str = "*New* Build faster with the **Codex App**. Run 'codex app' or visit https://chatgpt.com/codex?app-landing-page=true";
-const OTHER_TOOLTIP_NON_MAC: &str = "*New* Build faster with Codex.";
+const APP_TOOLTIP: &str = "Use /model to switch providers, models, or reasoning effort.";
+const FAST_TOOLTIP: &str = "*New* Use **/fast** to enable our fastest inference at 2X plan usage.";
+const OTHER_TOOLTIP: &str = "*New* Use /review to surface issues in your current changes.";
+const OTHER_TOOLTIP_NON_MAC: &str =
+    "*New* Use /skills to discover local skills and MCP-powered helpers.";
 const FREE_GO_TOOLTIP: &str =
-    "*New* For a limited time, Codex is included in your plan for free – let’s build together.";
+    "*New* Use /permissions to control what Interpreter is allowed to do.";
+const OPEN_INTERPRETER_TOOLTIPS: &[&str] = &[
+    "Use /model to switch providers, models, or reasoning effort.",
+    "Use /skills to list local skills and MCP-powered helpers.",
+    "Use /permissions to control what Interpreter is allowed to do.",
+    "Use /status to inspect the current model, approvals, and session state.",
+    "Use /mcp to inspect or configure MCP servers.",
+    "Use /compact when the conversation gets long and you want to free up context.",
+    "Use /init to create an AGENTS.md with project-specific guidance.",
+    "Type / to open the command popup; Tab autocompletes slash commands.",
+    "Paste an image with Ctrl+V to attach it to your next message.",
+    "Run /review to review your current changes and surface issues.",
+];
 
 const RAW_TOOLTIPS: &str = include_str!("../tooltips.txt");
 
@@ -27,7 +41,7 @@ lazy_static! {
             if line.is_empty() || line.starts_with('#') {
                 return false;
             }
-            if !IS_MACOS && !IS_WINDOWS && line.contains("codex app") {
+            if !IS_MACOS && !IS_WINDOWS && line.contains("interpreter app") {
                 return false;
             }
             true
@@ -48,9 +62,21 @@ fn experimental_tooltips() -> Vec<&'static str> {
         .collect()
 }
 
-/// Pick a random tooltip to show to the user when starting Codex.
+/// Pick a random tooltip to show to the user when starting Interpreter.
 pub(crate) fn get_tooltip(plan: Option<PlanType>, fast_mode_enabled: bool) -> Option<String> {
+    get_tooltip_with_branding(ProductBranding::current(), plan, fast_mode_enabled)
+}
+
+pub(crate) fn get_tooltip_with_branding(
+    branding: ProductBranding,
+    plan: Option<PlanType>,
+    fast_mode_enabled: bool,
+) -> Option<String> {
     let mut rng = rand::rng();
+
+    if branding.is_open_interpreter {
+        return pick_open_interpreter_tooltip(&mut rng).map(str::to_string);
+    }
 
     if let Some(announcement) = announcement::fetch_announcement_tip(plan) {
         return Some(announcement);
@@ -87,8 +113,19 @@ pub(crate) fn get_tooltip(plan: Option<PlanType>, fast_mode_enabled: bool) -> Op
     pick_tooltip(&mut rng).map(str::to_string)
 }
 
+fn pick_open_interpreter_tooltip<R: Rng + ?Sized>(rng: &mut R) -> Option<&'static str> {
+    if OPEN_INTERPRETER_TOOLTIPS.is_empty() {
+        None
+    } else {
+        let _ = rng;
+        OPEN_INTERPRETER_TOOLTIPS.first().copied()
+    }
+}
+
 fn paid_app_tooltip() -> Option<&'static str> {
-    if IS_MACOS || IS_WINDOWS {
+    if IS_MACOS {
+        Some(APP_TOOLTIP)
+    } else if IS_WINDOWS {
         Some(APP_TOOLTIP)
     } else {
         None
@@ -120,6 +157,7 @@ fn pick_tooltip<R: Rng + ?Sized>(rng: &mut R) -> Option<&'static str> {
     }
 }
 
+#[cfg(feature = "startup-network")]
 pub(crate) mod announcement {
     use crate::tooltips::ANNOUNCEMENT_TIP_URL;
     use crate::version::CODEX_CLI_VERSION;
@@ -322,6 +360,118 @@ pub(crate) mod announcement {
     }
 }
 
+#[cfg(not(feature = "startup-network"))]
+pub(crate) mod announcement {
+    use crate::version::CODEX_CLI_VERSION;
+    use chrono::NaiveDate;
+    use chrono::Utc;
+    use codex_protocol::account::PlanType;
+    use regex_lite::Regex;
+    use serde::Deserialize;
+
+    pub(crate) fn prewarm() {}
+
+    pub(crate) fn fetch_announcement_tip(_plan: Option<PlanType>) -> Option<String> {
+        None
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct AnnouncementTipRaw {
+        content: String,
+        from_date: Option<String>,
+        to_date: Option<String>,
+        version_regex: Option<String>,
+        target_app: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct AnnouncementTipDocument {
+        announcements: Vec<AnnouncementTipRaw>,
+    }
+
+    #[derive(Debug)]
+    struct AnnouncementTip {
+        content: String,
+        from_date: Option<NaiveDate>,
+        to_date: Option<NaiveDate>,
+        version_regex: Option<Regex>,
+        target_app: String,
+    }
+
+    pub(crate) fn parse_announcement_tip_toml(text: &str) -> Option<String> {
+        let announcements = toml::from_str::<AnnouncementTipDocument>(text)
+            .map(|doc| doc.announcements)
+            .or_else(|_| toml::from_str::<Vec<AnnouncementTipRaw>>(text))
+            .ok()?;
+
+        let mut latest_match = None;
+        let today = Utc::now().date_naive();
+        for raw in announcements {
+            let Some(tip) = AnnouncementTip::from_raw(raw) else {
+                continue;
+            };
+            if tip.version_matches(CODEX_CLI_VERSION)
+                && tip.date_matches(today)
+                && tip.target_app == "cli"
+            {
+                latest_match = Some(tip.content);
+            }
+        }
+        latest_match
+    }
+
+    impl AnnouncementTip {
+        fn from_raw(raw: AnnouncementTipRaw) -> Option<Self> {
+            let from_date = raw
+                .from_date
+                .as_deref()
+                .map(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d"))
+                .transpose()
+                .ok()?;
+            let to_date = raw
+                .to_date
+                .as_deref()
+                .map(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d"))
+                .transpose()
+                .ok()?;
+            let version_regex = raw
+                .version_regex
+                .as_deref()
+                .map(Regex::new)
+                .transpose()
+                .ok()?;
+
+            Some(Self {
+                content: raw.content,
+                from_date,
+                to_date,
+                version_regex,
+                target_app: raw.target_app.unwrap_or_else(|| "cli".to_string()),
+            })
+        }
+
+        fn version_matches(&self, version: &str) -> bool {
+            self.version_regex
+                .as_ref()
+                .is_none_or(|regex| regex.is_match(version))
+        }
+
+        fn date_matches(&self, today: NaiveDate) -> bool {
+            if let Some(from) = self.from_date
+                && today < from
+            {
+                return false;
+            }
+            if let Some(to) = self.to_date
+                && today >= to
+            {
+                return false;
+            }
+            true
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,6 +521,20 @@ mod tests {
         let expected = std::collections::BTreeSet::from([paid_app_tooltip()]);
         assert_eq!(seen, expected);
         assert!(!seen.contains(&Some(FAST_TOOLTIP)));
+    }
+
+    #[test]
+    fn open_interpreter_branding_uses_open_interpreter_startup_tooltips() {
+        let mut seen = std::collections::BTreeSet::new();
+        for seed in 0..32 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            seen.insert(pick_open_interpreter_tooltip(&mut rng));
+        }
+
+        let expected = std::collections::BTreeSet::from([Some(
+            "Use /model to switch providers, models, or reasoning effort.",
+        )]);
+        assert_eq!(seen, expected);
     }
 
     #[test]

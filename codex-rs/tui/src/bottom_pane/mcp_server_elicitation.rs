@@ -43,6 +43,7 @@ use crate::bottom_pane::selection_popup_common::menu_surface_padding_height;
 use crate::bottom_pane::selection_popup_common::render_menu_surface;
 use crate::bottom_pane::selection_popup_common::render_rows;
 use crate::render::renderable::Renderable;
+use crate::style::app_accent_color;
 use crate::text_formatting::format_json_compact;
 use crate::text_formatting::truncate_text;
 
@@ -1297,7 +1298,7 @@ impl McpServerElicitationOverlay {
             let line = if answered {
                 Line::from(line.clone())
             } else {
-                Line::from(line.clone()).cyan()
+                Line::from(line.clone()).fg(app_accent_color())
             };
             Paragraph::new(line).render(
                 Rect {
@@ -1368,7 +1369,7 @@ impl McpServerElicitationOverlay {
                     spans.push(FOOTER_SEPARATOR.into());
                 }
                 if tip.highlight {
-                    spans.push(tip.text.cyan().bold().not_dim());
+                    spans.push(tip.text.fg(app_accent_color()).bold().not_dim());
                 } else {
                     spans.push(tip.text.into());
                 }

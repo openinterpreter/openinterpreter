@@ -3,6 +3,7 @@ load("//:defs.bzl", "codex_rust_crate")
 codex_rust_crate(
     name = "app-server",
     crate_name = "codex_app_server",
+    crate_features = ["cloud-requirements"],
     integration_test_timeout = "long",
     test_shard_counts = {
         "app-server-all-test": 8,

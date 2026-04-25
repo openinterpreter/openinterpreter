@@ -102,13 +102,14 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::mpsc;
 
-fn sample_thread(thread_id: &str, ephemeral: bool) -> Thread {
-    sample_thread_with_source(thread_id, ephemeral, AppServerSessionSource::Exec)
+fn sample_thread(thread_id: &str, ephemeral: bool, model: &str) -> Thread {
+    sample_thread_with_source(thread_id, ephemeral, model, AppServerSessionSource::Exec)
 }
 
 fn sample_thread_with_source(
     thread_id: &str,
     ephemeral: bool,
+    model: &str,
     source: AppServerSessionSource,
 ) -> Thread {
     Thread {
@@ -116,6 +117,7 @@ fn sample_thread_with_source(
         forked_from_id: None,
         preview: "first prompt".to_string(),
         ephemeral,
+        model: Some(model.to_string()),
         model_provider: "openai".to_string(),
         created_at: 1,
         updated_at: 2,
@@ -136,7 +138,7 @@ fn sample_thread_start_response(thread_id: &str, ephemeral: bool, model: &str) -
     ClientResponse::ThreadStart {
         request_id: RequestId::Integer(1),
         response: ThreadStartResponse {
-            thread: sample_thread(thread_id, ephemeral),
+            thread: sample_thread(thread_id, ephemeral, model),
             model: model.to_string(),
             model_provider: "openai".to_string(),
             service_tier: None,
@@ -187,7 +189,7 @@ fn sample_thread_resume_response_with_source(
     ClientResponse::ThreadResume {
         request_id: RequestId::Integer(2),
         response: ThreadResumeResponse {
-            thread: sample_thread_with_source(thread_id, ephemeral, source),
+            thread: sample_thread_with_source(thread_id, ephemeral, model, source),
             model: model.to_string(),
             model_provider: "openai".to_string(),
             service_tier: None,

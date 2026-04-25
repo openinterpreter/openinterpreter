@@ -1,5 +1,5 @@
-use codex_feedback::FEEDBACK_DIAGNOSTICS_ATTACHMENT_FILENAME;
-use codex_feedback::FeedbackDiagnostics;
+use crate::feedback_support::FEEDBACK_DIAGNOSTICS_ATTACHMENT_FILENAME;
+use crate::feedback_support::FeedbackDiagnostics;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
@@ -523,7 +523,8 @@ pub(crate) fn feedback_upload_consent_params(
             header_lines
                 .push(Line::from(vec!["  - ".into(), diagnostic.headline.clone().into()]).into());
             for detail in &diagnostic.details {
-                header_lines.push(Line::from(vec!["    - ".dim(), detail.clone().into()]).into());
+                header_lines
+                    .push(Line::from(vec!["    - ".dim(), Span::from(detail.clone())]).into());
             }
         }
     }

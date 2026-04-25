@@ -206,6 +206,62 @@ async fn skill_roots_from_layer_stack_maps_user_to_user_and_system_cache_and_sys
 }
 
 #[tokio::test]
+async fn skill_roots_from_layer_stack_uses_claude_skill_locations_for_claude_mode()
+-> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+
+    let system_folder = tmp.path().join("etc/codex");
+    let home_folder = tmp.path().join("home");
+    let user_folder = home_folder.join("codex");
+    fs::create_dir_all(&system_folder)?;
+    fs::create_dir_all(&user_folder)?;
+
+    let system_file = system_folder.join("config.toml").abs();
+    let user_file = user_folder.join("config.toml").abs();
+
+    let layers = vec![
+        ConfigLayerEntry::new(
+            ConfigLayerSource::System { file: system_file },
+            TomlValue::Table(toml::map::Map::new()),
+        ),
+        ConfigLayerEntry::new(
+            ConfigLayerSource::User { file: user_file },
+            TomlValue::Table(toml::map::Map::new()),
+        ),
+    ];
+    let stack = ConfigLayerStack::new(
+        layers,
+        ConfigRequirements::default(),
+        ConfigRequirementsToml::default(),
+    )?;
+
+    let home_folder_abs = home_folder.abs();
+    let got = skill_roots_from_layer_stack_with_mode(
+        Arc::clone(&LOCAL_FS),
+        &stack,
+        &home_folder_abs,
+        Some(&home_folder_abs),
+        SkillsDiscoveryMode::ClaudeCode,
+    )
+    .await
+    .into_iter()
+    .map(|root| (root.scope, root.path.to_path_buf()))
+    .collect::<Vec<_>>();
+
+    assert_eq!(
+        got,
+        vec![(
+            SkillScope::User,
+            home_folder
+                .join(EXTERNAL_AGENT_DIR_NAME)
+                .join(SKILLS_DIR_NAME)
+        )]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn skill_roots_from_layer_stack_includes_disabled_project_layers() -> anyhow::Result<()> {
     let tmp = tempfile::tempdir()?;
 
@@ -1753,6 +1809,7 @@ async fn skill_roots_include_admin_with_lowest_priority() {
         &cfg.config_layer_stack,
         &cfg.cwd,
         Vec::new(),
+        SkillsDiscoveryMode::Codex,
     )
     .await
     .into_iter()

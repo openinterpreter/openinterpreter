@@ -10,8 +10,6 @@ use codex_api::TransportError;
 use codex_api::auth_header_telemetry;
 use codex_api::map_api_error;
 use codex_app_server_protocol::AuthMode;
-use codex_feedback::FeedbackRequestTags;
-use codex_feedback::emit_feedback_request_tags_with_auth_env;
 use codex_login::AuthEnvTelemetry;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
@@ -26,10 +24,12 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CoreResult;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
+use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_response_debug_context::extract_response_debug_context;
 use codex_response_debug_context::telemetry_transport_error_message;
 use http::HeaderMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -45,6 +45,7 @@ const MODEL_CACHE_FILE: &str = "models_cache.json";
 const DEFAULT_MODEL_CACHE_TTL: Duration = Duration::from_secs(300);
 const MODELS_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 const MODELS_ENDPOINT: &str = "/models";
+const FEEDBACK_TAGS_TARGET: &str = "feedback_tags";
 #[derive(Clone)]
 struct ModelsRequestTelemetry {
     auth_mode: Option<String>,
@@ -115,24 +116,45 @@ impl RequestTelemetry for ModelsRequestTelemetry {
             auth.error_code = response_debug.auth_error_code.as_deref(),
             auth.mode = self.auth_mode.as_deref(),
         );
-        emit_feedback_request_tags_with_auth_env(
-            &FeedbackRequestTags {
-                endpoint: MODELS_ENDPOINT,
-                auth_header_attached: self.auth_header_attached,
-                auth_header_name: self.auth_header_name,
-                auth_mode: self.auth_mode.as_deref(),
-                auth_retry_after_unauthorized: None,
-                auth_recovery_mode: None,
-                auth_recovery_phase: None,
-                auth_connection_reused: None,
-                auth_request_id: response_debug.request_id.as_deref(),
-                auth_cf_ray: response_debug.cf_ray.as_deref(),
-                auth_error: response_debug.auth_error.as_deref(),
-                auth_error_code: response_debug.auth_error_code.as_deref(),
-                auth_recovery_followup_success: None,
-                auth_recovery_followup_status: None,
-            },
-            &self.auth_env,
+        let auth_request_id = response_debug.request_id.as_deref().unwrap_or("");
+        let auth_cf_ray = response_debug.cf_ray.as_deref().unwrap_or("");
+        let auth_error = response_debug.auth_error.as_deref().unwrap_or("");
+        let auth_error_code = response_debug.auth_error_code.as_deref().unwrap_or("");
+        let provider_key_name = self.auth_env.provider_env_key_name.as_deref().unwrap_or("");
+        let provider_key_present = self
+            .auth_env
+            .provider_env_key_present
+            .map_or_else(String::new, |value| value.to_string());
+        tracing::info!(
+            target: FEEDBACK_TAGS_TARGET,
+            endpoint = tracing::field::debug(MODELS_ENDPOINT),
+            auth_header_attached = tracing::field::debug(self.auth_header_attached),
+            auth_header_name = tracing::field::debug(self.auth_header_name.unwrap_or("")),
+            auth_mode = tracing::field::debug(self.auth_mode.as_deref().unwrap_or("")),
+            auth_retry_after_unauthorized = tracing::field::debug(""),
+            auth_recovery_mode = tracing::field::debug(""),
+            auth_recovery_phase = tracing::field::debug(""),
+            auth_connection_reused = tracing::field::debug(""),
+            auth_request_id = tracing::field::debug(auth_request_id),
+            auth_cf_ray = tracing::field::debug(auth_cf_ray),
+            auth_error = tracing::field::debug(auth_error),
+            auth_error_code = tracing::field::debug(auth_error_code),
+            auth_recovery_followup_success = tracing::field::debug(""),
+            auth_recovery_followup_status = tracing::field::debug(""),
+            auth_env_openai_api_key_present = tracing::field::debug(
+                self.auth_env.openai_api_key_env_present
+            ),
+            auth_env_codex_api_key_present = tracing::field::debug(
+                self.auth_env.codex_api_key_env_present
+            ),
+            auth_env_codex_api_key_enabled = tracing::field::debug(
+                self.auth_env.codex_api_key_env_enabled
+            ),
+            auth_env_provider_key_name = tracing::field::debug(provider_key_name),
+            auth_env_provider_key_present = tracing::field::debug(&provider_key_present),
+            auth_env_refresh_token_url_override_present = tracing::field::debug(
+                self.auth_env.refresh_token_url_override_present
+            ),
         );
     }
 }
@@ -216,7 +238,6 @@ impl ModelsManager {
         collaboration_modes_config: CollaborationModesConfig,
         provider_info: ModelProviderInfo,
     ) -> Self {
-        let model_provider = create_model_provider(provider_info, Some(auth_manager));
         let cache_path = codex_home.join(MODEL_CACHE_FILE);
         let cache_manager = ModelsCacheManager::new(cache_path, DEFAULT_MODEL_CACHE_TTL);
         let catalog_mode = if model_catalog.is_some() {
@@ -226,7 +247,8 @@ impl ModelsManager {
         };
         let remote_models = model_catalog
             .map(|catalog| catalog.models)
-            .unwrap_or_else(|| Self::load_remote_models_from_file().unwrap_or_default());
+            .unwrap_or_else(|| Self::seed_remote_models_for_provider(&provider_info));
+        let model_provider = create_model_provider(provider_info, Some(auth_manager));
         Self {
             remote_models: RwLock::new(remote_models),
             catalog_mode,
@@ -401,7 +423,10 @@ impl ModelsManager {
             .provider
             .auth_manager()
             .and_then(|auth_manager| auth_manager.auth_mode());
-        if auth_mode != Some(AuthMode::Chatgpt) && !self.provider.info().has_command_auth() {
+        let can_fetch_remote_models = !self.provider.info().requires_openai_auth
+            || auth_mode.is_some()
+            || self.provider.info().has_command_auth();
+        if !can_fetch_remote_models {
             if matches!(
                 refresh_strategy,
                 RefreshStrategy::Offline | RefreshStrategy::OnlineIfUncached
@@ -464,6 +489,40 @@ impl ModelsManager {
         .await
         .map_err(|_| CodexErr::Timeout)?
         .map_err(map_api_error)?;
+        let list_sparse_live_models = Self::provider_lists_sparse_live_models(self.provider.info());
+        let models: Vec<ModelInfo> = models
+            .into_iter()
+            .map(|model| {
+                if !model.used_fallback_model_metadata {
+                    return model;
+                }
+
+                let mut fallback = model_info::model_info_from_slug(model.slug.as_str());
+                fallback.display_name = model.display_name;
+                fallback.description = model.description.or(fallback.description);
+                fallback.default_reasoning_level = model
+                    .default_reasoning_level
+                    .or(fallback.default_reasoning_level);
+                if !model.supported_reasoning_levels.is_empty() {
+                    fallback.supported_reasoning_levels = model.supported_reasoning_levels;
+                }
+                fallback.visibility =
+                    if list_sparse_live_models && model.visibility == ModelVisibility::Hide {
+                        ModelVisibility::List
+                    } else {
+                        model.visibility
+                    };
+                fallback.supported_in_api = model.supported_in_api;
+                fallback.priority = model.priority;
+                fallback.supports_parallel_tool_calls = model.supports_parallel_tool_calls;
+                fallback.context_window = model.context_window.or(fallback.context_window);
+                fallback.input_modalities = model.input_modalities;
+                fallback.experimental_supported_tools = model.experimental_supported_tools;
+                fallback.supports_search_tool = model.supports_search_tool;
+                fallback.used_fallback_model_metadata = true;
+                fallback
+            })
+            .collect();
 
         self.apply_remote_models(models.clone()).await;
         *self.etag.write().await = etag.clone();
@@ -479,13 +538,29 @@ impl ModelsManager {
 
     /// Replace the cached remote models and rebuild the derived presets list.
     async fn apply_remote_models(&self, models: Vec<ModelInfo>) {
-        let mut existing_models = Self::load_remote_models_from_file().unwrap_or_default();
+        let provider_info = self.provider.info();
+        let mut existing_models = if Self::provider_uses_bundled_catalog(provider_info) {
+            Self::seed_remote_models_for_provider(provider_info)
+        } else {
+            let live_slugs: HashSet<&str> =
+                models.iter().map(|model| model.slug.as_str()).collect();
+            Self::seed_remote_models_for_provider(provider_info)
+                .into_iter()
+                .filter(|model| live_slugs.contains(model.slug.as_str()))
+                .collect()
+        };
         for model in models {
             if let Some(existing_index) = existing_models
                 .iter()
                 .position(|existing| existing.slug == model.slug)
             {
-                existing_models[existing_index] = model;
+                let existing = existing_models[existing_index].clone();
+                existing_models[existing_index] =
+                    if Self::provider_uses_bundled_catalog(provider_info) {
+                        model
+                    } else {
+                        Self::merge_provider_catalog_model(existing, model)
+                    };
             } else {
                 existing_models.push(model);
             }
@@ -493,8 +568,80 @@ impl ModelsManager {
         *self.remote_models.write().await = existing_models;
     }
 
+    fn provider_lists_sparse_live_models(provider: &ModelProviderInfo) -> bool {
+        provider.env_key.as_deref() == Some("MOONSHOT_API_KEY")
+            || provider
+                .base_url
+                .as_deref()
+                .is_some_and(|base_url| base_url.contains("api.moonshot.ai"))
+    }
+
+    fn merge_provider_catalog_model(curated: ModelInfo, live: ModelInfo) -> ModelInfo {
+        let visibility = if live.visibility != ModelVisibility::List
+            && curated.visibility == ModelVisibility::List
+        {
+            curated.visibility
+        } else {
+            live.visibility
+        };
+        let display_name = if live.display_name == live.slug {
+            curated.display_name
+        } else {
+            live.display_name
+        };
+        let description = live.description.or(curated.description);
+        let default_reasoning_level = live
+            .default_reasoning_level
+            .or(curated.default_reasoning_level);
+        let supported_reasoning_levels = if live.supported_reasoning_levels.is_empty() {
+            curated.supported_reasoning_levels
+        } else {
+            live.supported_reasoning_levels
+        };
+        let context_window = live.context_window.or(curated.context_window);
+        let max_context_window = live.max_context_window.or(curated.max_context_window);
+        let input_modalities = if live.input_modalities.len() == 1
+            && curated.input_modalities.len() > live.input_modalities.len()
+        {
+            curated.input_modalities
+        } else {
+            live.input_modalities
+        };
+
+        ModelInfo {
+            display_name,
+            description,
+            default_reasoning_level,
+            supported_reasoning_levels,
+            visibility,
+            priority: curated.priority,
+            context_window,
+            max_context_window,
+            input_modalities,
+            ..live
+        }
+    }
+
     fn load_remote_models_from_file() -> Result<Vec<ModelInfo>, std::io::Error> {
         Ok(crate::bundled_models_response()?.models)
+    }
+
+    fn seed_remote_models_for_provider(provider: &ModelProviderInfo) -> Vec<ModelInfo> {
+        if Self::provider_uses_bundled_catalog(provider) {
+            Self::load_remote_models_from_file().unwrap_or_default()
+        } else {
+            crate::provider_catalog_models::bundled_provider_model_infos(provider)
+        }
+    }
+
+    fn provider_uses_bundled_catalog(provider: &ModelProviderInfo) -> bool {
+        if provider.requires_openai_auth {
+            return true;
+        }
+        let Some(base_url) = provider.base_url.as_deref() else {
+            return true;
+        };
+        base_url.contains("api.openai.com") || base_url.contains("chatgpt.com/backend-api/codex")
     }
 
     /// Attempt to satisfy the refresh from the cache when it matches the provider and TTL.
@@ -523,7 +670,12 @@ impl ModelsManager {
 
     /// Build picker-ready presets from the active catalog snapshot.
     fn build_available_models(&self, mut remote_models: Vec<ModelInfo>) -> Vec<ModelPreset> {
-        remote_models.sort_by(|a, b| a.priority.cmp(&b.priority));
+        remote_models.sort_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then_with(|| a.display_name.cmp(&b.display_name))
+                .then_with(|| a.slug.cmp(&b.slug))
+        });
 
         let mut presets: Vec<ModelPreset> = remote_models.into_iter().map(Into::into).collect();
         let auth_mode = self
@@ -567,7 +719,12 @@ impl ModelsManager {
             return model.to_string();
         }
         let mut models = Self::load_remote_models_from_file().unwrap_or_default();
-        models.sort_by(|a, b| a.priority.cmp(&b.priority));
+        models.sort_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then_with(|| a.display_name.cmp(&b.display_name))
+                .then_with(|| a.slug.cmp(&b.slug))
+        });
         let presets: Vec<ModelPreset> = models.into_iter().map(Into::into).collect();
         presets
             .iter()

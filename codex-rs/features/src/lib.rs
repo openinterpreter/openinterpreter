@@ -290,10 +290,6 @@ impl Features {
         self.enabled.contains(&f)
     }
 
-    pub fn apps_enabled_for_auth(&self, has_chatgpt_auth: bool) -> bool {
-        self.enabled(Feature::Apps) && has_chatgpt_auth
-    }
-
     pub fn use_legacy_landlock(&self) -> bool {
         self.enabled(Feature::UseLegacyLandlock)
     }
@@ -814,7 +810,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::Apps,
         key: "apps",
         stage: Stage::Stable,
-        default_enabled: true,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::ToolSearch,
@@ -844,7 +840,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::Plugins,
         key: "plugins",
         stage: Stage::Stable,
-        default_enabled: true,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::ExternalMigration,

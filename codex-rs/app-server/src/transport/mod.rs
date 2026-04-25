@@ -34,6 +34,8 @@ mod stdio;
 mod websocket;
 
 pub(crate) use remote_control::RemoteControlHandle;
+#[cfg(test)]
+pub(crate) use remote_control::persist_remote_control_enrollment_for_tests;
 pub(crate) use remote_control::start_remote_control;
 pub(crate) use stdio::start_stdio_connection;
 pub(crate) use websocket::start_websocket_acceptor;

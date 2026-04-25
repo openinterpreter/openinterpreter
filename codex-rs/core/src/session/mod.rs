@@ -178,7 +178,6 @@ use self::handlers::submission_dispatch_span;
 use self::handlers::submission_loop;
 use self::review::spawn_review_thread;
 use self::session::AppServerClientMetadata;
-use self::session::Session;
 use self::session::SessionConfiguration;
 use self::session::SessionSettingsUpdate;
 #[cfg(test)]
@@ -188,10 +187,11 @@ use self::turn::collect_explicit_app_ids_from_skill_items;
 #[cfg(test)]
 use self::turn::filter_connectors_for_input;
 use self::turn::realtime_text_for_event;
-use self::turn_context::TurnContext;
 use self::turn_context::TurnSkillsContext;
 #[cfg(test)]
 mod rollout_reconstruction_tests;
+pub(crate) use self::session::Session;
+pub(crate) use self::turn_context::TurnContext;
 
 #[derive(Debug, PartialEq)]
 pub enum SteerInputError {
@@ -2865,7 +2865,6 @@ impl Session {
     }
 
     /// Queue response items to be injected into the next active turn created for this session.
-    #[cfg(test)]
     pub(crate) async fn queue_response_items_for_next_turn(&self, items: Vec<ResponseInputItem>) {
         if items.is_empty() {
             return;

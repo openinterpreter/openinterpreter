@@ -221,7 +221,7 @@ fn parse_tool_input_schema_infers_string_from_enum_const_and_format_keywords() {
     //
     // Expected normalization behavior:
     // - `enum` and `const` normalize into explicit string-enum schemas.
-    // - `format` still falls back to a plain string schema.
+    // - `format` preserves the inferred string schema format hint.
     let enum_schema = parse_tool_input_schema(&serde_json::json!({
         "enum": ["fast", "safe"]
     }))
@@ -246,7 +246,27 @@ fn parse_tool_input_schema_infers_string_from_enum_const_and_format_keywords() {
         const_schema,
         JsonSchema::string_enum(vec![serde_json::json!("file")], /*description*/ None)
     );
-    assert_eq!(format_schema, JsonSchema::string(/*description*/ None));
+    assert_eq!(
+        format_schema,
+        JsonSchema {
+            schema_type: Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::String)),
+            description: None,
+            enum_values: None,
+            items: None,
+            properties: None,
+            property_names: None,
+            required: None,
+            additional_properties: None,
+            any_of: None,
+            min_items: None,
+            max_items: None,
+            default_value: None,
+            format: Some("date-time".to_string()),
+            min_length: None,
+            minimum: None,
+            maximum: None,
+        }
+    );
 }
 
 #[test]

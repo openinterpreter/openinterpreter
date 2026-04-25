@@ -43,6 +43,8 @@ pub struct JsonSchema {
     pub items: Option<Box<JsonSchema>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub properties: Option<BTreeMap<String, JsonSchema>>,
+    #[serde(rename = "propertyNames", skip_serializing_if = "Option::is_none")]
+    pub property_names: Option<Box<JsonSchema>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required: Option<Vec<String>>,
     #[serde(
@@ -52,6 +54,20 @@ pub struct JsonSchema {
     pub additional_properties: Option<AdditionalProperties>,
     #[serde(rename = "anyOf", skip_serializing_if = "Option::is_none")]
     pub any_of: Option<Vec<JsonSchema>>,
+    #[serde(rename = "minItems", skip_serializing_if = "Option::is_none")]
+    pub min_items: Option<u64>,
+    #[serde(rename = "maxItems", skip_serializing_if = "Option::is_none")]
+    pub max_items: Option<u64>,
+    #[serde(rename = "default", skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(rename = "minLength", skip_serializing_if = "Option::is_none")]
+    pub min_length: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minimum: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<i64>,
 }
 
 impl JsonSchema {

@@ -21,6 +21,10 @@ preview: string,
  */
 ephemeral: boolean,
 /**
+ * Latest observed model for this thread, when known.
+ */
+model: string | null,
+/**
  * Model provider used for this thread (for example, 'openai').
  */
 modelProvider: string,

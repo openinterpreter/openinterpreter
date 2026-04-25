@@ -1,7 +1,7 @@
 use clap::Parser;
-use codex_app_server_client::legacy_core;
 use codex_arg0::Arg0DispatchPaths;
 use codex_arg0::arg0_dispatch_or_else;
+use codex_core as legacy_core;
 use codex_tui::AppExitInfo;
 use codex_tui::Cli;
 use codex_tui::ExitReason;
@@ -57,6 +57,7 @@ fn main() -> anyhow::Result<()> {
             legacy_core::config_loader::LoaderOverrides::default(),
             /*remote*/ None,
             /*remote_auth_token*/ None,
+            /*local_daemon_remote*/ false,
         )
         .await?;
         match exit_info.exit_reason {

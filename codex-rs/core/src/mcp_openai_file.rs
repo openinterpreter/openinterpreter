@@ -115,6 +115,8 @@ async fn build_uploaded_local_argument_value(
     let upload_auth = BearerAuthProvider {
         token: Some(token_data.access_token),
         account_id: token_data.account_id,
+        token_header_name: None,
+        use_bearer_prefix: true,
         is_fedramp_account: auth.is_fedramp_account(),
     };
     let uploaded = upload_local_file(

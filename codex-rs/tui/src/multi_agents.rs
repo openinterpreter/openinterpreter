@@ -6,6 +6,7 @@
 
 use crate::history_cell::PlainHistoryCell;
 use crate::render::line_utils::prefix_lines;
+use crate::style::app_accent_color;
 use crate::text_formatting::truncate_text;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
@@ -398,11 +399,15 @@ fn agent_label_spans(agent: AgentLabel<'_>) -> Vec<Span<'static>> {
     let role = agent.role.map(str::trim).filter(|role| !role.is_empty());
 
     if let Some(nickname) = nickname {
-        spans.push(Span::from(nickname.to_string()).cyan().bold());
+        spans.push(
+            Span::from(nickname.to_string())
+                .fg(app_accent_color())
+                .bold(),
+        );
     } else if let Some(thread_id) = agent.thread_id {
-        spans.push(Span::from(thread_id.to_string()).cyan());
+        spans.push(Span::from(thread_id.to_string()).fg(app_accent_color()));
     } else {
-        spans.push(Span::from("agent").cyan());
+        spans.push(Span::from("agent").fg(app_accent_color()));
     }
 
     if let Some(role) = role {
@@ -543,8 +548,10 @@ fn status_summary_line(status: &AgentStatus) -> Line<'static> {
 
 fn status_summary_spans(status: &AgentStatus) -> Vec<Span<'static>> {
     match status {
-        AgentStatus::PendingInit => vec![Span::from("Pending init").cyan()],
-        AgentStatus::Running => vec![Span::from("Running").cyan().bold()],
+        AgentStatus::PendingInit => vec![Span::from("Pending init").fg(app_accent_color())],
+        AgentStatus::Running => {
+            vec![Span::from("Running").fg(app_accent_color()).bold()]
+        }
         // Allow `.yellow()`
         #[allow(clippy::disallowed_methods)]
         AgentStatus::Interrupted => vec![Span::from("Interrupted").yellow()],
@@ -760,7 +767,7 @@ mod tests {
         let lines = cell.display_lines(/*width*/ 200);
         let title = &lines[0];
         assert_eq!(title.spans[2].content.as_ref(), "Robie");
-        assert_eq!(title.spans[2].style.fg, Some(Color::Cyan));
+        assert_eq!(title.spans[2].style.fg, Some(app_accent_color()));
         assert!(title.spans[2].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(title.spans[4].content.as_ref(), "[explorer]");
         assert_eq!(title.spans[4].style.fg, None);

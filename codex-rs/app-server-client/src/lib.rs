@@ -20,39 +20,64 @@ mod remote;
 use std::error::Error;
 use std::fmt;
 use std::io::Error as IoError;
+#[cfg(feature = "in-process")]
 use std::io::ErrorKind;
 use std::io::Result as IoResult;
+#[cfg(feature = "in-process")]
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "in-process")]
 pub use codex_app_server::in_process::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY;
+#[cfg(feature = "in-process")]
 pub use codex_app_server::in_process::InProcessServerEvent;
+#[cfg(feature = "in-process")]
 use codex_app_server::in_process::InProcessStartArgs;
+#[cfg(not(feature = "in-process"))]
+pub const DEFAULT_IN_PROCESS_CHANNEL_CAPACITY: usize = 128;
+#[cfg(feature = "in-process")]
 use codex_app_server::in_process::LogDbLayer;
+#[cfg(feature = "in-process")]
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientNotification;
 use codex_app_server_protocol::ClientRequest;
+#[cfg(feature = "in-process")]
 use codex_app_server_protocol::ConfigWarningNotification;
+#[cfg(feature = "in-process")]
 use codex_app_server_protocol::InitializeCapabilities;
+#[cfg(feature = "in-process")]
 use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::Result as JsonRpcResult;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
+#[cfg(feature = "in-process")]
 use codex_arg0::Arg0DispatchPaths;
+#[cfg(feature = "in-process")]
 use codex_core::config::Config;
+#[cfg(feature = "in-process")]
 use codex_core::config_loader::CloudRequirementsLoader;
+#[cfg(feature = "in-process")]
 use codex_core::config_loader::LoaderOverrides;
+#[cfg(feature = "in-process")]
 pub use codex_exec_server::EnvironmentManager;
+#[cfg(feature = "in-process")]
 pub use codex_exec_server::ExecServerRuntimePaths;
+#[cfg(feature = "in-process")]
 use codex_feedback::CodexFeedback;
+#[cfg(feature = "in-process")]
 use codex_protocol::protocol::SessionSource;
 use serde::de::DeserializeOwned;
+#[cfg(feature = "in-process")]
 use tokio::sync::mpsc;
+#[cfg(feature = "in-process")]
 use tokio::sync::oneshot;
+#[cfg(feature = "in-process")]
 use tokio::time::timeout;
+#[cfg(feature = "in-process")]
 use toml::Value as TomlValue;
+#[cfg(feature = "in-process")]
 use tracing::warn;
 
 pub use crate::remote::RemoteAppServerClient;
@@ -63,15 +88,14 @@ pub use crate::remote::RemoteAppServerConnectArgs;
 /// New TUI behavior should prefer the app-server protocol methods. This
 /// module exists so clients can remove a direct `codex-core` dependency
 /// while legacy startup/config paths are migrated to RPCs.
+#[cfg(feature = "in-process")]
 pub mod legacy_core {
     pub use codex_core::Cursor;
     pub use codex_core::DEFAULT_AGENTS_MD_FILENAME;
     pub use codex_core::INTERACTIVE_SESSION_SOURCES;
     pub use codex_core::LOCAL_AGENTS_MD_FILENAME;
     pub use codex_core::McpManager;
-    pub use codex_core::PLUGIN_TEXT_MENTION_SIGIL;
     pub use codex_core::RolloutRecorder;
-    pub use codex_core::TOOL_MENTION_SIGIL;
     pub use codex_core::ThreadItem;
     pub use codex_core::ThreadSortKey;
     pub use codex_core::ThreadsPage;
@@ -83,6 +107,8 @@ pub mod legacy_core {
     pub use codex_core::format_exec_policy_error_with_source;
     pub use codex_core::grant_read_root_non_elevated;
     pub use codex_core::lookup_message_history_entry;
+    pub use codex_core::mention_syntax::PLUGIN_TEXT_MENTION_SIGIL;
+    pub use codex_core::mention_syntax::TOOL_MENTION_SIGIL;
     pub use codex_core::message_history_metadata;
     pub use codex_core::path_utils;
     pub use codex_core::read_session_meta_line;
@@ -158,6 +184,7 @@ pub enum AppServerEvent {
     Disconnected { message: String },
 }
 
+#[cfg(feature = "in-process")]
 impl From<InProcessServerEvent> for AppServerEvent {
     fn from(value: InProcessServerEvent) -> Self {
         match value {
@@ -170,6 +197,7 @@ impl From<InProcessServerEvent> for AppServerEvent {
     }
 }
 
+#[cfg(feature = "in-process")]
 fn event_requires_delivery(event: &InProcessServerEvent) -> bool {
     // These transcript and terminal events must remain lossless. Dropping
     // streamed assistant text or the authoritative completed item can leave
@@ -207,6 +235,7 @@ pub(crate) fn server_notification_requires_delivery(notification: &ServerNotific
 }
 
 /// Outcome of attempting to forward a single event to the consumer channel.
+#[cfg(feature = "in-process")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ForwardEventResult {
     /// The event was delivered (or intentionally dropped); the stream is healthy.
@@ -225,6 +254,7 @@ enum ForwardEventResult {
 ///
 /// If a dropped event is a `ServerRequest`, `reject_server_request` is called
 /// so the server does not wait for a response that will never come.
+#[cfg(feature = "in-process")]
 async fn forward_in_process_event<F>(
     event_tx: &mpsc::Sender<InProcessServerEvent>,
     skipped_events: &mut usize,
@@ -340,6 +370,7 @@ impl Error for TypedRequestError {
     }
 }
 
+#[cfg(feature = "in-process")]
 #[derive(Clone)]
 pub struct InProcessClientStartArgs {
     /// Resolved argv0 dispatch paths used by command execution internals.
@@ -376,6 +407,7 @@ pub struct InProcessClientStartArgs {
     pub channel_capacity: usize,
 }
 
+#[cfg(feature = "in-process")]
 impl InProcessClientStartArgs {
     /// Builds initialize params from caller-provided metadata.
     pub fn initialize_params(&self) -> InitializeParams {
@@ -422,6 +454,7 @@ impl InProcessClientStartArgs {
 ///
 /// Each variant carries a oneshot sender so the caller can `await` the
 /// result without holding a mutable reference to the client.
+#[cfg(feature = "in-process")]
 enum ClientCommand {
     Request {
         request: Box<ClientRequest>,
@@ -457,12 +490,14 @@ enum ClientCommand {
 /// model instead of exposing direct core runtime handles. That keeps in-process
 /// callers aligned with app-server behavior while still avoiding a process
 /// boundary.
+#[cfg(feature = "in-process")]
 pub struct InProcessAppServerClient {
     command_tx: mpsc::Sender<ClientCommand>,
     event_rx: mpsc::Receiver<InProcessServerEvent>,
     worker_handle: tokio::task::JoinHandle<()>,
 }
 
+#[cfg(feature = "in-process")]
 #[derive(Clone)]
 pub struct InProcessAppServerRequestHandle {
     command_tx: mpsc::Sender<ClientCommand>,
@@ -470,15 +505,18 @@ pub struct InProcessAppServerRequestHandle {
 
 #[derive(Clone)]
 pub enum AppServerRequestHandle {
+    #[cfg(feature = "in-process")]
     InProcess(InProcessAppServerRequestHandle),
     Remote(crate::remote::RemoteAppServerRequestHandle),
 }
 
 pub enum AppServerClient {
+    #[cfg(feature = "in-process")]
     InProcess(InProcessAppServerClient),
     Remote(RemoteAppServerClient),
 }
 
+#[cfg(feature = "in-process")]
 impl InProcessAppServerClient {
     /// Starts the in-process runtime and facade worker task.
     ///
@@ -792,6 +830,7 @@ impl InProcessAppServerClient {
     }
 }
 
+#[cfg(feature = "in-process")]
 impl InProcessAppServerRequestHandle {
     pub async fn request(&self, request: ClientRequest) -> IoResult<RequestResult> {
         let (response_tx, response_rx) = oneshot::channel();
@@ -839,6 +878,7 @@ impl InProcessAppServerRequestHandle {
 impl AppServerRequestHandle {
     pub async fn request(&self, request: ClientRequest) -> IoResult<RequestResult> {
         match self {
+            #[cfg(feature = "in-process")]
             Self::InProcess(handle) => handle.request(request).await,
             Self::Remote(handle) => handle.request(request).await,
         }
@@ -849,6 +889,7 @@ impl AppServerRequestHandle {
         T: DeserializeOwned,
     {
         match self {
+            #[cfg(feature = "in-process")]
             Self::InProcess(handle) => handle.request_typed(request).await,
             Self::Remote(handle) => handle.request_typed(request).await,
         }
@@ -858,6 +899,7 @@ impl AppServerRequestHandle {
 impl AppServerClient {
     pub async fn request(&self, request: ClientRequest) -> IoResult<RequestResult> {
         match self {
+            #[cfg(feature = "in-process")]
             Self::InProcess(client) => client.request(request).await,
             Self::Remote(client) => client.request(request).await,
         }
@@ -868,6 +910,7 @@ impl AppServerClient {
         T: DeserializeOwned,
     {
         match self {
+            #[cfg(feature = "in-process")]
             Self::InProcess(client) => client.request_typed(request).await,
             Self::Remote(client) => client.request_typed(request).await,
         }
@@ -875,6 +918,7 @@ impl AppServerClient {
 
     pub async fn notify(&self, notification: ClientNotification) -> IoResult<()> {
         match self {
+            #[cfg(feature = "in-process")]
             Self::InProcess(client) => client.notify(notification).await,
             Self::Remote(client) => client.notify(notification).await,
         }
@@ -886,6 +930,7 @@ impl AppServerClient {
         result: JsonRpcResult,
     ) -> IoResult<()> {
         match self {
+            #[cfg(feature = "in-process")]
             Self::InProcess(client) => client.resolve_server_request(request_id, result).await,
             Self::Remote(client) => client.resolve_server_request(request_id, result).await,
         }
@@ -897,6 +942,7 @@ impl AppServerClient {
         error: JSONRPCErrorError,
     ) -> IoResult<()> {
         match self {
+            #[cfg(feature = "in-process")]
             Self::InProcess(client) => client.reject_server_request(request_id, error).await,
             Self::Remote(client) => client.reject_server_request(request_id, error).await,
         }
@@ -904,6 +950,7 @@ impl AppServerClient {
 
     pub async fn next_event(&mut self) -> Option<AppServerEvent> {
         match self {
+            #[cfg(feature = "in-process")]
             Self::InProcess(client) => client.next_event().await.map(Into::into),
             Self::Remote(client) => client.next_event().await,
         }
@@ -911,6 +958,7 @@ impl AppServerClient {
 
     pub async fn shutdown(self) -> IoResult<()> {
         match self {
+            #[cfg(feature = "in-process")]
             Self::InProcess(client) => client.shutdown().await,
             Self::Remote(client) => client.shutdown().await,
         }
@@ -918,6 +966,7 @@ impl AppServerClient {
 
     pub fn request_handle(&self) -> AppServerRequestHandle {
         match self {
+            #[cfg(feature = "in-process")]
             Self::InProcess(client) => AppServerRequestHandle::InProcess(client.request_handle()),
             Self::Remote(client) => AppServerRequestHandle::Remote(client.request_handle()),
         }
@@ -938,7 +987,7 @@ pub(crate) fn request_method_name(request: &ClientRequest) -> String {
         .unwrap_or_else(|| "<unknown>".to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "in-process"))]
 mod tests {
     use super::*;
     use codex_app_server_protocol::AccountUpdatedNotification;

@@ -1,6 +1,6 @@
 ---
-source: tui/src/chatwidget/tests.rs
-expression: terminal.backend()
+source: tui/src/chatwidget/tests/status_and_layout.rs
+expression: normalized_backend_snapshot(terminal.backend())
 ---
 "                                                                                                    "
 "                                                                                                    "
@@ -12,6 +12,6 @@ expression: terminal.backend()
 "                                                                                                    "
 "› 1. Yes, proceed (y)                                                                               "
 "  2. Yes, and don't ask again for commands that start with `echo 'hello world'` (p)                 "
-"  3. No, and tell Codex what to do differently (esc)                                                "
+"  3. No, and tell Interpreter what to do differently (esc)                                          "
 "                                                                                                    "
 "  Press enter to confirm or esc to cancel                                                           "

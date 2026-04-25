@@ -1,0 +1,21 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 1569
+expression: popup
+---
+  Select Provider
+  Choose a provider for the next chat. Unconfigured providers will be added to
+
+  claude
+› Anthropic                    Use ANTHROPIC_API_KEY or paste a key | Harness:
+                               claude-code
+  Alibaba (China)              Use DASHSCOPE_API_KEY or paste a key
+  Ollama Cloud                 Use OLLAMA_API_KEY or paste a key
+  Alibaba Coding Plan          Use ALIBABA_CODING_PLAN_API_KEY or paste a key
+  Alibaba Coding Plan (China)  Use ALIBABA_CODING_PLAN_API_KEY or paste a key
+  DigitalOcean                 Use DIGITALOCEAN_ACCESS_TOKEN or paste a key
+  Kimi For Coding              Use KIMI_API_KEY or paste a key | Harness:
+                               claude-code
+  KUAE Cloud Coding Plan       Use KUAE_API_KEY or paste a key
+
+  Type to filter • Enter to continue • Esc to dismiss

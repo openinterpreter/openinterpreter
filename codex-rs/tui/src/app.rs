@@ -24,6 +24,8 @@ use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ExternalEditorState;
 use crate::chatwidget::ReplayKind;
 use crate::chatwidget::ThreadInputState;
+use crate::config_write_edits::preferred_harness_for_provider;
+use crate::config_write_edits::provider_model_selection_edits;
 use crate::cwd_prompt::CwdPromptAction;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::split_command_string;
@@ -31,6 +33,7 @@ use crate::exec_command::strip_bash_lc_and_escape;
 use crate::external_agent_config_migration_startup::ExternalAgentConfigMigrationStartupOutcome;
 use crate::external_agent_config_migration_startup::handle_external_agent_config_migration_prompt_if_needed;
 use crate::external_editor;
+use crate::feedback_support::CodexFeedback;
 use crate::file_search::FileSearchManager;
 use crate::history_cell;
 use crate::history_cell::HistoryCell;
@@ -42,7 +45,6 @@ use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::ConfigOverrides;
 use crate::legacy_core::config::edit::ConfigEdit;
 use crate::legacy_core::config::edit::ConfigEditsBuilder;
-use crate::legacy_core::config_loader::ConfigLayerStackOrdering;
 use crate::legacy_core::lookup_message_history_entry;
 use crate::legacy_core::plugins::PluginsManager;
 #[cfg(target_os = "windows")]
@@ -55,12 +57,20 @@ use crate::multi_agents::agent_picker_status_dot_spans;
 use crate::multi_agents::format_agent_picker_item_name;
 use crate::multi_agents::next_agent_shortcut_matches;
 use crate::multi_agents::previous_agent_shortcut_matches;
+use crate::onboarding::local_provider::start_local_provider;
+use crate::onboarding::local_provider::wait_for_local_provider_running;
+use crate::onboarding::model_selection::LoadingProviderModelsState;
+use crate::onboarding::model_selection::resolve_provider_model_load_resolution;
+use crate::onboarding::provider_setup::ProviderPreset;
+use crate::onboarding::provider_setup::ProviderPresetQuickAddAction;
 use crate::pager_overlay::Overlay;
+use crate::provider_preset_repair::configured_provider_repair_edits;
 use crate::read_session_model;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::Renderable;
 use crate::resume_picker::SessionSelection;
 use crate::resume_picker::SessionTarget;
+use crate::telemetry::SessionTelemetry;
 #[cfg(test)]
 use crate::test_support::PathBufExt;
 #[cfg(test)]
@@ -76,7 +86,8 @@ use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::CodexErrorInfo as AppServerCodexErrorInfo;
-use codex_app_server_protocol::ConfigLayerSource;
+use codex_app_server_protocol::ConfigBatchWriteParams;
+use codex_app_server_protocol::ConfigEdit as AppServerConfigEdit;
 use codex_app_server_protocol::ConfigValueWriteParams;
 use codex_app_server_protocol::ConfigWriteResponse;
 use codex_app_server_protocol::FeedbackUploadParams;
@@ -87,6 +98,8 @@ use codex_app_server_protocol::ListMcpServerStatusResponse;
 use codex_app_server_protocol::McpServerStatus;
 use codex_app_server_protocol::McpServerStatusDetail;
 use codex_app_server_protocol::MergeStrategy;
+use codex_app_server_protocol::ModelListParams;
+use codex_app_server_protocol::ModelListResponse;
 use codex_app_server_protocol::PluginInstallParams;
 use codex_app_server_protocol::PluginInstallResponse;
 use codex_app_server_protocol::PluginListParams;
@@ -115,7 +128,6 @@ use codex_features::Feature;
 use codex_models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_models_manager::model_presets::HIDE_GPT_5_1_CODEX_MAX_MIGRATION_PROMPT_CONFIG;
 use codex_models_manager::model_presets::HIDE_GPT5_1_MIGRATION_PROMPT_CONFIG;
-use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
 use codex_protocol::approvals::ExecApprovalRequestEvent;
 use codex_protocol::config_types::Personality;
@@ -477,45 +489,6 @@ fn emit_skill_load_warnings(app_event_tx: &AppEventSender, errors: &[SkillErrorI
             crate::history_cell::new_warning_event(format!("{path}: {message}")),
         )));
     }
-}
-
-fn emit_project_config_warnings(app_event_tx: &AppEventSender, config: &Config) {
-    let mut disabled_folders = Vec::new();
-
-    for layer in config.config_layer_stack.get_layers(
-        ConfigLayerStackOrdering::LowestPrecedenceFirst,
-        /*include_disabled*/ true,
-    ) {
-        let ConfigLayerSource::Project { dot_codex_folder } = &layer.name else {
-            continue;
-        };
-        let Some(disabled_reason) = &layer.disabled_reason else {
-            continue;
-        };
-        disabled_folders.push((
-            dot_codex_folder.as_path().display().to_string(),
-            disabled_reason.clone(),
-        ));
-    }
-
-    if disabled_folders.is_empty() {
-        return;
-    }
-
-    let mut message = concat!(
-        "Project-local config, hooks, and exec policies are disabled in the following folders ",
-        "until the project is trusted, but skills still load.\n",
-    )
-    .to_string();
-    for (index, (folder, reason)) in disabled_folders.iter().enumerate() {
-        let display_index = index + 1;
-        message.push_str(&format!("    {display_index}. {folder}\n"));
-        message.push_str(&format!("       {reason}\n"));
-    }
-
-    app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-        history_cell::new_warning_event(message),
-    )));
 }
 
 fn emit_system_bwrap_warning(app_event_tx: &AppEventSender, config: &Config) {
@@ -1021,7 +994,7 @@ pub(crate) struct App {
     /// This is used after a confirmed thread rollback to ensure scrollback reflects the trimmed
     /// transcript cells.
     pub(crate) backtrack_render_pending: bool,
-    pub(crate) feedback: codex_feedback::CodexFeedback,
+    pub(crate) feedback: CodexFeedback,
     feedback_audience: FeedbackAudience,
     environment_manager: Arc<EnvironmentManager>,
     remote_app_server_url: Option<String>,
@@ -1132,6 +1105,7 @@ impl App {
         cfg: crate::legacy_core::config::Config,
         initial_user_message: Option<crate::chatwidget::UserMessage>,
     ) -> crate::chatwidget::ChatWidgetInit {
+        let model = cfg.model.clone();
         crate::chatwidget::ChatWidgetInit {
             config: cfg,
             frame_requester: tui.frame_requester(),
@@ -1144,7 +1118,7 @@ impl App {
             is_first_run: false,
             status_account_display: self.chat_widget.status_account_display().cloned(),
             initial_plan_type: self.chat_widget.current_plan_type(),
-            model: Some(self.chat_widget.current_model().to_string()),
+            model,
             startup_tooltip_override: None,
             status_line_invalid_items_warned: self.status_line_invalid_items_warned.clone(),
             terminal_title_invalid_items_warned: self.terminal_title_invalid_items_warned.clone(),
@@ -1183,6 +1157,101 @@ impl App {
                 "failed to refresh config before thread transition; continuing with current in-memory config"
             );
         }
+    }
+
+    fn loading_provider_models_state_for_preset(
+        preset: &ProviderPreset,
+        provider_name: &str,
+    ) -> LoadingProviderModelsState {
+        LoadingProviderModelsState {
+            provider_id: preset.configured_provider_id(Some(provider_name)),
+            provider_name: preset.configured_provider_name(Some(provider_name)),
+            manual_model_placeholder: preset.model_placeholder.clone(),
+            default_manual_model: preset.default_model.clone().unwrap_or_default(),
+        }
+    }
+
+    fn spawn_provider_model_load(
+        &self,
+        request_handle: AppServerRequestHandle,
+        loading_state: LoadingProviderModelsState,
+    ) {
+        let tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let request_id = RequestId::String(format!("provider-model-list-{}", Uuid::new_v4()));
+            let result = request_handle
+                .request_typed::<ModelListResponse>(ClientRequest::ModelList {
+                    request_id,
+                    params: ModelListParams {
+                        cursor: None,
+                        limit: None,
+                        include_hidden: Some(true),
+                        model_provider: Some(loading_state.provider_id.clone()),
+                    },
+                })
+                .await
+                .map(|response| {
+                    response
+                        .data
+                        .into_iter()
+                        .map(crate::app_server_session::model_preset_from_api_model)
+                        .collect()
+                })
+                .map_err(|err| err.to_string());
+            tx.send(AppEvent::ProviderModelsLoaded {
+                loading_state,
+                result,
+            });
+        });
+    }
+
+    async fn write_app_server_config_batch(
+        &mut self,
+        app_server: &mut AppServerSession,
+        edits: Vec<AppServerConfigEdit>,
+        action: &str,
+    ) -> Result<()> {
+        let request_id = RequestId::String(format!("config-batch-{action}-{}", Uuid::new_v4()));
+        let _: ConfigWriteResponse = app_server
+            .request_handle()
+            .request_typed(ClientRequest::ConfigBatchWrite {
+                request_id,
+                params: ConfigBatchWriteParams {
+                    edits,
+                    file_path: None,
+                    expected_version: None,
+                    reload_user_config: true,
+                },
+            })
+            .await
+            .wrap_err_with(|| format!("config/batchWrite failed while {action}"))?;
+        self.refresh_in_memory_config_from_disk_best_effort(action)
+            .await;
+        self.chat_widget.submit_op(AppCommand::reload_user_config());
+        Ok(())
+    }
+
+    async fn configure_provider_definition_and_load(
+        &mut self,
+        app_server: &mut AppServerSession,
+        preset: ProviderPreset,
+        provider_name: String,
+        edits: Vec<AppServerConfigEdit>,
+    ) {
+        if !edits.is_empty()
+            && let Err(err) = self
+                .write_app_server_config_batch(app_server, edits, "configuring provider")
+                .await
+        {
+            self.chat_widget.add_error_message(format!(
+                "Failed to configure {}: {err}",
+                preset.configured_provider_name(Some(provider_name.as_str()))
+            ));
+            return;
+        }
+
+        let loading_state = Self::loading_provider_models_state_for_preset(&preset, &provider_name);
+        self.spawn_provider_model_load(app_server.request_handle(), loading_state);
     }
 
     async fn rebuild_config_for_resume_or_fallback(
@@ -3902,7 +3971,7 @@ impl App {
         initial_prompt: Option<String>,
         initial_images: Vec<PathBuf>,
         session_selection: SessionSelection,
-        feedback: codex_feedback::CodexFeedback,
+        feedback: CodexFeedback,
         is_first_run: bool,
         entered_trust_nux: bool,
         should_prompt_windows_sandbox_nux_at_startup: bool,
@@ -3913,7 +3982,6 @@ impl App {
         use tokio_stream::StreamExt;
         let (app_event_tx, mut app_event_rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(app_event_tx);
-        emit_project_config_warnings(&app_event_tx, &config);
         emit_system_bwrap_warning(&app_event_tx, &config);
         tui.set_notification_settings(
             config.tui_notifications.method,
@@ -3999,7 +4067,7 @@ impl App {
             /*account_id*/ None,
             bootstrap.account_email.clone(),
             auth_mode,
-            codex_login::default_client::originator().value,
+            crate::login_support::originator_value(),
             config.otel.log_user_prompt,
             user_agent(),
             SessionSource::Cli,
@@ -5004,13 +5072,246 @@ impl App {
                 self.on_update_reasoning_effort(effort);
             }
             AppEvent::UpdateModel(model) => {
-                self.chat_widget.set_model(&model);
+                self.on_update_model(model);
             }
             AppEvent::UpdateCollaborationMode(mask) => {
                 self.chat_widget.set_collaboration_mask(mask);
             }
             AppEvent::UpdatePersonality(personality) => {
                 self.on_update_personality(personality);
+            }
+            AppEvent::ConfigureProviderPresetAndLoadModels { preset } => {
+                match preset.quick_add_action() {
+                    Some(ProviderPresetQuickAddAction::WriteEdits(edits)) => {
+                        let provider_name =
+                            preset.configured_provider_name(/*provider_name*/ None);
+                        self.configure_provider_definition_and_load(
+                            app_server,
+                            preset,
+                            provider_name,
+                            edits,
+                        )
+                        .await;
+                    }
+                    Some(ProviderPresetQuickAddAction::PromptForApiKey) => {
+                        let provider_name =
+                            preset.configured_provider_name(/*provider_name*/ None);
+                        self.chat_widget.open_custom_provider_api_key_prompt(
+                            preset.clone(),
+                            provider_name,
+                            preset.base_url.clone(),
+                        );
+                    }
+                    None => {
+                        self.chat_widget.open_custom_provider_name_prompt(preset);
+                    }
+                }
+            }
+            AppEvent::LoadProviderModels { loading_state } => {
+                self.spawn_provider_model_load(app_server.request_handle(), loading_state);
+            }
+            AppEvent::ProviderModelsLoaded {
+                loading_state,
+                result,
+            } => {
+                let resolution =
+                    resolve_provider_model_load_resolution(loading_state, result).await;
+                self.chat_widget
+                    .present_provider_model_load_resolution(resolution);
+            }
+            AppEvent::OpenCustomProviderBaseUrlPrompt {
+                preset,
+                provider_name,
+            } => {
+                self.chat_widget
+                    .open_custom_provider_base_url_prompt(preset, provider_name);
+            }
+            AppEvent::OpenCustomProviderApiKeyPrompt {
+                preset,
+                provider_name,
+                base_url,
+            } => {
+                self.chat_widget.open_custom_provider_api_key_prompt(
+                    preset,
+                    provider_name,
+                    base_url,
+                );
+            }
+            AppEvent::ConfigureCustomProviderAndLoadModels {
+                preset,
+                provider_name,
+                base_url,
+                api_key,
+                api_key_prefilled_from_env,
+            } => {
+                let configured_provider_id =
+                    preset.configured_provider_id(Some(provider_name.as_str()));
+                let configured_provider_name =
+                    preset.configured_provider_name(Some(provider_name.as_str()));
+                let edits = preset.provider_definition_edits(
+                    configured_provider_id.as_str(),
+                    configured_provider_name.as_str(),
+                    base_url.as_str(),
+                    api_key.as_str(),
+                    api_key_prefilled_from_env,
+                );
+                self.configure_provider_definition_and_load(
+                    app_server,
+                    preset,
+                    configured_provider_name,
+                    edits,
+                )
+                .await;
+            }
+            AppEvent::OpenCustomProviderModelPrompt {
+                provider_id,
+                provider_name,
+                initial_text,
+            } => {
+                self.chat_widget
+                    .open_custom_model_prompt_for_provider_with_initial_value(
+                        provider_id,
+                        provider_name,
+                        initial_text,
+                    );
+            }
+            AppEvent::OpenReasoningPopupForProvider {
+                provider_id,
+                provider_name,
+                model,
+            } => {
+                self.chat_widget.open_reasoning_popup_for_provider(
+                    provider_id,
+                    provider_name,
+                    model,
+                );
+            }
+            AppEvent::PersistProviderModelSelection {
+                provider_id,
+                provider_name,
+                model,
+                effort,
+            } => {
+                let mut edits = self
+                    .config
+                    .model_providers
+                    .get(provider_id.as_str())
+                    .map(|provider| {
+                        configured_provider_repair_edits(provider_id.as_str(), provider)
+                    })
+                    .unwrap_or_default();
+                edits.extend(provider_model_selection_edits(
+                    /*profile*/ None,
+                    provider_id.as_str(),
+                    self.config.model_providers.get(provider_id.as_str()),
+                    Some(model.as_str()),
+                    effort,
+                ));
+                match self
+                    .write_app_server_config_batch(
+                        app_server,
+                        edits,
+                        "saving provider model selection",
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        let onboarding_marker_path = self
+                            .config
+                            .codex_home
+                            .join(".fresh_home_provider_onboarding");
+                        if let Err(err) = std::fs::remove_file(&onboarding_marker_path)
+                            && err.kind() != std::io::ErrorKind::NotFound
+                        {
+                            tracing::warn!(
+                                path = %onboarding_marker_path.display(),
+                                "failed to clear fresh-home onboarding marker: {err}"
+                            );
+                        }
+                        self.config.model_provider_id = provider_id.clone();
+                        if let Some(provider) = self
+                            .config
+                            .model_providers
+                            .get(provider_id.as_str())
+                            .cloned()
+                        {
+                            self.config.model_provider = provider.clone();
+                            self.config.harness = preferred_harness_for_provider(
+                                provider_id.as_str(),
+                                Some(provider.name.as_str()),
+                                provider.base_url.as_deref(),
+                                Some(provider.wire_api),
+                            )
+                            .map(ToOwned::to_owned);
+                        } else {
+                            self.config.harness = None;
+                        }
+                        self.config.model = Some(model.clone());
+                        self.config.model_reasoning_effort = effort;
+                        self.chat_widget.set_model(&model);
+                        self.chat_widget.set_reasoning_effort(effort);
+                        self.start_fresh_session_with_summary_hint(
+                            tui, app_server, /*session_start_source*/ None,
+                            /*initial_user_message*/ None,
+                        )
+                        .await;
+                    }
+                    Err(err) => {
+                        self.chat_widget.add_error_message(format!(
+                            "Failed to save {provider_name} with {model}: {err}"
+                        ));
+                    }
+                }
+            }
+            AppEvent::StartLocalProviderAndLoadModels { loading_state } => {
+                let request_handle = app_server.request_handle();
+                let tx = self.app_event_tx.clone();
+                tokio::spawn(async move {
+                    let provider_name = loading_state.provider_name.clone();
+                    let provider_id = loading_state.provider_id.clone();
+                    let result = async {
+                        start_local_provider(provider_id.as_str())
+                            .await
+                            .map_err(|err| format!("Failed to start {provider_name}: {err}"))?;
+                        let running = wait_for_local_provider_running(
+                            provider_id.as_str(),
+                            std::time::Duration::from_secs(8),
+                        )
+                        .await
+                        .map_err(|err| {
+                            format!("Failed while waiting for {provider_name}: {err}")
+                        })?;
+                        if !running {
+                            return Err(format!("{provider_name} did not start in time."));
+                        }
+                        let request_id =
+                            RequestId::String(format!("provider-model-list-{}", Uuid::new_v4()));
+                        request_handle
+                            .request_typed::<ModelListResponse>(ClientRequest::ModelList {
+                                request_id,
+                                params: ModelListParams {
+                                    cursor: None,
+                                    limit: None,
+                                    include_hidden: Some(true),
+                                    model_provider: Some(provider_id.clone()),
+                                },
+                            })
+                            .await
+                            .map(|response| {
+                                response
+                                    .data
+                                    .into_iter()
+                                    .map(crate::app_server_session::model_preset_from_api_model)
+                                    .collect()
+                            })
+                            .map_err(|err| err.to_string())
+                    }
+                    .await;
+                    tx.send(AppEvent::ProviderModelsLoaded {
+                        loading_state,
+                        result,
+                    });
+                });
             }
             AppEvent::OpenRealtimeAudioDeviceSelection { kind } => {
                 self.chat_widget.open_realtime_audio_device_selection(kind);
@@ -6338,6 +6639,11 @@ impl App {
         self.chat_widget.set_reasoning_effort(effort);
     }
 
+    fn on_update_model(&mut self, model: String) {
+        self.config.model = Some(model.clone());
+        self.chat_widget.set_model(&model);
+    }
+
     fn on_update_personality(&mut self, personality: Personality) {
         self.config.personality = Some(personality);
         self.chat_widget.set_personality(personality);
@@ -6903,6 +7209,7 @@ mod tests {
 
     use crate::legacy_core::config::ConfigBuilder;
     use crate::legacy_core::config::ConfigOverrides;
+    use crate::telemetry::SessionTelemetry;
     use codex_app_server_protocol::AdditionalFileSystemPermissions;
     use codex_app_server_protocol::AdditionalNetworkPermissions;
     use codex_app_server_protocol::AdditionalPermissionProfile;
@@ -6946,7 +7253,6 @@ mod tests {
     use codex_app_server_protocol::TurnStatus;
     use codex_app_server_protocol::UserInput as AppServerUserInput;
     use codex_config::types::ModelAvailabilityNuxConfig;
-    use codex_otel::SessionTelemetry;
     use codex_protocol::ThreadId;
     use codex_protocol::config_types::CollaborationMode;
     use codex_protocol::config_types::CollaborationModeMask;
@@ -7390,7 +7696,7 @@ mod tests {
             enhanced_keys_supported: false,
             has_chatgpt_account: false,
             model_catalog: app.model_catalog.clone(),
-            feedback: codex_feedback::CodexFeedback::new(),
+            feedback: CodexFeedback::new(),
             is_first_run: false,
             status_account_display: None,
             initial_plan_type: None,
@@ -9591,6 +9897,7 @@ guardian_approval = true
                     forked_from_id: None,
                     preview: "agent thread".to_string(),
                     ephemeral: false,
+                    model: None,
                     model_provider: "agent-provider".to_string(),
                     created_at: 1,
                     updated_at: 2,
@@ -9672,6 +9979,7 @@ guardian_approval = true
                     forked_from_id: None,
                     preview: "agent thread".to_string(),
                     ephemeral: false,
+                    model: None,
                     model_provider: "agent-provider".to_string(),
                     created_at: 1,
                     updated_at: 2,
@@ -10426,7 +10734,7 @@ guardian_approval = true
             terminal_title_invalid_items_warned: Arc::new(AtomicBool::new(false)),
             backtrack: BacktrackState::default(),
             backtrack_render_pending: false,
-            feedback: codex_feedback::CodexFeedback::new(),
+            feedback: CodexFeedback::new(),
             feedback_audience: FeedbackAudience::External,
             environment_manager: Arc::new(EnvironmentManager::new(/*exec_server_url*/ None)),
             remote_app_server_url: None,
@@ -10483,7 +10791,7 @@ guardian_approval = true
                 terminal_title_invalid_items_warned: Arc::new(AtomicBool::new(false)),
                 backtrack: BacktrackState::default(),
                 backtrack_render_pending: false,
-                feedback: codex_feedback::CodexFeedback::new(),
+                feedback: CodexFeedback::new(),
                 feedback_audience: FeedbackAudience::External,
                 environment_manager: Arc::new(EnvironmentManager::new(
                     /*exec_server_url*/ None,
@@ -12069,6 +12377,7 @@ guardian_approval = true
                     forked_from_id: None,
                     preview: String::new(),
                     ephemeral: false,
+                    model: None,
                     model_provider: "openai".to_string(),
                     created_at: 0,
                     updated_at: 0,

@@ -53,3 +53,21 @@ fn resume_accepts_output_last_message_flag_after_subcommand() {
     assert_eq!(args.session_id.as_deref(), Some("session-123"));
     assert_eq!(args.prompt.as_deref(), Some(PROMPT));
 }
+
+#[test]
+fn parses_hidden_remote_exec_options() {
+    let cli = Cli::parse_from([
+        "codex-exec",
+        "--remote",
+        "ws://127.0.0.1:7777",
+        "--remote-auth-token-env",
+        "CODEX_TOKEN",
+        "--json",
+        "hello",
+    ]);
+
+    assert_eq!(cli.remote, Some("ws://127.0.0.1:7777".to_string()));
+    assert_eq!(cli.remote_auth_token_env, Some("CODEX_TOKEN".to_string()));
+    assert!(cli.json);
+    assert_eq!(cli.prompt.as_deref(), Some("hello"));
+}

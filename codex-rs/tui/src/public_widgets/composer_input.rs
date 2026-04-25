@@ -34,6 +34,11 @@ pub struct ComposerInput {
 impl ComposerInput {
     /// Create a new composer input with a neutral placeholder.
     pub fn new() -> Self {
+        Self::new_with_placeholder("Compose new task".to_string())
+    }
+
+    /// Create a new composer input with a custom placeholder.
+    pub fn new_with_placeholder(placeholder_text: String) -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let sender = AppEventSender::new(tx.clone());
         // `enhanced_keys_supported=true` enables Shift+Enter newline hint/behavior.
@@ -41,7 +46,7 @@ impl ComposerInput {
             /*has_input_focus*/ true,
             sender,
             /*enhanced_keys_supported*/ true,
-            "Compose new task".to_string(),
+            placeholder_text,
             /*disable_paste_burst*/ false,
         );
         Self { inner, _tx: tx, rx }
@@ -56,6 +61,17 @@ impl ComposerInput {
     pub fn clear(&mut self) {
         self.inner
             .set_text_content(String::new(), Vec::new(), Vec::new());
+    }
+
+    /// Set the current input text.
+    pub fn set_text(&mut self, text: String) {
+        self.inner.set_text_content(text, Vec::new(), Vec::new());
+        self.drain_app_events();
+    }
+
+    /// Return the current input text.
+    pub fn text(&self) -> String {
+        self.inner.current_text()
     }
 
     /// Feed a key event into the composer and return a high-level action.

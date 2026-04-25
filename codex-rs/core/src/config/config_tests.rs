@@ -904,9 +904,8 @@ async fn load_workspace_permission_profile(
             cwd: Some(cwd.path().to_path_buf()),
             ..Default::default()
         },
-        codex_home.abs(),
+        codex_home.abs().to_path_buf(),
     )
-    .await
 }
 
 #[tokio::test]
@@ -1974,7 +1973,8 @@ async fn cli_override_takes_precedence_over_profile_sandbox_mode() -> std::io::R
     };
 
     let config =
-        Config::load_from_base_config_with_overrides(cfg, overrides, codex_home.abs()).await?;
+        Config::load_from_base_config_with_overrides_async(cfg, overrides, codex_home.abs())
+            .await?;
 
     if cfg!(target_os = "windows") {
         assert!(matches!(
@@ -2362,6 +2362,7 @@ async fn to_mcp_config_preserves_apps_feature_from_config() -> std::io::Result<(
     .await?;
     let plugins_manager = PluginsManager::new(codex_home.path().to_path_buf());
 
+    let _ = config.features.enable(Feature::Apps);
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
     assert!(mcp_config.apps_enabled);
 
@@ -3533,7 +3534,8 @@ async fn loads_compact_prompt_from_file() -> std::io::Result<()> {
     };
 
     let config =
-        Config::load_from_base_config_with_overrides(cfg, overrides, codex_home.abs()).await?;
+        Config::load_from_base_config_with_overrides_async(cfg, overrides, codex_home.abs())
+            .await?;
 
     assert_eq!(
         config.compact_prompt.as_deref(),
@@ -4817,6 +4819,7 @@ async fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             service_tier: None,
             model_provider_id: "openai".to_string(),
             model_provider: fixture.openai_provider.clone(),
+            harness: None,
             permissions: Permissions {
                 approval_policy: Constrained::allow_any(AskForApproval::Never),
                 sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
@@ -4967,6 +4970,7 @@ async fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         service_tier: None,
         model_provider_id: "openai-custom".to_string(),
         model_provider: fixture.openai_custom_provider.clone(),
+        harness: None,
         permissions: Permissions {
             approval_policy: Constrained::allow_any(AskForApproval::UnlessTrusted),
             sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
@@ -5115,6 +5119,7 @@ async fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         service_tier: None,
         model_provider_id: "openai".to_string(),
         model_provider: fixture.openai_provider.clone(),
+        harness: None,
         permissions: Permissions {
             approval_policy: Constrained::allow_any(AskForApproval::OnFailure),
             sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
@@ -5248,6 +5253,7 @@ async fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         service_tier: None,
         model_provider_id: "openai".to_string(),
         model_provider: fixture.openai_provider.clone(),
+        harness: None,
         permissions: Permissions {
             approval_policy: Constrained::allow_any(AskForApproval::OnFailure),
             sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
@@ -5355,6 +5361,149 @@ async fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
 
     assert_eq!(expected_gpt5_profile_config, gpt5_profile_config);
 
+    Ok(())
+}
+
+#[test]
+fn anthropic_like_provider_defaults_to_claude_code_harness() -> std::io::Result<()> {
+    let cwd_temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(cwd_temp_dir.path().join(".git"), "gitdir: nowhere")?;
+    let codex_home_temp_dir = TempDir::new().expect("temp dir");
+
+    let cfg = ConfigToml {
+        model_provider: Some("anthropic".to_string()),
+        model_providers: HashMap::from([(
+            "anthropic".to_string(),
+            ModelProviderInfo {
+                name: "Anthropic".to_string(),
+                base_url: Some("https://api.anthropic.com".to_string()),
+                env_key: Some("ANTHROPIC_API_KEY".to_string()),
+                env_key_instructions: None,
+                experimental_bearer_token: None,
+                auth: None,
+                wire_api: WireApi::Messages,
+                query_params: None,
+                http_headers: None,
+                env_http_headers: None,
+                request_max_retries: None,
+                stream_max_retries: None,
+                stream_idle_timeout_ms: None,
+                websocket_connect_timeout_ms: None,
+                requires_openai_auth: false,
+                supports_websockets: false,
+            },
+        )]),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides {
+            cwd: Some(cwd_temp_dir.path().to_path_buf()),
+            ..Default::default()
+        },
+        codex_home_temp_dir.path().to_path_buf(),
+    )?;
+
+    assert_eq!(config.harness.as_deref(), Some("claude-code"));
+    Ok(())
+}
+
+#[test]
+fn kimi_like_provider_defaults_to_kimi_cli_harness() -> std::io::Result<()> {
+    let cwd_temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(cwd_temp_dir.path().join(".git"), "gitdir: nowhere")?;
+    let codex_home_temp_dir = TempDir::new().expect("temp dir");
+
+    let cfg = ConfigToml {
+        model_provider: Some("kimi-for-coding".to_string()),
+        model_providers: HashMap::from([(
+            "kimi-for-coding".to_string(),
+            ModelProviderInfo {
+                name: "Kimi For Coding".to_string(),
+                base_url: Some("https://api.kimi.com/coding/v1".to_string()),
+                env_key: Some("KIMI_API_KEY".to_string()),
+                env_key_instructions: None,
+                experimental_bearer_token: None,
+                auth: None,
+                wire_api: WireApi::Chat,
+                query_params: None,
+                http_headers: None,
+                env_http_headers: None,
+                request_max_retries: None,
+                stream_max_retries: None,
+                stream_idle_timeout_ms: None,
+                websocket_connect_timeout_ms: None,
+                requires_openai_auth: false,
+                supports_websockets: false,
+            },
+        )]),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides {
+            cwd: Some(cwd_temp_dir.path().to_path_buf()),
+            ..Default::default()
+        },
+        codex_home_temp_dir.path().to_path_buf(),
+    )?;
+
+    assert_eq!(config.harness.as_deref(), Some("kimi-cli"));
+    Ok(())
+}
+
+#[test]
+fn profile_harness_overrides_provider_default_harness() -> std::io::Result<()> {
+    let cwd_temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(cwd_temp_dir.path().join(".git"), "gitdir: nowhere")?;
+    let codex_home_temp_dir = TempDir::new().expect("temp dir");
+
+    let cfg = ConfigToml {
+        profile: Some("claude".to_string()),
+        model_provider: Some("anthropic".to_string()),
+        profiles: HashMap::from([(
+            "claude".to_string(),
+            ConfigProfile {
+                harness: Some("gemini-cli".to_string()),
+                ..Default::default()
+            },
+        )]),
+        model_providers: HashMap::from([(
+            "anthropic".to_string(),
+            ModelProviderInfo {
+                name: "Anthropic".to_string(),
+                base_url: Some("https://api.anthropic.com".to_string()),
+                env_key: Some("ANTHROPIC_API_KEY".to_string()),
+                env_key_instructions: None,
+                experimental_bearer_token: None,
+                auth: None,
+                wire_api: WireApi::Messages,
+                query_params: None,
+                http_headers: None,
+                env_http_headers: None,
+                request_max_retries: None,
+                stream_max_retries: None,
+                stream_idle_timeout_ms: None,
+                websocket_connect_timeout_ms: None,
+                requires_openai_auth: false,
+                supports_websockets: false,
+            },
+        )]),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides {
+            cwd: Some(cwd_temp_dir.path().to_path_buf()),
+            ..Default::default()
+        },
+        codex_home_temp_dir.path().to_path_buf(),
+    )?;
+
+    assert_eq!(config.harness.as_deref(), Some("gemini-cli"));
     Ok(())
 }
 

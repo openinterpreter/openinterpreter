@@ -1,6 +1,6 @@
 ---
-source: tui/src/chatwidget/tests.rs
-expression: term.backend().vt100().screen().contents()
+source: tui/src/chatwidget/tests/status_and_layout.rs
+expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
 ---
 
 
@@ -38,7 +38,7 @@ expression: term.backend().vt100().screen().contents()
 
 • Investigating rendering code (0s • esc to interrupt)
 
-
+ 
 › Summarize recent commits
-
+ 
   tab to queue message                                       100% context left

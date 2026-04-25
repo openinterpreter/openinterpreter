@@ -16,6 +16,7 @@ pub use codex_protocol::config_types::ModeKind;
 pub use codex_protocol::config_types::Personality;
 pub use codex_protocol::config_types::ServiceTier;
 pub use codex_protocol::config_types::WebSearchMode;
+use codex_protocol::openai_models::ModelsResponse;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -36,10 +37,6 @@ const MIN_MEMORIES_MAX_RAW_MEMORIES_FOR_CONSOLIDATION: usize = 1;
 const MAX_MEMORIES_MAX_RAW_MEMORIES_FOR_CONSOLIDATION: usize = 4096;
 const MIN_MEMORIES_MAX_ROLLOUTS_PER_STARTUP: usize = 1;
 const MAX_MEMORIES_MAX_ROLLOUTS_PER_STARTUP: usize = 128;
-
-const fn default_enabled() -> bool {
-    true
-}
 
 /// Determine where Codex should store CLI auth credentials.
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -69,6 +66,21 @@ pub enum OAuthCredentialsStoreMode {
     File,
     /// Keyring when available, otherwise fail.
     Keyring,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ModelsManagerConfig {
+    pub model_context_window: Option<i64>,
+    pub model_auto_compact_token_limit: Option<i64>,
+    pub tool_output_token_limit: Option<usize>,
+    pub base_instructions: Option<String>,
+    pub personality_enabled: bool,
+    pub model_supports_reasoning_summaries: Option<bool>,
+    pub model_catalog: Option<ModelsResponse>,
+}
+
+const fn default_enabled() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]

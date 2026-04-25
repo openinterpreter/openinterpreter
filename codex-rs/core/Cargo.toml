@@ -16,6 +16,10 @@ path = "src/bin/config_schema.rs"
 [lints]
 workspace = true
 
+[features]
+default = ["message-history"]
+message-history = []
+
 [dependencies]
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
@@ -30,6 +34,7 @@ codex-api = { workspace = true }
 codex-app-server-protocol = { workspace = true }
 codex-apply-patch = { workspace = true }
 codex-async-utils = { workspace = true }
+codex-chat-wire-compat = { workspace = true }
 codex-code-mode = { workspace = true }
 codex-connectors = { workspace = true }
 codex-config = { workspace = true }

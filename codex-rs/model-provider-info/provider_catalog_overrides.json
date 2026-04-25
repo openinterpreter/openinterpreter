@@ -1,0 +1,58 @@
+{
+  "supported_provider_npm_packages": [
+    "@ai-sdk/openai-compatible",
+    "@ai-sdk/openai",
+    "@ai-sdk/anthropic",
+    "@openrouter/ai-sdk-provider",
+    "@ai-sdk/groq"
+  ],
+  "include_provider_ids": [],
+  "exclude_provider_ids": [
+    "cloudflare-workers-ai",
+    "lmstudio",
+    "privatemode-ai"
+  ],
+  "api_base_url_overrides": {
+    "groq": "https://api.groq.com/openai/v1",
+    "anthropic": "https://api.anthropic.com"
+  },
+  "wire_api_overrides": {
+    "anthropic": "messages"
+  },
+  "sort_priorities": {
+    "anthropic": 2,
+    "openrouter": 20,
+    "groq": 21,
+    "github-models": 24,
+    "opencode": 26,
+    "opencode-go": 27,
+    "github-copilot": 28,
+    "poe": 29,
+    "perplexity-agent": 30,
+    "requesty": 31,
+    "deepseek": 32,
+    "moonshotai": 33,
+    "moonshotai-cn": 34,
+    "zhipuai": 35,
+    "zai": 36,
+    "siliconflow": 37,
+    "siliconflow-cn": 38,
+    "alibaba": 39,
+    "alibaba-cn": 40,
+    "stepfun": 41,
+    "modelscope": 42,
+    "qiniu-ai": 43,
+    "jiekou": 44,
+    "302ai": 45,
+    "novita-ai": 46,
+    "fireworks-ai": 47,
+    "nvidia": 48,
+    "huggingface": 49,
+    "chutes": 50,
+    "ollama-cloud": 51,
+    "llama": 52,
+    "upstage": 53,
+    "nova": 54,
+    "xiaomi": 55
+  }
+}

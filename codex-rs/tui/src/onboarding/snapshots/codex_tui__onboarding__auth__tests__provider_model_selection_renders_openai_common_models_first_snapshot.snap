@@ -1,0 +1,20 @@
+---
+source: tui/src/onboarding/auth.rs
+assertion_line: 3187
+expression: terminal.backend()
+---
+> OpenAI (API key)
+
+  Choose a model for this new chat.
+  Filter models: type to search
+
+> 1. gpt-5.4
+     gpt-5.4 description
+
+  2. gpt-5.4-mini
+     gpt-5.4-mini description
+
+  3. gpt-5.4-nano
+     gpt-5.4-nano description
+  Press Enter to continue
+  Type to filter • Backspace clears • Esc goes back

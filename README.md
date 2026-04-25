@@ -1,60 +1,55 @@
-<p align="center"><code>npm i -g @openai/codex</code><br />or <code>brew install --cask codex</code></p>
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+# Open Interpreter 1.0
 
----
+Open Interpreter 1.0 is a provider-agnostic terminal coding agent based on
+Codex.
 
-## Quickstart
+It keeps the terminal workflow strong, makes multi-tab use more memory
+efficient, and supports native harness emulation for systems like Claude Code.
 
-### Installing and running Codex CLI
+## What it does
 
-Install globally with your preferred package manager:
+Open Interpreter is built for practical software work in the terminal:
 
-```shell
-# Install using npm
-npm install -g @openai/codex
-```
+- run `interpreter` and work in the current directory
+- choose the provider and model that fit your workflow
+- keep configuration and session state local in `~/.openinterpreter`
+- use long-running sessions without treating each tab as a separate product
 
-```shell
-# Install using Homebrew
-brew install --cask codex
-```
+## Core ideas
 
-Then simply run `codex` to get started.
+- **Based on Codex:** Open Interpreter builds on the mature Codex terminal
+  experience instead of replacing it with a separate UI model.
+- **Provider agnostic:** model and provider choice are first-class parts of the
+  product.
+- **Memory efficient:** the runtime is designed around a shared local backend so
+  many tabs do not have to behave like many fully separate agent runtimes.
+- **Harness emulation:** Open Interpreter can emulate harness behavior such as
+  Claude Code natively in Rust instead of depending on external CLIs in the
+  product runtime.
 
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
+## Product goals
 
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
+- provider agnostic model access
+- reliable long-running terminal sessions
+- efficient multi-tab usage
+- clean onboarding and model selection
+- clear tool, approval, and session behavior
 
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
+## User model
 
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
+- run `interpreter`
+- select a provider, model, and reasoning level in the UI
+- work directly in the current project
+- keep state under `~/.openinterpreter`
 
-</details>
+## Scope
 
-### Using Codex with your ChatGPT plan
+This README describes the product itself.
 
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
+Open Interpreter should read here as:
 
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
-
-## Docs
-
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
-
-This repository is licensed under the [Apache-2.0 License](LICENSE).
+- a terminal coding agent
+- based on Codex
+- provider agnostic
+- memory efficient
+- capable of native harness emulation

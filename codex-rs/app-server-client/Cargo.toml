@@ -11,21 +11,33 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+[features]
+default = ["in-process"]
+in-process = [
+    "dep:codex-app-server",
+    "dep:codex-arg0",
+    "dep:codex-core",
+    "dep:codex-exec-server",
+    "dep:codex-feedback",
+    "dep:codex-protocol",
+    "dep:toml",
+]
+
 [dependencies]
-codex-app-server = { workspace = true }
+codex-app-server = { workspace = true, optional = true }
 codex-app-server-protocol = { workspace = true }
-codex-arg0 = { workspace = true }
-codex-core = { workspace = true }
-codex-exec-server = { workspace = true }
-codex-feedback = { workspace = true }
-codex-protocol = { workspace = true }
+codex-arg0 = { workspace = true, optional = true }
+codex-core = { workspace = true, optional = true }
+codex-exec-server = { workspace = true, optional = true }
+codex-feedback = { workspace = true, optional = true }
+codex-protocol = { workspace = true, optional = true }
 codex-utils-rustls-provider = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt"] }
 tokio-tungstenite = { workspace = true }
-toml = { workspace = true }
+toml = { workspace = true, optional = true }
 tracing = { workspace = true }
 url = { workspace = true }
 

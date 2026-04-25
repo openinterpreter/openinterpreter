@@ -86,6 +86,36 @@ async fn run_search_handles_no_matches() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn grep_content_mode_on_single_file_omits_filename_prefix() -> anyhow::Result<()> {
+    if !rg_available() {
+        return Ok(());
+    }
+    let temp = tempdir().expect("create temp dir");
+    let dir = temp.path();
+    let file = dir.join("gauntlet.txt");
+    std::fs::write(&file, "first\nTOKEN_OLD and TOKEN_OLD\nlast\n").unwrap();
+
+    let output = run_rg_command(
+        [
+            "--color",
+            "never",
+            "--no-heading",
+            "--line-number",
+            "TOKEN_OLD",
+            file.to_string_lossy().as_ref(),
+        ],
+        dir,
+    )
+    .await?;
+    let lines = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(lines, "2:TOKEN_OLD and TOKEN_OLD");
+    Ok(())
+}
+
 fn rg_available() -> bool {
     StdCommand::new("rg")
         .arg("--version")

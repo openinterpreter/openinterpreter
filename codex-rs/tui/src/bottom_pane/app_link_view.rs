@@ -30,6 +30,7 @@ use crate::app_event_sender::AppEventSender;
 use crate::key_hint;
 use crate::render::Insets;
 use crate::render::RectExt as _;
+use crate::style::app_accent_color;
 use crate::style::user_message_style;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_lines;
@@ -334,7 +335,7 @@ impl AppLinkView {
 
         lines.push(Line::from(""));
         lines.push(Line::from(vec!["Setup URL:".dim()]));
-        let url_line = Line::from(vec![self.url.clone().cyan().underlined()]);
+        let url_line = Line::from(vec![self.url.clone().fg(app_accent_color()).underlined()]);
         lines.extend(adaptive_wrap_lines(
             vec![url_line],
             RtOptions::new(usable_width),

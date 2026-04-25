@@ -21,6 +21,18 @@ use crate::collect_tool_search_source_infos;
 use crate::collect_tool_suggest_entries;
 use crate::create_apply_patch_freeform_tool;
 use crate::create_apply_patch_json_tool;
+use crate::create_claude_code_agent_tool;
+use crate::create_claude_code_ask_user_question_tool;
+use crate::create_claude_code_bash_tool;
+use crate::create_claude_code_edit_tool;
+use crate::create_claude_code_glob_tool;
+use crate::create_claude_code_grep_tool;
+use crate::create_claude_code_lsp_tool;
+use crate::create_claude_code_read_tool;
+use crate::create_claude_code_todo_write_tool;
+use crate::create_claude_code_web_fetch_tool;
+use crate::create_claude_code_web_search_tool;
+use crate::create_claude_code_write_tool;
 use crate::create_close_agent_tool_v1;
 use crate::create_close_agent_tool_v2;
 use crate::create_code_mode_tool;
@@ -29,6 +41,23 @@ use crate::create_followup_task_tool;
 use crate::create_image_generation_tool;
 use crate::create_js_repl_reset_tool;
 use crate::create_js_repl_tool;
+use crate::create_kimi_cli_agent_tool;
+use crate::create_kimi_cli_ask_user_question_tool;
+use crate::create_kimi_cli_enter_plan_mode_tool;
+use crate::create_kimi_cli_exit_plan_mode_tool;
+use crate::create_kimi_cli_fetch_url_tool;
+use crate::create_kimi_cli_glob_tool;
+use crate::create_kimi_cli_grep_tool;
+use crate::create_kimi_cli_read_file_tool;
+use crate::create_kimi_cli_read_media_file_tool;
+use crate::create_kimi_cli_search_web_tool;
+use crate::create_kimi_cli_set_todo_list_tool;
+use crate::create_kimi_cli_shell_tool;
+use crate::create_kimi_cli_str_replace_file_tool;
+use crate::create_kimi_cli_task_list_tool;
+use crate::create_kimi_cli_task_output_tool;
+use crate::create_kimi_cli_task_stop_tool;
+use crate::create_kimi_cli_write_file_tool;
 use crate::create_list_agents_tool;
 use crate::create_list_dir_tool;
 use crate::create_list_mcp_resource_templates_tool;
@@ -61,6 +90,7 @@ use crate::dynamic_tool_to_responses_api_tool;
 use crate::mcp_tool_to_responses_api_tool;
 use crate::request_permissions_tool_description;
 use crate::request_user_input_tool_description;
+use crate::tool_registry_plan_types::ToolRegistryPlanMcpTool;
 use crate::tool_registry_plan_types::agent_type_description;
 use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ConfigShellToolType;
@@ -72,8 +102,10 @@ pub fn build_tool_registry_plan(
 ) -> ToolRegistryPlan {
     let mut plan = ToolRegistryPlan::new();
     let exec_permission_approvals_enabled = config.exec_permission_approvals_enabled;
+    let using_claude_code = config.harness.is_claude_code();
+    let using_kimi_cli = config.harness.is_kimi_cli();
 
-    if config.code_mode_enabled {
+    if config.code_mode_enabled && !using_claude_code && !using_kimi_cli {
         let namespace_descriptions = params
             .tool_namespaces
             .into_iter()
@@ -130,6 +162,247 @@ pub fn build_tool_registry_plan(
             codex_code_mode::WAIT_TOOL_NAME,
             ToolHandlerKind::CodeModeWait,
         );
+    }
+
+    if using_claude_code {
+        if config.has_environment {
+            if config.claude_code_agent_tool_enabled {
+                plan.push_spec(
+                    create_claude_code_agent_tool(),
+                    /*supports_parallel_tool_calls*/ false,
+                    /*code_mode_enabled*/ false,
+                );
+            }
+            plan.push_spec(
+                create_claude_code_ask_user_question_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_claude_code_bash_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_claude_code_edit_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_claude_code_glob_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_claude_code_grep_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_claude_code_lsp_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_claude_code_read_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_claude_code_todo_write_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_claude_code_web_fetch_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_claude_code_web_search_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_claude_code_write_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            if config.claude_code_agent_tool_enabled {
+                plan.register_handler("Agent", ToolHandlerKind::ClaudeAgent);
+            }
+            plan.register_handler("AskUserQuestion", ToolHandlerKind::ClaudeAskUserQuestion);
+            plan.register_handler("Bash", ToolHandlerKind::ClaudeBash);
+            plan.register_handler("CronCreate", ToolHandlerKind::ClaudeCronCreate);
+            plan.register_handler("CronDelete", ToolHandlerKind::ClaudeCronDelete);
+            plan.register_handler("CronList", ToolHandlerKind::ClaudeCronList);
+            plan.register_handler("Edit", ToolHandlerKind::ClaudeEdit);
+            plan.register_handler("Glob", ToolHandlerKind::ClaudeGlob);
+            plan.register_handler("Grep", ToolHandlerKind::ClaudeGrep);
+            plan.register_handler("LSP", ToolHandlerKind::ClaudeLsp);
+            plan.register_handler("Read", ToolHandlerKind::ClaudeRead);
+            plan.register_handler("ScheduleWakeup", ToolHandlerKind::ClaudeScheduleWakeup);
+            plan.register_handler("TodoWrite", ToolHandlerKind::ClaudeTodoWrite);
+            plan.register_handler("WebFetch", ToolHandlerKind::ClaudeWebFetch);
+            plan.register_handler("WebSearch", ToolHandlerKind::ClaudeWebSearch);
+            plan.register_handler("Write", ToolHandlerKind::ClaudeWrite);
+        }
+
+        if let Some(mcp_tools) = params.mcp_tools {
+            let mut entries: Vec<&ToolRegistryPlanMcpTool<'_>> = mcp_tools.iter().collect();
+            entries.sort_by(|left, right| left.name.display().cmp(&right.name.display()));
+
+            for tool in entries {
+                match mcp_tool_to_responses_api_tool(&tool.name, tool.tool) {
+                    Ok(converted_tool) => {
+                        plan.push_spec(
+                            ToolSpec::Function(converted_tool),
+                            /*supports_parallel_tool_calls*/ false,
+                            /*code_mode_enabled*/ false,
+                        );
+                        plan.register_handler(tool.name.clone(), ToolHandlerKind::Mcp);
+                    }
+                    Err(error) => {
+                        let tool_name = &tool.name;
+                        tracing::error!(
+                            "Failed to convert `{tool_name}` MCP tool to OpenAI tool: {error:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        for tool in params.dynamic_tools {
+            match dynamic_tool_to_responses_api_tool(tool) {
+                Ok(converted_tool) => {
+                    plan.push_spec(
+                        ToolSpec::Function(converted_tool),
+                        /*supports_parallel_tool_calls*/ false,
+                        /*code_mode_enabled*/ false,
+                    );
+                    plan.register_handler(tool.name.clone(), ToolHandlerKind::DynamicTool);
+                }
+                Err(error) => {
+                    tracing::error!(
+                        "Failed to convert dynamic tool {:?} to OpenAI tool: {error:?}",
+                        tool.name
+                    );
+                }
+            }
+        }
+
+        apply_tool_name_filters(&mut plan, config);
+        return plan;
+    }
+
+    if using_kimi_cli {
+        if config.has_environment {
+            plan.push_spec(
+                create_kimi_cli_agent_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_kimi_cli_ask_user_question_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_kimi_cli_set_todo_list_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_kimi_cli_shell_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_kimi_cli_task_list_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_kimi_cli_task_output_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_kimi_cli_task_stop_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_kimi_cli_read_file_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_kimi_cli_read_media_file_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_kimi_cli_glob_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_kimi_cli_grep_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_kimi_cli_write_file_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_kimi_cli_str_replace_file_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_kimi_cli_search_web_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_kimi_cli_fetch_url_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_kimi_cli_exit_plan_mode_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.push_spec(
+                create_kimi_cli_enter_plan_mode_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                /*code_mode_enabled*/ false,
+            );
+            plan.register_handler("Agent", ToolHandlerKind::KimiAgent);
+            plan.register_handler("AskUserQuestion", ToolHandlerKind::KimiAskUserQuestion);
+            plan.register_handler("SetTodoList", ToolHandlerKind::KimiSetTodoList);
+            plan.register_handler("Shell", ToolHandlerKind::KimiShell);
+            plan.register_handler("TaskList", ToolHandlerKind::KimiTaskList);
+            plan.register_handler("TaskOutput", ToolHandlerKind::KimiTaskOutput);
+            plan.register_handler("TaskStop", ToolHandlerKind::KimiTaskStop);
+            plan.register_handler("ReadFile", ToolHandlerKind::KimiReadFile);
+            plan.register_handler("ReadMediaFile", ToolHandlerKind::KimiReadMediaFile);
+            plan.register_handler("Glob", ToolHandlerKind::KimiGlob);
+            plan.register_handler("Grep", ToolHandlerKind::KimiGrep);
+            plan.register_handler("WriteFile", ToolHandlerKind::KimiWriteFile);
+            plan.register_handler("StrReplaceFile", ToolHandlerKind::KimiStrReplaceFile);
+            plan.register_handler("SearchWeb", ToolHandlerKind::KimiSearchWeb);
+            plan.register_handler("FetchURL", ToolHandlerKind::KimiFetchUrl);
+            plan.register_handler("ExitPlanMode", ToolHandlerKind::KimiExitPlanMode);
+            plan.register_handler("EnterPlanMode", ToolHandlerKind::KimiEnterPlanMode);
+        }
+
+        apply_tool_name_filters(&mut plan, config);
+        return plan;
     }
 
     if config.has_environment {
@@ -574,7 +847,29 @@ pub fn build_tool_registry_plan(
         }
     }
 
+    apply_tool_name_filters(&mut plan, config);
     plan
+}
+
+fn apply_tool_name_filters(plan: &mut ToolRegistryPlan, config: &ToolsConfig) {
+    if config.allowed_tool_names.is_none() && config.disallowed_tool_names.is_none() {
+        return;
+    }
+
+    let tool_allowed = |tool_name: &str| {
+        config
+            .allowed_tool_names
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(tool_name))
+            && config
+                .disallowed_tool_names
+                .as_ref()
+                .is_none_or(|disallowed| !disallowed.contains(tool_name))
+    };
+
+    plan.specs.retain(|tool| tool_allowed(tool.name()));
+    plan.handlers
+        .retain(|handler| tool_allowed(&handler.name.display()));
 }
 
 fn compare_code_mode_tools(

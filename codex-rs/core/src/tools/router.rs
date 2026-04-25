@@ -5,6 +5,7 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
+use crate::tools::handlers::hidden_tool_call_message;
 use crate::tools::registry::AnyToolResult;
 use crate::tools::registry::ToolArgumentDiffConsumer;
 use crate::tools::registry::ToolRegistry;
@@ -105,6 +106,35 @@ impl ToolRouter {
 
     pub fn model_visible_specs(&self) -> Vec<ToolSpec> {
         self.model_visible_specs.clone()
+    }
+
+    fn model_exposes_tool(&self, tool_name: &ToolName) -> bool {
+        self.model_visible_specs.iter().any(|spec| match spec {
+            ToolSpec::Function(tool)
+                if tool_name.namespace.is_none() && tool.name == tool_name.name =>
+            {
+                true
+            }
+            ToolSpec::Freeform(tool)
+                if tool_name.namespace.is_none() && tool.name == tool_name.name =>
+            {
+                true
+            }
+            ToolSpec::Function(_) | ToolSpec::Freeform(_) => false,
+            ToolSpec::Namespace(namespace) => namespace.tools.iter().any(|tool| match tool {
+                ResponsesApiNamespaceTool::Function(tool)
+                    if tool_name.namespace.as_deref() == Some(namespace.name.as_str())
+                        && tool.name == tool_name.name =>
+                {
+                    true
+                }
+                _ => false,
+            }),
+            ToolSpec::ToolSearch { .. }
+            | ToolSpec::LocalShell {}
+            | ToolSpec::ImageGeneration { .. }
+            | ToolSpec::WebSearch { .. } => false,
+        })
     }
 
     pub fn find_spec(&self, tool_name: &ToolName) -> Option<ToolSpec> {
@@ -287,6 +317,16 @@ impl ToolRouter {
                 "direct tool calls are disabled; use js_repl and codex.tool(...) instead"
                     .to_string(),
             ));
+        }
+
+        if source != ToolCallSource::Direct
+            && matches!(payload, ToolPayload::Function { .. })
+            && !self.model_exposes_tool(&tool_name)
+        {
+            return Err(FunctionCallError::RespondToModel(hidden_tool_call_message(
+                tool_name.display(),
+                &turn.tools_config.harness,
+            )));
         }
 
         let invocation = ToolInvocation {

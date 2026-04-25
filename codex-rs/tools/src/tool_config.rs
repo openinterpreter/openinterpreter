@@ -1,3 +1,4 @@
+use crate::Harness;
 use crate::can_request_original_image_detail;
 use codex_features::Feature;
 use codex_features::Features;
@@ -14,7 +15,11 @@ use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
+
+const HARNESS_ALLOWED_TOOLS_ENV_VAR: &str = "OPEN_INTERPRETER_HARNESS_ALLOWED_TOOLS";
+const HARNESS_DISALLOWED_TOOLS_ENV_VAR: &str = "OPEN_INTERPRETER_HARNESS_DISALLOWED_TOOLS";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ShellCommandBackendConfig {
@@ -82,6 +87,7 @@ impl UnifiedExecShellMode {
 
 #[derive(Debug, Clone)]
 pub struct ToolsConfig {
+    pub harness: Harness,
     pub available_models: Vec<ModelPreset>,
     pub shell_type: ConfigShellToolType,
     pub shell_command_backend: ShellCommandBackendConfig,
@@ -99,6 +105,7 @@ pub struct ToolsConfig {
     pub request_permissions_tool_enabled: bool,
     pub code_mode_enabled: bool,
     pub code_mode_only_enabled: bool,
+    pub claude_code_agent_tool_enabled: bool,
     pub js_repl_enabled: bool,
     pub js_repl_tools_only: bool,
     pub can_request_original_image_detail: bool,
@@ -112,6 +119,8 @@ pub struct ToolsConfig {
     pub agent_jobs_tools: bool,
     pub agent_jobs_worker_tools: bool,
     pub agent_type_description: String,
+    pub allowed_tool_names: Option<BTreeSet<String>>,
+    pub disallowed_tool_names: Option<BTreeSet<String>>,
 }
 
 pub struct ToolsConfigParams<'a> {
@@ -140,6 +149,7 @@ impl ToolsConfig {
         let include_apply_patch_tool = features.enabled(Feature::ApplyPatchFreeform);
         let include_code_mode = features.enabled(Feature::CodeMode);
         let include_code_mode_only = include_code_mode && features.enabled(Feature::CodeModeOnly);
+        let include_claude_code_agent_tool = !matches!(session_source, SessionSource::SubAgent(_));
         let include_js_repl = features.enabled(Feature::JsRepl);
         let include_js_repl_tools_only =
             include_js_repl && features.enabled(Feature::JsReplToolsOnly);
@@ -203,6 +213,7 @@ impl ToolsConfig {
             );
 
         Self {
+            harness: Harness::Native,
             available_models: available_models.to_vec(),
             shell_type,
             shell_command_backend,
@@ -220,6 +231,7 @@ impl ToolsConfig {
             request_permissions_tool_enabled,
             code_mode_enabled: include_code_mode,
             code_mode_only_enabled: include_code_mode_only,
+            claude_code_agent_tool_enabled: include_claude_code_agent_tool,
             js_repl_enabled: include_js_repl,
             js_repl_tools_only: include_js_repl_tools_only,
             can_request_original_image_detail: include_original_image_detail,
@@ -233,7 +245,26 @@ impl ToolsConfig {
             agent_jobs_tools: include_agent_jobs,
             agent_jobs_worker_tools,
             agent_type_description: String::new(),
+            allowed_tool_names: None,
+            disallowed_tool_names: None,
         }
+    }
+
+    pub fn with_harness(mut self, harness: Option<&str>) -> Self {
+        self.harness = Harness::from_config_name(harness);
+        self.allowed_tool_names = parse_tool_name_filter_env(HARNESS_ALLOWED_TOOLS_ENV_VAR);
+        self.disallowed_tool_names = parse_tool_name_filter_env(HARNESS_DISALLOWED_TOOLS_ENV_VAR);
+        self
+    }
+
+    pub fn with_tool_name_filters(
+        mut self,
+        allowed_tool_names: Option<Vec<String>>,
+        disallowed_tool_names: Option<Vec<String>>,
+    ) -> Self {
+        self.allowed_tool_names = normalize_tool_name_filter(allowed_tool_names);
+        self.disallowed_tool_names = normalize_tool_name_filter(disallowed_tool_names);
+        self
     }
 
     pub fn with_agent_type_description(mut self, agent_type_description: String) -> Self {
@@ -303,6 +334,31 @@ impl ToolsConfig {
         nested.code_mode_only_enabled = false;
         nested
     }
+}
+
+fn parse_tool_name_filter_env(name: &str) -> Option<BTreeSet<String>> {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .and_then(|values| normalize_tool_name_filter(Some(values)))
+}
+
+fn normalize_tool_name_filter(filter: Option<Vec<String>>) -> Option<BTreeSet<String>> {
+    filter.and_then(|values| {
+        let names = values
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<BTreeSet<_>>();
+        (!names.is_empty()).then_some(names)
+    })
 }
 
 fn supports_image_generation(model_info: &ModelInfo) -> bool {
