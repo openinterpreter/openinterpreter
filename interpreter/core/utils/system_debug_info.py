@@ -82,7 +82,17 @@ def interpreter_info(interpreter):
     try:
         if interpreter.offline and interpreter.llm.api_base:
             try:
-                curl = subprocess.check_output(f"curl {interpreter.llm.api_base}")
+                # Pass argv as a list (no shell=True) and a timeout so a dead /
+                # slow api_base doesn't hang `%info`. Previously this was
+                # `subprocess.check_output(f"curl {api_base}")` which raised
+                # FileNotFoundError because the whole string was treated as
+                # the executable path. See issues #1218 / #1083.
+                curl = subprocess.check_output(
+                    ["curl", "--silent", "--show-error", "--max-time", "5",
+                     interpreter.llm.api_base],
+                    stderr=subprocess.STDOUT,
+                    timeout=10,
+                )
             except Exception as e:
                 curl = str(e)
         else:
