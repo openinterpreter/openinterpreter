@@ -2,7 +2,7 @@
 
 set -eu
 
-GITHUB_REPO="${OPEN_INTERPRETER_GITHUB_REPO:-KillianLucas/openinterpreter}"
+GITHUB_REPO="${OPEN_INTERPRETER_GITHUB_REPO:-KillianLucas/oix}"
 RELEASE="latest"
 
 BIN_DIR="${OPEN_INTERPRETER_INSTALL_DIR:-$HOME/.local/bin}"
