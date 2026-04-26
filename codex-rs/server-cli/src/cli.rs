@@ -227,7 +227,6 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
         prompt,
         prefill_prompt: _,
         submit_prefill_prompt: _,
-        images: _,
         resume_picker: _,
         resume_last: _,
         resume_session_id: _,

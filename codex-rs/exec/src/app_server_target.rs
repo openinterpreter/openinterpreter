@@ -57,10 +57,6 @@ pub(crate) fn exec_app_server_target(
     }
 }
 
-pub(crate) fn lagged_event_warning_message(skipped: usize) -> String {
-    format!("app-server event stream lagged; dropped {skipped} events")
-}
-
 fn read_remote_auth_token_from_env_var(env_var_name: &str) -> Result<String> {
     let token = std::env::var(env_var_name).with_context(|| {
         format!("failed to read remote auth token from environment variable `{env_var_name}`")

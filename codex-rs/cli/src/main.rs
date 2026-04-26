@@ -1552,6 +1552,7 @@ async fn run_interactive_tui(
         codex_core::config_loader::LoaderOverrides::default(),
         normalized_remote,
         remote_auth_token,
+        /*local_daemon_remote*/ false,
     )
     .await
 }

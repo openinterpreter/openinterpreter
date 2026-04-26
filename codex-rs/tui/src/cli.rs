@@ -4,7 +4,6 @@ use clap::Parser;
 use codex_utils_cli::ApprovalModeCliArg;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::SharedCliOptions;
-use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -20,10 +19,6 @@ pub struct Cli {
     /// Internal: submit the prefilled composer content after startup.
     #[clap(skip)]
     pub submit_prefill_prompt: bool,
-
-    /// Optional image(s) to attach to the initial prompt.
-    #[arg(long = "image", short = 'i', value_name = "FILE", value_delimiter = ',', num_args = 1..)]
-    pub images: Vec<PathBuf>,
 
     // Internal controls set by the top-level `codex resume` subcommand.
     // These are not exposed as user flags on the base `codex` command.
