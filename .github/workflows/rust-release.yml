@@ -77,6 +77,8 @@ jobs:
 
       - name: Install musl build tools
         if: contains(matrix.target, 'unknown-linux-musl')
+        env:
+          TARGET: ${{ matrix.target }}
         run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
 
       - name: Configure musl rusty_v8 artifacts
