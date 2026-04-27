@@ -166,8 +166,14 @@ jobs:
         run: |
           set -euo pipefail
           release_dir="target/${{ matrix.target }}/release"
-          dist_dir="${GITHUB_WORKSPACE}/dist/${{ matrix.target }}"
-          package_dir="${RUNNER_TEMP}/open-interpreter"
+          workspace_dir="${GITHUB_WORKSPACE}"
+          temp_dir="${RUNNER_TEMP}"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            workspace_dir="$(cygpath -u "${workspace_dir}")"
+            temp_dir="$(cygpath -u "${temp_dir}")"
+          fi
+          dist_dir="${workspace_dir}/dist/${{ matrix.target }}"
+          package_dir="${temp_dir}/open-interpreter"
           rm -rf "${package_dir}"
           mkdir -p "${package_dir}"
 
