@@ -28,6 +28,7 @@ pub use codex_core::find_thread_meta_by_name_str;
 pub use codex_core::find_thread_name_by_id;
 pub use codex_core::find_thread_names_by_ids;
 pub use codex_core::format_exec_policy_error_with_source;
+pub use codex_core::grant_read_root_non_elevated;
 #[cfg(feature = "cross-session-history")]
 pub use codex_core::lookup_message_history_entry;
 pub use codex_core::mention_syntax::PLUGIN_TEXT_MENTION_SIGIL;
