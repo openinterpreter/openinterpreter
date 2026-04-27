@@ -1,7 +1,6 @@
 #![cfg(all(not(debug_assertions), feature = "startup-network"))]
 
 use crate::legacy_core::config::Config;
-use crate::update_action;
 use crate::update_action::UpdateAction;
 use chrono::DateTime;
 use chrono::Duration;
@@ -11,11 +10,12 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Stdio;
 
 use crate::version::CODEX_CLI_VERSION;
 
 pub fn get_upgrade_version(config: &Config) -> Option<String> {
-    if !config.check_for_update_on_startup || is_source_build_version(CODEX_CLI_VERSION) {
+    if !config.check_for_update_on_startup {
         return None;
     }
 
@@ -27,8 +27,7 @@ pub fn get_upgrade_version(config: &Config) -> Option<String> {
         Some(info) => info.last_checked_at < Utc::now() - Duration::hours(20),
     } {
         // Refresh the cached latest version in the background so TUI startup
-        // isn’t blocked by a network call. The UI reads the previously cached
-        // value (if any) for this run; the next run shows the banner if needed.
+        // isn't blocked by a network call.
         tokio::spawn(async move {
             check_for_update(&version_file)
                 .await
@@ -50,22 +49,21 @@ struct VersionInfo {
     latest_version: String,
     // ISO-8601 timestamp (RFC3339)
     last_checked_at: DateTime<Utc>,
-    #[serde(default)]
-    dismissed_version: Option<String>,
 }
 
 const VERSION_FILENAME: &str = "version.json";
-// We use the latest version from the cask if installation is via homebrew - homebrew does not immediately pick up the latest release and can lag behind.
-const HOMEBREW_CASK_API_URL: &str = "https://formulae.brew.sh/api/cask/codex.json";
-const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/openai/codex/releases/latest";
+const AUTO_UPDATE_MARKER_FILENAME: &str = "update-installed.json";
+const AUTO_UPDATE_LOCK_FILENAME: &str = "update-running.lock";
+const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/KillianLucas/oix/releases/latest";
+const RELEASES_URL: &str = "https://api.github.com/repos/KillianLucas/oix/releases";
 
 #[derive(Deserialize, Debug, Clone)]
 struct ReleaseInfo {
     tag_name: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
-struct HomebrewCaskInfo {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct InstalledUpdateInfo {
     version: String,
 }
 
@@ -79,37 +77,12 @@ fn read_version_info(version_file: &Path) -> anyhow::Result<VersionInfo> {
 }
 
 async fn check_for_update(version_file: &Path) -> anyhow::Result<()> {
-    let latest_version = match update_action::get_update_action() {
-        Some(UpdateAction::BrewUpgrade) => {
-            let HomebrewCaskInfo { version } = create_client()
-                .get(HOMEBREW_CASK_API_URL)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<HomebrewCaskInfo>()
-                .await?;
-            version
-        }
-        _ => {
-            let ReleaseInfo {
-                tag_name: latest_tag_name,
-            } = create_client()
-                .get(LATEST_RELEASE_URL)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<ReleaseInfo>()
-                .await?;
-            extract_version_from_latest_tag(&latest_tag_name)?
-        }
-    };
+    let latest_tag_name = latest_release_tag_name().await?;
+    let latest_version = extract_version_from_latest_tag(&latest_tag_name)?;
 
-    // Preserve any previously dismissed version if present.
-    let prev_info = read_version_info(version_file).ok();
     let info = VersionInfo {
         latest_version,
         last_checked_at: Utc::now(),
-        dismissed_version: prev_info.and_then(|p| p.dismissed_version),
     };
 
     let json_line = format!("{}\n", serde_json::to_string(&info)?);
@@ -118,6 +91,33 @@ async fn check_for_update(version_file: &Path) -> anyhow::Result<()> {
     }
     tokio::fs::write(version_file, json_line).await?;
     Ok(())
+}
+
+async fn latest_release_tag_name() -> anyhow::Result<String> {
+    let client = create_client();
+    let latest_response = client.get(LATEST_RELEASE_URL).send().await?;
+    if latest_response.status().as_u16() != 404 {
+        let ReleaseInfo { tag_name } = latest_response
+            .error_for_status()?
+            .json::<ReleaseInfo>()
+            .await?;
+        return Ok(tag_name);
+    }
+
+    // GitHub's /latest endpoint excludes prereleases. During early 0.x release
+    // testing, fall back to the release list so self-update still has a channel.
+    let releases = client
+        .get(RELEASES_URL)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Vec<ReleaseInfo>>()
+        .await?;
+    releases
+        .into_iter()
+        .map(|release| release.tag_name)
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("No Open Interpreter releases found"))
 }
 
 fn is_newer(latest: &str, current: &str) -> Option<bool> {
@@ -129,44 +129,120 @@ fn is_newer(latest: &str, current: &str) -> Option<bool> {
 
 fn extract_version_from_latest_tag(latest_tag_name: &str) -> anyhow::Result<String> {
     latest_tag_name
-        .strip_prefix("rust-v")
+        .strip_prefix('v')
         .map(str::to_owned)
         .ok_or_else(|| anyhow::anyhow!("Failed to parse latest tag name '{latest_tag_name}'"))
 }
 
-/// Returns the latest version to show in a popup, if it should be shown.
-/// This respects the user's dismissal choice for the current latest version.
-pub fn get_upgrade_version_for_popup(config: &Config) -> Option<String> {
-    if !config.check_for_update_on_startup || is_source_build_version(CODEX_CLI_VERSION) {
-        return None;
+pub fn spawn_auto_update_if_needed(config: &Config) {
+    if !config.check_for_update_on_startup {
+        return;
     }
-
-    let version_file = version_filepath(config);
-    let latest = get_upgrade_version(config)?;
-    // If the user dismissed this exact version previously, do not show the popup.
-    if let Ok(info) = read_version_info(&version_file)
-        && info.dismissed_version.as_deref() == Some(latest.as_str())
-    {
-        return None;
+    let Some(update_action) = crate::update_action::get_update_action() else {
+        return;
+    };
+    let marker_file = update_marker_filepath(config);
+    let Some(latest_version) = get_upgrade_version(config) else {
+        return;
+    };
+    let lock_file = update_lock_filepath(config);
+    if !try_create_update_lock(&lock_file) {
+        return;
     }
-    Some(latest)
+    spawn_update_command(update_action, latest_version, marker_file, Some(lock_file));
 }
 
-/// Persist a dismissal for the current latest version so we don't show
-/// the update popup again for this version.
-pub async fn dismiss_version(config: &Config, version: &str) -> anyhow::Result<()> {
-    let version_file = version_filepath(config);
-    let mut info = match read_version_info(&version_file) {
-        Ok(info) => info,
-        Err(_) => return Ok(()),
+pub fn spawn_manual_update(config: &Config) -> anyhow::Result<()> {
+    let Some(update_action) = crate::update_action::get_update_action() else {
+        anyhow::bail!(
+            "This installation cannot self-update. Install with the standalone installer to enable updates."
+        );
     };
-    info.dismissed_version = Some(version.to_string());
-    let json_line = format!("{}\n", serde_json::to_string(&info)?);
-    if let Some(parent) = version_file.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+    let marker_file = update_marker_filepath(config);
+    let lock_file = update_lock_filepath(config);
+    if !try_create_update_lock(&lock_file) {
+        anyhow::bail!("An Open Interpreter update is already running.");
     }
-    tokio::fs::write(version_file, json_line).await?;
+    spawn_update_command(
+        update_action,
+        "latest".to_string(),
+        marker_file,
+        Some(lock_file),
+    );
     Ok(())
+}
+
+pub fn take_installed_update_notice(config: &Config) -> Option<String> {
+    let marker_file = update_marker_filepath(config);
+    let contents = std::fs::read_to_string(&marker_file).ok()?;
+    let _ = std::fs::remove_file(&marker_file);
+    let info: InstalledUpdateInfo = serde_json::from_str(&contents).ok()?;
+    Some(format!("Updated to Open Interpreter {}.", info.version))
+}
+
+fn update_marker_filepath(config: &Config) -> PathBuf {
+    config
+        .codex_home
+        .join(AUTO_UPDATE_MARKER_FILENAME)
+        .into_path_buf()
+}
+
+fn update_lock_filepath(config: &Config) -> PathBuf {
+    config
+        .codex_home
+        .join(AUTO_UPDATE_LOCK_FILENAME)
+        .into_path_buf()
+}
+
+fn try_create_update_lock(lock_file: &Path) -> bool {
+    if let Some(parent) = lock_file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(lock_file)
+        .is_ok()
+}
+
+fn spawn_update_command(
+    update_action: UpdateAction,
+    version: String,
+    marker_file: PathBuf,
+    lock_file: Option<PathBuf>,
+) {
+    let marker_parent = marker_file.parent().map(Path::to_path_buf);
+    std::thread::spawn(move || {
+        let (command, args) = update_action.command_args();
+        let command_status = std::process::Command::new(command)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        match command_status {
+            Ok(status) if status.success() => {
+                if let Some(parent) = marker_parent {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let marker = InstalledUpdateInfo { version };
+                if let Ok(json_line) =
+                    serde_json::to_string(&marker).map(|line| format!("{line}\n"))
+                {
+                    let _ = std::fs::write(marker_file, json_line);
+                }
+            }
+            Ok(status) => {
+                tracing::warn!("Open Interpreter update command exited with status {status}");
+            }
+            Err(err) => {
+                tracing::warn!("Failed to start Open Interpreter update command: {err}");
+            }
+        }
+        if let Some(lock_file) = lock_file {
+            let _ = std::fs::remove_file(lock_file);
+        }
+    });
 }
 
 fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
@@ -177,40 +253,21 @@ fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
     Some((maj, min, pat))
 }
 
-fn is_source_build_version(version: &str) -> bool {
-    parse_version(version) == Some((0, 0, 0))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn extract_version_from_brew_api_json() {
-        //
-        // https://formulae.brew.sh/api/cask/codex.json
-        let cask_json = r#"{
-            "token": "codex",
-            "full_token": "codex",
-            "tap": "homebrew/cask",
-            "version": "0.96.0",
-        }"#;
-        let HomebrewCaskInfo { version } = serde_json::from_str::<HomebrewCaskInfo>(cask_json)
-            .expect("failed to parse version from cask json");
-        assert_eq!(version, "0.96.0");
-    }
-
-    #[test]
-    fn extracts_version_from_latest_tag() {
+    fn extracts_version_from_open_interpreter_latest_tag() {
         assert_eq!(
-            extract_version_from_latest_tag("rust-v1.5.0").expect("failed to parse version"),
+            extract_version_from_latest_tag("v1.5.0").expect("failed to parse version"),
             "1.5.0"
         );
     }
 
     #[test]
-    fn latest_tag_without_prefix_is_invalid() {
-        assert!(extract_version_from_latest_tag("v1.5.0").is_err());
+    fn latest_tag_without_known_prefix_is_invalid() {
+        assert!(extract_version_from_latest_tag("1.5.0").is_err());
     }
 
     #[test]

@@ -429,7 +429,9 @@ impl App {
                 let text = text.clone();
                 let config = self.chat_widget.config_ref().clone();
                 tokio::spawn(async move {
-                    if let Err(err) = append_message_history_entry(&text, &thread_id, &config).await
+                    if let Err(err) =
+                        crate::legacy_core::append_message_history_entry(&text, &thread_id, &config)
+                            .await
                     {
                         tracing::warn!(
                             thread_id = %thread_id,

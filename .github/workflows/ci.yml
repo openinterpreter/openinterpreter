@@ -36,31 +36,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # stage_npm_packages.py requires DotSlash when staging releases.
-      - uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2
-
-      - name: Stage npm package
-        id: stage_npm_package
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # Use a rust-release version that includes all native binaries.
-          CODEX_VERSION=0.115.0
-          OUTPUT_DIR="${RUNNER_TEMP}"
-          python3 ./scripts/stage_npm_packages.py \
-            --release-version "$CODEX_VERSION" \
-            --package codex \
-            --output-dir "$OUTPUT_DIR"
-          PACK_OUTPUT="${OUTPUT_DIR}/codex-npm-${CODEX_VERSION}.tgz"
-          echo "pack_output=$PACK_OUTPUT" >> "$GITHUB_OUTPUT"
-
-      - name: Upload staged npm package artifact
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
-        with:
-          name: codex-npm-staging
-          path: ${{ steps.stage_npm_package.outputs.pack_output }}
-
       - name: Ensure root README.md contains only ASCII and certain Unicode code points
         run: ./scripts/asciicheck.py README.md
       - name: Check root README ToC

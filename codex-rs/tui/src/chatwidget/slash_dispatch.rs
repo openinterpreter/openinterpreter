@@ -61,6 +61,63 @@ impl ChatWidget {
         self.bottom_pane.record_pending_slash_command_history();
     }
 
+    fn add_update_status_message(&mut self) {
+        let mode = if self.config.check_for_update_on_startup {
+            "on"
+        } else {
+            "off"
+        };
+        #[cfg(not(debug_assertions))]
+        let self_update_available = crate::update_action::get_update_action().is_some();
+        #[cfg(debug_assertions)]
+        let self_update_available = false;
+        let hint = if self_update_available {
+            "Use /update now to update immediately, or /update off to disable automatic updates."
+        } else {
+            "Self-update is available for standalone installer builds."
+        };
+        self.add_info_message(
+            format!("Automatic updates are {mode}."),
+            Some(hint.to_string()),
+        );
+    }
+
+    fn start_manual_update(&mut self) {
+        #[cfg(all(not(debug_assertions), feature = "startup-network"))]
+        {
+            match crate::updates::spawn_manual_update(&self.config) {
+                Ok(()) => self.add_info_message(
+                    "Updating Open Interpreter in the background.".to_string(),
+                    Some("Restart after it finishes to use the new version.".to_string()),
+                ),
+                Err(err) => self.add_error_message(err.to_string()),
+            }
+        }
+        #[cfg(any(debug_assertions, not(feature = "startup-network")))]
+        {
+            self.add_error_message(
+                "Self-update is only available in release builds with startup networking."
+                    .to_string(),
+            );
+        }
+    }
+
+    fn set_auto_update_enabled(&mut self, enabled: bool) {
+        self.config.check_for_update_on_startup = enabled;
+        let codex_home = self.config.codex_home.clone();
+        tokio::spawn(async move {
+            if let Err(err) = crate::legacy_core::config::edit::ConfigEditsBuilder::new(&codex_home)
+                .set_check_for_update_on_startup(enabled)
+                .apply()
+                .await
+            {
+                tracing::warn!("failed to persist update setting: {err}");
+            }
+        });
+        let mode = if enabled { "on" } else { "off" };
+        self.add_info_message(format!("Automatic updates are now {mode}."), None);
+    }
+
     fn apply_plan_slash_command(&mut self) -> bool {
         if !self.collaboration_modes_enabled() {
             self.add_info_message(
@@ -354,6 +411,9 @@ impl ChatWidget {
                     );
                 }
             }
+            SlashCommand::Update => {
+                self.add_update_status_message();
+            }
             SlashCommand::DebugConfig => {
                 self.add_debug_config_output();
             }
@@ -566,6 +626,13 @@ impl ChatWidget {
             SlashCommand::Mcp => match trimmed.to_ascii_lowercase().as_str() {
                 "verbose" => self.add_mcp_output(McpServerStatusDetail::Full),
                 _ => self.add_error_message("Usage: /mcp [verbose]".to_string()),
+            },
+            SlashCommand::Update => match trimmed.to_ascii_lowercase().as_str() {
+                "status" => self.add_update_status_message(),
+                "now" => self.start_manual_update(),
+                "on" => self.set_auto_update_enabled(true),
+                "off" => self.set_auto_update_enabled(false),
+                _ => self.add_error_message("Usage: /update [status|now|on|off]".to_string()),
             },
             SlashCommand::Rename if !trimmed.is_empty() => {
                 if !self.ensure_thread_rename_allowed() {
@@ -828,6 +895,7 @@ impl ChatWidget {
         match cmd {
             SlashCommand::Fast
             | SlashCommand::Status
+            | SlashCommand::Update
             | SlashCommand::DebugConfig
             | SlashCommand::Ps
             | SlashCommand::Stop

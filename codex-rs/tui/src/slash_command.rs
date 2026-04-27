@@ -40,6 +40,7 @@ pub enum SlashCommand {
     Diff,
     Mention,
     Status,
+    Update,
     DebugConfig,
     Title,
     Statusline,
@@ -89,6 +90,7 @@ impl SlashCommand {
             SlashCommand::Mention => "mention a file",
             SlashCommand::Skills => "use skills to improve how the assistant performs tasks",
             SlashCommand::Status => "show current session configuration and token usage",
+            SlashCommand::Update => "manage Open Interpreter updates",
             SlashCommand::DebugConfig => "show config layers and requirement sources for debugging",
             SlashCommand::Title => "configure which items appear in the terminal title",
             SlashCommand::Statusline => "configure which items appear in the status line",
@@ -140,6 +142,7 @@ impl SlashCommand {
                 | SlashCommand::Plan
                 | SlashCommand::Goal
                 | SlashCommand::Fast
+                | SlashCommand::Update
                 | SlashCommand::Mcp
                 | SlashCommand::Side
                 | SlashCommand::Resume
@@ -151,7 +154,11 @@ impl SlashCommand {
     pub fn available_in_side_conversation(self) -> bool {
         matches!(
             self,
-            SlashCommand::Copy | SlashCommand::Diff | SlashCommand::Mention | SlashCommand::Status
+            SlashCommand::Copy
+                | SlashCommand::Diff
+                | SlashCommand::Mention
+                | SlashCommand::Status
+                | SlashCommand::Update
         )
     }
 
@@ -185,6 +192,7 @@ impl SlashCommand {
             | SlashCommand::Mention
             | SlashCommand::Skills
             | SlashCommand::Status
+            | SlashCommand::Update
             | SlashCommand::DebugConfig
             | SlashCommand::Ps
             | SlashCommand::Stop

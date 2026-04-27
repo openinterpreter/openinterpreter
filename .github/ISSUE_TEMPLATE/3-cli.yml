@@ -1,5 +1,5 @@
-name: 💻 CLI Bug
-description: Report an issue in the Codex CLI
+name: CLI Bug
+description: Report an issue in Open Interpreter
 labels:
   - bug
   - needs triage
@@ -10,13 +10,13 @@ body:
         Before submitting a new issue, please search for existing issues to see if your issue has already been reported.
         If it has, please add a 👍 reaction (no need to leave a comment) to the existing issue instead of creating a new one.
 
-        Make sure you are running the [latest](https://npmjs.com/package/@openai/codex) version of Codex CLI. The bug you are experiencing may already have been fixed.
+        Make sure you are running the latest Open Interpreter release. The bug you are experiencing may already have been fixed.
 
   - type: input
     id: version
     attributes:
-      label: What version of Codex CLI is running?
-      description: use `codex --version`
+      label: What version of Open Interpreter is running?
+      description: use `interpreter --version`
     validations:
       required: true
   - type: input

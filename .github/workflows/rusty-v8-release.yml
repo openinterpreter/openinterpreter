@@ -184,5 +184,5 @@ jobs:
           tag_name: ${{ needs.metadata.outputs.release_tag }}
           name: ${{ needs.metadata.outputs.release_tag }}
           files: dist/**
-          # Keep V8 artifact releases out of Codex's normal "latest release" channel.
+          # Keep V8 artifact releases out of Open Interpreter's normal "latest release" channel.
           prerelease: true

@@ -1004,6 +1004,14 @@ impl ConfigEditsBuilder {
         self
     }
 
+    pub fn set_check_for_update_on_startup(mut self, enabled: bool) -> Self {
+        self.edits.push(ConfigEdit::SetPath {
+            segments: vec!["check_for_update_on_startup".to_string()],
+            value: value(enabled),
+        });
+        self
+    }
+
     pub fn set_personality(mut self, personality: Option<Personality>) -> Self {
         self.edits
             .push(ConfigEdit::SetModelPersonality { personality });

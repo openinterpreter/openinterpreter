@@ -1,5 +1,6 @@
 param(
-    [string]$Release = "latest"
+    [string]$Release = "latest",
+    [string]$Repo = $(if ([string]::IsNullOrWhiteSpace($env:OPEN_INTERPRETER_GITHUB_REPO)) { "KillianLucas/oix" } else { $env:OPEN_INTERPRETER_GITHUB_REPO })
 )
 
 Set-StrictMode -Version Latest
@@ -44,15 +45,58 @@ function Normalize-Version {
         return "latest"
     }
 
-    if ($RawVersion.StartsWith("rust-v")) {
-        return $RawVersion.Substring(6)
-    }
-
     if ($RawVersion.StartsWith("v")) {
         return $RawVersion.Substring(1)
     }
 
     return $RawVersion
+}
+
+function Get-GitHubHeaders {
+    param(
+        [string]$Accept = "application/vnd.github+json"
+    )
+
+    $headers = @{
+        "Accept" = $Accept
+        "X-GitHub-Api-Version" = "2022-11-28"
+    }
+    $token = if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) {
+        $env:GITHUB_TOKEN
+    } elseif (-not [string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {
+        $env:GH_TOKEN
+    } else {
+        $null
+    }
+    if (-not [string]::IsNullOrWhiteSpace($token)) {
+        $headers["Authorization"] = "Bearer $token"
+    }
+    return $headers
+}
+
+function Invoke-GitHubJson {
+    param(
+        [string]$Uri
+    )
+
+    return Invoke-RestMethod -Uri $Uri -Headers (Get-GitHubHeaders)
+}
+
+function Invoke-GitHubAssetDownload {
+    param(
+        [string]$Uri,
+        [string]$OutFile
+    )
+
+    Invoke-WebRequest -Uri $Uri -Headers (Get-GitHubHeaders -Accept "application/octet-stream") -OutFile $OutFile
+}
+
+function Invoke-GitHubAssetText {
+    param(
+        [string]$Uri
+    )
+
+    return Invoke-RestMethod -Uri $Uri -Headers (Get-GitHubHeaders -Accept "application/octet-stream")
 }
 
 function Get-ReleaseAssetMetadata {
@@ -61,20 +105,33 @@ function Get-ReleaseAssetMetadata {
         [string]$ResolvedVersion
     )
 
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/openai/codex/releases/tags/rust-v$ResolvedVersion"
+    $release = Invoke-GitHubJson -Uri "https://api.github.com/repos/$Repo/releases/tags/v$ResolvedVersion"
     $asset = $release.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
     if ($null -eq $asset) {
-        throw "Could not find release asset $AssetName for Codex $ResolvedVersion."
+        throw "Could not find release asset $AssetName for Open Interpreter $ResolvedVersion."
     }
 
+    $digest = $null
     $digestMatch = [regex]::Match([string]$asset.digest, "^sha256:([0-9a-fA-F]{64})$")
-    if (-not $digestMatch.Success) {
+    if ($digestMatch.Success) {
+        $digest = $digestMatch.Groups[1].Value.ToLowerInvariant()
+    } else {
+        $checksumAsset = $release.assets | Where-Object { $_.name -eq "$AssetName.sha256" } | Select-Object -First 1
+        if ($null -ne $checksumAsset) {
+            $checksumText = [string](Invoke-GitHubAssetText -Uri $checksumAsset.url)
+            $checksumMatch = [regex]::Match($checksumText, "\b([0-9a-fA-F]{64})\b")
+            if ($checksumMatch.Success) {
+                $digest = $checksumMatch.Groups[1].Value.ToLowerInvariant()
+            }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($digest)) {
         throw "Could not find SHA-256 digest for release asset $AssetName."
     }
 
     return [PSCustomObject]@{
-        Url = $asset.browser_download_url
-        Sha256 = $digestMatch.Groups[1].Value.ToLowerInvariant()
+        Url = $asset.url
+        Sha256 = $digest
     }
 }
 
@@ -86,7 +143,7 @@ function Test-ArchiveDigest {
 
     $actualDigest = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actualDigest -ne $ExpectedDigest) {
-        throw "Downloaded Codex archive checksum did not match release metadata. Expected $ExpectedDigest but got $actualDigest."
+        throw "Downloaded Open Interpreter archive checksum did not match release metadata. Expected $ExpectedDigest but got $actualDigest."
     }
 }
 
@@ -154,9 +211,14 @@ function Resolve-Version {
         return $normalizedVersion
     }
 
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/openai/codex/releases/latest"
+    try {
+        $release = Invoke-GitHubJson -Uri "https://api.github.com/repos/$Repo/releases/latest"
+    } catch {
+        $releases = Invoke-GitHubJson -Uri "https://api.github.com/repos/$Repo/releases"
+        $release = $releases | Select-Object -First 1
+    }
     if (-not $release.tag_name) {
-        Write-Error "Failed to resolve the latest Codex release version."
+        Write-Error "Failed to resolve the latest Open Interpreter release version."
         exit 1
     }
 
@@ -165,15 +227,15 @@ function Resolve-Version {
 
 function Get-VersionFromBinary {
     param(
-        [string]$CodexPath
+        [string]$InterpreterPath
     )
 
-    if (-not (Test-Path -LiteralPath $CodexPath -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $InterpreterPath -PathType Leaf)) {
         return $null
     }
 
     try {
-        $versionOutput = & $CodexPath --version 2>$null
+        $versionOutput = & $InterpreterPath --version 2>$null
     } catch {
         return $null
     }
@@ -190,7 +252,7 @@ function Get-CurrentInstalledVersion {
         [string]$StandaloneCurrentDir
     )
 
-    $standaloneVersion = Get-VersionFromBinary -CodexPath (Join-Path $StandaloneCurrentDir "codex.exe")
+    $standaloneVersion = Get-VersionFromBinary -InterpreterPath (Join-Path $StandaloneCurrentDir "interpreter.exe")
     if (-not [string]::IsNullOrWhiteSpace($standaloneVersion)) {
         return $standaloneVersion
     }
@@ -216,7 +278,7 @@ function Test-OldStandaloneBinLayout {
         return $false
     }
 
-    $requiredFiles = @("codex.exe", "rg.exe")
+    $requiredFiles = @("interpreter.exe")
     foreach ($fileName in $requiredFiles) {
         if (-not (Test-Path -LiteralPath (Join-Path $VisibleBinDir $fileName) -PathType Leaf)) {
             return $false
@@ -224,11 +286,11 @@ function Test-OldStandaloneBinLayout {
     }
 
     $knownFiles = @(
-        "codex.exe",
-        "rg.exe",
-        "codex-command-runner.exe",
-        "codex-windows-sandbox.exe",
-        "codex-windows-sandbox-setup.exe"
+        "interpreter.exe",
+        "interpreter-root-tui.exe",
+        "interpreter-tui.exe",
+        "interpreter-app-server.exe",
+        "rg.exe"
     )
     foreach ($child in Get-ChildItem -LiteralPath $VisibleBinDir -Force) {
         if ($child.PSIsContainer) {
@@ -252,9 +314,9 @@ function Move-OldStandaloneBinIfApproved {
         return $null
     }
 
-    Write-Step "We found an older Codex install at $VisibleBinDir"
-    Write-WarningStep "To continue, Codex needs to update the install at this path."
-    if (-not (Prompt-YesNo "Replace it with the current Codex setup now?")) {
+    Write-Step "We found an older Open Interpreter install at $VisibleBinDir"
+    Write-WarningStep "To continue, Open Interpreter needs to update the install at this path."
+    if (-not (Prompt-YesNo "Replace it with the current Open Interpreter setup now?")) {
         throw "Cannot replace older standalone install without confirmation: $VisibleBinDir"
     }
 
@@ -265,7 +327,7 @@ function Move-OldStandaloneBinIfApproved {
 }
 
 function Add-JunctionSupportType {
-    if (([System.Management.Automation.PSTypeName]'CodexInstaller.Junction').Type) {
+    if (([System.Management.Automation.PSTypeName]'OpenInterpreterInstaller.Junction').Type) {
         return
     }
 
@@ -277,7 +339,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 
-namespace CodexInstaller
+namespace OpenInterpreterInstaller
 {
     public static class Junction
     {
@@ -384,7 +446,7 @@ function Set-JunctionTarget {
     )
 
     Add-JunctionSupportType
-    [CodexInstaller.Junction]::SetTarget($LinkPath, $TargetPath)
+    [OpenInterpreterInstaller.Junction]::SetTarget($LinkPath, $TargetPath)
 }
 
 function Test-IsJunction {
@@ -461,10 +523,10 @@ function Test-ReleaseIsComplete {
     }
 
     $expectedFiles = @(
-        "codex.exe",
-        "codex-resources\codex-command-runner.exe",
-        "codex-resources\codex-windows-sandbox-setup.exe",
-        "codex-resources\rg.exe"
+        "interpreter.exe",
+        "interpreter-root-tui.exe",
+        "interpreter-tui.exe",
+        "interpreter-app-server.exe"
     )
     foreach ($name in $expectedFiles) {
         if (-not (Test-Path -LiteralPath (Join-Path $ReleaseDir $name) -PathType Leaf)) {
@@ -475,100 +537,25 @@ function Test-ReleaseIsComplete {
     return (Split-Path -Leaf $ReleaseDir) -eq "$ExpectedVersion-$ExpectedTarget"
 }
 
-function Get-ExistingCodexCommand {
-    $existing = Get-Command codex -ErrorAction SilentlyContinue
+function Test-VisibleInterpreterCommand {
+    param(
+        [string]$VisibleBinDir
+    )
+
+    $interpreterCommand = Join-Path $VisibleBinDir "interpreter.exe"
+    & $interpreterCommand --version *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Installed Open Interpreter command failed verification: $interpreterCommand --version"
+    }
+}
+
+function Get-ExistingInterpreterCommand {
+    $existing = Get-Command interpreter -ErrorAction SilentlyContinue
     if ($null -eq $existing) {
         return $null
     }
 
     return $existing.Source
-}
-
-function Get-ExistingCodexManager {
-    param(
-        [string]$ExistingPath,
-        [string]$VisibleBinDir
-    )
-
-    if ([string]::IsNullOrWhiteSpace($ExistingPath)) {
-        return $null
-    }
-
-    if ($ExistingPath.StartsWith($VisibleBinDir, [System.StringComparison]::OrdinalIgnoreCase)) {
-        return $null
-    }
-
-    if ($ExistingPath -match "\\.bun\\") {
-        return "bun"
-    }
-
-    if ($ExistingPath -match "node_modules" -or $ExistingPath -match "\\npm\\") {
-        return "npm"
-    }
-
-    return $null
-}
-
-function Get-ConflictingInstall {
-    param(
-        [string]$VisibleBinDir
-    )
-
-    $existingPath = Get-ExistingCodexCommand
-    $manager = Get-ExistingCodexManager -ExistingPath $existingPath -VisibleBinDir $VisibleBinDir
-    if ($null -eq $manager) {
-        return $null
-    }
-
-    Write-Step "Detected existing $manager-managed Codex at $existingPath"
-    Write-WarningStep "Multiple managed Codex installs can be ambiguous because PATH order decides which one runs."
-
-    return [PSCustomObject]@{
-        Manager = $manager
-        Path = $existingPath
-    }
-}
-
-function Maybe-HandleConflictingInstall {
-    param(
-        [object]$Conflict
-    )
-
-    if ($null -eq $Conflict) {
-        return
-    }
-
-    $manager = $Conflict.Manager
-
-    $uninstallArgs = if ($manager -eq "bun") {
-        @("remove", "-g", "@openai/codex")
-    } else {
-        @("uninstall", "-g", "@openai/codex")
-    }
-    $uninstallCommand = if ($manager -eq "bun") { "bun" } else { "npm" }
-
-    if (Prompt-YesNo "Uninstall the existing $manager-managed Codex now?") {
-        Write-Step "Running: $uninstallCommand $($uninstallArgs -join ' ')"
-        try {
-            & $uninstallCommand @uninstallArgs
-        } catch {
-            Write-WarningStep "Failed to uninstall the existing $manager-managed Codex. Continuing with the standalone install."
-        }
-    } else {
-        Write-WarningStep "Leaving the existing $manager-managed Codex installed. PATH order will determine which codex runs."
-    }
-}
-
-function Test-VisibleCodexCommand {
-    param(
-        [string]$VisibleBinDir
-    )
-
-    $codexCommand = Join-Path $VisibleBinDir "codex.exe"
-    & $codexCommand --version *> $null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Installed Codex command failed verification: $codexCommand --version"
-    }
 }
 
 if ($env:OS -ne "Windows_NT") {
@@ -577,24 +564,21 @@ if ($env:OS -ne "Windows_NT") {
 }
 
 if (-not [Environment]::Is64BitOperatingSystem) {
-    Write-Error "Codex requires a 64-bit version of Windows."
+    Write-Error "Open Interpreter requires a 64-bit version of Windows."
     exit 1
 }
 
 $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
 $target = $null
 $platformLabel = $null
-$npmTag = $null
 switch ($architecture) {
     "Arm64" {
         $target = "aarch64-pc-windows-msvc"
         $platformLabel = "Windows (ARM64)"
-        $npmTag = "win32-arm64"
     }
     "X64" {
         $target = "x86_64-pc-windows-msvc"
         $platformLabel = "Windows (x64)"
-        $npmTag = "win32-x64"
     }
     default {
         Write-Error "Unsupported architecture: $architecture"
@@ -602,21 +586,21 @@ switch ($architecture) {
     }
 }
 
-$codexHome = if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
-    Join-Path $env:USERPROFILE ".codex"
+$openInterpreterHome = if ([string]::IsNullOrWhiteSpace($env:OPEN_INTERPRETER_HOME)) {
+    Join-Path $env:USERPROFILE ".openinterpreter"
 } else {
-    $env:CODEX_HOME
+    $env:OPEN_INTERPRETER_HOME
 }
-$standaloneRoot = Join-Path $codexHome "packages\standalone"
+$standaloneRoot = Join-Path $openInterpreterHome "packages\standalone"
 $releasesDir = Join-Path $standaloneRoot "releases"
 $currentDir = Join-Path $standaloneRoot "current"
 $lockPath = Join-Path $standaloneRoot "install.lock"
 
-$defaultVisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\OpenAI\Codex\bin"
-if ([string]::IsNullOrWhiteSpace($env:CODEX_INSTALL_DIR)) {
+$defaultVisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\Open Interpreter\bin"
+if ([string]::IsNullOrWhiteSpace($env:OPEN_INTERPRETER_INSTALL_DIR)) {
     $visibleBinDir = $defaultVisibleBinDir
 } else {
-    $visibleBinDir = $env:CODEX_INSTALL_DIR
+    $visibleBinDir = $env:OPEN_INTERPRETER_INSTALL_DIR
 }
 
 $currentVersion = Get-CurrentInstalledVersion -StandaloneCurrentDir $currentDir
@@ -625,20 +609,19 @@ $releaseName = "$resolvedVersion-$target"
 $releaseDir = Join-Path $releasesDir $releaseName
 
 if (-not [string]::IsNullOrWhiteSpace($currentVersion) -and $currentVersion -ne $resolvedVersion) {
-    Write-Step "Updating Codex CLI from $currentVersion to $resolvedVersion"
+    Write-Step "Updating Open Interpreter from $currentVersion to $resolvedVersion"
 } elseif (-not [string]::IsNullOrWhiteSpace($currentVersion)) {
-    Write-Step "Updating Codex CLI"
+    Write-Step "Refreshing Open Interpreter $currentVersion"
 } else {
-    Write-Step "Installing Codex CLI"
+    Write-Step "Installing Open Interpreter"
 }
 Write-Step "Detected platform: $platformLabel"
 Write-Step "Resolved version: $resolvedVersion"
 
-$conflictingInstall = Get-ConflictingInstall -VisibleBinDir $visibleBinDir
 $oldStandaloneBackup = $null
 
-$packageAsset = "codex-npm-$npmTag-$resolvedVersion.tgz"
-$tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("codex-install-" + [System.Guid]::NewGuid().ToString("N"))
+$packageAsset = "open-interpreter-$target.tar.gz"
+$tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("open-interpreter-install-" + [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 
 try {
@@ -655,8 +638,8 @@ try {
             $stagingDir = Join-Path $releasesDir ".staging.$releaseName.$PID"
             $assetMetadata = Get-ReleaseAssetMetadata -AssetName $packageAsset -ResolvedVersion $resolvedVersion
 
-            Write-Step "Downloading Codex CLI"
-            Invoke-WebRequest -Uri $assetMetadata.Url -OutFile $archivePath
+            Write-Step "Downloading Open Interpreter"
+            Invoke-GitHubAssetDownload -Uri $assetMetadata.Url -OutFile $archivePath
             Test-ArchiveDigest -ArchivePath $archivePath -ExpectedDigest $assetMetadata.Sha256
 
             New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
@@ -667,18 +650,9 @@ try {
             New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
             tar -xzf $archivePath -C $extractDir
 
-            $vendorRoot = Join-Path $extractDir "package/vendor/$target"
-            $resourcesDir = Join-Path $stagingDir "codex-resources"
-            New-Item -ItemType Directory -Force -Path $resourcesDir | Out-Null
-            $copyMap = @{
-                "codex/codex.exe" = "codex.exe"
-                "codex/codex-command-runner.exe" = "codex-resources\codex-command-runner.exe"
-                "codex/codex-windows-sandbox-setup.exe" = "codex-resources\codex-windows-sandbox-setup.exe"
-                "path/rg.exe" = "codex-resources\rg.exe"
-            }
-
-            foreach ($relativeSource in $copyMap.Keys) {
-                Copy-Item -LiteralPath (Join-Path $vendorRoot $relativeSource) -Destination (Join-Path $stagingDir $copyMap[$relativeSource])
+            $packageRoot = Join-Path $extractDir "open-interpreter"
+            foreach ($binary in @("interpreter.exe", "interpreter-root-tui.exe", "interpreter-tui.exe", "interpreter-app-server.exe")) {
+                Copy-Item -LiteralPath (Join-Path $packageRoot $binary) -Destination (Join-Path $stagingDir $binary)
             }
 
             if (Test-Path -LiteralPath $releaseDir) {
@@ -695,7 +669,7 @@ try {
         $oldStandaloneBackup = Move-OldStandaloneBinIfApproved -VisibleBinDir $visibleBinDir -DefaultVisibleBinDir $defaultVisibleBinDir
         try {
             Ensure-Junction -LinkPath $visibleBinDir -TargetPath $currentDir -InstallerOwnedTargetPrefix $standaloneRoot
-            Test-VisibleCodexCommand -VisibleBinDir $visibleBinDir
+            Test-VisibleInterpreterCommand -VisibleBinDir $visibleBinDir
         } catch {
             if ($null -ne $oldStandaloneBackup -and (Test-Path -LiteralPath $oldStandaloneBackup)) {
                 if (Test-Path -LiteralPath $visibleBinDir) {
@@ -712,8 +686,6 @@ try {
 } finally {
     Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
 }
-
-Maybe-HandleConflictingInstall -Conflict $conflictingInstall
 
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if (-not (Path-Contains -PathValue $userPath -Entry $visibleBinDir)) {
@@ -739,12 +711,12 @@ if (-not (Path-Contains -PathValue $env:Path -Entry $visibleBinDir)) {
     }
 }
 
-Write-Step "Current PowerShell session: codex"
-Write-Step "Future PowerShell windows: open a new PowerShell window and run: codex"
-Write-Host "Codex CLI $resolvedVersion installed successfully."
+Write-Step "Current PowerShell session: interpreter"
+Write-Step "Future PowerShell windows: open a new PowerShell window and run: interpreter"
+Write-Host "Open Interpreter $resolvedVersion installed successfully."
 
-$codexCommand = Join-Path $visibleBinDir "codex.exe"
-if (Prompt-YesNo "Start Codex now?") {
-    Write-Step "Launching Codex"
-    & $codexCommand
+$interpreterCommand = Join-Path $visibleBinDir "interpreter.exe"
+if (Prompt-YesNo "Start Open Interpreter now?") {
+    Write-Step "Launching Open Interpreter"
+    & $interpreterCommand
 }

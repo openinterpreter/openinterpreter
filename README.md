@@ -13,6 +13,7 @@ Open Interpreter is built for practical software work in the terminal:
 - run `interpreter` and work in the current directory
 - choose the provider and model that fit your workflow
 - keep configuration and session state local in `~/.openinterpreter`
+- receive standalone app updates automatically by default
 - use long-running sessions without treating each tab as a separate product
 
 ## Core ideas
@@ -26,6 +27,8 @@ Open Interpreter is built for practical software work in the terminal:
 - **Harness emulation:** Open Interpreter can emulate harness behavior such as
   Claude Code natively in Rust instead of depending on external CLIs in the
   product runtime.
+- **Automatic updates:** standalone installs stage new releases in the
+  background and use them on the next launch.
 
 ## Product goals
 
@@ -34,6 +37,7 @@ Open Interpreter is built for practical software work in the terminal:
 - efficient multi-tab usage
 - clean onboarding and model selection
 - clear tool, approval, and session behavior
+- safe default-on updates with an opt-out
 
 ## User model
 

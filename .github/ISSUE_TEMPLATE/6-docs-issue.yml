@@ -1,11 +1,11 @@
-name: 📗 Documentation Issue
+name: Documentation Issue
 description: Tell us if there is missing or incorrect documentation
 labels: [docs]
 body:
   - type: markdown
     attributes:
       value: |
-        Thank you for submitting a documentation request. It helps make Codex better.
+        Thank you for submitting a documentation request. It helps make Open Interpreter better.
   - type: dropdown
     attributes:
       label: What is the type of issue?

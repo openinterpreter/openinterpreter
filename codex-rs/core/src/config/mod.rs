@@ -611,8 +611,9 @@ pub struct Config {
     /// Collection of various notices we show the user
     pub notices: Notice,
 
-    /// When `true`, checks for Codex updates on startup and surfaces update prompts.
-    /// Set to `false` only if your Codex updates are centrally managed.
+    /// When `true`, checks for Open Interpreter updates on startup and stages
+    /// standalone installer updates in the background.
+    /// Set to `false` to disable automatic updates.
     /// Defaults to `true`.
     pub check_for_update_on_startup: bool,
 

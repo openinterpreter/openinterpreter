@@ -235,8 +235,6 @@ mod ui_consts;
 pub(crate) mod update_action;
 pub use update_action::UpdateAction;
 #[cfg(all(not(debug_assertions), feature = "startup-network"))]
-mod update_prompt;
-#[cfg(all(not(debug_assertions), feature = "startup-network"))]
 mod updates;
 mod version;
 #[cfg(all(not(target_os = "linux"), feature = "realtime-audio"))]
@@ -1174,26 +1172,7 @@ async fn run_ratatui_app(
     let mut terminal_restore_guard = TerminalRestoreGuard::new();
 
     #[cfg(all(not(debug_assertions), feature = "startup-network"))]
-    {
-        use crate::update_prompt::UpdatePromptOutcome;
-
-        let skip_update_prompt = cli.prompt.as_ref().is_some_and(|prompt| !prompt.is_empty());
-        if !skip_update_prompt {
-            match update_prompt::run_update_prompt_if_needed(&mut tui, &initial_config).await? {
-                UpdatePromptOutcome::Continue => {}
-                UpdatePromptOutcome::RunUpdate(action) => {
-                    terminal_restore_guard.restore()?;
-                    return Ok(AppExitInfo {
-                        token_usage: codex_protocol::protocol::TokenUsage::default(),
-                        thread_id: None,
-                        thread_name: None,
-                        update_action: Some(action),
-                        exit_reason: ExitReason::UserRequested,
-                    });
-                }
-            }
-        }
-    }
+    updates::spawn_auto_update_if_needed(&initial_config);
 
     // Initialize high-fidelity session event logging if enabled.
     session_log::maybe_init(&initial_config);

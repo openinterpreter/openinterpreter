@@ -17,7 +17,7 @@ runs:
   using: composite
   steps:
     # Some integration tests rely on DotSlash being installed.
-    # See https://github.com/openai/codex/pull/7617.
+    # Keep Bazel's output tree on a stable path so remote cache keys stay small.
     - name: Install DotSlash
       if: inputs.install-test-prereqs == 'true'
       uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2

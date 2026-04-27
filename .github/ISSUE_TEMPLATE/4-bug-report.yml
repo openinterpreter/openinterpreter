@@ -1,5 +1,5 @@
-name: 🪲 Other Bug
-description: Report an issue in Codex Web, integrations, or other Codex components
+name: Other Bug
+description: Report an issue in Open Interpreter or related integrations
 labels:
   - bug
 body:
@@ -9,7 +9,7 @@ body:
         Before submitting a new issue, please search for existing issues to see if your issue has already been reported.
         If it has, please add a 👍 reaction (no need to leave a comment) to the existing issue instead of creating a new one.
 
-        If you need help or support using Codex and are not reporting a bug, please post on [codex/discussions](https://github.com/openai/codex/discussions), where you can ask questions or engage with others on ideas for how to improve codex.
+        If you need help or support and are not reporting a bug, use the project's discussion or support channel instead of opening a bug report.
 
   - type: textarea
     id: actual

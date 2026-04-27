@@ -43,7 +43,6 @@ use crate::file_search::FileSearchManager;
 use crate::history_cell;
 use crate::history_cell::HistoryCell;
 #[cfg(not(debug_assertions))]
-use crate::history_cell::UpdateAvailableHistoryCell;
 use crate::legacy_core::append_message_history_entry;
 use crate::legacy_core::config::Config;
 use crate::legacy_core::config::ConfigBuilder;
@@ -883,13 +882,15 @@ impl App {
         if let Some(message) = external_agent_config_migration_message {
             chat_widget.add_info_message(message, /*hint*/ None);
         }
+        #[cfg(all(not(debug_assertions), feature = "startup-network"))]
+        if let Some(message) = crate::updates::take_installed_update_notice(&config) {
+            chat_widget.add_info_message(message, /*hint*/ None);
+        }
 
         chat_widget
             .maybe_prompt_windows_sandbox_enable(should_prompt_windows_sandbox_nux_at_startup);
 
         let file_search = FileSearchManager::new(config.cwd.to_path_buf(), app_event_tx.clone());
-        #[cfg(all(not(debug_assertions), feature = "startup-network"))]
-        let upgrade_version = crate::updates::get_upgrade_version(&config);
 
         let mut app = Self {
             model_catalog,
@@ -978,26 +979,6 @@ impl App {
         let mut listen_for_app_server_events = true;
         let mut waiting_for_initial_session_configured = wait_for_initial_session_configured;
 
-        #[cfg(all(not(debug_assertions), feature = "startup-network"))]
-        let pre_loop_exit_reason = if let Some(latest_version) = upgrade_version {
-            let control = app
-                .handle_event(
-                    tui,
-                    &mut app_server,
-                    AppEvent::InsertHistoryCell(Box::new(UpdateAvailableHistoryCell::new(
-                        latest_version,
-                        crate::update_action::get_update_action(),
-                    ))),
-                )
-                .await?;
-            match control {
-                AppRunControl::Continue => None,
-                AppRunControl::Exit(exit_reason) => Some(exit_reason),
-            }
-        } else {
-            None
-        };
-        #[cfg(any(debug_assertions, not(feature = "startup-network")))]
         let pre_loop_exit_reason: Option<ExitReason> = None;
 
         let exit_reason_result = if let Some(exit_reason) = pre_loop_exit_reason {

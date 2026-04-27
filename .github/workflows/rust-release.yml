@@ -44,6 +44,12 @@ jobs:
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             archive: open-interpreter-aarch64-unknown-linux-musl.tar.gz
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            archive: open-interpreter-x86_64-pc-windows-msvc.tar.gz
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            archive: open-interpreter-aarch64-pc-windows-msvc.tar.gz
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -140,10 +146,13 @@ jobs:
       - name: Configure musl rusty_v8 artifacts
         if: contains(matrix.target, 'unknown-linux-musl')
         uses: ./.github/actions/setup-rusty-v8-musl
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         with:
           target: ${{ matrix.target }}
 
       - name: Build release binaries
+        shell: bash
         run: |
           set -euo pipefail
           cargo build --locked --release --target "${{ matrix.target }}" \
@@ -162,9 +171,14 @@ jobs:
           rm -rf "${package_dir}"
           mkdir -p "${package_dir}"
 
+          suffix=""
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            suffix=".exe"
+          fi
+
           for binary in interpreter interpreter-root-tui interpreter-tui interpreter-app-server; do
-            cp "${release_dir}/${binary}" "${package_dir}/${binary}"
-            chmod 0755 "${package_dir}/${binary}"
+            cp "${release_dir}/${binary}${suffix}" "${package_dir}/${binary}${suffix}"
+            chmod 0755 "${package_dir}/${binary}${suffix}"
           done
 
           {
@@ -176,7 +190,11 @@ jobs:
 
           mkdir -p "${dist_dir}"
           tar -C "${RUNNER_TEMP}" -czf "${dist_dir}/${{ matrix.archive }}" open-interpreter
-          shasum -a 256 "${dist_dir}/${{ matrix.archive }}" > "${dist_dir}/${{ matrix.archive }}.sha256"
+          if command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "${dist_dir}/${{ matrix.archive }}" > "${dist_dir}/${{ matrix.archive }}.sha256"
+          else
+            sha256sum "${dist_dir}/${{ matrix.archive }}" > "${dist_dir}/${{ matrix.archive }}.sha256"
+          fi
 
       - uses: actions/upload-artifact@2848b2cda0e5190984587ec6bb1f36730ca78d50
         with:
@@ -222,7 +240,11 @@ jobs:
             first=1
             for archive in dist/open-interpreter-*.tar.gz; do
               name="$(basename "${archive}")"
-              sha="$(shasum -a 256 "${archive}" | awk '{print $1}')"
+              if command -v shasum >/dev/null 2>&1; then
+                sha="$(shasum -a 256 "${archive}" | awk '{print $1}')"
+              else
+                sha="$(sha256sum "${archive}" | awk '{print $1}')"
+              fi
               target="${name#open-interpreter-}"
               target="${target%.tar.gz}"
               if [[ "${first}" -eq 0 ]]; then

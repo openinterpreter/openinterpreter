@@ -3,18 +3,12 @@ use codex_install_context::InstallContext;
 #[cfg(any(not(debug_assertions), test))]
 use codex_install_context::StandalonePlatform;
 
-/// Update action the CLI should perform after the TUI exits.
+/// Update action the CLI should perform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateAction {
-    /// Update via `npm install -g @openai/codex@latest`.
-    NpmGlobalLatest,
-    /// Update via `bun install -g @openai/codex@latest`.
-    BunGlobalLatest,
-    /// Update via `brew upgrade codex`.
-    BrewUpgrade,
-    /// Update via `curl -fsSL https://chatgpt.com/codex/install.sh | sh`.
+    /// Update via `curl -fsSL https://openinterpreter.com/install.sh | sh`.
     StandaloneUnix,
-    /// Update via `irm https://chatgpt.com/codex/install.ps1|iex`.
+    /// Update via `irm https://openinterpreter.com/install.ps1|iex`.
     StandaloneWindows,
 }
 
@@ -22,30 +16,30 @@ impl UpdateAction {
     #[cfg(any(not(debug_assertions), test))]
     pub(crate) fn from_install_context(context: &InstallContext) -> Option<Self> {
         match context {
-            InstallContext::Npm => Some(UpdateAction::NpmGlobalLatest),
-            InstallContext::Bun => Some(UpdateAction::BunGlobalLatest),
-            InstallContext::Brew => Some(UpdateAction::BrewUpgrade),
             InstallContext::Standalone { platform, .. } => Some(match platform {
                 StandalonePlatform::Unix => UpdateAction::StandaloneUnix,
                 StandalonePlatform::Windows => UpdateAction::StandaloneWindows,
             }),
-            InstallContext::Other => None,
+            InstallContext::Npm
+            | InstallContext::Bun
+            | InstallContext::Brew
+            | InstallContext::Other => None,
         }
     }
 
     /// Returns the list of command-line arguments for invoking the update.
     pub fn command_args(self) -> (&'static str, &'static [&'static str]) {
         match self {
-            UpdateAction::NpmGlobalLatest => ("npm", &["install", "-g", "@openai/codex"]),
-            UpdateAction::BunGlobalLatest => ("bun", &["install", "-g", "@openai/codex"]),
-            UpdateAction::BrewUpgrade => ("brew", &["upgrade", "--cask", "codex"]),
             UpdateAction::StandaloneUnix => (
                 "sh",
-                &["-c", "curl -fsSL https://chatgpt.com/codex/install.sh | sh"],
+                &[
+                    "-c",
+                    "curl -fsSL https://openinterpreter.com/install.sh | sh",
+                ],
             ),
             UpdateAction::StandaloneWindows => (
                 "powershell",
-                &["-c", "irm https://chatgpt.com/codex/install.ps1|iex"],
+                &["-c", "irm https://openinterpreter.com/install.ps1|iex"],
             ),
         }
     }
@@ -79,15 +73,15 @@ mod tests {
         );
         assert_eq!(
             UpdateAction::from_install_context(&InstallContext::Npm),
-            Some(UpdateAction::NpmGlobalLatest)
+            None
         );
         assert_eq!(
             UpdateAction::from_install_context(&InstallContext::Bun),
-            Some(UpdateAction::BunGlobalLatest)
+            None
         );
         assert_eq!(
             UpdateAction::from_install_context(&InstallContext::Brew),
-            Some(UpdateAction::BrewUpgrade)
+            None
         );
         assert_eq!(
             UpdateAction::from_install_context(&InstallContext::Standalone {
@@ -113,14 +107,17 @@ mod tests {
             UpdateAction::StandaloneUnix.command_args(),
             (
                 "sh",
-                &["-c", "curl -fsSL https://chatgpt.com/codex/install.sh | sh"][..],
+                &[
+                    "-c",
+                    "curl -fsSL https://openinterpreter.com/install.sh | sh"
+                ][..],
             )
         );
         assert_eq!(
             UpdateAction::StandaloneWindows.command_args(),
             (
                 "powershell",
-                &["-c", "irm https://chatgpt.com/codex/install.ps1|iex"][..],
+                &["-c", "irm https://openinterpreter.com/install.ps1|iex"][..],
             )
         );
     }
