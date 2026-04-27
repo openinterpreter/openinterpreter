@@ -114,11 +114,22 @@ jobs:
             --build_metadata=COMMIT_SHA=$(git rev-parse HEAD)
           )
 
-          bazel \
-            --noexperimental_remote_repo_contents_cache \
-            "${bazel_args[@]}" \
-            --config=ci-v8 \
-            "--remote_header=x-buildbuddy-api-key=${BUILDBUDDY_API_KEY}"
+          if [[ -n "${BUILDBUDDY_API_KEY}" ]]; then
+            bazel_args+=(
+              --config=ci-v8
+              "--remote_header=x-buildbuddy-api-key=${BUILDBUDDY_API_KEY}"
+            )
+          else
+            bazel_args+=(
+              --bes_backend=
+              --bes_results_url=
+              --remote_cache=
+              --remote_upload_local_results=false
+              --experimental_remote_downloader=
+            )
+          fi
+
+          bazel --noexperimental_remote_repo_contents_cache "${bazel_args[@]}"
 
       - name: Stage release pair
         env:
