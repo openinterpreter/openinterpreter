@@ -1,0 +1,63 @@
+---
+title: FuturMix
+---
+
+[FuturMix](https://futurmix.ai) is a unified AI gateway that provides access to 22+ models (including GPT-4o, Claude, Gemini, and more) through a single OpenAI-compatible API endpoint.
+
+Since Open Interpreter uses LiteLLM under the hood, FuturMix works out of the box via the `api_base` flag:
+
+<CodeGroup>
+
+```bash Terminal
+interpreter --model openai/gpt-4o --api_base https://futurmix.ai/v1 --api_key your-futurmix-key
+```
+
+```python Python
+from interpreter import interpreter
+
+interpreter.llm.model = "openai/gpt-4o"
+interpreter.llm.api_base = "https://futurmix.ai/v1"
+interpreter.llm.api_key = "your-futurmix-key"
+interpreter.chat()
+```
+
+</CodeGroup>
+
+# Supported Models
+
+All models available on FuturMix can be used by prefixing with `openai/`:
+
+<CodeGroup>
+
+```bash Terminal
+interpreter --model openai/gpt-4o --api_base https://futurmix.ai/v1
+interpreter --model openai/claude-sonnet-4-20250514 --api_base https://futurmix.ai/v1
+interpreter --model openai/gemini-2.5-pro --api_base https://futurmix.ai/v1
+interpreter --model openai/deepseek-chat --api_base https://futurmix.ai/v1
+```
+
+```python Python
+interpreter.llm.model = "openai/gpt-4o"
+interpreter.llm.model = "openai/claude-sonnet-4-20250514"
+interpreter.llm.model = "openai/gemini-2.5-pro"
+interpreter.llm.model = "openai/deepseek-chat"
+```
+
+</CodeGroup>
+
+# Required Environment Variables
+
+Set the following environment variables [(click here to learn how)](https://chat.openai.com/share/1062cdd8-62a1-4aa8-8ec9-eca45645971a) to use these models.
+
+| Environment Variable | Description | Where to Find |
+| -------------------- | ----------- | ------------- |
+| `OPENAI_API_KEY` | Your FuturMix API key | [FuturMix Dashboard](https://futurmix.ai) |
+| `OPENAI_API_BASE` | Set to `https://futurmix.ai/v1` | — |
+
+You can also set these as environment variables so you do not need to pass them as flags each time:
+
+```bash
+export OPENAI_API_KEY=your-futurmix-key
+export OPENAI_API_BASE=https://futurmix.ai/v1
+interpreter --model openai/gpt-4o
+```
