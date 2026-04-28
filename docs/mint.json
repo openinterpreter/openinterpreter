@@ -75,6 +75,7 @@
             "language-models/hosted-models/cohere",
             "language-models/hosted-models/ai21",
             "language-models/hosted-models/deepinfra",
+            "language-models/hosted-models/futurmix",
             "language-models/hosted-models/huggingface",
             "language-models/hosted-models/nlp-cloud",
             "language-models/hosted-models/openrouter",
