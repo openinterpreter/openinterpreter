@@ -61,7 +61,7 @@ def profile(interpreter, filename_or_url):
             else:
                 raise
 
-    return apply_profile(interpreter, profile, profile_path)
+    return apply_profile(interpreter, profile, profile_path, filename_or_url)
 
 
 def get_profile(filename_or_url, profile_path):
@@ -111,7 +111,9 @@ def get_profile(filename_or_url, profile_path):
     response = requests.get(filename_or_url)
     response.raise_for_status()
     if extension == ".py":
-        return {"start_script": response.text, "version": OI_VERSION}
+        raise Exception(
+            "Remote Python profiles are not allowed for security reasons."
+        )
     elif extension == ".json":
         return json.loads(response.text)
     elif extension == ".yaml":
@@ -142,8 +144,12 @@ class RemoveInterpreter(ast.NodeTransformer):
         return node  # return node otherwise to keep it in the AST
 
 
-def apply_profile(interpreter, profile, profile_path):
+def apply_profile(interpreter, profile, profile_path, source=None):
     if "start_script" in profile:
+        if source and (source.startswith("http://") or source.startswith("https://")):
+            raise Exception(
+                "Remote Python profiles are not allowed for security reasons."
+            )
         scope = {"interpreter": interpreter}
         exec(profile["start_script"], scope, scope)
 

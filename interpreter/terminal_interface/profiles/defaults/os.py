@@ -12,8 +12,8 @@ interpreter.computer.import_computer_api = True
 interpreter.llm.supports_functions = True
 interpreter.llm.context_window = 110000
 interpreter.llm.max_tokens = 4096
-interpreter.auto_run = True
-interpreter.loop = True
+interpreter.auto_run = False
+interpreter.loop = False
 interpreter.sync_computer = True
 
 interpreter.system_message = r"""
@@ -242,9 +242,7 @@ if not interpreter.auto_run:
 #     if chunk.get("format") != "active_line":
 #         print(chunk.get("content"))
 
-interpreter.auto_run = True
-
 interpreter.display_message(
-    "**Warning:** In this mode, Open Interpreter will not require approval before performing actions. Be ready to close your terminal."
+    "**Warning:** OS Control mode enables full system access. Actions require approval by default—set auto_run=True only if you understand the risks."
 )
 print("")  # < - Aesthetic choice
