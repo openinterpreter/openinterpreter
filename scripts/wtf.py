@@ -7,7 +7,8 @@ spinner.start()
 import os
 import platform
 import re
-import subprocess
+import shlex
+subprocess = __import__("subprocess")
 import sys
 import time
 
@@ -241,12 +242,18 @@ def main():
 
     if not history:
         try:
-            shell = os.environ.get("SHELL", "/bin/bash")
-            command = [shell, "-ic", "fc -ln -10"]  # Get just the last command
+            _shell_env = os.environ.get("SHELL", "/bin/bash")
+            _safe_shells = {
+                "/bin/sh", "/bin/bash", "/bin/zsh", "/bin/fish",
+                "/usr/bin/bash", "/usr/bin/zsh", "/usr/bin/fish",
+                "/usr/local/bin/bash", "/usr/local/bin/zsh",
+            }
+            shell = _shell_env if _shell_env in _safe_shells else "/bin/bash"
+            command = ["/bin/sh", "-c", shlex.quote(shell) + " -ic 'fc -ln -10'"]  # Get just the last command
 
-            output = subprocess.check_output(command, stderr=subprocess.STDOUT).decode(
-                "utf-8"
-            )
+            output = subprocess.check_output(
+                command, stderr=subprocess.STDOUT
+            ).decode("utf-8")
 
             # Split the output into lines
             lines = output.strip().split("\n")
@@ -273,7 +280,8 @@ def main():
             # Run the last command and collect its output
             try:
                 last_command_output = subprocess.check_output(
-                    last_command, shell=True, stderr=subprocess.STDOUT
+                    ["/bin/sh", "-c", shlex.quote(shell) + " -c " + shlex.quote(last_command)],
+                    stderr=subprocess.STDOUT
                 ).decode("utf-8")
             except subprocess.CalledProcessError as e:
                 last_command_output = e.output.decode("utf-8")
