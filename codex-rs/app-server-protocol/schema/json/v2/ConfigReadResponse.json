@@ -256,6 +256,12 @@
             "null"
           ]
         },
+        "harness_guidance": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "instructions": {
           "type": [
             "string",
@@ -624,6 +630,12 @@
         "harness": {
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "harness_guidance": {
+          "type": [
+            "boolean",
             "null"
           ]
         },

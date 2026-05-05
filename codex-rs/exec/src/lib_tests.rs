@@ -23,6 +23,55 @@ fn exec_defaults_analytics_to_enabled() {
 }
 
 #[test]
+fn timeout_steer_message_mentions_remaining_time_at_75_percent() {
+    assert_eq!(
+        timeout_steer_message(75, 1800, 1350),
+        "75% of the configured task timeout has elapsed. About 7 minutes 30 seconds remain. Keep working, but converge on the smallest complete solution that satisfies the request."
+    );
+}
+
+#[test]
+fn timeout_steer_message_asks_to_wrap_up_at_90_percent() {
+    assert_eq!(
+        timeout_steer_message(90, 1800, 1620),
+        "90% of the configured task timeout has elapsed. About 3 minutes remain. Wrap up now: finish the smallest valid artifact, run the exact visible check or command if available, clean up background work, and give the final answer."
+    );
+}
+
+#[test]
+fn completion_verification_initial_instruction_requires_todo_first() {
+    let instruction = completion_verification_initial_instruction();
+
+    assert!(instruction.contains("SetTodoList"));
+    assert!(instruction.contains("Before starting substantive work"));
+    assert!(instruction.contains("audit every explicit constraint"));
+    assert!(!instruction.contains("CONFIRM"));
+}
+
+#[test]
+fn completion_verification_prompt_includes_original_request() {
+    let prompt = completion_verification_prompt("write /app/move.txt with the best chess move");
+
+    assert!(prompt.contains("write /app/move.txt with the best chess move"));
+    assert!(prompt.contains("SetTodoList"));
+    assert!(prompt.contains("exact commands"));
+    assert!(prompt.contains("different method"));
+    assert!(prompt.contains("Only when every item is complete and verified"));
+    assert!(prompt.contains("CONFIRM"));
+}
+
+#[test]
+fn completion_verification_confirmation_is_explicit() {
+    assert!(completion_verification_confirmed(Some(
+        "All requested work is complete. CONFIRM"
+    )));
+    assert!(!completion_verification_confirmed(Some(
+        "All requested work is complete."
+    )));
+    assert!(!completion_verification_confirmed(None));
+}
+
+#[test]
 fn exec_root_span_can_be_parented_from_trace_context() {
     let subscriber = test_tracing_subscriber();
     let _guard = tracing::subscriber::set_default(subscriber);

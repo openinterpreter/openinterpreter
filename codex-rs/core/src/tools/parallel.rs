@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures::FutureExt;
+use futures::future::BoxFuture;
 use tokio::sync::RwLock;
 use tokio_util::either::Either;
 use tokio_util::sync::CancellationToken;
@@ -156,7 +158,7 @@ impl ToolCallRuntime {
         call: ToolCall,
         source: ToolCallSource,
         cancellation_token: CancellationToken,
-    ) -> impl std::future::Future<Output = Result<AnyToolResult, FunctionCallError>> {
+    ) -> BoxFuture<'static, Result<AnyToolResult, FunctionCallError>> {
         let supports_parallel = self.router.tool_supports_parallel(&call);
         let router = Arc::clone(&self.router);
         let session = Arc::clone(&self.session);
@@ -166,6 +168,7 @@ impl ToolCallRuntime {
         let invocation_cancellation_token = cancellation_token.clone();
         let started = Instant::now();
         let display_name = call.tool_name.display();
+        let defer_spawn_until_polled = turn.tools_config.harness.is_kimi_cli();
 
         let dispatch_span = trace_span!(
             "dispatch_tool_call_with_code_mode_result",
@@ -175,35 +178,41 @@ impl ToolCallRuntime {
             aborted = false,
         );
 
-        let handle: AbortOnDropHandle<Result<AnyToolResult, FunctionCallError>> =
-            AbortOnDropHandle::new(tokio::spawn(async move {
-                tokio::select! {
-                    _ = cancellation_token.cancelled() => {
-                        let secs = started.elapsed().as_secs_f32().max(0.1);
-                        dispatch_span.record("aborted", true);
-                        Ok(Self::aborted_response(&call, secs))
-                    },
-                    res = async {
-                        let _guard = if supports_parallel {
-                            Either::Left(lock.read().await)
-                        } else {
-                            Either::Right(lock.write().await)
-                        };
+        let dispatch = async move {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    let secs = started.elapsed().as_secs_f32().max(0.1);
+                    dispatch_span.record("aborted", true);
+                    Ok(Self::aborted_response(&call, secs))
+                },
+                res = async {
+                    let _guard = if supports_parallel {
+                        Either::Left(lock.read().await)
+                    } else {
+                        Either::Right(lock.write().await)
+                    };
 
-                        router
-                            .dispatch_tool_call_with_code_mode_result(
-                                session,
-                                turn,
-                                invocation_cancellation_token,
-                                tracker,
-                                call.clone(),
-                                source,
-                            )
-                            .instrument(dispatch_span.clone())
-                            .await
-                    } => res,
-                }
-            }));
+                    router
+                        .dispatch_tool_call_with_code_mode_result(
+                            session,
+                            turn,
+                            invocation_cancellation_token,
+                            tracker,
+                            call.clone(),
+                            source,
+                        )
+                        .instrument(dispatch_span.clone())
+                        .await
+                } => res,
+            }
+        };
+
+        if defer_spawn_until_polled {
+            return dispatch.in_current_span().boxed();
+        }
+
+        let handle: AbortOnDropHandle<Result<AnyToolResult, FunctionCallError>> =
+            AbortOnDropHandle::new(tokio::spawn(dispatch));
 
         async move {
             handle.await.map_err(|err| {
@@ -211,6 +220,7 @@ impl ToolCallRuntime {
             })?
         }
         .in_current_span()
+        .boxed()
     }
 }
 

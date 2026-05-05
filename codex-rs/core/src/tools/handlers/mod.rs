@@ -114,6 +114,15 @@ where
     })
 }
 
+fn parse_kimi_arguments<T>(arguments: &str) -> Result<T, FunctionCallError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    serde_json::from_str(arguments).map_err(|err| {
+        FunctionCallError::RespondToModel(format!("Error parsing JSON arguments: {err}"))
+    })
+}
+
 fn parse_arguments_with_base_path<T>(
     arguments: &str,
     base_path: &AbsolutePathBuf,

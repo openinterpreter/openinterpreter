@@ -1,64 +1,125 @@
-## Installing & building
+---
+title: Install
+description: Install the Open Interpreter CLI on macOS, Linux, or Windows.
+---
 
-### System requirements
+The fastest way to get Open Interpreter is the install script. It downloads
+the right binary for your platform and puts `interpreter` on your `PATH`.
 
-| Requirement                 | Details                                                         |
-| --------------------------- | --------------------------------------------------------------- |
-| Operating systems           | macOS 12+, Ubuntu 20.04+/Debian 10+, or Windows 11 **via WSL2** |
-| Git (optional, recommended) | 2.23+ for built-in PR helpers                                   |
-| RAM                         | 4-GB minimum (8-GB recommended)                                 |
+<Tabs>
+  <Tab title="macOS / Linux">
+    ```bash
+    curl -fsSL https://openinterpreter.com/install.sh | sh
+    ```
+  </Tab>
+  <Tab title="Windows (PowerShell)">
+    ```powershell
+    irm https://openinterpreter.com/install.ps1 | iex
+    ```
+  </Tab>
+</Tabs>
 
-### DotSlash
-
-The GitHub Release also contains a [DotSlash](https://dotslash-cli.com/) file for the Codex CLI named `codex`. Using a DotSlash file makes it possible to make a lightweight commit to source control to ensure all contributors use the same version of an executable, regardless of what platform they use for development.
-
-### Build from source
+After it finishes, restart your shell and run:
 
 ```bash
-# Clone the repository and navigate to the root of the Cargo workspace.
-git clone https://github.com/openai/codex.git
-cd codex/codex-rs
+interpreter --version
+```
 
-# Install the Rust toolchain, if necessary.
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
-rustup component add rustfmt
-rustup component add clippy
-# Install helper tools used by the workspace justfile:
-cargo install just
-# Optional: install nextest for the `just test` helper
-cargo install --locked cargo-nextest
+## System requirements
 
-# Build Codex.
-cargo build
+| Item              | Minimum                                                         |
+| ----------------- | --------------------------------------------------------------- |
+| Operating system  | macOS 12+, Ubuntu 20.04+/Debian 10+, or Windows 11 (via WSL2)   |
+| RAM               | 4 GB (8 GB recommended)                                         |
+| Git               | 2.23+ if you want the built-in PR helpers                       |
 
-# Launch the TUI with a sample prompt.
-cargo run --bin codex -- "explain this codebase to me"
+## Updating
 
-# After making changes, use the root justfile helpers (they default to codex-rs):
+Open Interpreter checks for updates in the background and stages new
+releases automatically. To update right now:
+
+```bash
+/update
+```
+
+Run it from inside a session, or rerun the install script.
+
+## DotSlash
+
+Releases include a [DotSlash](https://dotslash-cli.com/) descriptor named
+`interpreter`. Commit it to a repo and every contributor runs the same
+version of the binary, no matter their platform.
+
+## Build from source
+
+You only need this if you want to develop on the CLI itself.
+
+<Steps>
+  <Step title="Clone the repo">
+    ```bash
+    git clone https://github.com/openinterpreter/open-interpreter.git
+    cd open-interpreter/codex-rs
+    ```
+  </Step>
+  <Step title="Install the Rust toolchain">
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+    rustup component add rustfmt clippy
+    ```
+  </Step>
+  <Step title="Install workspace helpers">
+    ```bash
+    cargo install just
+    cargo install --locked cargo-nextest
+    ```
+  </Step>
+  <Step title="Build and run">
+    ```bash
+    cargo build
+    cargo run --bin interpreter -- "explain this codebase to me"
+    ```
+  </Step>
+</Steps>
+
+The root `justfile` has the everyday workflow shortcuts:
+
+```bash
 just fmt
 just fix -p <crate-you-touched>
-
-# Run the relevant tests (project-specific is fastest), for example:
-cargo test -p codex-tui
-# If you have cargo-nextest installed, `just test` runs the test suite via nextest:
 just test
-# Avoid `--all-features` for routine local runs because it increases build
-# time and `target/` disk usage by compiling additional feature combinations.
-# If you specifically want full feature coverage, use:
-cargo test --all-features
 ```
 
-## Tracing / verbose logging
+Avoid `--all-features` for routine local runs. It bloats `target/` and slows
+the build down for little benefit. Use it only when you specifically need
+full feature coverage.
 
-Codex is written in Rust, so it honors the `RUST_LOG` environment variable to configure its logging behavior.
+## Verbose logging
 
-The TUI defaults to `RUST_LOG=codex_core=info,codex_tui=info,codex_rmcp_client=info` and log messages are written to `~/.codex/log/codex-tui.log` by default. For a single run, you can override the log directory with `-c log_dir=...` (for example, `-c log_dir=./.codex-log`).
+Open Interpreter is written in Rust and honors the `RUST_LOG` environment
+variable.
+
+The TUI defaults to `RUST_LOG=codex_core=info,codex_tui=info,codex_rmcp_client=info`
+and writes logs to:
+
+```
+~/.openinterpreter/log/interpreter-tui.log
+```
+
+Tail it in another terminal while you work:
 
 ```bash
-tail -F ~/.codex/log/codex-tui.log
+tail -F ~/.openinterpreter/log/interpreter-tui.log
 ```
 
-By comparison, the non-interactive mode (`codex exec`) defaults to `RUST_LOG=error`, but messages are printed inline, so there is no need to monitor a separate file.
+For a single run, override the directory with `-c log_dir=...`:
 
-See the Rust documentation on [`RUST_LOG`](https://docs.rs/env_logger/latest/env_logger/#enabling-logging) for more information on the configuration options.
+```bash
+interpreter -c log_dir=./.interpreter-log
+```
+
+`interpreter exec` defaults to `RUST_LOG=error` and prints messages inline,
+so you do not need a separate log file.
+
+See the [`RUST_LOG` reference](https://docs.rs/env_logger/latest/env_logger/#enabling-logging)
+for the full filter syntax.

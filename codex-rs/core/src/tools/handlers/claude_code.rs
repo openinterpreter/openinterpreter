@@ -755,7 +755,7 @@ impl ToolHandler for ClaudeBashHandler {
             cwd: exec_params.cwd.clone(),
             timeout_ms,
             env: exec_params.env.clone(),
-            explicit_env_overrides: HashMap::new(),
+            explicit_env_overrides: turn.shell_environment_policy.r#set.clone(),
             network: exec_params.network.clone(),
             sandbox_permissions: effective_permissions.sandbox_permissions,
             additional_permissions: None,
@@ -1145,7 +1145,7 @@ impl CronField {
     fn matches(&self, value: u32) -> bool {
         match self {
             Self::Any => true,
-            Self::Step(step) => value % step == 0,
+            Self::Step(step) => value.is_multiple_of(*step),
             Self::Values(values) => values.contains(&value),
         }
     }

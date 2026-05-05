@@ -245,6 +245,35 @@ pub(crate) struct AppServerClientMetadata {
 }
 
 impl Session {
+    pub(crate) async fn kimi_todos(&self) -> Vec<codex_protocol::plan_tool::PlanItemArg> {
+        self.state.lock().await.kimi_todos.clone()
+    }
+
+    pub(crate) async fn set_kimi_todos(&self, todos: Vec<codex_protocol::plan_tool::PlanItemArg>) {
+        self.state.lock().await.kimi_todos = todos;
+    }
+
+    pub(crate) async fn set_kimi_shell_task_description(
+        &self,
+        process_id: i32,
+        description: String,
+    ) {
+        self.state
+            .lock()
+            .await
+            .kimi_shell_task_descriptions
+            .insert(process_id, description);
+    }
+
+    pub(crate) async fn kimi_shell_task_description(&self, process_id: i32) -> Option<String> {
+        self.state
+            .lock()
+            .await
+            .kimi_shell_task_descriptions
+            .get(&process_id)
+            .cloned()
+    }
+
     #[instrument(name = "session_init", level = "info", skip_all)]
     #[allow(clippy::too_many_arguments)]
     #[expect(
@@ -768,6 +797,7 @@ impl Session {
                     config.features.enabled(Feature::RuntimeMetrics),
                     Self::build_model_client_beta_features_header(config.as_ref()),
                     Harness::from_config_name(config.harness.as_deref()),
+                    config.harness_guidance,
                 ),
                 code_mode_service: crate::tools::code_mode::CodeModeService::new(),
                 environment_manager,

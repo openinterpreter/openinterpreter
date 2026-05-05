@@ -3,14 +3,13 @@ use crate::session::TurnContext;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
-use crate::tools::handlers::claude_code_search::canonicalize_rg_path;
-use crate::tools::handlers::claude_code_search::compare_paths_by_modified_desc;
-use crate::tools::handlers::claude_code_search::parse_results;
 use crate::tools::handlers::claude_code_search::resolve_search_root;
 use crate::tools::handlers::claude_code_search::run_rg_command;
-use crate::tools::handlers::parse_arguments;
+use crate::tools::handlers::parse_kimi_arguments;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
+use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
 use std::path::Path;
 use std::path::PathBuf;
@@ -19,6 +18,7 @@ pub struct KimiGlobHandler;
 pub struct KimiGrepHandler;
 
 const KIMI_GREP_DEFAULT_HEAD_LIMIT: usize = 250;
+const KIMI_GLOB_MAX_MATCHES: usize = 1000;
 
 #[derive(Deserialize)]
 struct KimiGlobArgs {
@@ -78,32 +78,59 @@ impl ToolHandler for KimiGlobHandler {
                 "Glob received unsupported payload".to_string(),
             ));
         };
-        let args: KimiGlobArgs = parse_arguments(&arguments)?;
+        let args: KimiGlobArgs = parse_kimi_arguments(&arguments)?;
+        if args.pattern.starts_with("**") {
+            let output = std::fs::read_dir(turn.cwd.as_path())
+                .map(|entries| {
+                    let mut names = entries
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>();
+                    names.sort();
+                    names.join("\n")
+                })
+                .unwrap_or_default();
+            return Ok(FunctionToolOutput::from_content(
+                vec![
+                    FunctionCallOutputContentItem::InputText {
+                        text: "<system>ERROR: Unsafe pattern</system>".to_string(),
+                    },
+                    FunctionCallOutputContentItem::InputText {
+                        text: format!(
+                            "Pattern `{}` starts with '**' which is not allowed. This would recursively search all directories and may include large directories like `node_modules`. Use more specific patterns instead. For your convenience, a list of all files and directories in the top level of the working directory is provided below.",
+                            args.pattern
+                        ),
+                    },
+                    FunctionCallOutputContentItem::InputText { text: output },
+                ],
+                Some(true),
+            ));
+        }
         if let Some(error) = kimi_glob_directory_error(turn.as_ref(), args.directory.as_deref()) {
             return Err(FunctionCallError::RespondToModel(error));
         }
         let search_root =
             resolve_search_root(session.as_ref(), turn.as_ref(), args.directory.as_deref()).await?;
-        let output = run_rg_command(
-            [
-                "--files",
-                "--hidden",
-                "--glob",
-                &args.pattern,
-                search_root.as_path().to_string_lossy().as_ref(),
-            ],
-            turn.cwd.as_path(),
-        )
-        .await?;
-        let mut paths = parse_results(&output.stdout, usize::MAX)
-            .into_iter()
-            .map(|path| canonicalize_rg_path(search_root.as_path(), Path::new(&path)))
-            .collect::<Result<Vec<_>, _>>()?;
+        if !search_root.as_path().exists() {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "`{}` does not exist.",
+                args.directory.as_deref().unwrap_or("")
+            )));
+        }
+        if !search_root.as_path().is_dir() {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "`{}` is not a directory.",
+                args.directory.as_deref().unwrap_or("")
+            )));
+        }
+        let mut paths = kimi_glob_paths(search_root.as_path(), &args.pattern)?;
         if !args.include_dirs.unwrap_or(true) {
             paths.retain(|path| path.as_path().is_file());
         }
-        paths.sort_by(compare_paths_by_modified_desc);
-        let output = paths
+        paths.sort_by(|left, right| left.as_path().cmp(right.as_path()));
+        let match_count = paths.len();
+        let limited = paths.into_iter().take(KIMI_GLOB_MAX_MATCHES);
+        let output = limited
             .into_iter()
             .map(|path| {
                 path.as_path()
@@ -114,8 +141,67 @@ impl ToolHandler for KimiGlobHandler {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        Ok(FunctionToolOutput::from_text(output, Some(true)))
+        let message = if match_count == 0 {
+            format!("No matches found for pattern `{}`.", args.pattern)
+        } else {
+            format!(
+                "Found {match_count} matches for pattern `{}`.",
+                args.pattern
+            )
+        };
+        let message = if match_count > KIMI_GLOB_MAX_MATCHES {
+            format!(
+                "{message} Only the first {KIMI_GLOB_MAX_MATCHES} matches are returned. You may want to use a more specific pattern."
+            )
+        } else {
+            message
+        };
+        Ok(FunctionToolOutput::from_content(
+            vec![
+                FunctionCallOutputContentItem::InputText {
+                    text: format!("<system>{message}</system>"),
+                },
+                FunctionCallOutputContentItem::InputText { text: output },
+            ],
+            Some(true),
+        ))
     }
+}
+
+fn kimi_glob_paths(
+    search_root: &Path,
+    pattern: &str,
+) -> Result<Vec<AbsolutePathBuf>, FunctionCallError> {
+    let absolute_pattern = search_root.join(pattern);
+    let pattern = absolute_pattern.to_str().ok_or_else(|| {
+        FunctionCallError::RespondToModel("Glob pattern is not valid UTF-8".to_string())
+    })?;
+    let entries = glob::glob(pattern).map_err(|err| {
+        FunctionCallError::RespondToModel(format!(
+            "Failed to search for pattern {pattern}. Error: {err}"
+        ))
+    })?;
+    entries
+        .map(|entry| {
+            entry
+                .map_err(|err| {
+                    FunctionCallError::RespondToModel(format!(
+                        "Failed to search for pattern {pattern}. Error: {err}"
+                    ))
+                })
+                .and_then(|path| {
+                    AbsolutePathBuf::try_from(normalize_glob_path(path)).map_err(|err| {
+                        FunctionCallError::RespondToModel(format!(
+                            "Glob produced an invalid path: {err}"
+                        ))
+                    })
+                })
+        })
+        .collect()
+}
+
+fn normalize_glob_path(path: PathBuf) -> PathBuf {
+    dunce::simplified(&path).to_path_buf()
 }
 
 impl ToolHandler for KimiGrepHandler {
@@ -137,7 +223,7 @@ impl ToolHandler for KimiGrepHandler {
                 "Grep received unsupported payload".to_string(),
             ));
         };
-        let args: KimiGrepArgs = parse_arguments(&arguments)?;
+        let args: KimiGrepArgs = parse_kimi_arguments(&arguments)?;
         let search_root =
             resolve_search_root(session.as_ref(), turn.as_ref(), args.path.as_deref()).await?;
         let mut rg_args = vec![
@@ -197,7 +283,7 @@ impl ToolHandler for KimiGrepHandler {
         let output = run_rg_command(rg_args.iter().map(String::as_str), turn.cwd.as_path()).await?;
         let lines = String::from_utf8_lossy(&output.stdout)
             .lines()
-            .map(|line| format_kimi_grep_line(search_root.as_path(), line))
+            .map(|line| format_kimi_grep_line(args.path.as_deref(), search_root.as_path(), line))
             .skip(args.offset.unwrap_or(0))
             .take(args.head_limit.unwrap_or(KIMI_GREP_DEFAULT_HEAD_LIMIT))
             .collect::<Vec<_>>()
@@ -217,7 +303,10 @@ fn kimi_glob_directory_error(turn: &TurnContext, directory: Option<&str>) -> Opt
     ))
 }
 
-fn format_kimi_grep_line(search_root: &Path, line: &str) -> String {
+fn format_kimi_grep_line(raw_search_root: Option<&str>, search_root: &Path, line: &str) -> String {
+    let Some(raw_search_root) = raw_search_root else {
+        return line.to_string();
+    };
     let Some((path, suffix)) = split_grep_path_suffix(line) else {
         return line.to_string();
     };
@@ -225,16 +314,14 @@ fn format_kimi_grep_line(search_root: &Path, line: &str) -> String {
     if !path.is_absolute() {
         return line.to_string();
     }
-    let relative = path
-        .strip_prefix(search_root)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|_| {
-            lexical_strip_prefix(path, search_root).unwrap_or_else(|| path.to_path_buf())
-        });
+    let Ok(relative) = path.strip_prefix(search_root) else {
+        return line.to_string();
+    };
+    let raw_path = Path::new(raw_search_root).join(relative);
     if suffix.is_empty() {
-        relative.display().to_string()
+        raw_path.display().to_string()
     } else {
-        format!("{}{}", relative.display(), suffix)
+        format!("{}{}", raw_path.display(), suffix)
     }
 }
 
@@ -247,53 +334,74 @@ fn split_grep_path_suffix(line: &str) -> Option<(&str, &str)> {
     Some((line, ""))
 }
 
-fn lexical_strip_prefix(path: &Path, prefix: &Path) -> Option<PathBuf> {
-    let mut path_components = path.components();
-    for prefix_component in prefix.components() {
-        if path_components.next()? != prefix_component {
-            return None;
-        }
-    }
-    Some(path_components.as_path().to_path_buf())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::format_kimi_grep_line;
-    use super::lexical_strip_prefix;
-    use std::path::Path;
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use tempfile::tempdir;
 
     #[test]
-    fn kimi_grep_formats_absolute_files_with_matches_as_relative() {
+    fn kimi_glob_includes_directories_and_sorts_like_kimi_code() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let dir = temp.path();
+        std::fs::create_dir_all(dir.join("task_file/input_data"))?;
+        std::fs::create_dir_all(dir.join("task_file/scripts"))?;
+        std::fs::write(dir.join("task_file/input_data/requests_bucket_1.jsonl"), "")?;
+        std::fs::write(dir.join("task_file/input_data/requests_bucket_2.jsonl"), "")?;
+        std::fs::write(dir.join("task_file/scripts/__init__.py"), "")?;
+        std::fs::write(dir.join("task_file/scripts/baseline_packer.py"), "")?;
+        std::fs::write(dir.join("task_file/scripts/cost_model.py"), "")?;
+
+        let relative_paths = kimi_glob_paths(dir, "task_file/**/*")?
+            .into_iter()
+            .map(|path| {
+                path.as_path()
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .display()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+
         assert_eq!(
-            format_kimi_grep_line(
-                Path::new("/tmp/workspace/docs"),
-                "/tmp/workspace/docs/source.txt"
-            ),
-            "source.txt"
+            relative_paths,
+            vec![
+                "task_file/input_data",
+                "task_file/input_data/requests_bucket_1.jsonl",
+                "task_file/input_data/requests_bucket_2.jsonl",
+                "task_file/scripts",
+                "task_file/scripts/__init__.py",
+                "task_file/scripts/baseline_packer.py",
+                "task_file/scripts/cost_model.py",
+            ]
         );
+        Ok(())
     }
 
     #[test]
-    fn kimi_grep_preserves_content_suffix_after_relative_path() {
-        assert_eq!(
-            format_kimi_grep_line(
-                Path::new("/tmp/workspace/docs"),
-                "/tmp/workspace/docs/source.txt:2:NEEDLE"
-            ),
-            "source.txt:2:NEEDLE"
-        );
-    }
+    fn kimi_glob_supports_excluding_directories() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let dir = temp.path();
+        std::fs::create_dir_all(dir.join("task_file/input_data"))?;
+        std::fs::write(dir.join("task_file/input_data/requests_bucket_1.jsonl"), "")?;
 
-    #[test]
-    fn lexical_prefix_strips_without_canonicalizing_symlinks() {
+        let mut paths = kimi_glob_paths(dir, "task_file/**/*")?;
+        paths.retain(|path| path.as_path().is_file());
+        let relative_paths = paths
+            .into_iter()
+            .map(|path| {
+                path.as_path()
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .display()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+
         assert_eq!(
-            lexical_strip_prefix(
-                Path::new("/tmp/workspace/docs/source.txt"),
-                Path::new("/tmp/workspace/docs")
-            )
-            .as_deref(),
-            Some(Path::new("source.txt"))
+            relative_paths,
+            vec!["task_file/input_data/requests_bucket_1.jsonl"]
         );
+        Ok(())
     }
 }

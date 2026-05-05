@@ -15,6 +15,7 @@ use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::BufReader;
 use tokio::process::Child;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::sandboxing::ExecOptions;
@@ -789,6 +790,7 @@ fn append_capped(dst: &mut Vec<u8>, src: &[u8], max_bytes: usize) {
     dst.extend_from_slice(&src[..take]);
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn aggregate_output(
     stdout: &StreamOutput<Vec<u8>>,
     stderr: &StreamOutput<Vec<u8>>,
@@ -1254,20 +1256,6 @@ async fn consume_output(
         ))
     })?;
 
-    let retained_bytes_cap = capture_policy.retained_bytes_cap();
-    let stdout_handle = tokio::spawn(read_output(
-        BufReader::new(stdout_reader),
-        stdout_stream.clone(),
-        /*is_stderr*/ false,
-        retained_bytes_cap,
-    ));
-    let stderr_handle = tokio::spawn(read_output(
-        BufReader::new(stderr_reader),
-        stdout_stream.clone(),
-        /*is_stderr*/ true,
-        retained_bytes_cap,
-    ));
-
     let expiration_wait = async {
         if capture_policy.uses_expiration() {
             expiration.wait().await;
@@ -1316,12 +1304,40 @@ async fn consume_output(
         }
     }
 
+    let retained_bytes_cap = capture_policy.retained_bytes_cap();
+    let (aggregate_tx, mut aggregate_rx) = mpsc::unbounded_channel();
+    let stdout_handle = tokio::spawn(read_output(
+        BufReader::new(stdout_reader),
+        stdout_stream.clone(),
+        /*is_stderr*/ false,
+        retained_bytes_cap,
+        Some(aggregate_tx.clone()),
+    ));
+    let stderr_handle = tokio::spawn(read_output(
+        BufReader::new(stderr_reader),
+        stdout_stream.clone(),
+        /*is_stderr*/ true,
+        retained_bytes_cap,
+        Some(aggregate_tx),
+    ));
+
     let mut stdout_handle = stdout_handle;
     let mut stderr_handle = stderr_handle;
 
     let stdout = await_output(&mut stdout_handle, capture_policy.io_drain_timeout()).await?;
     let stderr = await_output(&mut stderr_handle, capture_policy.io_drain_timeout()).await?;
-    let aggregated_output = aggregate_output(&stdout, &stderr, retained_bytes_cap);
+    let mut aggregated = Vec::new();
+    while let Ok(chunk) = aggregate_rx.try_recv() {
+        if let Some(max_bytes) = retained_bytes_cap {
+            append_capped(&mut aggregated, &chunk, max_bytes);
+        } else {
+            aggregated.extend_from_slice(&chunk);
+        }
+    }
+    let aggregated_output = StreamOutput {
+        text: aggregated,
+        truncated_after_lines: None,
+    };
 
     Ok(RawExecToolCallOutput {
         exit_status,
@@ -1337,6 +1353,7 @@ async fn read_output<R: AsyncRead + Unpin + Send + 'static>(
     stream: Option<StdoutStream>,
     is_stderr: bool,
     max_bytes: Option<usize>,
+    aggregate_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
 ) -> io::Result<StreamOutput<Vec<u8>>> {
     let mut buf = Vec::with_capacity(
         max_bytes.map_or(AGGREGATE_BUFFER_INITIAL_CAPACITY, |max_bytes| {
@@ -1352,10 +1369,11 @@ async fn read_output<R: AsyncRead + Unpin + Send + 'static>(
             break;
         }
 
+        let chunk = tmp[..n].to_vec();
+
         if let Some(stream) = &stream
             && emitted_deltas < MAX_EXEC_OUTPUT_DELTAS_PER_CALL
         {
-            let chunk = tmp[..n].to_vec();
             let msg = EventMsg::ExecCommandOutputDelta(ExecCommandOutputDeltaEvent {
                 call_id: stream.call_id.clone(),
                 stream: if is_stderr {
@@ -1363,7 +1381,7 @@ async fn read_output<R: AsyncRead + Unpin + Send + 'static>(
                 } else {
                     ExecOutputStream::Stdout
                 },
-                chunk,
+                chunk: chunk.clone(),
             });
             let event = Event {
                 id: stream.sub_id.clone(),
@@ -1372,6 +1390,10 @@ async fn read_output<R: AsyncRead + Unpin + Send + 'static>(
             #[allow(clippy::let_unit_value)]
             let _ = stream.tx_event.send(event).await;
             emitted_deltas += 1;
+        }
+
+        if let Some(aggregate_tx) = &aggregate_tx {
+            let _ = aggregate_tx.send(chunk);
         }
 
         if let Some(max_bytes) = max_bytes {

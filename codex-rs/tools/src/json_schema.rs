@@ -1,8 +1,10 @@
+use indexmap::IndexMap;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use serde_json::json;
-use std::collections::BTreeMap;
+
+pub type JsonSchemaProperties = IndexMap<String, JsonSchema>;
 
 /// Primitive JSON Schema type names we support in tool definitions.
 ///
@@ -42,7 +44,7 @@ pub struct JsonSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub items: Option<Box<JsonSchema>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub properties: Option<BTreeMap<String, JsonSchema>>,
+    pub properties: Option<JsonSchemaProperties>,
     #[serde(rename = "propertyNames", skip_serializing_if = "Option::is_none")]
     pub property_names: Option<Box<JsonSchema>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -127,13 +129,13 @@ impl JsonSchema {
     }
 
     pub fn object(
-        properties: BTreeMap<String, JsonSchema>,
+        properties: impl IntoIterator<Item = (String, JsonSchema)>,
         required: Option<Vec<String>>,
         additional_properties: Option<AdditionalProperties>,
     ) -> Self {
         Self {
             schema_type: Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Object)),
-            properties: Some(properties),
+            properties: Some(properties.into_iter().collect()),
             required,
             additional_properties,
             ..Default::default()

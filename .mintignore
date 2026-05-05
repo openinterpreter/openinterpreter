@@ -1,0 +1,12 @@
+codex-cli/
+codex-rs/
+patches/
+scripts/
+sdk/
+third_party/
+tools/
+.codex/
+.devcontainer/
+.github/
+.git/
+.vscode/

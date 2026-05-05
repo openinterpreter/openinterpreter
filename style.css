@@ -1,0 +1,143 @@
+html.dark body,
+html.dark #body-content,
+html.dark #navbar {
+  background-color: #000000 !important;
+}
+
+html.dark #sidebar-content {
+  background-color: #000000 !important;
+  border-color: #262626 !important;
+}
+
+html.dark #navigation-items a {
+  color: #c7c7c7 !important;
+}
+
+html.dark #navigation-items a:hover {
+  background-color: #151515 !important;
+  color: #eeeeee !important;
+}
+
+html.dark #navigation-items li[data-active="true"] > a {
+  background-color: #1f1f1f !important;
+  color: #f2f2f2 !important;
+}
+
+html.dark h1,
+html.dark h2,
+html.dark h3,
+html.dark h4,
+html.dark h5,
+html.dark h6 {
+  color: #f2f2f2 !important;
+}
+
+html.dark p,
+html.dark li,
+html.dark td,
+html.dark th {
+  color: #cfcfcf !important;
+}
+
+html.dark a[href],
+html.dark button {
+  color: #f1f3f5;
+}
+
+html.dark [href^="/docs/"] {
+  border-color: #30343b !important;
+}
+
+html.dark [href^="/docs/"]:hover {
+  background-color: #151515 !important;
+}
+
+.eyebrow {
+  display: none !important;
+}
+
+#header .space-y-2\\.5 {
+  margin-top: 0 !important;
+}
+
+#page-title {
+  font-size: 1.75rem !important;
+  line-height: 1.25 !important;
+  letter-spacing: 0 !important;
+}
+
+html body a {
+  color: inherit !important;
+}
+
+html body a:hover {
+  color: #111111 !important;
+}
+
+html.dark body a:hover {
+  color: #ffffff !important;
+}
+
+html body pre,
+html body .shiki {
+  background-color: #f6f6f6 !important;
+  border-color: #e7e7e7 !important;
+}
+
+html.dark body pre,
+html.dark body .shiki {
+  background-color: #080808 !important;
+  border-color: #2a2a2a !important;
+}
+
+html body *,
+html body *::before,
+html body *::after,
+html body button,
+html body input,
+html body textarea,
+html body select {
+  font-weight: 400 !important;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+strong,
+b,
+th,
+.font-bold,
+.font-semibold,
+.font-medium {
+  font-weight: 400 !important;
+}
+
+#navigation-items li[data-active="true"] > a {
+  font-weight: 400 !important;
+  text-shadow: none !important;
+}
+
+[href^="/docs/"] {
+  font-weight: 400 !important;
+  text-shadow: none !important;
+}
+
+/* Tabs: every tab label stays readable. The underline marks the active one. */
+html body [role="tablist"] [role="tab"],
+html body [role="tablist"] [role="tab"] *,
+html body [role="tablist"] button,
+html body [role="tablist"] button * {
+  color: #111111 !important;
+  opacity: 1 !important;
+}
+
+html.dark body [role="tablist"] [role="tab"],
+html.dark body [role="tablist"] [role="tab"] *,
+html.dark body [role="tablist"] button,
+html.dark body [role="tablist"] button * {
+  color: #f2f2f2 !important;
+  opacity: 1 !important;
+}

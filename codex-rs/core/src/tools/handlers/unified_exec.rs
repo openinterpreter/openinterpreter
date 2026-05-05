@@ -349,6 +349,7 @@ impl ToolHandler for UnifiedExecHandler {
                                 .permissions_preapproved,
                             justification,
                             prefix_rule,
+                            preserve_on_shutdown: false,
                         },
                         &context,
                     )

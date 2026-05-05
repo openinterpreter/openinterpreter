@@ -2,7 +2,6 @@ use crate::JsonSchema;
 use crate::ResponsesApiTool;
 use crate::ToolSpec;
 use serde_json::json;
-use std::collections::BTreeMap;
 
 const KIMI_CLI_ASK_USER_QUESTION_DESCRIPTION: &str = r#"Use this tool when you need to ask the user questions with structured options during execution. This allows you to:
 1. Collect user preferences or requirements before proceeding
@@ -265,7 +264,7 @@ pub fn create_kimi_cli_ask_user_question_tool() -> ToolSpec {
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
-            BTreeMap::from([("questions".to_string(), {
+            [("questions".to_string(), {
                 let mut schema = JsonSchema::array(
                     kimi_question_schema(),
                     Some("The questions to ask the user (1-4 questions).".to_string()),
@@ -273,7 +272,7 @@ pub fn create_kimi_cli_ask_user_question_tool() -> ToolSpec {
                 schema.min_items = Some(1);
                 schema.max_items = Some(4);
                 schema
-            })]),
+            })],
             Some(vec!["questions".to_string()]),
             None,
         ),
@@ -299,11 +298,7 @@ pub fn create_kimi_cli_set_todo_list_tool() -> ToolSpec {
         description: KIMI_CLI_SET_TODO_LIST_DESCRIPTION.to_string(),
         strict: false,
         defer_loading: None,
-        parameters: JsonSchema::object(
-            BTreeMap::from([("todos".to_string(), todos_schema)]),
-            None,
-            None,
-        ),
+        parameters: JsonSchema::object([("todos".to_string(), todos_schema)], None, None),
         output_schema: None,
     })
 }
@@ -315,7 +310,7 @@ pub fn create_kimi_cli_shell_tool() -> ToolSpec {
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
-            BTreeMap::from([
+            [
                 (
                     "command".to_string(),
                     JsonSchema::string(Some("The command to execute.".to_string())),
@@ -345,7 +340,7 @@ pub fn create_kimi_cli_shell_tool() -> ToolSpec {
                     schema.default_value = Some(json!(""));
                     schema
                 }),
-            ]),
+            ],
             Some(vec!["command".to_string()]),
             None,
         ),
@@ -360,7 +355,7 @@ pub fn create_kimi_cli_read_file_tool() -> ToolSpec {
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
-            BTreeMap::from([
+            [
                 (
                     "path".to_string(),
                     JsonSchema::string(Some(
@@ -390,7 +385,7 @@ pub fn create_kimi_cli_read_file_tool() -> ToolSpec {
                         schema
                     },
                 ),
-            ]),
+            ],
             Some(vec!["path".to_string()]),
             None,
         ),
@@ -405,7 +400,7 @@ pub fn create_kimi_cli_glob_tool() -> ToolSpec {
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
-            BTreeMap::from([
+            [
                 (
                     "pattern".to_string(),
                     JsonSchema::string(Some(
@@ -430,7 +425,7 @@ pub fn create_kimi_cli_glob_tool() -> ToolSpec {
                     schema.default_value = Some(json!(true));
                     schema
                 }),
-            ]),
+            ],
             Some(vec!["pattern".to_string()]),
             None,
         ),
@@ -445,7 +440,7 @@ pub fn create_kimi_cli_grep_tool() -> ToolSpec {
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
-            BTreeMap::from([
+            [
                 (
                     "pattern".to_string(),
                     JsonSchema::string(Some(
@@ -578,7 +573,7 @@ pub fn create_kimi_cli_grep_tool() -> ToolSpec {
                     schema.default_value = Some(json!(false));
                     schema
                 }),
-            ]),
+            ],
             Some(vec!["pattern".to_string()]),
             None,
         ),
@@ -593,7 +588,7 @@ pub fn create_kimi_cli_write_file_tool() -> ToolSpec {
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
-            BTreeMap::from([
+            [
                 (
                     "path".to_string(),
                     JsonSchema::string(Some(
@@ -619,7 +614,7 @@ pub fn create_kimi_cli_write_file_tool() -> ToolSpec {
                         schema
                     },
                 ),
-            ]),
+            ],
             Some(vec!["path".to_string(), "content".to_string()]),
             None,
         ),
@@ -634,7 +629,7 @@ pub fn create_kimi_cli_str_replace_file_tool() -> ToolSpec {
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
-            BTreeMap::from([
+            [
                 (
                     "path".to_string(),
                     JsonSchema::string(Some(
@@ -655,7 +650,7 @@ pub fn create_kimi_cli_str_replace_file_tool() -> ToolSpec {
                         ),
                     ),
                 ),
-            ]),
+            ],
             Some(vec!["path".to_string(), "edit".to_string()]),
             None,
         ),
@@ -672,7 +667,7 @@ pub fn create_kimi_cli_search_web_tool() -> ToolSpec {
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
-            BTreeMap::from([
+            [
                 (
                     "query".to_string(),
                     JsonSchema::string(Some("The query text to search for.".to_string())),
@@ -701,7 +696,7 @@ pub fn create_kimi_cli_search_web_tool() -> ToolSpec {
                         schema
                     },
                 ),
-            ]),
+            ],
             Some(vec!["query".to_string()]),
             None,
         ),
@@ -717,10 +712,10 @@ pub fn create_kimi_cli_fetch_url_tool() -> ToolSpec {
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
-            BTreeMap::from([(
+            [(
                 "url".to_string(),
                 JsonSchema::string(Some("The URL to fetch content from.".to_string())),
-            )]),
+            )],
             Some(vec!["url".to_string()]),
             None,
         ),
@@ -735,7 +730,7 @@ pub fn create_kimi_cli_task_list_tool() -> ToolSpec {
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
-            BTreeMap::from([
+            [
                 ("active_only".to_string(), {
                     let mut schema = JsonSchema::boolean(Some(
                         "Whether to list only non-terminal background tasks.".to_string(),
@@ -751,7 +746,7 @@ pub fn create_kimi_cli_task_list_tool() -> ToolSpec {
                     schema.maximum = Some(100);
                     schema
                 }),
-            ]),
+            ],
             None,
             None,
         ),
@@ -766,7 +761,7 @@ pub fn create_kimi_cli_task_output_tool() -> ToolSpec {
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
-            BTreeMap::from([
+            [
                 (
                     "task_id".to_string(),
                     JsonSchema::string(Some("The background task ID to inspect.".to_string())),
@@ -787,7 +782,7 @@ pub fn create_kimi_cli_task_output_tool() -> ToolSpec {
                     schema.maximum = Some(3_600);
                     schema
                 }),
-            ]),
+            ],
             Some(vec!["task_id".to_string()]),
             None,
         ),
@@ -802,7 +797,7 @@ pub fn create_kimi_cli_task_stop_tool() -> ToolSpec {
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
-            BTreeMap::from([
+            [
                 (
                     "task_id".to_string(),
                     JsonSchema::string(Some("The background task ID to stop.".to_string())),
@@ -814,7 +809,7 @@ pub fn create_kimi_cli_task_stop_tool() -> ToolSpec {
                     schema.default_value = Some(json!("Stopped by TaskStop"));
                     schema
                 }),
-            ]),
+            ],
             Some(vec!["task_id".to_string()]),
             None,
         ),
@@ -829,13 +824,13 @@ pub fn create_kimi_cli_read_media_file_tool() -> ToolSpec {
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
-            BTreeMap::from([(
+            [(
                 "path".to_string(),
                 JsonSchema::string(Some(
                     "The path to the file to read. Absolute paths are required when reading files outside the working directory."
                         .to_string(),
                 )),
-            )]),
+            )],
             Some(vec!["path".to_string()]),
             None,
         ),
@@ -850,11 +845,11 @@ pub fn create_kimi_cli_exit_plan_mode_tool() -> ToolSpec {
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
-            BTreeMap::from([("options".to_string(), {
+            [("options".to_string(), {
                 let mut options_array = JsonSchema::array(
                     {
                         let mut option = JsonSchema::object(
-                            BTreeMap::from([
+                            [
                                 (
                                     "label".to_string(),
                                     JsonSchema::string(Some(
@@ -873,7 +868,7 @@ pub fn create_kimi_cli_exit_plan_mode_tool() -> ToolSpec {
                                         schema
                                     },
                                 ),
-                            ]),
+                            ],
                             Some(vec!["label".to_string()]),
                             None,
                             );
@@ -893,7 +888,7 @@ pub fn create_kimi_cli_exit_plan_mode_tool() -> ToolSpec {
                     );
                 schema.default_value = Some(json!(null));
                 schema
-            })]),
+            })],
             None,
             None,
         ),
@@ -907,14 +902,14 @@ pub fn create_kimi_cli_enter_plan_mode_tool() -> ToolSpec {
         description: KIMI_CLI_ENTER_PLAN_MODE_DESCRIPTION.to_string(),
         strict: false,
         defer_loading: None,
-        parameters: JsonSchema::object(BTreeMap::new(), None, None),
+        parameters: JsonSchema::object([], None, None),
         output_schema: None,
     })
 }
 
 fn kimi_todo_item_schema() -> JsonSchema {
     JsonSchema::object(
-        BTreeMap::from([
+        [
             ("title".to_string(), {
                 let mut schema = JsonSchema::string(Some("The title of the todo".to_string()));
                 schema.min_length = Some(1);
@@ -927,7 +922,7 @@ fn kimi_todo_item_schema() -> JsonSchema {
                     Some("The status of the todo".to_string()),
                 ),
             ),
-        ]),
+        ],
         Some(vec!["title".to_string(), "status".to_string()]),
         None,
     )
@@ -935,7 +930,7 @@ fn kimi_todo_item_schema() -> JsonSchema {
 
 fn kimi_question_schema() -> JsonSchema {
     JsonSchema::object(
-        BTreeMap::from([
+        [
             (
                 "question".to_string(),
                 JsonSchema::string(Some(
@@ -952,7 +947,7 @@ fn kimi_question_schema() -> JsonSchema {
             ("options".to_string(), {
                 let mut schema = JsonSchema::array(
                     JsonSchema::object(
-                        BTreeMap::from([
+                        [
                             (
                                 "label".to_string(),
                                 JsonSchema::string(Some(
@@ -968,7 +963,7 @@ fn kimi_question_schema() -> JsonSchema {
                                 schema.default_value = Some(json!(""));
                                 schema
                             }),
-                        ]),
+                        ],
                         Some(vec!["label".to_string()]),
                         None,
                     ),
@@ -988,7 +983,7 @@ fn kimi_question_schema() -> JsonSchema {
                 schema.default_value = Some(json!(false));
                 schema
             }),
-        ]),
+        ],
         Some(vec!["question".to_string(), "options".to_string()]),
         None,
     )
@@ -996,7 +991,7 @@ fn kimi_question_schema() -> JsonSchema {
 
 fn kimi_edit_schema() -> JsonSchema {
     JsonSchema::object(
-        BTreeMap::from([
+        [
             (
                 "old".to_string(),
                 JsonSchema::string(Some(
@@ -1015,8 +1010,61 @@ fn kimi_edit_schema() -> JsonSchema {
                 schema.default_value = Some(json!(false));
                 schema
             }),
-        ]),
+        ],
         Some(vec!["old".to_string(), "new".to_string()]),
         None,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_kimi_cli_read_file_tool;
+    use super::create_kimi_cli_shell_tool;
+    use super::create_kimi_cli_str_replace_file_tool;
+    use super::create_kimi_cli_write_file_tool;
+    use crate::JsonSchema;
+    use crate::ToolSpec;
+
+    fn assert_property_order(schema: &JsonSchema, expected: &[&str]) {
+        let serialized = serde_json::to_string(schema).expect("serialize schema");
+        let mut last_position = 0;
+        for property in expected {
+            let needle = format!("\"{property}\":");
+            let relative_position = serialized[last_position..]
+                .find(&needle)
+                .unwrap_or_else(|| panic!("missing property {property} in {serialized}"));
+            last_position += relative_position + needle.len();
+        }
+    }
+
+    fn parameters(tool: ToolSpec) -> JsonSchema {
+        let ToolSpec::Function(tool) = tool else {
+            panic!("expected function tool");
+        };
+        tool.parameters
+    }
+
+    #[test]
+    fn kimi_shell_parameter_order_matches_kimi_code() {
+        assert_property_order(
+            &parameters(create_kimi_cli_shell_tool()),
+            &["command", "timeout", "run_in_background", "description"],
+        );
+    }
+
+    #[test]
+    fn kimi_file_tool_parameter_order_matches_kimi_code() {
+        assert_property_order(
+            &parameters(create_kimi_cli_read_file_tool()),
+            &["path", "line_offset", "n_lines"],
+        );
+        assert_property_order(
+            &parameters(create_kimi_cli_write_file_tool()),
+            &["path", "content", "mode"],
+        );
+        assert_property_order(
+            &parameters(create_kimi_cli_str_replace_file_tool()),
+            &["path", "edit"],
+        );
+    }
 }

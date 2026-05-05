@@ -23,7 +23,7 @@ def load_litellm_catalog() -> dict[str, dict]:
         return json.load(response)
 
 
-def load_overrides() -> dict[str, list[str]]:
+def load_overrides() -> dict:
     return json.loads(OVERRIDES_PATH.read_text())
 
 
@@ -64,6 +64,8 @@ def supported_parameters(metadata: dict) -> list[str]:
         params.extend(["tools", "tool_choice"])
     if supports_reasoning(metadata):
         params.append("reasoning_effort")
+    if supports_thinking_toggle(metadata):
+        params.append("thinking")
     if metadata.get("supports_web_search"):
         params.append("web_search_options")
     return params
@@ -96,6 +98,18 @@ def supports_reasoning(metadata: dict) -> bool:
         or metadata.get("supports_none_reasoning_effort")
         or metadata.get("supports_xhigh_reasoning_effort")
     )
+
+
+def supports_thinking_toggle(metadata: dict) -> bool:
+    return bool(metadata.get("supports_thinking_toggle"))
+
+
+def reasoning_control(metadata: dict) -> str:
+    if supports_thinking_toggle(metadata) and not supports_reasoning(metadata):
+        return "thinking_toggle"
+    if supports_reasoning(metadata):
+        return "effort"
+    return "none"
 
 
 def input_modalities(metadata: dict) -> list[str]:
@@ -151,6 +165,8 @@ def description(metadata: dict) -> str | None:
         tags.append("Tool calling")
     if supports_reasoning(metadata):
         tags.append("Reasoning effort")
+    if supports_thinking_toggle(metadata):
+        tags.append("Thinking toggle")
     if metadata.get("supports_web_search"):
         tags.append("Search")
     return " • ".join(tags) if tags else None
@@ -167,6 +183,8 @@ def build_entry(model_id: str, metadata: dict, force_hide_ids: set[str]) -> dict
         "visibility": visibility_name,
         "supported_parameters": supported_parameters(metadata),
         "supported_reasoning_levels": supported_reasoning_efforts(metadata),
+        "supports_thinking_toggle": supports_thinking_toggle(metadata),
+        "reasoning_control": reasoning_control(metadata),
         "supports_parallel_tool_calls": bool(
             metadata.get("supports_parallel_function_calling")
         ),
@@ -200,12 +218,15 @@ def write_catalog() -> int:
     litellm_catalog = load_litellm_catalog()
     overrides = load_overrides()
     force_hide_ids = set(overrides.get("force_hide_ids", []))
+    metadata_overrides = overrides.get("metadata_overrides", {})
     model_ids = sorted(litellm_catalog)
     aliases = unique_suffix_aliases(model_ids)
     entries = []
 
     for model_id in model_ids:
-        entry = build_entry(model_id, litellm_catalog[model_id], force_hide_ids)
+        metadata = litellm_catalog[model_id].copy()
+        metadata.update(metadata_overrides.get(model_id, {}))
+        entry = build_entry(model_id, metadata, force_hide_ids)
         entry["aliases"] = aliases[model_id]
         entries.append(entry)
 

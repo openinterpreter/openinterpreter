@@ -224,6 +224,7 @@ pub(super) fn build_startup_display_config(
         model_provider_id,
         model_provider,
         harness,
+        harness_guidance: crate::harness::guidance::DEFAULT_HARNESS_GUIDANCE_ENABLED,
         personality: personality.or(cfg.personality),
         permissions: Permissions {
             approval_policy: Constrained::allow_any(

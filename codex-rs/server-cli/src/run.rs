@@ -188,9 +188,12 @@ async fn run_tui(
             let app_server_bin = launch.app_server_bin.clone();
             let daemon_cli_overrides = daemon_cli_overrides.clone();
             async move {
-                daemon::ensure_local_app_server_url(app_server_bin, daemon_cli_overrides)
-                    .await
-                    .map_err(|err| std::io::Error::other(err.to_string()))
+                daemon::ensure_local_app_server_url_with_startup_message(
+                    app_server_bin,
+                    daemon_cli_overrides,
+                )
+                .await
+                .map_err(|err| std::io::Error::other(err.to_string()))
             }
         },
     )

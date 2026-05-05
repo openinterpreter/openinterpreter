@@ -1,0 +1,73 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "aspen",
+  "name": "Open Interpreter",
+  "description": "Documentation for Open Interpreter.",
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg"
+  },
+  "colors": {
+    "primary": "#171717",
+    "light": "#f5f5f5",
+    "dark": "#525252"
+  },
+  "appearance": {
+    "default": "light"
+  },
+  "background": {
+    "color": {
+      "light": "#ffffff",
+      "dark": "#000000"
+    }
+  },
+  "styling": {
+    "codeblocks": "dark"
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Get started",
+        "pages": [
+          "docs/getting-started",
+          "docs/install",
+          "docs/quickstart",
+          "docs/authentication"
+        ]
+      },
+      {
+        "group": "Using Open Interpreter",
+        "pages": [
+          "docs/interactive",
+          "docs/exec",
+          "docs/sessions",
+          "docs/slash_commands"
+        ]
+      },
+      {
+        "group": "Customize",
+        "pages": [
+          "docs/config",
+          "docs/providers",
+          "docs/agents_md",
+          "docs/skills",
+          "docs/mcp"
+        ]
+      },
+      {
+        "group": "Security",
+        "pages": [
+          "docs/sandbox",
+          "docs/execpolicy"
+        ]
+      },
+      {
+        "group": "Reference",
+        "pages": [
+          "docs/example-config",
+          "docs/project-license"
+        ]
+      }
+    ]
+  }
+}

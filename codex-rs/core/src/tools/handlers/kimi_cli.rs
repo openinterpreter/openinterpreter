@@ -6,7 +6,7 @@ use crate::tools::context::ToolPayload;
 use crate::tools::handlers::claude_code::effective_turn_file_system_policy;
 use crate::tools::handlers::claude_code::ensure_readable_path;
 use crate::tools::handlers::claude_code::ensure_writable_path;
-use crate::tools::handlers::parse_arguments;
+use crate::tools::handlers::parse_kimi_arguments;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 use codex_protocol::models::FunctionCallOutputContentItem;
@@ -137,12 +137,24 @@ impl ToolHandler for KimiSetTodoListHandler {
                 "SetTodoList received unsupported payload".to_string(),
             ));
         };
-        let args: KimiTodoListArgs = parse_arguments(&arguments)?;
+        let args: KimiTodoListArgs = parse_kimi_arguments(&arguments)?;
         let Some(todos) = args.todos else {
-            return Ok(FunctionToolOutput::from_text(
-                "Todo list is empty.".to_string(),
-                Some(true),
-            ));
+            let todos = session.kimi_todos().await;
+            let output = if todos.is_empty() {
+                "Todo list is empty.".to_string()
+            } else {
+                let mut lines = vec!["Current todo list:".to_string()];
+                lines.extend(todos.into_iter().map(|todo| {
+                    let status = match todo.status {
+                        StepStatus::Pending => "pending",
+                        StepStatus::InProgress => "in_progress",
+                        StepStatus::Completed => "done",
+                    };
+                    format!("- [{status}] {}", todo.step)
+                }));
+                lines.join("\n")
+            };
+            return Ok(FunctionToolOutput::from_text(output, Some(true)));
         };
         let plan = UpdatePlanArgs {
             explanation: None,
@@ -158,6 +170,7 @@ impl ToolHandler for KimiSetTodoListHandler {
                 })
                 .collect(),
         };
+        session.set_kimi_todos(plan.plan.clone()).await;
         let arguments = serde_json::to_string(&plan).map_err(|err| {
             FunctionCallError::Fatal(format!("failed to serialize SetTodoList update: {err}"))
         })?;
@@ -195,7 +208,7 @@ impl ToolHandler for KimiReadFileHandler {
                 "ReadFile received unsupported payload".to_string(),
             ));
         };
-        let args: KimiReadFileArgs = parse_arguments(&arguments)?;
+        let args: KimiReadFileArgs = parse_kimi_arguments(&arguments)?;
         let path = resolve_workspace_path(turn.as_ref(), &args.path)?;
         let file_system_policy =
             effective_turn_file_system_policy(session.as_ref(), turn.as_ref()).await;
@@ -243,12 +256,13 @@ impl ToolHandler for KimiWriteFileHandler {
                 "WriteFile received unsupported payload".to_string(),
             ));
         };
-        let args: KimiWriteFileArgs = parse_arguments(&arguments)?;
+        let args: KimiWriteFileArgs = parse_kimi_arguments(&arguments)?;
         let path = resolve_workspace_path(turn.as_ref(), &args.path)?;
         let file_system_policy =
             effective_turn_file_system_policy(session.as_ref(), turn.as_ref()).await;
         ensure_writable_path(&file_system_policy, turn.as_ref(), &path)?;
-        match args.mode.unwrap_or(KimiWriteMode::Overwrite) {
+        let mode = args.mode.unwrap_or(KimiWriteMode::Overwrite);
+        match mode {
             KimiWriteMode::Overwrite => {
                 tokio::fs::write(path.as_path(), args.content)
                     .await
@@ -277,9 +291,13 @@ impl ToolHandler for KimiWriteFileHandler {
             .await
             .map(|metadata| metadata.len())
             .unwrap_or_default();
+        let action = match mode {
+            KimiWriteMode::Overwrite => "overwritten",
+            KimiWriteMode::Append => "appended to",
+        };
         Ok(FunctionToolOutput::from_text(
             format!(
-                "<system>File successfully overwritten. Current size: {size_bytes} bytes.</system>"
+                "<system>File successfully {action}. Current size: {size_bytes} bytes.</system>"
             ),
             Some(true),
         ))
@@ -309,7 +327,7 @@ impl ToolHandler for KimiStrReplaceFileHandler {
                 "StrReplaceFile received unsupported payload".to_string(),
             ));
         };
-        let args: KimiStrReplaceFileArgs = parse_arguments(&arguments)?;
+        let args: KimiStrReplaceFileArgs = parse_kimi_arguments(&arguments)?;
         let path = resolve_workspace_path(turn.as_ref(), &args.path)?;
         let file_system_policy =
             effective_turn_file_system_policy(session.as_ref(), turn.as_ref()).await;
@@ -378,7 +396,7 @@ impl ToolHandler for KimiAskUserQuestionHandler {
         ) {
             return Err(FunctionCallError::RespondToModel(message));
         }
-        let args: KimiAskUserQuestionArgs = parse_arguments(&arguments)?;
+        let args: KimiAskUserQuestionArgs = parse_kimi_arguments(&arguments)?;
         let request = RequestUserInputArgs {
             questions: args
                 .questions
@@ -446,40 +464,94 @@ struct KimiReadOutput {
     body: String,
 }
 
+const KIMI_READ_MAX_LINES: usize = 1000;
+const KIMI_READ_MAX_LINE_LENGTH: usize = 2000;
+const KIMI_READ_MAX_BYTES: usize = 100 << 10;
+
 fn format_kimi_read_output(content: &str, line_offset: isize, n_lines: usize) -> KimiReadOutput {
-    let lines = content.lines().collect::<Vec<_>>();
-    let total = lines.len();
-    let n_lines = n_lines.max(1);
+    let all_lines = content.split_inclusive('\n').collect::<Vec<_>>();
+    let total = all_lines.len();
     let start = if line_offset < 0 {
         total.saturating_sub(line_offset.unsigned_abs())
     } else {
         usize::try_from(line_offset.saturating_sub(1)).unwrap_or(0)
     };
-    let mut numbered_lines = lines
-        .into_iter()
-        .enumerate()
-        .skip(start)
-        .take(n_lines)
-        .map(|(index, line)| format!("{:6}\t{line}", index + 1))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let lines_read = numbered_lines.lines().count();
-    if lines_read > 0 {
-        numbered_lines.push('\n');
+
+    let mut lines = Vec::new();
+    let mut n_bytes = 0usize;
+    let mut truncated_line_numbers = Vec::new();
+    let mut max_lines_reached = false;
+    let mut max_bytes_reached = false;
+    let mut collecting = true;
+    let n_lines = n_lines.max(1);
+    for (index, line) in all_lines.into_iter().enumerate().skip(start) {
+        if !collecting {
+            continue;
+        }
+        let truncated = truncate_kimi_read_line(line, KIMI_READ_MAX_LINE_LENGTH);
+        if truncated != line {
+            truncated_line_numbers.push(index + 1);
+        }
+        n_bytes += truncated.len();
+        lines.push((index + 1, truncated));
+        if lines.len() >= n_lines {
+            collecting = false;
+        } else if lines.len() >= KIMI_READ_MAX_LINES {
+            max_lines_reached = true;
+            collecting = false;
+        } else if n_bytes >= KIMI_READ_MAX_BYTES {
+            max_bytes_reached = true;
+            collecting = false;
+        }
     }
+
+    let mut numbered_lines = String::new();
+    for (line_number, line) in &lines {
+        numbered_lines.push_str(&format!("{line_number:6}\t{line}"));
+    }
+    let lines_read = lines.len();
     let start_line = start.saturating_add(1);
-    let end_of_file = start.saturating_add(lines_read) >= total;
+    let mut message = if lines_read > 0 {
+        format!("{lines_read} lines read from file starting from line {start_line}.")
+    } else {
+        "No lines read from file.".to_string()
+    };
+    message.push_str(&format!(" Total lines in file: {total}."));
+    if max_lines_reached {
+        message.push_str(&format!(" Max {KIMI_READ_MAX_LINES} lines reached."));
+    } else if max_bytes_reached {
+        message.push_str(&format!(" Max {KIMI_READ_MAX_BYTES} bytes reached."));
+    } else if lines_read < n_lines {
+        message.push_str(" End of file reached.");
+    }
+    if !truncated_line_numbers.is_empty() {
+        message.push_str(&format!(
+            " Lines {truncated_line_numbers:?} were truncated."
+        ));
+    }
+
     KimiReadOutput {
-        system_message: format!(
-            "<system>{lines_read} lines read from file starting from line {start_line}. Total lines in file: {total}. {}</system>",
-            if end_of_file {
-                "End of file reached."
-            } else {
-                "File has more lines."
-            }
-        ),
+        system_message: format!("<system>{message}</system>"),
         body: numbered_lines,
     }
+}
+
+fn truncate_kimi_read_line(line: &str, max_length: usize) -> String {
+    if line.chars().count() <= max_length {
+        return line.to_string();
+    }
+    let linebreak_start = line
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !matches!(ch, '\r' | '\n'))
+        .map_or(0, |(idx, ch)| idx + ch.len_utf8());
+    let linebreak = &line[linebreak_start..];
+    let marker = "...";
+    let suffix = format!("{marker}{linebreak}");
+    let suffix_chars = suffix.chars().count();
+    let prefix_chars = max_length.max(suffix_chars).saturating_sub(suffix_chars);
+    let prefix = line.chars().take(prefix_chars).collect::<String>();
+    format!("{prefix}{suffix}")
 }
 
 fn apply_kimi_edit(content: &str, edit: &KimiEdit) -> (String, usize) {

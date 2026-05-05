@@ -15,7 +15,9 @@ use codex_protocol::models::is_image_open_tag_text;
 use codex_protocol::models::is_local_image_close_tag_text;
 use codex_protocol::models::is_local_image_open_tag_text;
 use codex_protocol::protocol::COLLABORATION_MODE_OPEN_TAG;
+use codex_protocol::protocol::PLUGINS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::REALTIME_CONVERSATION_OPEN_TAG;
+use codex_protocol::protocol::SKILLS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::user_input::UserInput;
 use tracing::warn;
 use uuid::Uuid;
@@ -26,6 +28,8 @@ use crate::web_search::web_search_action_detail;
 
 const CONTEXTUAL_DEVELOPER_PREFIXES: &[&str] = &[
     "<permissions instructions>",
+    SKILLS_INSTRUCTIONS_OPEN_TAG,
+    PLUGINS_INSTRUCTIONS_OPEN_TAG,
     "<model_switch>",
     COLLABORATION_MODE_OPEN_TAG,
     REALTIME_CONVERSATION_OPEN_TAG,
@@ -42,7 +46,7 @@ pub(crate) fn is_contextual_user_message_content(message: &[ContentItem]) -> boo
 /// single developer message, so callers that care about invalidating a stored reference baseline
 /// should pair this with `has_non_contextual_dev_message_content`.
 pub(crate) fn is_contextual_dev_message_content(message: &[ContentItem]) -> bool {
-    message.iter().any(is_contextual_dev_fragment)
+    message.iter().any(is_contextual_dev_content_item)
 }
 
 /// Returns true when a developer message contains any fragment that is not part of the
@@ -50,10 +54,10 @@ pub(crate) fn is_contextual_dev_message_content(message: &[ContentItem]) -> bool
 pub(crate) fn has_non_contextual_dev_message_content(message: &[ContentItem]) -> bool {
     message
         .iter()
-        .any(|content_item| !is_contextual_dev_fragment(content_item))
+        .any(|content_item| !is_contextual_dev_content_item(content_item))
 }
 
-fn is_contextual_dev_fragment(content_item: &ContentItem) -> bool {
+pub(crate) fn is_contextual_dev_content_item(content_item: &ContentItem) -> bool {
     let ContentItem::InputText { text } = content_item else {
         return false;
     };

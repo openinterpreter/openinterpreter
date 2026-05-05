@@ -1835,6 +1835,7 @@ async fn websocket_harness_with_provider_options(
         runtime_metrics_enabled,
         /*beta_features_header*/ None,
         Harness::Native,
+        /*harness_guidance*/ true,
     );
 
     WebsocketTestHarness {

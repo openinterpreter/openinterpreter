@@ -227,12 +227,12 @@ fn subagent_header(source: &Option<codex_protocol::protocol::SessionSource>) -> 
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use codex_api::Compression;
     use codex_api::ResponsesApiRequest;
+    use codex_api::ResponsesOptions;
     use codex_api::common::OpenAiVerbosity;
     use codex_api::common::TextControls;
-    use codex_api::endpoint::responses::ResponsesOptions;
     use codex_api::provider::RetryConfig;
-    use codex_api::requests::responses::Compression;
     use codex_client::Response;
     use codex_protocol::ThreadId;
     use codex_protocol::models::ContentItem;
@@ -272,12 +272,15 @@ mod tests {
     struct StaticAuth;
 
     impl AuthProvider for StaticAuth {
-        fn bearer_token(&self) -> Option<String> {
-            Some("test-token".to_string())
-        }
-
-        fn account_id(&self) -> Option<String> {
-            Some("acct_123".to_string())
+        fn add_auth_headers(&self, headers: &mut HeaderMap) {
+            headers.insert(
+                http::header::AUTHORIZATION,
+                "Bearer test-token".parse().expect("valid header value"),
+            );
+            headers.insert(
+                "ChatGPT-Account-ID",
+                "acct_123".parse().expect("valid header value"),
+            );
         }
     }
 
@@ -323,6 +326,7 @@ mod tests {
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
+            client_metadata: None,
             text: Some(TextControls {
                 verbosity: Some(OpenAiVerbosity::Low),
                 format: None,

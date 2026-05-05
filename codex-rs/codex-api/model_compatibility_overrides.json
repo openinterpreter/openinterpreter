@@ -3,5 +3,13 @@
     "bedrock_mantle/openai.gpt-oss-safeguard-120b",
     "bedrock_mantle/openai.gpt-oss-safeguard-20b",
     "groq/openai/gpt-oss-safeguard-20b"
-  ]
+  ],
+  "metadata_overrides": {
+    "moonshotai.kimi-k2.5": {
+      "supports_reasoning": true,
+      "supports_none_reasoning_effort": true,
+      "supports_thinking_toggle": true,
+      "supports_parallel_function_calling": true
+    }
+  }
 }

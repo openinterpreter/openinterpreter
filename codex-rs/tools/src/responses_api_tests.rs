@@ -141,7 +141,7 @@ fn loadable_tool_spec_namespace_serializes_with_deferred_child_tools() {
             strict: false,
             defer_loading: Some(true),
             parameters: JsonSchema::object(
-                Default::default(),
+                [],
                 /*required*/ None,
                 /*additional_properties*/ None,
             ),

@@ -52,6 +52,7 @@ export type { RealtimeConversationVersion } from "./RealtimeConversationVersion"
 export type { RealtimeOutputModality } from "./RealtimeOutputModality";
 export type { RealtimeVoice } from "./RealtimeVoice";
 export type { RealtimeVoicesList } from "./RealtimeVoicesList";
+export type { ReasoningControl } from "./ReasoningControl";
 export type { ReasoningEffort } from "./ReasoningEffort";
 export type { ReasoningItemContent } from "./ReasoningItemContent";
 export type { ReasoningItemReasoningSummary } from "./ReasoningItemReasoningSummary";

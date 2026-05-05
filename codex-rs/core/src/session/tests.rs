@@ -350,6 +350,7 @@ fn test_model_client_session() -> crate::client::ModelClientSession {
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
         Harness::Native,
+        /*harness_guidance*/ true,
     )
     .new_session()
 }
@@ -2534,6 +2535,26 @@ async fn make_turn_context_preserves_configured_harness_in_tools_config() {
 }
 
 #[tokio::test]
+async fn make_turn_context_uses_context_window_truncation_for_kimi_harness() {
+    let (_session, turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |config| {
+            config.harness = Some("kimi-cli".to_string());
+        },
+    )
+    .await;
+
+    assert_eq!(turn_context.tools_config.harness, Harness::KimiCli);
+    assert_eq!(
+        turn_context.truncation_policy,
+        codex_protocol::protocol::TruncationPolicy::Tokens(
+            usize::try_from(turn_context.model_context_window().unwrap()).unwrap()
+        )
+    );
+}
+
+#[tokio::test]
 async fn turn_context_with_model_preserves_configured_harness_in_tools_config() {
     let (session, mut turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::from_api_key("Test API Key"),
@@ -3367,6 +3388,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             config.features.enabled(Feature::RuntimeMetrics),
             Session::build_model_client_beta_features_header(config.as_ref()),
             Harness::Native,
+            /*harness_guidance*/ true,
         ),
         code_mode_service: crate::tools::code_mode::CodeModeService::new(),
         environment_manager: Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
@@ -4731,6 +4753,7 @@ where
             config.features.enabled(Feature::RuntimeMetrics),
             Session::build_model_client_beta_features_header(config.as_ref()),
             Harness::Native,
+            /*harness_guidance*/ true,
         ),
         code_mode_service: crate::tools::code_mode::CodeModeService::new(),
         environment_manager: Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),

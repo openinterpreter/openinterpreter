@@ -27,7 +27,11 @@ pub async fn run_exec_subcommand(
     let remote = if let Some(remote) = launch.remote.as_deref() {
         codex_tui::normalize_remote_addr(remote).map_err(|err| anyhow::anyhow!(err.to_string()))?
     } else {
-        daemon::ensure_local_app_server_url(launch.app_server_bin, daemon_cli_overrides).await?
+        daemon::ensure_local_app_server_url_with_startup_message(
+            launch.app_server_bin,
+            daemon_cli_overrides,
+        )
+        .await?
     };
 
     let exec_binary = resolve_exec_binary(arg0_paths)?;

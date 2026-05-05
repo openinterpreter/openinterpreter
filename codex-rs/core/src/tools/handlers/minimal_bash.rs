@@ -156,7 +156,7 @@ impl ToolHandler for MinimalBashHandler {
             cwd: exec_params.cwd.clone(),
             timeout_ms,
             env: exec_params.env.clone(),
-            explicit_env_overrides: HashMap::new(),
+            explicit_env_overrides: turn.shell_environment_policy.r#set.clone(),
             network: exec_params.network.clone(),
             sandbox_permissions: effective_permissions.sandbox_permissions,
             additional_permissions: None,
@@ -275,7 +275,7 @@ fn strip_cwd_sentinel_and_update(
     let Some((cleaned, cwd)) = split_cwd_sentinel(&output.aggregated_output.text) else {
         return output;
     };
-    output.aggregated_output.text = cleaned.clone();
+    output.aggregated_output.text = cleaned;
     output.stdout.text = strip_cwd_sentinel_from_stream(&output.stdout.text);
     output.stderr.text = strip_cwd_sentinel_from_stream(&output.stderr.text);
     set_persistent_cwd(conversation_key, PathBuf::from(cwd));

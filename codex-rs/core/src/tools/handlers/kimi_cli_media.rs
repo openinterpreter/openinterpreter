@@ -2,7 +2,7 @@ use crate::function_tool::FunctionCallError;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
-use crate::tools::handlers::parse_arguments;
+use crate::tools::handlers::parse_kimi_arguments;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 use base64::Engine;
@@ -46,7 +46,7 @@ impl ToolHandler for KimiReadMediaFileHandler {
             ));
         };
 
-        let args: KimiReadMediaFileArgs = parse_arguments(&arguments)?;
+        let args: KimiReadMediaFileArgs = parse_kimi_arguments(&arguments)?;
         let Some(environment) = turn.environment.as_ref() else {
             return Err(FunctionCallError::RespondToModel(
                 "ReadMediaFile is unavailable in this session".to_string(),
@@ -89,16 +89,35 @@ impl ToolHandler for KimiReadMediaFileHandler {
                 path.display()
             ))
         })?;
+        let byte_len = bytes.len();
+        let dimensions = image::load_from_memory(&bytes)
+            .map(|image| (image.width(), image.height()))
+            .map_err(|error| {
+                FunctionCallError::RespondToModel(format!(
+                    "unable to decode image at `{}`: {error}",
+                    path.display()
+                ))
+            })?;
         let image_url = format!("data:{mime};base64,{}", BASE64_STANDARD.encode(bytes));
+        let display_path = path.display();
 
         Ok(FunctionToolOutput::from_content(
             vec![
                 FunctionCallOutputContentItem::InputText {
-                    text: format!("<system>Loaded media file `{}`.</system>", path.display()),
+                    text: format!(
+                        "<system>Loaded image file `{display_path}` ({mime}, {byte_len} bytes, original size {}x{}px). If you need to output coordinates, output relative coordinates first and compute absolute coordinates using the original image size; if you generate or edit images/videos via commands or scripts, read the result back immediately before continuing.</system>",
+                        dimensions.0, dimensions.1
+                    ),
+                },
+                FunctionCallOutputContentItem::InputText {
+                    text: format!("<image path=\"{display_path}\">"),
                 },
                 FunctionCallOutputContentItem::InputImage {
                     image_url,
                     detail: Some(DEFAULT_IMAGE_DETAIL),
+                },
+                FunctionCallOutputContentItem::InputText {
+                    text: "</image>".to_string(),
                 },
             ],
             Some(true),
@@ -110,7 +129,7 @@ fn mime_from_path(path: &std::path::Path) -> Option<&'static str> {
     match path
         .extension()
         .and_then(|extension| extension.to_str())
-        .map(|extension| extension.to_ascii_lowercase())
+        .map(str::to_ascii_lowercase)
         .as_deref()
     {
         Some("png") => Some("image/png"),

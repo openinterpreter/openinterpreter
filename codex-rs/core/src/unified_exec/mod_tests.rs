@@ -101,6 +101,7 @@ async fn exec_command_with_tty(
                 tty,
                 Box::new(NoopSpawnLifecycle),
                 turn.environment.as_ref().expect("turn environment"),
+                /*preserve_on_shutdown*/ false,
             )
             .await?,
     );
@@ -118,6 +119,7 @@ async fn exec_command_with_tty(
             network_approval_id: None,
             session: Arc::downgrade(session),
             last_used: started_at,
+            preserve_on_shutdown: false,
         };
         manager
             .process_store
@@ -516,6 +518,7 @@ async fn completed_pipe_commands_preserve_exit_code() -> anyhow::Result<()> {
             /*tty*/ false,
             Box::new(NoopSpawnLifecycle),
             &environment,
+            /*preserve_on_shutdown*/ false,
         )
         .await?;
 
@@ -531,6 +534,71 @@ async fn completed_pipe_commands_preserve_exit_code() -> anyhow::Result<()> {
 
     assert!(process.has_exited());
     assert_eq!(process.exit_code(), Some(17));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminate_all_processes_detaches_preserved_pipe_command() -> anyhow::Result<()> {
+    skip_if_sandbox!(Ok(()));
+    let (session, turn) = test_session_and_turn().await;
+    let manager = &session.services.unified_exec_manager;
+    let process_id = manager.allocate_process_id().await;
+    let temp_dir =
+        std::env::temp_dir().join(format!("oi-preserved-process-test-{}", std::process::id()));
+    std::fs::create_dir_all(&temp_dir)?;
+    let pid_file = temp_dir.join("pid");
+    let command_text = format!("echo $$ > {}; sleep 60", pid_file.display());
+    let request = ExecCommandRequest {
+        command: vec!["bash".to_string(), "-lc".to_string(), command_text.clone()],
+        hook_command: command_text,
+        process_id,
+        yield_time_ms: MIN_YIELD_TIME_MS,
+        max_output_tokens: None,
+        workdir: Some(turn.cwd.clone()),
+        network: None,
+        tty: false,
+        sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
+        additional_permissions: None,
+        additional_permissions_preapproved: false,
+        justification: None,
+        prefix_rule: None,
+        preserve_on_shutdown: true,
+    };
+    let output = manager
+        .exec_command(
+            request,
+            &UnifiedExecContext::new(session.clone(), turn, "call".to_string()),
+        )
+        .await?;
+
+    assert_eq!(output.process_id, Some(process_id));
+    let mut child_pid = None;
+    for _ in 0..20 {
+        if let Ok(pid_text) = std::fs::read_to_string(&pid_file) {
+            child_pid = Some(pid_text.trim().parse::<i32>()?);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let child_pid = child_pid.expect("background process should write its pid");
+
+    manager.terminate_all_processes().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(child_pid.to_string())
+            .status()?
+            .success(),
+        "preserved process should still be alive after manager shutdown"
+    );
+
+    let _ = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(format!("-{child_pid}"))
+        .status();
+    let _ = std::fs::remove_dir_all(temp_dir);
     Ok(())
 }
 
@@ -558,6 +626,7 @@ async fn unified_exec_uses_remote_exec_server_when_configured() -> anyhow::Resul
             /*tty*/ true,
             Box::new(NoopSpawnLifecycle),
             remote_test_env.environment(),
+            /*preserve_on_shutdown*/ false,
         )
         .await?;
 
@@ -614,6 +683,7 @@ async fn remote_exec_server_rejects_inherited_fd_launches() -> anyhow::Result<()
                 inherited_fds: vec![42],
             }),
             turn.environment.as_ref().expect("turn environment"),
+            /*preserve_on_shutdown*/ false,
         )
         .await
         .expect_err("expected inherited fd rejection");

@@ -578,6 +578,10 @@
           "description": "Optional harness family to emulate for this profile, such as `claude-code`.",
           "type": "string"
         },
+        "harness_guidance": {
+          "description": "Whether to include Open Interpreter guidance for the selected harness.",
+          "type": "boolean"
+        },
         "include_apply_patch_tool": {
           "type": "boolean"
         },
@@ -2476,7 +2480,7 @@
       "type": "string"
     },
     "check_for_update_on_startup": {
-      "description": "When `true`, checks for Codex updates on startup and surfaces update prompts. Set to `false` only if your Codex updates are centrally managed. Defaults to `true`.",
+      "description": "When `true`, checks for Open Interpreter updates on startup and stages standalone installer updates in the background. Set to `false` to disable automatic updates. Defaults to `true`.",
       "type": "boolean"
     },
     "cli_auth_credentials_store": {
@@ -2829,6 +2833,10 @@
     "harness": {
       "description": "Optional default harness family to emulate, such as `claude-code`.",
       "type": "string"
+    },
+    "harness_guidance": {
+      "description": "Whether to include Open Interpreter guidance for the selected harness.",
+      "type": "boolean"
     },
     "hide_agent_reasoning": {
       "description": "When set to `true`, `AgentReasoning` events will be hidden from the UI/output. Defaults to `false`.",

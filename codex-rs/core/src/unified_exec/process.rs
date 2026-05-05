@@ -85,6 +85,7 @@ pub(crate) struct UnifiedExecProcess {
     output_task: Option<JoinHandle<()>>,
     sandbox_type: SandboxType,
     _spawn_lifecycle: Option<SpawnLifecycleHandle>,
+    detached_on_drop: AtomicBool,
 }
 
 impl std::fmt::Debug for UnifiedExecProcess {
@@ -126,6 +127,7 @@ impl UnifiedExecProcess {
             output_task: None,
             sandbox_type,
             _spawn_lifecycle: spawn_lifecycle,
+            detached_on_drop: AtomicBool::new(false),
         }
     }
 
@@ -195,6 +197,9 @@ impl UnifiedExecProcess {
     }
 
     pub(super) fn terminate(&self) {
+        if self.detached_on_drop.load(Ordering::Acquire) {
+            return;
+        }
         self.output_closed.store(true, Ordering::Release);
         self.output_closed_notify.notify_waiters();
         match &self.process_handle {
@@ -210,6 +215,17 @@ impl UnifiedExecProcess {
         if let Some(output_task) = &self.output_task {
             output_task.abort();
         }
+    }
+
+    pub(super) fn detach_on_drop(&self) {
+        self.detached_on_drop.store(true, Ordering::Release);
+        self.output_closed.store(true, Ordering::Release);
+        self.output_closed_notify.notify_waiters();
+        match &self.process_handle {
+            ProcessHandle::Local(process_handle) => process_handle.detach(),
+            ProcessHandle::ExecServer(_) => {}
+        }
+        self.cancellation_token.cancel();
     }
 
     async fn snapshot_output(&self) -> Vec<Vec<u8>> {

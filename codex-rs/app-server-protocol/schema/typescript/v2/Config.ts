@@ -16,7 +16,7 @@ import type { SandboxMode } from "./SandboxMode";
 import type { SandboxWorkspaceWrite } from "./SandboxWorkspaceWrite";
 import type { ToolsV2 } from "./ToolsV2";
 
-export type Config = {model: string | null, review_model: string | null, model_context_window: bigint | null, model_auto_compact_token_limit: bigint | null, model_provider: string | null, harness: string | null, approval_policy: AskForApproval | null, /**
+export type Config = {model: string | null, review_model: string | null, model_context_window: bigint | null, model_auto_compact_token_limit: bigint | null, model_provider: string | null, harness: string | null, harness_guidance: boolean | null, approval_policy: AskForApproval | null, /**
  * [UNSTABLE] Optional default for where approval requests are routed for
  * review.
  */

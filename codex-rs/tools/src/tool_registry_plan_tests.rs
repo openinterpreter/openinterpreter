@@ -6,6 +6,7 @@ use crate::DiscoverableTool;
 use crate::FreeformTool;
 use crate::JsonSchema;
 use crate::JsonSchemaPrimitiveType;
+use crate::JsonSchemaProperties;
 use crate::JsonSchemaType;
 use crate::ResponsesApiNamespaceTool;
 use crate::ResponsesApiTool;
@@ -1023,6 +1024,112 @@ fn test_parallel_support_flags() {
 
     assert!(find_tool(&tools, "exec_command").supports_parallel_tool_calls);
     assert!(!find_tool(&tools, "write_stdin").supports_parallel_tool_calls);
+}
+
+#[test]
+fn kimi_cli_tools_support_parallel_runtime_execution() {
+    let model_info = model_info();
+    let features = Features::with_defaults();
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    })
+    .with_harness(Some("kimi-cli"));
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*deferred_mcp_tools*/ None,
+        &[],
+    );
+
+    assert_contains_tool_names(&tools, &["Shell", "ReadFile", "WriteFile", "Agent"]);
+    for tool in tools {
+        assert!(
+            tool.supports_parallel_tool_calls,
+            "Kimi CLI runs same-response tool calls concurrently; {} was serialized",
+            tool.name()
+        );
+    }
+}
+
+#[test]
+fn kimi_cli_root_tool_names_match_official_active_tool_list() {
+    let model_info = model_info();
+    let features = Features::with_defaults();
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    })
+    .with_harness(Some("kimi-cli"));
+    let (tools, handlers) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*deferred_mcp_tools*/ None,
+        &[],
+    );
+
+    let actual = tools.iter().map(|tool| tool.name()).collect::<Vec<_>>();
+    let expected = vec![
+        "Agent",
+        "AskUserQuestion",
+        "SetTodoList",
+        "Shell",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
+        "ReadFile",
+        "ReadMediaFile",
+        "Glob",
+        "Grep",
+        "WriteFile",
+        "StrReplaceFile",
+        "SearchWeb",
+        "FetchURL",
+        "ExitPlanMode",
+        "EnterPlanMode",
+    ];
+    assert_eq!(actual, expected);
+    for (tool, kind) in [
+        ("Agent", ToolHandlerKind::KimiAgent),
+        ("AskUserQuestion", ToolHandlerKind::KimiAskUserQuestion),
+        ("SetTodoList", ToolHandlerKind::KimiSetTodoList),
+        ("Shell", ToolHandlerKind::KimiShell),
+        ("TaskList", ToolHandlerKind::KimiTaskList),
+        ("TaskOutput", ToolHandlerKind::KimiTaskOutput),
+        ("TaskStop", ToolHandlerKind::KimiTaskStop),
+        ("ReadFile", ToolHandlerKind::KimiReadFile),
+        ("ReadMediaFile", ToolHandlerKind::KimiReadMediaFile),
+        ("Glob", ToolHandlerKind::KimiGlob),
+        ("Grep", ToolHandlerKind::KimiGrep),
+        ("WriteFile", ToolHandlerKind::KimiWriteFile),
+        ("StrReplaceFile", ToolHandlerKind::KimiStrReplaceFile),
+        ("SearchWeb", ToolHandlerKind::KimiSearchWeb),
+        ("FetchURL", ToolHandlerKind::KimiFetchUrl),
+        ("ExitPlanMode", ToolHandlerKind::KimiExitPlanMode),
+        ("EnterPlanMode", ToolHandlerKind::KimiEnterPlanMode),
+    ] {
+        assert!(
+            handlers.contains(&ToolHandlerSpec {
+                name: ToolName::plain(tool),
+                kind,
+            }),
+            "missing handler for Kimi CLI tool {tool}"
+        );
+    }
 }
 
 #[test]
@@ -2243,9 +2350,7 @@ fn namespace_function_names(tools: &[ConfiguredToolSpec], expected_namespace: &s
         .collect()
 }
 
-fn expect_object_schema(
-    schema: &JsonSchema,
-) -> (&BTreeMap<String, JsonSchema>, Option<&Vec<String>>) {
+fn expect_object_schema(schema: &JsonSchema) -> (&JsonSchemaProperties, Option<&Vec<String>>) {
     assert_eq!(
         schema.schema_type,
         Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Object))

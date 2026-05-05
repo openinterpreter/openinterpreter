@@ -5,6 +5,8 @@ use codex_arg0::arg0_dispatch_or_else_current_thread;
 use codex_tui::AppExitInfo;
 use codex_tui::ExitReason;
 use codex_utils_cli::CliConfigOverrides;
+use std::io::IsTerminal;
+use std::io::Write;
 
 #[path = "../../server-cli/src/cli_common.rs"]
 mod cli_common;
@@ -108,6 +110,7 @@ async fn run_root_tui(
             anyhow::bail!("`--remote-auth-token-env` requires `--remote`.");
         }
         let daemon_cli_overrides = daemon_startup_overrides(&interactive.config_overrides);
+        print_root_tui_startup_message();
         record_startup_trace_event("interpreter.tui.delegate.enter");
         codex_tui::run_main_with_deferred_remote(
             interactive,
@@ -132,6 +135,15 @@ async fn run_root_tui(
         .await?
     };
     handle_app_exit(exit_info)
+}
+
+fn print_root_tui_startup_message() {
+    if std::io::stderr().is_terminal()
+        && std::env::var_os("OPEN_INTERPRETER_STARTUP_MESSAGE_SHOWN").is_none()
+    {
+        eprint!("\rStarting Open Interpreter daemon. This only happens once...");
+        let _ = std::io::stderr().flush();
+    }
 }
 
 fn handle_app_exit(exit_info: AppExitInfo) -> anyhow::Result<()> {

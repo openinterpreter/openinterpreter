@@ -17,6 +17,7 @@ pub use cli::Command;
 pub use cli::ReviewArgs;
 use codex_app_server_client::AppServerClient;
 use codex_app_server_client::AppServerEvent;
+use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY;
 use codex_app_server_client::EnvironmentManager;
 use codex_app_server_client::EnvironmentManagerArgs;
@@ -52,6 +53,8 @@ use codex_app_server_protocol::TurnInterruptResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStartedNotification;
+use codex_app_server_protocol::TurnSteerParams;
+use codex_app_server_protocol::TurnSteerResponse;
 use codex_arg0::Arg0DispatchPaths;
 use codex_cloud_requirements::cloud_requirements_loader_for_storage;
 use codex_core::check_execpolicy_for_warnings;
@@ -138,6 +141,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use supports_color::Stream;
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 use tracing::Instrument;
 use tracing::error;
 use tracing::field;
@@ -208,6 +212,9 @@ struct ExecRunArgs {
     remote_auth_token_env: Option<String>,
     skip_git_repo_check: bool,
     stderr_with_ansi: bool,
+    timeout_seconds: Option<u64>,
+    verify_completion: bool,
+    verify_iterations: u64,
 }
 
 fn exec_root_span() -> tracing::Span {
@@ -235,6 +242,9 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         last_message_file,
         json: json_mode,
         prompt,
+        timeout_seconds,
+        verify_completion,
+        verify_iterations,
         output_schema: output_schema_path,
         config_overrides,
         remote,
@@ -533,6 +543,9 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         remote_auth_token_env,
         skip_git_repo_check,
         stderr_with_ansi,
+        timeout_seconds,
+        verify_completion,
+        verify_iterations,
     })
     .instrument(exec_span)
     .await
@@ -556,7 +569,16 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         remote_auth_token_env,
         skip_git_repo_check,
         stderr_with_ansi,
+        timeout_seconds,
+        verify_completion,
+        verify_iterations,
     } = args;
+
+    if verify_completion && output_schema_path.is_some() {
+        return Err(anyhow::anyhow!(
+            "--verify cannot be combined with --output-schema because the verification turn expects a plain-text CONFIRM response"
+        ));
+    }
 
     let mut event_processor: Box<dyn EventProcessor> = match json_mode {
         true => Box::new(EventProcessorWithJsonOutput::new(last_message_file.clone())),
@@ -588,7 +610,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     let default_sandbox_policy = config.permissions.sandbox_policy.get();
     let default_effort = config.model_reasoning_effort;
 
-    let (initial_operation, prompt_summary) = match (command.as_ref(), prompt, images) {
+    let (mut initial_operation, prompt_summary) = match (command.as_ref(), prompt, images) {
         (Some(ExecCommand::Review(review_cli)), _, _) => {
             let review_request = build_review_request(review_cli)?;
             let summary = codex_core::review_prompts::user_facing_hint(&review_request.target);
@@ -647,6 +669,9 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             )
         }
     };
+    if verify_completion && let InitialOperation::UserTurn { items, .. } = &mut initial_operation {
+        append_text_input(items, completion_verification_initial_instruction());
+    }
 
     // When --yolo (dangerously_bypass_approvals_and_sandbox) is set, also skip the git repo check
     // since the user is explicitly running in an externally sandboxed environment.
@@ -740,11 +765,13 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         }
     });
 
-    let task_id = match initial_operation {
+    let mut timeout_steer_thread_id: Option<String> = None;
+    let mut task_id = match initial_operation {
         InitialOperation::UserTurn {
             items,
             output_schema,
         } => {
+            timeout_steer_thread_id = Some(primary_thread_id_for_span.clone());
             let permission_profile = permission_profile_override_from_config(&config);
             let sandbox_policy = permission_profile
                 .is_none()
@@ -758,7 +785,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         input: items.into_iter().map(Into::into).collect(),
                         responsesapi_client_metadata: None,
                         environments: None,
-                        cwd: Some(default_cwd),
+                        cwd: Some(default_cwd.clone()),
                         approval_policy: Some(default_approval_policy.into()),
                         approvals_reviewer: None,
                         sandbox_policy,
@@ -807,6 +834,22 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         }
     };
     exec_span.record("turn.id", task_id.as_str());
+    let mut timeout_steer_cancel =
+        timeout_seconds
+            .zip(timeout_steer_thread_id)
+            .map(|(timeout_seconds, thread_id)| {
+                spawn_timeout_steers(
+                    client.request_handle(),
+                    thread_id,
+                    task_id.clone(),
+                    timeout_seconds,
+                )
+            });
+    let mut remaining_verification_turns = if verify_completion {
+        verify_iterations
+    } else {
+        0
+    };
 
     // Run the loop until the task is complete.
     // Track whether a fatal error was reported by the server so we can
@@ -882,6 +925,72 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     &primary_thread_id_for_requests,
                     &task_id,
                 ) {
+                    if let ServerNotification::TurnCompleted(payload) = &notification
+                        && payload.thread_id == primary_thread_id_for_requests
+                        && payload.turn.id == task_id
+                        && payload.turn.status == codex_app_server_protocol::TurnStatus::Completed
+                        && remaining_verification_turns > 0
+                    {
+                        let final_message = final_message_from_turn_items(&payload.turn.items);
+                        if !completion_verification_confirmed(final_message.as_deref()) {
+                            remaining_verification_turns -= 1;
+                            if let Some(cancel) = timeout_steer_cancel.take() {
+                                let _ = cancel.send(true);
+                            }
+                            let response: TurnStartResponse =
+                                send_request_with_response(
+                                    &client,
+                                    ClientRequest::TurnStart {
+                                        request_id: request_ids.next(),
+                                        params: TurnStartParams {
+                                            thread_id: primary_thread_id_for_requests.clone(),
+                                            input: vec![
+                                                UserInput::Text {
+                                                    text: completion_verification_prompt(
+                                                        &prompt_summary,
+                                                    ),
+                                                    text_elements: Vec::new(),
+                                                }
+                                                .into(),
+                                            ],
+                                            responsesapi_client_metadata: None,
+                                            environments: None,
+                                            cwd: Some(default_cwd.clone()),
+                                            approval_policy: Some(default_approval_policy.into()),
+                                            approvals_reviewer: None,
+                                            sandbox_policy:
+                                                permission_profile_override_from_config(&config)
+                                                    .is_none()
+                                                    .then(|| default_sandbox_policy.clone().into()),
+                                            permission_profile:
+                                                permission_profile_override_from_config(&config),
+                                            model: None,
+                                            service_tier: None,
+                                            effort: default_effort,
+                                            summary: None,
+                                            personality: None,
+                                            output_schema: None,
+                                            collaboration_mode: None,
+                                        },
+                                    },
+                                    "turn/start",
+                                )
+                                .await
+                                .map_err(anyhow::Error::msg)?;
+                            task_id = response.turn.id;
+                            exec_span.record("turn.id", task_id.as_str());
+                            if let Some(timeout_seconds) = timeout_seconds {
+                                timeout_steer_cancel = Some(spawn_timeout_steers(
+                                    client.request_handle(),
+                                    primary_thread_id_for_requests.clone(),
+                                    task_id.clone(),
+                                    timeout_seconds,
+                                ));
+                            }
+                            info!("Sent completion verification turn with event ID: {task_id}");
+                            continue;
+                        }
+                    }
                     match event_processor.process_server_notification(notification) {
                         CodexStatus::Running => {}
                         CodexStatus::InitiateShutdown => {
@@ -912,6 +1021,10 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         }
     }
 
+    if let Some(cancel) = timeout_steer_cancel {
+        let _ = cancel.send(true);
+    }
+
     if let Err(err) = client.shutdown().await {
         warn!("in-process app-server shutdown failed: {err}");
     }
@@ -921,6 +1034,149 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn spawn_timeout_steers(
+    request_handle: AppServerRequestHandle,
+    thread_id: String,
+    turn_id: String,
+    timeout_seconds: u64,
+) -> watch::Sender<bool> {
+    let (cancel_tx, mut cancel_rx) = watch::channel(false);
+    tokio::spawn(async move {
+        let mut previous_elapsed_seconds = 0;
+        for percent in [75_u64, 90_u64] {
+            let elapsed_seconds = timeout_seconds.saturating_mul(percent) / 100;
+            let sleep_duration = std::time::Duration::from_secs(
+                elapsed_seconds.saturating_sub(previous_elapsed_seconds),
+            );
+            tokio::select! {
+                _ = tokio::time::sleep(sleep_duration) => {}
+                changed = cancel_rx.changed() => {
+                    if changed.is_err() || *cancel_rx.borrow() {
+                        return;
+                    }
+                    continue;
+                }
+            }
+
+            previous_elapsed_seconds = elapsed_seconds;
+            if *cancel_rx.borrow() {
+                return;
+            }
+
+            let message = timeout_steer_message(percent, timeout_seconds, elapsed_seconds);
+            let request_id =
+                RequestId::String(format!("timeout-steer-{percent}-{}", Uuid::new_v4()));
+            let result = request_handle
+                .request_typed::<TurnSteerResponse>(ClientRequest::TurnSteer {
+                    request_id,
+                    params: TurnSteerParams {
+                        thread_id: thread_id.clone(),
+                        input: vec![
+                            UserInput::Text {
+                                text: message,
+                                text_elements: Vec::new(),
+                            }
+                            .into(),
+                        ],
+                        responsesapi_client_metadata: None,
+                        expected_turn_id: turn_id.clone(),
+                    },
+                })
+                .await;
+            if let Err(err) = result {
+                warn!("timeout steer at {percent}% failed: {err}");
+            }
+        }
+    });
+    cancel_tx
+}
+
+fn append_text_input(items: &mut Vec<UserInput>, additional_text: String) {
+    match items.last_mut() {
+        Some(UserInput::Text { text, .. }) => {
+            text.push_str("\n\n");
+            text.push_str(&additional_text);
+        }
+        Some(
+            UserInput::Image { .. }
+            | UserInput::LocalImage { .. }
+            | UserInput::Skill { .. }
+            | UserInput::Mention { .. },
+        )
+        | Some(_)
+        | None => {
+            items.push(UserInput::Text {
+                text: additional_text,
+                text_elements: Vec::new(),
+            });
+        }
+    }
+}
+
+fn completion_verification_initial_instruction() -> String {
+    "Before starting substantive work, call the SetTodoList tool to break down the concrete requirements and completion checks for this request. Use the available file-editing and shell tools directly for workspace changes. Before your final answer, audit every explicit constraint from the request, including required files, exact commands, output formats, size limits, allowed edits, cleanup requirements, and verification commands. Verify the requested artifacts or behavior directly; if something is incomplete, keep working. Clean up any long-running or background processes you started during investigation or verification before finalizing.".to_string()
+}
+
+fn completion_verification_prompt(original_request: &str) -> String {
+    format!(
+        "Verify completion of the original request below.\n\nOriginal request:\n{original_request}\n\nFirst, call the SetTodoList tool and list every concrete requirement, artifact, explicit constraint, and verification check implied by the original request. Include required files, exact commands, output formats, size limits, allowed edits, cleanup requirements, and verification commands. Inspect the workspace and run appropriate direct checks; when feasible, verify with a different method than the one used to produce the answer. Clean up any long-running or background processes you started during investigation or verification. If anything is incomplete or failing, keep working until it is complete. Only when every item is complete and verified, reply with CONFIRM in your final message."
+    )
+}
+
+fn completion_verification_confirmed(final_message: Option<&str>) -> bool {
+    final_message.is_some_and(|message| message.contains("CONFIRM"))
+}
+
+fn final_message_from_turn_items(items: &[AppServerThreadItem]) -> Option<String> {
+    items.iter().rev().find_map(|item| match item {
+        AppServerThreadItem::AgentMessage { text, .. } => Some(text.clone()),
+        AppServerThreadItem::UserMessage { .. }
+        | AppServerThreadItem::HookPrompt { .. }
+        | AppServerThreadItem::Plan { .. }
+        | AppServerThreadItem::Reasoning { .. }
+        | AppServerThreadItem::CommandExecution { .. }
+        | AppServerThreadItem::FileChange { .. }
+        | AppServerThreadItem::McpToolCall { .. }
+        | AppServerThreadItem::DynamicToolCall { .. }
+        | AppServerThreadItem::CollabAgentToolCall { .. }
+        | AppServerThreadItem::WebSearch { .. }
+        | AppServerThreadItem::ImageView { .. }
+        | AppServerThreadItem::ImageGeneration { .. }
+        | AppServerThreadItem::EnteredReviewMode { .. }
+        | AppServerThreadItem::ExitedReviewMode { .. }
+        | AppServerThreadItem::ContextCompaction { .. } => None,
+    })
+}
+
+fn timeout_steer_message(percent: u64, timeout_seconds: u64, elapsed_seconds: u64) -> String {
+    let remaining_seconds = timeout_seconds.saturating_sub(elapsed_seconds);
+    let remaining = format_duration_for_timeout_steer(remaining_seconds);
+    match percent {
+        75 => format!(
+            "75% of the configured task timeout has elapsed. About {remaining} remain. Keep working, but converge on the smallest complete solution that satisfies the request."
+        ),
+        90 => format!(
+            "90% of the configured task timeout has elapsed. About {remaining} remain. Wrap up now: finish the smallest valid artifact, run the exact visible check or command if available, clean up background work, and give the final answer."
+        ),
+        _ => format!(
+            "{percent}% of the configured task timeout has elapsed. About {remaining} remain."
+        ),
+    }
+}
+
+fn format_duration_for_timeout_steer(seconds: u64) -> String {
+    let minutes = seconds / 60;
+    let seconds = seconds % 60;
+    match (minutes, seconds) {
+        (0, 1) => "1 second".to_string(),
+        (0, seconds) => format!("{seconds} seconds"),
+        (1, 0) => "1 minute".to_string(),
+        (1, seconds) => format!("1 minute {seconds} seconds"),
+        (minutes, 0) => format!("{minutes} minutes"),
+        (minutes, seconds) => format!("{minutes} minutes {seconds} seconds"),
+    }
 }
 
 fn sandbox_mode_from_policy(

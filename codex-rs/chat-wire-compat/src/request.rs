@@ -539,6 +539,7 @@ mod tests {
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
+            client_metadata: None,
             text: None,
         };
 
@@ -587,6 +588,7 @@ mod tests {
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
+            client_metadata: None,
             text: None,
         };
 
@@ -638,6 +640,7 @@ mod tests {
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
+            client_metadata: None,
             text: Some(TextControls {
                 verbosity: None,
                 format: Some(TextFormat {

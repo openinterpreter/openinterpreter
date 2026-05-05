@@ -107,6 +107,7 @@ async fn read_output_limits_retained_bytes_for_shell_capture() {
         /*stream*/ None,
         /*is_stderr*/ false,
         Some(EXEC_OUTPUT_MAX_BYTES),
+        /*aggregate_tx*/ None,
     )
     .await
     .expect("read");
@@ -205,6 +206,7 @@ async fn read_output_retains_all_bytes_for_full_buffer_capture() {
 
     let out = read_output(
         reader, /*stream*/ None, /*is_stderr*/ false, /*max_bytes*/ None,
+        /*aggregate_tx*/ None,
     )
     .await
     .expect("read");

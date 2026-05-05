@@ -99,6 +99,7 @@ async fn spawn_process_with_stdin_mode(
     arg0: &Option<String>,
     stdin_mode: PipeStdinMode,
     inherited_fds: &[i32],
+    kill_on_parent_drop: bool,
 ) -> Result<SpawnedProcess> {
     if program.is_empty() {
         anyhow::bail!("missing program for pipe spawn");
@@ -114,6 +115,8 @@ async fn spawn_process_with_stdin_mode(
     }
     #[cfg(target_os = "linux")]
     let parent_pid = unsafe { libc::getpid() };
+    #[cfg(not(target_os = "linux"))]
+    let _ = kill_on_parent_drop;
     #[cfg(unix)]
     let inherited_fds = inherited_fds.to_vec();
     #[cfg(unix)]
@@ -121,7 +124,9 @@ async fn spawn_process_with_stdin_mode(
         command.pre_exec(move || {
             crate::process_group::detach_from_tty()?;
             #[cfg(target_os = "linux")]
-            crate::process_group::set_parent_death_signal(parent_pid)?;
+            if kill_on_parent_drop {
+                crate::process_group::set_parent_death_signal(parent_pid)?;
+            }
             crate::pty::close_inherited_fds_except(&inherited_fds);
             Ok(())
         });
@@ -253,7 +258,17 @@ pub async fn spawn_process(
     env: &HashMap<String, String>,
     arg0: &Option<String>,
 ) -> Result<SpawnedProcess> {
-    spawn_process_with_stdin_mode(program, args, cwd, env, arg0, PipeStdinMode::Piped, &[]).await
+    spawn_process_with_stdin_mode(
+        program,
+        args,
+        cwd,
+        env,
+        arg0,
+        PipeStdinMode::Piped,
+        &[],
+        /*kill_on_parent_drop*/ true,
+    )
+    .await
 }
 
 /// Spawn a process using regular pipes, but close stdin immediately.
@@ -285,6 +300,33 @@ pub async fn spawn_process_no_stdin_with_inherited_fds(
         arg0,
         PipeStdinMode::Null,
         inherited_fds,
+        /*kill_on_parent_drop*/ true,
+    )
+    .await
+}
+
+/// Spawn a persistent process using regular pipes, close stdin immediately,
+/// and preserve selected inherited file descriptors across exec on Unix.
+///
+/// The child is not configured with Linux parent-death signaling, so it can
+/// survive the owning process when the caller later detaches it.
+pub async fn spawn_persistent_process_no_stdin_with_inherited_fds(
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    env: &HashMap<String, String>,
+    arg0: &Option<String>,
+    inherited_fds: &[i32],
+) -> Result<SpawnedProcess> {
+    spawn_process_with_stdin_mode(
+        program,
+        args,
+        cwd,
+        env,
+        arg0,
+        PipeStdinMode::Null,
+        inherited_fds,
+        /*kill_on_parent_drop*/ false,
     )
     .await
 }

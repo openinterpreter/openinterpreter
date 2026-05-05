@@ -6845,6 +6845,12 @@
               "null"
             ]
           },
+          "harness_guidance": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "instructions": {
             "type": [
               "string",
@@ -10905,6 +10911,14 @@
           "model": {
             "type": "string"
           },
+          "reasoningControl": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/v2/ReasoningControl"
+              }
+            ],
+            "default": "none"
+          },
           "supportedReasoningEfforts": {
             "items": {
               "$ref": "#/definitions/v2/ReasoningEffortOption"
@@ -10912,6 +10926,10 @@
             "type": "array"
           },
           "supportsPersonality": {
+            "default": false,
+            "type": "boolean"
+          },
+          "supportsThinkingToggle": {
             "default": false,
             "type": "boolean"
           },
@@ -12088,6 +12106,12 @@
               "null"
             ]
           },
+          "harness_guidance": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "model": {
             "type": [
               "string",
@@ -12353,6 +12377,46 @@
           "v2"
         ],
         "type": "object"
+      },
+      "ReasoningControl": {
+        "description": "How a model's reasoning behavior can be controlled by the client UI/API.",
+        "oneOf": [
+          {
+            "description": "No known reasoning control.",
+            "enum": [
+              "none"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Reasoning exists, but this client should not show a user-facing control.",
+            "enum": [
+              "fixed"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "OpenAI-style enum control such as low/medium/high.",
+            "enum": [
+              "effort"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Boolean thinking on/off control.",
+            "enum": [
+              "thinking_toggle"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Token-budget thinking control.",
+            "enum": [
+              "thinking_budget"
+            ],
+            "type": "string"
+          }
+        ]
       },
       "ReasoningEffort": {
         "description": "See https://platform.openai.com/docs/guides/reasoning?api-mode=responses#get-started-with-reasoning",

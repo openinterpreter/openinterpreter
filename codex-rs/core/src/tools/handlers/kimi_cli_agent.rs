@@ -15,7 +15,7 @@ use crate::tools::handlers::multi_agents_common::build_agent_spawn_config;
 use crate::tools::handlers::multi_agents_common::collab_agent_error;
 use crate::tools::handlers::multi_agents_common::collab_spawn_error;
 use crate::tools::handlers::multi_agents_common::thread_spawn_source;
-use crate::tools::handlers::parse_arguments;
+use crate::tools::handlers::parse_kimi_arguments;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 use codex_protocol::ThreadId;
@@ -66,7 +66,7 @@ impl ToolHandler for KimiAgentHandler {
                 "Agent received unsupported payload".to_string(),
             ));
         };
-        let args: KimiAgentArgs = parse_arguments(&arguments)?;
+        let args: KimiAgentArgs = parse_kimi_arguments(&arguments)?;
         if args.description.trim().is_empty() || args.prompt.trim().is_empty() {
             return Err(FunctionCallError::RespondToModel(
                 "Agent requires non-empty description and prompt".to_string(),

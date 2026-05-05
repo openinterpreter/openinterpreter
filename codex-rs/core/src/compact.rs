@@ -23,9 +23,13 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::ContextCompactionItem;
 use codex_protocol::items::TurnItem;
+use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::models::function_call_output_content_items_to_text;
 use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TurnStartedEvent;
@@ -42,6 +46,14 @@ use codex_model_provider_info::ModelProviderInfo;
 
 pub const SUMMARIZATION_PROMPT: &str = include_str!("../templates/compact/prompt.md");
 pub const SUMMARY_PREFIX: &str = include_str!("../templates/compact/summary_prefix.md");
+const KIMI_CLI_COMPACTION_PROMPT: &str = include_str!("harness/kimi_cli_compaction_prompt.md");
+pub(crate) const KIMI_CLI_COMPACTION_SYSTEM_PROMPT: &str =
+    "You are a helpful assistant that compacts conversation context.";
+const KIMI_CLI_COMPACTION_SUMMARY_PREFIX: &str =
+    "Previous context has been compacted. Here is the compaction output:";
+pub(crate) const KIMI_CLI_RESERVED_CONTEXT_SIZE: i64 = 50_000;
+pub(crate) const KIMI_CLI_COMPACTION_TRIGGER_RATIO_NUMERATOR: i64 = 85;
+pub(crate) const KIMI_CLI_COMPACTION_TRIGGER_RATIO_DENOMINATOR: i64 = 100;
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
 
 /// Controls whether compaction replacement history must include initial context.
@@ -70,6 +82,10 @@ pub(crate) async fn run_inline_auto_compact_task(
     reason: CompactionReason,
     phase: CompactionPhase,
 ) -> CodexResult<()> {
+    if turn_context.tools_config.harness.is_kimi_cli() {
+        return run_kimi_cli_auto_compact_task(sess, turn_context, reason, phase).await;
+    }
+
     let prompt = turn_context.compact_prompt().to_string();
     let input = vec![UserInput::Text {
         text: prompt,
@@ -87,6 +103,113 @@ pub(crate) async fn run_inline_auto_compact_task(
         phase,
     )
     .await?;
+    Ok(())
+}
+
+async fn run_kimi_cli_auto_compact_task(
+    sess: Arc<Session>,
+    turn_context: Arc<TurnContext>,
+    reason: CompactionReason,
+    phase: CompactionPhase,
+) -> CodexResult<()> {
+    let attempt = CompactionAnalyticsAttempt::begin(
+        sess.as_ref(),
+        turn_context.as_ref(),
+        CompactionTrigger::Auto,
+        reason,
+        CompactionImplementation::Responses,
+        phase,
+    )
+    .await;
+    let result = run_kimi_cli_auto_compact_task_impl(sess.clone(), turn_context.clone()).await;
+    attempt
+        .track(
+            sess.as_ref(),
+            compaction_status_from_result(&result),
+            result.as_ref().err().map(ToString::to_string),
+        )
+        .await;
+    result
+}
+
+async fn run_kimi_cli_auto_compact_task_impl(
+    sess: Arc<Session>,
+    turn_context: Arc<TurnContext>,
+) -> CodexResult<()> {
+    let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
+    sess.emit_turn_item_started(&turn_context, &compaction_item)
+        .await;
+
+    let history_snapshot = sess.clone_history().await;
+    let history_items = history_snapshot.raw_items();
+    let Some((compact_input, to_preserve)) = prepare_kimi_cli_compaction(history_items) else {
+        sess.emit_turn_item_completed(&turn_context, compaction_item)
+            .await;
+        return Ok(());
+    };
+
+    let mut client_session = sess.services.model_client.new_session();
+    let prompt = Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: compact_input,
+            }],
+            end_turn: None,
+            phase: None,
+        }],
+        cwd: Some(turn_context.cwd.to_path_buf()),
+        tools: Vec::new(),
+        parallel_tool_calls: false,
+        base_instructions: BaseInstructions {
+            text: KIMI_CLI_COMPACTION_SYSTEM_PROMPT.to_string(),
+        },
+        personality: None,
+        output_schema: None,
+        output_schema_strict: true,
+    };
+
+    drain_to_completed(
+        &sess,
+        turn_context.as_ref(),
+        &mut client_session,
+        /*turn_metadata_header*/ None,
+        &prompt,
+    )
+    .await?;
+
+    let history_snapshot = sess.clone_history().await;
+    let history_items = history_snapshot.raw_items();
+    let summary_suffix = get_last_assistant_message_from_turn(history_items).unwrap_or_default();
+    let summary_text = format!("{KIMI_CLI_COMPACTION_SUMMARY_PREFIX}\n{summary_suffix}");
+    let mut new_history = vec![ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: summary_text.clone(),
+        }],
+        end_turn: None,
+        phase: None,
+    }];
+    new_history.extend(to_preserve);
+    new_history.extend(
+        history_items
+            .iter()
+            .filter(|item| matches!(item, ResponseItem::GhostSnapshot { .. }))
+            .cloned(),
+    );
+
+    let compacted_item = CompactedItem {
+        message: summary_text,
+        replacement_history: Some(new_history.clone()),
+    };
+    sess.replace_compacted_history(new_history, None, compacted_item)
+        .await;
+    client_session.reset_websocket_session();
+    sess.recompute_token_usage(&turn_context).await;
+    sess.emit_turn_item_completed(&turn_context, compaction_item)
+        .await;
     Ok(())
 }
 
@@ -389,6 +512,131 @@ pub fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
         None
     } else {
         Some(pieces.join("\n"))
+    }
+}
+
+fn prepare_kimi_cli_compaction(items: &[ResponseItem]) -> Option<(String, Vec<ResponseItem>)> {
+    let preserve_start_index = kimi_cli_preserve_start_index(items, 2)?;
+    let (to_compact, to_preserve) = items.split_at(preserve_start_index);
+    if to_compact.is_empty() {
+        return None;
+    }
+
+    let mut compact_input = String::new();
+    for (index, item) in to_compact.iter().enumerate() {
+        let Some((role, content)) = kimi_cli_compaction_message_text(item) else {
+            continue;
+        };
+        compact_input
+            .push_str(format!("## Message {}\nRole: {role}\nContent:\n", index + 1).as_str());
+        compact_input.push_str(content.as_str());
+    }
+    compact_input.push('\n');
+    compact_input.push_str(KIMI_CLI_COMPACTION_PROMPT);
+    Some((compact_input, to_preserve.to_vec()))
+}
+
+fn kimi_cli_preserve_start_index(
+    items: &[ResponseItem],
+    max_preserved_messages: usize,
+) -> Option<usize> {
+    if items.is_empty() || max_preserved_messages == 0 {
+        return None;
+    }
+
+    let mut preserved = 0usize;
+    for (index, item) in items.iter().enumerate().rev() {
+        if matches!(
+            item,
+            ResponseItem::Message { role, .. } if role == "user" || role == "assistant"
+        ) {
+            preserved += 1;
+            if preserved == max_preserved_messages {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
+fn kimi_cli_compaction_message_text(item: &ResponseItem) -> Option<(&'static str, String)> {
+    match item {
+        ResponseItem::Message { role, content, .. } => {
+            let role = match role.as_str() {
+                "user" => "user",
+                "assistant" => "assistant",
+                "developer" | "system" => "system",
+                "tool" => "tool",
+                _ => return None,
+            };
+            content_items_to_text(content).map(|text| (role, text))
+        }
+        ResponseItem::FunctionCall {
+            name, arguments, ..
+        } => Some((
+            "assistant",
+            format!("Tool call: {name}\nArguments:\n{arguments}"),
+        )),
+        ResponseItem::CustomToolCall { name, input, .. } => Some((
+            "assistant",
+            format!("Tool call: {name}\nArguments:\n{input}"),
+        )),
+        ResponseItem::LocalShellCall { action, .. } => Some((
+            "assistant",
+            format!(
+                "Tool call: Shell\nArguments:\n{}",
+                serde_json::to_string(action).ok()?
+            ),
+        )),
+        ResponseItem::FunctionCallOutput { output, .. }
+        | ResponseItem::CustomToolCallOutput { output, .. } => {
+            kimi_cli_function_output_text(output).map(|text| ("tool", text))
+        }
+        ResponseItem::ToolSearchOutput {
+            status,
+            execution,
+            tools,
+            ..
+        } => Some((
+            "tool",
+            format!(
+                "status: {status}\nexecution: {execution}\ntools:\n{}",
+                serde_json::to_string(tools).ok()?
+            ),
+        )),
+        ResponseItem::ToolSearchCall {
+            execution,
+            arguments,
+            ..
+        } => Some((
+            "assistant",
+            format!("Tool call: {execution}\nArguments:\n{arguments}"),
+        )),
+        ResponseItem::ImageGenerationCall {
+            status,
+            revised_prompt,
+            ..
+        } => Some((
+            "assistant",
+            format!(
+                "Image generation: {status}\n{}",
+                revised_prompt.as_deref().unwrap_or_default()
+            ),
+        )),
+        ResponseItem::Reasoning { .. }
+        | ResponseItem::WebSearchCall { .. }
+        | ResponseItem::GhostSnapshot { .. }
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::Other => None,
+    }
+}
+
+fn kimi_cli_function_output_text(output: &FunctionCallOutputPayload) -> Option<String> {
+    match &output.body {
+        FunctionCallOutputBody::Text(text) => Some(text.clone()).filter(|text| !text.is_empty()),
+        FunctionCallOutputBody::ContentItems(items) => {
+            function_call_output_content_items_to_text(items)
+        }
     }
 }
 

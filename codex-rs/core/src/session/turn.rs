@@ -12,6 +12,9 @@ use crate::client_common::ResponseEvent;
 use crate::collect_env_var_dependencies;
 use crate::collect_explicit_skill_mentions;
 use crate::compact::InitialContextInjection;
+use crate::compact::KIMI_CLI_COMPACTION_TRIGGER_RATIO_DENOMINATOR;
+use crate::compact::KIMI_CLI_COMPACTION_TRIGGER_RATIO_NUMERATOR;
+use crate::compact::KIMI_CLI_RESERVED_CONTEXT_SIZE;
 use crate::compact::collect_user_messages;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact::should_use_remote_compact_task;
@@ -106,7 +109,6 @@ use codex_utils_stream_parser::extract_proposed_plan_text;
 use codex_utils_stream_parser::strip_citations;
 use futures::future::BoxFuture;
 use futures::prelude::*;
-use futures::stream::FuturesOrdered;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing::error;
@@ -146,8 +148,7 @@ pub(crate) async fn run_turn(
         return None;
     }
 
-    let model_info = turn_context.model_info.clone();
-    let auto_compact_limit = model_info.auto_compact_token_limit().unwrap_or(i64::MAX);
+    let auto_compact_limit = auto_compact_token_limit(&turn_context);
     let mut prewarmed_client_session = prewarmed_client_session;
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
@@ -705,6 +706,23 @@ async fn track_turn_resolved_config_analytics(
         });
 }
 
+fn auto_compact_token_limit(turn_context: &TurnContext) -> i64 {
+    if turn_context.tools_config.harness.is_kimi_cli()
+        && let Some(context_window) = turn_context.model_info.resolved_context_window()
+    {
+        let ratio_limit = context_window
+            .saturating_mul(KIMI_CLI_COMPACTION_TRIGGER_RATIO_NUMERATOR)
+            / KIMI_CLI_COMPACTION_TRIGGER_RATIO_DENOMINATOR;
+        let reserved_limit = context_window.saturating_sub(KIMI_CLI_RESERVED_CONTEXT_SIZE);
+        return std::cmp::min(ratio_limit, reserved_limit);
+    }
+
+    turn_context
+        .model_info
+        .auto_compact_token_limit()
+        .unwrap_or(i64::MAX)
+}
+
 async fn run_pre_sampling_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
@@ -717,10 +735,7 @@ async fn run_pre_sampling_compact(
     )
     .await?;
     let total_usage_tokens = sess.get_total_token_usage().await;
-    let auto_compact_limit = turn_context
-        .model_info
-        .auto_compact_token_limit()
-        .unwrap_or(i64::MAX);
+    let auto_compact_limit = auto_compact_token_limit(turn_context);
     // Compact if the total usage tokens are greater than the auto compact limit
     if total_usage_tokens >= auto_compact_limit {
         run_auto_compact(
@@ -762,10 +777,7 @@ async fn maybe_run_previous_model_inline_compact(
     let Some(new_context_window) = turn_context.model_context_window() else {
         return Ok(false);
     };
-    let new_auto_compact_limit = turn_context
-        .model_info
-        .auto_compact_token_limit()
-        .unwrap_or(i64::MAX);
+    let new_auto_compact_limit = auto_compact_token_limit(turn_context);
     let should_run = total_usage_tokens > new_auto_compact_limit
         && previous_model_turn_context.model_info.slug != turn_context.model_info.slug
         && old_context_window > new_context_window;
@@ -1826,22 +1838,18 @@ async fn handle_assistant_item_done_in_plan_mode(
 }
 
 async fn drain_in_flight(
-    in_flight: &mut FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>>,
+    in_flight: &mut Vec<BoxFuture<'static, CodexResult<ResponseInputItem>>>,
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
 ) -> CodexResult<()> {
-    while let Some(res) = in_flight.next().await {
+    let futures = std::mem::take(in_flight);
+    let mut ordered = futures
+        .into_iter()
+        .collect::<futures::stream::FuturesOrdered<_>>();
+    while let Some(res) = ordered.next().await {
         match res {
             Ok(response_input) => {
-                let response_item = response_input.into();
-                sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
-                    .await;
-                mark_thread_memory_mode_polluted_if_external_context(
-                    sess.as_ref(),
-                    turn_context.as_ref(),
-                    &response_item,
-                )
-                .await;
+                record_tool_response(response_input, sess.clone(), turn_context.clone()).await;
             }
             Err(err) => {
                 error_or_panic(format!("in-flight tool future failed during drain: {err}"));
@@ -1849,6 +1857,22 @@ async fn drain_in_flight(
         }
     }
     Ok(())
+}
+
+async fn record_tool_response(
+    response_input: ResponseInputItem,
+    sess: Arc<Session>,
+    turn_context: Arc<TurnContext>,
+) {
+    let response_item = response_input.into();
+    sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
+        .await;
+    mark_thread_memory_mode_polluted_if_external_context(
+        sess.as_ref(),
+        turn_context.as_ref(),
+        &response_item,
+    )
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1896,8 +1920,7 @@ async fn try_run_sampling_request(
         .instrument(trace_span!("stream_request"))
         .or_cancel(&cancellation_token)
         .await??;
-    let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
-        FuturesOrdered::new();
+    let mut in_flight: Vec<BoxFuture<'static, CodexResult<ResponseInputItem>>> = Vec::new();
     let mut needs_follow_up = false;
     let mut tool_call_seen_in_response = false;
     let mut last_agent_message: Option<String> = None;
@@ -2018,7 +2041,7 @@ async fn try_run_sampling_request(
                     };
                 if let Some(tool_future) = output_result.tool_future {
                     tool_call_seen_in_response = true;
-                    in_flight.push_back(tool_future);
+                    in_flight.push(tool_future);
                 }
                 let had_last_agent_message = output_result.last_agent_message.is_some();
                 if let Some(agent_message) = output_result.last_agent_message {

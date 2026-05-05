@@ -216,7 +216,7 @@ pub(super) fn build_system_prompt(prompt: &Prompt, model_slug: &str) -> String {
 
     body.push_str("\n\n\n# Environment\nYou have been invoked in the following environment: \n - Primary working directory: ");
     body.push_str(cwd.as_str());
-    body.push_str("\n  - Is a git repository: ");
+    body.push_str("\n - Is a git repository: ");
     body.push_str(if prompt.cwd.as_deref().is_some_and(is_git_repository) {
         "true"
     } else {
@@ -232,7 +232,7 @@ pub(super) fn build_system_prompt(prompt: &Prompt, model_slug: &str) -> String {
     body.push_str(claude_code_model_display_name(model_slug).as_str());
     body.push_str(". The exact model ID is ");
     body.push_str(canonical_claude_model_slug(model_slug));
-    body.push_str(".\n - Assistant knowledge cutoff is August 2025.\n - The most recent Claude model family is Claude 4.X. Model IDs — Opus 4.7: 'claude-opus-4-7', Sonnet 4.6: 'claude-sonnet-4-6', Haiku 4.5: 'claude-haiku-4-5-20251001'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code uses Claude Opus 4.6 with faster output (it does not downgrade to a smaller model). It can be toggled with /fast and is only available on Opus 4.6.\n\nWhen working with tool results, write down any important information you might need later in your response, as the original tool result may be cleared later.");
+    body.push_str(".\n - Assistant knowledge cutoff is August 2025.\n - The most recent Claude model family is Claude 4.X. Model IDs — Opus 4.7: 'claude-opus-4-7', Sonnet 4.6: 'claude-sonnet-4-6', Haiku 4.5: 'claude-haiku-4-5-20251001'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code uses Claude Opus 4.6 with faster output (it does not downgrade to a smaller model). It can be toggled with /fast and is only available on Opus 4.6.\n\n# Context management\nWhen working with tool results, write down any important information you might need later in your response, as the original tool result may be cleared later.");
 
     body
 }
@@ -311,7 +311,7 @@ fn claude_code_shell_name() -> String {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
         })
-        .unwrap_or_else(|| "zsh".to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn claude_code_os_version() -> String {

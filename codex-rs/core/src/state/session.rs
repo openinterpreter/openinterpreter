@@ -2,6 +2,7 @@
 
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::plan_tool::PlanItemArg;
 use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -31,6 +32,8 @@ pub(crate) struct SessionState {
     /// Startup prewarmed session prepared during session initialization.
     pub(crate) startup_prewarm: Option<SessionStartupPrewarmHandle>,
     pub(crate) active_connector_selection: HashSet<String>,
+    pub(crate) kimi_todos: Vec<PlanItemArg>,
+    pub(crate) kimi_shell_task_descriptions: HashMap<i32, String>,
     pub(crate) pending_session_start_source: Option<codex_hooks::SessionStartSource>,
     granted_permissions: Option<AdditionalPermissionProfile>,
     next_turn_is_first: bool,
@@ -50,6 +53,8 @@ impl SessionState {
             previous_turn_settings: None,
             startup_prewarm: None,
             active_connector_selection: HashSet::new(),
+            kimi_todos: Vec::new(),
+            kimi_shell_task_descriptions: HashMap::new(),
             pending_session_start_source: None,
             granted_permissions: None,
             next_turn_is_first: true,

@@ -84,6 +84,7 @@ pub use image_detail::sanitize_original_image_detail;
 pub use json_schema::AdditionalProperties;
 pub use json_schema::JsonSchema;
 pub use json_schema::JsonSchemaPrimitiveType;
+pub use json_schema::JsonSchemaProperties;
 pub use json_schema::JsonSchemaType;
 pub use json_schema::parse_tool_input_schema;
 pub use kimi_cli_agent_tool::create_kimi_cli_agent_tool;

@@ -31,6 +31,8 @@ pub struct ConfigProfile {
     /// Optional harness family to emulate for this profile, such as
     /// `claude-code`.
     pub harness: Option<String>,
+    /// Whether to include Open Interpreter guidance for the selected harness.
+    pub harness_guidance: Option<bool>,
     pub approval_policy: Option<AskForApproval>,
     pub approvals_reviewer: Option<ApprovalsReviewer>,
     pub sandbox_mode: Option<SandboxMode>,
@@ -82,6 +84,7 @@ impl From<ConfigProfile> for codex_app_server_protocol::Profile {
             model: config_profile.model,
             model_provider: config_profile.model_provider,
             harness: config_profile.harness,
+            harness_guidance: config_profile.harness_guidance,
             approval_policy: config_profile.approval_policy,
             model_reasoning_effort: config_profile.model_reasoning_effort,
             model_reasoning_summary: config_profile.model_reasoning_summary,

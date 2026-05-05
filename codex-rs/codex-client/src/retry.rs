@@ -1,5 +1,7 @@
 use crate::error::TransportError;
 use crate::request::Request;
+use http::HeaderMap;
+use http::header::RETRY_AFTER;
 use rand::Rng;
 use std::future::Future;
 use std::time::Duration;
@@ -46,6 +48,35 @@ pub fn backoff(base: Duration, attempt: u64) -> Duration {
     Duration::from_millis((raw as f64 * jitter) as u64)
 }
 
+fn retry_after_delay(headers: Option<&HeaderMap>) -> Option<Duration> {
+    let headers = headers?;
+    [
+        RETRY_AFTER.as_str(),
+        "x-retry-after",
+        "msh-cooldown-seconds",
+    ]
+    .iter()
+    .filter_map(|name| headers.get(*name))
+    .filter_map(|value| value.to_str().ok())
+    .filter_map(|value| value.trim().parse::<u64>().ok())
+    .map(Duration::from_secs)
+    .max()
+}
+
+fn retry_delay(base: Duration, attempt: u64, err: &TransportError) -> Duration {
+    let backoff_delay = backoff(base, attempt);
+    let retry_after = match err {
+        TransportError::Http { headers, .. } => retry_after_delay(headers.as_ref()),
+        TransportError::RetryLimit
+        | TransportError::Timeout
+        | TransportError::Network(_)
+        | TransportError::Build(_) => None,
+    };
+    retry_after
+        .filter(|delay| *delay > backoff_delay)
+        .unwrap_or(backoff_delay)
+}
+
 pub async fn run_with_retry<T, F, Fut>(
     policy: RetryPolicy,
     mut make_req: impl FnMut() -> Request,
@@ -64,10 +95,52 @@ where
                     .retry_on
                     .should_retry(&err, attempt, policy.max_attempts) =>
             {
-                sleep(backoff(policy.base_delay, attempt + 1)).await;
+                sleep(retry_delay(policy.base_delay, attempt + 1, &err)).await;
             }
             Err(err) => return Err(err),
         }
     }
     Err(TransportError::RetryLimit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::HeaderMap;
+    use http::HeaderValue;
+    use http::StatusCode;
+
+    #[test]
+    fn retry_delay_honors_retry_after_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("10"));
+        let err = TransportError::Http {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            url: None,
+            headers: Some(headers),
+            body: None,
+        };
+
+        assert_eq!(
+            retry_delay(Duration::from_millis(200), 1, &err),
+            Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn retry_delay_honors_provider_cooldown_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("msh-cooldown-seconds", HeaderValue::from_static("10"));
+        let err = TransportError::Http {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            url: None,
+            headers: Some(headers),
+            body: None,
+        };
+
+        assert_eq!(
+            retry_delay(Duration::from_millis(200), 1, &err),
+            Duration::from_secs(10)
+        );
+    }
 }

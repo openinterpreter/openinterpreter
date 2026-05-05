@@ -15,6 +15,7 @@ use crate::config_loader::ResidencyRequirement;
 use crate::config_loader::Sourced;
 use crate::config_loader::load_config_layers_state;
 use crate::config_loader::project_trust_key;
+use crate::harness::guidance::DEFAULT_HARNESS_GUIDANCE_ENABLED;
 use crate::memories::memory_root;
 use crate::path_utils::normalize_for_native_workdir;
 use crate::unified_exec::DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS;
@@ -277,6 +278,9 @@ pub struct Config {
 
     /// Optional harness family to emulate for this session.
     pub harness: Option<String>,
+
+    /// Whether to include Open Interpreter guidance for the selected harness.
+    pub harness_guidance: bool,
 
     /// Optionally specify the personality of the model
     pub personality: Option<Personality>,
@@ -2398,6 +2402,10 @@ impl Config {
             model_provider_id,
             model_provider,
             harness,
+            harness_guidance: config_profile
+                .harness_guidance
+                .or(cfg.harness_guidance)
+                .unwrap_or(DEFAULT_HARNESS_GUIDANCE_ENABLED),
             cwd: resolved_cwd,
             startup_warnings,
             permissions: Permissions {

@@ -39,6 +39,29 @@ pub struct Cli {
     #[arg(long = "output-schema", value_name = "FILE")]
     pub output_schema: Option<PathBuf>,
 
+    /// Send time remaining reminders during the turn without enforcing a hard stop.
+    #[arg(
+        long = "timeout",
+        value_name = "SECONDS",
+        global = true,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub timeout_seconds: Option<u64>,
+
+    /// Run one extra completion-verification turn before exiting.
+    #[arg(long = "verify", global = true, default_value_t = false)]
+    pub verify_completion: bool,
+
+    /// Maximum completion-verification turns to run after the first completion.
+    #[arg(
+        long = "verify-iterations",
+        value_name = "N",
+        global = true,
+        default_value_t = 1,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub verify_iterations: u64,
+
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
 

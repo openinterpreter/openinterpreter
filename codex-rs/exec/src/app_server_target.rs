@@ -69,6 +69,8 @@ fn read_remote_auth_token_from_env_var(env_var_name: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::lagged_event_warning_message;
+
     use super::*;
     use pretty_assertions::assert_eq;
 

@@ -100,6 +100,22 @@ pub(crate) struct ExecCommandRequest {
     pub additional_permissions_preapproved: bool,
     pub justification: Option<String>,
     pub prefix_rule: Option<Vec<String>>,
+    pub preserve_on_shutdown: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum UnifiedExecTaskStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct UnifiedExecTaskSnapshot {
+    pub process_id: i32,
+    pub status: UnifiedExecTaskStatus,
+    pub description: String,
+    pub exit_code: Option<i32>,
 }
 
 #[derive(Debug)]
@@ -153,6 +169,7 @@ struct ProcessEntry {
     network_approval_id: Option<String>,
     session: Weak<Session>,
     last_used: tokio::time::Instant,
+    preserve_on_shutdown: bool,
 }
 
 pub(crate) fn clamp_yield_time(yield_time_ms: u64) -> u64 {

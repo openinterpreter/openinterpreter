@@ -1,20 +1,130 @@
-# Configuration
+---
+title: Configuration
+description: Tune Open Interpreter from one TOML file.
+---
 
-For basic configuration instructions, see [this documentation](https://developers.openai.com/codex/config-basic).
+Open Interpreter reads its configuration from `~/.openinterpreter/config.toml`.
+You can also drop a `.openinterpreter/config.toml` into a project to layer
+project-specific settings on top.
 
-For advanced configuration instructions, see [this documentation](https://developers.openai.com/codex/config-advanced).
+## Where settings come from
 
-For a full configuration reference, see [this documentation](https://developers.openai.com/codex/config-reference).
+Settings layer in this order, with later layers winning:
 
-## Connecting to MCP servers
+<Steps>
+  <Step title="Built-in defaults">
+    Sensible values that ship with the binary.
+  </Step>
+  <Step title="System config">
+    Admin-managed values, if present.
+  </Step>
+  <Step title="User config">
+    `~/.openinterpreter/config.toml`. Your defaults.
+  </Step>
+  <Step title="Project config">
+    `.openinterpreter/config.toml` inside the project root.
+  </Step>
+  <Step title="Profile">
+    A named profile selected with `--profile`.
+  </Step>
+  <Step title="CLI flags">
+    `-c key=value` overrides for a single run.
+  </Step>
+</Steps>
 
-Codex can connect to MCP servers configured in `~/.codex/config.toml`. See the configuration reference for the latest MCP server options:
+To see exactly where each value came from:
 
-- https://developers.openai.com/codex/config-reference
+```
+/debug-config
+```
 
-MCP tools default to serialized calls. To mark every tool exposed by one server
-as eligible for parallel tool calls, set `supports_parallel_tool_calls` on that
-server:
+## The settings you reach for most
+
+```toml
+# Default model and provider
+model = "gpt-5-codex"
+
+# When to ask before running things: "untrusted" | "on-request" | "never"
+approval_policy = "on-request"
+
+# Sandbox: "read-only" | "workspace-write" | "danger-full-access"
+sandbox_mode = "workspace-write"
+
+# Reasoning effort: "low" | "medium" | "high" | "none"
+model_reasoning_effort = "medium"
+
+# Harness guidance: lets selected harnesses include Open Interpreter
+# reliability and tool-use guidance. Set false for stricter harness emulation.
+harness_guidance = true
+
+# Communication style
+personality = "concise"
+
+# Where the agent writes logs
+log_dir = "~/.openinterpreter/log"
+```
+
+## Profiles
+
+Profiles are named groups of overrides for different contexts.
+
+```toml
+[profiles.fast]
+model = "gpt-5-codex-mini"
+model_reasoning_effort = "low"
+
+[profiles.review]
+model = "gpt-5-codex"
+model_reasoning_effort = "high"
+sandbox_mode = "read-only"
+```
+
+Use one with:
+
+```bash
+interpreter --profile review
+```
+
+## Override values from the CLI
+
+`-c` takes a TOML expression and applies it to the active config:
+
+```bash
+interpreter -c model='"gpt-5-codex-mini"' -c approval_policy='"never"'
+```
+
+Useful for one-off runs and scripts.
+
+## Harness guidance
+
+When `harness_guidance` is enabled, a selected harness can add a small
+Open Interpreter guidance block to the model instructions. This is intended
+to make tool use more reliable while preserving the selected harness behavior.
+
+It defaults to `true`. Disable it when you want stricter emulation:
+
+```toml
+harness_guidance = false
+```
+
+For a single run:
+
+```bash
+interpreter -c harness_guidance=false "fix the failing tests"
+```
+
+## MCP servers
+
+Open Interpreter can connect to [Model Context Protocol](https://modelcontextprotocol.io)
+servers. Define them under `[mcp_servers]`:
+
+```toml
+[mcp_servers.docs]
+command = "docs-server"
+```
+
+By default, MCP tools run one at a time. To allow parallel calls for a
+server whose tools are safe to run together:
 
 ```toml
 [mcp_servers.docs]
@@ -22,16 +132,15 @@ command = "docs-server"
 supports_parallel_tool_calls = true
 ```
 
-Only enable parallel calls for MCP servers whose tools are safe to run at the
-same time. If tools read and write shared state, files, databases, or external
-resources, review those read/write race conditions before enabling this setting.
+<Warning>
+Only enable parallel calls for tools that do not share state. Two tools
+that write to the same file or row at the same time will race.
+</Warning>
 
-## MCP tool approvals
+### MCP tool approvals
 
-Codex stores approval defaults and per-tool overrides for custom MCP servers
-under `mcp_servers` in `~/.codex/config.toml`. Set
-`default_tools_approval_mode` on the server to apply a default to every tool,
-and use per-tool `approval_mode` entries for exceptions:
+Set a default approval mode for every tool exposed by a server, and
+override individual tools:
 
 ```toml
 [mcp_servers.docs]
@@ -42,97 +151,70 @@ default_tools_approval_mode = "approve"
 approval_mode = "prompt"
 ```
 
-## Apps (Connectors)
+See the [MCP servers guide](/docs/mcp) for the full picture.
 
-Apps/connectors are disabled by default so the base configuration stays provider-neutral.
-Enable them in `config.toml` if you specifically want the ChatGPT/OpenAI connector surface
-such as `$` mentions and `/apps`:
+## Feature flags
 
-```toml
-[features]
-apps = true
-```
-
-With `apps = true`, `$` in the composer inserts a ChatGPT connector and `/apps` lists
-available and installed apps. Connected apps appear first and are labeled as connected;
-others are marked as can be installed.
-
-## Plugins
-
-Plugins are also disabled by default. Enable them in `config.toml` if you want plugin
-bundles that can contribute skills, MCP servers, and app connectors:
+Optional behavior lives behind `[features]`.
 
 ```toml
 [features]
-plugins = true
+apps = true            # ChatGPT connector surface ($ mentions, /apps)
+plugins = true         # Plugin bundles for skills, MCP, connectors
+child_agents_md = true # Hierarchical AGENTS.md guidance
 ```
 
-If you want the full app/plugin suggestion surface, enable both flags:
+Apps and plugins stay off by default so the base config stays
+provider-neutral.
 
-```toml
-[features]
-apps = true
-plugins = true
+## Notify hook
+
+Open Interpreter can run a shell hook each time a turn finishes. Wire it
+up under `[notify]`. The notification payload includes a `client` field
+identifying the surface that started the turn (the TUI reports
+`interpreter-tui`).
+
+## Custom CA certificates
+
+Behind a corporate proxy that intercepts TLS? Point Open Interpreter at
+your bundle:
+
+```bash
+export CODEX_CA_CERTIFICATE=/etc/ssl/corp-bundle.pem
 ```
 
-## Notify
+If `CODEX_CA_CERTIFICATE` is not set, Open Interpreter falls back to
+`SSL_CERT_FILE`. If neither is set, it uses your system root certificates.
 
-Codex can run a notification hook when the agent finishes a turn. See the configuration reference for the latest notification settings:
+The PEM file may contain multiple certificates. OpenSSL `TRUSTED CERTIFICATE`
+labels are tolerated, and well-formed `X509 CRL` sections are ignored.
 
-- https://developers.openai.com/codex/config-reference
+## SQLite state
 
-When Codex knows which client started the turn, the legacy notify JSON payload also includes a top-level `client` field. The TUI reports `codex-tui`, and the app server reports the `clientInfo.name` value from `initialize`.
-
-## JSON Schema
-
-The generated JSON Schema for `config.toml` lives at `codex-rs/core/config.schema.json`.
-
-## SQLite State DB
-
-Codex stores the SQLite-backed state DB under `sqlite_home` (config key) or the
-`CODEX_SQLITE_HOME` environment variable. When unset, WorkspaceWrite sandbox
-sessions default to a temp directory; other modes default to `CODEX_HOME`.
-
-## Custom CA Certificates
-
-Codex can trust a custom root CA bundle for outbound HTTPS and secure websocket
-connections when enterprise proxies or gateways intercept TLS. This applies to
-login flows and to Codex's other external connections, including Codex
-components that build reqwest clients or secure websocket clients through the
-shared `codex-client` CA-loading path and remote MCP connections that use it.
-
-Set `CODEX_CA_CERTIFICATE` to the path of a PEM file containing one or more
-certificate blocks to use a Codex-specific CA bundle. If
-`CODEX_CA_CERTIFICATE` is unset, Codex falls back to `SSL_CERT_FILE`. If
-neither variable is set, Codex uses the system root certificates.
-
-`CODEX_CA_CERTIFICATE` takes precedence over `SSL_CERT_FILE`. Empty values are
-treated as unset.
-
-The PEM file may contain multiple certificates. Codex also tolerates OpenSSL
-`TRUSTED CERTIFICATE` labels and ignores well-formed `X509 CRL` sections in the
-same bundle. If the file is empty, unreadable, or malformed, the affected Codex
-HTTP or secure websocket connection reports a user-facing error that points
-back to these environment variables.
-
-## Notices
-
-Codex stores "do not show again" flags for some UI prompts under the `[notice]` table.
+Sessions and memory are stored in SQLite under `sqlite_home`. Override it
+with the config key or `CODEX_SQLITE_HOME`. By default,
+`workspace-write` sessions store under a temp dir, while other sandboxes
+use `~/.openinterpreter`.
 
 ## Plan mode defaults
 
-`plan_mode_reasoning_effort` lets you set a Plan-mode-specific default reasoning
-effort override. When unset, Plan mode uses the built-in Plan preset default
-(currently `medium`). When explicitly set (including `none`), it overrides the
-Plan preset. The string value `none` means "no reasoning" (an explicit Plan
-override), not "inherit the global default". There is currently no separate
-config value for "follow the global default in Plan mode".
+`plan_mode_reasoning_effort` lets you override reasoning effort while in
+Plan mode. Set it to `"none"` to explicitly disable reasoning when planning.
+Leave it unset to inherit the Plan preset default (`medium`).
 
-## Realtime start instructions
+## Notices
 
-`experimental_realtime_start_instructions` lets you replace the built-in
-developer message Codex inserts when realtime becomes active. It only affects
-the realtime start message in prompt history and does not change websocket
-backend prompt settings or the realtime end/inactive message.
+The `[notice]` table stores "do not show again" flags for some UI prompts.
+Delete entries here if you want a notice to appear again.
 
-Ctrl+C/Ctrl+D quitting uses a ~1 second double-press hint (`ctrl + c again to quit`).
+## JSON Schema
+
+A generated JSON Schema for `config.toml` lives at
+`codex-rs/core/config.schema.json` in the source tree. Useful for editor
+autocomplete or validation in CI.
+
+## Quitting hint
+
+Pressing `Ctrl+C` once shows a one-second hint (`ctrl + c again to quit`).
+The second press exits. This catches accidental quits without making
+intentional exits slow.

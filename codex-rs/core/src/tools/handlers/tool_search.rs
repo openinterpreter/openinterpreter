@@ -235,7 +235,7 @@ mod tests {
                             strict: false,
                             defer_loading: Some(true),
                             parameters: codex_tools::JsonSchema::object(
-                                Default::default(),
+                                [],
                                 /*required*/ None,
                                 Some(false.into()),
                             ),
@@ -247,7 +247,7 @@ mod tests {
                             strict: false,
                             defer_loading: Some(true),
                             parameters: codex_tools::JsonSchema::object(
-                                Default::default(),
+                                [],
                                 /*required*/ None,
                                 Some(false.into()),
                             ),

@@ -834,6 +834,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                         transport,
                         codex_protocol::protocol::SessionSource::VSCode,
                         auth,
+                        /*shutdown_idle_timeout*/ None,
                     )
                     .await?;
                 }

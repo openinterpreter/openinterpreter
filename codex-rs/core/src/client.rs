@@ -116,10 +116,13 @@ use crate::client_common::ResponseStream;
 use crate::flags::CODEX_RS_SSE_FIXTURE;
 use crate::harness::claude_code::CLAUDE_CODE_APP_HEADER;
 use crate::harness::claude_code::CLAUDE_CODE_BETA_HEADER;
+use crate::harness::claude_code::CLAUDE_CODE_STARTUP_HEAD_USER_AGENT;
+use crate::harness::claude_code::CLAUDE_CODE_STARTUP_MODELS_USER_AGENT;
 use crate::harness::claude_code::CLAUDE_CODE_TITLE_BETA_HEADER;
 use crate::harness::claude_code::CLAUDE_CODE_USER_AGENT;
 use crate::harness::claude_code::build_request as build_claude_code_request;
 use crate::harness::claude_code::build_title_request as build_claude_code_title_request;
+use crate::harness::guidance::guidance_for_harness;
 use crate::harness::kimi_cli::build_request as build_kimi_cli_request;
 use crate::harness::minimal::build_request as build_minimal_request;
 use crate::harness::routing::ChatHarnessRoute;
@@ -184,6 +187,8 @@ struct ModelClientState {
     include_timing_metrics: bool,
     beta_features_header: Option<String>,
     harness: Harness,
+    harness_guidance: bool,
+    claude_code_startup_preflight_sent: AtomicBool,
     claude_code_title_preflight_sent: AtomicBool,
     disable_websockets: AtomicBool,
     cached_websocket_session: StdMutex<WebsocketSession>,
@@ -329,6 +334,7 @@ impl ModelClient {
         include_timing_metrics: bool,
         beta_features_header: Option<String>,
         harness: Harness,
+        harness_guidance: bool,
     ) -> Self {
         let model_provider = create_model_provider(provider_info, auth_manager);
         let codex_api_key_env_enabled = model_provider
@@ -350,6 +356,8 @@ impl ModelClient {
                 include_timing_metrics,
                 beta_features_header,
                 harness,
+                harness_guidance,
+                claude_code_startup_preflight_sent: AtomicBool::new(false),
                 claude_code_title_preflight_sent: AtomicBool::new(false),
                 disable_websockets: AtomicBool::new(false),
                 cached_websocket_session: StdMutex::new(WebsocketSession::default()),
@@ -1389,6 +1397,8 @@ impl ModelClientSession {
             };
             let request_auth_mode = auth_mode.or(Some(AuthMode::ApiKey));
             let mut api_provider = self.client.state.provider.api_provider().await?;
+            self.send_claude_code_startup_preflight(&api_provider, &api_key)
+                .await;
             let mut query_params = api_provider.query_params.take().unwrap_or_default();
             query_params.insert("beta".to_string(), "true".to_string());
             api_provider.query_params = Some(query_params);
@@ -1402,9 +1412,9 @@ impl ModelClientSession {
                 "anthropic-beta",
                 HeaderValue::from_static(CLAUDE_CODE_BETA_HEADER),
             );
-            extra_headers.insert("x-stainless-arch", HeaderValue::from_static("arm64"));
+            extra_headers.insert("x-stainless-arch", HeaderValue::from_static("x64"));
             extra_headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
-            extra_headers.insert("x-stainless-os", HeaderValue::from_static("MacOS"));
+            extra_headers.insert("x-stainless-os", HeaderValue::from_static("Linux"));
             extra_headers.insert(
                 "x-stainless-package-version",
                 HeaderValue::from_static("0.81.0"),
@@ -1449,8 +1459,13 @@ impl ModelClientSession {
                 RequestRouteTelemetry::for_endpoint(ANTHROPIC_MESSAGES_ENDPOINT),
                 self.client.state.auth_env_telemetry.clone(),
             );
-            let request = build_claude_code_request(
+            let guided_prompt = prompt_with_harness_guidance(
                 prompt,
+                &self.client.state.harness,
+                self.client.state.harness_guidance,
+            );
+            let request = build_claude_code_request(
+                &guided_prompt,
                 model_info,
                 effort,
                 &claude_code_session_id,
@@ -1459,13 +1474,10 @@ impl ModelClientSession {
             .map_err(|err| {
                 CodexErr::InvalidRequest(format!("invalid claude-code request: {err}"))
             })?;
-            let title_request = if prompt.tools.is_empty() {
-                None
-            } else {
-                build_claude_code_title_request(prompt, &claude_code_session_id).map_err(|err| {
+            let title_request = build_claude_code_title_request(prompt, &claude_code_session_id)
+                .map_err(|err| {
                     CodexErr::InvalidRequest(format!("invalid claude-code title request: {err}"))
-                })?
-            };
+                })?;
             let title_request = if title_request.is_some()
                 && self
                     .client
@@ -1596,6 +1608,53 @@ impl ModelClientSession {
         }
     }
 
+    async fn send_claude_code_startup_preflight(&self, api_provider: &ApiProvider, api_key: &str) {
+        if self
+            .client
+            .state
+            .claude_code_startup_preflight_sent
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+
+        let client = build_reqwest_client();
+        if let Err(err) = client
+            .head(api_provider.url_for_path(""))
+            .header("user-agent", CLAUDE_CODE_STARTUP_HEAD_USER_AGENT)
+            .send()
+            .await
+        {
+            warn!(
+                error = %err,
+                "claude-code startup HEAD preflight failed; continuing"
+            );
+        }
+
+        let mut models_provider = api_provider.clone();
+        models_provider.query_params =
+            Some(HashMap::from([("limit".to_string(), "1000".to_string())]));
+        match client
+            .get(models_provider.url_for_path("v1/models"))
+            .header("anthropic-version", ANTHROPIC_API_VERSION)
+            .header("user-agent", CLAUDE_CODE_STARTUP_MODELS_USER_AGENT)
+            .header("x-api-key", api_key)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                let _ = response.bytes().await;
+            }
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "claude-code startup models preflight failed; continuing"
+                );
+            }
+        }
+    }
+
     async fn stream_messages_harness_api(
         &self,
         route: MessagesHarnessRoute,
@@ -1622,7 +1681,7 @@ impl ModelClientSession {
     ) -> Result<ResponseStream> {
         match route {
             ChatHarnessRoute::KimiCli => {
-                self.stream_kimi_cli_api(prompt, model_info, session_telemetry)
+                self.stream_kimi_cli_api(prompt, model_info, session_telemetry, effort)
                     .await
             }
             ChatHarnessRoute::Minimal => {
@@ -1671,8 +1730,13 @@ impl ModelClientSession {
                 RequestRouteTelemetry::for_endpoint(CHAT_COMPLETIONS_ENDPOINT),
                 self.client.state.auth_env_telemetry.clone(),
             );
-            let (request_body, tool_kinds) = build_minimal_request(prompt, model_info, effort)
-                .map_err(|err| {
+            let guided_prompt = prompt_with_harness_guidance(
+                prompt,
+                &self.client.state.harness,
+                self.client.state.harness_guidance,
+            );
+            let (request_body, tool_kinds) =
+                build_minimal_request(&guided_prompt, model_info, effort).map_err(|err| {
                     CodexErr::InvalidRequest(format!("invalid minimal request: {err}"))
                 })?;
             let options = ApiResponsesOptions {
@@ -1734,6 +1798,7 @@ impl ModelClientSession {
         prompt: &Prompt,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
     ) -> Result<ResponseStream> {
         let auth_manager = self.client.state.provider.auth_manager();
         let mut auth_recovery = auth_manager
@@ -1760,9 +1825,15 @@ impl ModelClientSession {
                     .base_instructions
                     .text
                     .contains("Approval policy is currently never.");
-            let (request_body, tool_kinds) = build_kimi_cli_request(
+            let guided_prompt = prompt_with_harness_guidance(
                 prompt,
+                &self.client.state.harness,
+                self.client.state.harness_guidance,
+            );
+            let (request_body, tool_kinds) = build_kimi_cli_request(
+                &guided_prompt,
                 model_info,
+                effort,
                 self.client.state.conversation_id.to_string().as_str(),
                 Some(&self.client.state.session_source),
                 yolo_mode,
@@ -2629,6 +2700,22 @@ impl WebsocketTelemetry for ApiTelemetry {
         self.session_telemetry
             .record_websocket_event(result, duration);
     }
+}
+
+fn prompt_with_harness_guidance<'a>(
+    prompt: &'a Prompt,
+    harness: &Harness,
+    enabled: bool,
+) -> std::borrow::Cow<'a, Prompt> {
+    if !enabled {
+        return std::borrow::Cow::Borrowed(prompt);
+    }
+    let Some(guidance) = guidance_for_harness(harness) else {
+        return std::borrow::Cow::Borrowed(prompt);
+    };
+    let mut prompt = prompt.clone();
+    prompt.base_instructions.text = format!("{guidance}\n\n{}", prompt.base_instructions.text);
+    std::borrow::Cow::Owned(prompt)
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use super::AdditionalProperties;
 use super::JsonSchema;
 use super::JsonSchemaPrimitiveType;
+use super::JsonSchemaProperties;
 use super::JsonSchemaType;
 use super::parse_tool_input_schema;
 use pretty_assertions::assert_eq;
@@ -191,7 +192,13 @@ fn parse_tool_input_schema_infers_number_from_numeric_keywords() {
     }))
     .expect("parse schema");
 
-    assert_eq!(schema, JsonSchema::number(/*description*/ None));
+    assert_eq!(
+        schema,
+        JsonSchema {
+            minimum: Some(1),
+            ..JsonSchema::number(/*description*/ None)
+        }
+    );
 }
 
 #[test]
@@ -438,7 +445,7 @@ fn parse_tool_input_schema_fills_default_properties_for_nullable_object_union() 
                 JsonSchemaPrimitiveType::Object,
                 JsonSchemaPrimitiveType::Null,
             ])),
-            properties: Some(BTreeMap::new()),
+            properties: Some(JsonSchemaProperties::new()),
             ..Default::default()
         }
     );

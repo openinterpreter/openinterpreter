@@ -462,6 +462,7 @@ fn anthropic_provider_uses_x_api_key_auth_without_bearer_prefix() {
         env_key_instructions: None,
         experimental_bearer_token: None,
         auth: None,
+        aws: None,
         wire_api: WireApi::Messages,
         query_params: None,
         http_headers: None,
@@ -483,4 +484,16 @@ fn anthropic_provider_uses_x_api_key_auth_without_bearer_prefix() {
         api_provider.headers.get("anthropic-version"),
         Some(&http::HeaderValue::from_static("2023-06-01"))
     );
+}
+
+#[test]
+fn api_provider_retries_rate_limits() {
+    let provider =
+        ModelProviderInfo::create_openai_provider(Some("https://api.moonshot.ai/v1".into()));
+
+    let api_provider = provider
+        .to_api_provider(Some(AuthMode::ApiKey))
+        .expect("provider should convert to API provider");
+
+    assert!(api_provider.retry.retry_429);
 }

@@ -306,87 +306,87 @@ pub fn build_tool_registry_plan(
         if config.has_environment {
             plan.push_spec(
                 create_kimi_cli_agent_tool(),
-                /*supports_parallel_tool_calls*/ false,
+                /*supports_parallel_tool_calls*/ true,
                 /*code_mode_enabled*/ false,
             );
             plan.push_spec(
                 create_kimi_cli_ask_user_question_tool(),
-                /*supports_parallel_tool_calls*/ false,
+                /*supports_parallel_tool_calls*/ true,
                 /*code_mode_enabled*/ false,
             );
             plan.push_spec(
                 create_kimi_cli_set_todo_list_tool(),
-                /*supports_parallel_tool_calls*/ false,
+                /*supports_parallel_tool_calls*/ true,
                 /*code_mode_enabled*/ false,
             );
             plan.push_spec(
                 create_kimi_cli_shell_tool(),
-                /*supports_parallel_tool_calls*/ false,
+                /*supports_parallel_tool_calls*/ true,
                 /*code_mode_enabled*/ false,
             );
             plan.push_spec(
                 create_kimi_cli_task_list_tool(),
-                /*supports_parallel_tool_calls*/ false,
+                /*supports_parallel_tool_calls*/ true,
                 /*code_mode_enabled*/ false,
             );
             plan.push_spec(
                 create_kimi_cli_task_output_tool(),
-                /*supports_parallel_tool_calls*/ false,
+                /*supports_parallel_tool_calls*/ true,
                 /*code_mode_enabled*/ false,
             );
             plan.push_spec(
                 create_kimi_cli_task_stop_tool(),
-                /*supports_parallel_tool_calls*/ false,
+                /*supports_parallel_tool_calls*/ true,
                 /*code_mode_enabled*/ false,
             );
             plan.push_spec(
                 create_kimi_cli_read_file_tool(),
-                /*supports_parallel_tool_calls*/ false,
+                /*supports_parallel_tool_calls*/ true,
                 /*code_mode_enabled*/ false,
             );
             plan.push_spec(
                 create_kimi_cli_read_media_file_tool(),
-                /*supports_parallel_tool_calls*/ false,
+                /*supports_parallel_tool_calls*/ true,
                 /*code_mode_enabled*/ false,
             );
             plan.push_spec(
                 create_kimi_cli_glob_tool(),
-                /*supports_parallel_tool_calls*/ false,
+                /*supports_parallel_tool_calls*/ true,
                 /*code_mode_enabled*/ false,
             );
             plan.push_spec(
                 create_kimi_cli_grep_tool(),
-                /*supports_parallel_tool_calls*/ false,
+                /*supports_parallel_tool_calls*/ true,
                 /*code_mode_enabled*/ false,
             );
             plan.push_spec(
                 create_kimi_cli_write_file_tool(),
-                /*supports_parallel_tool_calls*/ false,
+                /*supports_parallel_tool_calls*/ true,
                 /*code_mode_enabled*/ false,
             );
             plan.push_spec(
                 create_kimi_cli_str_replace_file_tool(),
-                /*supports_parallel_tool_calls*/ false,
+                /*supports_parallel_tool_calls*/ true,
                 /*code_mode_enabled*/ false,
             );
             plan.push_spec(
                 create_kimi_cli_search_web_tool(),
-                /*supports_parallel_tool_calls*/ false,
+                /*supports_parallel_tool_calls*/ true,
                 /*code_mode_enabled*/ false,
             );
             plan.push_spec(
                 create_kimi_cli_fetch_url_tool(),
-                /*supports_parallel_tool_calls*/ false,
+                /*supports_parallel_tool_calls*/ true,
                 /*code_mode_enabled*/ false,
             );
             plan.push_spec(
                 create_kimi_cli_exit_plan_mode_tool(),
-                /*supports_parallel_tool_calls*/ false,
+                /*supports_parallel_tool_calls*/ true,
                 /*code_mode_enabled*/ false,
             );
             plan.push_spec(
                 create_kimi_cli_enter_plan_mode_tool(),
-                /*supports_parallel_tool_calls*/ false,
+                /*supports_parallel_tool_calls*/ true,
                 /*code_mode_enabled*/ false,
             );
             plan.register_handler("Agent", ToolHandlerKind::KimiAgent);

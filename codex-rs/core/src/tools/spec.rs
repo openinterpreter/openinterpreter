@@ -448,7 +448,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
                 ),
                 strict: false,
                 parameters: JsonSchema::object(
-                    Default::default(),
+                    [],
                     /*required*/ None,
                     Some(AdditionalProperties::Boolean(false)),
                 ),

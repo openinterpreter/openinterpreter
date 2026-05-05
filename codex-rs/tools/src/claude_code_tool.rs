@@ -549,12 +549,14 @@ pub fn create_claude_code_ask_user_question_tool() -> ToolSpec {
                         description: Some(
                             "Optional metadata for tracking and analytics purposes. Not displayed to user.".to_string(),
                         ),
-                        properties: Some(BTreeMap::from([(
+                        properties: Some([(
                             "source".to_string(),
                             JsonSchema::string(Some(
                                 "Optional identifier for the source of this question (e.g., \"remember\" for /remember command). Used for analytics tracking.".to_string(),
                             )),
-                        )])),
+                        )]
+                        .into_iter()
+                        .collect()),
                         additional_properties: Some(false.into()),
                         ..Default::default()
                     },

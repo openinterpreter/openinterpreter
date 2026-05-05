@@ -3,10 +3,11 @@ use crate::session::session::SessionSettingsUpdate;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
-use crate::tools::handlers::parse_arguments;
+use crate::tools::handlers::parse_kimi_arguments;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 use codex_protocol::config_types::ModeKind;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::request_user_input::RequestUserInputArgs;
 use codex_protocol::request_user_input::RequestUserInputQuestion;
 use codex_protocol::request_user_input::RequestUserInputQuestionOption;
@@ -102,7 +103,7 @@ impl ToolHandler for KimiExitPlanModeHandler {
                 "ExitPlanMode received unsupported payload".to_string(),
             ));
         };
-        let args: KimiExitPlanModeArgs = parse_arguments(&arguments)?;
+        let args: KimiExitPlanModeArgs = parse_kimi_arguments(&arguments)?;
         let current_mode = session.collaboration_mode().await;
         if current_mode.mode != ModeKind::Plan {
             return Ok(system_message_output("Plan mode is not active."));
@@ -146,7 +147,7 @@ async fn plan_mode_approved(
     call_id: String,
     approval_kind: PlanApprovalKind,
 ) -> Result<bool, FunctionCallError> {
-    if std::env::var_os("OPEN_INTERPRETER_KIMI_CLI_YOLO").is_some() {
+    if kimi_plan_approval_is_preapproved(turn) {
         return Ok(true);
     }
 
@@ -227,6 +228,11 @@ async fn plan_mode_approved(
         }))
 }
 
+fn kimi_plan_approval_is_preapproved(turn: &crate::session::TurnContext) -> bool {
+    std::env::var_os("OPEN_INTERPRETER_KIMI_CLI_YOLO").is_some()
+        || turn.approval_policy.value() == AskForApproval::Never
+}
+
 fn system_message_output(text: &str) -> FunctionToolOutput {
     FunctionToolOutput::from_content(
         vec![
@@ -236,4 +242,104 @@ fn system_message_output(text: &str) -> FunctionToolOutput {
         ],
         Some(true),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::tests::make_session_and_context;
+    use crate::tools::context::ToolCallSource;
+    use crate::tools::context::ToolInvocation;
+    use crate::tools::context::ToolPayload;
+    use crate::tools::registry::ToolHandler;
+    use crate::turn_diff_tracker::TurnDiffTracker;
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    fn invocation(
+        session: Arc<crate::session::session::Session>,
+        turn: Arc<crate::session::TurnContext>,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> ToolInvocation {
+        ToolInvocation {
+            session,
+            turn,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
+            call_id: "call_1".to_string(),
+            tool_name: codex_tools::ToolName::plain(tool_name),
+            source: ToolCallSource::Direct,
+            payload: ToolPayload::Function {
+                arguments: arguments.to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn enter_plan_mode_auto_accepts_when_approval_policy_never() {
+        let (session, mut turn) = make_session_and_context().await;
+        turn.approval_policy
+            .set(AskForApproval::Never)
+            .expect("test setup can set approval policy");
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+
+        let output = KimiEnterPlanModeHandler
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "EnterPlanMode",
+                json!({}),
+            ))
+            .await
+            .expect("enter plan mode succeeds")
+            .into_text();
+
+        assert_eq!(output, "<system>Entered plan mode.</system>");
+        assert_eq!(session.collaboration_mode().await.mode, ModeKind::Plan);
+    }
+
+    #[tokio::test]
+    async fn exit_plan_mode_auto_accepts_when_approval_policy_never() {
+        let (session, mut turn) = make_session_and_context().await;
+        turn.approval_policy
+            .set(AskForApproval::Never)
+            .expect("test setup can set approval policy");
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+
+        let mut plan_mode = session.collaboration_mode().await;
+        plan_mode.mode = ModeKind::Plan;
+        session
+            .update_settings(SessionSettingsUpdate {
+                collaboration_mode: Some(plan_mode),
+                ..Default::default()
+            })
+            .await
+            .expect("test setup can enter plan mode");
+
+        let output = KimiExitPlanModeHandler
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "ExitPlanMode",
+                json!({
+                    "options": [
+                        {
+                            "label": "Revise plan",
+                            "description": "Stay in planning and revise."
+                        }
+                    ]
+                }),
+            ))
+            .await
+            .expect("exit plan mode succeeds")
+            .into_text();
+
+        assert_eq!(output, "<system>Exited plan mode.</system>");
+        assert_eq!(session.collaboration_mode().await.mode, ModeKind::Default);
+    }
 }

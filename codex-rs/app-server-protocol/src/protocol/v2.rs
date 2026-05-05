@@ -719,6 +719,7 @@ pub struct ProfileV2 {
     pub model: Option<String>,
     pub model_provider: Option<String>,
     pub harness: Option<String>,
+    pub harness_guidance: Option<bool>,
     #[experimental(nested)]
     pub approval_policy: Option<AskForApproval>,
     /// [UNSTABLE] Optional profile-level override for where approval requests
@@ -820,6 +821,7 @@ pub struct Config {
     pub model_auto_compact_token_limit: Option<i64>,
     pub model_provider: Option<String>,
     pub harness: Option<String>,
+    pub harness_guidance: Option<bool>,
     #[experimental(nested)]
     pub approval_policy: Option<AskForApproval>,
     /// [UNSTABLE] Optional default for where approval requests are routed for

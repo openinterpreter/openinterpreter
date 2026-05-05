@@ -76,7 +76,7 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: prepare
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
+    timeout-minutes: 360
     defaults:
       run:
         working-directory: codex-rs
@@ -194,7 +194,14 @@ jobs:
             --bin interpreter \
             --bin interpreter-root-tui \
             --bin interpreter-tui \
-            --bin interpreter-app-server
+            --bin interpreter-app-server \
+            --bin codex-exec &
+          cargo_pid="$!"
+          while kill -0 "${cargo_pid}" 2>/dev/null; do
+            echo "cargo release build still running for ${{ matrix.target }} at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            sleep 60
+          done
+          wait "${cargo_pid}"
 
       - name: Package archive
         shell: bash
@@ -217,7 +224,7 @@ jobs:
             suffix=".exe"
           fi
 
-          for binary in interpreter interpreter-root-tui interpreter-tui interpreter-app-server; do
+          for binary in interpreter interpreter-root-tui interpreter-tui interpreter-app-server codex-exec; do
             cp "${release_dir}/${binary}${suffix}" "${package_dir}/${binary}${suffix}"
             chmod 0755 "${package_dir}/${binary}${suffix}"
           done

@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 use url::Url;
 
-use super::parse_arguments;
+use super::parse_kimi_arguments;
 
 const BRAVE_SEARCH_URL: &str = "https://search.brave.com/search";
 const KIMI_WEB_RESULT_LIMIT: usize = 20;
@@ -56,7 +56,7 @@ impl ToolHandler for KimiSearchWebHandler {
                 "SearchWeb received unsupported payload".to_string(),
             ));
         };
-        let args: KimiSearchWebArgs = parse_arguments(&arguments)?;
+        let args: KimiSearchWebArgs = parse_kimi_arguments(&arguments)?;
         let output = run_kimi_web_search(args).await?;
         Ok(FunctionToolOutput::from_text(output, Some(true)))
     }
@@ -75,7 +75,7 @@ impl ToolHandler for KimiFetchUrlHandler {
                 "FetchURL received unsupported payload".to_string(),
             ));
         };
-        let args: KimiFetchUrlArgs = parse_arguments(&arguments)?;
+        let args: KimiFetchUrlArgs = parse_kimi_arguments(&arguments)?;
         let output = run_kimi_fetch_url(args).await?;
         Ok(FunctionToolOutput::from_text(output, Some(true)))
     }

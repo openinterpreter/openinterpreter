@@ -7,12 +7,14 @@ use super::X_CODEX_PARENT_THREAD_ID_HEADER;
 use super::X_CODEX_TURN_METADATA_HEADER;
 use super::X_CODEX_WINDOW_ID_HEADER;
 use super::X_OPENAI_SUBAGENT_HEADER;
+use crate::client_common::Prompt;
 use codex_app_server_protocol::AuthMode;
 use codex_model_provider::BearerAuthProvider;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
+use codex_protocol::models::BaseInstructions;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -33,6 +35,7 @@ fn test_model_client(session_source: SessionSource) -> ModelClient {
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
         Harness::default(),
+        /*harness_guidance*/ true,
     )
 }
 
@@ -79,6 +82,44 @@ fn test_session_telemetry() -> SessionTelemetry {
         "test-terminal".to_string(),
         SessionSource::Cli,
     )
+}
+
+#[test]
+fn harness_guidance_prepends_kimi_extra_instruction_when_enabled() {
+    let prompt = Prompt {
+        base_instructions: BaseInstructions {
+            text: "base instructions".to_string(),
+        },
+        ..Default::default()
+    };
+
+    let guided_prompt =
+        super::prompt_with_harness_guidance(&prompt, &Harness::KimiCli, /*enabled*/ true);
+    assert!(
+        guided_prompt
+            .base_instructions
+            .text
+            .contains("<extra_instruction>")
+    );
+    assert!(
+        guided_prompt
+            .base_instructions
+            .text
+            .contains("use SetTodoList early")
+    );
+    assert!(
+        guided_prompt
+            .base_instructions
+            .text
+            .starts_with("<extra_instruction>")
+    );
+
+    let unguided_prompt =
+        super::prompt_with_harness_guidance(&prompt, &Harness::KimiCli, /*enabled*/ false);
+    assert_eq!(
+        unguided_prompt.base_instructions.text,
+        prompt.base_instructions.text
+    );
 }
 
 #[test]

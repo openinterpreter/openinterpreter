@@ -218,6 +218,40 @@ impl ProcessHandle {
             handle.abort();
         }
     }
+
+    /// Releases ownership of the child process and stops local helper tasks.
+    ///
+    /// This is used for intentionally persistent background commands where the
+    /// caller wants the child to outlive the owning agent process.
+    pub fn detach(&self) {
+        if let Ok(mut killer_opt) = self.killer.lock() {
+            killer_opt.take();
+        }
+
+        if let Ok(mut writer_tx) = self.writer_tx.lock() {
+            writer_tx.take();
+        }
+        if let Ok(mut h) = self.reader_handle.lock()
+            && let Some(handle) = h.take()
+        {
+            handle.abort();
+        }
+        if let Ok(mut handles) = self.reader_abort_handles.lock() {
+            for handle in handles.drain(..) {
+                handle.abort();
+            }
+        }
+        if let Ok(mut h) = self.writer_handle.lock()
+            && let Some(handle) = h.take()
+        {
+            handle.abort();
+        }
+        if let Ok(mut h) = self.wait_handle.lock()
+            && let Some(handle) = h.take()
+        {
+            handle.abort();
+        }
+    }
 }
 
 impl Drop for ProcessHandle {

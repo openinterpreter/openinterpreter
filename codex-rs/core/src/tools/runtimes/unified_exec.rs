@@ -68,6 +68,7 @@ pub struct UnifiedExecRequest {
     pub additional_permissions_preapproved: bool,
     pub justification: Option<String>,
     pub exec_approval_requirement: ExecApprovalRequirement,
+    pub preserve_on_shutdown: bool,
 }
 
 /// Cache key for approval decisions that can be reused across equivalent
@@ -300,6 +301,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
                             req.tty,
                             prepared.spawn_lifecycle,
                             environment.as_ref(),
+                            req.preserve_on_shutdown,
                         )
                         .await
                         .map_err(|err| match err {
@@ -342,6 +344,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
                 req.tty,
                 Box::new(NoopSpawnLifecycle),
                 environment.as_ref(),
+                req.preserve_on_shutdown,
             )
             .await
             .map_err(|err| match err {

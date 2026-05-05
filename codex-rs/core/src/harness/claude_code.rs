@@ -2,6 +2,7 @@ use crate::client_common::Prompt;
 use crate::event_mapping::is_contextual_user_message_content;
 use crate::harness::claude_code_prompt::build_child_agent_system_prompt;
 use crate::harness::claude_code_prompt::build_system_prompt;
+use chrono::Datelike;
 use codex_api::AnthropicCacheControl;
 use codex_api::AnthropicContentBlock;
 use codex_api::AnthropicContextEdit;
@@ -10,6 +11,7 @@ use codex_api::AnthropicMessage;
 use codex_api::AnthropicMessageContent;
 use codex_api::AnthropicMessageRequest;
 use codex_api::AnthropicOutputConfig;
+use codex_api::AnthropicOutputFormat;
 use codex_api::AnthropicRequestMetadata;
 use codex_api::AnthropicTextBlock;
 use codex_api::AnthropicThinkingConfig;
@@ -36,45 +38,36 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
 
-pub(crate) const CLAUDE_CODE_BETA_HEADER: &str = "claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24";
-pub(crate) const CLAUDE_CODE_TITLE_BETA_HEADER: &str = "interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,structured-outputs-2025-12-15";
-pub(crate) const CLAUDE_CODE_USER_AGENT: &str = "claude-cli/2.1.116 (external, sdk-cli)";
+pub(crate) const CLAUDE_CODE_BETA_HEADER: &str = "claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,effort-2025-11-24";
+pub(crate) const CLAUDE_CODE_TITLE_BETA_HEADER: &str = "interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,structured-outputs-2025-12-15";
+pub(crate) const CLAUDE_CODE_STARTUP_HEAD_USER_AGENT: &str = "Bun/1.3.14";
+pub(crate) const CLAUDE_CODE_STARTUP_MODELS_USER_AGENT: &str = "claude-code/2.1.126";
+pub(crate) const CLAUDE_CODE_USER_AGENT: &str = "claude-cli/2.1.126 (external, sdk-cli)";
 pub(crate) const CLAUDE_CODE_APP_HEADER: &str = "cli";
 const CLAUDE_CODE_DEFAULT_MAX_TOKENS: u32 = 32_000;
 const CLAUDE_CODE_OPUS_4_6_PLUS_MAX_TOKENS: u32 = 64_000;
-const CLAUDE_CODE_VERSION: &str = "2.1.116";
+const CLAUDE_CODE_VERSION: &str = "2.1.126";
 const CLAUDE_CODE_BILLING_VERSION_SALT: &str = "59cf53e54c78";
 const CLAUDE_CODE_BILLING_HEADER_PREFIX: &str = "x-anthropic-billing-header: cc_version=";
 const CLAUDE_CODE_BILLING_ENTRYPOINT: &str = "sdk-cli";
 const CLAUDE_CODE_SYSTEM_PROMPT_HEADER: &str =
     "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 const CLAUDE_CODE_METADATA_DEVICE_ID: &str =
-    "f54e293e630406b6d4d55a67a6c87b6e253792080149b99367c1e27b37d73805";
+    "5ac70074a85c7e515d6d6a5e5f442a6fe84d73ee6791b5b88d8c03e67dcfea6e";
+const CLAUDE_CODE_TITLE_MODEL: &str = "claude-haiku-4-5-20251001";
+const CLAUDE_CODE_TITLE_PROMPT: &str = "Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this coding session. The title should be clear enough that the user recognizes the session in a list. Use sentence case: capitalize only the first word and proper nouns.\n\nReturn JSON with a single \"title\" field.\n\nGood examples:\n{\"title\": \"Fix login button on mobile\"}\n{\"title\": \"Add OAuth authentication\"}\n{\"title\": \"Debug failing CI tests\"}\n{\"title\": \"Refactor API client error handling\"}\n\nBad (too vague): {\"title\": \"Code changes\"}\nBad (too long): {\"title\": \"Investigate and fix the issue where the login button does not respond on mobile devices\"}\nBad (wrong case): {\"title\": \"Fix Login Button On Mobile\"}";
 const CLAUDE_CODE_TODO_REMINDER_TOOL_GAP: usize = 8;
 const CLAUDE_CODE_TODO_REMINDER_STALENESS_THRESHOLD: usize = 10;
 const CLAUDE_CODE_TODO_REMINDER_PREFIX: &str = "<system-reminder>\nThe TodoWrite tool hasn't been used recently. If you're working on tasks that would benefit from tracking progress, consider using the TodoWrite tool to track progress. Also consider cleaning up the todo list if has become stale and no longer matches what you are working on. Only use it if it's relevant to the current work. This is just a gentle reminder - ignore if not applicable. Make sure that you NEVER mention this reminder to the user\n\n\nHere are the existing contents of your todo list:\n\n";
-const CLAUDE_REFERENCE_SKILLS_REMINDER: &str = r#"- update-config: Use this skill to configure the Claude Code harness via settings.json. Automated behaviors ("from now on when X", "each time X", "whenever X", "before/after X") require hooks configured in settings.json - the harness executes these, not Claude, so memory/preferences cannot fulfill them. Also use for: permissions ("allow X", "add permission", "move permission to"), env vars ("set X=Y"), hook troubleshooting, or any changes to settings.json/settings.local.json files. Examples: "allow npm commands", "add bq permission to global settings", "move permission to user settings", "set DEBUG=true", "when claude stops show X". For simple settings like theme/model, use Config tool.
+const CLAUDE_REFERENCE_SKILLS_REMINDER: &str = r#"- update-config: Use this skill to configure the Claude Code harness via settings.json. Automated behaviors ("from now on when X", "each time X", "whenever X", "before/after X") require hooks configured in settings.json - the harness executes these, not Claude, so memory/preferences cannot fulfill them. Also use for: permissions ("allow X", "add permission", "move permission to"), env vars ("set X=Y"), hook troubleshooting, or any changes to settings.json/settings.local.json files. Examples: "allow npm commands", "add bq permission to global settings", "move permission to user settings", "set DEBUG=true", "when claude stops show X". For simple settings like theme/model, suggest the /config command.
 - keybindings-help: Use when the user wants to customize keyboard shortcuts, rebind keys, add chord bindings, or modify ~/.claude/keybindings.json. Examples: "rebind ctrl+s", "add a chord shortcut", "change the submit key", "customize keybindings".
 - simplify: Review changed code for reuse, quality, and efficiency, then fix any issues found.
 - fewer-permission-prompts: Scan your transcripts for common read-only Bash and MCP tool calls, then add a prioritized allowlist to project .claude/settings.json to reduce permission prompts.
 - loop: Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo, defaults to 10m) - When the user wants to set up a recurring task, poll for status, or run something repeatedly on an interval (e.g. "check the deploy every 5 minutes", "keep running /babysit-prs"). Do NOT invoke for one-off tasks.
+- schedule: Create, update, list, or run scheduled remote agents (routines) that execute on a cron schedule. - When the user wants to schedule a recurring remote agent, set up automated tasks, create a cron job for Claude Code, or manage their scheduled agents/routines. Also use when the user wants a one-time scheduled run ("run this once at 3pm", "remind me to check X tomorrow").
 - claude-api: Build, debug, and optimize Claude API / Anthropic SDK apps. Apps built with this skill should include prompt caching. Also handles migrating existing Claude API code between Claude model versions (4.5 → 4.6, 4.6 → 4.7, retired-model replacements).
 TRIGGER when: code imports `anthropic`/`@anthropic-ai/sdk`; user asks for the Claude API, Anthropic SDK, or Managed Agents; user adds/modifies/tunes a Claude feature (caching, thinking, compaction, tool use, batch, files, citations, memory) or model (Opus/Sonnet/Haiku) in a file; questions about prompt caching / cache hit rate in an Anthropic SDK project.
 SKIP: file imports `openai`/other-provider SDK, filename like `*-openai.py`/`*-generic.py`, provider-neutral code, general programming/ML.
-- docx: Use this skill whenever the user wants to create, read, edit, or manipulate Word documents (.docx files). Triggers include: any mention of 'Word doc', 'word document', '.docx', or requests to produce professional documents with formatting like tables of contents, headings, page numbers, or letterheads. Also use when extracting or reorganizing content from .docx files, inserting or replacing images in documents, performing find-and-replace in Word files, working with tracked changes or comments, or converting content into a polished Word document. If the user asks for a 'report', 'memo', 'letter', 'template', or similar deliverable as a Word or .docx file, use this skill. Do NOT use for PDFs, spreadsheets, Google Docs, or general coding tasks unrelated to document generation.
-- be-scientific: Work methodically with a documented experiment log to avoid repeating failed solutions
-- implement-plan-parallelization-agent: Parallelization Agent Instructions
-- enrich-plan-agent: Enrich Plan Subagent Instructions
-- implement-plan: Execute an architectural plan using parallel subagents
-- ui-skills: Opinionated constraints for building better interfaces with agents.
-- rams: Run accessibility and visual design review
-- implement-plan-test-agent: Test & Iterate Agent Instructions
-- implement-plan-implementation-agent: Implementation Agent Instructions
-- start-plan: Create an initial architectural plan for a feature or change
-- enrich-plan: Dispatch 8 parallel agents to deeply scrutinize and enrich the current plan
-- ralph-loop:help: Explain Ralph Loop plugin and available commands
-- ralph-loop:cancel-ralph: Cancel active Ralph Loop
-- ralph-loop:ralph-loop: Start Ralph Loop in current session
 - init: Initialize a new CLAUDE.md file with codebase documentation
 - review: Review a pull request
 - security-review: Complete a security review of the pending changes on the current branch"#;
@@ -86,22 +79,7 @@ pub(crate) fn build_request(
     session_id: &str,
     session_source: Option<&SessionSource>,
 ) -> Result<AnthropicMessageRequest, serde_json::Error> {
-    let billing_version_source = prompt
-        .input
-        .iter()
-        .find_map(|item| match item {
-            ResponseItem::Message { role, content, .. }
-                if role == "user" && !is_contextual_user_message_content(content) =>
-            {
-                content.iter().find_map(|content_item| match content_item {
-                    ContentItem::InputText { text } | ContentItem::OutputText { text } => {
-                        Some(text.as_str())
-                    }
-                    ContentItem::InputImage { .. } => None,
-                })
-            }
-            _ => None,
-        })
+    let billing_version_source = first_non_contextual_user_text(prompt)
         .unwrap_or_default()
         .to_string();
     let is_child_agent_request = matches!(
@@ -109,6 +87,9 @@ pub(crate) fn build_request(
         Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. }))
     );
     let mut messages = build_messages(&prompt.input, !is_child_agent_request)?;
+    if !is_child_agent_request {
+        ensure_skills_reminder(&mut messages);
+    }
     prepend_current_date_reminder(&mut messages);
     apply_message_cache_breakpoint(&mut messages);
     normalize_plain_text_messages(&mut messages);
@@ -172,23 +153,87 @@ pub(crate) fn build_title_request(
     prompt: &Prompt,
     session_id: &str,
 ) -> Result<Option<AnthropicMessageRequest>, serde_json::Error> {
-    let _ = (prompt, session_id);
-    Ok(None)
+    let Some(title_text) = first_non_contextual_user_text(prompt) else {
+        return Ok(None);
+    };
+    let title_text = title_text.trim_end_matches('\n').to_string();
+    let messages = vec![AnthropicMessage {
+        role: "user".to_string(),
+        content: AnthropicMessageContent::Blocks(vec![AnthropicContentBlock::Text {
+            text: title_text.clone(),
+            cache_control: None,
+        }]),
+    }];
+    let tools = vec![];
+    let system = vec![
+        AnthropicTextBlock::new(build_billing_header(
+            "title",
+            CLAUDE_CODE_TITLE_MODEL,
+            title_text.as_str(),
+            &messages,
+            &tools,
+        )),
+        AnthropicTextBlock::new(CLAUDE_CODE_SYSTEM_PROMPT_HEADER.to_string()),
+        AnthropicTextBlock::new(CLAUDE_CODE_TITLE_PROMPT.to_string()),
+    ];
+    let output_config = Some(AnthropicOutputConfig {
+        effort: None,
+        format: Some(AnthropicOutputFormat::JsonSchema {
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string"
+                    }
+                },
+                "required": ["title"],
+                "additionalProperties": false
+            }),
+        }),
+    });
+    Ok(Some(AnthropicMessageRequest {
+        model: CLAUDE_CODE_TITLE_MODEL.to_string(),
+        messages,
+        system,
+        tools,
+        thinking: None,
+        context_management: None,
+        output_config,
+        metadata: Some(build_request_metadata(session_id)),
+        temperature: Some(1),
+        max_tokens: CLAUDE_CODE_DEFAULT_MAX_TOKENS,
+        stream: true,
+    }))
+}
+
+fn first_non_contextual_user_text(prompt: &Prompt) -> Option<&str> {
+    prompt.input.iter().find_map(|item| match item {
+        ResponseItem::Message { role, content, .. }
+            if role == "user" && !is_contextual_user_message_content(content) =>
+        {
+            content.iter().find_map(|content_item| match content_item {
+                ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                    Some(text.as_str())
+                }
+                ContentItem::InputImage { .. } => None,
+            })
+        }
+        _ => None,
+    })
 }
 
 fn claude_code_output_config(
     model_info: &ModelInfo,
     effort: Option<ReasoningEffortConfig>,
 ) -> Option<AnthropicOutputConfig> {
-    if anthropic_output_effort_is_unsupported(model_info) {
-        return None;
-    }
-
     let output_effort = anthropic_output_effort(effort).or_else(|| {
         claude_code_uses_adaptive_thinking(model_info.slug.as_str())
             .then(|| claude_code_default_effort(model_info.slug.as_str()))
             .flatten()
     });
+    if output_effort.is_none() && anthropic_output_effort_is_unsupported(model_info) {
+        return None;
+    }
     output_effort.map(|effort| AnthropicOutputConfig {
         effort: Some(effort.to_string()),
         format: None,
@@ -627,6 +672,31 @@ fn is_claude_code_skills_reminder_block(block: &AnthropicContentBlock) -> bool {
     )
 }
 
+fn ensure_skills_reminder(messages: &mut Vec<AnthropicMessage>) {
+    let reminder = AnthropicContentBlock::Text {
+        text: format!(
+            "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n{CLAUDE_REFERENCE_SKILLS_REMINDER}\n</system-reminder>\n"
+        ),
+        cache_control: None,
+    };
+    if let Some(first_user_message) = messages.iter_mut().find(|message| message.role == "user") {
+        let Some(blocks) = first_user_message.content.blocks_mut() else {
+            return;
+        };
+        if !blocks.iter().any(is_claude_code_skills_reminder_block) {
+            blocks.insert(0, reminder);
+        }
+    } else {
+        messages.insert(
+            0,
+            AnthropicMessage {
+                role: "user".to_string(),
+                content: vec![reminder].into(),
+            },
+        );
+    }
+}
+
 fn apply_message_cache_breakpoint(messages: &mut [AnthropicMessage]) {
     let mut last_cacheable_block = None;
     for (message_idx, message) in messages.iter_mut().enumerate() {
@@ -753,6 +823,7 @@ fn build_tools(
                     return None;
                 }
                 match tool.name.as_str() {
+                "LSP" => None,
                 "Bash" => Some(Ok(AnthropicTool {
                     name: "Bash".to_string(),
                     description: tool.description.clone(),
@@ -811,49 +882,6 @@ fn build_tools(
                             }
                         },
                         "required": ["file_path", "old_string", "new_string"],
-                        "additionalProperties": false
-                    }),
-                })),
-                "LSP" => Some(Ok(AnthropicTool {
-                    name: "LSP".to_string(),
-                    description: tool.description.clone(),
-                    input_schema: serde_json::json!({
-                        "$schema": "https://json-schema.org/draft/2020-12/schema",
-                        "type": "object",
-                        "properties": {
-                            "operation": {
-                                "description": "The LSP operation to perform",
-                                "type": "string",
-                                "enum": [
-                                    "goToDefinition",
-                                    "findReferences",
-                                    "hover",
-                                    "documentSymbol",
-                                    "workspaceSymbol",
-                                    "goToImplementation",
-                                    "prepareCallHierarchy",
-                                    "incomingCalls",
-                                    "outgoingCalls"
-                                ]
-                            },
-                            "filePath": {
-                                "description": "The absolute or relative path to the file",
-                                "type": "string"
-                            },
-                            "line": {
-                                "description": "The line number (1-based, as shown in editors)",
-                                "type": "integer",
-                                "exclusiveMinimum": 0,
-                                "maximum": 9007199254740991_i64
-                            },
-                            "character": {
-                                "description": "The character offset (1-based, as shown in editors)",
-                                "type": "integer",
-                                "exclusiveMinimum": 0,
-                                "maximum": 9007199254740991_i64
-                            }
-                        },
-                        "required": ["operation", "filePath", "line", "character"],
                         "additionalProperties": false
                     }),
                 })),
@@ -957,6 +985,7 @@ fn build_tools(
         &existing_names,
         is_child_agent_request,
     )?);
+    normalize_reference_claude_tool_descriptions(&mut tools);
     tools.sort_by_key(|tool| match tool.name.as_str() {
         "Agent" => 0,
         "AskUserQuestion" => 1,
@@ -971,21 +1000,81 @@ fn build_tools(
         "ExitWorktree" => 10,
         "Glob" => 11,
         "Grep" => 12,
-        "LSP" => 13,
+        "Monitor" => 13,
         "NotebookEdit" => 14,
-        "Read" => 15,
-        "ScheduleWakeup" => 16,
-        "Skill" => 17,
-        "TaskOutput" => 18,
-        "TaskStop" => 19,
-        "TodoWrite" => 20,
-        "ToolSearch" => 21,
-        "WebFetch" => 22,
-        "WebSearch" => 23,
-        "Write" => 24,
-        _ => 25,
+        "PushNotification" => 15,
+        "Read" => 16,
+        "RemoteTrigger" => 17,
+        "ScheduleWakeup" => 18,
+        "Skill" => 19,
+        "TaskOutput" => 20,
+        "TaskStop" => 21,
+        "TodoWrite" => 22,
+        "ToolSearch" => 23,
+        "WebFetch" => 24,
+        "WebSearch" => 25,
+        "Write" => 26,
+        _ => 27,
     });
     Ok(tools)
+}
+
+fn normalize_reference_claude_tool_descriptions(tools: &mut [AnthropicTool]) {
+    for tool in tools {
+        match tool.name.as_str() {
+            "Agent" => {
+                tool.description = tool.description.replace(
+                    "- Explore: Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. \"src/components/**/*.tsx\"), search code for keywords (eg. \"API endpoints\"), or answer questions about the codebase (eg. \"how do API endpoints work?\"). When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"very thorough\" for comprehensive analysis across multiple locations and naming conventions. (Tools: All tools except Agent, ExitPlanMode, Edit, Write, NotebookEdit)",
+                    "- Explore: Fast read-only search agent for locating code. Use it to find files by pattern (eg. \"src/components/**/*.tsx\"), grep for symbols or keywords (eg. \"API endpoints\"), or answer \"where is X defined / which files reference Y.\" Do NOT use it for code review, design-doc auditing, cross-file consistency checks, or open-ended analysis — it reads excerpts rather than whole files and will miss content past its read window. When calling, specify search breadth: \"quick\" for a single targeted lookup, \"medium\" for moderate exploration, or \"very thorough\" to search across multiple locations and naming conventions. (Tools: All tools except Agent, ExitPlanMode, Edit, Write, NotebookEdit)",
+                );
+            }
+            "Bash" => {
+                tool.description = tool.description.replace(
+                    "  - If your command is long running and you would like to be notified when it finishes — use `run_in_background`. No sleep needed.\n  - Do not retry failing commands in a sleep loop — diagnose the root cause.\n  - If waiting for a background task you started with `run_in_background`, you will be notified when it completes — do not poll.\n  - If you must poll an external process, use a check command (e.g. `gh run view`) rather than sleeping first.\n  - If you must sleep, keep the duration short to avoid blocking the user.",
+                    "  - Use the Monitor tool to stream events from a background process (each stdout line is a notification). For one-shot \"wait until done,\" use Bash with run_in_background instead.\n  - If your command is long running and you would like to be notified when it finishes — use `run_in_background`. No sleep needed.\n  - Do not retry failing commands in a sleep loop — diagnose the root cause.\n  - If waiting for a background task you started with `run_in_background`, you will be notified when it completes — do not poll.\n  - Long leading `sleep` commands are blocked. To poll until a condition is met, use Monitor with an until-loop (e.g. `until <check>; do sleep 2; done`) — you get a notification when the loop exits. Do not chain shorter sleeps to work around the block.",
+                );
+            }
+            "Read" => {
+                tool.description = tool
+                    .description
+                    .replace(
+                        "- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters",
+                        "- When you already know which part of the file you need, only read that part. This can be important for larger files.",
+                    )
+                    .replace(
+                        "- This tool can only read files, not directories. To read a directory, use an ls command via the Bash tool.",
+                        "- This tool can only read files, not directories. To list files in a directory, use the registered shell tool.",
+                    );
+            }
+            "WebSearch" => {
+                let date = current_local_date();
+                let current_month = format!("{} {}", month_name(date.month()), date.year());
+                tool.description = tool.description.replace(
+                    "The current month is April 2026.",
+                    format!("The current month is {current_month}.").as_str(),
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn month_name(month: u32) -> &'static str {
+    match month {
+        1 => "January",
+        2 => "February",
+        3 => "March",
+        4 => "April",
+        5 => "May",
+        6 => "June",
+        7 => "July",
+        8 => "August",
+        9 => "September",
+        10 => "October",
+        11 => "November",
+        12 => "December",
+        _ => "January",
+    }
 }
 
 fn reference_claude_supplemental_tools(
@@ -995,15 +1084,15 @@ fn reference_claude_supplemental_tools(
     [
         (
             "CronCreate",
-            r###"{"name":"CronCreate","description":"Schedule a prompt to be enqueued at a future time. Use for both recurring schedules and one-shot reminders.\n\nUses standard 5-field cron in the user's local timezone: minute hour day-of-month month day-of-week. \"0 9 * * *\" means 9am local — no timezone conversion needed.\n\n## One-shot tasks (recurring: false)\n\nFor \"remind me at X\" or \"at <time>, do Y\" requests — fire once then auto-delete.\nPin minute/hour/day-of-month/month to specific values:\n  \"remind me at 2:30pm today to check the deploy\" → cron: \"30 14 <today_dom> <today_month> *\", recurring: false\n  \"tomorrow morning, run the smoke test\" → cron: \"57 8 <tomorrow_dom> <tomorrow_month> *\", recurring: false\n\n## Recurring jobs (recurring: true, the default)\n\nFor \"every N minutes\" / \"every hour\" / \"weekdays at 9am\" requests:\n  \"*/5 * * * *\" (every 5 min), \"0 * * * *\" (hourly), \"0 9 * * 1-5\" (weekdays at 9am local)\n\n## Avoid the :00 and :30 minute marks when the task allows it\n\nEvery user who asks for \"9am\" gets `0 9`, and every user who asks for \"hourly\" gets `0 *` — which means requests from across the planet land on the API at the same instant. When the user's request is approximate, pick a minute that is NOT 0 or 30:\n  \"every morning around 9\" → \"57 8 * * *\" or \"3 9 * * *\" (not \"0 9 * * *\")\n  \"hourly\" → \"7 * * * *\" (not \"0 * * * *\")\n  \"in an hour or so, remind me to...\" → pick whatever minute you land on, don't round\n\nOnly use minute 0 or 30 when the user names that exact time and clearly means it (\"at 9:00 sharp\", \"at half past\", coordinating with a meeting). When in doubt, nudge a few minutes early or late — the user will not notice, and the fleet will.\n\n## Durability\n\nBy default (durable: false) the job lives only in this Claude session — nothing is written to disk, and the job is gone when Claude exits. Pass durable: true to write to .claude/scheduled_tasks.json so the job survives restarts. Only use durable: true when the user explicitly asks for the task to persist (\"keep doing this every day\", \"set this up permanently\"). Most \"remind me in 5 minutes\" / \"check back in an hour\" requests should stay session-only.\n\n## Runtime behavior\n\nJobs only fire while the REPL is idle (not mid-query). Durable jobs persist to .claude/scheduled_tasks.json and survive session restarts — on next launch they resume automatically. One-shot durable tasks that were missed while the REPL was closed are surfaced for catch-up. Session-only jobs die with the process. The scheduler adds a small deterministic jitter on top of whatever you pick: recurring tasks fire up to 10% of their period late (max 15 min); one-shot tasks landing on :00 or :30 fire up to 90 s early. Picking an off-minute is still the bigger lever.\n\nRecurring tasks auto-expire after 7 days — they fire one final time, then are deleted. This bounds session lifetime. Tell the user about the 7-day limit when scheduling recurring jobs.\n\nReturns a job ID you can pass to CronDelete.","input_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"cron":{"description":"Standard 5-field cron expression in local time: \"M H DoM Mon DoW\" (e.g. \"*/5 * * * *\" = every 5 minutes, \"30 14 28 2 *\" = Feb 28 at 2:30pm local once).","type":"string"},"prompt":{"description":"The prompt to enqueue at each fire time.","type":"string"},"recurring":{"description":"true (default) = fire on every cron match until deleted or auto-expired after 7 days. false = fire once at the next match, then auto-delete. Use false for \"remind me at X\" one-shot requests with pinned minute/hour/dom/month.","type":"boolean"},"durable":{"description":"true = persist to .claude/scheduled_tasks.json and survive restarts. false (default) = in-memory only, dies when this Claude session ends. Use true only when the user asks the task to survive across sessions.","type":"boolean"}},"required":["cron","prompt"],"additionalProperties":false}}"###,
+            r###"{"name":"CronCreate","description":"Schedule a prompt to be enqueued at a future time. Use for both recurring schedules and one-shot reminders.\n\nUses standard 5-field cron in the user's local timezone: minute hour day-of-month month day-of-week. \"0 9 * * *\" means 9am local — no timezone conversion needed.\n\n## One-shot tasks (recurring: false)\n\nFor \"remind me at X\" or \"at <time>, do Y\" requests — fire once then auto-delete.\nPin minute/hour/day-of-month/month to specific values:\n  \"remind me at 2:30pm today to check the deploy\" → cron: \"30 14 <today_dom> <today_month> *\", recurring: false\n  \"tomorrow morning, run the smoke test\" → cron: \"57 8 <tomorrow_dom> <tomorrow_month> *\", recurring: false\n\n## Recurring jobs (recurring: true, the default)\n\nFor \"every N minutes\" / \"every hour\" / \"weekdays at 9am\" requests:\n  \"*/5 * * * *\" (every 5 min), \"0 * * * *\" (hourly), \"0 9 * * 1-5\" (weekdays at 9am local)\n\n## Avoid the :00 and :30 minute marks when the task allows it\n\nEvery user who asks for \"9am\" gets `0 9`, and every user who asks for \"hourly\" gets `0 *` — which means requests from across the planet land on the API at the same instant. When the user's request is approximate, pick a minute that is NOT 0 or 30:\n  \"every morning around 9\" → \"57 8 * * *\" or \"3 9 * * *\" (not \"0 9 * * *\")\n  \"hourly\" → \"7 * * * *\" (not \"0 * * * *\")\n  \"in an hour or so, remind me to...\" → pick whatever minute you land on, don't round\n\nOnly use minute 0 or 30 when the user names that exact time and clearly means it (\"at 9:00 sharp\", \"at half past\", coordinating with a meeting). When in doubt, nudge a few minutes early or late — the user will not notice, and the fleet will.\n\n## Session-only\n\nJobs live only in this Claude session — nothing is written to disk, and the job is gone when Claude exits.\n\n## Runtime behavior\n\nJobs only fire while the REPL is idle (not mid-query). The scheduler adds a small deterministic jitter on top of whatever you pick: recurring tasks fire up to 10% of their period late (max 15 min); one-shot tasks landing on :00 or :30 fire up to 90 s early. Picking an off-minute is still the bigger lever.\n\nRecurring tasks auto-expire after 7 days — they fire one final time, then are deleted. This bounds session lifetime. Tell the user about the 7-day limit when scheduling recurring jobs.\n\nReturns a job ID you can pass to CronDelete.","input_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"cron":{"description":"Standard 5-field cron expression in local time: \"M H DoM Mon DoW\" (e.g. \"*/5 * * * *\" = every 5 minutes, \"30 14 28 2 *\" = Feb 28 at 2:30pm local once).","type":"string"},"prompt":{"description":"The prompt to enqueue at each fire time.","type":"string"},"recurring":{"description":"true (default) = fire on every cron match until deleted or auto-expired after 7 days. false = fire once at the next match, then auto-delete. Use false for \"remind me at X\" one-shot requests with pinned minute/hour/dom/month.","type":"boolean"},"durable":{"description":"true = persist to .claude/scheduled_tasks.json and survive restarts. false (default) = in-memory only, dies when this Claude session ends. Use true only when the user asks the task to survive across sessions.","type":"boolean"}},"required":["cron","prompt"],"additionalProperties":false}}"###,
         ),
         (
             "CronDelete",
-            r###"{"name":"CronDelete","description":"Cancel a cron job previously scheduled with CronCreate. Removes it from .claude/scheduled_tasks.json (durable jobs) or the in-memory session store (session-only jobs).","input_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"id":{"description":"Job ID returned by CronCreate.","type":"string"}},"required":["id"],"additionalProperties":false}}"###,
+            r###"{"name":"CronDelete","description":"Cancel a cron job previously scheduled with CronCreate. Removes it from the in-memory session store.","input_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"id":{"description":"Job ID returned by CronCreate.","type":"string"}},"required":["id"],"additionalProperties":false}}"###,
         ),
         (
             "CronList",
-            r###"{"name":"CronList","description":"List all cron jobs scheduled via CronCreate, both durable (.claude/scheduled_tasks.json) and session-only.","input_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{},"additionalProperties":false}}"###,
+            r###"{"name":"CronList","description":"List all cron jobs scheduled via CronCreate in this session.","input_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{},"additionalProperties":false}}"###,
         ),
         (
             "EnterPlanMode",
@@ -1022,8 +1111,20 @@ fn reference_claude_supplemental_tools(
             r###"{"name":"ExitWorktree","description":"Exit a worktree session created by EnterWorktree and return the session to the original working directory.\n\n## Scope\n\nThis tool ONLY operates on worktrees created by EnterWorktree in this session. It will NOT touch:\n- Worktrees you created manually with `git worktree add`\n- Worktrees from a previous session (even if created by EnterWorktree then)\n- The directory you're in if EnterWorktree was never called\n\nIf called outside an EnterWorktree session, the tool is a **no-op**: it reports that no worktree session is active and takes no action. Filesystem state is unchanged.\n\n## When to Use\n\n- The user explicitly asks to \"exit the worktree\", \"leave the worktree\", \"go back\", or otherwise end the worktree session\n- Do NOT call this proactively — only when the user asks\n\n## Parameters\n\n- `action` (required): `\"keep\"` or `\"remove\"`\n  - `\"keep\"` — leave the worktree directory and branch intact on disk. Use this if the user wants to come back to the work later, or if there are changes to preserve.\n  - `\"remove\"` — delete the worktree directory and its branch. Use this for a clean exit when the work is done or abandoned.\n- `discard_changes` (optional, default false): only meaningful with `action: \"remove\"`. If the worktree has uncommitted files or commits not on the original branch, the tool will REFUSE to remove it unless this is set to `true`. If the tool returns an error listing changes, confirm with the user before re-invoking with `discard_changes: true`.\n\n## Behavior\n\n- Restores the session's working directory to where it was before EnterWorktree\n- Clears CWD-dependent caches (system prompt sections, memory files, plans directory) so the session state reflects the original directory\n- If a tmux session was attached to the worktree: killed on `remove`, left running on `keep` (its name is returned so the user can reattach)\n- Once exited, EnterWorktree can be called again to create a fresh worktree\n","input_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"action":{"description":"\"keep\" leaves the worktree and branch on disk; \"remove\" deletes both.","type":"string","enum":["keep","remove"]},"discard_changes":{"description":"Required true when action is \"remove\" and the worktree has uncommitted files or unmerged commits. The tool will refuse and list them otherwise.","type":"boolean"}},"required":["action"],"additionalProperties":false}}"###,
         ),
         (
+            "Monitor",
+            r###"{"name":"Monitor","description":"Start a background monitor that streams events from a long-running script. Each stdout line is an event — you keep working and notifications arrive in the chat. Events arrive on their own schedule and are not replies from the user, even if one lands while you're waiting for the user to answer a question.\n\nPick by how many notifications you need:\n- **One** (\"tell me when the server is ready / the build finishes\") → use **Bash with `run_in_background`** and a command that exits when the condition is true, e.g. `until grep -q \"Ready in\" dev.log; do sleep 0.5; done`. You get a single completion notification when it exits.\n- **One per occurrence, indefinitely** (\"tell me every time an ERROR line appears\") → Monitor with an unbounded command (`tail -f`, `inotifywait -m`, `while true`).\n- **One per occurrence, until a known end** (\"emit each CI step result, stop when the run completes\") → Monitor with a command that emits lines and then exits.\n\nYour script's stdout is the event stream. Each line becomes a notification. Exit ends the watch.\n\n  # Each matching log line is an event\n  tail -f /var/log/app.log | grep --line-buffered \"ERROR\"\n\n  # Each file change is an event\n  inotifywait -m --format '%e %f' /watched/dir\n\n  # Poll GitHub for new PR comments and emit one line per new comment\n  last=$(date -u +%Y-%m-%dT%H:%M:%SZ)\n  while true; do\n    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)\n    gh api \"repos/owner/repo/issues/123/comments?since=$last\" --jq '.[] | \"\\(.user.login): \\(.body)\"'\n    last=$now; sleep 30\n  done\n\n  # Node script that emits events as they arrive (e.g. WebSocket listener)\n  node watch-for-events.js\n\n  # Per-occurrence with a natural end: emit each CI check as it lands, exit when the run completes\n  prev=\"\"\n  while true; do\n    s=$(gh pr checks 123 --json name,bucket)\n    cur=$(jq -r '.[] | select(.bucket!=\"pending\") | \"\\(.name): \\(.bucket)\"' <<<\"$s\" | sort)\n    comm -13 <(echo \"$prev\") <(echo \"$cur\")\n    prev=$cur\n    jq -e 'all(.bucket!=\"pending\")' <<<\"$s\" >/dev/null && break\n    sleep 30\n  done\n\n**Don't use an unbounded command for a single notification.** `tail -f`, `inotifywait -m`, and `while true` never exit on their own, so the monitor stays armed until timeout even after the event has fired. For \"tell me when X is ready,\" use Bash `run_in_background` with an `until` loop instead (one notification, ends in seconds). Note that `tail -f log | grep -m 1 ...` does *not* fix this: if the log goes quiet after the match, `tail` never receives SIGPIPE and the pipeline hangs anyway.\n\n**Script quality:**\n- Always use `grep --line-buffered` in pipes — without it, pipe buffering delays events by minutes.\n- In poll loops, handle transient failures (`curl ... || true`) — one failed request shouldn't kill the monitor.\n- Poll intervals: 30s+ for remote APIs (rate limits), 0.5-1s for local checks.\n- Write a specific `description` — it appears in every notification (\"errors in deploy.log\" not \"watching logs\").\n- Only stdout is the event stream. Stderr goes to the output file (readable via Read) but does not trigger notifications — for a command you run directly (e.g. `python train.py 2>&1 | grep --line-buffered ...`), merge stderr with `2>&1` so its failures reach your filter. (No effect on `tail -f` of an existing log — that file only contains what its writer redirected.)\n\n**Coverage — silence is not success.** When watching a job or process for an outcome, your filter must match every terminal state, not just the happy path. A monitor that greps only for the success marker stays silent through a crashloop, a hung process, or an unexpected exit — and silence looks identical to \"still running.\" Before arming, ask: *if this process crashed right now, would my filter emit anything?* If not, widen it.\n\n  # Wrong — silent on crash, hang, or any non-success exit\n  tail -f run.log | grep --line-buffered \"elapsed_steps=\"\n\n  # Right — one alternation covering progress + the failure signatures you'd act on\n  tail -f run.log | grep -E --line-buffered \"elapsed_steps=|Traceback|Error|FAILED|assert|Killed|OOM\"\n\nFor poll loops checking job state, emit on every terminal status (`succeeded|failed|cancelled|timeout`), not just success. If you cannot confidently enumerate the failure signatures, broaden the grep alternation rather than narrow it — some extra noise is better than missing a crashloop.\n\n**Output volume**: Every stdout line is a conversation message, so the filter should be selective — but selective means \"the lines you'd act on,\" not \"only good news.\" Never pipe raw logs; use `grep --line-buffered`, `awk`, or a wrapper that emits exactly the success and failure signals you care about. Monitors that produce too many events are automatically stopped; restart with a tighter filter if this happens.\n\nStdout lines within 200ms are batched into a single notification, so multiline output from a single event groups naturally.\n\nThe script runs in the same shell environment as Bash. Exit ends the watch (exit code is reported). Timeout → killed. Set `persistent: true` for session-length watches (PR monitoring, log tails) — the monitor runs until you call TaskStop or the session ends. Use TaskStop to cancel early.","input_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"description":{"description":"Short human-readable description of what you are monitoring (shown in notifications).","type":"string"},"timeout_ms":{"description":"Kill the monitor after this deadline. Default 300000ms, max 3600000ms. Ignored when persistent is true.","default":300000,"type":"number","minimum":1000},"persistent":{"description":"Run for the lifetime of the session (no timeout). Use for session-length watches like PR monitoring or log tails. Stop with TaskStop.","default":false,"type":"boolean"},"command":{"description":"Shell command or script. Each stdout line is an event; exit ends the watch.","type":"string"}},"required":["description","timeout_ms","persistent","command"],"additionalProperties":false}}"###,
+        ),
+        (
             "NotebookEdit",
             r###"{"name":"NotebookEdit","description":"Completely replaces the contents of a specific cell in a Jupyter notebook (.ipynb file) with new source. Jupyter notebooks are interactive documents that combine code, text, and visualizations, commonly used for data analysis and scientific computing. The notebook_path parameter must be an absolute path, not a relative path. The cell_number is 0-indexed. Use edit_mode=insert to add a new cell at the index specified by cell_number. Use edit_mode=delete to delete the cell at the index specified by cell_number.","input_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"notebook_path":{"description":"The absolute path to the Jupyter notebook file to edit (must be absolute, not relative)","type":"string"},"cell_id":{"description":"The ID of the cell to edit. When inserting a new cell, the new cell will be inserted after the cell with this ID, or at the beginning if not specified.","type":"string"},"new_source":{"description":"The new source for the cell","type":"string"},"cell_type":{"description":"The type of the cell (code or markdown). If not specified, it defaults to the current cell type. If using edit_mode=insert, this is required.","type":"string","enum":["code","markdown"]},"edit_mode":{"description":"The type of edit to make (replace, insert, delete). Defaults to replace.","type":"string","enum":["replace","insert","delete"]}},"required":["notebook_path","new_source"],"additionalProperties":false}}"###,
+        ),
+        (
+            "PushNotification",
+            r###"{"name":"PushNotification","description":"This tool sends a desktop notification in the user's terminal. If Remote Control is connected, it also pushes to their phone. Either way, it pulls their attention from whatever they're doing — a meeting, another task, dinner — to this session. That's the cost. The benefit is they learn something now that they'd want to know now: a long task finished while they were away, a build is ready, you've hit something that needs their decision before you can continue.\n\nBecause a notification they didn't need is annoying in a way that accumulates, err toward not sending one. Don't notify for routine progress, or to announce you've answered something they asked seconds ago and are clearly still watching, or when a quick task completes. Notify when there's a real chance they've walked away and there's something worth coming back for — or when they've explicitly asked you to notify them.\n\nKeep the message under 200 characters, one line, no markdown. Lead with what they'd act on — \"build failed: 2 auth tests\" tells them more than \"task done\" and more than a status dump.\n\nIf the result says the push wasn't sent, that's expected — no action needed.","input_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"message":{"description":"The notification body. Keep it under 200 characters; mobile OSes truncate.","type":"string","minLength":1},"status":{"type":"string","const":"proactive"}},"required":["message","status"],"additionalProperties":false}}"###,
+        ),
+        (
+            "RemoteTrigger",
+            r###"{"name":"RemoteTrigger","description":"Call the claude.ai remote-trigger API. Use this instead of curl — the OAuth token is added automatically in-process and never exposed.\n\nActions:\n- list: GET /v1/code/triggers\n- get: GET /v1/code/triggers/{trigger_id}\n- create: POST /v1/code/triggers (requires body)\n- update: POST /v1/code/triggers/{trigger_id} (requires body, partial update)\n- run: POST /v1/code/triggers/{trigger_id}/run (optional body)\n\nThe response is the raw JSON from the API.","input_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"action":{"type":"string","enum":["list","get","create","update","run"]},"trigger_id":{"description":"Required for get, update, and run","type":"string","pattern":"^[\\w-]+$"},"body":{"description":"Required for create and update; optional for run","type":"object","propertyNames":{"type":"string"},"additionalProperties":{}}},"required":["action"],"additionalProperties":false}}"###,
         ),
         (
             "ScheduleWakeup",
@@ -1080,9 +1181,11 @@ fn add_json_schema_draft(input_schema: Value) -> Value {
 }
 
 fn build_request_metadata(session_id: &str) -> AnthropicRequestMetadata {
+    let device_id = std::env::var("OPEN_INTERPRETER_CLAUDE_CODE_DEVICE_ID_OVERRIDE")
+        .unwrap_or_else(|_| CLAUDE_CODE_METADATA_DEVICE_ID.to_string());
     AnthropicRequestMetadata {
         user_id: serde_json::json!({
-            "device_id": CLAUDE_CODE_METADATA_DEVICE_ID,
+            "device_id": device_id,
             "account_uuid": "",
             "session_id": session_id,
         })
@@ -1251,6 +1354,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_request(
@@ -1394,6 +1498,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_request(
@@ -1452,6 +1557,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_request(
@@ -1496,6 +1602,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_request(
@@ -1562,6 +1669,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_request(
@@ -1624,6 +1732,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_request(
@@ -1714,6 +1823,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_request(
@@ -1796,6 +1906,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_request(
@@ -1885,6 +1996,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_request(
@@ -1963,6 +2075,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_request(
@@ -2024,6 +2137,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_request(
@@ -2290,6 +2404,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_request(
@@ -2350,6 +2465,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_title_request(&prompt, "session-123").expect("build title request");
@@ -2401,6 +2517,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_title_request(&prompt, "session-123").expect("build title request");
@@ -2446,6 +2563,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_request(
@@ -2488,6 +2606,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_request(
@@ -2530,6 +2649,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_request(
@@ -2572,6 +2692,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_request(
@@ -2614,6 +2735,7 @@ mod tests {
             },
             personality: None,
             output_schema: None,
+            output_schema_strict: true,
         };
 
         let request = build_request(

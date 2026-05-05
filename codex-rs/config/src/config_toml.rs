@@ -79,6 +79,9 @@ pub struct ConfigToml {
     /// Optional default harness family to emulate, such as `claude-code`.
     pub harness: Option<String>,
 
+    /// Whether to include Open Interpreter guidance for the selected harness.
+    pub harness_guidance: Option<bool>,
+
     /// Size of the context window for the model, in tokens.
     pub model_context_window: Option<i64>,
 
@@ -457,6 +460,7 @@ impl From<ConfigToml> for UserSavedConfig {
             forced_login_method: config_toml.forced_login_method,
             model: config_toml.model,
             harness: config_toml.harness,
+            harness_guidance: config_toml.harness_guidance,
             model_reasoning_effort: config_toml.model_reasoning_effort,
             model_reasoning_summary: config_toml.model_reasoning_summary,
             model_verbosity: config_toml.model_verbosity,
@@ -877,6 +881,31 @@ where
     let model_providers = HashMap::<String, ModelProviderInfo>::deserialize(deserializer)?;
     validate_model_providers(&model_providers).map_err(serde::de::Error::custom)?;
     Ok(model_providers)
+}
+
+#[cfg(test)]
+mod model_provider_deserialization_tests {
+    use super::*;
+    use codex_model_provider_info::WireApi;
+
+    #[test]
+    fn config_toml_accepts_messages_wire_api_provider() {
+        let config: ConfigToml = toml::from_str(
+            r#"
+            [model_providers.anthropic]
+            name = "Anthropic"
+            base_url = "https://api.anthropic.com"
+            env_key = "ANTHROPIC_API_KEY"
+            wire_api = "messages"
+            "#,
+        )
+        .expect("messages wire_api provider should deserialize");
+
+        assert_eq!(
+            config.model_providers["anthropic"].wire_api,
+            WireApi::Messages
+        );
+    }
 }
 
 pub fn validate_oss_provider(provider: &str) -> std::io::Result<()> {

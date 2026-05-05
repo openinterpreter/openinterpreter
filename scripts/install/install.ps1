@@ -278,7 +278,13 @@ function Test-OldStandaloneBinLayout {
         return $false
     }
 
-    $requiredFiles = @("interpreter.exe")
+    $requiredFiles = @(
+        "interpreter.exe",
+        "interpreter-root-tui.exe",
+        "interpreter-tui.exe",
+        "interpreter-app-server.exe",
+        "codex-exec.exe"
+    )
     foreach ($fileName in $requiredFiles) {
         if (-not (Test-Path -LiteralPath (Join-Path $VisibleBinDir $fileName) -PathType Leaf)) {
             return $false
@@ -290,6 +296,7 @@ function Test-OldStandaloneBinLayout {
         "interpreter-root-tui.exe",
         "interpreter-tui.exe",
         "interpreter-app-server.exe",
+        "codex-exec.exe",
         "rg.exe"
     )
     foreach ($child in Get-ChildItem -LiteralPath $VisibleBinDir -Force) {
@@ -526,7 +533,8 @@ function Test-ReleaseIsComplete {
         "interpreter.exe",
         "interpreter-root-tui.exe",
         "interpreter-tui.exe",
-        "interpreter-app-server.exe"
+        "interpreter-app-server.exe",
+        "codex-exec.exe"
     )
     foreach ($name in $expectedFiles) {
         if (-not (Test-Path -LiteralPath (Join-Path $ReleaseDir $name) -PathType Leaf)) {
@@ -651,7 +659,7 @@ try {
             tar -xzf $archivePath -C $extractDir
 
             $packageRoot = Join-Path $extractDir "open-interpreter"
-            foreach ($binary in @("interpreter.exe", "interpreter-root-tui.exe", "interpreter-tui.exe", "interpreter-app-server.exe")) {
+            foreach ($binary in @("interpreter.exe", "interpreter-root-tui.exe", "interpreter-tui.exe", "interpreter-app-server.exe", "codex-exec.exe")) {
                 Copy-Item -LiteralPath (Join-Path $packageRoot $binary) -Destination (Join-Path $stagingDir $binary)
             }
 
