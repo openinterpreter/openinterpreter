@@ -34,7 +34,7 @@ codex-git-utils = { workspace = true }
 codex-login = { workspace = true }
 codex-model-provider-info = { workspace = true }
 codex-protocol = { workspace = true }
-codex-tui = { path = "../tui", default-features = false, features = ["thin-client", "direct-login", "extended-mentions", "rich-media", "structured-mcp-content"] }
+codex-tui = { path = "../tui", default-features = false, features = ["thin-client", "direct-login", "startup-network", "extended-mentions", "rich-media", "structured-mcp-content"] }
 codex-utils-cli = { workspace = true }
 codex-utils-home-dir = { workspace = true }
 crossterm = { workspace = true }

@@ -314,6 +314,31 @@ mod tests {
     }
 
     #[test]
+    fn update_prefix_shows_actionable_update_commands() {
+        let mut popup = CommandPopup::new(CommandPopupFlags::default());
+        popup.on_composer_text_change("/update".to_string());
+
+        let cmds: Vec<&str> = popup
+            .filtered_items()
+            .into_iter()
+            .map(|item| match item {
+                CommandItem::Builtin(cmd) => cmd.command(),
+            })
+            .collect();
+
+        assert_eq!(
+            cmds,
+            vec![
+                "update",
+                "update-now",
+                "update-status",
+                "update-on",
+                "update-off"
+            ]
+        );
+    }
+
+    #[test]
     fn prefix_filter_limits_matches_for_ac() {
         let mut popup = CommandPopup::new(CommandPopupFlags::default());
         popup.on_composer_text_change("/ac".to_string());

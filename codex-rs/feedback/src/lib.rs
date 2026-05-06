@@ -28,8 +28,13 @@ pub use feedback_diagnostics::FeedbackDiagnostic;
 pub use feedback_diagnostics::FeedbackDiagnostics;
 
 const DEFAULT_MAX_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
+// Open Interpreter Sentry org. The same Sentry project also receives events
+// from the workstation app and other surfaces, so events from this binary are
+// distinguished by the `app` tag, the `release` prefix below, and the
+// `[interpreter-cli]` prefix in the event title.
 const SENTRY_DSN: &str =
-    "https://ae32ed50620d7a7792c1ce5df38b3e3e@o33249.ingest.us.sentry.io/4510195390611458";
+    "https://08dfb810b5cbe0897400cd839f715727@o4506046614667264.ingest.us.sentry.io/4510858434969600";
+const SENTRY_APP_TAG: &str = "interpreter-cli";
 const UPLOAD_TIMEOUT_SECS: u64 = 10;
 const FEEDBACK_TAGS_TARGET: &str = "feedback_tags";
 const MAX_FEEDBACK_TAGS: usize = 64;
@@ -392,10 +397,17 @@ impl FeedbackSnapshot {
         use sentry::transports::DefaultTransportFactory;
         use sentry::types::Dsn;
 
-        // Build Sentry client
+        // Build Sentry client. The DSN points at the shared Open Interpreter
+        // Sentry org, so set `release` and `environment` up front so CLI
+        // events are easy to filter from workstation / other surfaces.
+        let cli_version = env!("CARGO_PKG_VERSION");
         let client = Client::from_config(ClientOptions {
             dsn: Some(Dsn::from_str(SENTRY_DSN).map_err(|e| anyhow!("invalid DSN: {e}"))?),
             transport: Some(Arc::new(DefaultTransportFactory {})),
+            release: Some(format!("{SENTRY_APP_TAG}@{cli_version}").into()),
+            environment: Some(
+                if cfg!(debug_assertions) { "development" } else { "production" }.into(),
+            ),
             ..Default::default()
         });
 
@@ -413,7 +425,7 @@ impl FeedbackSnapshot {
 
         let mut envelope = Envelope::new();
         let title = format!(
-            "[{}]: Codex session {}",
+            "[{SENTRY_APP_TAG}][{}]: Interpreter session {}",
             display_classification(options.classification),
             self.thread_id
         );
@@ -458,6 +470,10 @@ impl FeedbackSnapshot {
     ) -> BTreeMap<String, String> {
         let cli_version = env!("CARGO_PKG_VERSION");
         let mut tags = BTreeMap::from([
+            // `app` is how the shared Open Interpreter Sentry project tells
+            // CLI events apart from workstation / other surfaces. Always set,
+            // never overridable by callers.
+            (String::from("app"), SENTRY_APP_TAG.to_string()),
             (String::from("thread_id"), self.thread_id.to_string()),
             (String::from("classification"), classification.to_string()),
             (String::from("cli_version"), cli_version.to_string()),
@@ -470,6 +486,7 @@ impl FeedbackSnapshot {
         }
 
         let reserved = [
+            "app",
             "thread_id",
             "classification",
             "cli_version",

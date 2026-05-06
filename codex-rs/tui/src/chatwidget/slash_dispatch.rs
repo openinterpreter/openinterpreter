@@ -72,7 +72,7 @@ impl ChatWidget {
         #[cfg(debug_assertions)]
         let self_update_available = false;
         let hint = if self_update_available {
-            "Use /update now to update immediately, or /update off to disable automatic updates."
+            "Use /update-now to update immediately, or /update-off to disable automatic updates."
         } else {
             "Self-update is available for standalone installer builds."
         };
@@ -414,6 +414,18 @@ impl ChatWidget {
             SlashCommand::Update => {
                 self.add_update_status_message();
             }
+            SlashCommand::UpdateNow => {
+                self.start_manual_update();
+            }
+            SlashCommand::UpdateStatus => {
+                self.add_update_status_message();
+            }
+            SlashCommand::UpdateOn => {
+                self.set_auto_update_enabled(true);
+            }
+            SlashCommand::UpdateOff => {
+                self.set_auto_update_enabled(false);
+            }
             SlashCommand::DebugConfig => {
                 self.add_debug_config_output();
             }
@@ -632,7 +644,9 @@ impl ChatWidget {
                 "now" => self.start_manual_update(),
                 "on" => self.set_auto_update_enabled(true),
                 "off" => self.set_auto_update_enabled(false),
-                _ => self.add_error_message("Usage: /update [status|now|on|off]".to_string()),
+                _ => self.add_error_message(
+                    "Usage: /update-now, /update-status, /update-on, or /update-off".to_string(),
+                ),
             },
             SlashCommand::Rename if !trimmed.is_empty() => {
                 if !self.ensure_thread_rename_allowed() {
@@ -896,6 +910,10 @@ impl ChatWidget {
             SlashCommand::Fast
             | SlashCommand::Status
             | SlashCommand::Update
+            | SlashCommand::UpdateNow
+            | SlashCommand::UpdateStatus
+            | SlashCommand::UpdateOn
+            | SlashCommand::UpdateOff
             | SlashCommand::DebugConfig
             | SlashCommand::Ps
             | SlashCommand::Stop

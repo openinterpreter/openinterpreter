@@ -41,6 +41,10 @@ pub enum SlashCommand {
     Mention,
     Status,
     Update,
+    UpdateNow,
+    UpdateStatus,
+    UpdateOn,
+    UpdateOff,
     DebugConfig,
     Title,
     Statusline,
@@ -90,7 +94,11 @@ impl SlashCommand {
             SlashCommand::Mention => "mention a file",
             SlashCommand::Skills => "use skills to improve how the assistant performs tasks",
             SlashCommand::Status => "show current session configuration and token usage",
-            SlashCommand::Update => "manage Open Interpreter updates",
+            SlashCommand::Update => "show Open Interpreter update status",
+            SlashCommand::UpdateNow => "update Open Interpreter immediately",
+            SlashCommand::UpdateStatus => "show Open Interpreter update status",
+            SlashCommand::UpdateOn => "enable automatic updates",
+            SlashCommand::UpdateOff => "disable automatic updates",
             SlashCommand::DebugConfig => "show config layers and requirement sources for debugging",
             SlashCommand::Title => "configure which items appear in the terminal title",
             SlashCommand::Statusline => "configure which items appear in the status line",
@@ -159,6 +167,10 @@ impl SlashCommand {
                 | SlashCommand::Mention
                 | SlashCommand::Status
                 | SlashCommand::Update
+                | SlashCommand::UpdateNow
+                | SlashCommand::UpdateStatus
+                | SlashCommand::UpdateOn
+                | SlashCommand::UpdateOff
         )
     }
 
@@ -193,6 +205,10 @@ impl SlashCommand {
             | SlashCommand::Skills
             | SlashCommand::Status
             | SlashCommand::Update
+            | SlashCommand::UpdateNow
+            | SlashCommand::UpdateStatus
+            | SlashCommand::UpdateOn
+            | SlashCommand::UpdateOff
             | SlashCommand::DebugConfig
             | SlashCommand::Ps
             | SlashCommand::Stop

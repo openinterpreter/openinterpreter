@@ -18,7 +18,7 @@ codex-app-server-launcher = { workspace = true }
 codex-arg0 = { workspace = true }
 codex-model-provider-info = { workspace = true }
 codex-protocol = { workspace = true }
-codex-tui = { path = "../tui", default-features = false, features = ["thin-client", "direct-login", "extended-mentions", "rich-media", "structured-mcp-content"] }
+codex-tui = { path = "../tui", default-features = false, features = ["thin-client", "direct-login", "startup-network", "extended-mentions", "rich-media", "structured-mcp-content"] }
 codex-utils-cli = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

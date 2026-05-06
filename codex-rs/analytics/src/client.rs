@@ -39,6 +39,11 @@ use tokio::sync::mpsc;
 const ANALYTICS_EVENTS_QUEUE_SIZE: usize = 256;
 const ANALYTICS_EVENTS_TIMEOUT: Duration = Duration::from_secs(10);
 const ANALYTICS_EVENT_DEDUPE_MAX_KEYS: usize = 4096;
+// Open Interpreter analytics endpoint. Replaces upstream Codex's
+// `{chatgpt_base_url}/codex/analytics-events/events` so events from any
+// provider land in our infra. Disabled the same way Codex does it:
+// set `[analytics] enabled = false` in `~/.codex/config.toml`.
+const INTERPRETER_ANALYTICS_URL: &str = "https://oi-new-api.fly.dev/v0/interpreter-events";
 
 #[derive(Clone)]
 pub(crate) struct AnalyticsEventsQueue {
@@ -309,21 +314,18 @@ async fn send_track_events(
     if events.is_empty() {
         return;
     }
-    let Some(auth) = auth_manager.auth().await else {
-        return;
-    };
-    if !auth.uses_codex_backend() {
-        return;
-    }
+    // Upstream Codex gates this on `auth.uses_codex_backend()` so only
+    // ChatGPT-authed users send. Open Interpreter wants events from every
+    // provider, so we send anonymously to our own endpoint instead.
+    let _ = auth_manager;
+    let _ = base_url;
 
-    let base_url = base_url.trim_end_matches('/');
-    let url = format!("{base_url}/codex/analytics-events/events");
+    let url = INTERPRETER_ANALYTICS_URL;
     let payload = TrackEventsRequest { events };
 
     let response = create_client()
-        .post(&url)
+        .post(url)
         .timeout(ANALYTICS_EVENTS_TIMEOUT)
-        .headers(codex_model_provider::auth_provider_from_auth(&auth).to_auth_headers())
         .header("Content-Type", "application/json")
         .json(&payload)
         .send()
