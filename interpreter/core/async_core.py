@@ -897,7 +897,7 @@ def create_router(async_interpreter):
 
         else:
             if async_interpreter.context_mode:
-                # In context mode, we only respond if we recieved a {START} message
+                # In context mode, we only respond if we received a {START} message
                 # Otherwise, we're just accumulating context
                 if last_message.content == "{START}":
                     if async_interpreter.messages[-1]["content"] == "{START}":

@@ -6,8 +6,8 @@ import traceback
 
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 import litellm
-import openai
 
+from ..terminal_interface.utils.display_markdown_message import display_markdown_message
 from .render_message import render_message
 
 
@@ -99,24 +99,24 @@ def respond(interpreter):
                 )
                 break
 
-                # Provide extra information on how to change API keys, if we encounter that error
-                # (Many people writing GitHub issues were struggling with this)
-
             except Exception as e:
                 error_message = str(e).lower()
                 if (
                     interpreter.offline == False
-                    and "auth" in error_message
-                    or "api key" in error_message
+                    and ("auth" in error_message or
+                         "api key" in error_message)
                 ):
+                    # Provide extra information on how to change API keys, if
+                    # we encounter that error (Many people writing GitHub
+                    # issues were struggling with this)
                     output = traceback.format_exc()
                     raise Exception(
                         f"{output}\n\nThere might be an issue with your API key(s).\n\nTo reset your API key (we'll use OPENAI_API_KEY for this example, but you may need to reset your ANTHROPIC_API_KEY, HUGGINGFACE_API_KEY, etc):\n        Mac/Linux: 'export OPENAI_API_KEY=your-key-here'. Update your ~/.zshrc on MacOS or ~/.bashrc on Linux with the new key if it has already been persisted there.,\n        Windows: 'setx OPENAI_API_KEY your-key-here' then restart terminal.\n\n"
                     )
                 elif (
-                    type(e) == litellm.exceptions.RateLimitError
-                    and "exceeded" in str(e).lower()
-                    or "insufficient_quota" in str(e).lower()
+                    isinstance(e, litellm.exceptions.RateLimitError)
+                    and ("exceeded" in str(e).lower() or
+                         "insufficient_quota" in str(e).lower())
                 ):
                     display_markdown_message(
                         f""" > You ran out of current quota for OpenAI's API, please check your plan and billing details. You can either wait for the quota to reset or upgrade your plan.
@@ -130,9 +130,7 @@ def respond(interpreter):
                 elif (
                     interpreter.offline == False and "not have access" in str(e).lower()
                 ):
-                    """
-                    Check for invalid model in error message and then fallback.
-                    """
+                    # Check for invalid model in error message and then fallback.
                     if (
                         "invalid model" in error_message
                         or "model does not exist" in error_message
@@ -257,7 +255,7 @@ def respond(interpreter):
                     continue
 
                 # Is this language enabled/supported?
-                if interpreter.computer.terminal.get_language(language) == None:
+                if interpreter.computer.terminal.get_language(language) is None:
                     output = f"`{language}` disabled or not supported."
 
                     yield {
@@ -323,14 +321,12 @@ def respond(interpreter):
                     code = re.sub(r"import computer\.\w+\n", "pass\n", code)
                     # If it does this it sees the screenshot twice (which is expected jupyter behavior)
                     if any(
-                        [
-                            code.strip().split("\n")[-1].startswith(text)
-                            for text in [
-                                "computer.display.view",
-                                "computer.display.screenshot",
-                                "computer.view",
-                                "computer.screenshot",
-                            ]
+                        code.strip().split("\n")[-1].startswith(text)
+                        for text in [
+                            "computer.display.view",
+                            "computer.display.screenshot",
+                            "computer.view",
+                            "computer.screenshot",
                         ]
                     ):
                         code = code + "\npass"
@@ -391,7 +387,7 @@ def respond(interpreter):
                     print(str(e))
                     print("Failed to sync your Computer with iComputer. Continuing.")
 
-                # yield final "active_line" message, as if to say, no more code is running. unlightlight active lines
+                # yield final "active_line" message, as if to say, no more code is running. unhighlight active lines
                 # (is this a good idea? is this our responsibility? i think so — we're saying what line of code is running! ...?)
                 yield {
                     "role": "computer",

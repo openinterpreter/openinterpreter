@@ -15,10 +15,8 @@
 
 <br>
 
-<img alt="local_explorer" src="https://github.com/OpenInterpreter/open-interpreter/assets/63927363/d941c3b4-b5ad-4642-992c-40edf31e2e7a">
+![local_explorer](https://github.com/OpenInterpreter/open-interpreter/assets/63927363/d941c3b4-b5ad-4642-992c-40edf31e2e7a)
 
-<br>
-</p>
 <br>
 
 **Open Interpreter** lets LLMs run code (Python, Javascript, Shell, and more) locally. You can chat with Open Interpreter through a ChatGPT-like interface in your terminal by running `$ interpreter` after installing.
@@ -36,18 +34,17 @@ This provides a natural-language interface to your computer's general-purpose ca
 
 ## Demo
 
-https://github.com/OpenInterpreter/open-interpreter/assets/63927363/37152071-680d-4423-9af3-64836a6f7b60
+[Demo video](https://github.com/OpenInterpreter/open-interpreter/assets/63927363/37152071-680d-4423-9af3-64836a6f7b60)
 
-#### An interactive demo is also available on Google Colab:
+### An interactive demo is also available on Google Colab
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1WKmRXZgsErej2xUriKzxrEAXdxMSgWbb?usp=sharing)
 
-#### Along with an example voice interface, inspired by _Her_:
+### Along with an example voice interface, inspired by _Her_
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1NojYGHDgxH6Y1G1oxThEBBb2AtyODBIK)
 
 ## Quick Start
-
 
 ### Install
 
@@ -55,7 +52,7 @@ https://github.com/OpenInterpreter/open-interpreter/assets/63927363/37152071-680
 pip install git+https://github.com/OpenInterpreter/open-interpreter.git
 ```
 
-> Not working? Read our [setup guide](https://docs.openinterpreter.com/getting-started/setup).
+> See our [setup guide](https://docs.openinterpreter.com/getting-started/setup) for optional dependencies.
 
 ### Terminal
 
@@ -64,6 +61,8 @@ After installation, simply run `interpreter`:
 ```shell
 interpreter
 ```
+
+Open Interpreter will default to OpenAI's **GPT-4o** and will ask you to enter a key, which you can obtain from [OpenAI's API keys page](https://platform.openai.com/api-keys).  For other providers or local models, see below.
 
 ### Python
 
@@ -85,7 +84,7 @@ OpenAI's release of [Code Interpreter](https://openai.com/blog/chatgpt-plugins#c
 However, OpenAI's service is hosted, closed-source, and heavily restricted:
 
 - No internet access.
-- [Limited set of pre-installed packages](https://wfhbrian.com/mastering-chatgpts-code-interpreter-list-of-python-packages/).
+- [Limited set of pre-installed packages](https://wfhbrian.com/artificial-intelligence/mastering-chatgpts-code-interpreter-list-of-python-packages/).
 - 100 MB maximum upload, 120.0 second runtime limit.
 - State is cleared (along with any generated files or links) when the environment dies.
 
@@ -96,15 +95,6 @@ Open Interpreter overcomes these limitations by running in your local environmen
 This combines the power of GPT-4's Code Interpreter with the flexibility of your local development environment.
 
 ## Commands
-
-**Update:** The Generator Update (0.1.5) introduced streaming:
-
-```python
-message = "What operating system are we on?"
-
-for chunk in interpreter.chat(message, display=False, stream=True):
-  print(chunk)
-```
 
 ### Interactive Chat
 
@@ -197,9 +187,9 @@ interpreter.llm.model = "gpt-3.5-turbo"
 
 #### Terminal
 
-Open Interpreter can use OpenAI-compatible server to run models locally. (LM Studio, jan.ai, ollama etc)
+Open Interpreter can use OpenAI-compatible server to run models locally (in LM Studio, Jan.ai, Ollama, etc.)
 
-Simply run `interpreter` with the api_base URL of your inference server (for LM studio it is `http://localhost:1234/v1` by default):
+Simply run `interpreter` with the `api_base` URL of your inference server (for LM Studio it is `http://localhost:1234/v1` by default):
 
 ```shell
 interpreter --api_base "http://localhost:1234/v1" --api_key "fake_key"
@@ -211,11 +201,11 @@ Alternatively you can use Llamafile without installing any third party software 
 interpreter --local
 ```
 
-for a more detailed guide check out [this video by Mike Bird](https://www.youtube.com/watch?v=CEs51hGWuGU?si=cN7f6QhfT4edfG5H)
+for a more detailed guide check out [this video by Mike Bird](https://www.youtube.com/watch?v=CEs51hGWuGU&si=cN7f6QhfT4edfG5H)
 
 **How to run LM Studio in the background.**
 
-1. Download [https://lmstudio.ai/](https://lmstudio.ai/) then start it.
+1. Download [LM Studio](https://lmstudio.ai/) then start it.
 2. Select a model then click **↓ Download**.
 3. Click the **↔️** button on the left (below 💬).
 4. Select your model at the top, then click **Start Server**.
@@ -351,11 +341,11 @@ There is **experimental** support for a [safe mode](https://github.com/OpenInter
 
 ## How Does it Work?
 
-Open Interpreter equips a [function-calling language model](https://platform.openai.com/docs/guides/gpt/function-calling) with an `exec()` function, which accepts a `language` (like "Python" or "JavaScript") and `code` to run.
+Open Interpreter equips a [function-calling language model](https://platform.openai.com/docs/guides/function-calling) with an `exec()` function, which accepts a `language` (like "Python" or "JavaScript") and `code` to run.
 
 We then stream the model's messages, code, and your system's outputs to the terminal as Markdown.
 
-# Access Documentation Offline
+## Access Documentation Offline
 
 The full [documentation](https://docs.openinterpreter.com/) is accessible on-the-go without the need for an internet connection.
 
@@ -383,13 +373,13 @@ mintlify dev
 
 A new browser window should open. The documentation will be available at [http://localhost:3000](http://localhost:3000) as long as the documentation server is running.
 
-# Contributing
+## Contributing
 
 Thank you for your interest in contributing! We welcome involvement from the community.
 
 Please see our [contributing guidelines](https://github.com/OpenInterpreter/open-interpreter/blob/main/docs/CONTRIBUTING.md) for more details on how to get involved.
 
-# Roadmap
+## Roadmap
 
 Visit [our roadmap](https://github.com/OpenInterpreter/open-interpreter/blob/main/docs/ROADMAP.md) to preview the future of Open Interpreter.
 
@@ -400,5 +390,3 @@ Visit [our roadmap](https://github.com/OpenInterpreter/open-interpreter/blob/mai
 > Having access to a junior programmer working at the speed of your fingertips ... can make new workflows effortless and efficient, as well as open the benefits of programming to new audiences.
 >
 > — _OpenAI's Code Interpreter Release_
-
-<br>

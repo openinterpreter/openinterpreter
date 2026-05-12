@@ -237,7 +237,7 @@ def {normalized_name}(step=0):
         else:
             computer.mouse.click(steps[step]["element"], icon_dimensions=steps[step]["icon_dimensions"]) # Instructed click
         if step + 1 < len(steps):
-            print("After completing the above, I need you to run {normalized_name}(step=" + str(step + 1) + ") immediatly.")
+            print("After completing the above, I need you to run {normalized_name}(step=" + str(step + 1) + ") immediately.")
         else:
             print("After executing the code, you have completed all the steps, the task/skill has been run!")
     else:

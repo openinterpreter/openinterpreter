@@ -36,7 +36,7 @@ easyocr = { version = "^1.7.1", optional = true }
 janus = { version = "^1.0.0", optional = true }
 
 # Required dependencies
-python = ">=3.9,<3.15"
+python = ">=3.9,<4"
 setuptools = "*"
 astor = "^0.8.1"
 git-python = "^1.0.3"
@@ -54,7 +54,7 @@ ipykernel = "^6.26.0"
 jupyter-client = "^8.6.0"
 matplotlib = "^3.8.2"
 toml = "^0.10.2"
-tiktoken = "^0.7.0"
+tiktoken = ">=0.8.0"
 platformdirs = "^4.2.0"
 pydantic = "^2.6.4"
 google-generativeai = "^0.7.1"
