@@ -314,7 +314,7 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: Open Interpreter ${{ steps.version.outputs.version }}
           draft: false
-          prerelease: true
+          prerelease: false
           files: |
             dist/open-interpreter-*.tar.gz
             dist/open-interpreter-*.tar.gz.sha256
