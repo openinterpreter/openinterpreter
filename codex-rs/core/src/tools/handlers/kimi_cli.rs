@@ -38,28 +38,35 @@ struct KimiTodoListArgs {
 }
 
 #[derive(Deserialize)]
-struct KimiTodoItem {
+pub(super) struct KimiTodoItem {
+    #[serde(default)]
+    #[allow(dead_code)]
+    id: Option<String>,
+    #[serde(alias = "content")]
     title: String,
     status: KimiTodoStatus,
 }
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum KimiTodoStatus {
+pub(super) enum KimiTodoStatus {
     Pending,
     InProgress,
+    Completed,
     Done,
 }
 
 #[derive(Deserialize)]
-struct KimiReadFileArgs {
+pub(super) struct KimiReadFileArgs {
+    #[serde(alias = "file_path")]
     path: String,
     line_offset: Option<isize>,
     n_lines: Option<usize>,
 }
 
 #[derive(Deserialize)]
-struct KimiWriteFileArgs {
+pub(super) struct KimiWriteFileArgs {
+    #[serde(alias = "file_path")]
     path: String,
     content: String,
     mode: Option<KimiWriteMode>,
@@ -67,27 +74,30 @@ struct KimiWriteFileArgs {
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum KimiWriteMode {
+pub(super) enum KimiWriteMode {
     Overwrite,
     Append,
 }
 
 #[derive(Deserialize)]
-struct KimiStrReplaceFileArgs {
+pub(super) struct KimiStrReplaceFileArgs {
+    #[serde(alias = "file_path")]
     path: String,
     edit: KimiEditArg,
 }
 
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum KimiEditArg {
+pub(super) enum KimiEditArg {
     Single(KimiEdit),
     Multiple(Vec<KimiEdit>),
 }
 
 #[derive(Deserialize)]
-struct KimiEdit {
+pub(super) struct KimiEdit {
+    #[serde(alias = "old_string")]
     old: String,
+    #[serde(alias = "new_string")]
     new: String,
     replace_all: Option<bool>,
 }
@@ -98,16 +108,16 @@ struct KimiAskUserQuestionArgs {
 }
 
 #[derive(Deserialize)]
-struct KimiAskUserQuestionItem {
+pub(super) struct KimiAskUserQuestionItem {
     question: String,
     header: String,
     options: Vec<KimiAskUserQuestionOption>,
-    #[serde(default)]
+    #[serde(default, alias = "multiSelect")]
     multi_select: bool,
 }
 
 #[derive(Deserialize)]
-struct KimiAskUserQuestionOption {
+pub(super) struct KimiAskUserQuestionOption {
     label: String,
     description: String,
 }
@@ -165,7 +175,7 @@ impl ToolHandler for KimiSetTodoListHandler {
                     status: match todo.status {
                         KimiTodoStatus::Pending => StepStatus::Pending,
                         KimiTodoStatus::InProgress => StepStatus::InProgress,
-                        KimiTodoStatus::Done => StepStatus::Completed,
+                        KimiTodoStatus::Completed | KimiTodoStatus::Done => StepStatus::Completed,
                     },
                 })
                 .collect(),
@@ -444,7 +454,7 @@ impl ToolHandler for KimiAskUserQuestionHandler {
     }
 }
 
-fn resolve_workspace_path(
+pub(super) fn resolve_workspace_path(
     turn: &TurnContext,
     raw_path: &str,
 ) -> Result<AbsolutePathBuf, FunctionCallError> {
@@ -459,7 +469,7 @@ fn resolve_workspace_path(
     })
 }
 
-struct KimiReadOutput {
+pub(super) struct KimiReadOutput {
     system_message: String,
     body: String,
 }
@@ -468,7 +478,11 @@ const KIMI_READ_MAX_LINES: usize = 1000;
 const KIMI_READ_MAX_LINE_LENGTH: usize = 2000;
 const KIMI_READ_MAX_BYTES: usize = 100 << 10;
 
-fn format_kimi_read_output(content: &str, line_offset: isize, n_lines: usize) -> KimiReadOutput {
+pub(super) fn format_kimi_read_output(
+    content: &str,
+    line_offset: isize,
+    n_lines: usize,
+) -> KimiReadOutput {
     let all_lines = content.split_inclusive('\n').collect::<Vec<_>>();
     let total = all_lines.len();
     let start = if line_offset < 0 {
@@ -554,7 +568,7 @@ fn truncate_kimi_read_line(line: &str, max_length: usize) -> String {
     format!("{prefix}{suffix}")
 }
 
-fn apply_kimi_edit(content: &str, edit: &KimiEdit) -> (String, usize) {
+pub(super) fn apply_kimi_edit(content: &str, edit: &KimiEdit) -> (String, usize) {
     if edit.replace_all.unwrap_or(false) {
         let replacement_count = content.matches(&edit.old).count();
         (content.replace(&edit.old, &edit.new), replacement_count)

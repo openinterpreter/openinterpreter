@@ -68,6 +68,7 @@ use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
 use codex_model_provider_info::built_in_model_providers;
+use codex_model_provider_info::default_harness_for_provider_model;
 use codex_model_provider_info::merge_configured_model_providers;
 use codex_protocol::config_types::AltScreenMode;
 use codex_protocol::config_types::ForcedLoginMethod;
@@ -1516,43 +1517,6 @@ fn resolve_web_search_mode(
     None
 }
 
-fn default_harness_for_model_provider(
-    model_provider_id: &str,
-    model_provider: &ModelProviderInfo,
-) -> Option<String> {
-    let provider_id = model_provider_id.to_ascii_lowercase();
-    let provider_name = model_provider.name.to_ascii_lowercase();
-    let base_url = model_provider
-        .base_url
-        .as_deref()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if provider_id.contains("deepseek")
-        || provider_name.contains("deepseek")
-        || base_url.contains("api.deepseek.com")
-    {
-        return Some("minimal".to_string());
-    }
-    if provider_id.contains("kimi")
-        || provider_id.contains("moonshot")
-        || provider_name.contains("kimi")
-        || provider_name.contains("moonshot")
-        || base_url.contains("api.kimi.com")
-        || base_url.contains("api.moonshot.ai")
-        || base_url.contains("api.moonshot.cn")
-    {
-        return Some("kimi-cli".to_string());
-    }
-    if provider_id.contains("anthropic")
-        || provider_name.contains("anthropic")
-        || base_url.contains("api.anthropic.com")
-    {
-        Some("claude-code".to_string())
-    } else {
-        None
-    }
-}
-
 fn resolve_web_search_config(
     config_toml: &ConfigToml,
     config_profile: &ConfigProfile,
@@ -2049,12 +2013,6 @@ impl Config {
                 std::io::Error::new(std::io::ErrorKind::NotFound, message)
             })?
             .clone();
-        let harness = config_profile
-            .harness
-            .clone()
-            .or(cfg.harness.clone())
-            .or_else(|| default_harness_for_model_provider(&model_provider_id, &model_provider));
-
         let shell_environment_policy = cfg.shell_environment_policy.into();
         let allow_login_shell = cfg.allow_login_shell.unwrap_or(true);
 
@@ -2159,6 +2117,18 @@ impl Config {
         let forced_login_method = cfg.forced_login_method;
 
         let model = model.or(config_profile.model).or(cfg.model);
+        let harness = config_profile
+            .harness
+            .clone()
+            .or(cfg.harness.clone())
+            .or_else(|| {
+                default_harness_for_provider_model(
+                    &model_provider_id,
+                    &model_provider,
+                    model.as_deref(),
+                )
+                .map(ToOwned::to_owned)
+            });
         let mut notices = cfg.notice.unwrap_or_default();
         let service_tier = match service_tier_override {
             Some(Some(service_tier)) => Some(service_tier),

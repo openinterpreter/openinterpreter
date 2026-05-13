@@ -11,6 +11,7 @@ pub(crate) enum MessagesHarnessRoute {
 pub(crate) enum ChatHarnessRoute {
     KimiCli,
     Minimal,
+    QwenCode,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -32,7 +33,7 @@ pub(crate) fn resolve_stream_transport_route(
     harness: &Harness,
 ) -> Result<StreamTransportRoute, CodexErr> {
     match (wire_api, harness) {
-        (WireApi::Responses, Harness::ClaudeCode) | (WireApi::Chat, Harness::ClaudeCode) => {
+        (WireApi::Responses, Harness::ClaudeCode) => {
             Err(CodexErr::InvalidRequest(
                 "harness = \"claude-code\" requires a provider with wire_api = \"messages\""
                     .to_string(),
@@ -45,6 +46,9 @@ pub(crate) fn resolve_stream_transport_route(
         (WireApi::Chat, Harness::Minimal) => {
             Ok(StreamTransportRoute::ChatHarness(ChatHarnessRoute::Minimal))
         }
+        (WireApi::Chat, Harness::QwenCode) => Ok(StreamTransportRoute::ChatHarness(
+            ChatHarnessRoute::QwenCode,
+        )),
         (WireApi::Chat, _) => Ok(StreamTransportRoute::ChatCompletionsCompat),
         (WireApi::Messages, Harness::ClaudeCode) => Ok(StreamTransportRoute::MessagesHarness(
             MessagesHarnessRoute::ClaudeCode,
@@ -54,6 +58,9 @@ pub(crate) fn resolve_stream_transport_route(
         )),
         (WireApi::Messages, Harness::Minimal) => Err(CodexErr::InvalidRequest(
             "wire_api = \"messages\" is not supported by harness = \"minimal\"".to_string(),
+        )),
+        (WireApi::Messages, Harness::QwenCode) => Err(CodexErr::InvalidRequest(
+            "wire_api = \"messages\" is not supported by harness = \"qwen-code\"".to_string(),
         )),
         (WireApi::Messages, Harness::Native) => Err(CodexErr::InvalidRequest(
             "wire_api = \"messages\" requires a harness-native transport; configure harness = \"claude-code\" for Anthropic-style sessions"
@@ -94,6 +101,15 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_chat_wire_uses_chat_compat_route() {
+        assert_eq!(
+            resolve_stream_transport_route(WireApi::Chat, &Harness::ClaudeCode)
+                .expect("chat claude-code route"),
+            StreamTransportRoute::ChatCompletionsCompat
+        );
+    }
+
+    #[test]
     fn kimi_cli_chat_wire_uses_harness_native_chat_route() {
         assert_eq!(
             resolve_stream_transport_route(WireApi::Chat, &Harness::KimiCli).expect("kimi route"),
@@ -113,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_code_harness_requires_messages_wire() {
+    fn claude_code_harness_rejects_responses_wire() {
         let err = resolve_stream_transport_route(WireApi::Responses, &Harness::ClaudeCode)
             .expect_err("claude-code on responses should fail");
 
@@ -140,6 +156,14 @@ mod tests {
             resolve_stream_transport_route(WireApi::Chat, &Harness::Minimal)
                 .expect("minimal route"),
             StreamTransportRoute::ChatHarness(ChatHarnessRoute::Minimal)
+        );
+    }
+
+    #[test]
+    fn qwen_code_chat_wire_uses_harness_native_chat_route() {
+        assert_eq!(
+            resolve_stream_transport_route(WireApi::Chat, &Harness::QwenCode).expect("qwen route"),
+            StreamTransportRoute::ChatHarness(ChatHarnessRoute::QwenCode)
         );
     }
 }

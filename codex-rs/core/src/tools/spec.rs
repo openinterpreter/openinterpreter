@@ -120,6 +120,16 @@ pub(crate) fn build_specs_with_discoverable_tools(
     use crate::tools::handlers::MinimalBashHandler;
     use crate::tools::handlers::MinimalStrReplaceEditorHandler;
     use crate::tools::handlers::PlanHandler;
+    use crate::tools::handlers::QwenAgentHandler;
+    use crate::tools::handlers::QwenAskUserQuestionHandler;
+    use crate::tools::handlers::QwenEditHandler;
+    use crate::tools::handlers::QwenExitPlanModeHandler;
+    use crate::tools::handlers::QwenGlobHandler;
+    use crate::tools::handlers::QwenGrepSearchHandler;
+    use crate::tools::handlers::QwenReadFileHandler;
+    use crate::tools::handlers::QwenShellHandler;
+    use crate::tools::handlers::QwenTodoWriteHandler;
+    use crate::tools::handlers::QwenWriteFileHandler;
     use crate::tools::handlers::RequestPermissionsHandler;
     use crate::tools::handlers::RequestUserInputHandler;
     use crate::tools::handlers::ShellCommandHandler;
@@ -367,6 +377,36 @@ pub(crate) fn build_specs_with_discoverable_tools(
             }
             ToolHandlerKind::Plan => {
                 builder.register_handler(handler.name, plan_handler.clone());
+            }
+            ToolHandlerKind::QwenAgent => {
+                builder.register_handler(handler.name, Arc::new(QwenAgentHandler));
+            }
+            ToolHandlerKind::QwenAskUserQuestion => {
+                builder.register_handler(handler.name, Arc::new(QwenAskUserQuestionHandler));
+            }
+            ToolHandlerKind::QwenEdit => {
+                builder.register_handler(handler.name, Arc::new(QwenEditHandler));
+            }
+            ToolHandlerKind::QwenExitPlanMode => {
+                builder.register_handler(handler.name, Arc::new(QwenExitPlanModeHandler));
+            }
+            ToolHandlerKind::QwenGlob => {
+                builder.register_handler(handler.name, Arc::new(QwenGlobHandler));
+            }
+            ToolHandlerKind::QwenGrepSearch => {
+                builder.register_handler(handler.name, Arc::new(QwenGrepSearchHandler));
+            }
+            ToolHandlerKind::QwenReadFile => {
+                builder.register_handler(handler.name, Arc::new(QwenReadFileHandler));
+            }
+            ToolHandlerKind::QwenShell => {
+                builder.register_handler(handler.name, Arc::new(QwenShellHandler));
+            }
+            ToolHandlerKind::QwenTodoWrite => {
+                builder.register_handler(handler.name, Arc::new(QwenTodoWriteHandler));
+            }
+            ToolHandlerKind::QwenWriteFile => {
+                builder.register_handler(handler.name, Arc::new(QwenWriteFileHandler));
             }
             ToolHandlerKind::RequestPermissions => {
                 builder.register_handler(handler.name, request_permissions_handler.clone());

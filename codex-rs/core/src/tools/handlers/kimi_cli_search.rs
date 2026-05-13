@@ -23,6 +23,7 @@ const KIMI_GLOB_MAX_MATCHES: usize = 1000;
 #[derive(Deserialize)]
 struct KimiGlobArgs {
     pattern: String,
+    #[serde(alias = "path")]
     directory: Option<String>,
     include_dirs: Option<bool>,
 }
@@ -45,6 +46,7 @@ struct KimiGrepArgs {
     case_insensitive: Option<bool>,
     #[serde(rename = "type")]
     file_type: Option<String>,
+    #[serde(alias = "limit")]
     head_limit: Option<usize>,
     offset: Option<usize>,
     multiline: Option<bool>,

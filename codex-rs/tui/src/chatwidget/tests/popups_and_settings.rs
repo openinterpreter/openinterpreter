@@ -2014,6 +2014,53 @@ async fn model_picker_hides_show_in_picker_false_models_from_cache() {
 }
 
 #[tokio::test]
+async fn provider_model_picker_shows_model_family_harnesses() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
+    chat.config.model_providers.insert(
+        "openrouter".to_string(),
+        codex_model_provider_info::ModelProviderInfo {
+            name: "OpenRouter".to_string(),
+            base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            wire_api: codex_model_provider_info::WireApi::Chat,
+            ..Default::default()
+        },
+    );
+    let preset = |slug: &str| ModelPreset {
+        id: slug.to_string(),
+        model: slug.to_string(),
+        display_name: slug.to_string(),
+        description: format!("{slug} description"),
+        default_reasoning_effort: ReasoningEffortConfig::Medium,
+        supported_reasoning_efforts: Vec::new(),
+        reasoning_control: Default::default(),
+        supports_thinking_toggle: false,
+        supports_personality: false,
+        additional_speed_tiers: Vec::new(),
+        is_default: false,
+        upgrade: None,
+        show_in_picker: true,
+        availability_nux: None,
+        supported_in_api: true,
+        input_modalities: default_input_modalities(),
+    };
+
+    chat.open_model_popup_for_provider(
+        "openrouter".to_string(),
+        "OpenRouter".to_string(),
+        vec![
+            preset("qwen/qwen3.6-plus"),
+            preset("moonshotai/kimi-k2.5"),
+            preset("anthropic/claude-sonnet-4.6"),
+        ],
+    );
+    let popup = render_bottom_popup(&chat, /*width*/ 96);
+
+    assert!(popup.contains("qwen/qwen3.6-plus description | Harness: qwen-code"));
+    assert!(popup.contains("moonshotai/kimi-k2.5 description | Harness: kimi-cli"));
+    assert!(popup.contains("anthropic/claude-sonnet-4.6 description | Harness: claude-code"));
+}
+
+#[tokio::test]
 async fn server_overloaded_error_does_not_switch_models() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
     chat.set_model("gpt-5.3-codex");

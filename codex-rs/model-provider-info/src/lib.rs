@@ -150,6 +150,100 @@ pub struct ModelProviderInfo {
     pub supports_websockets: bool,
 }
 
+/// Returns the native harness that should be used by default for a provider/model selection.
+pub fn default_harness_for_provider_model(
+    provider_id: &str,
+    provider: &ModelProviderInfo,
+    model: Option<&str>,
+) -> Option<&'static str> {
+    let provider_id = provider_id.to_ascii_lowercase();
+    let provider_name = provider.name.to_ascii_lowercase();
+    let base_url = provider
+        .base_url
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let model = model.unwrap_or_default().to_ascii_lowercase();
+
+    if matches!(provider.wire_api, WireApi::Messages)
+        || model.contains("anthropic/")
+        || model.contains("claude")
+        || provider_id.contains("anthropic")
+        || provider_name.contains("anthropic")
+        || base_url.contains("api.anthropic.com")
+    {
+        return Some("claude-code");
+    }
+
+    if model.contains("kimi")
+        || model.contains("moonshot")
+        || provider_id.contains("kimi")
+        || provider_id.contains("moonshot")
+        || provider_name.contains("kimi")
+        || provider_name.contains("moonshot")
+        || base_url.contains("api.kimi.com")
+        || base_url.contains("api.moonshot.ai")
+        || base_url.contains("api.moonshot.cn")
+    {
+        return Some("kimi-cli");
+    }
+
+    if model.contains("qwen")
+        || model.starts_with("qwq")
+        || model.contains("/qwq")
+        || provider_id.contains("qwen")
+        || provider_id.contains("dashscope")
+        || provider_name.contains("qwen")
+        || provider_name.contains("dashscope")
+        || base_url.contains("dashscope.aliyuncs.com/compatible-mode")
+        || base_url.contains("dashscope-intl.aliyuncs.com/compatible-mode")
+    {
+        return Some("qwen-code");
+    }
+
+    if model.contains("deepseek")
+        || provider_id.contains("deepseek")
+        || provider_name.contains("deepseek")
+        || base_url.contains("api.deepseek.com")
+    {
+        return Some("minimal");
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod default_harness_tests {
+    use super::*;
+
+    fn chat_provider(name: &str, base_url: &str) -> ModelProviderInfo {
+        ModelProviderInfo {
+            name: name.to_string(),
+            base_url: Some(base_url.to_string()),
+            wire_api: WireApi::Chat,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn detects_harness_by_model_family_on_mixed_chat_providers() {
+        let provider = chat_provider("OpenRouter", "https://openrouter.ai/api/v1");
+
+        for (model, harness) in [
+            ("qwen/qwen3.6-plus", Some("qwen-code")),
+            ("moonshotai/kimi-k2.5", Some("kimi-cli")),
+            ("anthropic/claude-sonnet-4.6", Some("claude-code")),
+            ("openai/gpt-5.1", None),
+        ] {
+            assert_eq!(
+                default_harness_for_provider_model("openrouter", &provider, Some(model)),
+                harness,
+                "{model}",
+            );
+        }
+    }
+}
+
 /// AWS SigV4 auth configuration for a model provider.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]

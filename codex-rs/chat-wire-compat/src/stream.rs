@@ -310,11 +310,11 @@ async fn process_chat_sse(
                         }
                         let partial =
                             ensure_partial_tool_call(&mut state.tool_calls, tool_call.index);
-                        if let Some(id) = tool_call.id {
+                        if let Some(id) = tool_call.id.filter(|id| !id.is_empty()) {
                             partial.id = Some(id);
                         }
                         if let Some(function) = tool_call.function {
-                            if let Some(name) = function.name {
+                            if let Some(name) = function.name.filter(|name| !name.is_empty()) {
                                 partial.name = Some(name);
                             }
                             if let Some(arguments) = function.arguments {

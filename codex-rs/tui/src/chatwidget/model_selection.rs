@@ -1,6 +1,6 @@
 use super::*;
 use crate::bottom_pane::custom_prompt_view::CustomPromptView;
-use crate::config_write_edits::preferred_harness_for_provider;
+use crate::config_write_edits::preferred_harness_for_provider_model;
 use crate::onboarding::local_provider::start_hint as local_provider_start_hint;
 use crate::onboarding::model_selection::LoadingProviderModelsState;
 use crate::onboarding::model_selection::LocalProviderUnavailableState;
@@ -34,15 +34,41 @@ impl ChatWidget {
         }
     }
 
-    fn provider_harness_label(&self, provider_id: &str, provider_name: &str) -> Option<String> {
+    pub(crate) fn model_harness_label(
+        &self,
+        provider_id: &str,
+        provider_name: &str,
+        model: Option<&str>,
+    ) -> Option<String> {
         let provider = self.config.model_providers.get(provider_id);
-        preferred_harness_for_provider(
+        preferred_harness_for_provider_model(
             provider_id,
             Some(provider_name),
             provider.and_then(|entry| entry.base_url.as_deref()),
             provider.map(|entry| entry.wire_api),
+            model,
         )
         .map(ToOwned::to_owned)
+    }
+
+    fn provider_harness_label(&self, provider_id: &str, provider_name: &str) -> Option<String> {
+        self.model_harness_label(provider_id, provider_name, None)
+    }
+
+    pub(crate) fn model_description_with_harness(
+        &self,
+        provider_id: &str,
+        provider_name: &str,
+        model: &str,
+        description: &str,
+    ) -> Option<String> {
+        let harness = self.model_harness_label(provider_id, provider_name, Some(model));
+        match (description.is_empty(), harness) {
+            (true, None) => None,
+            (true, Some(harness)) => Some(format!("Harness: {harness}")),
+            (false, None) => Some(description.to_string()),
+            (false, Some(harness)) => Some(format!("{description} | Harness: {harness}")),
+        }
     }
 
     fn provider_model_prompt_context(
@@ -441,8 +467,12 @@ impl ChatWidget {
         let items: Vec<SelectionItem> = filtered
             .into_iter()
             .map(|preset| {
-                let description =
-                    (!preset.description.is_empty()).then_some(preset.description.clone());
+                let description = self.model_description_with_harness(
+                    provider_id.as_str(),
+                    provider_name.as_str(),
+                    preset.model.as_str(),
+                    preset.description.as_str(),
+                );
                 let preset_for_action = preset.clone();
                 let provider_id_for_action = provider_id.clone();
                 let provider_name_for_action = provider_name.clone();

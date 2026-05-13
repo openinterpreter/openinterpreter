@@ -29,7 +29,7 @@ use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ExternalEditorState;
 use crate::chatwidget::ReplayKind;
 use crate::chatwidget::ThreadInputState;
-use crate::config_write_edits::preferred_harness_for_provider;
+use crate::config_write_edits::preferred_harness_for_provider_model;
 use crate::config_write_edits::provider_model_selection_edits;
 use crate::cwd_prompt::CwdPromptAction;
 use crate::diff_render::DiffSummary;

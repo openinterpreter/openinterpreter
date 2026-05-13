@@ -599,7 +599,11 @@ print_launch_instructions() {
 maybe_launch_interpreter_now() {
   if prompt_yes_no "Start Open Interpreter now?"; then
     step "Launching Open Interpreter"
-    "$BIN_PATH"
+    if ( : </dev/tty ) 2>/dev/null; then
+      "$BIN_PATH" </dev/tty >/dev/tty 2>/dev/tty
+    else
+      "$BIN_PATH"
+    fi
   fi
 }
 

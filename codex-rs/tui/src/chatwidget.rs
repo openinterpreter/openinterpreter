@@ -9187,9 +9187,20 @@ impl ChatWidget {
         }
 
         let mut items: Vec<SelectionItem> = Vec::new();
+        let provider_id = self.config.model_provider_id.clone();
+        let provider_name = self
+            .config
+            .model_providers
+            .get(provider_id.as_str())
+            .map(|provider| provider.name.clone())
+            .unwrap_or_else(|| provider_id.clone());
         for preset in presets.into_iter() {
-            let description =
-                (!preset.description.is_empty()).then_some(preset.description.to_string());
+            let description = self.model_description_with_harness(
+                provider_id.as_str(),
+                provider_name.as_str(),
+                preset.model.as_str(),
+                preset.description.as_str(),
+            );
             let is_current = preset.model.as_str() == self.current_model();
             let preset_for_action = preset.clone();
             let single_supported_effort = Self::single_supported_reasoning_effort(&preset);

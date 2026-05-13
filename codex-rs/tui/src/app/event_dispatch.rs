@@ -1181,11 +1181,12 @@ impl App {
                             .cloned()
                         {
                             self.config.model_provider = provider.clone();
-                            self.config.harness = preferred_harness_for_provider(
+                            self.config.harness = preferred_harness_for_provider_model(
                                 provider_id.as_str(),
                                 Some(provider.name.as_str()),
                                 provider.base_url.as_deref(),
                                 Some(provider.wire_api),
+                                Some(model.as_str()),
                             )
                             .map(ToOwned::to_owned);
                         } else {

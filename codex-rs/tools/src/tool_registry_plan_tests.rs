@@ -1082,7 +1082,10 @@ fn kimi_cli_root_tool_names_match_official_active_tool_list() {
         &[],
     );
 
-    let actual = tools.iter().map(|tool| tool.name()).collect::<Vec<_>>();
+    let actual = tools
+        .iter()
+        .map(ConfiguredToolSpec::name)
+        .collect::<Vec<_>>();
     let expected = vec![
         "Agent",
         "AskUserQuestion",
@@ -1128,6 +1131,50 @@ fn kimi_cli_root_tool_names_match_official_active_tool_list() {
                 kind,
             }),
             "missing handler for Kimi CLI tool {tool}"
+        );
+    }
+}
+
+#[test]
+fn qwen_code_root_tool_names_match_active_tool_list() {
+    let model_info = model_info();
+    let features = Features::with_defaults();
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    })
+    .with_harness(Some("qwen-code"));
+    let (tools, handlers) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*deferred_mcp_tools*/ None,
+        &[],
+    );
+
+    let actual = tools
+        .iter()
+        .map(ConfiguredToolSpec::name)
+        .collect::<Vec<_>>();
+    let expected = vec!["read_file", "run_shell_command", "edit"];
+    assert_eq!(actual, expected);
+    for (tool, kind) in [
+        ("read_file", ToolHandlerKind::QwenReadFile),
+        ("run_shell_command", ToolHandlerKind::QwenShell),
+        ("edit", ToolHandlerKind::QwenEdit),
+    ] {
+        assert!(
+            handlers.contains(&ToolHandlerSpec {
+                name: ToolName::plain(tool),
+                kind,
+            }),
+            "missing handler for Qwen Code tool {tool}"
         );
     }
 }

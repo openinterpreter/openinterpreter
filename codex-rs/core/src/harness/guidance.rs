@@ -5,7 +5,11 @@ pub(crate) const DEFAULT_HARNESS_GUIDANCE_ENABLED: bool = true;
 pub(crate) fn guidance_for_harness(harness: &Harness) -> Option<&'static str> {
     match harness {
         Harness::KimiCli => Some(KIMI_CLI_GUIDANCE),
-        Harness::Native | Harness::ClaudeCode | Harness::Minimal | Harness::Other(_) => None,
+        Harness::Native
+        | Harness::ClaudeCode
+        | Harness::Minimal
+        | Harness::QwenCode
+        | Harness::Other(_) => None,
     }
 }
 

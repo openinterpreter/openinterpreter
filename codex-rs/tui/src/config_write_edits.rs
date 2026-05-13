@@ -4,6 +4,7 @@ use codex_config::types::ApprovalsReviewer;
 use codex_features::FEATURES;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
+use codex_model_provider_info::default_harness_for_provider_model;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -75,11 +76,12 @@ pub(crate) fn provider_model_selection_edits(
     effort: Option<ReasoningEffort>,
 ) -> Vec<AppServerConfigEdit> {
     let mut edits = vec![model_provider_edit(profile, provider_id)];
-    match preferred_harness_for_provider(
+    match preferred_harness_for_provider_model(
         provider_id,
         provider.map(|entry| entry.name.as_str()),
         provider.and_then(|entry| entry.base_url.as_deref()),
         provider.map(|entry| entry.wire_api),
+        model,
     ) {
         Some(harness) => edits.push(set_path(
             scoped_segments(profile, &["harness"]),
@@ -91,67 +93,20 @@ pub(crate) fn provider_model_selection_edits(
     edits
 }
 
-pub(crate) fn preferred_harness_for_provider(
+pub(crate) fn preferred_harness_for_provider_model(
     provider_id: &str,
     provider_name: Option<&str>,
     base_url: Option<&str>,
     wire_api: Option<WireApi>,
+    model: Option<&str>,
 ) -> Option<&'static str> {
-    if is_deepseek_provider(provider_id, provider_name, base_url) {
-        return Some("minimal");
-    }
-
-    if is_kimi_provider(provider_id, provider_name, base_url) {
-        return Some("kimi-cli");
-    }
-
-    if matches!(wire_api, Some(WireApi::Messages)) {
-        return Some("claude-code");
-    }
-
-    let provider_id = provider_id.to_ascii_lowercase();
-    let provider_name = provider_name.unwrap_or_default().to_ascii_lowercase();
-    let base_url = base_url.unwrap_or_default().to_ascii_lowercase();
-    if provider_id.contains("anthropic")
-        || provider_name.contains("anthropic")
-        || base_url.contains("api.anthropic.com")
-    {
-        Some("claude-code")
-    } else {
-        None
-    }
-}
-
-fn is_deepseek_provider(
-    provider_id: &str,
-    provider_name: Option<&str>,
-    base_url: Option<&str>,
-) -> bool {
-    let provider_id = provider_id.to_ascii_lowercase();
-    let provider_name = provider_name.unwrap_or_default().to_ascii_lowercase();
-    let base_url = base_url.unwrap_or_default().to_ascii_lowercase();
-
-    provider_id.contains("deepseek")
-        || provider_name.contains("deepseek")
-        || base_url.contains("api.deepseek.com")
-}
-
-fn is_kimi_provider(
-    provider_id: &str,
-    provider_name: Option<&str>,
-    base_url: Option<&str>,
-) -> bool {
-    let provider_id = provider_id.to_ascii_lowercase();
-    let provider_name = provider_name.unwrap_or_default().to_ascii_lowercase();
-    let base_url = base_url.unwrap_or_default().to_ascii_lowercase();
-
-    provider_id.contains("kimi")
-        || provider_id.contains("moonshot")
-        || provider_name.contains("kimi")
-        || provider_name.contains("moonshot")
-        || base_url.contains("api.kimi.com")
-        || base_url.contains("api.moonshot.ai")
-        || base_url.contains("api.moonshot.cn")
+    let provider = ModelProviderInfo {
+        name: provider_name.unwrap_or_default().to_string(),
+        base_url: base_url.map(ToOwned::to_owned),
+        wire_api: wire_api.unwrap_or_default(),
+        ..Default::default()
+    };
+    default_harness_for_provider_model(provider_id, &provider, model)
 }
 
 pub(crate) fn service_tier_edit(
@@ -522,5 +477,48 @@ mod tests {
             edits[1],
             set_path(vec!["harness".to_string()], json!("kimi-cli"))
         );
+    }
+
+    #[test]
+    fn provider_model_selection_sets_model_family_harness_for_openrouter() {
+        let provider = ModelProviderInfo {
+            name: "OpenRouter".to_string(),
+            base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            env_key: Some("OPENROUTER_API_KEY".to_string()),
+            env_key_instructions: None,
+            experimental_bearer_token: None,
+            auth: None,
+            aws: None,
+            wire_api: WireApi::Chat,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: false,
+        };
+
+        for (model, harness) in [
+            ("qwen/qwen3.6-plus", "qwen-code"),
+            ("moonshotai/kimi-k2.5", "kimi-cli"),
+            ("anthropic/claude-sonnet-4.6", "claude-code"),
+        ] {
+            let edits = provider_model_selection_edits(
+                None,
+                "openrouter",
+                Some(&provider),
+                Some(model),
+                None,
+            );
+
+            assert_eq!(
+                edits[1],
+                set_path(vec!["harness".to_string()], json!(harness)),
+                "{model}",
+            );
+        }
     }
 }

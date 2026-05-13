@@ -183,7 +183,7 @@ fn cached_work_dir_listing(conversation_id: &str, work_dir: &Path) -> String {
         .clone()
 }
 
-fn build_messages(
+pub(super) fn build_messages(
     items: &[ResponseItem],
 ) -> Result<impl Iterator<Item = Value>, serde_json::Error> {
     let mut messages = Vec::new();
@@ -356,7 +356,10 @@ fn build_messages(
     Ok(messages.into_iter())
 }
 
-fn build_tools(tools: &[ToolSpec], yolo_mode: bool) -> Result<Vec<Value>, serde_json::Error> {
+pub(super) fn build_tools(
+    tools: &[ToolSpec],
+    yolo_mode: bool,
+) -> Result<Vec<Value>, serde_json::Error> {
     let mut converted = Vec::new();
     for tool in tools {
         let ToolSpec::Function(ResponsesApiTool {

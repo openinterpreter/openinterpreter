@@ -4,9 +4,9 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_model_provider_info::WireApi;
+use codex_model_provider_info::default_harness_for_provider_model;
 use std::collections::HashSet;
 
-use crate::config_write_edits::preferred_harness_for_provider;
 use crate::onboarding::provider_setup::KIMI_FOR_CODING_PROVIDER_ID;
 use crate::onboarding::provider_setup::ProviderPreset;
 use crate::onboarding::provider_setup::provider_preset_by_id;
@@ -155,12 +155,7 @@ pub(crate) fn provider_choice_description(
 
     decorate_harness_description(
         description,
-        preferred_harness_for_provider(
-            provider_id,
-            Some(provider.name.as_str()),
-            provider.base_url.as_deref(),
-            Some(provider.wire_api),
-        ),
+        default_harness_for_provider_model(provider_id, provider, None),
     )
 }
 
@@ -183,11 +178,15 @@ pub(crate) fn provider_preset_choice_description(preset: &ProviderPreset) -> Str
 
     decorate_harness_description(
         description,
-        preferred_harness_for_provider(
+        default_harness_for_provider_model(
             preset.provider_id.as_str(),
-            Some(preset.title.as_str()),
-            Some(preset.base_url.as_str()),
-            Some(preset.wire_api()),
+            &ModelProviderInfo {
+                name: preset.title.clone(),
+                base_url: Some(preset.base_url.clone()),
+                wire_api: preset.wire_api(),
+                ..Default::default()
+            },
+            None,
         ),
     )
 }

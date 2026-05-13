@@ -5903,6 +5903,62 @@ fn kimi_like_provider_defaults_to_kimi_cli_harness() -> std::io::Result<()> {
 }
 
 #[test]
+fn openrouter_model_family_defaults_to_matching_harness() -> std::io::Result<()> {
+    let cases = [
+        ("qwen/qwen3.6-plus", Some("qwen-code")),
+        ("moonshotai/kimi-k2.5", Some("kimi-cli")),
+        ("anthropic/claude-sonnet-4.6", Some("claude-code")),
+        ("openai/gpt-5.1", None),
+    ];
+
+    for (model, expected_harness) in cases {
+        let cwd_temp_dir = TempDir::new().expect("temp dir");
+        std::fs::write(cwd_temp_dir.path().join(".git"), "gitdir: nowhere")?;
+        let codex_home_temp_dir = TempDir::new().expect("temp dir");
+
+        let cfg = ConfigToml {
+            model: Some(model.to_string()),
+            model_provider: Some("openrouter".to_string()),
+            model_providers: HashMap::from([(
+                "openrouter".to_string(),
+                ModelProviderInfo {
+                    name: "OpenRouter".to_string(),
+                    base_url: Some("https://openrouter.ai/api/v1".to_string()),
+                    env_key: Some("OPENROUTER_API_KEY".to_string()),
+                    env_key_instructions: None,
+                    experimental_bearer_token: None,
+                    auth: None,
+                    wire_api: WireApi::Chat,
+                    query_params: None,
+                    http_headers: None,
+                    env_http_headers: None,
+                    request_max_retries: None,
+                    stream_max_retries: None,
+                    stream_idle_timeout_ms: None,
+                    websocket_connect_timeout_ms: None,
+                    requires_openai_auth: false,
+                    supports_websockets: false,
+                },
+            )]),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                cwd: Some(cwd_temp_dir.path().to_path_buf()),
+                ..Default::default()
+            },
+            codex_home_temp_dir.path().to_path_buf(),
+        )?;
+
+        assert_eq!(config.harness.as_deref(), expected_harness, "{model}");
+    }
+
+    Ok(())
+}
+
+#[test]
 fn deepseek_provider_defaults_to_minimal_harness() -> std::io::Result<()> {
     let cwd_temp_dir = TempDir::new().expect("temp dir");
     std::fs::write(cwd_temp_dir.path().join(".git"), "gitdir: nowhere")?;

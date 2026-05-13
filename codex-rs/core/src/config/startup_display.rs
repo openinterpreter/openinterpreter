@@ -11,7 +11,6 @@ use super::ProjectConfig;
 use super::RealtimeAudioConfig;
 use super::RealtimeConfig;
 use super::UriBasedFileOpener;
-use super::default_harness_for_model_provider;
 use super::deserialize_config_toml_with_base;
 use super::resolve_sqlite_home_env;
 use super::resolve_tool_suggest_config;
@@ -37,6 +36,7 @@ use codex_features::FeatureConfigSource;
 use codex_git_utils::GhostSnapshotConfig;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_model_provider_info::built_in_model_providers;
+use codex_model_provider_info::default_harness_for_provider_model;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
@@ -210,7 +210,14 @@ pub(super) fn build_startup_display_config(
         .harness
         .clone()
         .or(cfg.harness.clone())
-        .or_else(|| default_harness_for_model_provider(&model_provider_id, &model_provider));
+        .or_else(|| {
+            default_harness_for_provider_model(
+                &model_provider_id,
+                &model_provider,
+                model.as_deref(),
+            )
+            .map(ToOwned::to_owned)
+        });
 
     Ok(Config {
         config_layer_stack: Default::default(),
