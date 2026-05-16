@@ -644,11 +644,11 @@ def create_router(async_interpreter):
         for key, value in payload.items():
             print("Updating settings...")
             # print(f"Updating settings: {key} = {value}")
+            if key == "auto_run":
+                return {
+                    "error": f"The setting {key} is not modifiable through the server due to security constraints."
+                }, 403
             if key in ["llm", "computer"] and isinstance(value, dict):
-                if key == "auto_run":
-                    return {
-                        "error": f"The setting {key} is not modifiable through the server due to security constraints."
-                    }, 403
                 if hasattr(async_interpreter, key):
                     for sub_key, sub_value in value.items():
                         if hasattr(getattr(async_interpreter, key), sub_key):
