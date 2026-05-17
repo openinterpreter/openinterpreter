@@ -1,0 +1,259 @@
+---
+title: Windows Setup Troubleshooting
+description: Troubleshooting Open Interpreter installation and OS mode issues on Windows
+---
+
+## Recommended Python Version
+
+We recommend Python 3.11 or later. Check your version:
+
+```powershell
+python --version
+```
+## Create a Virtual Environment on Windows
+
+Using a virtual environment is recommended to avoid dependency conflicts.
+
+<CodeGroup>
+
+```powershell Command Prompt or PowerShell
+python -m venv oi-env
+oi-env\Scripts\Activate.ps1
+```
+
+</CodeGroup>
+
+<Info>
+  If you get an execution policy error when running `Activate.ps1`, see
+  [PowerShell Execution Policy Issues](#powershell-execution-policy-issues) below.
+</Info>
+
+## Verify Basic Installation
+
+Once your virtual environment is activated:
+
+```powershell
+pip install open-interpreter
+```
+
+Test the installation:
+
+```powershell
+interpreter --help
+```
+
+## Installing OS Mode Dependencies
+
+[OS Mode](/guides/os-mode/) requires additional dependencies on Windows. Install them with:
+
+```powershell
+pip install "open-interpreter[os]"
+```
+
+This installs additional dependencies required for OS mode on Windows.
+
+<Warning>
+  These dependencies have platform-specific requirements. If installation fails,
+  see [Common Installation Issues](#common-installation-issues) below.
+</Warning>
+
+## Common Installation Issues
+
+### Missing pyautogui or pywinctl
+
+<Accordion title="Error: ModuleNotFoundError: No module named 'pyautogui'">
+
+**Cause:** OS mode dependencies weren't installed.
+
+**Solution:**
+
+```powershell
+# Ensure you installed with [os] extras
+pip install "open-interpreter[os]"
+
+# Or install individually
+pip install pyautogui pywinctl
+```
+
+Then verify:
+
+```powershell
+python -c "import pyautogui; print('pyautogui OK')"
+python -c "import pywinctl; print('pywinctl OK')"
+```
+
+</Accordion>
+
+### Invalid format string errors
+
+<Accordion title="Error: ValueError: stray % in replacement text or Invalid format string">
+
+**Cause:** Incompatible `strftime` format strings on Windows or outdated Python version.
+
+**Solution:**
+
+1. Upgrade to Python 3.11 or later:
+
+```powershell
+python --version
+```
+
+2. If upgrading isn't possible, the issue occurs when OS mode tries to format system dates. Update Python or report on [Discord](https://discord.com/invite/6p3fD6rBVm).
+
+</Accordion>
+
+### opencv-python installation fails
+
+<Accordion title="Error: Failed building wheel for opencv-python">
+
+**Cause:** Missing C++ build tools or Visual Studio Build Tools.
+
+**Solution:**
+
+Install Microsoft C++ Build Tools:
+
+1. Download [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+2. Run the installer and select "Desktop development with C++"
+3. Retry: `pip install "open-interpreter[os]"`
+
+Alternatively, try the pre-built wheel:
+
+```powershell
+pip install opencv-python-headless
+```
+
+</Accordion>
+
+### Dependency conflict errors
+
+<Accordion title="Error: ERROR: pip's dependency resolver does not currently take into account...">
+
+**Cause:** Conflicting dependency versions, often with `torch`, `transformers`, or `opencv`.
+
+**Solution:**
+
+Try installing in a fresh virtual environment:
+
+```powershell
+# Deactivate current environment
+deactivate
+
+# Create new environment
+python -m venv oi-clean
+oi-clean\Scripts\Activate.ps1
+
+# Install with extras one at a time
+pip install open-interpreter
+pip install pyautogui
+pip install pywinctl
+pip install opencv-python
+pip install plyer
+```
+
+If conflicts persist, report on [Discord](https://discord.com/invite/6p3fD6rBVm) with the full error message.
+
+</Accordion>
+
+## PowerShell Execution Policy Issues
+
+<Accordion title="Error: Cannot be loaded because running scripts is disabled on this system">
+
+**Cause:** PowerShell execution policy restricts running scripts.
+
+**Solution - Temporary (current session only):**
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
+oi-env\Scripts\Activate.ps1
+```
+
+**Solution - Permanent (all sessions):**
+
+Run PowerShell as Administrator, then:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+Then activate normally:
+
+```powershell
+oi-env\Scripts\Activate.ps1
+```
+
+</Accordion>
+
+## Verifying Your Installation
+
+Run these commands to verify everything is working:
+
+<CodeGroup>
+
+```powershell Test Basic Installation
+# Verify Open Interpreter is installed
+interpreter --version
+
+# Test basic functionality
+python -c "from interpreter import interpreter; print('Core OK')"
+```
+
+```powershell Test OS Mode Dependencies
+# Test OS mode dependencies individually
+python -c "import pyautogui; print('pyautogui OK')"
+python -c "import pywinctl; print('pywinctl OK')"
+python -c "import cv2; print('opencv-python OK')"
+python -c "import plyer; print('plyer OK')"
+```
+
+</CodeGroup>
+
+If all tests pass, your installation is ready. Test OS mode with:
+
+```powershell
+interpreter --os
+```
+
+<Info>
+  If you get a screenshot successfully, OS mode is working. Note that OS mode
+  requires a multimodal model like GPT-4V to function properly.
+</Info>
+
+## Common Runtime Issues
+
+<Accordion title="OS mode takes a screenshot but then errors">
+
+**Possible causes:**
+
+- Your model doesn't support multimodal input (GPT-4V, Claude Vision, etc. do)
+- Screen recording permissions aren't enabled for your terminal
+
+**Solutions:**
+
+1. Verify your model supports images (see [Language Models](/language-models/introduction/))
+2. Enable screen recording for your terminal:
+   -Ensure your terminal application has screen capture permissions enabled.
+
+</Accordion>
+
+<Accordion title="PyAutoGUI safety feature blocking movement">
+
+**Cause:** PyAutoGUI has a built-in safety feature that stops movement if you move the mouse to a corner.
+
+**Behavior:** This is intentional. Move your mouse away from corners to resume OS mode operation.
+
+</Accordion>
+
+## Getting Help
+
+- **General questions:** Check [FAQ](/troubleshooting/faq/)
+- **OS mode specific:** See [OS Mode Documentation](/guides/os-mode/)
+- **Community support:** Join our [Discord](https://discord.com/invite/6p3fD6rBVm)
+- **Report bugs:** Open an [issue on GitHub](https://github.com/OpenInterpreter/open-interpreter/issues)
+
+Include the output of these when asking for help:
+
+```powershell
+python --version
+pip show open-interpreter
+pip show pyautogui pywinctl opencv-python plyer
+```

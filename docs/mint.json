@@ -133,7 +133,8 @@
     {
       "group": "Troubleshooting",
       "pages": [
-        "troubleshooting/faq"
+        "troubleshooting/faq",
+        "troubleshooting/windows-setup-troubleshooting"
       ]
     },
     {
