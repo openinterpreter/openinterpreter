@@ -1430,11 +1430,7 @@ impl ModelClientSession {
                 "user-agent",
                 HeaderValue::from_static(CLAUDE_CODE_USER_AGENT),
             );
-            let claude_code_session_id =
-                std::env::var("OPEN_INTERPRETER_CLAUDE_CODE_SESSION_ID_OVERRIDE")
-                    .ok()
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or_else(|| self.client.state.conversation_id.to_string());
+            let claude_code_session_id = self.client.state.conversation_id.to_string();
             if let Ok(value) = HeaderValue::from_str(&claude_code_session_id) {
                 extra_headers.insert("x-claude-code-session-id", value);
             }

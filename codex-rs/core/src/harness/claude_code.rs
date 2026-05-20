@@ -1372,8 +1372,7 @@ fn add_json_schema_draft(input_schema: Value) -> Value {
 }
 
 fn build_request_metadata(session_id: &str) -> AnthropicRequestMetadata {
-    let device_id = std::env::var("OPEN_INTERPRETER_CLAUDE_CODE_DEVICE_ID_OVERRIDE")
-        .unwrap_or_else(|_| CLAUDE_CODE_METADATA_DEVICE_ID.to_string());
+    let device_id = CLAUDE_CODE_METADATA_DEVICE_ID.to_string();
     let device_id = serde_json::to_string(&device_id).unwrap_or_else(|_| "\"\"".to_string());
     let session_id = serde_json::to_string(session_id).unwrap_or_else(|_| "\"\"".to_string());
     AnthropicRequestMetadata {
