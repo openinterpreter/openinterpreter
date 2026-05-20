@@ -12,7 +12,11 @@ Bazel, or just command for local release work.
 
 The script changes into `codex-rs/` before invoking Cargo so the repo-local
 `rust-toolchain.toml`, Cargo target directory, and release profile are the ones
-used. It builds the complete release binary set required by `interpreter`:
+used. It builds with one Cargo job by default because the release profile uses
+fat LTO and concurrent final links can consume too much memory. To deliberately
+override that, set `CARGO_BUILD_JOBS` before running the script.
+
+It builds the complete release binary set required by `interpreter`:
 
 - `codex-rs/target/release/interpreter`
 - `codex-rs/target/release/interpreter-tui`

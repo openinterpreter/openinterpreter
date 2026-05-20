@@ -6,13 +6,16 @@ codex_rs_dir="$repo_root/codex-rs"
 target_dir="$codex_rs_dir/target/release"
 shim_dir="${HOME}/.local/bin"
 shim_path="$shim_dir/interpreter"
+build_jobs="${CARGO_BUILD_JOBS:-1}"
 
 echo "Building Open Interpreter release binaries..."
 echo "Workspace: $codex_rs_dir"
+echo "Cargo build jobs: $build_jobs"
 
 cd "$codex_rs_dir"
 
 cargo build \
+  --jobs "$build_jobs" \
   --target-dir "$codex_rs_dir/target" \
   --release \
   -p codex-server-cli --bins \
