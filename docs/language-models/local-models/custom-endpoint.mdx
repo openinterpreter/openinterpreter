@@ -6,13 +6,36 @@ Simply set `api_base` to any OpenAI compatible server:
 
 <CodeGroup>
 ```bash Terminal
-interpreter --api_base <custom_endpoint>
+interpreter --api_base <custom_endpoint> --api_key <api_key> --model openai/<model>
 ```
 
 ```python Python
 from interpreter import interpreter
 
 interpreter.llm.api_base = "<custom_endpoint>"
+interpreter.llm.api_key = "<api_key>"
+interpreter.llm.model = "openai/<model>"
+interpreter.chat()
+```
+
+</CodeGroup>
+
+For example, to use a Tuning Engines workspace as the OpenAI-compatible endpoint:
+
+<CodeGroup>
+```bash Terminal
+interpreter \
+  --api_base "https://api.tuningengines.com/v1" \
+  --api_key "sk-te-..." \
+  --model "openai/<your-model-alias>"
+```
+
+```python Python
+from interpreter import interpreter
+
+interpreter.llm.api_base = "https://api.tuningengines.com/v1"
+interpreter.llm.api_key = "sk-te-..."
+interpreter.llm.model = "openai/<your-model-alias>"
 interpreter.chat()
 ```
 
