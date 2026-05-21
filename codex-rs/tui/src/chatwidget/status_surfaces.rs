@@ -421,7 +421,7 @@ impl ChatWidget {
     /// git metadata.
     pub(super) fn status_line_value_for_item(&mut self, item: &StatusLineItem) -> Option<String> {
         match item {
-            StatusLineItem::ModelName => Some(self.model_display_name().to_string()),
+            StatusLineItem::ModelName => Some(self.model_display_label()),
             StatusLineItem::ModelWithReasoning => Some(self.model_with_reasoning_display_name()),
             StatusLineItem::CurrentDir => {
                 Some(format_directory_display(
@@ -590,7 +590,7 @@ impl ChatWidget {
                 .status_line_value_for_item(&StatusLineItem::FastMode)
                 .map(|value| Self::truncate_terminal_title_part(value, /*max_chars*/ 32)),
             TerminalTitleItem::Model => Some(Self::truncate_terminal_title_part(
-                self.model_display_name().to_string(),
+                self.model_display_label(),
                 /*max_chars*/ 32,
             )),
             TerminalTitleItem::ModelWithReasoning => Some(Self::truncate_terminal_title_part(
@@ -609,7 +609,7 @@ impl ChatWidget {
             } else {
                 ""
             };
-        format!("{} {label}{fast_label}", self.model_display_name())
+        format!("{} {label}{fast_label}", self.model_display_label())
     }
 
     /// Computes the compact runtime status label used by the terminal title.

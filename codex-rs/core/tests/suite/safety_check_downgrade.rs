@@ -123,6 +123,62 @@ async fn openai_model_header_mismatch_emits_warning_event_and_warning_item() -> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_openai_model_header_mismatch_does_not_emit_openai_cyber_warning() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let response =
+        sse_response(sse_completed("resp-1")).insert_header("OpenAI-Model", SERVER_MODEL);
+    let _mock = mount_response_once(&server, response).await;
+
+    let mut builder = test_codex()
+        .with_model("moonshotai/kimi-k2.6")
+        .with_config(|config| {
+            config.model_provider_id = "openrouter".to_string();
+            config.model_provider.name = "OpenRouter".to_string();
+        });
+    let test = builder.build(&server).await?;
+
+    test.codex
+        .submit(Op::UserTurn {
+            environments: None,
+            items: vec![UserInput::Text {
+                text: "hello".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: test.cwd_path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
+            model: "moonshotai/kimi-k2.6".to_string(),
+            effort: test.config.model_reasoning_effort,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+
+    loop {
+        let event = wait_for_event(&test.codex, |_| true).await;
+        match event {
+            EventMsg::ModelReroute(_) => {
+                panic!("non-OpenAI provider mismatch should not emit model reroute event");
+            }
+            EventMsg::Warning(warning) if warning.message.contains("high-risk cyber activity") => {
+                panic!("non-OpenAI provider mismatch should not emit cyber warning");
+            }
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cyber_policy_response_emits_typed_error_without_retry() -> Result<()> {
     skip_if_no_network!(Ok(()));
 

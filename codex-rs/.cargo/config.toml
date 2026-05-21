@@ -1,3 +1,6 @@
+[build]
+rustc-wrapper = "scripts/rustc-wrapper-sccache.sh"
+
 [net]
 git-fetch-with-cli = true
 

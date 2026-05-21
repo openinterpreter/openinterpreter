@@ -23,6 +23,7 @@ use crate::legacy_core::config::Config;
 use crate::legacy_core::web_search_detail;
 use crate::live_wrap::take_prefix_by_width;
 use crate::markdown::append_markdown;
+use crate::model_display::provider_model_label;
 use crate::product_branding::ProductBranding;
 use crate::render::line_utils::line_to_static;
 use crate::render::line_utils::prefix_lines;
@@ -1188,6 +1189,7 @@ pub(crate) fn new_session_info(
 ) -> SessionInfoCell {
     let SessionConfiguredEvent {
         model,
+        model_provider_id,
         reasoning_effort,
         approval_policy,
         sandbox_policy,
@@ -1195,7 +1197,7 @@ pub(crate) fn new_session_info(
     } = event;
     // Header box rendered as history (so it appears at the very top)
     let header = SessionHeaderHistoryCell::new(
-        model.clone(),
+        provider_model_label(&model_provider_id, &model),
         reasoning_effort,
         show_fast_status,
         config.cwd.to_path_buf(),

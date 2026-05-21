@@ -67,6 +67,7 @@ use crate::legacy_core::windows_sandbox::WindowsSandboxLevelExt;
 use crate::mention_codec::LinkedMention;
 use crate::mention_codec::encode_history_mentions;
 use crate::model_catalog::ModelCatalog;
+use crate::model_display::provider_model_label;
 use crate::multi_agents;
 use crate::product_branding::ProductBranding;
 use crate::status::RateLimitWindowDisplay;
@@ -2392,7 +2393,10 @@ impl ChatWidget {
         self.status_line_project_root_name_cache = None;
         let forked_from_id = event.forked_from_id;
         let model_for_header = event.model.clone();
-        self.session_header.set_model(&model_for_header);
+        self.session_header.set_model(&provider_model_label(
+            &event.model_provider_id,
+            &model_for_header,
+        ));
         self.current_collaboration_mode = self.current_collaboration_mode.with_updates(
             Some(model_for_header.clone()),
             Some(event.reasoning_effort),
@@ -5570,6 +5574,10 @@ impl ChatWidget {
         let current_cwd = Some(config.cwd.to_path_buf());
         let effective_service_tier = config.service_tier;
         let queued_message_edit_binding = queued_message_edit_binding_for_terminal(terminal_info());
+        let session_header = SessionHeader::new(provider_model_label(
+            &config.model_provider_id,
+            &header_model,
+        ));
         let mut widget = Self {
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
@@ -5595,7 +5603,7 @@ impl ChatWidget {
             has_chatgpt_account,
             model_catalog,
             session_telemetry,
-            session_header: SessionHeader::new(header_model),
+            session_header,
             initial_user_message,
             status_account_display,
             token_info: None,
@@ -10934,8 +10942,7 @@ impl ChatWidget {
     }
 
     fn refresh_model_display(&mut self) {
-        let effective = self.effective_collaboration_mode();
-        self.session_header.set_model(effective.model());
+        self.session_header.set_model(&self.model_display_label());
         // Keep composer paste affordances aligned with the currently effective model.
         self.sync_image_paste_enabled();
         self.refresh_terminal_title();
@@ -10961,6 +10968,10 @@ impl ChatWidget {
         } else {
             model
         }
+    }
+
+    pub(crate) fn model_display_label(&self) -> String {
+        provider_model_label(&self.config.model_provider_id, self.model_display_name())
     }
 
     /// Get the label for the current collaboration mode.
@@ -11145,7 +11156,7 @@ impl ChatWidget {
         let placeholder_style = Style::default().add_modifier(Modifier::DIM | Modifier::ITALIC);
         Box::new(
             history_cell::SessionHeaderHistoryCell::new_with_style(
-                DEFAULT_MODEL_DISPLAY_NAME.to_string(),
+                provider_model_label(&config.model_provider_id, DEFAULT_MODEL_DISPLAY_NAME),
                 placeholder_style,
                 /*reasoning_effort*/ None,
                 /*show_fast_status*/ false,

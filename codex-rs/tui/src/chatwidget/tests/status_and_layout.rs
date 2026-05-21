@@ -1440,7 +1440,9 @@ async fn status_line_model_with_reasoning_includes_fast_for_fast_capable_models(
 
     assert_eq!(
         status_line_text(&chat),
-        Some(format!("gpt-5.4 xhigh fast · Context 0% used · {test_cwd}"))
+        Some(format!(
+            "openai gpt-5.4 xhigh fast · Context 0% used · {test_cwd}"
+        ))
     );
 
     chat.set_model("gpt-5.3-codex");
@@ -1449,7 +1451,7 @@ async fn status_line_model_with_reasoning_includes_fast_for_fast_capable_models(
     assert_eq!(
         status_line_text(&chat),
         Some(format!(
-            "gpt-5.3-codex xhigh · Context 0% used · {test_cwd}"
+            "openai gpt-5.3-codex xhigh · Context 0% used · {test_cwd}"
         ))
     );
 }
@@ -1460,11 +1462,14 @@ async fn terminal_title_model_updates_on_model_change_without_manual_refresh() {
     chat.config.tui_terminal_title = Some(vec!["model".to_string()]);
     chat.refresh_terminal_title();
 
-    assert_eq!(chat.last_terminal_title, Some("gpt-5.4".to_string()));
+    assert_eq!(chat.last_terminal_title, Some("openai gpt-5.4".to_string()));
 
     chat.set_model("gpt-5.3-codex");
 
-    assert_eq!(chat.last_terminal_title, Some("gpt-5.3-codex".to_string()));
+    assert_eq!(
+        chat.last_terminal_title,
+        Some("openai gpt-5.3-codex".to_string())
+    );
 }
 
 #[tokio::test]
@@ -1476,7 +1481,7 @@ async fn status_line_model_with_reasoning_updates_on_mode_switch_without_manual_
 
     assert_eq!(
         status_line_text(&chat),
-        Some("gpt-5.3-codex high".to_string())
+        Some("openai gpt-5.3-codex high".to_string())
     );
 
     let plan_mask = collaboration_modes::plan_mask(chat.model_catalog.as_ref())
@@ -1485,7 +1490,7 @@ async fn status_line_model_with_reasoning_updates_on_mode_switch_without_manual_
 
     assert_eq!(
         status_line_text(&chat),
-        Some("gpt-5.3-codex medium".to_string())
+        Some("openai gpt-5.3-codex medium".to_string())
     );
 
     let default_mask = collaboration_modes::default_mask(chat.model_catalog.as_ref())
@@ -1494,7 +1499,7 @@ async fn status_line_model_with_reasoning_updates_on_mode_switch_without_manual_
 
     assert_eq!(
         status_line_text(&chat),
-        Some("gpt-5.3-codex high".to_string())
+        Some("openai gpt-5.3-codex high".to_string())
     );
 }
 
