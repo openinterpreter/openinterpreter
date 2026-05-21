@@ -88,7 +88,13 @@ function Invoke-GitHubAssetDownload {
         [string]$OutFile
     )
 
-    Invoke-WebRequest -Uri $Uri -Headers (Get-GitHubHeaders -Accept "application/octet-stream") -OutFile $OutFile
+    $previousProgressPreference = $ProgressPreference
+    try {
+        $global:ProgressPreference = "Continue"
+        Invoke-WebRequest -Uri $Uri -Headers (Get-GitHubHeaders -Accept "application/octet-stream") -OutFile $OutFile
+    } finally {
+        $global:ProgressPreference = $previousProgressPreference
+    }
 }
 
 function Invoke-GitHubAssetText {

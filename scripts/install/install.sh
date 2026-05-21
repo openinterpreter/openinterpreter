@@ -98,18 +98,18 @@ download_file() {
 
   if command -v curl >/dev/null 2>&1; then
     if [ -n "$token" ]; then
-      curl -fsSL -H "Authorization: Bearer $token" -H "Accept: $accept_header" -H "X-GitHub-Api-Version: 2022-11-28" "$url" -o "$output"
+      curl -fL --progress-bar -H "Authorization: Bearer $token" -H "Accept: $accept_header" -H "X-GitHub-Api-Version: 2022-11-28" "$url" -o "$output"
     else
-      curl -fsSL -H "Accept: $accept_header" "$url" -o "$output"
+      curl -fL --progress-bar -H "Accept: $accept_header" "$url" -o "$output"
     fi
     return
   fi
 
   if command -v wget >/dev/null 2>&1; then
     if [ -n "$token" ]; then
-      wget -q --header="Authorization: Bearer $token" --header="Accept: $accept_header" --header="X-GitHub-Api-Version: 2022-11-28" -O "$output" "$url"
+      wget --header="Authorization: Bearer $token" --header="Accept: $accept_header" --header="X-GitHub-Api-Version: 2022-11-28" -O "$output" "$url"
     else
-      wget -q --header="Accept: $accept_header" -O "$output" "$url"
+      wget --header="Accept: $accept_header" -O "$output" "$url"
     fi
     return
   fi
@@ -575,23 +575,23 @@ prompt_yes_no() {
 print_launch_instructions() {
   case "$path_action" in
     added)
-      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && interpreter"
-      step "Future terminals: open a new terminal and run: interpreter"
+      step "To run now: export PATH=\"$BIN_DIR:\$PATH\" && interpreter"
+      step "After opening a new terminal: interpreter"
       step "PATH was added to $path_profile"
       ;;
     updated)
-      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && interpreter"
-      step "Future terminals: open a new terminal and run: interpreter"
+      step "To run now: export PATH=\"$BIN_DIR:\$PATH\" && interpreter"
+      step "After opening a new terminal: interpreter"
       step "PATH was updated in $path_profile"
       ;;
     configured)
-      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && interpreter"
-      step "Future terminals: open a new terminal and run: interpreter"
+      step "To run now: export PATH=\"$BIN_DIR:\$PATH\" && interpreter"
+      step "After opening a new terminal: interpreter"
       step "PATH is already configured in $path_profile"
       ;;
     *)
-      step "Current terminal: interpreter"
-      step "Future terminals: open a new terminal and run: interpreter"
+      step "To run now: interpreter"
+      step "After opening a new terminal: interpreter"
       ;;
   esac
 }
