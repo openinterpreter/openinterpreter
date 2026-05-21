@@ -9,6 +9,7 @@ use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::error::Result as CoreResult;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
+use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ModelsResponse;
 use std::fmt;
 use std::path::PathBuf;
@@ -319,10 +320,11 @@ impl OpenAiModelsManager {
     async fn fetch_and_update_models(&self) -> CoreResult<()> {
         let client_version = crate::client_version_to_whole();
         let (models, etag) = self.endpoint_client.list_models(&client_version).await?;
-        self.apply_remote_models(models.clone()).await;
+        let merged_models = self.merged_provider_catalog_models(models);
+        *self.remote_models.write().await = merged_models.clone();
         *self.etag.write().await = etag.clone();
         self.cache_manager
-            .persist_cache(&models, etag, client_version)
+            .persist_cache(&merged_models, etag, client_version)
             .await;
         Ok(())
     }
@@ -335,20 +337,26 @@ impl OpenAiModelsManager {
         self.etag.read().await.clone()
     }
 
-    /// Replace the cached remote models and rebuild the derived presets list.
+    /// Merge refreshed live/cache models with the generated provider catalog.
     async fn apply_remote_models(&self, models: Vec<ModelInfo>) {
+        let merged_models = self.merged_provider_catalog_models(models);
+        *self.remote_models.write().await = merged_models;
+    }
+
+    fn merged_provider_catalog_models(&self, models: Vec<ModelInfo>) -> Vec<ModelInfo> {
         let mut existing_models = self.base_models.clone();
         for model in models {
             if let Some(existing_index) = existing_models
                 .iter()
                 .position(|existing| existing.slug == model.slug)
             {
-                existing_models[existing_index] = model;
+                existing_models[existing_index] =
+                    merge_provider_catalog_model(&existing_models[existing_index], model);
             } else {
                 existing_models.push(model);
             }
         }
-        *self.remote_models.write().await = existing_models;
+        existing_models
     }
 
     /// Attempt to satisfy the refresh from the cache when it matches the provider and TTL.
@@ -375,6 +383,17 @@ impl OpenAiModelsManager {
             "models cache: cache entry applied"
         );
         true
+    }
+}
+
+fn merge_provider_catalog_model(existing: &ModelInfo, remote: ModelInfo) -> ModelInfo {
+    if existing.visibility == ModelVisibility::List && remote.visibility != ModelVisibility::List {
+        let mut merged = existing.clone();
+        merged.context_window = remote.context_window.or(merged.context_window);
+        merged.max_context_window = remote.max_context_window.or(merged.max_context_window);
+        merged
+    } else {
+        remote
     }
 }
 

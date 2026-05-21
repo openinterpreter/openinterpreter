@@ -1219,6 +1219,10 @@
       ],
       "supported_reasoning_levels": [
         {
+          "effort": "minimal",
+          "description": "minimal"
+        },
+        {
           "effort": "low",
           "description": "low"
         },
@@ -1320,6 +1324,10 @@
         "reasoning_effort"
       ],
       "supported_reasoning_levels": [
+        {
+          "effort": "minimal",
+          "description": "minimal"
+        },
         {
           "effort": "low",
           "description": "low"
@@ -5076,9 +5084,7 @@
     },
     {
       "id": "azure/gpt-5.4-2026-03-05",
-      "aliases": [
-        "gpt-5.4-2026-03-05"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort",
       "visibility": "list",
       "supported_parameters": [
@@ -5112,9 +5118,7 @@
     },
     {
       "id": "azure/gpt-5.4-mini",
-      "aliases": [
-        "gpt-5.4-mini"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -5149,9 +5153,7 @@
     },
     {
       "id": "azure/gpt-5.4-mini-2026-03-17",
-      "aliases": [
-        "gpt-5.4-mini-2026-03-17"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -5186,9 +5188,7 @@
     },
     {
       "id": "azure/gpt-5.4-nano",
-      "aliases": [
-        "gpt-5.4-nano"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -5223,9 +5223,7 @@
     },
     {
       "id": "azure/gpt-5.4-nano-2026-03-17",
-      "aliases": [
-        "gpt-5.4-nano-2026-03-17"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -5295,9 +5293,7 @@
     },
     {
       "id": "azure/gpt-5.4-pro-2026-03-05",
-      "aliases": [
-        "gpt-5.4-pro-2026-03-05"
-      ],
+      "aliases": [],
       "description": "Responses \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -8209,6 +8205,10 @@
       ],
       "supported_reasoning_levels": [
         {
+          "effort": "minimal",
+          "description": "minimal"
+        },
+        {
           "effort": "low",
           "description": "low"
         },
@@ -8763,6 +8763,358 @@
         "text"
       ],
       "context_window": 131072
+    },
+    {
+      "id": "azure_ai/gpt-5.4",
+      "aliases": [],
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "reasoning_effort",
+        "web_search_options"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "none",
+          "description": "none"
+        },
+        {
+          "effort": "minimal",
+          "description": "minimal"
+        },
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        },
+        {
+          "effort": "xhigh",
+          "description": "xhigh"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": true,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 1050000
+    },
+    {
+      "id": "azure_ai/gpt-5.4-2026-03-05",
+      "aliases": [],
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "reasoning_effort",
+        "web_search_options"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "none",
+          "description": "none"
+        },
+        {
+          "effort": "minimal",
+          "description": "minimal"
+        },
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        },
+        {
+          "effort": "xhigh",
+          "description": "xhigh"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": true,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 1050000
+    },
+    {
+      "id": "azure_ai/gpt-5.4-mini",
+      "aliases": [],
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "reasoning_effort",
+        "web_search_options"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "none",
+          "description": "none"
+        },
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        },
+        {
+          "effort": "xhigh",
+          "description": "xhigh"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": true,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 400000
+    },
+    {
+      "id": "azure_ai/gpt-5.4-mini-2026-03-17",
+      "aliases": [],
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "reasoning_effort",
+        "web_search_options"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "none",
+          "description": "none"
+        },
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        },
+        {
+          "effort": "xhigh",
+          "description": "xhigh"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": true,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 400000
+    },
+    {
+      "id": "azure_ai/gpt-5.4-nano",
+      "aliases": [],
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "reasoning_effort",
+        "web_search_options"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "none",
+          "description": "none"
+        },
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        },
+        {
+          "effort": "xhigh",
+          "description": "xhigh"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": true,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 400000
+    },
+    {
+      "id": "azure_ai/gpt-5.4-nano-2026-03-17",
+      "aliases": [],
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "reasoning_effort",
+        "web_search_options"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "none",
+          "description": "none"
+        },
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        },
+        {
+          "effort": "xhigh",
+          "description": "xhigh"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": true,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 400000
+    },
+    {
+      "id": "azure_ai/gpt-5.4-pro",
+      "aliases": [],
+      "description": "Responses \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "reasoning_effort",
+        "web_search_options"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "minimal",
+          "description": "minimal"
+        },
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        },
+        {
+          "effort": "xhigh",
+          "description": "xhigh"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": true,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 1050000
+    },
+    {
+      "id": "azure_ai/gpt-5.4-pro-2026-03-05",
+      "aliases": [],
+      "description": "Responses \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "reasoning_effort",
+        "web_search_options"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "minimal",
+          "description": "minimal"
+        },
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        },
+        {
+          "effort": "xhigh",
+          "description": "xhigh"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": true,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 1050000
     },
     {
       "id": "azure_ai/gpt-oss-120b",
@@ -14159,6 +14511,10 @@
       ],
       "supported_reasoning_levels": [
         {
+          "effort": "minimal",
+          "description": "minimal"
+        },
+        {
           "effort": "low",
           "description": "low"
         },
@@ -14192,6 +14548,10 @@
         "reasoning_effort"
       ],
       "supported_reasoning_levels": [
+        {
+          "effort": "minimal",
+          "description": "minimal"
+        },
         {
           "effort": "low",
           "description": "low"
@@ -15056,6 +15416,164 @@
         "image"
       ],
       "context_window": 8192
+    },
+    {
+      "id": "crusoe/Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "aliases": [],
+      "description": "Chat-compatible \u2022 Tool calling",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice"
+      ],
+      "supported_reasoning_levels": [],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "none",
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": false,
+      "input_modalities": [
+        "text"
+      ],
+      "context_window": 262144
+    },
+    {
+      "id": "crusoe/deepseek-ai/DeepSeek-R1-0528",
+      "aliases": [],
+      "description": "Chat-compatible \u2022 Reasoning effort",
+      "visibility": "hide",
+      "supported_parameters": [
+        "reasoning_effort"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": false,
+      "supports_search_tool": false,
+      "input_modalities": [
+        "text"
+      ],
+      "context_window": 163840
+    },
+    {
+      "id": "crusoe/deepseek-ai/DeepSeek-V3-0324",
+      "aliases": [],
+      "description": "Chat-compatible \u2022 Tool calling",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice"
+      ],
+      "supported_reasoning_levels": [],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "none",
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": false,
+      "input_modalities": [
+        "text"
+      ],
+      "context_window": 163840
+    },
+    {
+      "id": "crusoe/google/gemma-3-12b-it",
+      "aliases": [],
+      "description": "Chat-compatible \u2022 Tool calling",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice"
+      ],
+      "supported_reasoning_levels": [],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "none",
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": false,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 131072
+    },
+    {
+      "id": "crusoe/meta-llama/Llama-3.3-70B-Instruct",
+      "aliases": [],
+      "description": "Chat-compatible \u2022 Tool calling",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice"
+      ],
+      "supported_reasoning_levels": [],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "none",
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": false,
+      "input_modalities": [
+        "text"
+      ],
+      "context_window": 131072
+    },
+    {
+      "id": "crusoe/moonshotai/Kimi-K2-Thinking",
+      "aliases": [],
+      "description": "Chat-compatible \u2022 Reasoning effort",
+      "visibility": "hide",
+      "supported_parameters": [
+        "reasoning_effort"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": false,
+      "supports_search_tool": false,
+      "input_modalities": [
+        "text"
+      ],
+      "context_window": 262144
+    },
+    {
+      "id": "crusoe/openai/gpt-oss-120b",
+      "aliases": [],
+      "description": "Chat-compatible \u2022 Tool calling",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice"
+      ],
+      "supported_reasoning_levels": [],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "none",
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": false,
+      "input_modalities": [
+        "text"
+      ],
+      "context_window": 131072
     },
     {
       "id": "dall-e-2",
@@ -16364,6 +16882,10 @@
         "reasoning_effort"
       ],
       "supported_reasoning_levels": [
+        {
+          "effort": "minimal",
+          "description": "minimal"
+        },
         {
           "effort": "low",
           "description": "low"
@@ -19872,6 +20394,10 @@
         "reasoning_effort"
       ],
       "supported_reasoning_levels": [
+        {
+          "effort": "minimal",
+          "description": "minimal"
+        },
         {
           "effort": "low",
           "description": "low"
@@ -27438,6 +27964,41 @@
       "context_window": 1048576
     },
     {
+      "id": "gemini-3.5-flash",
+      "aliases": [],
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "reasoning_effort",
+        "web_search_options"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": true,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 1048576
+    },
+    {
       "id": "gemini-embedding-001",
       "aliases": [],
       "description": null,
@@ -28430,6 +28991,41 @@
       "context_window": 1048576
     },
     {
+      "id": "gemini/gemini-3.5-flash",
+      "aliases": [],
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "reasoning_effort",
+        "web_search_options"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": true,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 1048576
+    },
+    {
       "id": "gemini/gemini-embedding-001",
       "aliases": [],
       "description": null,
@@ -29150,15 +29746,33 @@
     {
       "id": "github_copilot/claude-opus-4.5",
       "aliases": [],
-      "description": "Chat-compatible \u2022 Tool calling",
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort",
       "visibility": "list",
       "supported_parameters": [
         "tools",
-        "tool_choice"
+        "tool_choice",
+        "reasoning_effort"
       ],
-      "supported_reasoning_levels": [],
+      "supported_reasoning_levels": [
+        {
+          "effort": "minimal",
+          "description": "minimal"
+        },
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        }
+      ],
       "supports_thinking_toggle": false,
-      "reasoning_control": "none",
+      "reasoning_control": "effort",
       "supports_parallel_tool_calls": true,
       "supports_search_tool": false,
       "input_modalities": [
@@ -29845,6 +30459,10 @@
       ],
       "supported_reasoning_levels": [
         {
+          "effort": "minimal",
+          "description": "minimal"
+        },
+        {
           "effort": "low",
           "description": "low"
         },
@@ -30114,15 +30732,33 @@
     {
       "id": "gmi/anthropic/claude-opus-4.5",
       "aliases": [],
-      "description": "Chat-compatible \u2022 Tool calling",
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort",
       "visibility": "list",
       "supported_parameters": [
         "tools",
-        "tool_choice"
+        "tool_choice",
+        "reasoning_effort"
       ],
-      "supported_reasoning_levels": [],
+      "supported_reasoning_levels": [
+        {
+          "effort": "minimal",
+          "description": "minimal"
+        },
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        }
+      ],
       "supports_thinking_toggle": false,
-      "reasoning_control": "none",
+      "reasoning_control": "effort",
       "supports_parallel_tool_calls": false,
       "supports_search_tool": false,
       "input_modalities": [
@@ -32783,10 +33419,6 @@
           "description": "none"
         },
         {
-          "effort": "minimal",
-          "description": "minimal"
-        },
-        {
           "effort": "low",
           "description": "low"
         },
@@ -32830,10 +33462,6 @@
           "description": "none"
         },
         {
-          "effort": "minimal",
-          "description": "minimal"
-        },
-        {
           "effort": "low",
           "description": "low"
         },
@@ -32873,10 +33501,6 @@
       ],
       "supported_reasoning_levels": [
         {
-          "effort": "minimal",
-          "description": "minimal"
-        },
-        {
           "effort": "low",
           "description": "low"
         },
@@ -32915,10 +33539,6 @@
         "web_search_options"
       ],
       "supported_reasoning_levels": [
-        {
-          "effort": "minimal",
-          "description": "minimal"
-        },
         {
           "effort": "low",
           "description": "low"
@@ -33182,6 +33802,26 @@
     },
     {
       "id": "gpt-realtime-1.5",
+      "aliases": [],
+      "description": "Chat-compatible \u2022 Tool calling",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice"
+      ],
+      "supported_reasoning_levels": [],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "none",
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": false,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 32000
+    },
+    {
+      "id": "gpt-realtime-2",
       "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
@@ -34727,6 +35367,44 @@
         "image"
       ],
       "context_window": 200000
+    },
+    {
+      "id": "jp.anthropic.claude-sonnet-4-6",
+      "aliases": [],
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "reasoning_effort"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "minimal",
+          "description": "minimal"
+        },
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": false,
+      "supports_search_tool": false,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 1000000
     },
     {
       "id": "kimi-k2-thinking-251104",
@@ -44384,6 +45062,10 @@
       ],
       "supported_reasoning_levels": [
         {
+          "effort": "minimal",
+          "description": "minimal"
+        },
+        {
           "effort": "low",
           "description": "low"
         },
@@ -46547,6 +47229,43 @@
       "context_window": 1000000
     },
     {
+      "id": "openrouter/qwen/qwen3.6-plus",
+      "aliases": [
+        "qwen/qwen3.6-plus",
+        "qwen3.6-plus"
+      ],
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "reasoning_effort"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": false,
+      "supports_search_tool": false,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 1000000
+    },
+    {
       "id": "openrouter/switchpoint/router",
       "aliases": [
         "router",
@@ -47341,16 +48060,34 @@
       "aliases": [
         "anthropic/claude-opus-4-5"
       ],
-      "description": "Responses \u2022 Tool calling \u2022 Search",
+      "description": "Responses \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
         "tools",
         "tool_choice",
+        "reasoning_effort",
         "web_search_options"
       ],
-      "supported_reasoning_levels": [],
+      "supported_reasoning_levels": [
+        {
+          "effort": "minimal",
+          "description": "minimal"
+        },
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        }
+      ],
       "supports_thinking_toggle": false,
-      "reasoning_control": "none",
+      "reasoning_control": "effort",
       "supports_parallel_tool_calls": false,
       "supports_search_tool": true,
       "input_modalities": [
@@ -50042,6 +50779,41 @@
         "text"
       ],
       "context_window": 16384
+    },
+    {
+      "id": "sambanova/MiniMax-M2.7",
+      "aliases": [
+        "MiniMax-M2.7"
+      ],
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "reasoning_effort"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": false,
+      "supports_search_tool": false,
+      "input_modalities": [
+        "text"
+      ],
+      "context_window": 204800
     },
     {
       "id": "sambanova/QwQ-32B",
@@ -53330,6 +54102,10 @@
       ],
       "supported_reasoning_levels": [
         {
+          "effort": "minimal",
+          "description": "minimal"
+        },
+        {
           "effort": "low",
           "description": "low"
         },
@@ -54468,6 +55244,10 @@
         "reasoning_effort"
       ],
       "supported_reasoning_levels": [
+        {
+          "effort": "minimal",
+          "description": "minimal"
+        },
         {
           "effort": "low",
           "description": "low"
@@ -56549,6 +57329,10 @@
       ],
       "supported_reasoning_levels": [
         {
+          "effort": "minimal",
+          "description": "minimal"
+        },
+        {
           "effort": "low",
           "description": "low"
         },
@@ -56584,6 +57368,10 @@
         "reasoning_effort"
       ],
       "supported_reasoning_levels": [
+        {
+          "effort": "minimal",
+          "description": "minimal"
+        },
         {
           "effort": "low",
           "description": "low"
@@ -57489,6 +58277,41 @@
       "supports_thinking_toggle": false,
       "reasoning_control": "effort",
       "supports_parallel_tool_calls": false,
+      "supports_search_tool": true,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 1048576
+    },
+    {
+      "id": "vertex_ai/gemini-3.5-flash",
+      "aliases": [],
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "reasoning_effort",
+        "web_search_options"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": true,
       "supports_search_tool": true,
       "input_modalities": [
         "text",
@@ -58650,6 +59473,130 @@
         "text"
       ],
       "context_window": 1024
+    },
+    {
+      "id": "vertex_ai/xai/grok-4.1-fast-non-reasoning",
+      "aliases": [
+        "grok-4.1-fast-non-reasoning",
+        "xai/grok-4.1-fast-non-reasoning"
+      ],
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Search",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "web_search_options"
+      ],
+      "supported_reasoning_levels": [],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "none",
+      "supports_parallel_tool_calls": false,
+      "supports_search_tool": true,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 2000000
+    },
+    {
+      "id": "vertex_ai/xai/grok-4.1-fast-reasoning",
+      "aliases": [
+        "grok-4.1-fast-reasoning",
+        "xai/grok-4.1-fast-reasoning"
+      ],
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "reasoning_effort",
+        "web_search_options"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": false,
+      "supports_search_tool": true,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 2000000
+    },
+    {
+      "id": "vertex_ai/xai/grok-4.20-non-reasoning",
+      "aliases": [
+        "grok-4.20-non-reasoning",
+        "xai/grok-4.20-non-reasoning"
+      ],
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Search",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "web_search_options"
+      ],
+      "supported_reasoning_levels": [],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "none",
+      "supports_parallel_tool_calls": false,
+      "supports_search_tool": true,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 2000000
+    },
+    {
+      "id": "vertex_ai/xai/grok-4.20-reasoning",
+      "aliases": [
+        "grok-4.20-reasoning",
+        "xai/grok-4.20-reasoning"
+      ],
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "reasoning_effort",
+        "web_search_options"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": false,
+      "supports_search_tool": true,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 2000000
     },
     {
       "id": "vertex_ai/zai-org/glm-4.7-maas",
@@ -60980,6 +61927,80 @@
         "image"
       ],
       "context_window": 2000000
+    },
+    {
+      "id": "xai/grok-4.3",
+      "aliases": [
+        "grok-4.3"
+      ],
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "reasoning_effort",
+        "web_search_options"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": false,
+      "supports_search_tool": true,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 1000000
+    },
+    {
+      "id": "xai/grok-4.3-latest",
+      "aliases": [
+        "grok-4.3-latest"
+      ],
+      "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
+      "visibility": "list",
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "reasoning_effort",
+        "web_search_options"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "low"
+        },
+        {
+          "effort": "medium",
+          "description": "medium"
+        },
+        {
+          "effort": "high",
+          "description": "high"
+        }
+      ],
+      "supports_thinking_toggle": false,
+      "reasoning_control": "effort",
+      "supports_parallel_tool_calls": false,
+      "supports_search_tool": true,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "context_window": 1000000
     },
     {
       "id": "xai/grok-beta",

@@ -111,7 +111,7 @@ mod tests {
             v4_pro.default_reasoning_level,
             Some(ReasoningEffort::Medium)
         );
-        assert_eq!(v4_pro.reasoning_control, ReasoningControl::ThinkingToggle);
+        assert_eq!(v4_pro.reasoning_control, ReasoningControl::Fixed);
         assert!(v4_pro.supported_reasoning_levels.is_empty());
     }
 

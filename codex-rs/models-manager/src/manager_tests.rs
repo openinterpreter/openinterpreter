@@ -190,12 +190,26 @@ fn openai_manager_for_tests_with_auth(
     endpoint_client: Arc<dyn ModelsEndpointClient>,
     auth_manager: Option<Arc<AuthManager>>,
 ) -> OpenAiModelsManager {
+    openai_manager_for_tests_with_auth_and_base_models(
+        codex_home,
+        endpoint_client,
+        auth_manager,
+        Vec::new(),
+    )
+}
+
+fn openai_manager_for_tests_with_auth_and_base_models(
+    codex_home: std::path::PathBuf,
+    endpoint_client: Arc<dyn ModelsEndpointClient>,
+    auth_manager: Option<Arc<AuthManager>>,
+    base_models: Vec<ModelInfo>,
+) -> OpenAiModelsManager {
     OpenAiModelsManager::new(
         codex_home,
         endpoint_client,
         auth_manager,
         CollaborationModesConfig::default(),
-        Vec::new(),
+        base_models,
     )
 }
 
@@ -369,6 +383,45 @@ async fn refresh_available_models_sorts_by_priority() {
         "higher priority should be listed before lower priority"
     );
     assert_eq!(endpoint.fetch_count(), 1, "expected a single model fetch");
+}
+
+#[tokio::test]
+async fn refresh_available_models_keeps_visible_generated_metadata_when_live_entry_is_sparse() {
+    let slug = "provider-model";
+    let mut generated_model = remote_model(slug, "Generated Model", /*priority*/ 0);
+    generated_model.description = Some("Generated metadata".to_string());
+    generated_model.context_window = Some(262_144);
+    generated_model.max_context_window = Some(262_144);
+
+    let mut live_sparse_model =
+        remote_model_with_visibility(slug, "provider-model", /*priority*/ 180, "hide");
+    live_sparse_model.description = None;
+    live_sparse_model.default_reasoning_level = None;
+    live_sparse_model.supported_reasoning_levels = Vec::new();
+    live_sparse_model.reasoning_control = codex_protocol::openai_models::ReasoningControl::None;
+    live_sparse_model.context_window = Some(300_000);
+    live_sparse_model.max_context_window = Some(300_000);
+
+    let codex_home = tempdir().expect("temp dir");
+    let endpoint = TestModelsEndpoint::new(vec![vec![live_sparse_model]]);
+    let manager = openai_manager_for_tests_with_auth_and_base_models(
+        codex_home.path().to_path_buf(),
+        endpoint.clone(),
+        Some(AuthManager::from_auth_for_testing(
+            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        )),
+        vec![generated_model.clone()],
+    );
+
+    manager
+        .refresh_available_models(RefreshStrategy::Online)
+        .await
+        .expect("refresh succeeds");
+
+    let mut expected = generated_model;
+    expected.context_window = Some(300_000);
+    expected.max_context_window = Some(300_000);
+    assert_eq!(manager.get_remote_models().await, vec![expected]);
 }
 
 #[tokio::test]

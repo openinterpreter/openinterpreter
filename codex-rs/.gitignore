@@ -6,3 +6,6 @@
 
 # Value of CARGO_TARGET_DIR when using .devcontainer/devcontainer.json.
 /target-arm64/
+
+# Scratch files created when handler tests run with codex-rs/core as cwd.
+/core/*-target.txt
