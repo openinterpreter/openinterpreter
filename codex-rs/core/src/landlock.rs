@@ -74,6 +74,7 @@ where
         network,
         stdio_policy,
         env,
+        kill_on_parent_drop: true,
     })
     .await
 }

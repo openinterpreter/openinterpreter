@@ -46,6 +46,7 @@ pub(crate) struct SpawnChildRequest<'a> {
     pub network: Option<&'a NetworkProxy>,
     pub stdio_policy: StdioPolicy,
     pub env: HashMap<String, String>,
+    pub kill_on_parent_drop: bool,
 }
 
 pub(crate) async fn spawn_child_async(request: SpawnChildRequest<'_>) -> std::io::Result<Child> {
@@ -58,6 +59,7 @@ pub(crate) async fn spawn_child_async(request: SpawnChildRequest<'_>) -> std::io
         network,
         stdio_policy,
         mut env,
+        kill_on_parent_drop,
     } = request;
 
     trace!(
@@ -79,9 +81,9 @@ pub(crate) async fn spawn_child_async(request: SpawnChildRequest<'_>) -> std::io
         cmd.env(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR, "1");
     }
 
-    // If this Codex process dies (including being killed via SIGKILL), we want
-    // any child processes that were spawned as part of a `"shell"` tool call
-    // to also be terminated.
+    // Some callers need the child to die if this Codex process dies, but
+    // shell-tool calls intentionally opt out so detached commands such as
+    // `nohup server &` can survive after the parent shell exits.
 
     #[cfg(unix)]
     unsafe {
@@ -93,9 +95,12 @@ pub(crate) async fn spawn_child_async(request: SpawnChildRequest<'_>) -> std::io
                 codex_utils_pty::process_group::detach_from_tty()?;
             }
 
+            #[cfg(not(target_os = "linux"))]
+            let _ = kill_on_parent_drop;
+
             // This relies on prctl(2), so it only works on Linux.
             #[cfg(target_os = "linux")]
-            {
+            if kill_on_parent_drop {
                 // This prctl call effectively requests, "deliver SIGTERM when my
                 // current parent dies."
                 codex_utils_pty::process_group::set_parent_death_signal(parent_pid)?;

@@ -15,14 +15,21 @@ use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::TurnCompletedNotification;
+use codex_app_server_protocol::TurnInterruptParams;
+use codex_app_server_protocol::TurnInterruptResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
+use codex_app_server_protocol::TurnStartedNotification;
+use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnSteerResponse;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS;
+use core_test_support::responses;
 use tempfile::TempDir;
 use tokio::time::timeout;
+use wiremock::ResponseTemplate;
 
 use super::analytics::enable_analytics_capture;
 use super::analytics::wait_for_analytics_event;
@@ -311,4 +318,188 @@ async fn turn_steer_returns_active_turn_id() -> Result<()> {
         .await?;
 
     Ok(())
+}
+
+#[tokio::test]
+async fn turn_steer_survives_interrupt_into_follow_up_request() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let codex_home = tmp.path().join("codex_home");
+    std::fs::create_dir(&codex_home)?;
+    let working_directory = tmp.path().join("workdir");
+    std::fs::create_dir(&working_directory)?;
+
+    let follow_up_text = "90% of the configured task timeout has elapsed.";
+    let server = responses::start_mock_server().await;
+    let _response_mock = responses::mount_response_sequence(
+        &server,
+        vec![
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    app_test_support::create_final_assistant_message_sse_response("too late")?,
+                )
+                .set_delay(std::time::Duration::from_secs(5)),
+            responses::sse_response(
+                app_test_support::create_final_assistant_message_sse_response("wrapped up")?,
+            ),
+        ],
+    )
+    .await;
+    write_mock_responses_config_toml_with_chatgpt_base_url(
+        &codex_home,
+        &server.uri(),
+        &server.uri(),
+    )?;
+
+    let mut mcp = McpProcess::new_without_managed_config(&codex_home).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let thread_req = mcp
+        .send_thread_start_request(ThreadStartParams {
+            model: Some("gpt-5.4".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let thread_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
+
+    let turn_req = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![V2UserInput::Text {
+                text: "run sleep".to_string(),
+                text_elements: Vec::new(),
+            }],
+            cwd: Some(working_directory),
+            ..Default::default()
+        })
+        .await?;
+    let turn_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_req)),
+    )
+    .await??;
+    let TurnStartResponse { turn } = to_response::<TurnStartResponse>(turn_resp)?;
+
+    let _task_started: JSONRPCNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/started"),
+    )
+    .await??;
+    let initial_requests = wait_for_provider_requests(&server, 1).await?;
+    assert_eq!(
+        initial_requests.len(),
+        1,
+        "expected initial provider request"
+    );
+
+    let steer_req = mcp
+        .send_turn_steer_request(TurnSteerParams {
+            thread_id: thread.id.clone(),
+            input: vec![V2UserInput::Text {
+                text: follow_up_text.to_string(),
+                text_elements: Vec::new(),
+            }],
+            responsesapi_client_metadata: None,
+            expected_turn_id: turn.id.clone(),
+        })
+        .await?;
+    let steer_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(steer_req)),
+    )
+    .await??;
+    let steer: TurnSteerResponse = to_response::<TurnSteerResponse>(steer_resp)?;
+    assert_eq!(steer.turn_id, turn.id);
+
+    let interrupt_req = mcp
+        .send_turn_interrupt_request(TurnInterruptParams {
+            thread_id: thread.id.clone(),
+            turn_id: turn.id.clone(),
+        })
+        .await?;
+    let interrupt_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(interrupt_req)),
+    )
+    .await??;
+    let _interrupt: TurnInterruptResponse = to_response::<TurnInterruptResponse>(interrupt_resp)?;
+
+    let completed_notif: JSONRPCNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+    let completed: TurnCompletedNotification = serde_json::from_value(
+        completed_notif
+            .params
+            .expect("turn/completed params must be present"),
+    )?;
+    assert_eq!(completed.thread_id, thread.id);
+    assert_eq!(completed.turn.id, turn.id);
+    assert_eq!(completed.turn.status, TurnStatus::Interrupted);
+
+    let follow_up_started: JSONRPCNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/started"),
+    )
+    .await??;
+    let _follow_up_started: TurnStartedNotification = serde_json::from_value(
+        follow_up_started
+            .params
+            .expect("turn/started params must be present"),
+    )?;
+
+    let requests = wait_for_provider_requests(&server, 2).await?;
+    let follow_up_request: serde_json::Value = serde_json::from_slice(
+        &requests
+            .last()
+            .expect("provider request should be present")
+            .body,
+    )?;
+    if let Some(path) = std::env::var_os("INTERPRETER_TIMEOUT_STEERING_TRACE_OUT") {
+        std::fs::write(path, serde_json::to_string_pretty(&follow_up_request)?)?;
+    }
+    let follow_up_request_text = follow_up_request.to_string();
+    assert!(
+        follow_up_request_text.contains(follow_up_text),
+        "expected follow-up provider request to contain steer text, got {follow_up_request_text}"
+    );
+
+    Ok(())
+}
+
+async fn wait_for_provider_requests(
+    server: &wiremock::MockServer,
+    expected: usize,
+) -> Result<Vec<wiremock::Request>> {
+    let deadline = std::time::Instant::now() + DEFAULT_READ_TIMEOUT;
+    loop {
+        let requests = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|request| request.url.path().ends_with("/responses"))
+            .collect::<Vec<_>>();
+        if requests.len() >= expected {
+            return Ok(requests);
+        }
+        if std::time::Instant::now() >= deadline {
+            let all_requests = server.received_requests().await.unwrap_or_default();
+            let paths = all_requests
+                .iter()
+                .map(|request| format!("{} {}", request.method, request.url.path()))
+                .collect::<Vec<_>>();
+            anyhow::bail!(
+                "timed out waiting for {expected} provider requests; got {}; all paths: {paths:?}",
+                requests.len(),
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 }

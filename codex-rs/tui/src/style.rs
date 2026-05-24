@@ -12,7 +12,7 @@ use ratatui::style::Style;
 
 pub const APP_ACCENT_DARK_RGB: (u8, u8, u8) = (236, 236, 236);
 pub const APP_ACCENT_LIGHT_RGB: (u8, u8, u8) = (28, 28, 28);
-pub const APP_SURFACE_DARK_RGB: (u8, u8, u8) = (16, 16, 16);
+pub const APP_SURFACE_DARK_RGB: (u8, u8, u8) = (31, 31, 31);
 
 pub fn app_accent_color() -> Color {
     let accent_rgb = match default_bg() {

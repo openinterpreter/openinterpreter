@@ -480,9 +480,8 @@ impl Session {
             warn!("failed to apply goal runtime abort event: {err}");
         }
         if let Some(active_turn) = active_turn_to_clear {
-            // Let interrupted tasks observe cancellation before dropping pending approvals, or an
-            // in-flight approval wait can surface as a model-visible rejection before TurnAborted.
-            active_turn.clear_pending().await;
+            self.clear_pending_after_abort(active_turn, reason.clone())
+                .await;
         }
         if reason == TurnAbortReason::Interrupted && aborted_turn {
             self.maybe_start_turn_for_pending_work().await;
@@ -523,15 +522,34 @@ impl Session {
         {
             warn!("failed to apply goal runtime abort event: {err}");
         }
-        // Let interrupted tasks observe cancellation before dropping pending approvals, or an
-        // in-flight approval wait can surface as a model-visible rejection before TurnAborted.
-        active_turn.clear_pending().await;
+        self.clear_pending_after_abort(active_turn, reason.clone())
+            .await;
 
         if reason == TurnAbortReason::Interrupted {
             self.maybe_start_turn_for_pending_work().await;
         }
 
         true
+    }
+
+    async fn clear_pending_after_abort(
+        self: &Arc<Self>,
+        active_turn: ActiveTurn,
+        reason: TurnAbortReason,
+    ) {
+        let pending_input = if reason == TurnAbortReason::Interrupted {
+            let mut turn_state = active_turn.turn_state.lock().await;
+            turn_state.take_pending_input()
+        } else {
+            Vec::new()
+        };
+        // Let interrupted tasks observe cancellation before dropping pending approvals, or an
+        // in-flight approval wait can surface as a model-visible rejection before TurnAborted.
+        active_turn.clear_pending().await;
+
+        if !pending_input.is_empty() {
+            self.queue_response_items_for_next_turn(pending_input).await;
+        }
     }
 
     pub async fn on_task_finished(

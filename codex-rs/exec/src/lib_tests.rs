@@ -34,7 +34,7 @@ fn timeout_steer_message_mentions_remaining_time_at_75_percent() {
 fn timeout_steer_message_asks_to_wrap_up_at_90_percent() {
     assert_eq!(
         timeout_steer_message(90, 1800, 1620),
-        "90% of the configured task timeout has elapsed. About 3 minutes remain. Wrap up now: finish the smallest valid artifact, run the exact visible check or command if available, clean up background work, and give the final answer."
+        "90% of the configured task timeout has elapsed. About 3 minutes remain. Wrap up now: finish the smallest valid artifact, run the exact visible check or command if available, clean up background work, and give the final answer. The active model turn will now be interrupted like pressing Esc in the TUI; running terminal commands may continue in the background."
     );
 }
 

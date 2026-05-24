@@ -893,6 +893,7 @@ async fn exec(
         network: None,
         stdio_policy: StdioPolicy::RedirectForShellTool,
         env,
+        kill_on_parent_drop: false,
     })
     .await?;
     if let Some(after_spawn) = after_spawn {

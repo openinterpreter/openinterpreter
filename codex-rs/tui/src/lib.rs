@@ -189,6 +189,7 @@ mod key_hint;
 pub(crate) mod legacy_core;
 mod line_truncation;
 pub(crate) mod live_wrap;
+mod low_memory;
 pub use live_wrap::RowBuilder;
 mod local_chatgpt_auth;
 mod login_support;

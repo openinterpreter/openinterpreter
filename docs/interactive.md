@@ -97,6 +97,12 @@ Open Interpreter is designed for many tabs without each one acting like a
 separate runtime. Configuration and a shared local backend keep memory
 usage flat as you add tabs.
 
+The TUI also uses low-memory client behavior by default: completed transcript
+cells are not retained in every live client's in-memory transcript list, and
+large active tool outputs are capped in the live client. Set
+`INTERPRETER_TUI_LOW_MEMORY=0` before launch to disable this behavior for
+debugging.
+
 ## Quitting
 
 | Command       | What it does                                          |

@@ -2,4 +2,4 @@
 source: tui/src/style.rs
 expression: "composer_style_for(Some((0, 0, 0)))"
 ---
-Style::new().bg(Color::Rgb(16, 16, 16))
+Style::new().bg(Color::Rgb(31, 31, 31))

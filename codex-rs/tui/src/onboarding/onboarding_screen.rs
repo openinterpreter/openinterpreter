@@ -15,6 +15,8 @@ use crossterm::terminal;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
+use ratatui::widgets::Clear;
+use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
 
 use codex_protocol::config_types::ForcedLoginMethod;
@@ -436,6 +438,8 @@ impl KeyboardHandler for OnboardingScreen {
 
 impl WidgetRef for &OnboardingScreen {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
+        Clear.render(area, buf);
+
         // Render steps top-to-bottom, measuring each step's height dynamically.
         let mut y = area.y;
         let bottom = area.y.saturating_add(area.height);

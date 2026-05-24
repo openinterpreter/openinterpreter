@@ -139,6 +139,9 @@ use std::io::IsTerminal;
 use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use supports_color::Stream;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -156,6 +159,11 @@ use crate::cli::Command as ExecCommand;
 use crate::event_processor::EventProcessor;
 
 const DEFAULT_ANALYTICS_ENABLED: bool = true;
+
+struct TimeoutSteerControl {
+    cancel: watch::Sender<bool>,
+    interrupt_requested: Arc<AtomicBool>,
+}
 
 enum InitialOperation {
     UserTurn {
@@ -834,7 +842,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         }
     };
     exec_span.record("turn.id", task_id.as_str());
-    let mut timeout_steer_cancel =
+    let mut timeout_steer_control =
         timeout_seconds
             .zip(timeout_steer_thread_id)
             .map(|(timeout_seconds, thread_id)| {
@@ -857,6 +865,8 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     let mut error_seen = false;
     let mut interrupt_channel_open = true;
     let primary_thread_id_for_requests = primary_thread_id.to_string();
+    let mut timeout_interrupted_turn_id: Option<String> = None;
+    let mut timeout_interrupt_consumed = false;
     loop {
         let server_event = tokio::select! {
             maybe_interrupt = interrupt_rx.recv(), if interrupt_channel_open => {
@@ -893,6 +903,35 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 handle_server_request(&client, request, &mut error_seen).await;
             }
             AppServerEvent::ServerNotification(mut notification) => {
+                if !timeout_interrupt_consumed
+                    && timeout_interrupted_turn_id.is_none()
+                    && timeout_steer_control
+                        .as_ref()
+                        .is_some_and(|control| control.interrupt_requested.load(Ordering::SeqCst))
+                {
+                    timeout_interrupted_turn_id = Some(task_id.clone());
+                }
+                if let ServerNotification::TurnStarted(payload) = &notification
+                    && payload.thread_id == primary_thread_id_for_requests
+                    && timeout_interrupted_turn_id.is_some()
+                    && payload.turn.id != task_id
+                {
+                    task_id = payload.turn.id.clone();
+                    exec_span.record("turn.id", task_id.as_str());
+                    timeout_interrupted_turn_id = None;
+                    timeout_interrupt_consumed = true;
+                    info!("Following timeout wrap-up turn with event ID: {task_id}");
+                }
+                let timeout_interrupted_turn_completed =
+                    if let ServerNotification::TurnCompleted(payload) = &notification {
+                        payload.thread_id == primary_thread_id_for_requests
+                            && timeout_interrupted_turn_id.as_deref()
+                                == Some(payload.turn.id.as_str())
+                            && payload.turn.status
+                                == codex_app_server_protocol::TurnStatus::Interrupted
+                    } else {
+                        false
+                    };
                 if let ServerNotification::Error(payload) = &notification {
                     if payload.thread_id == primary_thread_id_for_requests
                         && payload.turn_id == task_id
@@ -908,6 +947,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         codex_app_server_protocol::TurnStatus::Failed
                             | codex_app_server_protocol::TurnStatus::Interrupted
                     )
+                    && !timeout_interrupted_turn_completed
                 {
                     error_seen = true;
                 }
@@ -919,6 +959,10 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     &mut notification,
                 )
                 .await;
+
+                if timeout_interrupted_turn_completed {
+                    continue;
+                }
 
                 if should_process_notification(
                     &notification,
@@ -934,8 +978,8 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         let final_message = final_message_from_turn_items(&payload.turn.items);
                         if !completion_verification_confirmed(final_message.as_deref()) {
                             remaining_verification_turns -= 1;
-                            if let Some(cancel) = timeout_steer_cancel.take() {
-                                let _ = cancel.send(true);
+                            if let Some(control) = timeout_steer_control.take() {
+                                let _ = control.cancel.send(true);
                             }
                             let response: TurnStartResponse =
                                 send_request_with_response(
@@ -980,12 +1024,14 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                             task_id = response.turn.id;
                             exec_span.record("turn.id", task_id.as_str());
                             if let Some(timeout_seconds) = timeout_seconds {
-                                timeout_steer_cancel = Some(spawn_timeout_steers(
+                                timeout_steer_control = Some(spawn_timeout_steers(
                                     client.request_handle(),
                                     primary_thread_id_for_requests.clone(),
                                     task_id.clone(),
                                     timeout_seconds,
                                 ));
+                                timeout_interrupted_turn_id = None;
+                                timeout_interrupt_consumed = false;
                             }
                             info!("Sent completion verification turn with event ID: {task_id}");
                             continue;
@@ -1021,8 +1067,8 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         }
     }
 
-    if let Some(cancel) = timeout_steer_cancel {
-        let _ = cancel.send(true);
+    if let Some(control) = timeout_steer_control {
+        let _ = control.cancel.send(true);
     }
 
     if let Err(err) = client.shutdown().await {
@@ -1041,8 +1087,10 @@ fn spawn_timeout_steers(
     thread_id: String,
     turn_id: String,
     timeout_seconds: u64,
-) -> watch::Sender<bool> {
+) -> TimeoutSteerControl {
     let (cancel_tx, mut cancel_rx) = watch::channel(false);
+    let interrupt_requested = Arc::new(AtomicBool::new(false));
+    let interrupt_requested_for_task = Arc::clone(&interrupt_requested);
     tokio::spawn(async move {
         let mut previous_elapsed_seconds = 0;
         for percent in [75_u64, 90_u64] {
@@ -1088,9 +1136,28 @@ fn spawn_timeout_steers(
             if let Err(err) = result {
                 warn!("timeout steer at {percent}% failed: {err}");
             }
+            if percent == 90 {
+                let request_id = RequestId::String(format!("timeout-interrupt-{}", Uuid::new_v4()));
+                interrupt_requested_for_task.store(true, Ordering::SeqCst);
+                let result = request_handle
+                    .request_typed::<TurnInterruptResponse>(ClientRequest::TurnInterrupt {
+                        request_id,
+                        params: TurnInterruptParams {
+                            thread_id: thread_id.clone(),
+                            turn_id: turn_id.clone(),
+                        },
+                    })
+                    .await;
+                if let Err(err) = result {
+                    warn!("timeout interrupt at {percent}% failed: {err}");
+                }
+            }
         }
     });
-    cancel_tx
+    TimeoutSteerControl {
+        cancel: cancel_tx,
+        interrupt_requested,
+    }
 }
 
 fn append_text_input(items: &mut Vec<UserInput>, additional_text: String) {
@@ -1158,7 +1225,7 @@ fn timeout_steer_message(percent: u64, timeout_seconds: u64, elapsed_seconds: u6
             "75% of the configured task timeout has elapsed. About {remaining} remain. Keep working, but converge on the smallest complete solution that satisfies the request."
         ),
         90 => format!(
-            "90% of the configured task timeout has elapsed. About {remaining} remain. Wrap up now: finish the smallest valid artifact, run the exact visible check or command if available, clean up background work, and give the final answer."
+            "90% of the configured task timeout has elapsed. About {remaining} remain. Wrap up now: finish the smallest valid artifact, run the exact visible check or command if available, clean up background work, and give the final answer. The active model turn will now be interrupted like pressing Esc in the TUI; running terminal commands may continue in the background."
         ),
         _ => format!(
             "{percent}% of the configured task timeout has elapsed. About {remaining} remain."

@@ -999,6 +999,62 @@ async fn kill_child_process_group_kills_grandchildren_on_timeout() -> Result<()>
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn shell_tool_allows_nohup_background_child_to_survive_parent_shell() -> Result<()> {
+    let command = vec![
+        "/bin/bash".to_string(),
+        "-c".to_string(),
+        "nohup sleep 60 >/dev/null 2>&1 & echo $!".to_string(),
+    ];
+    let cwd = codex_utils_absolute_path::AbsolutePathBuf::current_dir()?;
+    let env: HashMap<String, String> = std::env::vars().collect();
+    let params = ExecParams {
+        command,
+        cwd,
+        expiration: 1_000.into(),
+        capture_policy: ExecCapturePolicy::ShellTool,
+        env,
+        network: None,
+        sandbox_permissions: SandboxPermissions::UseDefault,
+        windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel::Disabled,
+        windows_sandbox_private_desktop: false,
+        justification: None,
+        arg0: None,
+    };
+
+    let output = exec(
+        params,
+        NetworkSandboxPolicy::Restricted,
+        /*stdout_stream*/ None,
+        /*after_spawn*/ None,
+    )
+    .await?;
+    let stdout = output.stdout.from_utf8_lossy().text;
+    let pid_line = stdout.lines().next().unwrap_or("").trim();
+    let pid: i32 = pid_line.parse().map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to parse pid from stdout '{pid_line}': {error}"),
+        )
+    })?;
+
+    let mut alive = false;
+    for _ in 0..20 {
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            alive = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+
+    assert!(alive, "background child with pid {pid} did not survive");
+    Ok(())
+}
+
 #[tokio::test]
 async fn process_exec_tool_call_respects_cancellation_token() -> Result<()> {
     let command = long_running_command();

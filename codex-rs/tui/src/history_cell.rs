@@ -17,7 +17,6 @@ use crate::exec_cell::OutputLinesParams;
 use crate::exec_cell::TOOL_CALL_MAX_LINES;
 use crate::exec_cell::output_lines;
 use crate::exec_cell::spinner;
-use crate::exec_command::relativize_to_home;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::legacy_core::config::Config;
 use crate::legacy_core::web_search_detail;
@@ -1051,21 +1050,6 @@ impl HistoryCell for CompletedMcpToolCallWithImageOutput {
     }
 }
 
-pub(crate) const SESSION_HEADER_MAX_INNER_WIDTH: usize = 56; // Just an eyeballed value
-
-pub(crate) fn card_inner_width(width: u16, max_inner_width: usize) -> Option<usize> {
-    if width < 4 {
-        return None;
-    }
-    let inner_width = std::cmp::min(width.saturating_sub(4) as usize, max_inner_width);
-    Some(inner_width)
-}
-
-/// Render `lines` inside a border sized to the widest span in the content.
-pub(crate) fn with_border(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
-    with_border_internal(lines, /*forced_inner_width*/ None)
-}
-
 /// Render `lines` inside a border whose inner width is at least `inner_width`.
 ///
 /// This is useful when callers have already clamped their content to a
@@ -1290,11 +1274,6 @@ pub(crate) fn new_user_prompt(
 #[derive(Debug)]
 pub(crate) struct SessionHeaderHistoryCell {
     version: &'static str,
-    model: String,
-    model_style: Style,
-    reasoning_effort: Option<ReasoningEffortConfig>,
-    show_fast_status: bool,
-    directory: PathBuf,
     yolo_mode: bool,
 }
 
@@ -1317,20 +1296,15 @@ impl SessionHeaderHistoryCell {
     }
 
     pub(crate) fn new_with_style(
-        model: String,
-        model_style: Style,
-        reasoning_effort: Option<ReasoningEffortConfig>,
-        show_fast_status: bool,
-        directory: PathBuf,
+        _model: String,
+        _model_style: Style,
+        _reasoning_effort: Option<ReasoningEffortConfig>,
+        _show_fast_status: bool,
+        _directory: PathBuf,
         version: &'static str,
     ) -> Self {
         Self {
             version,
-            model,
-            model_style,
-            reasoning_effort,
-            show_fast_status,
-            directory,
             yolo_mode: false,
         }
     }
@@ -1339,121 +1313,34 @@ impl SessionHeaderHistoryCell {
         self.yolo_mode = yolo_mode;
         self
     }
-
-    fn format_directory(&self, max_width: Option<usize>) -> String {
-        Self::format_directory_inner(&self.directory, max_width)
-    }
-
-    fn format_directory_inner(directory: &Path, max_width: Option<usize>) -> String {
-        let formatted = if let Some(rel) = relativize_to_home(directory) {
-            if rel.as_os_str().is_empty() {
-                "~".to_string()
-            } else {
-                format!("~{}{}", std::path::MAIN_SEPARATOR, rel.display())
-            }
-        } else {
-            directory.display().to_string()
-        };
-
-        if let Some(max_width) = max_width {
-            if max_width == 0 {
-                return String::new();
-            }
-            if UnicodeWidthStr::width(formatted.as_str()) > max_width {
-                return crate::text_formatting::center_truncate_path(&formatted, max_width);
-            }
-        }
-
-        formatted
-    }
-
-    fn reasoning_label(&self) -> Option<&'static str> {
-        self.reasoning_effort.map(|effort| match effort {
-            ReasoningEffortConfig::Minimal => "minimal",
-            ReasoningEffortConfig::Low => "low",
-            ReasoningEffortConfig::Medium => "medium",
-            ReasoningEffortConfig::High => "high",
-            ReasoningEffortConfig::XHigh => "xhigh",
-            ReasoningEffortConfig::None => "none",
-        })
-    }
 }
 
 impl HistoryCell for SessionHeaderHistoryCell {
-    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let Some(inner_width) = card_inner_width(width, SESSION_HEADER_MAX_INNER_WIDTH) else {
-            return Vec::new();
-        };
-
+    fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
         let make_row = |spans: Vec<Span<'static>>| Line::from(spans);
 
-        // Title line rendered inside the session box.
         let branding = ProductBranding::current();
+        const HEADER_INDENT: &str = "  ";
         let title_spans: Vec<Span<'static>> = vec![
-            Span::from(">_ ").dim(),
+            Span::from(HEADER_INDENT).dim(),
             Span::from(branding.session_header_name()).bold(),
             Span::from(" ").dim(),
             Span::from(format!("(v{})", self.version)).dim(),
         ];
 
-        const CHANGE_MODEL_HINT_COMMAND: &str = "/model";
-        const CHANGE_MODEL_HINT_EXPLANATION: &str = " to change";
-        const DIR_LABEL: &str = "directory:";
         const PERMISSIONS_LABEL: &str = "permissions:";
-        let label_width = if self.yolo_mode {
-            DIR_LABEL.len().max(PERMISSIONS_LABEL.len())
-        } else {
-            DIR_LABEL.len()
-        };
-
-        let model_label = format!(
-            "{model_label:<label_width$}",
-            model_label = "model:",
-            label_width = label_width
-        );
-        let reasoning_label = self.reasoning_label();
-        let model_spans: Vec<Span<'static>> = {
-            let mut spans = vec![
-                Span::from(format!("{model_label} ")).dim(),
-                Span::styled(self.model.clone(), self.model_style),
-            ];
-            if let Some(reasoning) = reasoning_label {
-                spans.push(Span::from(" "));
-                spans.push(Span::from(reasoning));
-            }
-            if self.show_fast_status {
-                spans.push("   ".into());
-                spans.push(Span::styled("fast", self.model_style.magenta()));
-            }
-            spans.push("   ".dim());
-            spans.push(CHANGE_MODEL_HINT_COMMAND.cyan());
-            spans.push(CHANGE_MODEL_HINT_EXPLANATION.dim());
-            spans
-        };
-
-        let dir_label = format!("{DIR_LABEL:<label_width$}");
-        let dir_prefix = format!("{dir_label} ");
-        let dir_prefix_width = UnicodeWidthStr::width(dir_prefix.as_str());
-        let dir_max_width = inner_width.saturating_sub(dir_prefix_width);
-        let dir = self.format_directory(Some(dir_max_width));
-        let dir_spans = vec![Span::from(dir_prefix).dim(), Span::from(dir)];
-
-        let mut lines = vec![
-            make_row(title_spans),
-            make_row(Vec::new()),
-            make_row(model_spans),
-            make_row(dir_spans),
-        ];
+        let mut lines = vec![Line::from(""), make_row(title_spans)];
 
         if self.yolo_mode {
-            let permissions_label = format!("{PERMISSIONS_LABEL:<label_width$}");
+            lines.push(make_row(Vec::new()));
             lines.push(make_row(vec![
-                Span::from(format!("{permissions_label} ")).dim(),
+                Span::from(HEADER_INDENT).dim(),
+                Span::from(format!("{PERMISSIONS_LABEL} ")).dim(),
                 "YOLO mode".magenta().bold(),
             ]));
         }
 
-        with_border(lines)
+        lines
     }
 }
 
@@ -3077,7 +2964,6 @@ mod tests {
     use codex_protocol::protocol::McpAuthStatus;
     use codex_protocol::protocol::SandboxPolicy;
     use codex_protocol::protocol::SessionConfiguredEvent;
-    use dirs::home_dir;
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use std::collections::HashMap;
@@ -4227,46 +4113,6 @@ mod tests {
     }
 
     #[test]
-    fn session_header_includes_reasoning_level_when_present() {
-        let cell = SessionHeaderHistoryCell::new(
-            "gpt-4o".to_string(),
-            Some(ReasoningEffortConfig::High),
-            /*show_fast_status*/ true,
-            std::env::temp_dir(),
-            "test",
-        );
-
-        let lines = render_lines(&cell.display_lines(/*width*/ 80));
-        let model_line = lines
-            .iter()
-            .find(|line| line.contains("model:"))
-            .expect("model line");
-
-        assert!(model_line.contains("gpt-4o high   fast"));
-        assert!(model_line.contains("/model to change"));
-    }
-
-    #[test]
-    fn session_header_hides_fast_status_when_disabled() {
-        let cell = SessionHeaderHistoryCell::new(
-            "gpt-4o".to_string(),
-            Some(ReasoningEffortConfig::High),
-            /*show_fast_status*/ false,
-            std::env::temp_dir(),
-            "test",
-        );
-
-        let lines = render_lines(&cell.display_lines(/*width*/ 80));
-        let model_line = lines
-            .iter()
-            .find(|line| line.contains("model:"))
-            .expect("model line");
-
-        assert!(model_line.contains("gpt-4o high"));
-        assert!(!model_line.contains("fast"));
-    }
-
-    #[test]
     #[cfg_attr(
         target_os = "windows",
         ignore = "snapshot path rendering differs on Windows"
@@ -4283,30 +4129,6 @@ mod tests {
 
         let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
         insta::assert_snapshot!(rendered);
-    }
-
-    #[test]
-    fn session_header_directory_center_truncates() {
-        let mut dir = home_dir().expect("home directory");
-        for part in ["hello", "the", "fox", "is", "very", "fast"] {
-            dir.push(part);
-        }
-
-        let formatted = SessionHeaderHistoryCell::format_directory_inner(&dir, Some(24));
-        let sep = std::path::MAIN_SEPARATOR;
-        let expected = format!("~{sep}hello{sep}the{sep}…{sep}very{sep}fast");
-        assert_eq!(formatted, expected);
-    }
-
-    #[test]
-    fn session_header_directory_front_truncates_long_segment() {
-        let mut dir = home_dir().expect("home directory");
-        dir.push("supercalifragilisticexpialidocious");
-
-        let formatted = SessionHeaderHistoryCell::format_directory_inner(&dir, Some(18));
-        let sep = std::path::MAIN_SEPARATOR;
-        let expected = format!("~{sep}…cexpialidocious");
-        assert_eq!(formatted, expected);
     }
 
     #[test]

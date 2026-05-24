@@ -11,7 +11,6 @@ use std::time::Instant;
 use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::protocol::ExecCommandSource;
 
-const ACTIVE_EXEC_OUTPUT_MAX_BYTES_ENV: &str = "INTERPRETER_TUI_ACTIVE_EXEC_OUTPUT_MAX_BYTES";
 const OUTPUT_TRUNCATED_MARKER: &str = "[output truncated]\n";
 
 #[derive(Clone, Debug, Default)]
@@ -172,10 +171,7 @@ impl ExecCell {
 }
 
 fn active_exec_output_max_bytes() -> Option<usize> {
-    std::env::var(ACTIVE_EXEC_OUTPUT_MAX_BYTES_ENV)
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|max_bytes| *max_bytes > OUTPUT_TRUNCATED_MARKER.len())
+    crate::low_memory::active_exec_output_max_bytes(OUTPUT_TRUNCATED_MARKER.len())
 }
 
 fn trim_active_output(output: &mut String, max_bytes: usize) {

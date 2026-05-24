@@ -2,10 +2,7 @@
 source: tui/src/history_cell.rs
 expression: rendered
 ---
-╭───────────────────────────────────────╮
-│ >_ Open Interpreter (vtest)           │
-│                                       │
-│ model:       gpt-5   /model to change │
-│ directory:   /tmp/project             │
-│ permissions: YOLO mode                │
-╰───────────────────────────────────────╯
+
+  Open Interpreter (vtest)
+
+  permissions: YOLO mode

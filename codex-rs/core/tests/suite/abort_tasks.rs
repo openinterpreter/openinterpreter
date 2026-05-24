@@ -249,3 +249,77 @@ async fn interrupt_persists_turn_aborted_marker_in_next_request() {
         "expected <turn_aborted> marker in follow-up request"
     );
 }
+
+/// Pending same-turn steering should survive an interrupt and become the next model request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupt_promotes_steered_input_to_follow_up_request() {
+    let command = "sleep 60";
+    let call_id = "call-interrupt-steered-follow-up";
+
+    let args = json!({
+        "command": command,
+        "timeout_ms": 60_000
+    })
+    .to_string();
+    let first_body = sse(vec![
+        ev_response_created("resp-steer-before-interrupt"),
+        ev_function_call(call_id, "shell_command", &args),
+        ev_completed("resp-steer-before-interrupt"),
+    ]);
+    let follow_up_body = sse(vec![
+        ev_response_created("resp-steered-followup"),
+        ev_completed("resp-steered-followup"),
+    ]);
+
+    let server = start_mock_server().await;
+    let response_mock = mount_sse_sequence(&server, vec![first_body, follow_up_body]).await;
+
+    let fixture = test_codex()
+        .with_model("gpt-5.4")
+        .build(&server)
+        .await
+        .unwrap();
+    let codex = Arc::clone(&fixture.codex);
+
+    codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![UserInput::Text {
+                text: "start interrupt steered follow-up".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+        })
+        .await
+        .unwrap();
+
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::ExecCommandBegin(_))).await;
+
+    codex
+        .steer_input(
+            vec![UserInput::Text {
+                text: "90% of the configured task timeout has elapsed.".into(),
+                text_elements: Vec::new(),
+            }],
+            /*expected_turn_id*/ None,
+            /*responsesapi_client_metadata*/ None,
+        )
+        .await
+        .unwrap();
+    codex.submit(Op::Interrupt).await.unwrap();
+
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2, "expected two calls to the responses API");
+
+    let follow_up_request = &requests[1];
+    let user_texts = follow_up_request.message_input_texts("user");
+    assert!(
+        user_texts
+            .iter()
+            .any(|text| text.contains("90% of the configured task timeout has elapsed.")),
+        "expected timeout steer text in follow-up request, got {user_texts:?}"
+    );
+}
