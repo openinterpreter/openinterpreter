@@ -461,6 +461,16 @@ def fixed_litellm_completions(**params):
                 )
                 # So, let's try one more time with a dummy API key:
                 params["api_key"] = "x"
+            if isinstance(e, litellm.exceptions.RateLimitError):
+                # On the second attempt, raise the error
+                if attempt == 1:
+                    # RateLimitError can be caused if you have no tokens left
+                    print("You still exceeded the rate limit. Try again later. If you use an API, ensure you have tokens left.")
+                    raise first_error
+                # Wait and try again
+                print("You exceeded the rate limit. Trying again in 15 seconds...")
+                time.sleep(15)
+                continue
             if attempt == 1:
                 # Try turning up the temperature?
                 params["temperature"] = params.get("temperature", 0.0) + 0.1
