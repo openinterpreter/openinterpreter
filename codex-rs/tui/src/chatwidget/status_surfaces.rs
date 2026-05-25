@@ -24,7 +24,7 @@ pub(super) const TERMINAL_TITLE_SPINNER_INTERVAL: Duration = Duration::from_mill
 /// onto one of these buckets before rendering.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum TerminalTitleStatusKind {
-    Working,
+    Interpreting,
     WaitingForBackgroundTerminal,
     Undoing,
     #[default]
@@ -312,6 +312,29 @@ impl ChatWidget {
             .unwrap_or(self.config.cwd.as_path())
     }
 
+    fn status_line_harness_label(&self) -> String {
+        self.config
+            .harness
+            .as_deref()
+            .filter(|harness| !harness.is_empty())
+            .unwrap_or("native")
+            .to_string()
+    }
+
+    fn status_line_permissions_label(&self) -> String {
+        let sandbox = match self.config.permissions.sandbox_policy.get() {
+            SandboxPolicy::DangerFullAccess => "full-access",
+            SandboxPolicy::ReadOnly { .. } => "read-only",
+            SandboxPolicy::WorkspaceWrite { .. } => "workspace-write",
+            SandboxPolicy::ExternalSandbox { .. } => "external-sandbox",
+        };
+        if self.config.permissions.network_sandbox_policy.is_enabled() {
+            sandbox.to_string()
+        } else {
+            format!("{sandbox}, no-network")
+        }
+    }
+
     /// Resolves the project root associated with `cwd`.
     ///
     /// Git repository root wins when available. Otherwise we fall back to the
@@ -423,6 +446,8 @@ impl ChatWidget {
         match item {
             StatusLineItem::ModelName => Some(self.model_display_label()),
             StatusLineItem::ModelWithReasoning => Some(self.model_with_reasoning_display_name()),
+            StatusLineItem::Harness => Some(self.status_line_harness_label()),
+            StatusLineItem::Permissions => Some(self.status_line_permissions_label()),
             StatusLineItem::CurrentDir => {
                 Some(format_directory_display(
                     self.status_line_cwd(),
@@ -523,6 +548,8 @@ impl ChatWidget {
             StatusSurfacePreviewItem::FastMode => StatusLineItem::FastMode,
             StatusSurfacePreviewItem::Model => StatusLineItem::ModelName,
             StatusSurfacePreviewItem::ModelWithReasoning => StatusLineItem::ModelWithReasoning,
+            StatusSurfacePreviewItem::Harness => StatusLineItem::Harness,
+            StatusSurfacePreviewItem::Permissions => StatusLineItem::Permissions,
         };
         self.status_line_value_for_item(&status_line_item)
     }
@@ -622,7 +649,7 @@ impl ChatWidget {
         }
 
         match self.terminal_title_status_kind {
-            TerminalTitleStatusKind::Working if !self.bottom_pane.is_task_running() => {
+            TerminalTitleStatusKind::Interpreting if !self.bottom_pane.is_task_running() => {
                 "Ready".to_string()
             }
             TerminalTitleStatusKind::WaitingForBackgroundTerminal
@@ -633,7 +660,7 @@ impl ChatWidget {
             TerminalTitleStatusKind::Thinking if !self.bottom_pane.is_task_running() => {
                 "Ready".to_string()
             }
-            TerminalTitleStatusKind::Working => "Working".to_string(),
+            TerminalTitleStatusKind::Interpreting => "Interpreting".to_string(),
             TerminalTitleStatusKind::WaitingForBackgroundTerminal => "Waiting".to_string(),
             TerminalTitleStatusKind::Undoing => "Undoing".to_string(),
             TerminalTitleStatusKind::Thinking => "Thinking".to_string(),

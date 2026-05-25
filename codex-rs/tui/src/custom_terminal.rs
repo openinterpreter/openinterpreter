@@ -518,7 +518,7 @@ fn diff_buffers(a: &Buffer, b: &Buffer) -> Vec<DrawCommand> {
     let next_buffer = &b.content;
 
     let mut updates = vec![];
-    let mut last_nonblank_columns = vec![0; a.area.height as usize];
+    let mut last_nonblank_columns = vec![None; a.area.height as usize];
     for y in 0..a.area.height {
         let row_start = y as usize * a.area.width as usize;
         let row_end = row_start + a.area.width as usize;
@@ -530,23 +530,24 @@ fn diff_buffers(a: &Buffer, b: &Buffer) -> Vec<DrawCommand> {
         // Multi-width glyphs extend that region through their full displayed width.
         // After that point the rest of the row can be cleared with a single ClearToEnd, a perf win
         // versus emitting multiple space Put commands.
-        let mut last_nonblank_column = 0usize;
+        let mut last_nonblank_column = None;
         let mut column = 0usize;
         while column < row.len() {
             let cell = &row[column];
             let width = display_width(cell.symbol());
             if cell.symbol() != " " || cell.bg != bg || cell.modifier != Modifier::empty() {
-                last_nonblank_column = column + (width.saturating_sub(1));
+                last_nonblank_column = Some(column + (width.saturating_sub(1)));
             }
             column += width.max(1); // treat zero-width symbols as width 1
         }
 
-        if last_nonblank_column + 1 < row.len() {
-            let (x, y) = a.pos_of(row_start + last_nonblank_column + 1);
+        let clear_start_column = last_nonblank_column.map_or(0, |column| column + 1);
+        if clear_start_column < row.len() {
+            let (x, y) = a.pos_of(row_start + clear_start_column);
             updates.push(DrawCommand::ClearToEnd { x, y, bg });
         }
 
-        last_nonblank_columns[y as usize] = last_nonblank_column as u16;
+        last_nonblank_columns[y as usize] = last_nonblank_column.map(|column| column as u16);
     }
 
     // Cells invalidated by drawing/replacing preceding multi-width characters:
@@ -558,7 +559,7 @@ fn diff_buffers(a: &Buffer, b: &Buffer) -> Vec<DrawCommand> {
         if !current.skip && (current != previous || invalidated > 0) && to_skip == 0 {
             let (x, y) = a.pos_of(i);
             let row = i / a.area.width as usize;
-            if x <= last_nonblank_columns[row] {
+            if last_nonblank_columns[row].is_some_and(|column| x <= column) {
                 updates.push(DrawCommand::Put {
                     x,
                     y,
@@ -754,6 +755,21 @@ mod tests {
                 .iter()
                 .any(|command| matches!(command, DrawCommand::ClearToEnd { x: 2, y: 0, .. })),
             "expected clear-to-end to start after the remaining wide char; commands: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn diff_buffers_clear_to_end_starts_at_zero_for_blank_row() {
+        let area = Rect::new(0, 0, 10, 1);
+        let previous = Buffer::empty(area);
+        let next = Buffer::empty(area);
+
+        let commands = diff_buffers(&previous, &next);
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, DrawCommand::ClearToEnd { x: 0, y: 0, .. })),
+            "expected blank row clear-to-end to start at column 0; commands: {commands:?}"
         );
     }
 }

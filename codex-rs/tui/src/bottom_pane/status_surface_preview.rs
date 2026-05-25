@@ -24,6 +24,8 @@ pub(crate) enum StatusSurfacePreviewItem {
     FastMode,
     Model,
     ModelWithReasoning,
+    Harness,
+    Permissions,
     TaskProgress,
 }
 
@@ -34,7 +36,7 @@ impl StatusSurfacePreviewItem {
             StatusSurfacePreviewItem::ProjectName => "my-project",
             StatusSurfacePreviewItem::ProjectRoot => "my-project",
             StatusSurfacePreviewItem::CurrentDir => "~/my-project/subdir",
-            StatusSurfacePreviewItem::Status => "Working",
+            StatusSurfacePreviewItem::Status => "Interpreting",
             StatusSurfacePreviewItem::ThreadTitle => "thread title",
             StatusSurfacePreviewItem::GitBranch => "feat/awesome-feature",
             StatusSurfacePreviewItem::ContextRemaining => "Context 0% left",
@@ -50,6 +52,8 @@ impl StatusSurfacePreviewItem {
             StatusSurfacePreviewItem::FastMode => "Fast on",
             StatusSurfacePreviewItem::Model => "gpt-5.2-codex",
             StatusSurfacePreviewItem::ModelWithReasoning => "gpt-5.2-codex medium",
+            StatusSurfacePreviewItem::Harness => "native",
+            StatusSurfacePreviewItem::Permissions => "workspace-write, no-network",
             StatusSurfacePreviewItem::TaskProgress => "Tasks 0/0",
         }
     }
@@ -76,6 +80,8 @@ impl StatusSurfacePreviewItem {
             Self::FastMode,
             Self::Model,
             Self::ModelWithReasoning,
+            Self::Harness,
+            Self::Permissions,
             Self::TaskProgress,
         ]
         .into_iter()

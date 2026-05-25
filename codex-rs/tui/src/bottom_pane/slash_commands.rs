@@ -169,6 +169,11 @@ mod tests {
                 SlashCommand::Diff,
                 SlashCommand::Mention,
                 SlashCommand::Status,
+                SlashCommand::Update,
+                SlashCommand::UpdateNow,
+                SlashCommand::UpdateStatus,
+                SlashCommand::UpdateOn,
+                SlashCommand::UpdateOff,
             ]
         );
     }

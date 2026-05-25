@@ -2,16 +2,21 @@
 source: tui/src/chatwidget/tests/popups_and_settings.rs
 expression: popup
 ---
-  Select Model and Effort
-  Access legacy models by running codex -m <model_name> or in your config.toml
+  Select Provider
+  Choose a provider for the next chat. Unconfigured providers will be added to
 
-  1. gpt-5.5 (default)  Frontier model for complex coding, research, and real-
-                        world work.
-  2. gpt-5.4            Strong model for everyday coding.
-  3. gpt-5.4-mini       Small, fast, and cost-efficient model for simpler
-                        coding tasks.
-  4. gpt-5.3-codex      Coding-optimized model.
-› 5. gpt-5.2 (current)  Optimized for professional work and long-running
-                        agents.
+  Filter providers
+› OpenAI (API key)                    Use OPENAI_API_KEY or paste a key ·
+                                      Ready
+  Anthropic                           Use ANTHROPIC_API_KEY or paste a key |
+                                      Harness: claude-code · Ready
+  OpenRouter                          Use OPENROUTER_API_KEY or paste a key ·
+                                      Ready
+  Groq                                Use GROQ_API_KEY or paste a key · Ready
+  DeepSeek                            Use DEEPSEEK_API_KEY or paste a key |
+                                      Harness: deepseek-tui · Ready
+  Moonshot AI                         Use MOONSHOT_API_KEY or paste a key |
+                                      Harness: kimi-cli · Ready
+  Moonshot AI (China)                 Use MOONSHOT_API_KEY or paste a key |
 
-  Press enter to select reasoning effort, or esc to dismiss.
+  Type to filter • Enter to continue • Esc to dismiss

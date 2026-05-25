@@ -42,11 +42,11 @@ pub fn unselected_option_style() -> Style {
 }
 
 pub fn composer_style() -> Style {
-    app_surface_style_for(default_bg())
+    composer_style_for(default_bg())
 }
 
 pub fn user_message_style() -> Style {
-    app_surface_style_for(default_bg())
+    user_message_style_for(default_bg())
 }
 
 pub fn proposed_plan_style() -> Style {
@@ -54,12 +54,14 @@ pub fn proposed_plan_style() -> Style {
 }
 
 pub fn composer_style_for(terminal_bg: Option<(u8, u8, u8)>) -> Style {
-    app_surface_style_for(terminal_bg)
+    let _ = terminal_bg;
+    Style::default()
 }
 
 /// Returns the style for a user-authored message using the provided terminal background.
 pub fn user_message_style_for(terminal_bg: Option<(u8, u8, u8)>) -> Style {
-    app_surface_style_for(terminal_bg)
+    let _ = terminal_bg;
+    Style::default()
 }
 
 pub fn app_surface_style() -> Style {

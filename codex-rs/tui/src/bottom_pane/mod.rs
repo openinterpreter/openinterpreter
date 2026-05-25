@@ -40,7 +40,10 @@ use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Stylize;
 use ratatui::text::Line;
+use ratatui::widgets::Paragraph;
+use ratatui::widgets::Widget;
 use std::time::Duration;
 
 mod app_link_view;
@@ -702,7 +705,7 @@ impl BottomPane {
         self.request_redraw();
     }
 
-    /// Update the status indicator header (defaults to "Working") and details below it.
+    /// Update the status indicator header (defaults to "Interpreting") and details below it.
     ///
     /// Passing `None` clears any existing details. No-ops if the status indicator is not active.
     pub(crate) fn update_status(
@@ -1343,6 +1346,17 @@ impl BottomPane {
 impl Renderable for BottomPane {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         self.as_renderable().render(area, buf);
+        if self.active_view().is_some() && area.width > 0 && area.height > 0 {
+            Paragraph::new(Line::from("⎺".repeat(usize::from(area.width))).dim()).render(
+                Rect {
+                    x: area.x,
+                    y: area.y,
+                    width: area.width,
+                    height: 1,
+                },
+                buf,
+            );
+        }
     }
     fn desired_height(&self, width: u16) -> u16 {
         self.as_renderable().desired_height(width)
@@ -1566,7 +1580,7 @@ mod tests {
             r0.push(buf[(x, 0)].symbol().chars().next().unwrap_or(' '));
         }
         assert!(
-            !r0.contains("Working"),
+            !r0.contains("Interpreting"),
             "overlay should not render above modal"
         );
     }
@@ -1689,7 +1703,7 @@ mod tests {
             "no active modal view after denial"
         );
 
-        // Render and ensure the top row includes the Working header and a composer line below.
+        // Render and ensure the top row includes the Interpreting header and a composer line below.
         // Give the animation thread a moment to tick.
         std::thread::sleep(Duration::from_millis(120));
         let area = Rect::new(0, 0, 40, 6);
@@ -1700,8 +1714,8 @@ mod tests {
             row0.push(buf[(x, 0)].symbol().chars().next().unwrap_or(' '));
         }
         assert!(
-            row0.contains("Working"),
-            "expected Working header after denial on row 0: {row0:?}"
+            row0.contains("Interpreting"),
+            "expected Interpreting header after denial on row 0: {row0:?}"
         );
 
         // Composer placeholder should be visible somewhere below.
@@ -1746,7 +1760,10 @@ mod tests {
         pane.render(area, &mut buf);
 
         let bufs = snapshot_buffer(&buf);
-        assert!(bufs.contains("• Working"), "expected Working header");
+        assert!(
+            bufs.contains("• Interpreting"),
+            "expected Interpreting header"
+        );
     }
 
     #[test]
@@ -1849,7 +1866,7 @@ mod tests {
 
         pane.set_task_running(/*running*/ true);
         pane.update_status(
-            "Working".to_string(),
+            "Interpreting".to_string(),
             Some("First detail line\nSecond detail line".to_string()),
             StatusDetailsCapitalization::CapitalizeFirst,
             STATUS_DETAILS_DEFAULT_MAX_LINES,

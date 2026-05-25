@@ -429,7 +429,12 @@ use unicode_segmentation::UnicodeSegmentation;
 const USER_SHELL_COMMAND_HELP_TITLE: &str = "Prefix a command with ! to run it locally";
 const USER_SHELL_COMMAND_HELP_HINT: &str = "Example: !ls";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
-const DEFAULT_STATUS_LINE_ITEMS: [&str; 2] = ["model-with-reasoning", "current-dir"];
+const DEFAULT_STATUS_LINE_ITEMS: [&str; 4] = [
+    "model-with-reasoning",
+    "harness",
+    "permissions",
+    "current-dir",
+];
 // Track information about an in-flight exec command.
 struct RunningCommand {
     command: Vec<String>,
@@ -700,7 +705,7 @@ struct StatusIndicatorState {
 impl StatusIndicatorState {
     fn working() -> Self {
         Self {
-            header: String::from("Working"),
+            header: String::from("Interpreting"),
             details: None,
             details_max_lines: STATUS_DETAILS_DEFAULT_MAX_LINES,
         }
@@ -2025,8 +2030,8 @@ impl ChatWidget {
             self.terminal_title_status_kind = TerminalTitleStatusKind::Thinking;
             self.set_status_header(header);
         } else if self.bottom_pane.is_task_running() {
-            self.terminal_title_status_kind = TerminalTitleStatusKind::Working;
-            self.set_status_header(String::from("Working"));
+            self.terminal_title_status_kind = TerminalTitleStatusKind::Interpreting;
+            self.set_status_header(String::from("Interpreting"));
         }
     }
 
@@ -2764,8 +2769,8 @@ impl ChatWidget {
         self.pending_status_indicator_restore = false;
         self.bottom_pane
             .set_interrupt_hint_visible(/*visible*/ true);
-        self.terminal_title_status_kind = TerminalTitleStatusKind::Working;
-        self.set_status_header(String::from("Working"));
+        self.terminal_title_status_kind = TerminalTitleStatusKind::Interpreting;
+        self.set_status_header(String::from("Interpreting"));
         self.full_reasoning_buffer.clear();
         self.reasoning_buffer.clear();
         self.request_redraw();
@@ -4096,12 +4101,12 @@ impl ChatWidget {
                     status.details_max_lines,
                 );
             } else if self.current_status.is_guardian_review() {
-                self.set_status_header(String::from("Working"));
+                self.set_status_header(String::from("Interpreting"));
             }
         } else if self.pending_guardian_review_status.is_empty()
             && self.current_status.is_guardian_review()
         {
-            self.set_status_header(String::from("Working"));
+            self.set_status_header(String::from("Interpreting"));
         }
 
         if ev.status == GuardianAssessmentStatus::Approved {
@@ -4959,7 +4964,7 @@ impl ChatWidget {
     fn on_undo_completed(&mut self, event: UndoCompletedEvent) {
         let UndoCompletedEvent { success, message } = event;
         self.bottom_pane.hide_status_indicator();
-        self.terminal_title_status_kind = TerminalTitleStatusKind::Working;
+        self.terminal_title_status_kind = TerminalTitleStatusKind::Interpreting;
         self.refresh_terminal_title();
         let message = message.unwrap_or_else(|| {
             if success {
@@ -5658,7 +5663,7 @@ impl ChatWidget {
             current_status: StatusIndicatorState::working(),
             pending_guardian_review_status: PendingGuardianReviewStatus::default(),
             active_hook_cell: None,
-            terminal_title_status_kind: TerminalTitleStatusKind::Working,
+            terminal_title_status_kind: TerminalTitleStatusKind::Interpreting,
             retry_status_header: None,
             pending_status_indicator_restore: false,
             suppress_queue_autosend: false,
@@ -5914,7 +5919,7 @@ impl ChatWidget {
                             // Reset any reasoning header only when we are actually submitting a turn.
                             self.reasoning_buffer.clear();
                             self.full_reasoning_buffer.clear();
-                            self.set_status_header(String::from("Working"));
+                            self.set_status_header(String::from("Interpreting"));
                             self.submit_user_message(user_message);
                         } else {
                             self.queue_user_message(user_message);

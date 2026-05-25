@@ -1499,9 +1499,9 @@ async fn review_custom_prompt_escape_navigates_back_then_dismisses() {
     chat.show_review_custom_prompt();
 
     // Verify child view is on top.
-    let header = render_bottom_first_row(&chat, /*width*/ 60);
+    let header = render_bottom_popup(&chat, /*width*/ 60);
     assert!(
-        header.contains("Custom review instructions"),
+        header.contains("Type instructions and press Enter"),
         "expected custom prompt view header: {header:?}"
     );
 

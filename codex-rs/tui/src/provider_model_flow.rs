@@ -381,7 +381,7 @@ mod tests {
             .find(|choice| choice.id == "kimi-for-coding")
             .expect("kimi provider choice");
 
-        assert_eq!(kimi.name, "Kimi Code".to_string());
+        assert_eq!(kimi.name, "Kimi For Coding".to_string());
         assert_eq!(
             kimi.description,
             "Sign in with Kimi Code | Harness: kimi-cli".to_string()

@@ -1,5 +1,5 @@
 ---
-source: tui/src/chatwidget/tests.rs
+source: tui/src/chatwidget/tests/history_replay.rs
 expression: header
 ---
 › Ask Codex to do anything

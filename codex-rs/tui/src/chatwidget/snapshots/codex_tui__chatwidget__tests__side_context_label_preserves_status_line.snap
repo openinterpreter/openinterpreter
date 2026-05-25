@@ -3,7 +3,7 @@ source: tui/src/chatwidget/tests/side.rs
 expression: terminal.backend()
 ---
 "                                                                                "
-"                                                                                "
+"⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺"
 "› Check recently modified functions for compatibility                           "
 "                                                                                "
-"  gpt-5.5                                Side from main thread · Esc to return  "
+"  openai gpt-5.5                         Side from main thread · Esc to return  "

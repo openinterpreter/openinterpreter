@@ -3,6 +3,7 @@ use std::future::Future;
 use std::io::IsTerminal;
 use std::io::Result;
 use std::io::Stdout;
+use std::io::Write;
 use std::io::stdin;
 use std::io::stdout;
 use std::panic;
@@ -174,11 +175,15 @@ fn should_emit_notification(condition: NotificationCondition, terminal_focused: 
 
 #[cfg(test)]
 mod tests {
+    use super::Tui;
     use super::keyboard_enhancement_disabled_for;
     use super::parse_bool_env;
     use super::should_emit_notification;
     use super::vscode_terminal_detected;
+    use crate::custom_terminal::Terminal;
+    use crate::test_backend::VT100Backend;
     use codex_config::types::NotificationCondition;
+    use std::io::Write;
 
     #[test]
     fn unfocused_notification_condition_is_suppressed_when_focused() {
@@ -194,6 +199,21 @@ mod tests {
             NotificationCondition::Always,
             /*terminal_focused*/ true
         ));
+    }
+
+    #[test]
+    fn update_inline_viewport_clears_new_viewport_on_first_draw() {
+        let mut backend = VT100Backend::new(/*width*/ 10, /*height*/ 4);
+        backend.write_all(b"S").expect("seed stale terminal text");
+
+        let mut terminal = Terminal::with_options(backend).expect("terminal");
+        Tui::update_inline_viewport(&mut terminal, /*height*/ 4, /*is_zellij*/ false)
+            .expect("update inline viewport");
+
+        assert!(
+            !terminal.backend().to_string().contains('S'),
+            "expected initial viewport clear to remove stale terminal text"
+        );
     }
 
     #[test]
@@ -678,11 +698,14 @@ impl Tui {
     /// the viewport would extend past the bottom of the screen. Returns `true` when
     /// the caller must invalidate the diff buffer (Zellij mode), because the scroll
     /// was performed with raw newlines that ratatui cannot track.
-    fn update_inline_viewport(
-        terminal: &mut Terminal,
+    fn update_inline_viewport<B>(
+        terminal: &mut CustomTerminal<B>,
         height: u16,
         is_zellij: bool,
-    ) -> Result<bool> {
+    ) -> Result<bool>
+    where
+        B: Backend + Write,
+    {
         let size = terminal.size()?;
         let mut needs_full_repaint = false;
 
@@ -702,9 +725,8 @@ impl Tui {
             area.y = size.height - area.height;
         }
         if area != terminal.viewport_area {
-            // TODO(nornagon): probably this could be collapsed with the clear + set_viewport_area above.
-            terminal.clear()?;
             terminal.set_viewport_area(area);
+            terminal.clear()?;
         }
 
         Ok(needs_full_repaint)
@@ -714,11 +736,14 @@ impl Tui {
     /// newlines at the screen bottom. This is the Zellij-safe alternative to
     /// `scroll_region_up`, which relies on DECSTBM sequences Zellij does not
     /// support.
-    fn scroll_zellij_expanded_viewport(
-        terminal: &mut Terminal,
+    fn scroll_zellij_expanded_viewport<B>(
+        terminal: &mut CustomTerminal<B>,
         size: Size,
         scroll_by: u16,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        B: Backend + Write,
+    {
         crossterm::queue!(
             terminal.backend_mut(),
             crossterm::cursor::MoveTo(0, size.height.saturating_sub(1))

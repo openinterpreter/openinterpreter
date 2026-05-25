@@ -3,7 +3,7 @@ source: tui/src/status_indicator_widget.rs
 assertion_line: 289
 expression: terminal.backend()
 ---
-"• Working (0s • esc to interrupt)                                               "
+"• Interpreting (0s • esc to interrupt)                                               "
 "                                                                                "
 " ↳ first                                                                        "
 " ↳ second                                                                       "

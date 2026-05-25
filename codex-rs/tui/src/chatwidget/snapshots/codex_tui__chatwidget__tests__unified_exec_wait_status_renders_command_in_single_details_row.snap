@@ -5,7 +5,7 @@ expression: normalize_snapshot_paths(rendered)
 • Waiting for background terminal (0s • esc to …
   └ cargo test -p codex-core -- --exact…
 
-
+⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺⎺
 › Ask Codex to do anything
 
-  gpt-5.5 default · /tmp/project
+  openai gpt-5.5 default · native · read-only, …

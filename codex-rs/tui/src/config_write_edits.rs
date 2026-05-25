@@ -317,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_model_selection_sets_minimal_harness_for_deepseek() {
+    fn provider_model_selection_sets_deepseek_tui_harness_for_deepseek() {
         let edits = provider_model_selection_edits(
             Some("work"),
             "deepseek",
@@ -334,7 +334,7 @@ mod tests {
                     "work".to_string(),
                     "harness".to_string(),
                 ],
-                json!("minimal"),
+                json!("deepseek-tui"),
             )
         );
     }

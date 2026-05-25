@@ -2,4 +2,4 @@
 source: tui/src/chatwidget/tests/exec_flow.rs
 expression: lines_to_single_string(&decision)
 ---
-✔ You approved interpreter to run echo hello world this time
+✔ You approved codex to run echo hello world this time

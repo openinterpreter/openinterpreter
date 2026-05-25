@@ -212,7 +212,7 @@ pub(super) async fn make_chatwidget_manual(
         plan_stream_controller: None,
         clipboard_lease: None,
         pending_guardian_review_status: PendingGuardianReviewStatus::default(),
-        terminal_title_status_kind: TerminalTitleStatusKind::Working,
+        terminal_title_status_kind: TerminalTitleStatusKind::Interpreting,
         last_agent_markdown: None,
         agent_turn_markdowns: Vec::new(),
         visible_user_turn_count: 0,
@@ -782,7 +782,7 @@ pub(super) fn render_bottom_first_row(chat: &ChatWidget, width: u16) -> String {
                 row.push_str(s);
             }
         }
-        if !row.trim().is_empty() {
+        if !is_bottom_pane_chrome_row(row.trim()) {
             return row;
         }
     }
@@ -813,11 +813,21 @@ pub(super) fn render_bottom_popup(chat: &ChatWidget, width: u16) -> String {
     while lines.first().is_some_and(|line| line.trim().is_empty()) {
         lines.remove(0);
     }
+    while lines
+        .first()
+        .is_some_and(|line| is_bottom_pane_chrome_row(line.trim()))
+    {
+        lines.remove(0);
+    }
     while lines.last().is_some_and(|line| line.trim().is_empty()) {
         lines.pop();
     }
 
     lines.join("\n")
+}
+
+fn is_bottom_pane_chrome_row(trimmed: &str) -> bool {
+    trimmed.is_empty() || trimmed.chars().all(|ch| matches!(ch, '⎺' | '▌'))
 }
 
 pub(super) fn strip_osc8_for_snapshot(text: &str) -> String {

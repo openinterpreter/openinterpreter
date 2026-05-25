@@ -1382,6 +1382,80 @@ async fn status_line_legacy_context_usage_renders_context_used_percent() {
 }
 
 #[tokio::test]
+async fn status_line_default_items_include_harness_between_model_and_cwd() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
+    chat.config.cwd = test_project_path().abs();
+    chat.config.harness = Some("kimi-cli".to_string());
+
+    chat.refresh_status_line();
+
+    let test_cwd = test_path_display("/tmp/project");
+    assert_eq!(
+        chat.configured_status_line_items(),
+        vec![
+            "model-with-reasoning".to_string(),
+            "harness".to_string(),
+            "permissions".to_string(),
+            "current-dir".to_string(),
+        ]
+    );
+    assert_eq!(
+        status_line_text(&chat),
+        Some(format!(
+            "openai gpt-5.3-codex default · kimi-cli · read-only, no-network · {test_cwd}"
+        ))
+    );
+}
+
+#[tokio::test]
+async fn status_line_harness_renders_native_when_unset() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.harness = None;
+    chat.config.tui_status_line = Some(vec!["harness".to_string()]);
+
+    chat.refresh_status_line();
+
+    assert_eq!(status_line_text(&chat), Some("native".to_string()));
+}
+
+#[tokio::test]
+async fn status_line_permissions_reflects_sandbox_and_network() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.tui_status_line = Some(vec!["permissions".to_string()]);
+
+    chat.refresh_status_line();
+    assert_eq!(
+        status_line_text(&chat),
+        Some("read-only, no-network".to_string())
+    );
+
+    chat.config
+        .permissions
+        .sandbox_policy
+        .set(SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: true,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        })
+        .expect("set sandbox policy");
+    chat.config.permissions.network_sandbox_policy =
+        codex_protocol::permissions::NetworkSandboxPolicy::Enabled;
+    chat.refresh_status_line();
+    assert_eq!(status_line_text(&chat), Some("workspace-write".to_string()));
+
+    chat.config
+        .permissions
+        .sandbox_policy
+        .set(SandboxPolicy::DangerFullAccess)
+        .expect("set sandbox policy");
+    chat.config.permissions.network_sandbox_policy =
+        codex_protocol::permissions::NetworkSandboxPolicy::Enabled;
+    chat.refresh_status_line();
+    assert_eq!(status_line_text(&chat), Some("full-access".to_string()));
+}
+
+#[tokio::test]
 async fn status_line_branch_state_resets_when_git_branch_disabled() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.status_line_branch = Some("main".to_string());

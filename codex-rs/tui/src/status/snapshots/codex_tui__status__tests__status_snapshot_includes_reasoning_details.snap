@@ -5,7 +5,7 @@ expression: sanitized
 /status
 
 ╭───────────────────────────────────────────────────────────────────────────╮
-│  >_ Open Interpreter (v0.0.0)                                             │
+│  >_ Open Interpreter (v0.0.6)                                             │
 │                                                                           │
 │  Model:            gpt-5.1-codex-max (reasoning high, summaries detailed) │
 │  Directory: [[workspace]]                                                 │
