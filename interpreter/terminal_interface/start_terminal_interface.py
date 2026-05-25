@@ -72,6 +72,13 @@ def start_terminal_interface(interpreter):
             "attribute": {"object": interpreter, "attr_name": "verbose"},
         },
         {
+            "name": "track_cost",
+            "flags": ["--track-cost", "--track_cost"],
+            "help_text": "show token counts and estimated cost after each assistant response",
+            "type": bool,
+            "attribute": {"object": interpreter, "attr_name": "track_usage"},
+        },
+        {
             "name": "model",
             "nickname": "m",
             "help_text": "language model to use",
@@ -354,14 +361,15 @@ Use """ to write multi-line messages.
         action = arg.get("action", "store_true")
         nickname = arg.get("nickname")
 
-        name_or_flags = [f'--{arg["name"]}']
-        if nickname:
-            name_or_flags.append(f"-{nickname}")
-
-        # Construct argument name flags
-        flags = (
-            [f"-{nickname}", f'--{arg["name"]}'] if nickname else [f'--{arg["name"]}']
-        )
+        flags = arg.get("flags")
+        if flags is None:
+            flags = (
+                [f"-{nickname}", f'--{arg["name"]}']
+                if nickname
+                else [f'--{arg["name"]}']
+            )
+        elif nickname:
+            flags = [f"-{nickname}"] + flags
 
         if arg["type"] == bool:
             parser.add_argument(
@@ -476,6 +484,8 @@ Use """ to write multi-line messages.
     ### Set attributes on interpreter, because the arguments passed in via the CLI should override profile
 
     set_attributes(args, arguments)
+    if args.verbose:
+        interpreter.track_usage = True
     interpreter.disable_telemetry = (
         os.getenv("DISABLE_TELEMETRY", "false").lower() == "true"
         or args.disable_telemetry

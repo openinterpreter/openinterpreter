@@ -84,8 +84,22 @@ def respond(interpreter):
             interpreter.messages[-1]["type"] != "code"
         ):  # If it is, we should run the code (we do below)
             try:
+                completion = []
                 for chunk in interpreter.llm.run(messages_for_llm):
+                    if chunk.get("content"):
+                        completion.append(chunk["content"])
                     yield {"role": "assistant", **chunk}
+
+                if interpreter.last_usage is None and interpreter.last_usage_request:
+                    interpreter.last_usage = interpreter.llm.estimate_usage(
+                        interpreter.last_usage_request["model"],
+                        interpreter.last_usage_request["messages"],
+                        "".join(completion),
+                    )
+
+                usage_message = interpreter.format_usage()
+                if usage_message and interpreter.should_display_usage():
+                    yield {"role": "assistant", "type": "usage", "content": usage_message}
 
             except litellm.exceptions.BudgetExceededError:
                 interpreter.display_message(

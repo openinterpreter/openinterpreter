@@ -183,6 +183,9 @@ def terminal_interface(interpreter, message):
                     # Specialized models can emit a code review.
                     print(chunk.get("content"), end="", flush=True)
 
+                if chunk["type"] == "usage" and chunk.get("content"):
+                    interpreter.display_message(chunk["content"])
+
                 # Execution notice
                 if chunk["type"] == "confirmation":
                     if not interpreter.auto_run:

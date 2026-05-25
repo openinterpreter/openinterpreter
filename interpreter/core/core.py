@@ -100,6 +100,9 @@ class OpenInterpreter:
         self.contribute_conversation = contribute_conversation
         self.plain_text_display = plain_text_display
         self.highlight_active_line = True  # additional setting to toggle active line highlighting. Defaults to True
+        self.track_usage = False
+        self.last_usage = None
+        self.last_usage_request = None
 
         # Loop messages
         self.loop = loop
@@ -310,6 +313,8 @@ class OpenInterpreter:
                 return True
             if chunk["type"] == "review":
                 return True
+            if chunk["type"] == "usage":
+                return True
             return False
 
         last_flag_base = None
@@ -432,6 +437,8 @@ class OpenInterpreter:
         self.computer._has_imported_computer_api = False  # Flag reset
         self.messages = []
         self.last_messages_count = 0
+        self.last_usage = None
+        self.last_usage_request = None
 
     def display_message(self, markdown):
         # This is just handy for start_script in profiles.
@@ -439,6 +446,38 @@ class OpenInterpreter:
             print(markdown)
         else:
             display_markdown_message(markdown)
+
+    def should_display_usage(self):
+        return self.in_terminal_interface and (self.verbose or self.track_usage)
+
+    def format_usage(self, usage=None):
+        usage = self.last_usage if usage is None else usage
+        if not usage:
+            return None
+
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        total_tokens = usage.get("total_tokens")
+        cost = usage.get("cost")
+        estimated = usage.get("estimated", False)
+
+        token_parts = []
+        if prompt_tokens is not None:
+            token_parts.append(f"{prompt_tokens} in")
+        if completion_tokens is not None:
+            token_parts.append(f"{completion_tokens} out")
+        if total_tokens is not None:
+            token_parts.append(f"{total_tokens} total")
+
+        if not token_parts and cost is None:
+            return None
+
+        label = "> Tokens (estimated): " if estimated else "> Tokens: "
+        message = label + ", ".join(token_parts) if token_parts else label.rstrip()
+        if cost is not None:
+            message += f" | Estimated cost: ${cost:.6f}"
+
+        return message
 
     def get_oi_dir(self):
         # Again, just handy for start_script in profiles.

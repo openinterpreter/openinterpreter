@@ -8,6 +8,7 @@ import pytest
 
 #####
 from interpreter import AsyncInterpreter, OpenInterpreter
+from interpreter.terminal_interface.magic_commands import handle_magic_command
 from interpreter.terminal_interface.utils.count_tokens import (
     count_messages_tokens,
     count_tokens,
@@ -1071,6 +1072,51 @@ def test_get_selected_text():
     text = interpreter.computer.os.get_selected_text()
     print(text)
     assert False
+
+
+def test_tokens_magic_command_toggles_usage_tracking():
+    interpreter.track_usage = False
+
+    handle_magic_command(interpreter, "%tokens")
+    assert interpreter.track_usage is True
+
+    handle_magic_command(interpreter, "%tokens off")
+    assert interpreter.track_usage is False
+
+
+def test_format_usage_includes_cost_when_available():
+    interpreter.last_usage = {
+        "prompt_tokens": 12,
+        "completion_tokens": 34,
+        "total_tokens": 46,
+        "cost": 0.001234,
+    }
+
+    assert (
+        interpreter.format_usage()
+        == "> Tokens: 12 in, 34 out, 46 total | Estimated cost: $0.001234"
+    )
+
+
+def test_should_display_usage_respects_terminal_state():
+    interpreter.in_terminal_interface = True
+    interpreter.track_usage = True
+    interpreter.verbose = False
+    assert interpreter.should_display_usage() is True
+
+    interpreter.in_terminal_interface = False
+    assert interpreter.should_display_usage() is False
+
+
+def test_format_usage_marks_estimated_usage():
+    interpreter.last_usage = {
+        "prompt_tokens": 12,
+        "completion_tokens": 34,
+        "total_tokens": 46,
+        "estimated": True,
+    }
+
+    assert interpreter.format_usage() == "> Tokens (estimated): 12 in, 34 out, 46 total"
 
 
 @pytest.mark.skip(reason="Computer with display only + no way to fail test")

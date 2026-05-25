@@ -23,6 +23,7 @@ computer:
 # safe_mode: "off"  # The safety mode for the LLM — one of "off", "ask", "auto"
 # offline: False  # If True, will disable some online features like checking for updates
 # verbose: False  # If True, will print detailed logs
+# track_usage: False  # If True, will show token counts and estimated cost after each assistant response
 
 # To use a separate model for the `wtf` command:
 # wtf:

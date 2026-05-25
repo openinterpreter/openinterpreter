@@ -54,7 +54,8 @@ def handle_help(self, arguments):
         "%undo": "Remove previous messages and its response from the message history.",
         "%save_message [path]": "Saves messages to a specified JSON path. If no path is provided, it defaults to 'messages.json'.",
         "%load_message [path]": "Loads messages from a specified JSON path. If no path is provided, it defaults to 'messages.json'.",
-        "%tokens [prompt]": "EXPERIMENTAL: Calculate the tokens used by the next request based on the current conversation's messages and estimate the cost of that request; optionally provide a prompt to also calculate the tokens used by that prompt and the total amount of tokens that will be sent with the next request",
+        "%tokens [on/off]": "Toggle display of token counts and estimated cost after each assistant response.",
+        "%token_estimate [prompt]": "EXPERIMENTAL: Calculate the tokens used by the next request based on the current conversation's messages and estimate the cost of that request; optionally provide a prompt to also calculate the tokens used by that prompt and the total amount of tokens that will be sent with the next request",
         "%help": "Show this help message.",
         "%info": "Show system and interpreter information",
         "%jupyter": "Export the conversation to a Jupyter notebook file",
@@ -171,6 +172,19 @@ def handle_load_message(self, json_path):
 
 
 def handle_count_tokens(self, prompt):
+    if prompt in ["", "on", "true"]:
+        self.track_usage = True
+        self.display_message("> Token tracking enabled")
+        return
+    if prompt in ["off", "false"]:
+        self.track_usage = False
+        self.display_message("> Token tracking disabled")
+        return
+
+    handle_token_estimate(self, prompt)
+
+
+def handle_token_estimate(self, prompt):
     messages = [{"role": "system", "message": self.system_message}] + self.messages
 
     outputs = []
@@ -329,6 +343,7 @@ def handle_magic_command(self, user_input):
         "load_message": handle_load_message,
         "undo": handle_undo,
         "tokens": handle_count_tokens,
+        "token_estimate": handle_token_estimate,
         "info": handle_info,
         "jupyter": jupyter,
         "markdown": markdown,
