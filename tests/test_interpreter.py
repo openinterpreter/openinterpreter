@@ -8,6 +8,7 @@ import pytest
 
 #####
 from interpreter import AsyncInterpreter, OpenInterpreter
+from interpreter.core.llm.llm import fixed_litellm_completions
 from interpreter.terminal_interface.magic_commands import handle_magic_command
 from interpreter.terminal_interface.utils.count_tokens import (
     count_messages_tokens,
@@ -1117,6 +1118,32 @@ def test_format_usage_marks_estimated_usage():
     }
 
     assert interpreter.format_usage() == "> Tokens (estimated): 12 in, 34 out, 46 total"
+
+
+def test_fixed_litellm_completions_uses_request_scoped_success_callback(monkeypatch):
+    import litellm
+
+    original_success_callback = litellm.success_callback
+    seen = {}
+
+    def fake_completion(**params):
+        seen["success_callback"] = params.get("success_callback")
+        yield {"choices": []}
+
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+
+    list(
+        fixed_litellm_completions(
+            model="gpt-4o",
+            messages=[],
+            stream=True,
+            interpreter=interpreter,
+        )
+    )
+
+    assert litellm.success_callback is original_success_callback
+    assert isinstance(seen["success_callback"], list)
+    assert len(seen["success_callback"]) == 1
 
 
 @pytest.mark.skip(reason="Computer with display only + no way to fail test")

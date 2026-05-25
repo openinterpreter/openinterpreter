@@ -486,9 +486,6 @@ def fixed_litellm_completions(**params):
     params["model"] = params["model"].replace(":latest", "")
 
     def normalize_usage(usage, response_cost=None):
-        if usage is None and response_cost is None:
-            return None
-
         if usage is not None and not isinstance(usage, dict):
             usage = {
                 "prompt_tokens": getattr(usage, "prompt_tokens", None),
@@ -506,20 +503,17 @@ def fixed_litellm_completions(**params):
         ):
             total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
 
-        if (
-            prompt_tokens is None
-            and completion_tokens is None
-            and total_tokens is None
-            and response_cost is None
-        ):
-            return None
-
-        return {
+        normalized_usage = {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
             "cost": response_cost,
         }
+
+        if all(value is None for value in normalized_usage.values()):
+            return None
+
+        return normalized_usage
 
     interpreter = params.pop("interpreter", None)
     if interpreter is not None:
@@ -537,13 +531,10 @@ def fixed_litellm_completions(**params):
             usage, response_cost=kwargs.get("response_cost")
         )
 
-    existing_success_callback = litellm.success_callback
-    if existing_success_callback is None:
-        litellm.success_callback = [capture_usage]
-    elif isinstance(existing_success_callback, list):
-        litellm.success_callback = existing_success_callback + [capture_usage]
-    else:
-        litellm.success_callback = [existing_success_callback, capture_usage]
+    success_callback = params.pop("success_callback", [])
+    if not isinstance(success_callback, list):
+        success_callback = [success_callback]
+    params["success_callback"] = success_callback + [capture_usage]
 
     # Run completion
     attempts = 4
@@ -551,32 +542,29 @@ def fixed_litellm_completions(**params):
 
     params["num_retries"] = 0
 
-    try:
-        for attempt in range(attempts):
-            try:
-                yield from litellm.completion(**params)
-                return  # If the completion is successful, exit the function
-            except KeyboardInterrupt:
-                print("Exiting...")
-                sys.exit(0)
-            except Exception as e:
-                if attempt == 0:
-                    # Store the first error
-                    first_error = e
-                if (
-                    isinstance(e, litellm.exceptions.AuthenticationError)
-                    and "api_key" not in params
-                ):
-                    print(
-                        "LiteLLM requires an API key. Trying again with a dummy API key. In the future, if this fixes it, please set a dummy API key to prevent this message. (e.g `interpreter --api_key x` or `self.api_key = 'x'`)"
-                    )
-                    # So, let's try one more time with a dummy API key:
-                    params["api_key"] = "x"
-                if attempt == 1:
-                    # Try turning up the temperature?
-                    params["temperature"] = params.get("temperature", 0.0) + 0.1
+    for attempt in range(attempts):
+        try:
+            yield from litellm.completion(**params)
+            return  # If the completion is successful, exit the function
+        except KeyboardInterrupt:
+            print("Exiting...")
+            sys.exit(0)
+        except Exception as e:
+            if attempt == 0:
+                # Store the first error
+                first_error = e
+            if (
+                isinstance(e, litellm.exceptions.AuthenticationError)
+                and "api_key" not in params
+            ):
+                print(
+                    "LiteLLM requires an API key. Trying again with a dummy API key. In the future, if this fixes it, please set a dummy API key to prevent this message. (e.g `interpreter --api_key x` or `self.api_key = 'x'`)"
+                )
+                # So, let's try one more time with a dummy API key:
+                params["api_key"] = "x"
+            if attempt == 1:
+                # Try turning up the temperature?
+                params["temperature"] = params.get("temperature", 0.0) + 0.1
 
-        if first_error is not None:
-            raise first_error  # If all attempts fail, raise the first error
-    finally:
-        litellm.success_callback = existing_success_callback
+    if first_error is not None:
+        raise first_error  # If all attempts fail, raise the first error
