@@ -4,6 +4,7 @@ import sys
 import time
 
 from importlib.metadata import version, PackageNotFoundError
+from .doctor import run_doctor
 
 from interpreter.terminal_interface.contributing_conversations import (
     contribute_conversation_launch_logic,
@@ -571,6 +572,11 @@ Use """ to write multi-line messages.
 
     if args.server:
         interpreter.server.run()
+        return
+
+    # System full diagnosis using doctor
+    if args.doctor:
+        run_doctor(interpreter)
         return
 
     interpreter.in_terminal_interface = True
