@@ -4,7 +4,7 @@ import sys
 import time
 
 from importlib.metadata import version, PackageNotFoundError
-from .doctor import run_doctor
+from interpreter.core.utils.doctor import run_doctor
 
 from interpreter.terminal_interface.contributing_conversations import (
     contribute_conversation_launch_logic,
