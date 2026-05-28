@@ -639,26 +639,37 @@ def create_router(async_interpreter):
         except Exception as e:
             return {"error": str(e)}, 500
 
+    # Attributes that must never be settable over the network: enabling
+    # auto_run / disabling safe_mode turns the server into unauthenticated
+    # RCE, and system_message / messages / llm.api_base / llm.api_key allow
+    # prompt poisoning and redirecting LLM traffic to an attacker.
+    BLOCKED_SETTINGS = {"auto_run", "safe_mode", "system_message", "messages"}
+    BLOCKED_SUB_SETTINGS = {"llm": {"api_base", "api_key"}, "computer": set()}
+
     @router.post("/settings")
     async def set_settings(payload: Dict[str, Any]):
         for key, value in payload.items():
             print("Updating settings...")
             # print(f"Updating settings: {key} = {value}")
+            if key in BLOCKED_SETTINGS:
+                return {
+                    "error": f"The setting {key} is not modifiable through the server due to security constraints."
+                }, 403
             if key in ["llm", "computer"] and isinstance(value, dict):
-                if key == "auto_run":
-                    return {
-                        "error": f"The setting {key} is not modifiable through the server due to security constraints."
-                    }, 403
-                if hasattr(async_interpreter, key):
-                    for sub_key, sub_value in value.items():
-                        if hasattr(getattr(async_interpreter, key), sub_key):
-                            setattr(getattr(async_interpreter, key), sub_key, sub_value)
-                        else:
-                            return {
-                                "error": f"Sub-setting {sub_key} not found in {key}"
-                            }, 404
-                else:
+                if not hasattr(async_interpreter, key):
                     return {"error": f"Setting {key} not found"}, 404
+                blocked_sub = BLOCKED_SUB_SETTINGS.get(key, set())
+                for sub_key, sub_value in value.items():
+                    if sub_key in blocked_sub:
+                        return {
+                            "error": f"The setting {key}.{sub_key} is not modifiable through the server due to security constraints."
+                        }, 403
+                    if hasattr(getattr(async_interpreter, key), sub_key):
+                        setattr(getattr(async_interpreter, key), sub_key, sub_value)
+                    else:
+                        return {
+                            "error": f"Sub-setting {sub_key} not found in {key}"
+                        }, 404
             elif hasattr(async_interpreter, key):
                 setattr(async_interpreter, key, value)
             else:
