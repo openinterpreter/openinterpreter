@@ -799,6 +799,63 @@ mod tests {
     }
 
     #[test]
+    fn convert_tools_sanitizes_namespaced_function_names_for_chat_completions() {
+        let tools = vec![json!({
+            "type": "namespace",
+            "name": "mcp.demo",
+            "tools": [
+                { "type": "function", "name": "lookup.order" }
+            ]
+        })];
+
+        let (chat_tools, tool_kinds, _) = convert_tools(&tools).expect("tools should convert");
+
+        let chat_tools = chat_tools.expect("namespace tool should produce a chat tool");
+        assert_eq!(chat_tools[0].function.name, "mcp_demo_lookup_order");
+        assert_eq!(
+            tool_kinds.get("mcp_demo_lookup_order"),
+            Some(&ToolOutputKind::NamespacedFunction {
+                name: "lookup.order".to_string(),
+                namespace: "mcp.demo".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn convert_tools_dedupes_flattened_name_colliding_with_flat_function() {
+        let tools = vec![
+            json!({ "type": "function", "name": "codex_app_demo" }),
+            json!({
+                "type": "namespace",
+                "name": "codex_app",
+                "tools": [
+                    { "type": "function", "name": "demo" }
+                ]
+            }),
+        ];
+
+        let (chat_tools, tool_kinds, _) = convert_tools(&tools).expect("tools should convert");
+
+        let chat_tools = chat_tools.expect("tools should convert");
+        let names: Vec<&str> = chat_tools
+            .iter()
+            .map(|tool| tool.function.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["codex_app_demo", "codex_app_demo_2"]);
+        assert_eq!(
+            tool_kinds.get("codex_app_demo"),
+            Some(&ToolOutputKind::Function)
+        );
+        assert_eq!(
+            tool_kinds.get("codex_app_demo_2"),
+            Some(&ToolOutputKind::NamespacedFunction {
+                name: "demo".to_string(),
+                namespace: "codex_app".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn convert_request_serializes_tool_search_outputs_into_tool_messages() {
         let request = ResponsesApiRequest {
             model: "gpt-5.2-codex".to_string(),
