@@ -447,3 +447,4 @@ def run_doctor(interpreter):
     # Summary
     print_section("Doctor Summary")
     generate_doctor_summary()
+    
