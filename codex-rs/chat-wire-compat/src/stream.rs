@@ -484,15 +484,25 @@ async fn finalize_tool_calls_until(
         let call_id = tool_call
             .id
             .unwrap_or_else(|| format!("call_{}", name.replace('.', "_")));
-        let item = match tool_kinds.get(&name).unwrap_or(&ToolOutputKind::Function) {
-            ToolOutputKind::Function => ResponseItem::FunctionCall {
+        let item = match tool_kinds.get(&name) {
+            Some(ToolOutputKind::Function) => ResponseItem::FunctionCall {
                 id: None,
                 name,
                 namespace: None,
                 arguments: tool_call.arguments,
                 call_id,
             },
-            ToolOutputKind::Custom => {
+            Some(ToolOutputKind::NamespacedFunction {
+                name: output_name,
+                namespace,
+            }) => ResponseItem::FunctionCall {
+                id: None,
+                name: output_name.clone(),
+                namespace: Some(namespace.clone()),
+                arguments: tool_call.arguments,
+                call_id,
+            },
+            Some(ToolOutputKind::Custom) => {
                 let input = match serde_json::from_str::<Value>(&tool_call.arguments) {
                     Ok(value) => value
                         .get("input")
@@ -509,6 +519,13 @@ async fn finalize_tool_calls_until(
                     input,
                 }
             }
+            None => ResponseItem::FunctionCall {
+                id: None,
+                name,
+                namespace: None,
+                arguments: tool_call.arguments,
+                call_id,
+            },
         };
         tx_event
             .send(Ok(ResponseEvent::OutputItemDone(item)))
@@ -599,6 +616,53 @@ mod tests {
                 response_id: _,
                 token_usage: None,
             }
+        ));
+    }
+
+    #[tokio::test]
+    async fn spawn_chat_stream_maps_flat_namespace_tool_name_back_to_response_namespace() {
+        let sse = concat!(
+            "data: {\"id\":\"chatcmpl-tool-namespace\",\"object\":\"chat.completion.chunk\",\"created\":0,",
+            "\"model\":\"gpt-5.2-codex\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,",
+            "\"id\":\"call-lookup-1\",\"function\":{\"name\":\"mcp__demo__lookup_order\",",
+            "\"arguments\":\"{\\\"order_id\\\":\\\"ord_123\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-tool-namespace\",\"object\":\"chat.completion.chunk\",\"created\":0,",
+            "\"model\":\"gpt-5.2-codex\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut tool_kinds = HashMap::new();
+        tool_kinds.insert(
+            "mcp__demo__lookup_order".to_string(),
+            ToolOutputKind::NamespacedFunction {
+                name: "lookup_order".to_string(),
+                namespace: "mcp__demo__".to_string(),
+            },
+        );
+
+        let mut stream = spawn_chat_stream(
+            Box::pin(futures::stream::once(async move { Ok(sse.into()) })),
+            Duration::from_secs(1),
+            /*telemetry*/ None,
+            tool_kinds,
+        );
+
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event.expect("chat stream event"));
+        }
+
+        assert!(matches!(
+            &events[2],
+            ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
+                name,
+                namespace: Some(namespace),
+                arguments,
+                call_id,
+                ..
+            }) if name == "lookup_order"
+                && namespace == "mcp__demo__"
+                && arguments == "{\"order_id\":\"ord_123\"}"
+                && call_id == "call-lookup-1"
         ));
     }
 

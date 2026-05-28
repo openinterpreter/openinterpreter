@@ -4,6 +4,7 @@ use codex_core::compact::SUMMARY_PREFIX;
 use codex_features::Feature;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
+use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
@@ -248,6 +249,101 @@ async fn chat_wire_turn_uses_chat_completions_endpoint() -> Result<()> {
             .and_then(|message| message.get("role"))
             .and_then(Value::as_str),
         Some("user")
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_wire_flattens_namespace_tools_for_chat_completions() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(chat_completions_sse("ok"), "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut builder = test_codex().with_config({
+        let provider = chat_provider(&server);
+        move |config| {
+            config.model = Some(NON_CODEX_CHAT_MODEL.to_string());
+            config.model_provider = provider;
+        }
+    });
+    let base_test = builder.build(&server).await?;
+    let new_thread = base_test
+        .thread_manager
+        .start_thread_with_tools(
+            base_test.config.clone(),
+            vec![DynamicToolSpec {
+                namespace: Some("codex_app".to_string()),
+                name: "geo_lookup".to_string(),
+                description: "Look up a city".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"],
+                    "additionalProperties": false
+                }),
+                defer_loading: false,
+            }],
+            /*persist_extended_history*/ false,
+        )
+        .await?;
+    let mut test = base_test;
+    test.codex = new_thread.thread;
+    test.session_configured = new_thread.session_configured;
+
+    test.submit_turn("prepare to use the namespaced tool")
+        .await?;
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    let chat_requests: Vec<_> = chat_completion_requests(&requests).collect();
+    assert_eq!(chat_requests.len(), 1);
+
+    let body: Value = chat_requests[0]
+        .body_json()
+        .expect("chat request body should be valid json");
+    let tools = body["tools"]
+        .as_array()
+        .expect("chat request should include tools");
+    assert!(
+        tools
+            .iter()
+            .all(|tool| tool["type"].as_str() == Some("function")),
+        "chat completions tools should all be function tools: {tools:?}"
+    );
+    assert!(
+        tools.iter().all(|tool| tool.get("tools").is_none()),
+        "chat completions tools should not include Responses namespace payloads: {tools:?}"
+    );
+    let dynamic_tool = tools
+        .iter()
+        .find(|tool| tool["function"]["name"].as_str() == Some("codex_app_geo_lookup"))
+        .expect("namespaced dynamic tool should be flattened");
+    assert_eq!(
+        dynamic_tool["function"]["description"].as_str(),
+        Some("Look up a city")
+    );
+    assert_eq!(
+        dynamic_tool["function"]["parameters"],
+        json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"],
+            "additionalProperties": false
+        })
     );
 
     Ok(())

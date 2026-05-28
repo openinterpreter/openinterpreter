@@ -15,14 +15,17 @@ use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolOutputKind {
     Function,
+    NamespacedFunction { name: String, namespace: String },
     Custom,
 }
 
 pub type ToolKinds = HashMap<String, ToolOutputKind>;
+type OriginalFunctionNames = HashMap<(Option<String>, String), String>;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ChatCompletionRequest {
@@ -89,6 +92,7 @@ pub(crate) struct ChatFunctionCall {
 pub(crate) fn convert_request(
     request: &ResponsesApiRequest,
 ) -> Result<(ChatCompletionRequest, ToolKinds), ApiError> {
+    let (tools, tool_kinds, original_function_names) = convert_tools(&request.tools)?;
     let mut messages = Vec::new();
     if !request.instructions.trim().is_empty() {
         messages.push(ChatMessage {
@@ -111,6 +115,7 @@ pub(crate) fn convert_request(
             }
             ResponseItem::FunctionCall {
                 name,
+                namespace,
                 arguments,
                 call_id,
                 ..
@@ -122,7 +127,11 @@ pub(crate) fn convert_request(
                         id: call_id.clone(),
                         type_: "function".to_string(),
                         function: ChatFunctionCall {
-                            name: name.clone(),
+                            name: chat_function_call_name(
+                                namespace.as_deref(),
+                                name,
+                                &original_function_names,
+                            ),
                             arguments: arguments.clone(),
                         },
                     }]),
@@ -248,7 +257,6 @@ pub(crate) fn convert_request(
         }
     }
 
-    let (tools, tool_kinds) = convert_tools(&request.tools)?;
     let chat_request = ChatCompletionRequest {
         model: request.model.clone(),
         messages,
@@ -344,9 +352,13 @@ fn convert_response_format(text: Option<&TextControls>) -> Option<Value> {
     }))
 }
 
-fn convert_tools(tools: &[Value]) -> Result<(Option<Vec<ChatTool>>, ToolKinds), ApiError> {
+fn convert_tools(
+    tools: &[Value],
+) -> Result<(Option<Vec<ChatTool>>, ToolKinds, OriginalFunctionNames), ApiError> {
     let mut converted = Vec::new();
     let mut tool_kinds = ToolKinds::new();
+    let mut original_function_names = OriginalFunctionNames::new();
+    let mut reserved_chat_names = reserve_flat_chat_tool_names(tools);
 
     for tool in tools {
         let Some(tool_type) = tool.get("type").and_then(Value::as_str) else {
@@ -370,7 +382,8 @@ fn convert_tools(tools: &[Value]) -> Result<(Option<Vec<ChatTool>>, ToolKinds), 
                             .unwrap_or_else(empty_object_schema),
                     },
                 });
-                tool_kinds.insert(name, ToolOutputKind::Function);
+                tool_kinds.insert(name.clone(), ToolOutputKind::Function);
+                original_function_names.insert((None, name.clone()), name);
             }
             "tool_search" => {
                 let name = "tool_search".to_string();
@@ -422,6 +435,63 @@ fn convert_tools(tools: &[Value]) -> Result<(Option<Vec<ChatTool>>, ToolKinds), 
                 });
                 tool_kinds.insert(name, ToolOutputKind::Custom);
             }
+            "namespace" => {
+                let namespace = string_field(tool, "name")?;
+                let Some(namespace_tools) = tool.get("tools").and_then(Value::as_array) else {
+                    return Err(ApiError::InvalidRequest {
+                        message: format!("namespace tool is missing a tools array: {tool}"),
+                    });
+                };
+
+                for namespace_tool in namespace_tools {
+                    let Some(namespace_tool_type) =
+                        namespace_tool.get("type").and_then(Value::as_str)
+                    else {
+                        return Err(ApiError::InvalidRequest {
+                            message: format!(
+                                "namespace tool is missing a type field: {namespace_tool}"
+                            ),
+                        });
+                    };
+                    match namespace_tool_type {
+                        "function" => {
+                            let name = string_field(namespace_tool, "name")?;
+                            let chat_name = unique_chat_tool_name(
+                                &namespaced_chat_tool_name(&namespace, &name),
+                                &mut reserved_chat_names,
+                            );
+                            converted.push(ChatTool {
+                                type_: "function".to_string(),
+                                function: ChatFunction {
+                                    name: chat_name.clone(),
+                                    description: string_field(namespace_tool, "description")
+                                        .unwrap_or_else(|_| name.clone()),
+                                    parameters: namespace_tool
+                                        .get("parameters")
+                                        .cloned()
+                                        .unwrap_or_else(empty_object_schema),
+                                },
+                            });
+                            tool_kinds.insert(
+                                chat_name.clone(),
+                                ToolOutputKind::NamespacedFunction {
+                                    name: name.clone(),
+                                    namespace: namespace.clone(),
+                                },
+                            );
+                            original_function_names
+                                .insert((Some(namespace.clone()), name), chat_name);
+                        }
+                        other => {
+                            return Err(ApiError::InvalidRequest {
+                                message: format!(
+                                    "unsupported chat wire namespace tool type: {other}"
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
             "image_generation" => {
                 let name = "image_generation".to_string();
                 converted.push(ChatTool {
@@ -472,7 +542,103 @@ fn convert_tools(tools: &[Value]) -> Result<(Option<Vec<ChatTool>>, ToolKinds), 
         }
     }
 
-    Ok(((!converted.is_empty()).then_some(converted), tool_kinds))
+    Ok((
+        (!converted.is_empty()).then_some(converted),
+        tool_kinds,
+        original_function_names,
+    ))
+}
+
+fn chat_function_call_name(
+    namespace: Option<&str>,
+    name: &str,
+    original_function_names: &OriginalFunctionNames,
+) -> String {
+    original_function_names
+        .get(&(namespace.map(str::to_string), name.to_string()))
+        .cloned()
+        .unwrap_or_else(|| match namespace {
+            Some(namespace) => namespaced_chat_tool_name(namespace, name),
+            None => name.to_string(),
+        })
+}
+
+fn reserve_flat_chat_tool_names(tools: &[Value]) -> HashSet<String> {
+    let mut reserved = HashSet::new();
+    for tool in tools {
+        match tool.get("type").and_then(Value::as_str) {
+            Some("function") | Some("custom") => {
+                if let Some(name) = tool.get("name").and_then(Value::as_str) {
+                    reserved.insert(name.to_string());
+                }
+            }
+            Some("tool_search") => {
+                reserved.insert("tool_search".to_string());
+            }
+            Some("local_shell") => {
+                reserved.insert("local_shell".to_string());
+            }
+            Some("image_generation") => {
+                reserved.insert("image_generation".to_string());
+            }
+            Some("web_search") => {
+                reserved.insert("web_search".to_string());
+            }
+            Some("namespace") | Some(_) | None => {}
+        }
+    }
+    reserved
+}
+
+fn namespaced_chat_tool_name(namespace: &str, name: &str) -> String {
+    let raw_name = if namespace.ends_with('_') || name.starts_with('_') {
+        format!("{namespace}{name}")
+    } else {
+        format!("{namespace}_{name}")
+    };
+    sanitize_chat_tool_name(&raw_name)
+}
+
+fn sanitize_chat_tool_name(name: &str) -> String {
+    let sanitized = name
+        .chars()
+        .map(|character| match character {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '-' => character,
+            _ => '_',
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "tool".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn unique_chat_tool_name(base_name: &str, reserved: &mut HashSet<String>) -> String {
+    const CHAT_TOOL_NAME_MAX_LEN: usize = 64;
+    let base_name = truncate_chat_tool_name(base_name, CHAT_TOOL_NAME_MAX_LEN);
+    if reserved.insert(base_name.clone()) {
+        return base_name;
+    }
+
+    for suffix_number in 2.. {
+        let suffix = format!("_{suffix_number}");
+        let prefix_len = CHAT_TOOL_NAME_MAX_LEN.saturating_sub(suffix.len());
+        let candidate = format!(
+            "{}{}",
+            truncate_chat_tool_name(base_name.as_str(), prefix_len),
+            suffix
+        );
+        if reserved.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+
+    unreachable!("unbounded suffix search should find a unique chat tool name")
+}
+
+fn truncate_chat_tool_name(name: &str, max_len: usize) -> String {
+    name.chars().take(max_len).collect()
 }
 
 fn string_field(value: &Value, field: &str) -> Result<String, ApiError> {
@@ -553,6 +719,139 @@ mod tests {
         assert_eq!(
             tool_kinds.get("shell_command"),
             Some(&ToolOutputKind::Function)
+        );
+    }
+
+    #[test]
+    fn convert_request_flattens_namespace_tools_and_preserves_output_mapping() {
+        let request = ResponsesApiRequest {
+            model: "gpt-5.2-codex".to_string(),
+            instructions: String::new(),
+            input: vec![ResponseItem::FunctionCall {
+                id: None,
+                name: "lookup_order".to_string(),
+                namespace: Some("mcp__demo__".to_string()),
+                arguments: json!({ "order_id": "ord_123" }).to_string(),
+                call_id: "call-lookup".to_string(),
+            }],
+            tools: vec![json!({
+                "type": "namespace",
+                "name": "mcp__demo__",
+                "description": "Demo tools",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "lookup_order",
+                        "description": "Look up an order",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "order_id": { "type": "string" }
+                            },
+                            "required": ["order_id"],
+                            "additionalProperties": false
+                        }
+                    }
+                ]
+            })],
+            tool_choice: "auto".to_string(),
+            parallel_tool_calls: true,
+            reasoning: None,
+            store: false,
+            stream: true,
+            include: Vec::new(),
+            service_tier: None,
+            prompt_cache_key: None,
+            client_metadata: None,
+            text: None,
+        };
+
+        let (chat, tool_kinds) = convert_request(&request).expect("request should convert");
+
+        let tool = &chat.tools.as_ref().expect("tools should be converted")[0];
+        assert_eq!(tool.function.name, "mcp__demo__lookup_order");
+        assert_eq!(tool.function.description, "Look up an order");
+        assert_eq!(
+            tool.function.parameters,
+            json!({
+                "type": "object",
+                "properties": {
+                    "order_id": { "type": "string" }
+                },
+                "required": ["order_id"],
+                "additionalProperties": false
+            })
+        );
+        assert_eq!(
+            tool_kinds.get("mcp__demo__lookup_order"),
+            Some(&ToolOutputKind::NamespacedFunction {
+                name: "lookup_order".to_string(),
+                namespace: "mcp__demo__".to_string(),
+            })
+        );
+        assert!(matches!(
+            &chat.messages[0],
+            ChatMessage {
+                tool_calls: Some(tool_calls),
+                ..
+            } if tool_calls[0].function.name == "mcp__demo__lookup_order"
+        ));
+    }
+
+    #[test]
+    fn convert_tools_sanitizes_namespaced_function_names_for_chat_completions() {
+        let tools = vec![json!({
+            "type": "namespace",
+            "name": "mcp.demo",
+            "tools": [
+                { "type": "function", "name": "lookup.order" }
+            ]
+        })];
+
+        let (chat_tools, tool_kinds, _) = convert_tools(&tools).expect("tools should convert");
+
+        let chat_tools = chat_tools.expect("namespace tool should produce a chat tool");
+        assert_eq!(chat_tools[0].function.name, "mcp_demo_lookup_order");
+        assert_eq!(
+            tool_kinds.get("mcp_demo_lookup_order"),
+            Some(&ToolOutputKind::NamespacedFunction {
+                name: "lookup.order".to_string(),
+                namespace: "mcp.demo".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn convert_tools_dedupes_flattened_name_colliding_with_flat_function() {
+        let tools = vec![
+            json!({ "type": "function", "name": "codex_app_demo" }),
+            json!({
+                "type": "namespace",
+                "name": "codex_app",
+                "tools": [
+                    { "type": "function", "name": "demo" }
+                ]
+            }),
+        ];
+
+        let (chat_tools, tool_kinds, _) = convert_tools(&tools).expect("tools should convert");
+
+        let chat_tools = chat_tools.expect("tools should convert");
+        let names: Vec<&str> = chat_tools
+            .iter()
+            .map(|tool| tool.function.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["codex_app_demo", "codex_app_demo_2"]);
+        assert_eq!(
+            tool_kinds.get("codex_app_demo"),
+            Some(&ToolOutputKind::Function)
+        );
+        assert_eq!(
+            tool_kinds.get("codex_app_demo_2"),
+            Some(&ToolOutputKind::NamespacedFunction {
+                name: "demo".to_string(),
+                namespace: "codex_app".to_string(),
+            })
         );
     }
 
