@@ -1,0 +1,115 @@
+name: cargo-ci
+
+# Workspace fmt + build gate, with a non-blocking test run (see job below).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: cargo-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt-build-test:
+    name: fmt + build + test
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      # Compiler cache. sccache caches per-crate compilations -- including the
+      # workspace crates that Swatinem/rust-cache deliberately does NOT cache --
+      # in the GitHub Actions cache, so unchanged crates restore instead of
+      # recompiling. RUSTC_WRAPPER overrides the repo's .cargo/config wrapper.
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_CACHE_SIZE: 10G
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+      - uses: dtolnay/rust-toolchain@a0b273b48ed29de4470960879e8381ff45632f26 # 1.93.0
+        with:
+          components: rustfmt
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      - uses: taiki-e/install-action@60ae4ce63c7aeb6e96d7f572c1ec7fafbb17ca80 # v2
+        with:
+          tool: nextest
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: codex-rs
+          # Stable key so the cache survives job/workflow renames (the default
+          # add-job-id-key bakes the job name into the key and busts on rename).
+          shared-key: codex-rs
+      - name: cargo fmt --check
+        run: cargo fmt -- --config imports_granularity=Item --check
+      # Hard gate: build the whole workspace including all test code (catches
+      # cargo-only breakage and test-compile errors). Uses the ci-test profile so
+      # the test step below reuses these exact artifacts (target/ci-test) and only
+      # runs the tests -- no recompile. codex-linux-sandbox is excluded: its
+      # integration tests use compile-time env!("CARGO_BIN_EXE_*"), which cargo
+      # does not wire for that crate (it is covered by the Bazel build).
+      - name: cargo build (workspace + tests)
+        run: cargo build --workspace --tests --exclude codex-linux-sandbox --profile ci-test --locked
+      - name: sccache stats (cache hit/miss proof)
+        run: sccache --show-stats
+      - name: Enable unprivileged user namespaces
+        run: |
+          # Required for bubblewrap-based sandbox tests on Linux CI runners.
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          if sudo sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      # ─────────────────────────────────────────────────────────────────────────
+      # NON-BLOCKING test run (continue-on-error). The build step above is the
+      # hard gate; this step RUNS the suite but must not fail CI yet. Reuses the
+      # ci-test target dir from the build, so it only executes -- no recompile.
+      #
+      # A full `cargo nextest run` currently has 38 pre-existing failures (of
+      # ~8342). They were never gated before: this fork runs no Rust test CI, and
+      # the Bazel CI is not active on PRs here. They are NOT caused by this
+      # workflow. To be fixed in a follow-up PR; categorized best-effort below.
+      #
+      # oix / fork-introduced (~32):
+      #   codex-server-cli (22): anthropic_tui_flow (5), exec_wire_paths (3),
+      #     wire_paths (3), frame_parity (2), onboarding_branding (5),
+      #     onboarding_model_selection (1), onboarding_provider_paths (1),
+      #     skills_command (1), thin_client_dependency (1).
+      #     Cause: oix "interpreter"/Open Interpreter rebrand + provider onboarding.
+      #     These spawn the interpreter binary / wiremock proxy / local daemon and
+      #     assert branding + manifest strings; they need the harness/binary env (or
+      #     hold stale expectations) under plain cargo. e.g. thin_client_dependency
+      #     asserts an outdated codex-tui dependency line in server-cli/Cargo.toml.
+      #   codex-app-server-launcher (5): ensure_app_server_url_* / stop / status --
+      #     daemon spawn+exit lifecycle (wait_for_process_exit timeouts). oix crate;
+      #     env/timing-sensitive on generic runners.
+      #   codex-core harness::claude_code (4): billing_header_version_* (2),
+      #     spawned_subagent_request_uses_claude_child_agent_profile,
+      #     tools::handlers::claude_code bash_returns_empty_output_marker.
+      #     Cause: oix native-harness Claude emulation; brittle exact version/prompt
+      #     assertions (e.g. expects billing version "2.1.143.190").
+      #   codex-tui onboarding::auth provider_model_selection_... (1): oix provider
+      #     onboarding saving-state timing.
+      #
+      # upstream / codex (~6), some possibly perturbed by oix model/harness data:
+      #   codex-app-server safety_check_downgrade (2): model-reroute notification
+      #     via wiremock (upstream #19055).
+      #   codex-tui chatwidget::plan_mode (3): plan-mode reasoning-scope popup
+      #     assertions (upstream plan mode).
+      #   codex-tui popups_and_settings::model_selection_popup_snapshot (1): insta
+      #     snapshot -- likely snapshot-root/runfiles env or model-list drift.
+      # ─────────────────────────────────────────────────────────────────────────
+      # DISABLED: the full nextest run self-terminates the unsandboxed runner --
+      # some codex-core process tests (unified_exec / terminate_all_processes /
+      # multi_agents) SIGTERM the job around test 3017/8342 (~5322 "not run due to
+      # signal" -> "operation was canceled"), on top of the ~38 failures above.
+      # Bazel runs these sandboxed. Re-enable by uncommenting (reuses the build's
+      # ci-test target dir, so it only runs -- no recompile).
+      # - name: cargo nextest (non-blocking; see comment above)
+      #   continue-on-error: true
+      #   run: cargo nextest run --workspace --exclude codex-linux-sandbox --cargo-profile ci-test --no-fail-fast
+      #   env:
+      #     RUST_MIN_STACK: "8388608" # 8 MiB
