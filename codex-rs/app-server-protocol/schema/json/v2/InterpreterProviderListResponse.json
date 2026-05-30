@@ -1,0 +1,162 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "InterpreterProvider": {
+      "description": "One provider entry for the `/model` picker, mirroring the TUI's `ProviderChoice`. The list is the union of configured providers and quick-add presets, with the OpenAI ChatGPT-vs-API-key split and readiness sort already applied by the server.\n\n`description` is the picker subtitle (already decorated with the readiness suffix and any \"| Harness: <name>\" hint). `readiness` is the raw label. `is_current` marks the active provider; `starts_new_chat` is true when selecting this entry begins a new chat (i.e. it is not the current provider). `kind` distinguishes already-configured entries from quick-add presets. `configured` is true exactly when `kind == Existing`; `is_default` is true when `id` equals `config.model_provider_id`. `base_url`, `wire_api`, and `env_key` are present for configured providers and may be absent for presets.",
+      "properties": {
+        "baseUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "configured": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string"
+        },
+        "envKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "isCurrent": {
+          "type": "boolean"
+        },
+        "isDefault": {
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/definitions/InterpreterProviderKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "readiness": {
+          "$ref": "#/definitions/ProviderReadinessDto"
+        },
+        "startsNewChat": {
+          "type": "boolean"
+        },
+        "wireApi": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireApiDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "configured",
+        "description",
+        "id",
+        "isCurrent",
+        "isDefault",
+        "kind",
+        "name",
+        "readiness",
+        "startsNewChat"
+      ],
+      "type": "object"
+    },
+    "InterpreterProviderKind": {
+      "description": "Whether a provider entry is already configured (`Existing`) or would be added on selection from a quick-add preset (`QuickAdd`).",
+      "oneOf": [
+        {
+          "description": "Already present in `config.model_providers`.",
+          "enum": [
+            "existing"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A quick-add preset that would be written to config on selection.",
+          "enum": [
+            "quickAdd"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ProviderReadinessDto": {
+      "description": "Readiness label for a provider entry, mirroring the TUI `/model` picker. Drives the trailing decoration on `description` (e.g. \"· Logged in\").",
+      "oneOf": [
+        {
+          "description": "Signed in (OpenAI ChatGPT auth).",
+          "enum": [
+            "loggedIn"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Credentials present (API key / bearer token / command auth).",
+          "enum": [
+            "ready"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A local provider binary is installed (e.g. Ollama).",
+          "enum": [
+            "installed"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Needs setup before it can be used.",
+          "enum": [
+            "needsSetup"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "WireApiDto": {
+      "description": "Wire protocol a provider speaks, as it appears on the app-server JSON-RPC/TS contract. Deliberately a standalone copy of `codex_model_provider_info::WireApi`, which lives in a heavy domain crate this protocol crate must not depend on; a dedicated wire type also keeps the generated bindings insulated from internal refactors of that enum. Converters map between the two with an exhaustive match, so a new variant on either side fails to compile until it is mapped.",
+      "oneOf": [
+        {
+          "description": "The Responses API exposed by OpenAI at `/v1/responses`.",
+          "enum": [
+            "responses"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "OpenAI-compatible Chat Completions exposed at `/v1/chat/completions`.",
+          "enum": [
+            "chat"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Anthropic Messages exposed at `/v1/messages`.",
+          "enum": [
+            "messages"
+          ],
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "data": {
+      "items": {
+        "$ref": "#/definitions/InterpreterProvider"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "data"
+  ],
+  "title": "InterpreterProviderListResponse",
+  "type": "object"
+}

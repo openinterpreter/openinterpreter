@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ReasoningEffort": {
+      "description": "See https://platform.openai.com/docs/guides/reasoning?api-mode=responses#get-started-with-reasoning",
+      "enum": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "type": "string"
+    }
+  },
+  "description": "Persist the selected model (and optional reasoning effort) to config.",
+  "properties": {
+    "model": {
+      "type": "string"
+    },
+    "profile": {
+      "description": "Optional config profile to write to instead of the top level.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reasoningEffort": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ReasoningEffort"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "model"
+  ],
+  "title": "InterpreterModelSetParams",
+  "type": "object"
+}

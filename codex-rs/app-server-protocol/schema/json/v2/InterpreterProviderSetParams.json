@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Persist the selected provider to config (affects future turns).",
+  "properties": {
+    "apiKey": {
+      "description": "API key for a quick-add preset that requires one and has no matching environment variable set. Ignored for already-configured providers.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "profile": {
+      "description": "Optional config profile to write to instead of the top level.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "providerId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "providerId"
+  ],
+  "title": "InterpreterProviderSetParams",
+  "type": "object"
+}

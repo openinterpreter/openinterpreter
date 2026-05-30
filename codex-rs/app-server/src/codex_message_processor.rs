@@ -810,6 +810,21 @@ impl CodexMessageProcessor {
             })
     }
 
+    /// Load the latest config, or send the error response for `request_id` and
+    /// return `None`. Lets handlers bail with `let Some(config) = … else { return };`.
+    async fn load_latest_config_or_send_error(
+        &self,
+        request_id: &ConnectionRequestId,
+    ) -> Option<Config> {
+        match self.load_latest_config(/*fallback_cwd*/ None).await {
+            Ok(config) => Some(config),
+            Err(error) => {
+                self.outgoing.send_error(request_id.clone(), error).await;
+                None
+            }
+        }
+    }
+
     async fn workspace_codex_plugins_enabled(
         &self,
         config: &Config,
@@ -1297,6 +1312,66 @@ impl CodexMessageProcessor {
             ClientRequest::FeedbackUpload { request_id, params } => {
                 self.upload_feedback(to_connection_request_id(request_id), params)
                     .await;
+            }
+            // NOTE(fork): append Open Interpreter match arms below to avoid upstream merge conflicts.
+            ClientRequest::InterpreterProviderList { request_id, params } => {
+                let request_id = to_connection_request_id(request_id);
+                let Some(config) = self.load_latest_config_or_send_error(&request_id).await else {
+                    return;
+                };
+                let response = crate::interpreter_api::list_providers(&config, params);
+                self.outgoing.send_response(request_id, response).await;
+            }
+            ClientRequest::InterpreterModelList { request_id, params } => {
+                let request_id = to_connection_request_id(request_id);
+                let Some(config) = self.load_latest_config_or_send_error(&request_id).await else {
+                    return;
+                };
+                // Model listing performs network I/O, so run it off the dispatch loop.
+                let config = Arc::new(config);
+                let outgoing = self.outgoing.clone();
+                let auth_manager = self.auth_manager.clone();
+                tokio::spawn(async move {
+                    match crate::interpreter_api::list_models(&config, auth_manager, params).await {
+                        Ok(response) => outgoing.send_response(request_id, response).await,
+                        Err(error) => outgoing.send_error(request_id, error).await,
+                    }
+                });
+            }
+            ClientRequest::InterpreterHarnessList { request_id, params } => {
+                let request_id = to_connection_request_id(request_id);
+                let Some(config) = self.load_latest_config_or_send_error(&request_id).await else {
+                    return;
+                };
+                let response = crate::interpreter_api::list_harnesses(&config, params);
+                self.outgoing.send_response(request_id, response).await;
+            }
+            ClientRequest::InterpreterProviderSet { request_id, params } => {
+                let request_id = to_connection_request_id(request_id);
+                match crate::interpreter_api::set_provider(
+                    &self.config,
+                    &self.config_manager,
+                    params,
+                )
+                .await
+                {
+                    Ok(response) => self.outgoing.send_response(request_id, response).await,
+                    Err(error) => self.outgoing.send_error(request_id, error).await,
+                }
+            }
+            ClientRequest::InterpreterModelSet { request_id, params } => {
+                let request_id = to_connection_request_id(request_id);
+                match crate::interpreter_api::set_model(&self.config, params).await {
+                    Ok(response) => self.outgoing.send_response(request_id, response).await,
+                    Err(error) => self.outgoing.send_error(request_id, error).await,
+                }
+            }
+            ClientRequest::InterpreterHarnessSet { request_id, params } => {
+                let request_id = to_connection_request_id(request_id);
+                match crate::interpreter_api::set_harness(&self.config, params).await {
+                    Ok(response) => self.outgoing.send_response(request_id, response).await,
+                    Err(error) => self.outgoing.send_error(request_id, error).await,
+                }
             }
         }
     }

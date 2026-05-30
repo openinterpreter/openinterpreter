@@ -5,12 +5,13 @@ expression: terminal.backend()
 > OpenRouter / anthropic/claude-sonnet-4.6
 
   Choose a tool harness for this new chat.
+  Only harnesses compatible with this provider's API are shown.
 
 > 1. Claude Code (recommended)
      Use the Claude Code-style tool harness.
 
-  2. Open Interpreter
-     Use Open Interpreter's native tool interface.
+  2. Codex
+     Use the native Codex tool harness.
 
   3. Claude Code Bare
      Use the lean Claude Code-style harness.
@@ -20,5 +21,3 @@ expression: terminal.backend()
 
   5. Qwen Code
      Use the Qwen Code-style tool harness.
-
-  6. DeepSeek TUI

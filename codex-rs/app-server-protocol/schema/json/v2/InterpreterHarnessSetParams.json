@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Persist the selected harness to config. `harness == None` selects native.",
+  "properties": {
+    "harness": {
+      "description": "Harness id, e.g. `\"claude-code\"`; `None` selects the native harness.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "profile": {
+      "description": "Optional config profile to write to instead of the top level.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "InterpreterHarnessSetParams",
+  "type": "object"
+}

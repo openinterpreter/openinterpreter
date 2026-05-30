@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "InterpreterHarness": {
+      "description": "A harness choice for a provider/model. `id == None` is the native (Codex) harness.",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "description": "e.g. `\"claude-code\"`, `\"kimi-cli\"`; `None` means the native harness.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isRecommended": {
+          "type": "boolean"
+        },
+        "label": {
+          "description": "Human-facing label, e.g. `\"Claude Code (recommended)\"`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "description",
+        "isRecommended",
+        "label"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "data": {
+      "items": {
+        "$ref": "#/definitions/InterpreterHarness"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "data"
+  ],
+  "title": "InterpreterHarnessListResponse",
+  "type": "object"
+}

@@ -88,6 +88,7 @@ mod fs_api;
 mod fs_watch;
 mod fuzzy_file_search;
 pub mod in_process;
+mod interpreter_api;
 mod message_processor;
 mod models;
 mod outgoing_message;

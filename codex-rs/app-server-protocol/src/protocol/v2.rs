@@ -119,6 +119,10 @@ use serde_with::serde_as;
 use thiserror::Error;
 use ts_rs::TS;
 
+// Re-exported so the schema generator emits these v2 methods under
+// schema/{json,typescript}/v2/ (it derives the subdir from the `v2::` path).
+pub use crate::protocol::interpreter::*;
+
 // Macro to declare a camelCased API v2 enum mirroring a core enum which
 // tends to use either snake_case or kebab-case.
 macro_rules! v2_enum_from_core {

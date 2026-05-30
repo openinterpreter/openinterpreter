@@ -1498,6 +1498,133 @@
       ],
       "type": "object"
     },
+    "InterpreterHarnessListParams": {
+      "description": "List the harness choices compatible with a provider/model.",
+      "properties": {
+        "model": {
+          "description": "Optional model; refines the compatible harness set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "providerId"
+      ],
+      "type": "object"
+    },
+    "InterpreterHarnessSetParams": {
+      "description": "Persist the selected harness to config. `harness == None` selects native.",
+      "properties": {
+        "harness": {
+          "description": "Harness id, e.g. `\"claude-code\"`; `None` selects the native harness.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profile": {
+          "description": "Optional config profile to write to instead of the top level.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "InterpreterModelListParams": {
+      "description": "List models for a provider.",
+      "properties": {
+        "includeHidden": {
+          "description": "When true, include models hidden from the default picker list.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "modelProvider": {
+          "description": "Optional provider override; defaults to the active provider.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "InterpreterModelSetParams": {
+      "description": "Persist the selected model (and optional reasoning effort) to config.",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "profile": {
+          "description": "Optional config profile to write to instead of the top level.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoningEffort": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "type": "object"
+    },
+    "InterpreterProviderListParams": {
+      "description": "List known providers (configured + bundled catalog).",
+      "properties": {
+        "includeUnconfigured": {
+          "description": "When true, include providers that are not yet configured.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "InterpreterProviderSetParams": {
+      "description": "Persist the selected provider to config (affects future turns).",
+      "properties": {
+        "apiKey": {
+          "description": "API key for a quick-add preset that requires one and has no matching environment variable set. Ignored for already-configured providers.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profile": {
+          "description": "Optional config profile to write to instead of the top level.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "providerId"
+      ],
+      "type": "object"
+    },
     "ListMcpServerStatusParams": {
       "properties": {
         "cursor": {
@@ -6133,6 +6260,156 @@
         "params"
       ],
       "title": "FuzzyFileSearchRequest",
+      "type": "object"
+    },
+    {
+      "description": "Lists known providers (configured + bundled catalog).",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "interpreter/provider/list"
+          ],
+          "title": "Interpreter/provider/listRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/InterpreterProviderListParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Interpreter/provider/listRequest",
+      "type": "object"
+    },
+    {
+      "description": "Lists models for a provider.",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "interpreter/model/list"
+          ],
+          "title": "Interpreter/model/listRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/InterpreterModelListParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Interpreter/model/listRequest",
+      "type": "object"
+    },
+    {
+      "description": "Lists the harness choices compatible with a provider/model.",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "interpreter/harness/list"
+          ],
+          "title": "Interpreter/harness/listRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/InterpreterHarnessListParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Interpreter/harness/listRequest",
+      "type": "object"
+    },
+    {
+      "description": "Persists the selected provider to config.",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "interpreter/provider/set"
+          ],
+          "title": "Interpreter/provider/setRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/InterpreterProviderSetParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Interpreter/provider/setRequest",
+      "type": "object"
+    },
+    {
+      "description": "Persists the selected model (and optional reasoning effort) to config.",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "interpreter/model/set"
+          ],
+          "title": "Interpreter/model/setRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/InterpreterModelSetParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Interpreter/model/setRequest",
+      "type": "object"
+    },
+    {
+      "description": "Persists the selected harness to config.",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "interpreter/harness/set"
+          ],
+          "title": "Interpreter/harness/setRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/InterpreterHarnessSetParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Interpreter/harness/setRequest",
       "type": "object"
     }
   ],

@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "List models for a provider.",
+  "properties": {
+    "includeHidden": {
+      "description": "When true, include models hidden from the default picker list.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "modelProvider": {
+      "description": "Optional provider override; defaults to the active provider.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "InterpreterModelListParams",
+  "type": "object"
+}

@@ -197,7 +197,9 @@ impl OnboardingScreen {
                     None
                 },
                 suppress_current_provider: force_provider_onboarding,
-                provider_readiness_snapshot: ProviderReadinessSnapshot::from_system(&config),
+                provider_readiness_snapshot: ProviderReadinessSnapshot::from_system(
+                    config.codex_home.as_path(),
+                ),
                 error: Arc::new(RwLock::new(None)),
                 sign_in_state: Arc::new(RwLock::new(initial_sign_in_state(
                     branding,
