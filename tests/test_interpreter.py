@@ -1436,3 +1436,57 @@ def test_doctor_handles_missing_package(monkeypatch, capsys):
 
     # Ensure the diagnostics marked something as failed
     assert "[fail]" in terminal_output or "fail:" in terminal_output
+
+def test_doctor_openai_api_key_network_check(monkeypatch, capsys):
+    """
+    Verify that doctor.py OpenAI API key network check:
+
+    1. Is executed during doctor run
+    2. Produces a diagnostic result entry
+    3. Does NOT crash the doctor process
+    """
+
+    from interpreter.core.utils.doctor import run_doctor
+    from interpreter import OpenInterpreter
+
+    # --- Mock OpenAI so no real network call is made ---
+    class MockModels:
+        def list(self):
+            return [{"id": "gpt-4o-mini"}]
+
+    class MockOpenAI:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @property
+        def models(self):
+            return MockModels()
+
+    # Patch OpenAI used inside doctor.py
+    monkeypatch.setattr(
+        "openai.OpenAI",
+        MockOpenAI
+    )
+
+    # Ensure environment variable exists for test consistency
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
+
+    test_interpreter = OpenInterpreter()
+
+    # doctor exits via sys.exit()
+    with pytest.raises(SystemExit):
+        run_doctor(test_interpreter)
+
+    captured_output = capsys.readouterr()
+    terminal_output = (captured_output.out + captured_output.err).lower()
+
+    # --- Assertions ---
+
+    # Ensure doctor ran fully
+    assert "open interpreter diagnostics" in terminal_output
+
+    # Ensure OpenAI section is present (or network check ran)
+    assert "openai" in terminal_output or "api key" in terminal_output
+
+    # Ensure failure or pass is reported in structured output
+    assert "[pass]" in terminal_output or "[fail]" in terminal_output

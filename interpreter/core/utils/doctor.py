@@ -2,6 +2,8 @@ import os
 import sys
 import subprocess
 import importlib.util
+from openai import OpenAI
+from openai import AuthenticationError, RateLimitError, APITimeoutError
 
 # Results of diagnosis
 diagnosis_results = []
@@ -149,6 +151,62 @@ def verify_openai_key_format():
         valid_format,
     )
 
+#Verify OpenAI API key is correct and actually exists
+def verify_openai_api_key_network():
+    """
+    Validates OpenAI API key via minimal API call with timeout.
+    """
+
+    key = os.getenv("OPENAI_API_KEY")
+
+    if not key:
+        return report_check(
+            "OpenAI API key (network check)",
+            False,
+            "Missing OPENAI_API_KEY"
+        )
+
+    try:
+        client = OpenAI(
+            api_key=key,
+            timeout=MAX_TIMEOUT
+        )
+
+        client.models.list()
+
+        return report_check(
+            "OpenAI API key (network check)",
+            True,
+            "Key accepted by OpenAI API"
+        )
+
+    except APITimeoutError:
+        return report_check(
+            "OpenAI API key (network check)",
+            False,
+            f"Request timed out after {MAX_TIMEOUT}s"
+        )
+
+    except AuthenticationError as e:
+        return report_check(
+            "OpenAI API key (network check)",
+            False,
+            f"Invalid API key: {str(e)}"
+        )
+
+    except RateLimitError as e:
+        return report_check(
+            "OpenAI API key (network check)",
+            False,
+            f"Rate limited: {str(e)}"
+        )
+
+    except Exception as e:
+        return report_check(
+            "OpenAI API key (network check)",
+            False,
+            f"Unexpected error: {str(e)}"
+        )
 
 # Verify LiteLLM provider resolution
 def verify_litellm_model(interpreter):
@@ -416,7 +474,9 @@ def run_doctor(interpreter):
     output_env_variable_statuses(env_vars)
 
     # OpenAI API key
+    print_section("Open AI API Key")
     verify_openai_key_format()
+    verify_openai_api_key_network()
 
     # LiteLLM
     print_section("LiteLLM")
