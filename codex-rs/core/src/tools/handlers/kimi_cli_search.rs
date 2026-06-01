@@ -185,31 +185,19 @@ fn kimi_glob_paths(
     pattern: &str,
 ) -> Result<Vec<AbsolutePathBuf>, FunctionCallError> {
     let absolute_pattern = search_root.join(pattern);
-    let pattern = absolute_pattern.to_str().ok_or_else(|| {
+    let joined = absolute_pattern.to_str().ok_or_else(|| {
         FunctionCallError::RespondToModel("Glob pattern is not valid UTF-8".to_string())
     })?;
-    let entries = glob::glob(pattern).map_err(|err| {
-        FunctionCallError::RespondToModel(format!(
-            "Failed to search for pattern {pattern}. Error: {err}"
-        ))
-    })?;
-    entries
-        .map(|entry| {
-            entry
-                .map_err(|err| {
-                    FunctionCallError::RespondToModel(format!(
-                        "Failed to search for pattern {pattern}. Error: {err}"
-                    ))
-                })
-                .and_then(|path| {
-                    AbsolutePathBuf::try_from(normalize_glob_path(path)).map_err(|err| {
-                        FunctionCallError::RespondToModel(format!(
-                            "Glob produced an invalid path: {err}"
-                        ))
-                    })
-                })
-        })
-        .collect()
+    // Bounded, symlink-safe glob: the `glob` crate follows symlinks, so a `**`
+    // pattern over a symlink cycle can loop forever. Include directories so the
+    // caller's `include_dirs` handling still applies. Walking with the bounded
+    // walker yields absolute paths already, so the conversion never fails.
+    Ok(
+        super::safe_fs::bounded_glob_paths(search_root, joined, /* include_dirs */ true)
+            .into_iter()
+            .filter_map(|path| AbsolutePathBuf::try_from(normalize_glob_path(path)).ok())
+            .collect(),
+    )
 }
 
 fn normalize_glob_path(path: PathBuf) -> PathBuf {

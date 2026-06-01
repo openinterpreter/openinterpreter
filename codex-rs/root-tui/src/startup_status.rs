@@ -25,10 +25,19 @@ const LABEL: &str = "\u{2022} Starting up...";
 /// Frame interval — matches the TUI status indicator's 32ms cadence.
 const FRAME: Duration = Duration::from_millis(32);
 
+/// Don't show the startup line until the daemon has been cold-starting for at
+/// least this long. Fast startups (often well under a second) finish before
+/// this elapses and draw nothing at all, avoiding a distracting flash.
+const SHOW_AFTER: Duration = Duration::from_secs(1);
+
 /// A running shimmer animation. Call [`StartupStatus::finish`] once the daemon
 /// is ready to stop the animation and clear the line.
 pub(crate) struct StartupStatus {
     stop: Arc<AtomicBool>,
+    /// Set by the render thread once it actually draws the status line (i.e.
+    /// startup outlasted [`SHOW_AFTER`]). `finish` only clears the screen when
+    /// this is set, so a fast startup that drew nothing leaves no trace.
+    drawn: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -41,21 +50,31 @@ impl StartupStatus {
         }
 
         let stop = Arc::new(AtomicBool::new(false));
+        let drawn = Arc::new(AtomicBool::new(false));
         let stop_for_thread = Arc::clone(&stop);
-        let handle = thread::spawn(move || animate(&stop_for_thread));
+        let drawn_for_thread = Arc::clone(&drawn);
+        let handle = thread::spawn(move || animate(&stop_for_thread, &drawn_for_thread));
         Some(Self {
             stop,
+            drawn,
             handle: Some(handle),
         })
     }
 
     /// Stop the animation, join the render thread, and wipe every trace of the
     /// status line — including the blank line we added above it — so the TUI
-    /// (or any subsequent output) starts on a clean screen.
+    /// (or any subsequent output) starts on a clean screen. If the line was
+    /// never drawn (startup finished before [`SHOW_AFTER`]), this leaves the
+    /// terminal untouched.
     pub(crate) fn finish(mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
+        }
+
+        // Nothing was drawn (fast startup) — don't touch the terminal.
+        if !self.drawn.load(Ordering::Relaxed) {
+            return;
         }
 
         let mut stderr = std::io::stderr().lock();
@@ -66,10 +85,26 @@ impl StartupStatus {
     }
 }
 
-fn animate(stop: &AtomicBool) {
+fn animate(stop: &AtomicBool, drawn: &AtomicBool) {
     let truecolor = supports_truecolor();
     let start = Instant::now();
 
+    // Hold off drawing anything until startup has lasted SHOW_AFTER. Poll the
+    // stop flag at the frame cadence so a fast startup exits promptly without
+    // ever touching the terminal.
+    while start.elapsed() < SHOW_AFTER {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        thread::sleep(FRAME);
+    }
+    if stop.load(Ordering::Relaxed) {
+        return;
+    }
+
+    // Past the threshold: commit to drawing. Mark `drawn` before any output so
+    // `finish` knows it must clear the line afterward.
+    drawn.store(true, Ordering::Relaxed);
     let mut stderr = std::io::stderr().lock();
     // One newline of separation above the status line, drawn once.
     let _ = write!(stderr, "\n");

@@ -25,6 +25,13 @@ After installation, start Open Interpreter in any project:
 interpreter
 ```
 
+`i` is a built-in shorthand for `interpreter` — `i` and `interpreter` are
+interchangeable, so you can just type:
+
+```bash
+i
+```
+
 You will be prompted to sign in or configure a provider, then Open Interpreter
 will work in the current directory.
 

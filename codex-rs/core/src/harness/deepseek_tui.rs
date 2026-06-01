@@ -328,7 +328,9 @@ fn collect_workspace_entries(root: &Path, dir: &Path, depth: usize, entries: &mu
         if let Ok(relative) = path.strip_prefix(root) {
             entries.push(relative.to_string_lossy().to_string());
         }
-        if path.is_dir() {
+        // Do not recurse into symlinked directories: a symlink pointing at a
+        // large tree (or back at an ancestor) must not expand the listing.
+        if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
             collect_workspace_entries(root, &path, depth - 1, entries);
         }
     }
@@ -395,7 +397,10 @@ fn collect_codewhale_tree(
         let prefix = " ".repeat(indent);
         if path.is_dir() {
             lines.push(format!("{prefix}DIR: {name}"));
-            collect_codewhale_tree(root, &path, depth - 1, indent + 2, lines);
+            // Do not descend into symlinked directories.
+            if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+                collect_codewhale_tree(root, &path, depth - 1, indent + 2, lines);
+            }
         } else {
             lines.push(format!("{prefix}FILE: {name}"));
         }

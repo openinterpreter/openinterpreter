@@ -32,6 +32,7 @@ mod plan;
 mod qwen_code;
 mod request_permissions;
 mod request_user_input;
+mod safe_fs;
 mod shell;
 mod swe_agent_command;
 mod test_sync;
@@ -40,6 +41,8 @@ mod tool_suggest;
 mod unavailable_tool;
 pub(crate) mod unified_exec;
 mod view_image;
+#[cfg(test)]
+mod workspace_safety_tests;
 
 use codex_sandboxing::policy_transforms::intersect_permission_profiles;
 use codex_sandboxing::policy_transforms::merge_permission_profiles;

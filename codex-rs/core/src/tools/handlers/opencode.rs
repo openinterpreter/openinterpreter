@@ -7,6 +7,8 @@ use crate::exec_env::create_env;
 use crate::exec_policy::ExecApprovalRequest;
 use crate::function_tool::FunctionCallError;
 use crate::harness::opencode::OPENCODE_TASK_AGENT_BASE_INSTRUCTIONS;
+use crate::session::Session;
+use crate::session::TurnContext;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
@@ -38,6 +40,7 @@ use codex_protocol::models::SandboxPermissions;
 use codex_protocol::protocol::AgentStatus as ProtocolAgentStatus;
 use codex_protocol::protocol::ExecCommandSource;
 use codex_protocol::user_input::UserInput;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use regex_lite::Regex;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
@@ -306,6 +309,34 @@ impl ToolHandler for OpenCodeTodoWriteHandler {
     }
 }
 
+/// Resolve a `glob`/`grep` base path and confirm the session policy allows
+/// reading it, so these search tools cannot escape the workspace (e.g. a base
+/// outside the project). Relative paths resolve against the turn's working
+/// directory.
+async fn read_checked_search_base(
+    session: &Session,
+    turn: &TurnContext,
+    path: Option<&str>,
+) -> Result<PathBuf, FunctionCallError> {
+    let base = match path {
+        Some(raw) => {
+            let raw = Path::new(raw);
+            if raw.is_absolute() {
+                raw.to_path_buf()
+            } else {
+                turn.cwd.as_path().join(raw)
+            }
+        }
+        None => turn.cwd.as_path().to_path_buf(),
+    };
+    let absolute = AbsolutePathBuf::try_from(base.clone()).map_err(|err| {
+        FunctionCallError::RespondToModel(format!("invalid path `{}`: {err}", base.display()))
+    })?;
+    let file_system_policy = effective_turn_file_system_policy(session, turn).await;
+    ensure_readable_path(&file_system_policy, turn, &absolute)?;
+    Ok(base)
+}
+
 impl ToolHandler for OpenCodeGlobHandler {
     type Output = FunctionToolOutput;
 
@@ -314,26 +345,26 @@ impl ToolHandler for OpenCodeGlobHandler {
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<Self::Output, FunctionCallError> {
-        let ToolInvocation { turn, payload, .. } = invocation;
+        let ToolInvocation {
+            session,
+            turn,
+            payload,
+            ..
+        } = invocation;
         let ToolPayload::Function { arguments } = payload else {
             return Err(FunctionCallError::RespondToModel(
                 "glob received unsupported payload".to_string(),
             ));
         };
         let args: OpenCodeGlobArgs = parse_arguments(&arguments)?;
-        let base = args
-            .path
-            .as_deref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| turn.cwd.as_path().to_path_buf());
+        let base =
+            read_checked_search_base(session.as_ref(), turn.as_ref(), args.path.as_deref()).await?;
         let pattern = base.join(args.pattern);
-        let pattern = pattern.to_string_lossy().to_string();
-        let mut matches = glob::glob(&pattern)
-            .map_err(|err| FunctionCallError::RespondToModel(format!("Glob failed: {err}")))?
-            .filter_map(Result::ok)
-            .filter(|path| path.is_file())
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>();
+        let mut matches =
+            super::safe_fs::bounded_glob_paths(&base, &pattern.to_string_lossy(), false)
+                .into_iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>();
         matches.sort();
         Ok(FunctionToolOutput::from_text(
             matches.join("\n"),
@@ -350,7 +381,12 @@ impl ToolHandler for OpenCodeGrepHandler {
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<Self::Output, FunctionCallError> {
-        let ToolInvocation { turn, payload, .. } = invocation;
+        let ToolInvocation {
+            session,
+            turn,
+            payload,
+            ..
+        } = invocation;
         let ToolPayload::Function { arguments } = payload else {
             return Err(FunctionCallError::RespondToModel(
                 "grep received unsupported payload".to_string(),
@@ -360,19 +396,15 @@ impl ToolHandler for OpenCodeGrepHandler {
         let regex = Regex::new(&args.pattern)
             .map_err(|err| FunctionCallError::RespondToModel(format!("Grep failed: {err}")))?;
         let include = args.include.as_deref();
-        let base = args
-            .path
-            .as_deref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| turn.cwd.as_path().to_path_buf());
-        let mut paths = Vec::new();
-        collect_files(&base, &mut paths);
+        let base =
+            read_checked_search_base(session.as_ref(), turn.as_ref(), args.path.as_deref()).await?;
+        let paths = super::safe_fs::bounded_collect_files(&base);
         let mut results: Vec<(String, Vec<String>)> = Vec::new();
         for path in paths {
             if !path.is_file() || !include_matches(&path, include) {
                 continue;
             }
-            let Ok(content) = fs::read_to_string(&path) else {
+            let Some(content) = super::safe_fs::read_searchable_file(&path) else {
                 continue;
             };
             let mut lines = Vec::new();
@@ -866,22 +898,6 @@ fn include_matches(path: &Path, include: Option<&str>) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| glob::Pattern::new(include).is_ok_and(|pattern| pattern.matches(name)))
-}
-
-fn collect_files(path: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(metadata) = fs::metadata(path) else {
-        return;
-    };
-    if metadata.is_file() {
-        files.push(path.to_path_buf());
-        return;
-    }
-    let Ok(entries) = fs::read_dir(path) else {
-        return;
-    };
-    for entry in entries.filter_map(Result::ok) {
-        collect_files(&entry.path(), files);
-    }
 }
 
 fn opencode_bash_output_text(text: &str) -> String {

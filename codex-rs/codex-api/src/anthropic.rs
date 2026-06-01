@@ -123,7 +123,42 @@ pub enum AnthropicContentBlock {
 #[serde(untagged)]
 pub enum AnthropicToolResultContent {
     Text(String),
-    Blocks(Vec<AnthropicTextBlock>),
+    Blocks(Vec<AnthropicToolResultBlock>),
+}
+
+/// A single block inside a tool result. Anthropic tool results may carry text
+/// or image blocks; image blocks are what `Read` returns for image files.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AnthropicToolResultBlock {
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<AnthropicCacheControl>,
+    },
+    Image {
+        source: AnthropicImageSource,
+    },
+}
+
+/// A base64-encoded image source, matching the Anthropic Messages API shape:
+/// `{"type":"base64","media_type":"image/png","data":"..."}`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct AnthropicImageSource {
+    #[serde(rename = "type")]
+    pub source_type: &'static str,
+    pub media_type: String,
+    pub data: String,
+}
+
+impl AnthropicImageSource {
+    pub fn base64(media_type: String, data: String) -> Self {
+        Self {
+            source_type: "base64",
+            media_type,
+            data,
+        }
+    }
 }
 
 impl From<String> for AnthropicToolResultContent {
@@ -132,8 +167,8 @@ impl From<String> for AnthropicToolResultContent {
     }
 }
 
-impl From<Vec<AnthropicTextBlock>> for AnthropicToolResultContent {
-    fn from(value: Vec<AnthropicTextBlock>) -> Self {
+impl From<Vec<AnthropicToolResultBlock>> for AnthropicToolResultContent {
+    fn from(value: Vec<AnthropicToolResultBlock>) -> Self {
         Self::Blocks(value)
     }
 }

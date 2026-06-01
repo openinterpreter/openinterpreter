@@ -1,6 +1,8 @@
 use super::parse_arguments;
 use super::plan::handle_update_plan;
 use crate::function_tool::FunctionCallError;
+use crate::session::Session;
+use crate::session::TurnContext;
 use crate::tools::context::ApplyPatchToolOutput;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
@@ -16,6 +18,7 @@ use crate::tools::registry::ToolKind;
 use codex_protocol::plan_tool::PlanItemArg;
 use codex_protocol::plan_tool::StepStatus;
 use codex_protocol::plan_tool::UpdatePlanArgs;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
@@ -412,7 +415,12 @@ impl ToolHandler for DeepSeekTuiListDirHandler {
             ));
         };
         let args: PathArg = parse_arguments(arguments)?;
-        let path = workspace_path(invocation.turn.cwd.as_path(), args.path.as_deref());
+        let path = read_checked_workspace_path(
+            invocation.session.as_ref(),
+            invocation.turn.as_ref(),
+            args.path.as_deref(),
+        )
+        .await?;
         let mut entries = Vec::new();
         for entry in fs::read_dir(&path)
             .map_err(|err| FunctionCallError::RespondToModel(format!("read_dir: {err}")))?
@@ -458,7 +466,12 @@ impl ToolHandler for DeepSeekTuiReadFileHandler {
             ));
         }
         let args: PathArg = parse_arguments(arguments)?;
-        let path = workspace_path(invocation.turn.cwd.as_path(), args.path.as_deref());
+        let path = read_checked_workspace_path(
+            invocation.session.as_ref(),
+            invocation.turn.as_ref(),
+            args.path.as_deref(),
+        )
+        .await?;
         let content = fs::read_to_string(&path)
             .map_err(|err| FunctionCallError::RespondToModel(format!("read_file: {err}")))?;
         Ok(FunctionToolOutput::from_text(content, Some(true)))
@@ -479,12 +492,17 @@ impl ToolHandler for DeepSeekTuiGrepFilesHandler {
             ));
         };
         let args: GrepFilesArgs = parse_arguments(arguments)?;
-        let root = workspace_path(invocation.turn.cwd.as_path(), args.path.as_deref());
+        let root = read_checked_workspace_path(
+            invocation.session.as_ref(),
+            invocation.turn.as_ref(),
+            args.path.as_deref(),
+        )
+        .await?;
         let mut files = workspace_files(&root);
         files.sort();
         let mut matches = Vec::new();
         for file in &files {
-            let Ok(content) = fs::read_to_string(file) else {
+            let Some(content) = super::safe_fs::read_searchable_file(file) else {
                 continue;
             };
             for (index, line) in content.lines().enumerate() {
@@ -656,7 +674,12 @@ impl ToolHandler for DeepSeekTuiFileSearchHandler {
             ));
         };
         let args: FileSearchArgs = parse_arguments(arguments)?;
-        let root = workspace_path(invocation.turn.cwd.as_path(), args.path.as_deref());
+        let root = read_checked_workspace_path(
+            invocation.session.as_ref(),
+            invocation.turn.as_ref(),
+            args.path.as_deref(),
+        )
+        .await?;
         let query = args.query.to_ascii_lowercase();
         let mut matches = workspace_files(&root)
             .into_iter()
@@ -790,6 +813,24 @@ fn json_text_output<T: Serialize>(value: &T) -> Result<FunctionToolOutput, Funct
     Ok(FunctionToolOutput::from_text(text, Some(true)))
 }
 
+/// Resolve a model-supplied path for a read/search/listing tool and confirm
+/// the session's filesystem policy allows reading it. This keeps these tools
+/// inside the workspace: a path such as `/Users/<name>` or one that climbs out
+/// via `..` is rejected unless the session policy explicitly permits it.
+async fn read_checked_workspace_path(
+    session: &Session,
+    turn: &TurnContext,
+    path: Option<&str>,
+) -> Result<PathBuf, FunctionCallError> {
+    let resolved = workspace_path(turn.cwd.as_path(), path);
+    let absolute = AbsolutePathBuf::try_from(resolved.clone()).map_err(|err| {
+        FunctionCallError::RespondToModel(format!("invalid path `{}`: {err}", resolved.display()))
+    })?;
+    let file_system_policy = effective_turn_file_system_policy(session, turn).await;
+    ensure_readable_path(&file_system_policy, turn, &absolute)?;
+    Ok(resolved)
+}
+
 fn workspace_path(cwd: &Path, path: Option<&str>) -> PathBuf {
     let path = path.filter(|path| !path.trim().is_empty()).unwrap_or(".");
     let path = PathBuf::from(path);
@@ -801,33 +842,7 @@ fn workspace_path(cwd: &Path, path: Option<&str>) -> PathBuf {
 }
 
 fn workspace_files(root: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    collect_workspace_files(root, &mut files);
-    files
-}
-
-fn collect_workspace_files(path: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(metadata) = fs::metadata(path) else {
-        return;
-    };
-    if metadata.is_file() {
-        files.push(path.to_path_buf());
-        return;
-    }
-    let Ok(entries) = fs::read_dir(path) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let entry_path = entry.path();
-        if entry_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name == ".git")
-        {
-            continue;
-        }
-        collect_workspace_files(&entry_path, files);
-    }
+    super::safe_fs::bounded_collect_files(root)
 }
 
 fn relative_display(cwd: &Path, path: &Path) -> String {

@@ -1,12 +1,19 @@
+#[cfg(feature = "v8-runtime")]
 mod callbacks;
+#[cfg(feature = "v8-runtime")]
 mod globals;
+#[cfg(feature = "v8-runtime")]
 mod module_loader;
+#[cfg(feature = "v8-runtime")]
 mod timers;
+#[cfg(feature = "v8-runtime")]
 mod value;
 
 use std::collections::HashMap;
+#[cfg(feature = "v8-runtime")]
 use std::sync::OnceLock;
 use std::sync::mpsc as std_mpsc;
+#[cfg(feature = "v8-runtime")]
 use std::thread;
 
 use codex_protocol::ToolName;
@@ -14,8 +21,10 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 
+#[cfg(feature = "v8-runtime")]
 use crate::description::EnabledToolMetadata;
 use crate::description::ToolDefinition;
+#[cfg(feature = "v8-runtime")]
 use crate::description::enabled_tool_metadata;
 use crate::response::FunctionCallOutputContentItem;
 
@@ -138,10 +147,45 @@ pub(crate) enum RuntimeEvent {
     },
 }
 
+/// Handle used to terminate a running runtime isolate. With the `v8-runtime`
+/// feature this is V8's real `IsolateHandle`; without it, a zero-sized stub
+/// (no isolate is ever spawned) so `service.rs` stays V8-free.
+#[cfg(feature = "v8-runtime")]
+pub(crate) type RuntimeTerminateHandle = v8::IsolateHandle;
+
+#[cfg(not(feature = "v8-runtime"))]
+#[derive(Clone)]
+pub(crate) struct RuntimeTerminateHandle;
+
+#[cfg(not(feature = "v8-runtime"))]
+impl RuntimeTerminateHandle {
+    /// Mirrors `v8::IsolateHandle::terminate_execution`; never called because
+    /// the stub `spawn_runtime` below always returns an error first.
+    pub(crate) fn terminate_execution(&self) -> bool {
+        false
+    }
+}
+
+/// Stub used when the V8 runtime is not compiled in. Code mode is an
+/// under-development, default-off feature; a binary built without
+/// `v8-runtime` reports this error if execution is ever requested.
+#[cfg(not(feature = "v8-runtime"))]
+pub(crate) fn spawn_runtime(
+    _request: ExecuteRequest,
+    _event_tx: mpsc::UnboundedSender<RuntimeEvent>,
+) -> Result<(std_mpsc::Sender<RuntimeCommand>, RuntimeTerminateHandle), String> {
+    Err(
+        "code mode is not available: this build was compiled without the \
+         V8 runtime (rebuild with --features codex-code-mode/v8-runtime)"
+            .to_string(),
+    )
+}
+
+#[cfg(feature = "v8-runtime")]
 pub(crate) fn spawn_runtime(
     request: ExecuteRequest,
     event_tx: mpsc::UnboundedSender<RuntimeEvent>,
-) -> Result<(std_mpsc::Sender<RuntimeCommand>, v8::IsolateHandle), String> {
+) -> Result<(std_mpsc::Sender<RuntimeCommand>, RuntimeTerminateHandle), String> {
     initialize_v8()?;
 
     let (command_tx, command_rx) = std_mpsc::channel();
@@ -176,6 +220,7 @@ pub(crate) fn spawn_runtime(
 }
 
 #[derive(Clone)]
+#[cfg(feature = "v8-runtime")]
 struct RuntimeConfig {
     tool_call_id: String,
     enabled_tools: Vec<EnabledToolMetadata>,
@@ -183,6 +228,7 @@ struct RuntimeConfig {
     stored_values: HashMap<String, JsonValue>,
 }
 
+#[cfg(feature = "v8-runtime")]
 pub(super) struct RuntimeState {
     event_tx: mpsc::UnboundedSender<RuntimeEvent>,
     pending_tool_calls: HashMap<String, v8::Global<v8::PromiseResolver>>,
@@ -196,6 +242,7 @@ pub(super) struct RuntimeState {
     exit_requested: bool,
 }
 
+#[cfg(feature = "v8-runtime")]
 pub(super) enum CompletionState {
     Pending,
     Completed {
@@ -204,6 +251,7 @@ pub(super) enum CompletionState {
     },
 }
 
+#[cfg(feature = "v8-runtime")]
 fn initialize_v8() -> Result<(), String> {
     static PLATFORM: OnceLock<Result<v8::SharedRef<v8::Platform>, String>> = OnceLock::new();
 
@@ -220,6 +268,7 @@ fn initialize_v8() -> Result<(), String> {
     }
 }
 
+#[cfg(feature = "v8-runtime")]
 fn run_runtime(
     config: RuntimeConfig,
     event_tx: mpsc::UnboundedSender<RuntimeEvent>,
@@ -330,6 +379,7 @@ fn run_runtime(
     }
 }
 
+#[cfg(feature = "v8-runtime")]
 fn capture_scope_send_error(
     scope: &mut v8::PinScope<'_, '_>,
     event_tx: &mpsc::UnboundedSender<RuntimeEvent>,
@@ -343,6 +393,7 @@ fn capture_scope_send_error(
     send_result(event_tx, stored_values, error_text);
 }
 
+#[cfg(feature = "v8-runtime")]
 fn send_result(
     event_tx: &mpsc::UnboundedSender<RuntimeEvent>,
     stored_values: HashMap<String, JsonValue>,
@@ -354,7 +405,7 @@ fn send_result(
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "v8-runtime"))]
 mod tests {
     use std::collections::HashMap;
     use std::time::Duration;

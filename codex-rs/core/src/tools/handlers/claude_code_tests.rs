@@ -6,6 +6,7 @@ use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::registry::ToolHandler;
 use crate::turn_diff_tracker::TurnDiffTracker;
+use codex_protocol::openai_models::InputModality;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::SandboxPolicy;
@@ -44,6 +45,82 @@ fn set_danger_full_access(turn: &mut TurnContext) {
         .expect("test setup should allow updating sandbox policy");
     turn.file_system_sandbox_policy = FileSystemSandboxPolicy::from(turn.sandbox_policy.get());
     turn.network_sandbox_policy = NetworkSandboxPolicy::from(turn.sandbox_policy.get());
+}
+
+/// A minimal valid 1x1 PNG, used to exercise the image-reading path.
+const PNG_1X1: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+    0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0xF8, 0xFF, 0xFF, 0x3F,
+    0x00, 0x05, 0xFE, 0x02, 0xFE, 0x33, 0x12, 0x95, 0x14, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
+    0x44, 0xAE, 0x42, 0x60, 0x82,
+];
+
+fn set_image_input(turn: &mut TurnContext, enabled: bool) {
+    if enabled {
+        if !turn
+            .model_info
+            .input_modalities
+            .contains(&InputModality::Image)
+        {
+            turn.model_info.input_modalities.push(InputModality::Image);
+        }
+    } else {
+        turn.model_info
+            .input_modalities
+            .retain(|modality| *modality != InputModality::Image);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_returns_image_content_for_png_when_model_supports_images() {
+    let (session, mut turn) = make_session_and_context().await;
+    set_image_input(&mut turn, true);
+    let path = turn.cwd.join("shot.png");
+    tokio::fs::write(path.as_path(), PNG_1X1)
+        .await
+        .expect("write png");
+
+    let output = ClaudeReadHandler
+        .handle(invocation(
+            session,
+            turn,
+            "Read",
+            json!({ "file_path": path.to_string_lossy() }),
+        ))
+        .await
+        .expect("reading a png should succeed, not fail on UTF-8");
+
+    // Image content carries no text body; it is returned as an image block.
+    assert_eq!(output.into_text(), "");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_rejects_image_when_model_lacks_image_input() {
+    let (session, mut turn) = make_session_and_context().await;
+    set_image_input(&mut turn, false);
+    let path = turn.cwd.join("shot.png");
+    tokio::fs::write(path.as_path(), PNG_1X1)
+        .await
+        .expect("write png");
+
+    let result = ClaudeReadHandler
+        .handle(invocation(
+            session,
+            turn,
+            "Read",
+            json!({ "file_path": path.to_string_lossy() }),
+        ))
+        .await;
+
+    let err = match result {
+        Ok(_) => panic!("image read must be rejected without image input"),
+        Err(err) => err,
+    };
+    assert!(
+        format!("{err:?}").contains("does not support image input"),
+        "unexpected error: {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -147,6 +224,55 @@ async fn bash_empty_failure_returns_claude_exit_code_message() {
     assert_eq!(
         result.err(),
         Some(FunctionCallError::RespondToModel("Exit code 1".to_string()))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bash_run_in_background_returns_captured_started_message_and_output_file() {
+    let (session, mut turn) = make_session_and_context().await;
+    set_danger_full_access(&mut turn);
+    let cwd = turn.cwd.clone();
+
+    let output = ClaudeBashHandler
+        .handle(invocation(
+            session,
+            turn,
+            "Bash",
+            json!({
+                "command": "echo HELLO_BG; sleep 2",
+                "description": "background sleep",
+                "run_in_background": true
+            }),
+        ))
+        .await
+        .expect("background bash should start, not return the old stub error")
+        .into_text();
+
+    // Matches the captured real Claude Code shape.
+    assert!(
+        output.starts_with("Command running in background with ID: "),
+        "unexpected start message: {output}"
+    );
+    assert!(
+        output.contains("Output is being written to: "),
+        "expected an output-file path: {output}"
+    );
+    // The output file the model is told about exists and collects output.
+    let path = output
+        .split("Output is being written to: ")
+        .nth(1)
+        .expect("output path")
+        .trim()
+        .to_string();
+    assert!(
+        path.starts_with(cwd.as_path().to_string_lossy().as_ref()),
+        "output file should be under the workspace: {path}"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let written = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+    assert!(
+        written.contains("HELLO_BG"),
+        "background output file should collect stdout, got: {written:?}"
     );
 }
 

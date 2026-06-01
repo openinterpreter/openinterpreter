@@ -9,6 +9,7 @@ use codex_api::AnthropicCacheControl;
 use codex_api::AnthropicContentBlock;
 use codex_api::AnthropicContextEdit;
 use codex_api::AnthropicContextManagement;
+use codex_api::AnthropicImageSource;
 use codex_api::AnthropicMessage;
 use codex_api::AnthropicMessageContent;
 use codex_api::AnthropicMessageRequest;
@@ -18,6 +19,7 @@ use codex_api::AnthropicRequestMetadata;
 use codex_api::AnthropicTextBlock;
 use codex_api::AnthropicThinkingConfig;
 use codex_api::AnthropicTool;
+use codex_api::AnthropicToolResultBlock;
 use codex_api::anthropic::AnthropicToolResultContent;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -669,16 +671,24 @@ fn build_claude_tool_result_content(
                 .iter()
                 .filter_map(map_tool_result_content_item)
                 .collect::<Vec<_>>();
-            if blocks.len() == 1 {
-                normalize_claude_tool_result_text(
+            match blocks.as_slice() {
+                [] => normalize_claude_tool_result_text(
                     tool_name,
-                    blocks[0].text.clone(),
+                    String::new(),
                     is_error,
                     todo_reminder_text,
                 )
-                .into()
-            } else {
-                blocks.into()
+                .into(),
+                // A single text block collapses to a plain text result, matching
+                // Claude. Image blocks (and mixed content) stay structured.
+                [AnthropicToolResultBlock::Text { text, .. }] => normalize_claude_tool_result_text(
+                    tool_name,
+                    text.clone(),
+                    is_error,
+                    todo_reminder_text,
+                )
+                .into(),
+                _ => blocks.into(),
             }
         }
     }
@@ -820,15 +830,31 @@ fn map_message_content_item(item: &ContentItem) -> Option<AnthropicContentBlock>
 
 fn map_tool_result_content_item(
     item: &FunctionCallOutputContentItem,
-) -> Option<AnthropicTextBlock> {
+) -> Option<AnthropicToolResultBlock> {
     match item {
-        FunctionCallOutputContentItem::InputText { text } => {
-            Some(AnthropicTextBlock::new(text.clone()))
+        FunctionCallOutputContentItem::InputText { text } => Some(AnthropicToolResultBlock::Text {
+            text: text.clone(),
+            cache_control: None,
+        }),
+        // Real Claude Code returns image file reads as an image tool-result
+        // block (`source: {type: base64, media_type, data}`), so pass the image
+        // through to the multimodal model instead of omitting it.
+        FunctionCallOutputContentItem::InputImage { image_url, .. } => {
+            parse_base64_data_url(image_url).map(|(media_type, data)| {
+                AnthropicToolResultBlock::Image {
+                    source: AnthropicImageSource::base64(media_type, data),
+                }
+            })
         }
-        FunctionCallOutputContentItem::InputImage { .. } => Some(AnthropicTextBlock::new(
-            "[image omitted by claude-code harness]".to_string(),
-        )),
     }
+}
+
+/// Parse a `data:<media_type>;base64,<data>` URL into `(media_type, data)`.
+fn parse_base64_data_url(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("data:")?;
+    let (meta, data) = rest.split_once(',')?;
+    let media_type = meta.strip_suffix(";base64")?;
+    Some((media_type.to_string(), data.to_string()))
 }
 
 fn map_claude_code_developer_content_item(item: &ContentItem) -> Option<AnthropicContentBlock> {
@@ -3134,10 +3160,28 @@ mod tests {
     }
 
     #[test]
+    fn read_image_tool_result_serializes_to_anthropic_image_block() {
+        let body =
+            FunctionCallOutputBody::ContentItems(vec![FunctionCallOutputContentItem::InputImage {
+                image_url: "data:image/png;base64,AAAB".to_string(),
+                detail: None,
+            }]);
+        let content = build_claude_tool_result_content(Some("Read"), &body, false, None);
+        let json = serde_json::to_value(&content).expect("serialize tool result");
+        assert_eq!(
+            json,
+            serde_json::json!([{
+                "type": "image",
+                "source": { "type": "base64", "media_type": "image/png", "data": "AAAB" }
+            }])
+        );
+    }
+
+    #[test]
     fn billing_header_version_matches_claude_code_suffix() {
         assert_eq!(
             build_billing_header_version("Use the Write tool exactly once"),
-            "2.1.143.190"
+            "2.1.150.2a5"
         );
     }
 
@@ -3147,7 +3191,7 @@ mod tests {
             build_billing_header_version(
                 "Create /tmp/child-proof.txt with exactly CHILD_OK followed by a newline, then reply with exactly the UTF-8 string whose hex bytes are 4348494c445f444f4e45 and nothing else."
             ),
-            "2.1.143.9b9"
+            "2.1.150.f6b"
         );
     }
 

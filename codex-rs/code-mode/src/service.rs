@@ -19,6 +19,7 @@ use crate::runtime::ExecuteRequest;
 use crate::runtime::RuntimeCommand;
 use crate::runtime::RuntimeEvent;
 use crate::runtime::RuntimeResponse;
+use crate::runtime::RuntimeTerminateHandle;
 use crate::runtime::TurnMessage;
 use crate::runtime::WaitOutcome;
 use crate::runtime::WaitRequest;
@@ -269,7 +270,7 @@ struct PendingResult {
 struct SessionControlContext {
     cell_id: String,
     runtime_tx: std::sync::mpsc::Sender<RuntimeCommand>,
-    runtime_terminate_handle: v8::IsolateHandle,
+    runtime_terminate_handle: RuntimeTerminateHandle,
 }
 
 fn missing_cell_response(cell_id: String) -> RuntimeResponse {
@@ -490,7 +491,7 @@ async fn run_session_control(
     inner.sessions.lock().await.remove(&cell_id);
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "v8-runtime"))]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;

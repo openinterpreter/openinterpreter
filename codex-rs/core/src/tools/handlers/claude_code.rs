@@ -30,13 +30,18 @@ use crate::tools::runtimes::shell::ShellRequest;
 use crate::tools::runtimes::shell::ShellRuntime;
 use crate::tools::runtimes::shell::ShellRuntimeBackend;
 use crate::tools::sandboxing::ToolError;
+use crate::unified_exec::ExecCommandRequest;
+use crate::unified_exec::UnifiedExecContext;
 use chrono::Datelike;
 use chrono::Local;
 use chrono::Timelike;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::SandboxErr;
+use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
+use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::SandboxPermissions;
+use codex_protocol::openai_models::InputModality;
 use codex_protocol::plan_tool::PlanItemArg;
 use codex_protocol::plan_tool::StepStatus;
 use codex_protocol::plan_tool::UpdatePlanArgs;
@@ -51,6 +56,8 @@ use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use codex_tools::normalize_request_user_input_args;
 use codex_tools::request_user_input_unavailable_message;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_image::PromptImageMode;
+use codex_utils_image::load_for_prompt_bytes;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -72,6 +79,13 @@ pub struct ClaudeWriteHandler;
 const CLAUDE_BASH_EMPTY_OUTPUT: &str = "(Bash completed with no output)";
 const CLAUDE_BASH_DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const CLAUDE_BASH_MAX_TIMEOUT_MS: u64 = 600_000;
+/// How long a backgrounded command runs in the foreground before this tool
+/// returns its `bash_id` and lets it keep running detached.
+const CLAUDE_BASH_BACKGROUND_START_YIELD_MS: u64 = 250;
+/// Background commands run far longer than foreground ones; without an explicit
+/// `timeout` they run for up to a day, then are terminated as a safety net.
+const CLAUDE_BASH_BACKGROUND_DEFAULT_TIMEOUT_MS: u64 = 60 * 60 * 1000;
+const CLAUDE_BASH_BACKGROUND_MAX_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
 pub(crate) const CLAUDE_TODO_WRITE_SUCCESS_MESSAGE: &str = "Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable";
 
 #[derive(Deserialize)]
@@ -199,6 +213,42 @@ impl ToolHandler for ClaudeReadHandler {
         let file_system_policy =
             effective_turn_file_system_policy(session.as_ref(), turn.as_ref()).await;
         ensure_readable_path(&file_system_policy, turn.as_ref(), &path)?;
+        // Image files are returned visually to a multimodal model, matching real
+        // Claude Code, instead of being read as text (which fails with a UTF-8
+        // error on binary data).
+        if is_image_file(path.as_path()) {
+            if !turn
+                .model_info
+                .input_modalities
+                .contains(&InputModality::Image)
+            {
+                return Err(FunctionCallError::RespondToModel(format!(
+                    "`{}` is an image file, but the current model does not support image input.",
+                    path.display()
+                )));
+            }
+            let bytes = tokio::fs::read(path.as_path())
+                .await
+                .map_err(|err| FunctionCallError::RespondToModel(format!("Read failed: {err}")))?;
+            let image = load_for_prompt_bytes(path.as_path(), bytes, PromptImageMode::ResizeToFit)
+                .map_err(|err| {
+                    FunctionCallError::RespondToModel(format!(
+                        "Read failed: unable to process image `{}`: {err}",
+                        path.display()
+                    ))
+                })?;
+            let image_url = image.into_data_url();
+            session
+                .record_claude_code_current_file(path.as_path())
+                .await;
+            return Ok(FunctionToolOutput::from_content(
+                vec![FunctionCallOutputContentItem::InputImage {
+                    image_url,
+                    detail: Some(DEFAULT_IMAGE_DETAIL),
+                }],
+                Some(true),
+            ));
+        }
         let content = tokio::fs::read_to_string(path.as_path())
             .await
             .map_err(|err| FunctionCallError::RespondToModel(format!("Read failed: {err}")))?;
@@ -708,9 +758,7 @@ impl ToolHandler for ClaudeBashHandler {
         };
         let args: ClaudeBashArgs = parse_arguments(&arguments)?;
         if args.run_in_background.unwrap_or(false) {
-            return Err(FunctionCallError::RespondToModel(
-                "run_in_background is not implemented for the claude-code harness yet.".to_string(),
-            ));
+            return run_claude_background_bash(session, turn, call_id, args).await;
         }
         let Some(_environment) = turn.environment.as_ref() else {
             return Err(FunctionCallError::RespondToModel(
@@ -874,6 +922,112 @@ impl ToolHandler for ClaudeBashHandler {
             }
         }
     }
+}
+
+/// Run a `Bash` command detached in the background, matching Claude Code's
+/// `run_in_background` behavior: the command's combined output is redirected
+/// to a file, and the tool returns
+/// `Command running in background with ID: <id>. Output is being written to:
+/// <path>`. The model retrieves progress by reading that file (claude-code-bare
+/// has no BashOutput/KillShell tool — it reads the file and kills via `Bash`).
+/// A safety-net timeout terminates the process if it outlives its limit.
+async fn run_claude_background_bash(
+    session: Arc<Session>,
+    turn: Arc<TurnContext>,
+    call_id: String,
+    args: ClaudeBashArgs,
+) -> Result<FunctionToolOutput, FunctionCallError> {
+    if turn.environment.as_ref().is_none() {
+        return Err(FunctionCallError::RespondToModel(
+            "Bash is unavailable in this session".to_string(),
+        ));
+    }
+    let timeout_ms = args
+        .timeout
+        .unwrap_or(CLAUDE_BASH_BACKGROUND_DEFAULT_TIMEOUT_MS)
+        .min(CLAUDE_BASH_BACKGROUND_MAX_TIMEOUT_MS);
+    let effective_permissions = apply_granted_turn_permissions(
+        session.as_ref(),
+        turn.cwd.as_path(),
+        SandboxPermissions::UseDefault,
+        None,
+    )
+    .await;
+    let manager = &session.services.unified_exec_manager;
+    let process_id = manager.allocate_process_id().await;
+
+    // Redirect combined output to a file under the workspace so the model can
+    // read it back, mirroring the captured "Output is being written to:" path.
+    let bg_dir = turn.cwd.as_path().join(".oi-background");
+    let output_file = bg_dir.join(format!("{process_id}.output"));
+    let bg_dir_str = bg_dir.to_string_lossy().to_string();
+    let output_file_str = output_file.to_string_lossy().to_string();
+    let wrapped = format!(
+        "mkdir -p \"{bg_dir_str}\" && {{ {} ; }} > \"{output_file_str}\" 2>&1",
+        args.command
+    );
+    let command = session
+        .user_shell()
+        .derive_exec_args(&wrapped, turn.tools_config.allow_login_shell);
+
+    let output = manager
+        .exec_command(
+            ExecCommandRequest {
+                command,
+                hook_command: args.command.clone(),
+                process_id,
+                yield_time_ms: CLAUDE_BASH_BACKGROUND_START_YIELD_MS,
+                max_output_tokens: None,
+                workdir: Some(turn.cwd.clone()),
+                network: turn.network.clone(),
+                tty: false,
+                sandbox_permissions: effective_permissions.sandbox_permissions,
+                additional_permissions: None,
+                additional_permissions_preapproved: effective_permissions.permissions_preapproved,
+                justification: args.description.clone(),
+                prefix_rule: None,
+                preserve_on_shutdown: true,
+            },
+            &UnifiedExecContext::new(session.clone(), turn.clone(), call_id),
+        )
+        .await
+        .map_err(|err| FunctionCallError::RespondToModel(format!("Bash failed: {err}")))?;
+
+    if output.process_id.is_some() {
+        spawn_claude_background_timeout(session.clone(), process_id, timeout_ms);
+    }
+    Ok(FunctionToolOutput::from_text(
+        format!(
+            "Command running in background with ID: {process_id}. Output is being written to: {output_file_str}"
+        ),
+        Some(true),
+    ))
+}
+
+fn spawn_claude_background_timeout(session: Arc<Session>, process_id: i32, timeout_ms: u64) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
+        session
+            .services
+            .unified_exec_manager
+            .terminate_process_if_running(process_id)
+            .await;
+    });
+}
+
+/// File extensions the `Read` tool returns visually (as an image content
+/// block) rather than reading as UTF-8 text. Mirrors the image formats
+/// `codex_utils_image::load_for_prompt_bytes` can decode.
+fn is_image_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|ext| {
+            matches!(
+                ext.as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+            )
+        })
 }
 
 pub(super) fn parse_absolute_path(path: &str) -> Result<AbsolutePathBuf, FunctionCallError> {

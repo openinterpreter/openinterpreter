@@ -501,7 +501,7 @@ cleanup_stale_install_artifacts() {
   find "$STANDALONE_ROOT" -mindepth 1 -maxdepth 1 -name '.current.*' -exec rm -f {} +
 
   if [ -d "$BIN_DIR" ]; then
-    find "$BIN_DIR" -mindepth 1 -maxdepth 1 -name '.interpreter.*' -exec rm -f {} +
+    find "$BIN_DIR" -mindepth 1 -maxdepth 1 \( -name '.interpreter.*' -o -name '.i.*' \) -exec rm -f {} +
   fi
 }
 
@@ -658,25 +658,29 @@ update_current_link() {
 
 update_visible_command() {
   mkdir -p "$BIN_DIR"
-  tmp_bin="$BIN_DIR/.interpreter.$$"
+  # Install both the full `interpreter` command and the short `i` alias.
+  for cmd_name in interpreter i; do
+    dest="$BIN_DIR/$cmd_name"
+    tmp_bin="$BIN_DIR/.$cmd_name.$$"
 
-  rm -f "$tmp_bin"
-  {
-    printf '%s\n' '#!/bin/sh'
-    printf '%s\n' "exec \"$CURRENT_LINK/interpreter\" \"\$@\""
-  } >"$tmp_bin"
-  chmod 0755 "$tmp_bin"
+    rm -f "$tmp_bin"
+    {
+      printf '%s\n' '#!/bin/sh'
+      printf '%s\n' "exec \"$CURRENT_LINK/interpreter\" \"\$@\""
+    } >"$tmp_bin"
+    chmod 0755 "$tmp_bin"
 
-  if mv -Tf "$tmp_bin" "$BIN_PATH" 2>/dev/null; then
-    return
-  fi
+    if mv -Tf "$tmp_bin" "$dest" 2>/dev/null; then
+      continue
+    fi
 
-  if mv -hf "$tmp_bin" "$BIN_PATH" 2>/dev/null; then
-    return
-  fi
+    if mv -hf "$tmp_bin" "$dest" 2>/dev/null; then
+      continue
+    fi
 
-  rm -f "$BIN_PATH"
-  mv -f "$tmp_bin" "$BIN_PATH"
+    rm -f "$dest"
+    mv -f "$tmp_bin" "$dest"
+  done
 }
 
 can_replace_existing_interpreter_command() {

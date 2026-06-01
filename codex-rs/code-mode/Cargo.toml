@@ -16,13 +16,22 @@ workspace = true
 async-channel = { workspace = true }
 async-trait = { workspace = true }
 codex-protocol = { workspace = true }
-deno_core_icudata = { workspace = true }
+deno_core_icudata = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
-v8 = { workspace = true }
+v8 = { workspace = true, optional = true }
+
+[features]
+# Off by default: the in-process V8 JavaScript runtime is enormous (~110 MB of
+# code + ICU data per binary) and is only needed by the under-development code
+# mode feature. Without it, code-mode still provides its tool-description /
+# schema helpers (no V8) and CodeModeService::execute() returns an error.
+# Enable when actually shipping code mode: --features codex-code-mode/v8-runtime
+default = []
+v8-runtime = ["dep:v8", "dep:deno_core_icudata"]
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

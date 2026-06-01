@@ -686,6 +686,11 @@ try {
             Move-Item -LiteralPath $stagingDir -Destination $releaseDir
         }
 
+        # Install the short `i` alias next to interpreter.exe so typing `i`
+        # also launches Open Interpreter.
+        $iCmdPath = Join-Path $releaseDir "i.cmd"
+        Set-Content -LiteralPath $iCmdPath -Value '@"%~dp0interpreter.exe" %*' -Encoding ASCII
+
         New-Item -ItemType Directory -Force -Path $standaloneRoot | Out-Null
         Ensure-Junction -LinkPath $currentDir -TargetPath $releaseDir -InstallerOwnedTargetPrefix $releasesDir
 

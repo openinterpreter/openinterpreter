@@ -1,3 +1,9 @@
+// Without the V8 runtime, the channel/runtime plumbing that feeds the gated
+// JS engine is intentionally unused — it exists to be driven by code that only
+// compiles with `v8-runtime`. Suppress dead-code noise in that configuration
+// only; full dead-code checking still applies when the runtime is built.
+#![cfg_attr(not(feature = "v8-runtime"), allow(dead_code))]
+
 mod description;
 mod response;
 mod runtime;

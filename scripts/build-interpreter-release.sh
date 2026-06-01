@@ -46,6 +46,14 @@ exec "$target_dir/interpreter" "\$@"
 EOF
 chmod +x "$shim_path"
 
+# Also install the short `i` alias next to `interpreter`.
+i_shim_path="$shim_dir/i"
+cat >"$i_shim_path" <<EOF
+#!/bin/sh
+exec "$target_dir/interpreter" "\$@"
+EOF
+chmod +x "$i_shim_path"
+
 echo
 echo "Built and verified:"
 for bin in "${required_bins[@]}"; do
