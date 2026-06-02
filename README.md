@@ -207,17 +207,17 @@ Or configure it in Python:
 ```python
 from interpreter import interpreter
 
-interpreter.llm.model = "openai/MiniMax-M2.7"
+interpreter.llm.model = "openai/MiniMax-M3"
 interpreter.llm.api_key = "your_api_key"
 interpreter.llm.api_base = "https://api.minimax.io/v1"
-interpreter.llm.context_window = 204800
+interpreter.llm.context_window = 512000
 interpreter.llm.max_tokens = 4096
 interpreter.llm.temperature = 1.0
 
 interpreter.chat()
 ```
 
-Available models: `MiniMax-M2.7` (default), `MiniMax-M2.7-highspeed` (faster), `MiniMax-M2.5`, and `MiniMax-M2.5-highspeed`.
+Available models: `MiniMax-M3` (default), `MiniMax-M2.7`, and `MiniMax-M2.7-highspeed` (faster).
 
 ### Running Open Interpreter locally
 
