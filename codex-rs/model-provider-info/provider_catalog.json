@@ -3347,17 +3347,6 @@
       "sort_priority": 21,
       "models": [
         {
-          "id": "gemma2-9b-it",
-          "display_name": "Gemma 2 9B",
-          "description": "gemma \u2022 Tool calling",
-          "reasoning": false,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 8192,
-          "priority": 0
-        },
-        {
           "id": "llama-3.1-8b-instant",
           "display_name": "Llama 3.1 8B Instant",
           "description": "llama \u2022 Tool calling",
@@ -3369,39 +3358,6 @@
           "priority": 1
         },
         {
-          "id": "llama3-8b-8192",
-          "display_name": "Llama 3 8B",
-          "description": "llama \u2022 Tool calling",
-          "reasoning": false,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 8192,
-          "priority": 2
-        },
-        {
-          "id": "mistral-saba-24b",
-          "display_name": "Mistral Saba 24B",
-          "description": "mistral \u2022 Tool calling",
-          "reasoning": false,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 32768,
-          "priority": 4
-        },
-        {
-          "id": "qwen-qwq-32b",
-          "display_name": "Qwen QwQ 32B",
-          "description": "qwen \u2022 Reasoning \u2022 Tool calling",
-          "reasoning": true,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 131072,
-          "priority": 5
-        },
-        {
           "id": "llama-3.3-70b-versatile",
           "display_name": "Llama 3.3 70B Versatile",
           "description": "llama \u2022 Tool calling",
@@ -3411,50 +3367,6 @@
           ],
           "context_window": 131072,
           "priority": 6
-        },
-        {
-          "id": "deepseek-r1-distill-llama-70b",
-          "display_name": "DeepSeek R1 Distill Llama 70B",
-          "description": "deepseek-thinking \u2022 Reasoning \u2022 Tool calling",
-          "reasoning": true,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 131072,
-          "priority": 8
-        },
-        {
-          "id": "llama3-70b-8192",
-          "display_name": "Llama 3 70B",
-          "description": "llama \u2022 Tool calling",
-          "reasoning": false,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 8192,
-          "priority": 10
-        },
-        {
-          "id": "moonshotai/kimi-k2-instruct-0905",
-          "display_name": "Kimi K2 Instruct 0905",
-          "description": "kimi \u2022 Tool calling",
-          "reasoning": false,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 262144,
-          "priority": 12
-        },
-        {
-          "id": "moonshotai/kimi-k2-instruct",
-          "display_name": "Kimi K2 Instruct",
-          "description": "kimi \u2022 Tool calling",
-          "reasoning": false,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 131072,
-          "priority": 13
         },
         {
           "id": "openai/gpt-oss-20b",
@@ -3533,18 +3445,6 @@
           ],
           "context_window": 131072,
           "priority": 23
-        },
-        {
-          "id": "meta-llama/llama-4-maverick-17b-128e-instruct",
-          "display_name": "Llama 4 Maverick 17B",
-          "description": "llama \u2022 Tool calling \u2022 Image input",
-          "reasoning": false,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 131072,
-          "priority": 25
         }
       ]
     },
