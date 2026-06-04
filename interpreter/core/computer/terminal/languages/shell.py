@@ -8,7 +8,7 @@ from .subprocess_language import SubprocessLanguage
 class Shell(SubprocessLanguage):
     file_extension = "sh"
     name = "Shell"
-    aliases = ["bash", "sh", "zsh", "batch", "bat"]
+    aliases = ["bash", "sh", "zsh", "batch", "bat", "cmd"]
 
     def __init__(
         self,
