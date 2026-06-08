@@ -20,12 +20,8 @@
 
 [![A close-up of a laptop screen running a terminal agent](https://www.openinterpreter.com/blog/open-interpreter-1-0/blog-hero-1.jpg)](https://www.openinterpreter.com/docs/terminal)
 
-<br>
-
 > [!NOTE]
-> **JUNE 2026: THE NEW ● OPEN INTERPRETER is in pre-release.** Check out the [blog post](https://www.openinterpreter.com/blog/open-interpreter-1-0) and let us know what you think on [Discord](https://discord.gg/Hvz9Axh84z).
-
-<br>
+> June 8th 2026: **Open Interpreter 1.0 is in pre-release.** Check out the [blog post](https://www.openinterpreter.com/blog/open-interpreter-1-0) and let us know what you think on [Discord](https://discord.gg/Hvz9Axh84z).
 
 ### Installation
 
@@ -42,8 +38,6 @@ irm https://openinterpreter.com/install.ps1 | iex
 ```
 
 Then type `i` or `interpreter` in your terminal to start a session.
-
-<br>
 
 ### Harness Emulation
 
@@ -66,13 +60,9 @@ minimal
 
 Read more in the [harness docs](https://www.openinterpreter.com/docs/terminal/harness) and [model provider docs](https://www.openinterpreter.com/docs/terminal/providers).
 
-<br>
-
 ### Computer Use
 
 Open Interpreter ships with a QA skill that lets any model operate and test interfaces. It can drive web apps in a real browser with [agent-browser](https://github.com/vercel-labs/agent-browser), or operate and test native apps with [trycua](https://github.com/trycua/cua).
-
-<br>
 
 ### Features
 
@@ -84,8 +74,6 @@ Open Interpreter ships with a QA skill that lets any model operate and test inte
 - Keeps config and session state local under `~/.openinterpreter`.
 - Supports `exec`, MCP, skills, hooks, permissions, and `AGENTS.md`.
 
-<br>
-
 ### Documentation
 
 - [Terminal docs](https://www.openinterpreter.com/docs/terminal)
@@ -96,8 +84,6 @@ Open Interpreter ships with a QA skill that lets any model operate and test inte
 - [Harnesses](https://www.openinterpreter.com/docs/terminal/harness)
 - [Model providers](https://www.openinterpreter.com/docs/terminal/providers)
 - [Sandbox & approvals](https://www.openinterpreter.com/docs/terminal/sandbox)
-
-<br>
 
 ### License
 
