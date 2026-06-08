@@ -1,75 +1,104 @@
-# Open Interpreter
+<h1 align="center">Open Interpreter</h1>
 
-Open Interpreter is a provider-agnostic coding agent for your terminal.
+<p align="center">A coding agent for low-cost models.</p>
 
-It is based on the OpenAI Codex CLI surface, with Open Interpreter defaults for
-provider choice, local state, and the interactive TUI.
+<p align="center">
+  <a href="https://discord.gg/Hvz9Axh84z"><img alt="Discord" src="https://img.shields.io/discord/1146610656779440188?style=flat-square&label=Discord" /></a>
+  <a href="https://www.openinterpreter.com/docs/terminal"><img alt="Documentation" src="https://img.shields.io/badge/Documentation-white?style=flat-square" /></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache--2.0-white?style=flat-square" /></a>
+</p>
 
----
+<p align="center">
+  <a href="https://www.openinterpreter.com"><img alt="English" src="https://img.shields.io/badge/English-white?style=flat-square" /></a>
+  <a href="https://www.openinterpreter.com/es"><img alt="Español" src="https://img.shields.io/badge/Espa%C3%B1ol-white?style=flat-square" /></a>
+  <a href="https://www.openinterpreter.com/fr"><img alt="Français" src="https://img.shields.io/badge/Fran%C3%A7ais-white?style=flat-square" /></a>
+  <a href="https://www.openinterpreter.com/de"><img alt="Deutsch" src="https://img.shields.io/badge/Deutsch-white?style=flat-square" /></a>
+  <a href="https://www.openinterpreter.com/pt"><img alt="Português" src="https://img.shields.io/badge/Portugu%C3%AAs-white?style=flat-square" /></a>
+  <a href="https://www.openinterpreter.com/zh"><img alt="中文" src="https://img.shields.io/badge/%E4%B8%AD%E6%96%87-white?style=flat-square" /></a>
+  <a href="https://www.openinterpreter.com/ja"><img alt="日本語" src="https://img.shields.io/badge/%E6%97%A5%E6%9C%AC%E8%AA%9E-white?style=flat-square" /></a>
+</p>
 
-## Installation
+[![A close-up of a laptop screen running a terminal agent](https://www.openinterpreter.com/blog/open-interpreter-1-0/blog-hero-1.jpg)](https://www.openinterpreter.com/docs/terminal)
+
+<br>
+
+> [!NOTE]
+> **JUNE 2026: THE NEW ● OPEN INTERPRETER is in pre-release.** Check out the [blog post](https://www.openinterpreter.com/blog/open-interpreter-1-0) and let us know what you think on [Discord](https://discord.gg/Hvz9Axh84z).
+
+<br>
+
+### Installation
+
+macOS and Linux:
 
 ```bash
-# macOS and Linux
 curl -fsSL https://openinterpreter.com/install | sh
 ```
 
+Windows:
+
 ```powershell
-# Windows
 irm https://openinterpreter.com/install.ps1 | iex
 ```
 
-After installation, start Open Interpreter in any project:
+Then type `i` or `interpreter` in your terminal to start a session.
 
-```bash
-interpreter
+<br>
+
+### Harness Emulation
+
+Open Interpreter is a fork of OpenAI's Codex, with a focus on emulating the agent harness that gets the best performance out of low-cost models.
+
+Use `/harness` to switch the active harness:
+
+```text
+> /harness
+
+native
+claude-code
+claude-code-bare
+kimi-cli
+qwen-code
+deepseek-tui
+swe-agent
+minimal
 ```
 
-`i` is a built-in shorthand for `interpreter` — `i` and `interpreter` are
-interchangeable, so you can just type:
+Read more in the [harness docs](https://www.openinterpreter.com/docs/terminal/harness) and [model provider docs](https://www.openinterpreter.com/docs/terminal/providers).
 
-```bash
-i
-```
+<br>
 
-You will be prompted to sign in or configure a provider, then Open Interpreter
-will work in the current directory.
+### Computer Use
 
-## What You Can Do
+Open Interpreter ships with a QA skill that lets any model operate and test interfaces. It can drive web apps in a real browser with [agent-browser](https://github.com/vercel-labs/agent-browser), or operate and test native apps with [trycua](https://github.com/trycua/cua).
 
-- Ask questions about the codebase in the current directory.
-- Make edits, run commands, and inspect files from the terminal.
-- Switch providers and models without changing tools.
-- Use `interpreter exec` for non-interactive scripting.
-- Keep config and session state local under `~/.openinterpreter`.
+<br>
 
-## CLI Compatibility
+### Features
 
-`interpreter` preserves the Codex CLI command surface under the Open
-Interpreter name. Subcommands, flags, and non-interactive flows should behave
-like their Codex CLI equivalents.
+- Runs commands inside native sandboxing on macOS, Linux, and Windows.
+- Switches providers and models from the TUI with `/model`.
+- Inspects or switches Rust-native model harnesses with `/harness`.
+- Tests web and native apps through the built-in QA skill.
+- Shares one local runtime across terminal tabs instead of starting a full agent runtime for every session.
+- Keeps config and session state local under `~/.openinterpreter`.
+- Supports `exec`, MCP, skills, hooks, permissions, and `AGENTS.md`.
 
-The intentional difference is bare startup: running `interpreter` without a
-subcommand starts Open Interpreter's app-server-backed interactive TUI.
+<br>
 
-For programmatic integrations, use OpenAI's Codex SDK and point it at
-`interpreter` or `interpreter-app-server`. See [the SDK docs](./docs/sdk.md).
+### Documentation
 
-## Building Locally
+- [Terminal docs](https://www.openinterpreter.com/docs/terminal)
+- [Quickstart](https://www.openinterpreter.com/docs/terminal/quickstart)
+- [Install guide](https://www.openinterpreter.com/docs/terminal/install)
+- [Configuration](https://www.openinterpreter.com/docs/terminal/config)
+- [CLI reference](https://www.openinterpreter.com/docs/terminal/cli-reference)
+- [Harnesses](https://www.openinterpreter.com/docs/terminal/harness)
+- [Model providers](https://www.openinterpreter.com/docs/terminal/providers)
+- [Sandbox & approvals](https://www.openinterpreter.com/docs/terminal/sandbox)
 
-For local release builds from this checkout, use the repository build script:
+<br>
 
-```bash
-./scripts/build-interpreter-release.sh
-```
-
-Do not build only `interpreter` by itself for local release testing. The
-user-facing binary is a launcher/router and depends on sibling release
-binaries at runtime: `interpreter-tui`, `interpreter-root-tui`,
-`interpreter-app-server`, and `interpreter-exec`.
-
-See [BUILDING.md](./BUILDING.md) for the full local build contract.
-
-## License
+### License
 
 Apache-2.0
