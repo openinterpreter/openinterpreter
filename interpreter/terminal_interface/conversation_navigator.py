@@ -76,8 +76,12 @@ def conversation_navigator(interpreter):
 
     selected_filename = readable_names_and_filenames[answers["name"]]
 
-    # Open the selected file and load the JSON data
-    with open(os.path.join(conversations_dir, selected_filename), "r") as f:
+    # Open the selected file and load the JSON data. Read as UTF-8 to match how
+    # conversations are written and to avoid UnicodeDecodeError on non-ASCII
+    # content under the Windows locale codepage.
+    with open(
+        os.path.join(conversations_dir, selected_filename), "r", encoding="utf-8"
+    ) as f:
         messages = json.load(f)
 
     # Pass the data into render_past_conversation
