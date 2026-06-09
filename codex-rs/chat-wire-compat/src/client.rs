@@ -326,6 +326,9 @@ fn synthetic_sse_from_chat_completion_response(body: &[u8]) -> Result<String, Ap
         if let Some(reasoning_content) = message.get("reasoning_content") {
             delta.insert("reasoning_content".to_string(), reasoning_content.clone());
         }
+        if let Some(reasoning) = message.get("reasoning") {
+            delta.insert("reasoning".to_string(), reasoning.clone());
+        }
         if let Some(tool_calls) = message.get("tool_calls") {
             delta.insert("tool_calls".to_string(), tool_calls.clone());
         }
@@ -531,6 +534,28 @@ mod tests {
         assert!(sse.contains("\"tool_calls\""));
         assert!(sse.contains("\"finish_reason\":\"tool_calls\""));
         assert!(sse.contains("\"id\":\"bash:0\""));
+    }
+
+    #[test]
+    fn synthetic_sse_from_non_streaming_response_preserves_reasoning() {
+        let body = serde_json::json!({
+            "id": "chatcmpl-test",
+            "model": "qwen3.5:0.8b",
+            "choices": [{
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "hello",
+                    "reasoning": "think first"
+                }
+            }]
+        });
+
+        let sse = synthetic_sse_from_chat_completion_response(&body.to_string().into_bytes())
+            .expect("synthetic sse");
+
+        assert!(sse.contains("\"reasoning\":\"think first\""));
     }
 
     fn test_request() -> ResponsesApiRequest {

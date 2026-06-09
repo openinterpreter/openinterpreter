@@ -45,6 +45,9 @@ struct Delta {
     content: Option<Value>,
     #[serde(default)]
     reasoning_content: Option<String>,
+    // Ollama/OpenRouter send thinking as `reasoning`; DeepSeek as `reasoning_content`.
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<ToolCallDelta>>,
 }
@@ -223,7 +226,7 @@ async fn process_chat_sse(
 
         for choice in chunk.choices {
             if let Some(delta) = choice.delta {
-                if let Some(reasoning_content) = delta.reasoning_content
+                if let Some(reasoning_content) = delta.reasoning_content.or(delta.reasoning)
                     && !reasoning_content.is_empty()
                 {
                     if !state.reasoning_item_started {
@@ -356,7 +359,7 @@ async fn process_chat_sse(
 }
 
 fn extract_text_deltas(content: &Value) -> Vec<String> {
-    match content {
+    let mut texts = match content {
         Value::String(text) => vec![text.clone()],
         Value::Array(parts) => parts
             .iter()
@@ -369,7 +372,11 @@ fn extract_text_deltas(content: &Value) -> Vec<String> {
             .into_iter()
             .collect(),
         Value::Bool(_) | Value::Null | Value::Number(_) => Vec::new(),
-    }
+    };
+    // Ollama pairs every `reasoning` delta with an empty-string `content`;
+    // empty fragments must not start an assistant message item.
+    texts.retain(|text| !text.is_empty());
+    texts
 }
 
 fn ensure_partial_tool_call(
@@ -822,6 +829,67 @@ mod tests {
             }) if content == &vec![ReasoningItemContent::ReasoningText {
                 text: "think again".to_string(),
             }]
+        )));
+    }
+
+    #[tokio::test]
+    async fn spawn_chat_stream_parses_ollama_reasoning_deltas() {
+        // Ollama's OpenAI-compat endpoint streams parsed thinking as `reasoning`
+        // and pairs it with an empty-string `content` on the same chunks
+        // (observed live on Ollama 0.30.7 with qwen3.5). The empty content
+        // fragments must not start an assistant message item.
+        let sse = concat!(
+            "data: {\"id\":\"chatcmpl-323\",\"object\":\"chat.completion.chunk\",\"created\":0,",
+            "\"model\":\"qwen3.5:0.8b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",",
+            "\"content\":\"\",\"reasoning\":\"think \"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-323\",\"object\":\"chat.completion.chunk\",\"created\":0,",
+            "\"model\":\"qwen3.5:0.8b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",",
+            "\"content\":\"\",\"reasoning\":\"again\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-323\",\"object\":\"chat.completion.chunk\",\"created\":0,",
+            "\"model\":\"qwen3.5:0.8b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",",
+            "\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-323\",\"object\":\"chat.completion.chunk\",\"created\":0,",
+            "\"model\":\"qwen3.5:0.8b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",",
+            "\"content\":\"\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let mut stream = spawn_chat_stream(
+            Box::pin(futures::stream::once(async move { Ok(sse.into()) })),
+            Duration::from_secs(1),
+            /*telemetry*/ None,
+            HashMap::new(),
+        );
+
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event.expect("chat stream event"));
+        }
+
+        assert!(matches!(
+            &events[2],
+            ResponseEvent::OutputItemAdded(ResponseItem::Reasoning { .. })
+        ));
+        assert!(matches!(
+            &events[3],
+            ResponseEvent::ReasoningContentDelta { delta, .. } if delta == "think "
+        ));
+        assert!(matches!(
+            &events[4],
+            ResponseEvent::ReasoningContentDelta { delta, .. } if delta == "again"
+        ));
+        assert!(matches!(
+            &events[5],
+            ResponseEvent::OutputItemAdded(ResponseItem::Message { .. })
+        ));
+        assert!(matches!(
+            &events[6],
+            ResponseEvent::OutputTextDelta(delta) if delta == "hello"
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ResponseEvent::OutputItemDone(ResponseItem::Message { content, .. })
+                if content == &vec![ContentItem::OutputText { text: "hello".to_string() }]
         )));
     }
 }
