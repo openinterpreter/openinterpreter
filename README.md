@@ -31,6 +31,10 @@ Windows:
 irm https://www.openinterpreter.com/install.ps1 | iex
 ```
 
+Use the `www.openinterpreter.com` host in PowerShell. Windows PowerShell 5.1
+does not follow the apex-domain `308 Permanent Redirect` from
+`openinterpreter.com` before evaluating the installer script.
+
 Then type `i` or `interpreter` in your terminal to start a session.
 
 ### Harness Emulation

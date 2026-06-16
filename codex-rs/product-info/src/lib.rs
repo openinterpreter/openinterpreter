@@ -234,6 +234,11 @@ mod tests {
                 .install_command()
                 .contains("https://www.openinterpreter.com/install")
         );
+        assert!(
+            !Product::OpenInterpreter
+                .install_command()
+                .contains("https://openinterpreter.com/install")
+        );
         assert_eq!(
             Product::OpenInterpreter.installer_env(),
             &[("CODEX_NON_INTERACTIVE", "1")]

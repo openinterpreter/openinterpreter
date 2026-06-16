@@ -18,6 +18,10 @@ files, run commands, review diffs, and resume work later.
     ```powershell
     irm https://www.openinterpreter.com/install.ps1 | iex
     ```
+
+    Use the `www.openinterpreter.com` host exactly as shown. Windows
+    PowerShell 5.1 does not follow the apex-domain `308 Permanent Redirect`
+    from `openinterpreter.com` before evaluating the installer script.
   </Step>
   <Step title="Open a project">
     ```bash
