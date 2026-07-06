@@ -9,6 +9,10 @@ Install from PowerShell:
 irm https://www.openinterpreter.com/install.ps1 | iex
 ```
 
+Use the `www.openinterpreter.com` host exactly as shown. Windows PowerShell 5.1
+does not follow the apex-domain `308 Permanent Redirect` from
+`openinterpreter.com` before evaluating the installer script.
+
 Restart the terminal, then verify:
 
 ```powershell
