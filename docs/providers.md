@@ -58,6 +58,65 @@ Use `wire_api = "responses"` for OpenAI Responses-compatible providers,
 `wire_api = "chat"` for OpenAI-compatible chat-completions providers, and
 `wire_api = "messages"` only for Anthropic Messages-compatible providers.
 
+### Example: DaoXE multi-protocol gateway
+
+[DaoXE](https://daoxe.com/) is a multi-model, multi-protocol API gateway (OpenAI
+Chat Completions / Responses and Anthropic Messages / Claude protocol, plus
+image-compatible endpoints where available). It is **not available in mainland
+China**. Model IDs are account-scoped — list them with
+`GET https://daoxe.com/v1/models` rather than hardcoding a blog list.
+
+OpenAI-compatible Chat Completions path (`wire_api = "chat"`):
+
+```toml
+model_provider = "daoxe"
+model = "YOUR_LIVE_MODEL_ID"  # from GET https://daoxe.com/v1/models
+
+[model_providers.daoxe]
+name = "DaoXE"
+base_url = "https://daoxe.com/v1"
+env_key = "DAOXE_API_KEY"
+wire_api = "chat"
+```
+
+```bash
+export DAOXE_API_KEY="your_daoxe_api_key"
+```
+
+Anthropic Messages / Claude protocol path (`wire_api = "messages"`) on the same
+host:
+
+```toml
+model_provider = "daoxe-messages"
+model = "YOUR_LIVE_MODEL_ID"
+
+[model_providers.daoxe-messages]
+name = "DaoXE (Anthropic Messages)"
+base_url = "https://daoxe.com/v1"
+env_key = "DAOXE_API_KEY"
+wire_api = "messages"
+```
+
+Smoke the endpoints before relying on the TUI:
+
+```bash
+# Chat Completions
+curl -H "Authorization: Bearer $DAOXE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"YOUR_LIVE_MODEL_ID","max_tokens":8,"messages":[{"role":"user","content":"Reply with OK."}]}' \
+  https://daoxe.com/v1/chat/completions
+
+# Anthropic Messages
+curl -H "x-api-key: $DAOXE_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"YOUR_LIVE_MODEL_ID","max_tokens":8,"messages":[{"role":"user","content":"Reply with OK."}]}' \
+  https://daoxe.com/v1/messages
+```
+
+Disclosure: this example was contributed by someone affiliated with DaoXE. Prefer
+live catalog IDs and your own latency/cost checks before production use.
+
 ## Authentication
 
 Provider auth can come from:
