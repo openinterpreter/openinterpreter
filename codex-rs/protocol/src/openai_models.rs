@@ -385,8 +385,53 @@ impl TruncationPolicyConfig {
 }
 
 /// Semantic version triple encoded as an array in JSON (e.g. [0, 62, 0]).
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, TS, JsonSchema)]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, TS, JsonSchema)]
 pub struct ClientVersion(pub i32, pub i32, pub i32);
+
+impl<'de> Deserialize<'de> for ClientVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum ClientVersionRepr {
+            Array([i32; 3]),
+            String(String),
+        }
+
+        match ClientVersionRepr::deserialize(deserializer)? {
+            ClientVersionRepr::Array([major, minor, patch]) => Ok(Self(major, minor, patch)),
+            ClientVersionRepr::String(version) => {
+                let mut components = version.split('.');
+                let parse_component = |component: Option<&str>, name: &str| {
+                    let component = component
+                        .ok_or_else(|| D::Error::custom(format!("missing {name} version")))?;
+                    let component = component.parse::<i32>().map_err(|_| {
+                        D::Error::custom(format!("invalid {name} version component: {component}"))
+                    })?;
+                    if component < 0 {
+                        return Err(D::Error::custom(format!(
+                            "{name} version component must be non-negative: {component}"
+                        )));
+                    }
+                    Ok(component)
+                };
+
+                let major = parse_component(components.next(), "major")?;
+                let minor = parse_component(components.next(), "minor")?;
+                let patch = parse_component(components.next(), "patch")?;
+                if components.next().is_some() {
+                    return Err(D::Error::custom(format!(
+                        "client version must have three components: {version}"
+                    )));
+                }
+
+                Ok(Self(major, minor, patch))
+            }
+        }
+    }
+}
 
 const fn default_effective_context_window_percent() -> i64 {
     95
@@ -406,6 +451,8 @@ pub struct ModelInfo {
     pub reasoning_control: ReasoningControl,
     pub shell_type: ConfigShellToolType,
     pub visibility: ModelVisibility,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimal_client_version: Option<ClientVersion>,
     pub supported_in_api: bool,
     pub priority: i32,
     #[serde(default)]
@@ -753,6 +800,7 @@ mod tests {
             reasoning_control: ReasoningControl::None,
             shell_type: ConfigShellToolType::ShellCommand,
             visibility: ModelVisibility::List,
+            minimal_client_version: None,
             supported_in_api: true,
             priority: 1,
             additional_speed_tiers: Vec::new(),
@@ -786,6 +834,21 @@ mod tests {
             tool_mode: None,
             multi_agent_version: None,
         }
+    }
+
+    #[test]
+    fn client_version_accepts_array_and_string_forms() {
+        let array: ClientVersion =
+            from_str("[0, 124, 0]").expect("array client version should deserialize");
+        let string: ClientVersion =
+            from_str("\"0.124.0\"").expect("string client version should deserialize");
+
+        assert_eq!(array, string);
+        assert!(ClientVersion(0, 0, 21) < array);
+        assert_eq!(
+            to_string(&array).expect("client version should serialize"),
+            "[0,124,0]"
+        );
     }
 
     fn personality_variables() -> ModelInstructionsVariables {

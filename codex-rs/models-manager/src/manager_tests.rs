@@ -42,7 +42,7 @@ fn remote_model_with_visibility(
             "supported_reasoning_levels": [{"effort": "low", "description": "low"}, {"effort": "medium", "description": "medium"}],
             "shell_type": "shell_command",
             "visibility": visibility,
-            "minimal_client_version": [0, 1, 0],
+            "minimal_client_version": [0, 0, 1],
             "supported_in_api": true,
             "priority": priority,
             "upgrade": null,
@@ -994,6 +994,46 @@ fn build_available_models_picks_default_after_hiding_hidden_models() {
     let available = manager.build_available_models(vec![hidden_model, visible_model]);
 
     assert_eq!(available, vec![expected_hidden, expected_visible]);
+}
+
+#[test]
+fn build_available_models_hides_models_requiring_newer_client() {
+    let manager = static_manager_for_tests(ModelsResponse { models: Vec::new() });
+
+    let mut incompatible = serde_json::to_value(remote_model(
+        "requires-newer-client",
+        "Requires Newer Client",
+        /*priority*/ 0,
+    ))
+    .expect("model should serialize");
+    incompatible["minimal_client_version"] = json!([0, 124, 0]);
+    let incompatible: ModelInfo =
+        serde_json::from_value(incompatible).expect("model should deserialize");
+    let compatible = remote_model("compatible", "Compatible", /*priority*/ 1);
+
+    let mut expected_compatible = ModelPreset::from(compatible.clone());
+    expected_compatible.is_default = true;
+
+    let available = manager.build_available_models(vec![incompatible, compatible]);
+
+    assert_eq!(available, vec![expected_compatible]);
+}
+
+#[tokio::test]
+async fn bundled_models_only_expose_compatible_models() {
+    let manager = static_manager_for_tests(
+        crate::bundled_models_response().expect("bundled model catalog should deserialize"),
+    );
+
+    let available = manager.list_models(RefreshStrategy::Offline).await;
+
+    assert_eq!(
+        available
+            .iter()
+            .map(|model| model.model.as_str())
+            .collect::<Vec<_>>(),
+        vec!["gpt-5.2"]
+    );
 }
 
 #[tokio::test]
