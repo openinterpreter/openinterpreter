@@ -345,6 +345,7 @@ fn test_remote_model(slug: &str, priority: i32) -> ModelInfo {
         reasoning_control: codex_protocol::openai_models::ReasoningControl::None,
         shell_type: ConfigShellToolType::ShellCommand,
         visibility: ModelVisibility::List,
+        minimal_client_version: None,
         supported_in_api: true,
         priority,
         additional_speed_tiers: Vec::new(),

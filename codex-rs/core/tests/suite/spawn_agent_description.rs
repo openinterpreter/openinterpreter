@@ -57,6 +57,7 @@ fn test_model_info(
         reasoning_control: codex_protocol::openai_models::ReasoningControl::None,
         shell_type: ConfigShellToolType::ShellCommand,
         visibility,
+        minimal_client_version: None,
         supported_in_api: true,
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: false,

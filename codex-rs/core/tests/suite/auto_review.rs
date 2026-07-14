@@ -227,6 +227,7 @@ fn remote_model_with_auto_review_override(slug: &str, review_model: &str) -> Mod
         reasoning_control: codex_protocol::openai_models::ReasoningControl::None,
         shell_type: ConfigShellToolType::ShellCommand,
         visibility: ModelVisibility::List,
+        minimal_client_version: None,
         supported_in_api: true,
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: false,

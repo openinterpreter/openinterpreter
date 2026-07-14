@@ -19,6 +19,7 @@ fn model_with_shell_type(shell_type: ConfigShellToolType) -> ModelInfo {
         reasoning_control: Default::default(),
         shell_type,
         visibility: ModelVisibility::List,
+        minimal_client_version: None,
         supported_in_api: true,
         priority: 0,
         additional_speed_tiers: Vec::new(),

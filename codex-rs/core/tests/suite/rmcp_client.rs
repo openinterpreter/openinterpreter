@@ -1644,6 +1644,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                 reasoning_control: codex_protocol::openai_models::ReasoningControl::None,
                 shell_type: ConfigShellToolType::Default,
                 visibility: ModelVisibility::List,
+                minimal_client_version: None,
                 supported_in_api: true,
                 priority: 1,
                 additional_speed_tiers: Vec::new(),
