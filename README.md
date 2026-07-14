@@ -1,6 +1,6 @@
 <h1 align="center">Open Interpreter</h1>
 
-<p align="center">A coding agent for low-cost models.</p>
+<p align="center">A coding agent optimized for low-cost models. <a href="https://www.openinterpreter.com/blog/open-interpreter"><strong>Blog post ↗</strong></a></p>
 
 <p align="center">
   <a href="https://discord.gg/Hvz9Axh84z"><img alt="Discord" src="https://img.shields.io/discord/1146610656779440188?style=flat-square&label=Discord" /></a>
@@ -8,17 +8,13 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache--2.0-white?style=flat-square" /></a>
 </p>
 
+<br>
+
 <p align="center">
-  <a href="https://www.openinterpreter.com/docs/terminal">
-    <img alt="A close-up of a laptop screen running a terminal agent" src="https://www.openinterpreter.com/blog/open-interpreter-1-0/blog-hero-1.jpg" width="720" />
+  <a href="https://www.openinterpreter.com/blog/open-interpreter">
+    <img alt="Open Interpreter running in a terminal" src="https://openinterpreter.com/blog/open-interpreter/blog-hero-1.jpg" width="100%" />
   </a>
 </p>
-
-> [!NOTE]
-> This is the new Rust version of Open Interpreter. Looking for the original Python project? It lives on as a community-maintained fork at [endolith/open-interpreter](https://github.com/endolith/open-interpreter).
-
-> [!TIP]
-> **New: GLM-5.2 with ZCode emulation.** Open Interpreter now includes a Rust-native `zcode` harness for GLM-5.2, designed to give GLM its best coding-agent workflow directly in your terminal.
 
 ### Installation
 
@@ -82,6 +78,10 @@ Open Interpreter ships with a QA skill that lets any model operate and test inte
 - [Harnesses](https://www.openinterpreter.com/docs/terminal/harness)
 - [Model providers](https://www.openinterpreter.com/docs/terminal/providers)
 - [Sandbox & approvals](https://www.openinterpreter.com/docs/terminal/sandbox)
+
+
+> [!NOTE]
+> This is the new Rust version of Open Interpreter, based on Codex. Looking for the original Python project? It lives on as a community-maintained fork at [endolith/open-interpreter](https://github.com/endolith/open-interpreter).
 
 ### License
 
