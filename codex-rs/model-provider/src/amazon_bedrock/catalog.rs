@@ -61,6 +61,7 @@ fn gpt_5_bedrock_model(openai_slug: &str, bedrock_slug: &str, priority: i32) -> 
     model.priority = priority;
     model.context_window = Some(GPT_5_BEDROCK_CONTEXT_WINDOW);
     model.max_context_window = Some(GPT_5_BEDROCK_CONTEXT_WINDOW);
+    model.minimal_client_version = None;
     model.availability_nux = None;
     model.upgrade = None;
     model
@@ -156,6 +157,7 @@ mod tests {
             expected.slug = slug.to_string();
             expected.display_name = display_name.to_string();
             expected.priority = priority;
+            expected.minimal_client_version = None;
             expected
                 .supported_reasoning_levels
                 .push(ReasoningEffortPreset {
