@@ -28,8 +28,9 @@ interpreter -c harness='"kimi-code"' "solve this task"
 | --- | --- | --- | --- |
 | unset or `""` | `responses` | Responses API | Native Open Interpreter/Codex-compatible surface |
 | unset or `""` | `chat` | Chat Completions compatibility | Generic OpenAI-compatible chat providers |
-| `claude-code` | `messages` | Anthropic Messages harness | [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) full agent surface |
-| `claude-code-bare` | `messages` | Anthropic Messages harness | [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) bare profile |
+| `claude-code` | `responses`, `chat`, or `messages` | Claude Code shaping over the provider transport | [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) full agent surface |
+| `claude-code-bare` | `responses`, `chat`, or `messages` | Claude Code shaping over the provider transport | [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) bare profile |
+| `zcode` | `messages` | Anthropic Messages harness | ZCode-shaped GLM coding-agent surface |
 | `deepseek-tui` | `chat` | Chat harness | [DeepSeek TUI](https://github.com/DeepSeek-TUI/DeepSeek-TUI) / [CodeWhale](https://www.codewhale.ai/) |
 | `kimi-code` | `chat` | Chat harness | Current [Kimi Code](https://www.kimi.com/code/docs/en/) / [GitHub](https://github.com/MoonshotAI/kimi-code) profile |
 | `kimi-cli` | `chat` | Chat harness | Legacy [Kimi CLI](https://moonshotai.github.io/kimi-cli/) / [GitHub](https://github.com/MoonshotAI/kimi-cli) profile |
@@ -45,6 +46,8 @@ surfaces informed the corresponding harness modes:
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview)
   from Anthropic.
+- ZCode, a GLM coding-agent surface used with Anthropic Messages-compatible
+  endpoints such as Z.AI's Coding Plan endpoint.
 - [DeepSeek TUI](https://github.com/DeepSeek-TUI/DeepSeek-TUI), with product
   context at [CodeWhale](https://www.codewhale.ai/).
 - Current [Kimi Code](https://www.kimi.com/code/docs/en/) and its
@@ -62,9 +65,9 @@ Harness routing is strict:
 
 | Provider `wire_api` | Compatible harnesses |
 | --- | --- |
-| `responses` | Native only. `claude-code` and `claude-code-bare` are rejected because they require `messages`. |
-| `chat` | Native chat compatibility, `deepseek-tui`, `kimi-code`, `kimi-cli`, `qwen-code`, `swe-agent`, and `minimal`. |
-| `messages` | `claude-code` and `claude-code-bare` only. Native mode is rejected because Messages requires a harness-native transport. |
+| `responses` | Native Responses, `claude-code`, and `claude-code-bare`. |
+| `chat` | Native chat compatibility, `claude-code`, `claude-code-bare`, `deepseek-tui`, `kimi-code`, `kimi-cli`, `qwen-code`, `swe-agent`, and `minimal`. |
+| `messages` | `claude-code`, `claude-code-bare`, and `zcode`. Native mode is rejected because Messages requires a harness-native transport. |
 
 This means an Anthropic-style provider normally needs:
 
@@ -86,7 +89,7 @@ the selected provider/model:
 | Anthropic, Claude model ids, Anthropic base URL, or any `messages` provider | `claude-code` |
 | Kimi/Moonshot provider ids, names, base URLs, or model ids | `kimi-code` |
 | Qwen/QwQ/DashScope provider ids, names, base URLs, or model ids | `qwen-code` |
-| DeepSeek provider ids, names, base URLs, or model ids | `deepseek-tui` |
+| DeepSeek provider ids, names, base URLs, or model ids | `claude-code-bare` |
 
 Explicit `harness = "..."` always wins.
 
@@ -94,10 +97,11 @@ Explicit `harness = "..."` always wins.
 
 ### `claude-code`
 
-Uses the Anthropic Messages API and builds Claude Code-shaped requests. It
-adds Claude Code headers, a Claude Code system prompt, Anthropic thinking
-configuration, context-management settings, title-generation requests, and a
-Claude-shaped tool surface.
+Builds Claude Code-shaped requests over the selected provider's Responses,
+Chat, or Anthropic Messages transport. It adds a Claude Code system prompt,
+thinking configuration, context-management settings, title-generation
+requests, and a Claude-shaped tool surface. Transport-specific headers and
+message conversion are applied when the provider requires them.
 
 It maps supported tools into Anthropic tool definitions and includes handlers
 for Bash/PowerShell, Read, Write, Edit, TodoWrite, Glob, Grep, web search/fetch,
@@ -105,9 +109,20 @@ LSP, scheduled wakeups, and Claude-style subagents.
 
 ### `claude-code-bare`
 
-Uses the same `messages` route as `claude-code`, but with the bare Claude Code
-profile. The bare profile uses a smaller prompt/profile shape and different
-output config defaults.
+Uses the same provider transport as `claude-code`, but with the bare Claude
+Code profile. The bare profile uses a smaller prompt/profile shape and
+different output config defaults. DeepSeek selects this profile automatically.
+
+### `zcode`
+
+Uses Anthropic Messages-compatible requests with a ZCode-shaped system prompt,
+headers, tools, todo and plan behavior, skills, session context, and subagent
+surface. Tool calls still run inside Open Interpreter's native Rust runtime.
+
+The harness requires `wire_api = "messages"`. The built-in Z.AI and Z.AI
+Coding Plan providers use `wire_api = "chat"`, so use the Messages endpoint
+configuration in [Z.AI, GLM, and ZCode](/docs/zai-glm) when you want the actual
+ZCode route.
 
 ### `kimi-code`
 

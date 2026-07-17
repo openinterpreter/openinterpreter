@@ -22,7 +22,7 @@
   </a>
 </p>
 
-### Installation
+## Installation
 
 macOS and Linux:
 
@@ -38,7 +38,7 @@ irm https://www.openinterpreter.com/install.ps1 | iex
 
 Then type `i` or `interpreter` in your terminal to start a session.
 
-### Harness Emulation
+## Harness Emulation
 
 Open Interpreter is a fork of OpenAI's Codex, with a focus on emulating the agent harness that gets the best performance out of low-cost models.
 
@@ -59,13 +59,9 @@ swe-agent
 minimal
 ```
 
-Kimi and Moonshot models use the current `kimi-code` harness by default.
-`kimi-cli` remains available for compatibility with the retired Python CLI
-profile.
+Read more in the [harness docs](https://www.openinterpreter.com/docs/terminal/harness?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=harness_docs) and [provider setup guides](https://www.openinterpreter.com/docs/terminal/providers?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=provider_guides).
 
-Read more in the [harness docs](https://www.openinterpreter.com/docs/terminal/harness?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=harness_docs) and [model provider docs](https://www.openinterpreter.com/docs/terminal/providers?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=model_provider_docs).
-
-### ACP compatible, Codex compatible
+## ACP compatible, Codex compatible
 
 Open Interpreter works in [ACP-compatible editors and clients](https://agentclientprotocol.com/get-started/clients). Configure the client to launch `interpreter acp`; see the [ACP guide](https://www.openinterpreter.com/docs/terminal/acp) for examples.
 
@@ -79,11 +75,11 @@ binary override:
 
 Open Interpreter speaks the same Codex exec protocol. See the [SDK guide](https://www.openinterpreter.com/docs/terminal/sdk) and run `scripts/test-codex-sdk-compat.sh` for a local, provider-free compatibility check.
 
-### Computer Use
+## Computer Use
 
 Open Interpreter ships with a QA skill that lets any model operate and test interfaces. It can drive web apps in a real browser with [agent-browser](https://github.com/vercel-labs/agent-browser), or operate and test native apps with [trycua](https://github.com/trycua/cua).
 
-### Features
+## Features
 
 - Runs commands inside native sandboxing on macOS, Linux, and Windows.
 - Switches providers and models from the TUI with `/model`.
@@ -93,7 +89,7 @@ Open Interpreter ships with a QA skill that lets any model operate and test inte
 - Keeps config and session state local under `~/.openinterpreter`.
 - Supports `exec`, MCP, skills, hooks, permissions, and `AGENTS.md`.
 
-### Documentation
+## Documentation
 
 - [Terminal docs](https://www.openinterpreter.com/docs/terminal?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=terminal_docs)
 - [Quickstart](https://www.openinterpreter.com/docs/terminal/quickstart?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=quickstart)
@@ -101,8 +97,10 @@ Open Interpreter ships with a QA skill that lets any model operate and test inte
 - [Configuration](https://www.openinterpreter.com/docs/terminal/config?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=configuration)
 - [CLI reference](https://www.openinterpreter.com/docs/terminal/cli-reference?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=cli_reference)
 - [Harnesses](https://www.openinterpreter.com/docs/terminal/harness?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=harnesses)
-- [Kimi K3](https://www.openinterpreter.com/docs/terminal/kimi-k3?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=kimi_k3_docs)
-- [Model providers](https://www.openinterpreter.com/docs/terminal/providers?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=model_providers)
+- [Model provider guides](https://www.openinterpreter.com/docs/terminal/providers?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=provider_guides)
+  - [Kimi K3](https://www.openinterpreter.com/docs/terminal/kimi-k3?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=kimi_k3_docs)
+  - [DeepSeek](https://www.openinterpreter.com/docs/terminal/deepseek?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=deepseek_docs)
+  - [Z.AI, GLM, and ZCode](https://www.openinterpreter.com/docs/terminal/zai-glm?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=zai_glm_docs)
 - [Agent Client Protocol](https://www.openinterpreter.com/docs/terminal/acp)
 - [Codex SDK](https://www.openinterpreter.com/docs/terminal/sdk)
 - [Sandbox & approvals](https://www.openinterpreter.com/docs/terminal/sandbox?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=sandbox_approvals)
@@ -118,6 +116,6 @@ sources require the provider credentials documented in the
 > [!NOTE]
 > This is the new Rust version of Open Interpreter, based on Codex. Looking for the original Python project? It lives on as a community-maintained fork at [endolith/open-interpreter](https://github.com/endolith/open-interpreter).
 
-### License
+## License
 
 Apache-2.0
