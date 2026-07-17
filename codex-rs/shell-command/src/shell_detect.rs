@@ -240,6 +240,17 @@ fn get_cmd_shell(path: Option<&PathBuf>) -> Option<DetectedShell> {
 
 pub fn ultimate_fallback_shell() -> DetectedShell {
     if cfg!(windows) {
+        // Prefer PowerShell over cmd.exe as the ultimate fallback on Windows.
+        // PowerShell is better supported (e.g., shell snapshotting works), and
+        // the model harnesses already steer toward PowerShell on Windows.
+        for path in ["pwsh", "powershell"] {
+            if let Ok(resolved) = which::which(path) {
+                return DetectedShell {
+                    shell_type: ShellType::PowerShell,
+                    shell_path: resolved,
+                };
+            }
+        }
         DetectedShell {
             shell_type: ShellType::Cmd,
             shell_path: PathBuf::from("cmd.exe"),
