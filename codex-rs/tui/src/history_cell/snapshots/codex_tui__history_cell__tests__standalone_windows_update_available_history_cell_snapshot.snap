@@ -3,7 +3,7 @@ source: tui/src/history_cell/tests.rs
 expression: rendered
 ---
 ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ ✨ Update available! 0.0.25 -> 9.9.9                                                                       │
+│ ✨ Update available! 0.0.27 -> 9.9.9                                                                       │
 │ Run powershell -ExecutionPolicy Bypass -c '$env:CODEX_NON_INTERACTIVE=1; irm                               │
 │ https://chatgpt.com/codex/install.ps1 | iex' to update.                                                    │
 │                                                                                                            │
