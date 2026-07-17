@@ -15,6 +15,7 @@ permissions:
 
 jobs:
   dispatch:
+    if: github.actor == 'KillianLucas'
     runs-on: ubuntu-latest
     env:
       WEBSITE_DOCS_SYNC_TOKEN: ${{ secrets.WEBSITE_DOCS_SYNC_TOKEN }}
