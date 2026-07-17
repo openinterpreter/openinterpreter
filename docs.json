@@ -39,6 +39,7 @@
               "docs/prompting",
               "docs/workflows",
               "docs/models",
+              "docs/kimi-k3",
               "docs/harness",
               "docs/subagents"
             ]

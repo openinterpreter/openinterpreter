@@ -1,11 +1,13 @@
 use crate::client_common::Prompt;
 use crate::harness::kimi_cli;
+use crate::harness::session_skills::parse_session_skills;
 use codex_chat_wire_compat::ToolKinds;
 use codex_chat_wire_compat::ToolOutputKind;
 use codex_protocol::openai_models::ModelInfo;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::hash::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -98,8 +100,20 @@ fn cached_system_prompt(prompt: &Prompt, conversation_id: &str) -> String {
 }
 
 /// Renders Kimi Code's source-backed model-facing skill listing.
-fn session_skills_listing(_prompt: &Prompt) -> String {
-    KIMI_CODE_BUILTIN_SKILLS.to_string()
+fn session_skills_listing(prompt: &Prompt) -> String {
+    let session_skills = parse_session_skills(&prompt.input);
+    let mut listing = KIMI_CODE_BUILTIN_SKILLS.to_string();
+    if !session_skills.is_empty() {
+        listing.push_str("\n### Open Interpreter");
+        for skill in session_skills {
+            let _ = write!(
+                listing,
+                "\n- {}: {}\n  Path: {}",
+                skill.name, skill.description, skill.path
+            );
+        }
+    }
+    listing
 }
 
 fn add_auto_permission_reminders(messages: Vec<Value>) -> Vec<Value> {
@@ -381,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn kimi_code_request_does_not_render_codex_session_skills() {
+    fn kimi_code_request_renders_open_interpreter_session_skills() {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
@@ -423,8 +437,12 @@ mod tests {
             .as_str()
             .expect("system content");
         assert!(!system.contains("{{ KIMI_SKILLS }}"));
-        assert!(!system.contains("qa-testing"));
-        assert!(!system.contains("### Extra"));
+        assert!(system.contains("### Open Interpreter"));
+        assert!(
+            system.contains("- qa-testing: Run the project's QA test plan against a live build")
+        );
+        assert!(system.contains("Path: /home/user/skills/.system/qa-testing/SKILL.md"));
+        assert!(!system.contains("<skills_instructions>"));
     }
 
     #[test]

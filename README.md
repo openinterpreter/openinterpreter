@@ -9,9 +9,10 @@
 </p>
 
 > [!NOTE]
-> **Kimi K3 is supported today.** Open Interpreter natively emulates the
-> current Kimi Code harness to maximize provider-recommended performance in a
-> familiar Codex TUI.
+> **Today: Kimi K3 is here.** We have reimplemented the provider-recommended
+> [Kimi Code](https://www.kimi.com/coding/en) harness in Rust, giving you
+> maximum K3 performance with a Codex-like interface.
+> [**Kimi Docs →**](https://www.openinterpreter.com/docs/terminal/kimi-k3?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=kimi_k3_note)
 
 <br>
 
@@ -64,7 +65,7 @@ profile.
 
 Read more in the [harness docs](https://www.openinterpreter.com/docs/terminal/harness?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=harness_docs) and [model provider docs](https://www.openinterpreter.com/docs/terminal/providers?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=model_provider_docs).
 
-### Editors and the Codex SDK
+### ACP compatible, Codex compatible
 
 Open Interpreter works in [ACP-compatible editors and clients](https://agentclientprotocol.com/get-started/clients). Configure the client to launch `interpreter acp`; see the [ACP guide](https://www.openinterpreter.com/docs/terminal/acp) for examples.
 
@@ -100,6 +101,7 @@ Open Interpreter ships with a QA skill that lets any model operate and test inte
 - [Configuration](https://www.openinterpreter.com/docs/terminal/config?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=configuration)
 - [CLI reference](https://www.openinterpreter.com/docs/terminal/cli-reference?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=cli_reference)
 - [Harnesses](https://www.openinterpreter.com/docs/terminal/harness?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=harnesses)
+- [Kimi K3](https://www.openinterpreter.com/docs/terminal/kimi-k3?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=kimi_k3_docs)
 - [Model providers](https://www.openinterpreter.com/docs/terminal/providers?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=model_providers)
 - [Agent Client Protocol](https://www.openinterpreter.com/docs/terminal/acp)
 - [Codex SDK](https://www.openinterpreter.com/docs/terminal/sdk)
