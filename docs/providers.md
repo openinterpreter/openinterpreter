@@ -1,11 +1,52 @@
 ---
-title: Providers
-description: Supported provider ids, wire APIs, auth modes, and catalog generation.
+title: Model Providers
+description: Choose a provider, connect an account or API key, and use the right harness for its models.
 ---
 
-Open Interpreter separates the provider from the model. The active provider
-decides where requests are sent, how credentials are attached, which wire API
-is used, and which bundled model metadata seeds the picker.
+Providers connect Open Interpreter to model services. A provider decides where
+requests are sent and how you authenticate; a model is the model ID you run; a
+harness controls the agent-facing prompt, tools, and message behavior.
+
+For most providers, start Open Interpreter and use `/model`:
+
+```text
+> /model
+```
+
+Choose the provider, authenticate or set the requested environment variable,
+then choose a model. Open Interpreter automatically selects a provider-specific
+harness when one is configured for that model family. You can inspect or
+override it with `/harness`.
+
+## Provider Guides
+
+| Provider family | Authentication | Default behavior | Guide |
+| --- | --- | --- | --- |
+| Kimi K3 and Moonshot | Kimi Code sign-in, `KIMI_API_KEY`, or `MOONSHOT_API_KEY` | `kimi-code` harness | [Kimi K3](/docs/kimi-k3) |
+| DeepSeek | `DEEPSEEK_API_KEY` | `claude-code-bare` harness | [DeepSeek](/docs/deepseek) |
+| Z.AI, Zhipu AI, and GLM | `ZAI_API_KEY` or `ZHIPU_API_KEY` | Generic Chat, or `zcode` with a Messages endpoint | [Z.AI, GLM, and ZCode](/docs/zai-glm) |
+
+These guides cover the provider IDs, current model-selection path, API or
+subscription setup, harness behavior, direct CLI use, and common mistakes.
+
+## Provider, Model, and Harness
+
+Keep the three layers separate when troubleshooting:
+
+| Layer | Example | What it controls |
+| --- | --- | --- |
+| Provider | `deepseek` | Endpoint, credentials, and wire API |
+| Model | `deepseek-v4-pro` | The model sent to that endpoint |
+| Harness | `claude-code-bare` | Agent prompt, tools, and request shaping |
+
+The provider's `wire_api` must support the selected harness. See
+[Harness](/docs/harness) for the compatibility matrix.
+
+## Provider Reference
+
+The active provider decides where requests are sent, how credentials are
+attached, which wire API is used, and which bundled model metadata seeds the
+picker.
 
 The source of truth is code, not this table:
 
@@ -236,7 +277,7 @@ harness mode from the provider/model family:
 | `wire_api = "messages"`, Anthropic provider/name/base URL, or `claude` model ids | `claude-code` |
 | `kimi`, `moonshot`, `api.kimi.com`, `api.moonshot.ai`, or `api.moonshot.cn` | `kimi-code` |
 | `qwen`, `qwq`, `dashscope`, or DashScope compatible-mode base URLs | `qwen-code` |
-| `deepseek` or `api.deepseek.com` | `deepseek-tui` |
+| `deepseek` or `api.deepseek.com` | `claude-code-bare` |
 
 You can override this with `harness = "..."` in config. See
 [Harness](/docs/harness) for route compatibility.

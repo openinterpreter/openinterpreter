@@ -125,6 +125,7 @@ Some model families get a default harness when no explicit harness is set:
 | Claude/Anthropic/Messages | `claude-code` |
 | Kimi/Moonshot | `kimi-code` |
 | Qwen/QwQ/DashScope | `qwen-code` |
-| DeepSeek | `deepseek-tui` |
+| DeepSeek | `claude-code-bare` |
 
-See [Harness](/docs/harness) for the wire-api compatibility matrix.
+See [Harness](/docs/harness) for the wire-api compatibility matrix and
+[Model providers](/docs/providers) for provider-specific setup guides.

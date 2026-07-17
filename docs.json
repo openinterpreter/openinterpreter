@@ -39,11 +39,19 @@
               "docs/prompting",
               "docs/workflows",
               "docs/models",
-              "docs/kimi-k3",
               "docs/harness",
               "docs/subagents"
             ]
           }
+        ]
+      },
+      {
+        "group": "Model providers",
+        "pages": [
+          "docs/providers",
+          "docs/kimi-k3",
+          "docs/deepseek",
+          "docs/zai-glm"
         ]
       },
       {
@@ -63,7 +71,6 @@
         "pages": [
           "docs/config",
           "docs/config-reference",
-          "docs/providers",
           "docs/authentication",
           {
             "group": "Project context",
