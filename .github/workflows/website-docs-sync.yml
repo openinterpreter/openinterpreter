@@ -1,0 +1,35 @@
+name: Sync website docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - docs.json
+      - docs-site/**
+      - codex-rs/core/config.schema.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    env:
+      WEBSITE_DOCS_SYNC_TOKEN: ${{ secrets.WEBSITE_DOCS_SYNC_TOKEN }}
+    steps:
+      - name: Dispatch the exact public revision to the private website
+        if: env.WEBSITE_DOCS_SYNC_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ env.WEBSITE_DOCS_SYNC_TOKEN }}
+        run: |
+          gh api repos/openinterpreter/website/dispatches \
+            --method POST \
+            --field event_type=open_interpreter_docs_changed \
+            --field "client_payload[sha]=$GITHUB_SHA"
+
+      - name: Report missing instant-sync credentials
+        if: env.WEBSITE_DOCS_SYNC_TOKEN == ''
+        run: |
+          echo "WEBSITE_DOCS_SYNC_TOKEN is not configured; the website's scheduled sync remains active."
