@@ -1955,10 +1955,51 @@ async fn handle_glob(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
             root
         }
     };
-    let include_dirs = args.include_dirs.unwrap_or(true);
+    let include_dirs = if is_kimi_code(&invocation) {
+        false
+    } else {
+        args.include_dirs.unwrap_or(true)
+    };
     let mut matches = Vec::new();
     collect_glob_matches(&root, &args.pattern, include_dirs, &mut matches)
         .map_err(|err| FunctionCallError::RespondToModel(format!("Glob failed: {err}")))?;
+    if is_kimi_code(&invocation) {
+        let mut timed_matches = matches
+            .into_iter()
+            .map(|path| {
+                let modified = std::fs::metadata(root.join(&path))
+                    .and_then(|metadata| metadata.modified())
+                    .ok();
+                (modified, path)
+            })
+            .collect::<Vec<_>>();
+        timed_matches.sort_by(|(left_modified, left), (right_modified, right)| {
+            right_modified
+                .cmp(left_modified)
+                .then_with(|| right.cmp(left))
+        });
+        let truncated = timed_matches.len() > 100;
+        timed_matches.truncate(100);
+        let mut output = timed_matches
+            .into_iter()
+            .map(|(_, path)| path)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if output.is_empty() {
+            output.push_str("No matches found");
+        } else if truncated {
+            output.insert_str(
+                0,
+                "[Truncated at 100 matches — use a more specific pattern]\nOnly the first 100 matches are returned.\n",
+            );
+        } else if output.lines().count() == 100 {
+            output.push_str("\nFound 100 matches");
+        }
+        return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+            output,
+            Some(true),
+        )));
+    }
     matches.sort();
     if is_zcode(&invocation) {
         if matches.is_empty() {
@@ -3804,6 +3845,11 @@ fn count_searchable_files(root: &Path) -> usize {
 }
 
 fn simple_glob_matches(pattern: &str, relative_path: &str) -> bool {
+    let relative_path = relative_path.replace('\\', "/");
+    let relative_path = relative_path.as_str();
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        return relative_path.starts_with(&format!("{prefix}/"));
+    }
     if let Some(extension) = pattern.strip_prefix("*.") {
         return relative_path
             .rsplit('/')
@@ -4928,6 +4974,58 @@ mod tests {
                 "unexpected image URL for {filename}: {image_url}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn kimi_glob_is_files_only_and_caps_matches_in_modified_order() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let files = workspace.path().join("gauntlet-files");
+        std::fs::create_dir_all(files.join("subdir")).expect("create fixture directories");
+        for index in 0..105 {
+            std::fs::write(
+                files.join(format!("item_{index:03}.txt")),
+                format!("GLOB_ITEM_{index:03}\n"),
+            )
+            .expect("write glob fixture");
+        }
+        let invocation = invocation_with_harness(
+            &workspace,
+            "Glob",
+            json!({
+                "pattern": "gauntlet-files/**",
+                "path": ".",
+                "include_ignored": true,
+                "include_dirs": true,
+            }),
+            Some("kimi-code"),
+        )
+        .await;
+
+        let output = HarnessAliasHandler::Glob
+            .handle(invocation)
+            .await
+            .expect("glob succeeds")
+            .log_preview();
+        let expected_paths = (5..105)
+            .rev()
+            .map(|index| format!("gauntlet-files/item_{index:03}.txt"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(
+            output,
+            format!(
+                "[Truncated at 100 matches — use a more specific pattern]\nOnly the first 100 matches are returned.\n{expected_paths}"
+            )
+        );
+    }
+
+    #[test]
+    fn recursive_glob_matches_windows_path_separators() {
+        assert!(simple_glob_matches(
+            "gauntlet-files/**",
+            r"gauntlet-files\item_001.txt"
+        ));
     }
 
     #[test]
