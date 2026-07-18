@@ -147,8 +147,7 @@ fn multipart_body(boundary: &str, filename: &str, mime_type: &str, data: &[u8]) 
     let filename = filename
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
-        .replace('\r', "_")
-        .replace('\n', "_");
+        .replace(['\r', '\n'], "_");
     let mut body = Vec::with_capacity(data.len() + 512);
     body.extend_from_slice(
         format!(
