@@ -21,6 +21,7 @@ use crate::harness::deepseek_tui::build_request as build_deepseek_tui_request;
 use crate::harness::guidance::guidance_for_harness;
 use crate::harness::kimi_cli::build_request as build_kimi_cli_request;
 use crate::harness::kimi_code::build_request as build_kimi_code_request;
+use crate::harness::kimi_code::preserve_reasoning_content as preserve_kimi_code_reasoning_content;
 use crate::harness::little_coder::build_request as build_little_coder_request;
 use crate::harness::mini_swe_agent::build_request as build_mini_swe_agent_request;
 use crate::harness::mini_swe_agent::inject_no_tool_call_format_error as inject_mini_swe_agent_no_tool_call_format_error;
@@ -62,6 +63,7 @@ pub(crate) struct ChatHarnessRequest {
 /// Harness-specific shaping applied to the provider response stream.
 pub(crate) enum ChatHarnessPostprocess {
     None,
+    KimiCodeReasoningContent,
     MiniSweAgentNoToolCallFormatError,
     SweAgentActionCalls {
         has_submit_review: bool,
@@ -115,7 +117,12 @@ pub(crate) fn build_chat_harness_request(
                 build_kimi_code_request(&guided_prompt, model_info, thread_id).map_err(|err| {
                     CodexErr::InvalidRequest(format!("invalid kimi-code request: {err}"))
                 })?;
-            (request_body, tool_kinds, None, ChatHarnessPostprocess::None)
+            (
+                request_body,
+                tool_kinds,
+                None,
+                ChatHarnessPostprocess::KimiCodeReasoningContent,
+            )
         }
         ChatHarnessRoute::LittleCoder => {
             let (request_body, tool_kinds) = build_little_coder_request(&guided_prompt, model_info)
@@ -217,6 +224,9 @@ pub(crate) fn apply_chat_harness_postprocess(
 ) -> ResponseStream {
     match postprocess {
         ChatHarnessPostprocess::None => stream,
+        ChatHarnessPostprocess::KimiCodeReasoningContent => {
+            preserve_kimi_code_reasoning_content(stream)
+        }
         ChatHarnessPostprocess::MiniSweAgentNoToolCallFormatError => {
             inject_mini_swe_agent_no_tool_call_format_error(stream)
         }

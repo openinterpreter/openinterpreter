@@ -1,10 +1,15 @@
 use crate::client_common::Prompt;
+use crate::client_common::ResponseEvent;
+use crate::client_common::ResponseStream;
 use crate::harness::kimi_cli;
 use crate::harness::session_skills::SessionSkill;
 use crate::harness::session_skills::parse_session_skills;
 use codex_chat_wire_compat::ToolKinds;
 use codex_chat_wire_compat::ToolOutputKind;
+use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
+use futures::StreamExt;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -16,6 +21,7 @@ use std::hash::Hasher;
 use std::path::Path;
 use std::sync::LazyLock;
 use std::sync::Mutex;
+use tokio::sync::mpsc;
 
 const KIMI_CODE_SYSTEM_PROMPT: &str = include_str!("kimi_code_system_prompt.md");
 const KIMI_CODE_TOOLS: &str = include_str!("kimi_code_tools.json");
@@ -77,6 +83,48 @@ pub(crate) fn build_request(
         }),
         tool_kinds,
     ))
+}
+
+/// Keeps Kimi reasoning available for the assistant tool-call message that is
+/// sent on the next provider request.
+pub(crate) fn preserve_reasoning_content(stream: ResponseStream) -> ResponseStream {
+    let (tx_event, rx_event) = mpsc::channel(1600);
+
+    tokio::spawn(async move {
+        let mut stream = stream;
+        while let Some(mut event) = stream.next().await {
+            if let Ok(ResponseEvent::OutputItemAdded(item) | ResponseEvent::OutputItemDone(item)) =
+                &mut event
+            {
+                make_reasoning_content_durable(item);
+            }
+            if tx_event.send(event).await.is_err() {
+                return;
+            }
+        }
+    });
+
+    ResponseStream {
+        rx_event,
+        consumer_dropped: tokio_util::sync::CancellationToken::new(),
+    }
+}
+
+fn make_reasoning_content_durable(item: &mut ResponseItem) {
+    let ResponseItem::Reasoning {
+        content: Some(content),
+        ..
+    } = item
+    else {
+        return;
+    };
+    for part in content {
+        if let ReasoningItemContent::ReasoningText { text } = part {
+            *part = ReasoningItemContent::Text {
+                text: std::mem::take(text),
+            };
+        }
+    }
 }
 
 fn kimi_code_prompt_cache_key(conversation_id: &str) -> String {
@@ -293,14 +341,57 @@ fn build_tools() -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::build_request;
+    use super::make_reasoning_content_durable;
     use super::session_skills_listing;
     use crate::client_common::Prompt;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::FunctionCallOutputContentItem;
     use codex_protocol::models::FunctionCallOutputPayload;
+    use codex_protocol::models::ReasoningItemContent;
     use codex_protocol::models::ResponseItem;
     use codex_protocol::openai_models::ModelInfo;
     use serde_json::json;
+
+    #[test]
+    fn kimi_code_reasoning_content_remains_serializable_for_follow_up_requests() {
+        let mut item = ResponseItem::Reasoning {
+            id: Some("reasoning-1".to_string()),
+            summary: Vec::new(),
+            content: Some(vec![ReasoningItemContent::ReasoningText {
+                text: "Use the requested tool.".to_string(),
+            }]),
+            encrypted_content: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+
+        make_reasoning_content_durable(&mut item);
+
+        assert_eq!(
+            item,
+            ResponseItem::Reasoning {
+                id: Some("reasoning-1".to_string()),
+                summary: Vec::new(),
+                content: Some(vec![ReasoningItemContent::Text {
+                    text: "Use the requested tool.".to_string(),
+                }]),
+                encrypted_content: None,
+                internal_chat_message_metadata_passthrough: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&item).expect("serialize reasoning"),
+            json!({
+                "type": "reasoning",
+                "id": "reasoning-1",
+                "summary": [],
+                "content": [{
+                    "type": "text",
+                    "text": "Use the requested tool.",
+                }],
+                "encrypted_content": null,
+            })
+        );
+    }
 
     #[test]
     fn kimi_code_request_renders_kimi_code_builtin_skills() {

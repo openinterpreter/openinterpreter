@@ -229,7 +229,7 @@ impl MessageBuildOptions {
         Self {
             omitted_reasoning_placeholder: None,
             compact_function_arguments: true,
-            merge_assistant_text_with_following_tool_calls: false,
+            merge_assistant_text_with_following_tool_calls: true,
             preserve_empty_reasoning_content: true,
             preserve_empty_tool_output: false,
             trim_user_message_trailing_newlines: false,
@@ -1520,6 +1520,73 @@ mod tests {
                     "role": "tool",
                     "content": "{}",
                     "tool_call_id": "GetGoal_0",
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn kimi_code_combines_reasoning_text_and_tool_calls_in_one_assistant_message() {
+        let items = vec![
+            ResponseItem::Reasoning {
+                id: Some("reasoning-1".to_string()),
+                summary: Vec::new(),
+                content: Some(vec![ReasoningItemContent::Text {
+                    text: "I should create the goal first.".to_string(),
+                }]),
+                encrypted_content: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::Message {
+                id: Some("message-1".to_string()),
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: "Starting with CreateGoal.".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCall {
+                id: Some("function-1".to_string()),
+                name: "CreateGoal".to_string(),
+                namespace: None,
+                arguments: r#"{"objective":"Ship it"}"#.to_string(),
+                call_id: "CreateGoal:0".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: "CreateGoal:0".to_string(),
+                output: FunctionCallOutputPayload::from_text("created".to_string()),
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ];
+
+        let messages =
+            super::build_messages_with_options(&items, super::MessageBuildOptions::kimi_code())
+                .expect("build messages")
+                .collect::<Vec<_>>();
+
+        assert_eq!(
+            messages,
+            vec![
+                json!({
+                    "role": "assistant",
+                    "content": "Starting with CreateGoal.",
+                    "reasoning_content": "I should create the goal first.",
+                    "tool_calls": [{
+                        "type": "function",
+                        "id": "CreateGoal_0",
+                        "function": {
+                            "name": "CreateGoal",
+                            "arguments": r#"{"objective":"Ship it"}"#,
+                        },
+                    }],
+                }),
+                json!({
+                    "role": "tool",
+                    "content": "created",
+                    "tool_call_id": "CreateGoal_0",
                 }),
             ]
         );
