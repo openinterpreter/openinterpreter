@@ -1209,6 +1209,9 @@ struct ReadArgs {
 }
 
 async fn handle_read(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    if is_kimi_code(&invocation) {
+        return super::kimi_code_read::handle(invocation).await;
+    }
     let arguments = function_arguments(&invocation.payload)?;
     let args: ReadArgs = parse_arguments(arguments)?;
     let path = harness_fs::checked_read_path(&invocation, &args.path, "Read")?;
@@ -1776,7 +1779,14 @@ async fn handle_write(
         _ => std::fs::write(&path, &args.content)
             .map_err(|err| FunctionCallError::RespondToModel(format!("Write failed: {err}")))?,
     }
-    let message = if is_zcode(&invocation) {
+    let message = if is_kimi_code(&invocation) {
+        let action = if args.mode.as_deref() == Some("append") {
+            "Appended"
+        } else {
+            "Wrote"
+        };
+        format!("{action} {bytes_written} bytes to {}", args.path)
+    } else if is_zcode(&invocation) {
         record_zcode_current_file(&invocation, &path);
         record_zcode_current_file_hash(
             &invocation,
@@ -1852,17 +1862,48 @@ async fn handle_edit(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
     }
     let text = std::fs::read_to_string(&path)
         .map_err(|err| FunctionCallError::RespondToModel(format!("Edit failed: {err}")))?;
+    if is_kimi_code(&invocation) && args.old_string.is_some() && args.old_string == args.new_string
+    {
+        return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+            "No changes to make: old_string and new_string are exactly the same.".to_string(),
+            Some(false),
+        )));
+    }
+    let pure_crlf = is_kimi_code(&invocation) && has_only_crlf_line_endings(&text);
+    let editable_text = if pure_crlf {
+        text.replace("\r\n", "\n")
+    } else {
+        text.clone()
+    };
     let replacements = edit_replacements(&args)?;
-    let mut updated = text.clone();
+    let mut updated = editable_text.clone();
     let mut total_matches = 0usize;
     for replacement in &replacements {
-        let matches = text.matches(&replacement.old_text).count();
+        let matches = editable_text.matches(&replacement.old_text).count();
         if matches == 0 {
+            if is_kimi_code(&invocation) {
+                return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+                    format!(
+                        "old_string not found in {}, the file contents may be out of date. Please use the Read Tool to reload the content.\n",
+                        args.path
+                    ),
+                    Some(false),
+                )));
+            }
             return Err(FunctionCallError::RespondToModel(
                 "Edit failed: old_string not found".to_string(),
             ));
         }
         if matches > 1 && !args.replace_all {
+            if is_kimi_code(&invocation) {
+                return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+                    format!(
+                        "old_string is not unique in {} (found {matches} occurrences). To replace every occurrence, set replace_all=true. To replace only one occurrence, include more surrounding context in old_string.",
+                        args.path
+                    ),
+                    Some(false),
+                )));
+            }
             return Err(FunctionCallError::RespondToModel(
                 "Edit failed: old_string found multiple times; set replace_all to true or provide more context".to_string(),
             ));
@@ -1874,12 +1915,31 @@ async fn handle_edit(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
             updated.replacen(&replacement.old_text, &replacement.new_text, 1)
         };
     }
+    let updated = if pure_crlf {
+        updated.replace('\n', "\r\n")
+    } else {
+        updated
+    };
     std::fs::write(&path, &updated)
         .map_err(|err| FunctionCallError::RespondToModel(format!("Edit failed: {err}")))?;
     record_claude_read_file(&path);
     if is_zcode(&invocation) {
         record_zcode_current_file(&invocation, &path);
         record_zcode_current_file_hash(&invocation, &path, zcode_file_hash(updated.as_bytes()));
+    }
+    if is_kimi_code(&invocation) {
+        let occurrence_label = if total_matches == 1 {
+            "occurrence"
+        } else {
+            "occurrences"
+        };
+        return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+            format!(
+                "Replaced {total_matches} {occurrence_label} in {}",
+                args.path
+            ),
+            Some(true),
+        )));
     }
     if is_claude_code_bare(&invocation) || is_zcode(&invocation) {
         return Ok(boxed_tool_output(FunctionToolOutput::from_text(
@@ -1916,6 +1976,23 @@ async fn handle_edit(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
         format!("Replaced {total_matches} {occurrence_label} in {display_path}"),
         Some(true),
     )))
+}
+
+fn has_only_crlf_line_endings(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut saw_crlf = false;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\r' if bytes.get(index + 1) == Some(&b'\n') => {
+                saw_crlf = true;
+                index += 2;
+            }
+            b'\r' | b'\n' => return false,
+            _ => index += 1,
+        }
+    }
+    saw_crlf
 }
 
 fn edit_replacements(args: &EditArgs) -> Result<Vec<EditReplacement>, FunctionCallError> {
