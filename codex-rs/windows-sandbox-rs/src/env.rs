@@ -116,7 +116,7 @@ fn ensure_denybin(tools: &[&str], denybin_dir: Option<&Path>) -> Result<PathBuf>
             let path = base.join(format!("{tool}{ext}"));
             if !path.exists() {
                 let mut f = File::create(&path)?;
-                f.write_all(b"@echo off\\r\\nexit /b 1\\r\\n")?;
+                f.write_all(b"@echo off\r\nexit /b 1\r\n")?;
             }
         }
     }
