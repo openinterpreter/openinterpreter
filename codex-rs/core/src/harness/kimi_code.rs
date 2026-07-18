@@ -41,13 +41,16 @@ pub(crate) fn build_request(
         "role": "system",
         "content": cached_system_prompt(prompt, conversation_id),
     })];
-    messages.extend(add_auto_permission_reminders(
-        kimi_cli::build_messages_with_options(
-            prompt.get_formatted_input(),
-            kimi_cli::MessageBuildOptions::kimi_code(),
-        )?
-        .collect(),
-    ));
+    let mut conversation_messages = kimi_cli::build_messages_with_options(
+        prompt.get_formatted_input(),
+        kimi_cli::MessageBuildOptions::kimi_code(),
+    )?
+    .collect::<Vec<_>>();
+    super::kimi_code_todo_reminder::add_todo_list_reminder(
+        &mut conversation_messages,
+        conversation_id,
+    );
+    messages.extend(add_auto_permission_reminders(conversation_messages));
     let tools = build_tools();
     let tool_kinds = tools
         .iter()
