@@ -368,7 +368,7 @@ fn encode_native(
     source_format: ImageFormat,
 ) -> Result<(Vec<u8>, &'static str), FunctionCallError> {
     if matches!(source_format, ImageFormat::Jpeg) {
-        Ok((encode_jpeg(image, 90)?, "image/jpeg"))
+        Ok((encode_jpeg(image, /*quality*/ 90)?, "image/jpeg"))
     } else {
         Ok((encode_png(image)?, "image/png"))
     }

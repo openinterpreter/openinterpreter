@@ -34,11 +34,11 @@ pub(crate) fn parse_cron_expression(raw: &str) -> Result<CronExpression, String>
         ));
     }
 
-    let minutes = parse_field(fields[0], 0, 59, "minute")?;
-    let hours = parse_field(fields[1], 0, 23, "hour")?;
-    let days_of_month = parse_field(fields[2], 1, 31, "day-of-month")?;
-    let months = parse_field(fields[3], 1, 12, "month")?;
-    let days_of_week = parse_field(fields[4], 0, 7, "day-of-week")?
+    let minutes = parse_field(fields[0], /*min*/ 0, /*max*/ 59, "minute")?;
+    let hours = parse_field(fields[1], /*min*/ 0, /*max*/ 23, "hour")?;
+    let days_of_month = parse_field(fields[2], /*min*/ 1, /*max*/ 31, "day-of-month")?;
+    let months = parse_field(fields[3], /*min*/ 1, /*max*/ 12, "month")?;
+    let days_of_week = parse_field(fields[4], /*min*/ 0, /*max*/ 7, "day-of-week")?
         .into_iter()
         .map(|value| if value == 7 { 0 } else { value })
         .collect();
@@ -180,14 +180,14 @@ impl CronExpression {
     }
 
     pub(crate) fn human_schedule(&self) -> String {
-        let all_minutes = is_full_range(&self.minutes, 0, 59);
-        let all_hours = is_full_range(&self.hours, 0, 23);
-        let all_months = is_full_range(&self.months, 1, 12);
+        let all_minutes = is_full_range(&self.minutes, /*min*/ 0, /*max*/ 59);
+        let all_hours = is_full_range(&self.hours, /*min*/ 0, /*max*/ 23);
+        let all_months = is_full_range(&self.months, /*min*/ 1, /*max*/ 12);
         let all_days_of_month = self.days_of_month_wildcard;
         let all_days_of_week = self.days_of_week_wildcard;
 
         if all_hours && all_days_of_month && all_months && all_days_of_week {
-            if let Some(step) = detect_step(&self.minutes, 0, 59)
+            if let Some(step) = detect_step(&self.minutes, /*min*/ 0, /*max*/ 59)
                 && step > 1
             {
                 return format!("every {step} minutes");
@@ -204,7 +204,7 @@ impl CronExpression {
             && all_days_of_month
             && all_months
             && all_days_of_week
-            && let Some(step) = detect_step(&self.hours, 0, 23)
+            && let Some(step) = detect_step(&self.hours, /*min*/ 0, /*max*/ 23)
             && step > 1
         {
             return format!("every {step} hours at minute {minute:02}");
