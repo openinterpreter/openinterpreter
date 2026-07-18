@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -241,12 +242,70 @@ fn load_token(codex_home: &Path) -> Result<KimiCodeToken, KimiCodeAuthError> {
 }
 
 fn save_token(codex_home: &Path, token: KimiCodeToken) -> Result<(), KimiCodeAuthError> {
-    fs::create_dir_all(credentials_dir(codex_home)).map_err(KimiCodeAuthError::CredentialsDir)?;
+    create_credentials_dir(&credentials_dir(codex_home))
+        .map_err(KimiCodeAuthError::CredentialsDir)?;
     let path = credentials_path(codex_home);
     let temp_path = path.with_extension("json.tmp");
     let contents = serde_json::to_vec(&token).map_err(KimiCodeAuthError::CredentialsParse)?;
-    fs::write(&temp_path, &contents).map_err(KimiCodeAuthError::CredentialsWrite)?;
+    write_private_file(&temp_path, &contents).map_err(KimiCodeAuthError::CredentialsWrite)?;
     fs::rename(temp_path, path).map_err(KimiCodeAuthError::CredentialsWrite)?;
+    Ok(())
+}
+
+/// Creates `dir` and any missing parents, restricted to the current user
+/// (`0o700`) on Unix. Mirrors the owner-only handling used for `auth.json`, and
+/// also tightens a directory that an earlier version may have left world- or
+/// group-readable.
+fn create_credentials_dir(dir: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // `DirBuilder` does not change the mode of a directory that already
+        // exists, so repair it explicitly.
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Writes `contents` to `path`, creating the file readable and writable only by
+/// the current user (`0o600`) on Unix. The Kimi credential file holds long-lived
+/// access and refresh tokens in plaintext, so it must not be world-readable.
+fn write_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+    // Remove any stale or pre-planted file at this path (a regular file left by
+    // a crashed write, or a symlink) so the create below always makes a fresh
+    // file with the mode we request and cannot be tricked into following a
+    // symlink to another location.
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    let mut options = fs::OpenOptions::new();
+    // `create_new` fails closed if the path reappears between the remove above
+    // and this open, rather than writing through whatever was planted there.
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Guarantee the exact mode regardless of the process umask.
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(contents)?;
+    file.flush()?;
     Ok(())
 }
 
@@ -442,5 +501,78 @@ mod tests {
         save_token(temp_dir.path(), token.clone()).expect("save token");
         let loaded = load_token(temp_dir.path()).expect("load token");
         assert_eq!(loaded, token);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_token_sets_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempdir().expect("tempdir");
+        let token = KimiCodeToken {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: 123,
+            scope: "scope".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 456,
+        };
+        save_token(temp_dir.path(), token).expect("save token");
+
+        let file_mode = std::fs::metadata(credentials_path(temp_dir.path()))
+            .expect("credentials metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600, "credential file must be owner-only");
+
+        let dir_mode = std::fs::metadata(credentials_dir(temp_dir.path()))
+            .expect("credentials dir metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "credentials dir must be owner-only");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_token_repairs_preexisting_loose_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempdir().expect("tempdir");
+
+        // Simulate state left by an earlier version: a world-readable
+        // credentials directory containing a stale, world-readable temp file.
+        let dir = credentials_dir(temp_dir.path());
+        std::fs::create_dir_all(&dir).expect("create dir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod dir");
+        let stale_temp = credentials_path(temp_dir.path()).with_extension("json.tmp");
+        std::fs::write(&stale_temp, b"stale").expect("write stale temp");
+        std::fs::set_permissions(&stale_temp, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod stale temp");
+
+        let token = KimiCodeToken {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: 123,
+            scope: "scope".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 456,
+        };
+        save_token(temp_dir.path(), token).expect("save token");
+
+        let file_mode = std::fs::metadata(credentials_path(temp_dir.path()))
+            .expect("credentials metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600, "credential file must be owner-only");
+
+        let dir_mode = std::fs::metadata(&dir)
+            .expect("credentials dir metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "loose credentials dir must be tightened");
     }
 }
