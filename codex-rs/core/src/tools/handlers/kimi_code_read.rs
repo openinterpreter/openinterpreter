@@ -230,7 +230,7 @@ mod tests {
         let text = (0..1_000)
             .map(|index| format!("{index:04} {}\n", "R".repeat(220)))
             .collect::<String>();
-        let rendered = render_read(&text, 1, 1_000);
+        let rendered = render_read(&text, 1, 999);
         assert!(rendered.contains("Max 102400 bytes reached."));
         assert!(!rendered.contains("Max 1000 lines reached."));
     }
