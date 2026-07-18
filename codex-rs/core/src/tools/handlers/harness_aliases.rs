@@ -546,11 +546,15 @@ fn zcode_task_name(description: &str) -> String {
 struct BashArgs {
     command: String,
     #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
     description: Option<String>,
     #[serde(default)]
     timeout: Option<u64>,
     #[serde(default)]
     run_in_background: bool,
+    #[serde(default)]
+    disable_timeout: bool,
     #[serde(default, rename = "dangerouslyDisableSandbox")]
     dangerously_disable_sandbox: bool,
 }
@@ -563,6 +567,10 @@ async fn handle_bash(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
         "cmd": command,
         "yield_time_ms": if args.run_in_background { 1_000 } else { args.timeout.unwrap_or(10_000).min(30_000) },
     });
+    if let Some(cwd) = args.cwd.as_deref() {
+        let cwd = harness_fs::checked_read_path(&invocation, cwd, "Bash")?;
+        translated["workdir"] = json!(cwd);
+    }
     if args.run_in_background {
         translated["tty"] = json!(true);
     }
@@ -571,8 +579,11 @@ async fn handle_bash(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
     }
 
     let is_zcode = is_zcode(&invocation);
+    let is_kimi_code = is_kimi_code(&invocation);
     if is_zcode {
         translated["max_output_tokens"] = json!(100_000);
+    } else if is_kimi_code {
+        translated["max_output_tokens"] = json!(1_000_000);
     }
 
     let payload = ToolPayload::Function {
@@ -591,6 +602,19 @@ async fn handle_bash(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
             .get("output")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
+        if is_kimi_code {
+            let output = super::kimi_code_tasks::register_process(
+                &invocation,
+                process_id as i32,
+                &command,
+                args.description.as_deref().unwrap_or(&args.command),
+                initial_output,
+            )?;
+            return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+                output,
+                Some(true),
+            )));
+        }
         let task_id = claude_task_id(process_id as i32);
         let output_path = output_path
             .map(|template| template.replace("{task_id}", &task_id))
@@ -604,10 +628,11 @@ async fn handle_bash(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
             &output_path,
             &invocation.call_id,
         );
+        let background_output = format!(
+            "Command running in background with ID: {task_id}. Output is being written to: {output_path}. You will be notified when it completes. To check interim output, use Read on that file path."
+        );
         return Ok(boxed_tool_output(FunctionToolOutput::from_text(
-            format!(
-                "Command running in background with ID: {task_id}. Output is being written to: {output_path}. You will be notified when it completes. To check interim output, use Read on that file path."
-            ),
+            background_output,
             Some(true),
         )));
     }
@@ -623,6 +648,15 @@ async fn handle_bash(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
         return Ok(boxed_tool_output(FunctionToolOutput::from_text(
             format!("{HARNESS_NO_TRUNCATE_PREFIX}{harness_output}"),
             success,
+        )));
+    }
+    if is_kimi_code {
+        let _ = args.disable_timeout;
+        let (harness_output, success) =
+            super::kimi_code_bash::format_foreground_output(raw_output, exit_code);
+        return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+            harness_output,
+            Some(success),
         )));
     }
     let is_deepseek_tui = is_deepseek_tui(&invocation);
@@ -1069,6 +1103,9 @@ fn default_task_list_limit() -> usize {
 async fn handle_task_list(
     invocation: ToolInvocation,
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    if is_kimi_code(&invocation) {
+        return super::kimi_code_tasks::handle_list(invocation).await;
+    }
     let arguments = function_arguments(&invocation.payload)?;
     let args: TaskListArgs = parse_arguments(arguments)?;
     let tasks = CLAUDE_TASKS
@@ -1099,6 +1136,9 @@ async fn handle_task_list(
 async fn handle_task_output(
     invocation: ToolInvocation,
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    if is_kimi_code(&invocation) {
+        return super::kimi_code_tasks::handle_output(invocation).await;
+    }
     let arguments = function_arguments(&invocation.payload)?;
     let args: TaskOutputArgs = parse_arguments(arguments)?;
     let task_state = claude_task_state(&args.task_id)?;
@@ -1164,6 +1204,9 @@ struct TaskStopArgs {
 async fn handle_task_stop(
     invocation: ToolInvocation,
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    if is_kimi_code(&invocation) {
+        return super::kimi_code_tasks::handle_stop(invocation).await;
+    }
     let arguments = function_arguments(&invocation.payload)?;
     let args: TaskStopArgs = parse_arguments(arguments)?;
     let task_state = claude_task_state(&args.task_id)?;
