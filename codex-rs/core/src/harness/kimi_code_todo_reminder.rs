@@ -23,6 +23,15 @@ struct TodoItem {
     status: String,
 }
 
+pub(super) fn is_todo_list_reminder(message: &Value) -> bool {
+    message
+        .get("content")
+        .and_then(Value::as_str)
+        .is_some_and(|content| {
+            content.starts_with("<system-reminder>\n") && content.contains(REMINDER)
+        })
+}
+
 pub(super) fn add_todo_list_reminder(messages: &mut Vec<Value>, conversation_id: &str) {
     let mut assistant_turn: usize = 0;
     let mut latest_write = None;

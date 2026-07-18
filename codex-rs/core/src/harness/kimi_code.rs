@@ -147,7 +147,7 @@ fn kimi_code_skill_description(description: &str) -> String {
 
 fn add_auto_permission_reminders(messages: Vec<Value>) -> Vec<Value> {
     let mut with_reminders = Vec::with_capacity(messages.len() + 1);
-    for message in messages {
+    for (index, message) in messages.iter().enumerate() {
         let is_user = message
             .get("role")
             .and_then(Value::as_str)
@@ -156,8 +156,11 @@ fn add_auto_permission_reminders(messages: Vec<Value>) -> Vec<Value> {
             .get("content")
             .and_then(Value::as_str)
             .is_some_and(|content| content == KIMI_CODE_AUTO_PERMISSION_REMINDER);
-        with_reminders.push(message);
-        if is_user && !already_reminder {
+        let next_is_todo_reminder = messages
+            .get(index + 1)
+            .is_some_and(super::kimi_code_todo_reminder::is_todo_list_reminder);
+        with_reminders.push(message.clone());
+        if is_user && !already_reminder && !next_is_todo_reminder {
             with_reminders.push(json!({
                 "role": "user",
                 "content": KIMI_CODE_AUTO_PERMISSION_REMINDER,
@@ -296,6 +299,8 @@ fn build_tools() -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
+    use super::KIMI_CODE_AUTO_PERMISSION_REMINDER;
+    use super::add_auto_permission_reminders;
     use super::build_request;
     use super::session_skills_listing;
     use crate::client_common::Prompt;
@@ -305,6 +310,30 @@ mod tests {
     use codex_protocol::models::ResponseItem;
     use codex_protocol::openai_models::ModelInfo;
     use serde_json::json;
+
+    #[test]
+    fn kimi_code_todo_reminder_precedes_the_permission_reminder() {
+        let todo_reminder = json!({
+            "role": "user",
+            "content": "<system-reminder>\nThe TodoList tool has not been updated recently. If you are working on tasks that benefit from progress tracking, consider using TodoList to update task status. Also consider clearing or rewriting the todo list if it has become stale and no longer matches the current work. Only use it if relevant. This is a gentle reminder; ignore it if not applicable. Make sure that you NEVER mention this reminder to the user.\n\nCurrent todo list:\n1. [in_progress] Continue\n</system-reminder>",
+        });
+        let messages = add_auto_permission_reminders(vec![
+            json!({"role": "user", "content": "Continue the task"}),
+            todo_reminder.clone(),
+        ]);
+
+        assert_eq!(
+            messages,
+            vec![
+                json!({"role": "user", "content": "Continue the task"}),
+                todo_reminder,
+                json!({
+                    "role": "user",
+                    "content": KIMI_CODE_AUTO_PERMISSION_REMINDER,
+                }),
+            ]
+        );
+    }
 
     #[test]
     fn kimi_code_request_renders_kimi_code_builtin_skills() {
