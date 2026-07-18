@@ -593,9 +593,11 @@ fn discard_unanswered_tool_calls(
     awaiting_tool_call_ids: &mut Vec<String>,
     pending_reasoning_content: &mut String,
 ) {
+    if !pending_tool_calls.is_empty() {
+        pending_reasoning_content.clear();
+    }
     pending_tool_calls.clear();
     awaiting_tool_call_ids.clear();
-    pending_reasoning_content.clear();
 }
 
 fn push_pending_assistant_content(
@@ -1584,6 +1586,59 @@ mod tests {
                     "role": "tool",
                     "content": "created",
                     "tool_call_id": "CreateGoal_0",
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn kimi_code_preserves_reasoning_before_follow_up_user_message() {
+        let items = vec![
+            ResponseItem::Reasoning {
+                id: Some("reasoning-1".to_string()),
+                summary: Vec::new(),
+                content: Some(vec![ReasoningItemContent::ReasoningText {
+                    text: "Now reply with the completion marker.".to_string(),
+                }]),
+                encrypted_content: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::Message {
+                id: Some("message-1".to_string()),
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: "PHASE_DONE".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::Message {
+                id: Some("message-2".to_string()),
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "Continue with the next phase.".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ];
+
+        let messages =
+            super::build_messages_with_options(&items, super::MessageBuildOptions::kimi_code())
+                .expect("build messages")
+                .collect::<Vec<_>>();
+
+        assert_eq!(
+            messages,
+            vec![
+                json!({
+                    "role": "assistant",
+                    "content": "PHASE_DONE",
+                    "reasoning_content": "Now reply with the completion marker.",
+                }),
+                json!({
+                    "role": "user",
+                    "content": "Continue with the next phase.",
                 }),
             ]
         );
