@@ -137,11 +137,25 @@ fn add_auto_permission_reminders(messages: Vec<Value>) -> Vec<Value> {
             .get("content")
             .and_then(Value::as_str)
             .is_some_and(|content| content == KIMI_CODE_AUTO_PERMISSION_REMINDER);
+        let todo_reminder = super::kimi_code_todo_reminder::is_todo_list_reminder(message);
+        let todo_reminder_follows_user_prompt = index
+            .checked_sub(1)
+            .and_then(|previous_index| messages.get(previous_index))
+            .is_some_and(|previous| {
+                previous.get("role").and_then(Value::as_str) == Some("user")
+                    && !super::kimi_code_todo_reminder::is_todo_list_reminder(previous)
+                    && previous.get("content").and_then(Value::as_str)
+                        != Some(KIMI_CODE_AUTO_PERMISSION_REMINDER)
+            });
         let next_is_todo_reminder = messages
             .get(index + 1)
             .is_some_and(super::kimi_code_todo_reminder::is_todo_list_reminder);
         with_reminders.push(message.clone());
-        if is_user && !already_reminder && !next_is_todo_reminder {
+        if is_user
+            && !already_reminder
+            && !next_is_todo_reminder
+            && (!todo_reminder || todo_reminder_follows_user_prompt)
+        {
             with_reminders.push(json!({
                 "role": "user",
                 "content": KIMI_CODE_AUTO_PERMISSION_REMINDER,
@@ -312,6 +326,26 @@ mod tests {
                     "role": "user",
                     "content": KIMI_CODE_AUTO_PERMISSION_REMINDER,
                 }),
+            ]
+        );
+    }
+
+    #[test]
+    fn kimi_code_trailing_todo_reminder_after_tool_omits_permission_reminder() {
+        let todo_reminder = json!({
+            "role": "user",
+            "content": "<system-reminder>\nThe TodoList tool has not been updated recently. If you are working on tasks that benefit from progress tracking, consider using TodoList to update task status. Also consider clearing or rewriting the todo list if it has become stale and no longer matches the current work. Only use it if relevant. This is a gentle reminder; ignore it if not applicable. Make sure that you NEVER mention this reminder to the user.\n\nCurrent todo list:\n1. [in_progress] Continue\n</system-reminder>",
+        });
+        let messages = add_auto_permission_reminders(vec![
+            json!({"role": "tool", "content": "contents"}),
+            todo_reminder.clone(),
+        ]);
+
+        assert_eq!(
+            messages,
+            vec![
+                json!({"role": "tool", "content": "contents"}),
+                todo_reminder,
             ]
         );
     }
