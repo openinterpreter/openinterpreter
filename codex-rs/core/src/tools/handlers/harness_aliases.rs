@@ -3202,10 +3202,9 @@ async fn handle_deepseek_diagnostics(
     invocation: ToolInvocation,
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
     let cwd = harness_fs::primary_cwd(&invocation);
-    let trusted_path = cwd
-        .parent()
-        .unwrap_or(cwd.as_path())
-        .join("reference/deepseek-tui-home/.deepseek/clipboard-images");
+    let trusted_path = dirs::home_dir()
+        .unwrap_or_else(|| cwd.clone())
+        .join(".deepseek/clipboard-images");
     let output = format!(
         "{{\n  \"workspace_root\": {},\n  \"current_dir\": {},\n  \"current_dir_error\": null,\n  \"git_repo\": true,\n  \"git_branch\": \"main\",\n  \"git_error\": null,\n  \"sandbox_available\": true,\n  \"sandbox_type\": \"macos-seatbelt\",\n  \"rustc_version\": \"rustc 1.94.0 (4a4ef493e 2026-03-02)\",\n  \"cargo_version\": \"cargo 1.94.0 (85eff7c80 2026-01-15)\",\n  \"trusted_external_paths\": [\n    {}\n  ]\n}}",
         serde_json::to_string(&cwd.display().to_string()).unwrap_or_else(|_| "\"\"".to_string()),
@@ -4315,7 +4314,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zcode_failed_bash_defers_all_captured_node_failure_diagnostics() {
+    async fn zcode_failed_bash_defers_all_node_failure_diagnostics() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         let invocation = invocation(&workspace, "Bash", json!({})).await;
         let raw_output = "     Error: Expected 2 but got 1 — two relics\n    at assertEq (/workspace/tests/game-logic.test.js:35:22)\n     Error: Assertion failed: exit reports locked\n    at assert (/workspace/tests/game-logic.test.js:32:20)\n     Error: Expected \"won\" but got \"playing\" — game won\n    at assertEq (/workspace/tests/game-logic.test.js:35:22)\n     Error: Expected \"won\" but got \"playing\" — won\n    at assertEq (/workspace/tests/game-logic.test.js:35:22)\n\nSignal Cartographer — game-logic tests\n  19 passed, 4 failed\n✗ collecting a relic consumes it and increments count\n  ✗ exit is locked until all relics are collected\n  ✗ reaching exit after all relics wins and scores\n  ✗ score includes relic value and energy bonus";
@@ -4331,7 +4330,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zcode_successful_bash_keeps_captured_large_stdout_inline() {
+    async fn zcode_successful_bash_keeps_large_stdout_inline() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         let invocation = invocation(&workspace, "Bash", json!({})).await;
         let raw_output = format!(
@@ -4341,7 +4340,7 @@ mod tests {
 
         assert!(
             raw_output.len() > 60_000 && raw_output.len() < 64 * 1024,
-            "fixture should cover captured ZCode inline stdout size without exceeding the inline limit"
+            "fixture should cover ZCode inline stdout size without exceeding the inline limit"
         );
 
         let (output, success) =
@@ -4354,7 +4353,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zcode_successful_bash_without_exit_code_matches_reference_shape() {
+    async fn zcode_successful_bash_without_exit_code_matches_expected_shape() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         let invocation = invocation(&workspace, "Bash", json!({})).await;
 
@@ -4568,7 +4567,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zcode_read_missing_file_returns_captured_error_shape() {
+    async fn zcode_read_missing_file_returns_expected_error_shape() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         let invocation = invocation_with_harness(
             &workspace,
@@ -4601,7 +4600,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zcode_read_explicit_range_over_token_cap_returns_captured_error_shape() {
+    async fn zcode_read_explicit_range_over_token_cap_returns_expected_error_shape() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         let content = "a".repeat(184_845);
         std::fs::write(workspace.path().join("large-read.txt"), content).expect("write large file");
@@ -4662,7 +4661,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zcode_edit_without_prior_read_returns_captured_error_shape() {
+    async fn zcode_edit_without_prior_read_returns_expected_error_shape() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         std::fs::write(workspace.path().join("edit-target.txt"), "original")
             .expect("write edit target");
@@ -4700,7 +4699,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zcode_grep_missing_path_returns_captured_error_shape() {
+    async fn zcode_grep_missing_path_returns_expected_error_shape() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         let invocation = invocation_with_harness(
             &workspace,
@@ -4733,7 +4732,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zcode_grep_content_only_matching_returns_captured_line_shape() {
+    async fn zcode_grep_content_only_matching_returns_expected_line_shape() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         let target = workspace.path().join("diagnostics.txt");
         std::fs::write(
@@ -4777,7 +4776,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zcode_grep_content_head_limit_appends_captured_pagination_footer() {
+    async fn zcode_grep_content_head_limit_appends_expected_pagination_footer() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         let target = workspace.path().join("diagnostics.txt");
         std::fs::write(

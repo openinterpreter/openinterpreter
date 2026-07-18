@@ -5,7 +5,7 @@ use super::next_cron_run;
 use super::parse_cron_expression;
 
 #[test]
-fn parses_and_renders_reference_schedules() {
+fn parses_and_renders_common_schedules() {
     let every_minute = parse_cron_expression("* * * * *").expect("valid cron");
     let every_five = parse_cron_expression("*/5 * * * *").expect("valid cron");
 
@@ -14,7 +14,7 @@ fn parses_and_renders_reference_schedules() {
 }
 
 #[test]
-fn rejects_the_captured_invalid_expression() {
+fn rejects_an_invalid_expression() {
     assert_eq!(
         parse_cron_expression("not a cron"),
         Err(

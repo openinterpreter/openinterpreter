@@ -565,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn kimi_code_request_deduplicates_and_truncates_project_skills_like_reference() {
+    fn kimi_code_request_deduplicates_and_truncates_project_skills() {
         let description = "x".repeat(251);
         let skills = format!(
             "<skills_instructions>\n## Skills\n### Available skills\n- qa-testing: {description} (file: /home/user/.openinterpreter/skills/.system/qa-testing/SKILL.md)\n- qa-testing: {description} (file: /workspace/.agents/skills/qa-testing/SKILL.md)\n### How to use skills\n- Discovery: ...\n</skills_instructions>"

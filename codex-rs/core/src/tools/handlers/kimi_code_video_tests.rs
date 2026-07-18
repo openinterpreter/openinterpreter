@@ -26,7 +26,7 @@ fn detection_accepts_every_kimi_code_video_suffix() {
 }
 
 #[test]
-fn detection_prefers_captured_mp4_magic_over_the_suffix() {
+fn detection_prefers_mp4_magic_over_the_suffix() {
     let mut header = vec![0, 0, 0, 24];
     header.extend_from_slice(b"ftypisom");
 
@@ -37,7 +37,7 @@ fn detection_prefers_captured_mp4_magic_over_the_suffix() {
 }
 
 #[test]
-fn multipart_body_matches_the_captured_file_and_purpose_parts() {
+fn multipart_body_matches_the_expected_file_and_purpose_parts() {
     let body = multipart_body("boundary", "probe.mp4", "video/mp4", b"video-bytes");
     let body = String::from_utf8(body).expect("multipart fixture is UTF-8");
 

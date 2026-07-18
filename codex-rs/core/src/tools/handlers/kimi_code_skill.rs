@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_default_skill_assets_match_the_captured_catalog() {
+    fn provider_default_skill_assets_match_the_expected_catalog() {
         for (name, contents) in [
             (
                 "check-kimi-code-docs",

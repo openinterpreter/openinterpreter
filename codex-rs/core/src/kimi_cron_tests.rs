@@ -9,7 +9,7 @@ use super::KimiCronService;
 use super::delivery_for_task;
 
 #[test]
-fn renders_the_captured_same_thread_envelope() {
+fn renders_the_expected_same_thread_envelope() {
     let task = CronTask {
         id: "3957c2ae".to_string(),
         cron: "* * * * *".to_string(),
