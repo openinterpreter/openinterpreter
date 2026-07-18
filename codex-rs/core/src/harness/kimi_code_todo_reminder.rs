@@ -23,10 +23,10 @@ pub(super) fn is_todo_list_reminder(message: &Value) -> bool {
 pub(super) fn add_todo_list_reminder(messages: &mut Vec<Value>) {
     let mut assistant_turn: usize = 0;
     let mut latest_write = None;
-    let mut latest_reminder_turn = None;
+    let mut existing_reminder_turns = Vec::new();
     for message in messages.iter() {
         if is_todo_list_reminder(message) {
-            latest_reminder_turn = Some(assistant_turn);
+            existing_reminder_turns.push(assistant_turn);
         }
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
             continue;
@@ -61,29 +61,9 @@ pub(super) fn add_todo_list_reminder(messages: &mut Vec<Value>) {
     let Some((write_turn, todos)) = latest_write else {
         return;
     };
-    let reminder_base_turn = latest_reminder_turn
-        .filter(|reminder_turn| *reminder_turn > write_turn)
-        .unwrap_or(write_turn);
-    let turns_since_reminder_base = assistant_turn.saturating_sub(reminder_base_turn);
-    if todos.is_empty() || turns_since_reminder_base < REMINDER_TURNS {
+    if todos.is_empty() {
         return;
     }
-
-    let reminder_turn = reminder_base_turn.saturating_add(REMINDER_TURNS);
-    let mut turns_seen = 0usize;
-    let insertion_index = messages
-        .iter()
-        .enumerate()
-        .find_map(|(index, message)| {
-            if message.get("role").and_then(Value::as_str) == Some("assistant") {
-                turns_seen += 1;
-                return None;
-            }
-            (turns_seen >= reminder_turn
-                && message.get("role").and_then(Value::as_str) == Some("user"))
-            .then_some(index + 1)
-        })
-        .unwrap_or(messages.len());
 
     let todo_list = todos
         .iter()
@@ -91,12 +71,35 @@ pub(super) fn add_todo_list_reminder(messages: &mut Vec<Value>) {
         .map(|(index, todo)| format!("{}. [{}] {}", index + 1, todo.status, todo.title))
         .collect::<Vec<_>>()
         .join("\n");
-    messages.insert(insertion_index, json!({
-        "role": "user",
-        "content": format!(
-            "<system-reminder>\n{REMINDER}\n\nCurrent todo list:\n{todo_list}\n</system-reminder>"
-        ),
-    }));
+    let mut reminder_turn = write_turn.saturating_add(REMINDER_TURNS);
+    while reminder_turn <= assistant_turn {
+        if !existing_reminder_turns.contains(&reminder_turn) {
+            let mut turns_seen = 0usize;
+            let insertion_index = messages
+                .iter()
+                .enumerate()
+                .find_map(|(index, message)| {
+                    if message.get("role").and_then(Value::as_str) == Some("assistant") {
+                        turns_seen += 1;
+                        return None;
+                    }
+                    (turns_seen >= reminder_turn
+                        && message.get("role").and_then(Value::as_str) == Some("user"))
+                    .then_some(index + 1)
+                })
+                .unwrap_or(messages.len());
+            messages.insert(insertion_index, json!({
+                "role": "user",
+                "content": format!(
+                    "<system-reminder>\n{REMINDER}\n\nCurrent todo list:\n{todo_list}\n</system-reminder>"
+                ),
+            }));
+        }
+        let Some(next_reminder_turn) = reminder_turn.checked_add(REMINDER_TURNS) else {
+            break;
+        };
+        reminder_turn = next_reminder_turn;
+    }
 }
 
 #[cfg(test)]
@@ -224,5 +227,42 @@ mod tests {
             2
         );
         assert!(messages.last().is_some_and(is_todo_list_reminder));
+    }
+
+    #[test]
+    fn reconstructs_all_due_reminders_when_they_are_not_in_history() {
+        let mut messages = vec![json!({
+            "role": "assistant",
+            "tool_calls": [{
+                "function": {
+                    "name": "TodoList",
+                    "arguments": r#"{"todos":[{"title":"Continue","status":"in_progress"}]}"#,
+                }
+            }],
+        })];
+        messages.extend((0..20).flat_map(|turn| {
+            [
+                json!({
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "function": {
+                            "name": "Read",
+                            "arguments": format!(r#"{{"path":"{turn}"}}"#),
+                        }
+                    }],
+                }),
+                json!({"role": "tool", "content": "contents"}),
+            ]
+        }));
+
+        add_todo_list_reminder(&mut messages);
+
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| is_todo_list_reminder(message))
+                .count(),
+            2
+        );
     }
 }
