@@ -139,7 +139,7 @@ pub(super) async fn handle(
             },
             FunctionCallOutputContentItem::InputText { text: note },
         ],
-        Some(true),
+        /*success*/ Some(true),
     )))
 }
 
