@@ -13,6 +13,7 @@ mod kimi_code_aliases;
 mod kimi_code_cron;
 mod kimi_code_extra;
 mod kimi_code_format;
+mod kimi_code_grep;
 mod kimi_code_media;
 mod kimi_code_skill;
 mod kimi_code_video;

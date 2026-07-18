@@ -2055,6 +2055,9 @@ struct GrepArgs {
 }
 
 async fn handle_grep(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    if is_kimi_code(&invocation) {
+        return super::kimi_code_grep::handle(invocation).await;
+    }
     let arguments = function_arguments(&invocation.payload)?;
     let args: GrepArgs = parse_arguments(arguments)?;
     let root = match args.path.as_deref() {
@@ -3844,7 +3847,7 @@ fn count_searchable_files(root: &Path) -> usize {
         .unwrap_or(0)
 }
 
-fn simple_glob_matches(pattern: &str, relative_path: &str) -> bool {
+pub(super) fn simple_glob_matches(pattern: &str, relative_path: &str) -> bool {
     let relative_path = relative_path.replace('\\', "/");
     let relative_path = relative_path.as_str();
     if let Some(prefix) = pattern.strip_suffix("/**") {
