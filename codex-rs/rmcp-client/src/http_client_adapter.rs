@@ -589,3 +589,41 @@ fn sse_stream_from_body(
     }))
     .boxed()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::within_body_limit;
+
+    #[test]
+    fn allows_chunk_that_exactly_reaches_limit() {
+        assert!(within_body_limit(90, 10, 100));
+    }
+
+    #[test]
+    fn allows_empty_chunk_at_limit() {
+        assert!(within_body_limit(100, 0, 100));
+    }
+
+    #[test]
+    fn rejects_chunk_that_exceeds_limit_by_one() {
+        assert!(!within_body_limit(90, 11, 100));
+    }
+
+    #[test]
+    fn rejects_first_chunk_larger_than_limit() {
+        assert!(!within_body_limit(0, 101, 100));
+    }
+
+    #[test]
+    fn rejects_any_chunk_once_body_is_at_limit() {
+        assert!(!within_body_limit(100, 1, 100));
+    }
+
+    #[test]
+    fn does_not_underflow_when_body_already_exceeds_limit() {
+        // A non-empty chunk is rejected rather than panicking on the internal
+        // subtraction; a zero-length chunk grows nothing and stays allowed.
+        assert!(!within_body_limit(200, 1, 100));
+        assert!(within_body_limit(200, 0, 100));
+    }
+}

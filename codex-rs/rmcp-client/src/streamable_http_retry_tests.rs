@@ -50,11 +50,14 @@ fn retryable_streamable_http_error_includes_remote_body_stream_failure() {
         )),
         StreamableHttpError::UnexpectedServerResponse("HTTP 502: upstream failure".into()),
         StreamableHttpError::UnexpectedServerResponse("HTTP 400: bad request".into()),
+        StreamableHttpError::Client(StreamableHttpClientAdapterError::ResponseBodyTooLarge {
+            limit: 100 * 1024 * 1024,
+        }),
     ];
 
     assert_eq!(
         errors.map(|error| RmcpClient::is_retryable_streamable_http_error(&error)),
-        [true, true, true, false, true, false],
+        [true, true, true, false, true, false, false],
     );
 }
 
