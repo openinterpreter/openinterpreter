@@ -2123,7 +2123,7 @@ async fn handle_glob(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
         timed_matches.truncate(100);
         let mut output = timed_matches
             .into_iter()
-            .map(|(_, path)| path)
+            .map(|(_, path)| path.replace('\\', "/"))
             .collect::<Vec<_>>()
             .join("\n");
         if output.is_empty() {
