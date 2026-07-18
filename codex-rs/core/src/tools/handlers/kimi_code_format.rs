@@ -114,9 +114,9 @@ mod tests {
 
     #[test]
     fn formats_kimi_goal_usage() {
-        assert_eq!(format_elapsed(20_600), "21s");
-        assert_eq!(format_elapsed(65_000), "1m05s");
-        assert_eq!(format_tokens(281), "281");
-        assert_eq!(format_tokens(4_300), "4.3k");
+        assert_eq!(format_elapsed(/*milliseconds*/ 20_600), "21s");
+        assert_eq!(format_elapsed(/*milliseconds*/ 65_000), "1m05s");
+        assert_eq!(format_tokens(/*tokens*/ 281), "281");
+        assert_eq!(format_tokens(/*tokens*/ 4_300), "4.3k");
     }
 }

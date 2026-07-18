@@ -3,7 +3,7 @@ source: tui/src/history_cell/tests.rs
 expression: rendered
 ---
 ╭─────────────────────────────────────────────────╮
-│ ✨ Update available! 0.0.34 -> 9.9.9            │
+│ ✨ Update available! 0.0.35 -> 9.9.9            │
 │ Run pnpm add -g @openai/codex to update.        │
 │                                                 │
 │ See full release notes:                         │
