@@ -24,7 +24,7 @@ struct TodoItem {
 }
 
 pub(super) fn add_todo_list_reminder(messages: &mut Vec<Value>, conversation_id: &str) {
-    let mut assistant_turn = 0;
+    let mut assistant_turn: usize = 0;
     let mut latest_write = None;
     for message in messages.iter() {
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
