@@ -1,7 +1,12 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-static OPENAI_KEY_REGEX: LazyLock<Regex> = LazyLock::new(|| compile_regex(r"sk-[A-Za-z0-9]{20,}"));
+// Matches the legacy `sk-...` key form (unchanged) plus the current prefixed
+// variants `sk-proj-...`, `sk-svcacct-...`, and `sk-admin-...`, whose random
+// tail can contain `-` and `_` and so was previously cut short.
+static OPENAI_KEY_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    compile_regex(r"sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9]{20,}")
+});
 static AWS_ACCESS_KEY_ID_REGEX: LazyLock<Regex> =
     LazyLock::new(|| compile_regex(r"\bAKIA[0-9A-Z]{16}\b"));
 static BEARER_TOKEN_REGEX: LazyLock<Regex> =
