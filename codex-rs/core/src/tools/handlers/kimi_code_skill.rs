@@ -217,7 +217,7 @@ mod tests {
             let contents = contents.replace("\r\n", "\n");
             assert!(contents.starts_with("---\nname: "));
             assert!(contents.contains(&format!("name: {name}\n")));
-            assert!(!expand_skill_body(contents, "").is_empty());
+            assert!(!expand_skill_body(&contents, "").is_empty());
         }
     }
 }
