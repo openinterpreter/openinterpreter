@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -241,12 +242,70 @@ fn load_token(codex_home: &Path) -> Result<KimiCodeToken, KimiCodeAuthError> {
 }
 
 fn save_token(codex_home: &Path, token: KimiCodeToken) -> Result<(), KimiCodeAuthError> {
-    fs::create_dir_all(credentials_dir(codex_home)).map_err(KimiCodeAuthError::CredentialsDir)?;
+    create_credentials_dir(&credentials_dir(codex_home))
+        .map_err(KimiCodeAuthError::CredentialsDir)?;
     let path = credentials_path(codex_home);
     let temp_path = path.with_extension("json.tmp");
     let contents = serde_json::to_vec(&token).map_err(KimiCodeAuthError::CredentialsParse)?;
-    fs::write(&temp_path, &contents).map_err(KimiCodeAuthError::CredentialsWrite)?;
+    write_private_file(&temp_path, &contents).map_err(KimiCodeAuthError::CredentialsWrite)?;
     fs::rename(temp_path, path).map_err(KimiCodeAuthError::CredentialsWrite)?;
+    Ok(())
+}
+
+/// Creates `dir` and any missing parents, restricted to the current user
+/// (`0o700`) on Unix. Mirrors the owner-only handling used for `auth.json`, and
+/// also tightens a directory that an earlier version may have left world- or
+/// group-readable.
+fn create_credentials_dir(dir: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // `DirBuilder` does not change the mode of a directory that already
+        // exists, so repair it explicitly.
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Writes `contents` to `path`, creating the file readable and writable only by
+/// the current user (`0o600`) on Unix. The Kimi credential file holds long-lived
+/// access and refresh tokens in plaintext, so it must not be world-readable.
+fn write_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+    // Remove any stale or pre-planted file at this path (a regular file left by
+    // a crashed write, or a symlink) so the create below always makes a fresh
+    // file with the mode we request and cannot be tricked into following a
+    // symlink to another location.
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    let mut options = fs::OpenOptions::new();
+    // `create_new` fails closed if the path reappears between the remove above
+    // and this open, rather than writing through whatever was planted there.
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Guarantee the exact mode regardless of the process umask.
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(contents)?;
+    file.flush()?;
     Ok(())
 }
 
