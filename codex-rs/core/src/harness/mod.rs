@@ -6,6 +6,7 @@ pub(crate) mod kimi_cli;
 pub(crate) mod kimi_code;
 mod kimi_code_prompt_cache;
 mod kimi_code_todo_reminder;
+mod kimi_code_tool_output;
 pub(crate) mod little_coder;
 pub(crate) mod mini_swe_agent;
 pub(crate) mod minimal;

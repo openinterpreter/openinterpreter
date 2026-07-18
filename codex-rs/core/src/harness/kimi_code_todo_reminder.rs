@@ -1,21 +1,9 @@
-use std::collections::HashMap;
-use std::sync::LazyLock;
-use std::sync::Mutex;
-
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
 
 const REMINDER_TURNS: usize = 10;
 const REMINDER: &str = "The TodoList tool has not been updated recently. If you are working on tasks that benefit from progress tracking, consider using TodoList to update task status. Also consider clearing or rewriting the todo list if it has become stale and no longer matches the current work. Only use it if relevant. This is a gentle reminder; ignore it if not applicable. Make sure that you NEVER mention this reminder to the user.";
-static REMINDER_STATE: LazyLock<Mutex<HashMap<String, ReminderState>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-#[derive(Default)]
-struct ReminderState {
-    write_marker: String,
-    last_reminder_assistant_turn: Option<usize>,
-}
 
 #[derive(Deserialize)]
 struct TodoItem {
@@ -32,7 +20,10 @@ pub(super) fn is_todo_list_reminder(message: &Value) -> bool {
         })
 }
 
-pub(super) fn add_todo_list_reminder(messages: &mut Vec<Value>, conversation_id: &str) {
+pub(super) fn add_todo_list_reminder(messages: &mut Vec<Value>) {
+    if messages.iter().any(is_todo_list_reminder) {
+        return;
+    }
     let mut assistant_turn: usize = 0;
     let mut latest_write = None;
     for message in messages.iter() {
@@ -62,37 +53,33 @@ pub(super) fn add_todo_list_reminder(messages: &mut Vec<Value>, conversation_id:
             let Ok(todos) = serde_json::from_value::<Vec<TodoItem>>(todos.clone()) else {
                 continue;
             };
-            latest_write = Some((assistant_turn, arguments.to_string(), todos));
+            latest_write = Some((assistant_turn, todos));
         }
     }
 
-    let Some((write_turn, write_arguments, todos)) = latest_write else {
+    let Some((write_turn, todos)) = latest_write else {
         return;
     };
-    let write_marker = format!("{write_turn}:{write_arguments}");
     let turns_since_write = assistant_turn.saturating_sub(write_turn);
-    let mut reminder_states = REMINDER_STATE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let reminder_state = reminder_states
-        .entry(conversation_id.to_string())
-        .or_default();
-    if reminder_state.write_marker != write_marker {
-        reminder_state.write_marker = write_marker;
-        reminder_state.last_reminder_assistant_turn = None;
-    }
     if todos.is_empty() || turns_since_write < REMINDER_TURNS {
         return;
     }
-    let should_emit = match reminder_state.last_reminder_assistant_turn {
-        Some(last_turn) if last_turn == assistant_turn => true,
-        Some(last_turn) => assistant_turn.saturating_sub(last_turn) >= REMINDER_TURNS,
-        None => true,
-    };
-    if !should_emit {
-        return;
-    }
-    reminder_state.last_reminder_assistant_turn = Some(assistant_turn);
+
+    let reminder_turn = write_turn.saturating_add(REMINDER_TURNS);
+    let mut turns_seen = 0usize;
+    let insertion_index = messages
+        .iter()
+        .enumerate()
+        .find_map(|(index, message)| {
+            if message.get("role").and_then(Value::as_str) == Some("assistant") {
+                turns_seen += 1;
+                return None;
+            }
+            (turns_seen >= reminder_turn
+                && message.get("role").and_then(Value::as_str) == Some("user"))
+            .then_some(index + 1)
+        })
+        .unwrap_or(messages.len());
 
     let todo_list = todos
         .iter()
@@ -100,7 +87,7 @@ pub(super) fn add_todo_list_reminder(messages: &mut Vec<Value>, conversation_id:
         .map(|(index, todo)| format!("{}. [{}] {}", index + 1, todo.status, todo.title))
         .collect::<Vec<_>>()
         .join("\n");
-    messages.push(json!({
+    messages.insert(insertion_index, json!({
         "role": "user",
         "content": format!(
             "<system-reminder>\n{REMINDER}\n\nCurrent todo list:\n{todo_list}\n</system-reminder>"
@@ -114,6 +101,7 @@ mod tests {
     use serde_json::json;
 
     use super::add_todo_list_reminder;
+    use super::is_todo_list_reminder;
 
     #[test]
     fn adds_stale_todo_reminder_after_ten_assistant_turns() {
@@ -138,7 +126,7 @@ mod tests {
             })
         }));
 
-        add_todo_list_reminder(&mut messages, "stale-todo-test");
+        add_todo_list_reminder(&mut messages);
 
         assert_eq!(
             messages.last(),
@@ -147,5 +135,37 @@ mod tests {
                 "content": "<system-reminder>\nThe TodoList tool has not been updated recently. If you are working on tasks that benefit from progress tracking, consider using TodoList to update task status. Also consider clearing or rewriting the todo list if it has become stale and no longer matches the current work. Only use it if relevant. This is a gentle reminder; ignore it if not applicable. Make sure that you NEVER mention this reminder to the user.\n\nCurrent todo list:\n1. [done] Capture state tools\n2. [in_progress] Capture remaining tools\n3. [pending] Finish gauntlet\n</system-reminder>",
             }))
         );
+    }
+
+    #[test]
+    fn keeps_the_stale_reminder_at_the_user_turn_that_triggered_it() {
+        let todo_call = json!({
+            "role": "assistant",
+            "tool_calls": [{
+                "function": {
+                    "name": "TodoList",
+                    "arguments": r#"{"todos":[{"title":"Continue","status":"in_progress"}]}"#,
+                }
+            }],
+        });
+        let mut messages = vec![todo_call];
+        messages.extend((0..10).map(|turn| {
+            json!({
+                "role": "assistant",
+                "content": format!("turn {turn}"),
+            })
+        }));
+        messages.extend([
+            json!({"role": "user", "content": "Continue"}),
+            json!({"role": "assistant", "tool_calls": [{"function": {"name": "Read"}}]}),
+            json!({"role": "tool", "content": "contents"}),
+        ]);
+
+        add_todo_list_reminder(&mut messages);
+
+        assert_eq!(messages[11]["content"], "Continue");
+        assert!(is_todo_list_reminder(&messages[12]));
+        assert_eq!(messages[13]["role"], "assistant");
+        assert_eq!(messages[14]["role"], "tool");
     }
 }

@@ -37,8 +37,10 @@ pub(crate) fn build_request(
         kimi_cli::MessageBuildOptions::kimi_code(),
     )?
     .collect::<Vec<_>>();
-    super::kimi_code_todo_reminder::add_todo_list_reminder(
+    super::kimi_code_todo_reminder::add_todo_list_reminder(&mut conversation_messages);
+    super::kimi_code_tool_output::shape_large_outputs(
         &mut conversation_messages,
+        prompt.cwd.as_deref().unwrap_or_else(|| Path::new(".")),
         conversation_id,
     );
     messages.extend(add_auto_permission_reminders(conversation_messages));
