@@ -502,4 +502,77 @@ mod tests {
         let loaded = load_token(temp_dir.path()).expect("load token");
         assert_eq!(loaded, token);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_token_sets_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempdir().expect("tempdir");
+        let token = KimiCodeToken {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: 123,
+            scope: "scope".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 456,
+        };
+        save_token(temp_dir.path(), token).expect("save token");
+
+        let file_mode = std::fs::metadata(credentials_path(temp_dir.path()))
+            .expect("credentials metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600, "credential file must be owner-only");
+
+        let dir_mode = std::fs::metadata(credentials_dir(temp_dir.path()))
+            .expect("credentials dir metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "credentials dir must be owner-only");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_token_repairs_preexisting_loose_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempdir().expect("tempdir");
+
+        // Simulate state left by an earlier version: a world-readable
+        // credentials directory containing a stale, world-readable temp file.
+        let dir = credentials_dir(temp_dir.path());
+        std::fs::create_dir_all(&dir).expect("create dir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod dir");
+        let stale_temp = credentials_path(temp_dir.path()).with_extension("json.tmp");
+        std::fs::write(&stale_temp, b"stale").expect("write stale temp");
+        std::fs::set_permissions(&stale_temp, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod stale temp");
+
+        let token = KimiCodeToken {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: 123,
+            scope: "scope".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 456,
+        };
+        save_token(temp_dir.path(), token).expect("save token");
+
+        let file_mode = std::fs::metadata(credentials_path(temp_dir.path()))
+            .expect("credentials metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600, "credential file must be owner-only");
+
+        let dir_mode = std::fs::metadata(&dir)
+            .expect("credentials dir metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "loose credentials dir must be tightened");
+    }
 }
