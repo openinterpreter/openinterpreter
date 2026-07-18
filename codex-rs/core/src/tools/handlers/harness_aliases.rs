@@ -294,8 +294,8 @@ async fn handle_agent(
     if is_zcode {
         return handle_zcode_agent(invocation, args).await;
     }
-    if is_kimi_code(&invocation) && !args.run_in_background {
-        return handle_kimi_code_foreground_agent(invocation, args).await;
+    if is_kimi_code(&invocation) {
+        return handle_kimi_code_agent(invocation, args).await;
     }
     let fork_turns = "all";
     let task_name = args.description.clone();
@@ -334,10 +334,12 @@ async fn handle_agent(
         .await
 }
 
-async fn handle_kimi_code_foreground_agent(
+async fn handle_kimi_code_agent(
     invocation: ToolInvocation,
     args: ClaudeAgentArgs,
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    let codex_home = invocation.turn.config.codex_home.to_path_buf();
+    let session_id = invocation.session.session_id().to_string();
     let ToolInvocation {
         session,
         turn,
@@ -398,6 +400,19 @@ async fn handle_kimi_code_foreground_agent(
     ))
     .await
     .map_err(collab_spawn_error)?;
+    if args.run_in_background {
+        let output = super::kimi_code_agent_tasks::register_agent(
+            &codex_home,
+            &session_id,
+            spawned.thread_id,
+            &args.description,
+            role_name,
+        )?;
+        return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+            output,
+            /*success*/ Some(true),
+        )));
+    }
     let status = wait_for_agent_final_status(&session.services.agent_control, spawned.thread_id)
         .await
         .unwrap_or(spawned.status);

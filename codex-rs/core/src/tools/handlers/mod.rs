@@ -9,6 +9,7 @@ mod get_context_remaining;
 pub(crate) mod get_context_remaining_spec;
 mod harness_aliases;
 mod harness_fs;
+mod kimi_code_agent_tasks;
 mod kimi_code_aliases;
 mod kimi_code_bash;
 mod kimi_code_cron;

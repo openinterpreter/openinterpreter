@@ -153,27 +153,32 @@ pub(super) async fn handle_list(
     let tasks = TASKS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut tasks = tasks
+    let tasks = tasks
         .values()
         .filter(|task| !args.active_only || !task.status.is_terminal())
         .cloned()
         .collect::<Vec<_>>();
-    tasks.sort_by(|left, right| left.task_id.cmp(&right.task_id));
-    tasks.truncate(args.limit.clamp(MIN_TASK_LIST_LIMIT, MAX_TASK_LIST_LIMIT));
+    let mut entries = tasks
+        .iter()
+        .map(|task| (task.task_id.clone(), format_task_info(task)))
+        .collect::<Vec<_>>();
+    entries.extend(super::kimi_code_agent_tasks::list(args.active_only));
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries.truncate(args.limit.clamp(MIN_TASK_LIST_LIMIT, MAX_TASK_LIST_LIMIT));
     let label = if args.active_only {
         "active_background_tasks"
     } else {
         "background_tasks"
     };
-    let output = if tasks.is_empty() {
+    let output = if entries.is_empty() {
         format!("{label}: 0\nNo background tasks found.")
     } else {
-        let entries = tasks
+        let formatted = entries
             .iter()
-            .map(format_task_info)
+            .map(|(_, formatted)| formatted.as_str())
             .collect::<Vec<_>>()
             .join("\n---\n");
-        format!("{label}: {}\n{entries}", tasks.len())
+        format!("{label}: {}\n{formatted}", entries.len())
     };
     text_output(output, /*success*/ true)
 }
@@ -185,11 +190,20 @@ pub(super) async fn handle_output(
         return model_error("TaskOutput received unsupported payload");
     };
     let args: TaskOutputArgs = parse_arguments(arguments)?;
-    let task = task(&args.task_id)?;
+    if !has_process_task(&args.task_id) {
+        return super::kimi_code_agent_tasks::handle_output(
+            invocation,
+            &args.task_id,
+            args.block,
+            args.timeout,
+        )
+        .await;
+    }
+    let task = get_process_task(&args.task_id)?;
     if task.status == TaskStatus::Running {
         poll_process(&invocation, &task, args.block, args.timeout).await?;
     }
-    let task = task(&args.task_id)?;
+    let task = get_process_task(&args.task_id)?;
     let retrieval_status = if task.status.is_terminal() {
         "success"
     } else if args.block {
@@ -248,7 +262,15 @@ pub(super) async fn handle_stop(
         return model_error("TaskStop received unsupported payload");
     };
     let args: TaskStopArgs = parse_arguments(arguments)?;
-    let task = task(&args.task_id)?;
+    if !has_process_task(&args.task_id) {
+        return super::kimi_code_agent_tasks::handle_stop(
+            invocation,
+            &args.task_id,
+            args.reason.as_deref(),
+        )
+        .await;
+    }
+    let task = get_process_task(&args.task_id)?;
     if task.status.is_terminal() {
         let reason = task
             .stop_reason
@@ -386,13 +408,20 @@ fn format_task_info(task: &ProcessTask) -> String {
     lines.join("\n")
 }
 
-fn task(task_id: &str) -> Result<ProcessTask, FunctionCallError> {
+fn get_process_task(task_id: &str) -> Result<ProcessTask, FunctionCallError> {
     TASKS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(task_id)
         .cloned()
         .ok_or_else(|| FunctionCallError::RespondToModel(format!("Task not found: {task_id}")))
+}
+
+fn has_process_task(task_id: &str) -> bool {
+    TASKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(task_id)
 }
 
 fn persist_output(task: &ProcessTask) -> Result<(), FunctionCallError> {
