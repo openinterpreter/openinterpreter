@@ -116,7 +116,7 @@ fn ensure_denybin(tools: &[&str], denybin_dir: Option<&Path>) -> Result<PathBuf>
             let path = base.join(format!("{tool}{ext}"));
             if !path.exists() {
                 let mut f = File::create(&path)?;
-                f.write_all(b"@echo off\\r\\nexit /b 1\\r\\n")?;
+                f.write_all(b"@echo off\r\nexit /b 1\r\n")?;
             }
         }
     }
@@ -174,4 +174,33 @@ pub fn apply_no_network_to_env(env_map: &mut HashMap<String, String>) -> Result<
     prepend_path(env_map, &base.to_string_lossy());
     reorder_pathext_for_stubs(env_map);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn denybin_stub_is_a_real_two_line_batch_file() {
+        let dir = tempdir().expect("tempdir");
+        ensure_denybin(&["ssh"], Some(dir.path())).expect("ensure_denybin");
+
+        for ext in [".bat", ".cmd"] {
+            let contents =
+                fs::read_to_string(dir.path().join(format!("ssh{ext}"))).expect("read stub");
+            // Must be two real CRLF-terminated lines, not one line containing
+            // the literal text `\r\n`, otherwise cmd.exe never runs `exit /b 1`
+            // and the network tool is not actually blocked.
+            assert_eq!(contents, "@echo off\r\nexit /b 1\r\n");
+            assert!(
+                !contents.contains("\\r\\n"),
+                "stub contains literal backslash-r-n: {contents:?}"
+            );
+            assert!(
+                contents.lines().any(|line| line == "exit /b 1"),
+                "stub is missing a standalone `exit /b 1` line: {contents:?}"
+            );
+        }
+    }
 }
