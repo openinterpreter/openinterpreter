@@ -204,12 +204,19 @@ pub(super) struct MessageBuildOptions {
     pub preserve_empty_tool_output: bool,
     pub trim_user_message_trailing_newlines: bool,
     pub tool_call_id_format: ToolCallIdFormat,
+    pub tool_failure_format: ToolFailureFormat,
 }
 
 #[derive(Clone, Copy)]
 pub(super) enum ToolCallIdFormat {
     Preserve,
     KimiCodeUnderscore,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ToolFailureFormat {
+    InlineSystemError,
+    KimiCodeEnvelope,
 }
 
 impl MessageBuildOptions {
@@ -222,6 +229,7 @@ impl MessageBuildOptions {
             preserve_empty_tool_output: false,
             trim_user_message_trailing_newlines: true,
             tool_call_id_format: ToolCallIdFormat::Preserve,
+            tool_failure_format: ToolFailureFormat::InlineSystemError,
         }
     }
 
@@ -234,6 +242,7 @@ impl MessageBuildOptions {
             preserve_empty_tool_output: false,
             trim_user_message_trailing_newlines: false,
             tool_call_id_format: ToolCallIdFormat::KimiCodeUnderscore,
+            tool_failure_format: ToolFailureFormat::KimiCodeEnvelope,
         }
     }
 
@@ -246,6 +255,7 @@ impl MessageBuildOptions {
             preserve_empty_tool_output: true,
             trim_user_message_trailing_newlines: true,
             tool_call_id_format: ToolCallIdFormat::Preserve,
+            tool_failure_format: ToolFailureFormat::InlineSystemError,
         }
     }
 }
@@ -830,7 +840,14 @@ fn kimi_tool_output_content(
                 if is_kimi_system_tool_text(text) {
                     return json!(text);
                 }
-                return json!(format!("<system>ERROR: {text}</system>"));
+                return json!(match options.tool_failure_format {
+                    ToolFailureFormat::InlineSystemError => {
+                        format!("<system>ERROR: {text}</system>")
+                    }
+                    ToolFailureFormat::KimiCodeEnvelope => {
+                        format!("<system>ERROR: Tool execution failed.</system>\n{text}")
+                    }
+                });
             }
             let text = safe_kimi_tool_text(text, options);
             json!(text)
@@ -1471,6 +1488,59 @@ mod tests {
                 "role": "user",
                 "content": "hello\n",
             })]
+        );
+    }
+
+    #[test]
+    fn kimi_code_failed_tool_output_uses_separate_error_envelope() {
+        let items = vec![
+            ResponseItem::FunctionCall {
+                id: Some("function-1".to_string()),
+                name: "Read".to_string(),
+                namespace: None,
+                arguments: r#"{"path":"missing.txt"}"#.to_string(),
+                call_id: "Read:14".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: "Read:14".to_string(),
+                output: FunctionCallOutputPayload {
+                    body: codex_protocol::models::FunctionCallOutputBody::Text(
+                        r#""missing.txt" does not exist."#.to_string(),
+                    ),
+                    success: Some(false),
+                },
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ];
+
+        let messages =
+            super::build_messages_with_options(&items, super::MessageBuildOptions::kimi_code())
+                .expect("build messages")
+                .collect::<Vec<_>>();
+
+        assert_eq!(
+            messages,
+            vec![
+                json!({
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "type": "function",
+                        "id": "Read_14",
+                        "function": {
+                            "name": "Read",
+                            "arguments": r#"{"path":"missing.txt"}"#,
+                        },
+                    }],
+                    "reasoning_content": "",
+                }),
+                json!({
+                    "role": "tool",
+                    "content": "<system>ERROR: Tool execution failed.</system>\n\"missing.txt\" does not exist.",
+                    "tool_call_id": "Read_14",
+                }),
+            ]
         );
     }
 
