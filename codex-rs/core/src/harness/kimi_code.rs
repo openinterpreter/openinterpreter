@@ -216,6 +216,7 @@ fn build_system_prompt(prompt: &Prompt, skills: &str) -> String {
     let cwd = prompt.cwd.as_deref().unwrap_or_else(|| Path::new("."));
     let listing = kimi_work_dir_listing(cwd);
     KIMI_CODE_SYSTEM_PROMPT
+        .replace("\r\n", "\n")
         .replace(
             "{% if KIMI_OS == \"Windows\" %}\n\nIMPORTANT: You are on Windows. The Bash tool runs through Git Bash, so use Unix shell syntax inside Bash commands — `/dev/null` not `NUL`, and forward slashes in paths. For file operations, always prefer the built-in tools (Read, Write, Edit, Glob, Grep) over Bash commands — they work reliably across all platforms.\n{% endif %}",
             "",
@@ -425,6 +426,7 @@ mod tests {
         assert!(system.contains("- update-config: Inspect or edit kimi-code's own config"));
         assert!(system.contains("Path: builtin://update-config"));
         assert!(system.contains("- write-goal:"));
+        assert!(!system.contains('\r'));
         assert!(!system.contains("{{ KIMI_SKILLS }}"));
         assert!(!system.contains("{% if KIMI_SKILLS %}"));
         assert!(!system.contains("<skills_instructions>"));

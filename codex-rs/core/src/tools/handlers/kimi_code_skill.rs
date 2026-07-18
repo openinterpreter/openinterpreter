@@ -122,7 +122,8 @@ fn kimi_skill_source(scope: SkillScope) -> &'static str {
 }
 
 fn expand_skill_body(contents: &str, args: &str) -> String {
-    let body = strip_frontmatter(contents).trim();
+    let contents = contents.replace("\r\n", "\n");
+    let body = strip_frontmatter(&contents).trim();
     if args.is_empty() {
         return body.to_string();
     }
@@ -172,6 +173,14 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_windows_line_endings() {
+        let contents =
+            "---\r\nname: qa-testing\r\ndescription: Test apps\r\n---\r\n\r\n# QA testing\r\n";
+
+        assert_eq!(expand_skill_body(contents, ""), "# QA testing");
+    }
+
+    #[test]
     fn appends_and_escapes_arguments_when_body_has_no_placeholder() {
         assert_eq!(
             expand_skill_body("# Review", "<raw \"value\">"),
@@ -205,6 +214,7 @@ mod tests {
             ),
             ("write-goal", include_str!("kimi_code_skills/write-goal.md")),
         ] {
+            let contents = contents.replace("\r\n", "\n");
             assert!(contents.starts_with("---\nname: "));
             assert!(contents.contains(&format!("name: {name}\n")));
             assert!(!expand_skill_body(contents, "").is_empty());
