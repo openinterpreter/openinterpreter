@@ -43,4 +43,49 @@ mod tests {
         // The goal of this test is just to compile all the regex to prevent the panic
         let _ = redact_secrets("secret".to_string());
     }
+
+    fn assert_redacted(secret: &str) {
+        let input = format!("prefix {secret} suffix");
+        let redacted = redact_secrets(input);
+        assert!(
+            !redacted.contains(secret),
+            "expected secret to be redacted, got: {redacted}"
+        );
+        assert!(redacted.contains("[REDACTED_SECRET]"), "got: {redacted}");
+    }
+
+    #[test]
+    fn redacts_legacy_openai_key() {
+        assert_redacted("sk-abcdEFGH1234ijklMNOP5678");
+    }
+
+    #[test]
+    fn redacts_prefixed_openai_keys() {
+        assert_redacted("sk-proj-abcdEFGH1234ijklMNOP5678_qrst-uvwx");
+        assert_redacted("sk-svcacct-ABCdef123456GHIjkl789012");
+        assert_redacted("sk-admin-ABCdef123456GHIjkl789012");
+    }
+
+    #[test]
+    fn still_redacts_aws_access_key_id() {
+        assert_redacted("AKIAIOSFODNN7EXAMPLE");
+    }
+
+    #[test]
+    fn still_redacts_bearer_and_assignment() {
+        let redacted = redact_secrets("Authorization: Bearer sometokenvalue1234567890".to_string());
+        assert!(
+            redacted.contains("Bearer [REDACTED_SECRET]"),
+            "got: {redacted}"
+        );
+
+        let redacted = redact_secrets("password=supersecretvalue".to_string());
+        assert!(!redacted.contains("supersecretvalue"), "got: {redacted}");
+    }
+
+    #[test]
+    fn leaves_ordinary_text_untouched() {
+        let input = "The quick brown fox jumps over the lazy dog.".to_string();
+        assert_eq!(redact_secrets(input.clone()), input);
+    }
 }
