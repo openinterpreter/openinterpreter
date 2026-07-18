@@ -220,7 +220,11 @@ impl ContextManager {
                 let mut replaced = false;
                 let placeholder = placeholder.to_string();
                 for item in content_items.iter_mut() {
-                    if matches!(item, FunctionCallOutputContentItem::InputImage { .. }) {
+                    if matches!(
+                        item,
+                        FunctionCallOutputContentItem::InputImage { .. }
+                            | FunctionCallOutputContentItem::InputVideo { .. }
+                    ) {
                         *item = FunctionCallOutputContentItem::InputText {
                             text: placeholder.clone(),
                         };

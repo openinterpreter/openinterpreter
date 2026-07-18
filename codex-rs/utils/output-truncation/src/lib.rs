@@ -38,6 +38,7 @@ pub fn formatted_truncate_text_content_items_with_policy(
         .filter_map(|item| match item {
             FunctionCallOutputContentItem::InputText { text } => Some(text.as_str()),
             FunctionCallOutputContentItem::InputImage { .. }
+            | FunctionCallOutputContentItem::InputVideo { .. }
             | FunctionCallOutputContentItem::EncryptedContent { .. } => None,
         })
         .collect::<Vec<_>>();
@@ -67,6 +68,12 @@ pub fn formatted_truncate_text_content_items_with_policy(
             Some(FunctionCallOutputContentItem::InputImage {
                 image_url: image_url.clone(),
                 detail: *detail,
+            })
+        }
+        FunctionCallOutputContentItem::InputVideo { video_url, id } => {
+            Some(FunctionCallOutputContentItem::InputVideo {
+                video_url: video_url.clone(),
+                id: id.clone(),
             })
         }
         FunctionCallOutputContentItem::EncryptedContent { encrypted_content } => {
@@ -125,6 +132,12 @@ pub fn truncate_function_output_items_with_policy(
                 out.push(FunctionCallOutputContentItem::InputImage {
                     image_url: image_url.clone(),
                     detail: *detail,
+                });
+            }
+            FunctionCallOutputContentItem::InputVideo { video_url, id } => {
+                out.push(FunctionCallOutputContentItem::InputVideo {
+                    video_url: video_url.clone(),
+                    id: id.clone(),
                 });
             }
             FunctionCallOutputContentItem::EncryptedContent { encrypted_content } => {

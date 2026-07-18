@@ -92,6 +92,16 @@ pub(super) async fn handle(
         )));
     }
 
+    if let Some(mime_type) = super::kimi_code_video::mime_type(&path, &data) {
+        let read_mode = if args.region.is_some() || args.full_resolution {
+            super::kimi_code_video::ReadMode::ImageOptionsRequested
+        } else {
+            super::kimi_code_video::ReadMode::Default
+        };
+        return super::kimi_code_video::handle(&invocation, &path, &data, mime_type, read_mode)
+            .await;
+    }
+
     let format = image::guess_format(&data).map_err(|_| {
         FunctionCallError::RespondToModel(format!(
             "\"{}\" is not a supported image or video file. Use Read for text files, or Bash or an MCP tool for other binary formats.",

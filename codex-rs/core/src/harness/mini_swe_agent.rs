@@ -576,6 +576,7 @@ fn mini_swe_agent_tool_output_content(output: &FunctionCallOutputPayload) -> Str
             .filter_map(|item| match item {
                 FunctionCallOutputContentItem::InputText { text } => Some(text.as_str()),
                 FunctionCallOutputContentItem::InputImage { .. }
+                | FunctionCallOutputContentItem::InputVideo { .. }
                 | FunctionCallOutputContentItem::EncryptedContent { .. } => None,
             })
             .collect::<Vec<_>>()

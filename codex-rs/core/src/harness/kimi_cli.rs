@@ -884,6 +884,13 @@ fn kimi_output_content_item(item: &FunctionCallOutputContentItem) -> Value {
                 "id": null,
             }
         }),
+        FunctionCallOutputContentItem::InputVideo { video_url, id } => json!({
+            "type": "video_url",
+            "video_url": {
+                "url": video_url,
+                "id": id,
+            }
+        }),
         FunctionCallOutputContentItem::EncryptedContent { .. } => json!({
             "type": "text",
             "text": "<system>Tool returned encrypted content.</system>",

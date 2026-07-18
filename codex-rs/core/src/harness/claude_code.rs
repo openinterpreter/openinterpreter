@@ -791,6 +791,7 @@ fn tool_result_body_stays_structured(body: &FunctionCallOutputBody) -> bool {
         matches!(
             item,
             FunctionCallOutputContentItem::InputImage { .. }
+                | FunctionCallOutputContentItem::InputVideo { .. }
                 | FunctionCallOutputContentItem::EncryptedContent { .. }
         )
     })
@@ -987,6 +988,10 @@ fn map_tool_result_content_item(
                 }
             })
         }
+        FunctionCallOutputContentItem::InputVideo { .. } => Some(AnthropicToolResultBlock::Text {
+            text: "[video omitted by claude-code harness]".to_string(),
+            cache_control: None,
+        }),
         FunctionCallOutputContentItem::EncryptedContent { .. } => None,
     }
 }

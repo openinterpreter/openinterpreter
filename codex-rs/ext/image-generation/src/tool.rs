@@ -417,6 +417,7 @@ fn output_image_urls(output: &FunctionCallOutputPayload) -> impl Iterator<Item =
         .filter_map(|item| match item {
             FunctionCallOutputContentItem::InputImage { image_url, .. } => Some(image_url.clone()),
             FunctionCallOutputContentItem::InputText { .. }
+            | FunctionCallOutputContentItem::InputVideo { .. }
             | FunctionCallOutputContentItem::EncryptedContent { .. } => None,
         })
 }

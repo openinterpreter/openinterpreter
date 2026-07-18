@@ -343,6 +343,10 @@ fn minimal_tool_output_content(output: &FunctionCallOutputPayload) -> Value {
                 FunctionCallOutputContentItem::InputImage { image_url, detail } => {
                     chat_image_content_part(image_url, *detail)
                 }
+                FunctionCallOutputContentItem::InputVideo { .. } => json!({
+                    "type": "text",
+                    "text": "[video content omitted]",
+                }),
                 FunctionCallOutputContentItem::EncryptedContent { .. } => json!({
                     "type": "text",
                     "text": "[encrypted content omitted]",

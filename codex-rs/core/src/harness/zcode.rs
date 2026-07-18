@@ -1038,6 +1038,7 @@ fn map_tool_result_content_item(
                 }
             })
         }
+        FunctionCallOutputContentItem::InputVideo { .. } => None,
         FunctionCallOutputContentItem::EncryptedContent { .. } => None,
     }
 }

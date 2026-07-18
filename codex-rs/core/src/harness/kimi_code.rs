@@ -269,6 +269,7 @@ mod tests {
     use super::build_request;
     use crate::client_common::Prompt;
     use codex_protocol::models::ContentItem;
+    use codex_protocol::models::FunctionCallOutputContentItem;
     use codex_protocol::models::FunctionCallOutputPayload;
     use codex_protocol::models::ResponseItem;
     use codex_protocol::openai_models::ModelInfo;
@@ -543,6 +544,84 @@ mod tests {
                         "url": "data:image/png;base64,AAAB",
                         "id": null
                     }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn kimi_code_request_preserves_captured_video_tool_content() {
+        let prompt = Prompt {
+            input: vec![
+                ResponseItem::Message {
+                    id: Some("user".to_string()),
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "Read the video.".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::FunctionCall {
+                    id: None,
+                    name: "ReadMediaFile".to_string(),
+                    namespace: None,
+                    arguments: r#"{"path":"probe.mp4"}"#.to_string(),
+                    call_id: "ReadMediaFile:1".to_string(),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::FunctionCallOutput {
+                    id: None,
+                    call_id: "ReadMediaFile:1".to_string(),
+                    output: FunctionCallOutputPayload::from_content_items(vec![
+                        FunctionCallOutputContentItem::InputText {
+                            text: "<video path=\"/workspace/probe.mp4\">".to_string(),
+                        },
+                        FunctionCallOutputContentItem::InputVideo {
+                            video_url: "ms://file-123".to_string(),
+                            id: Some("file-123".to_string()),
+                        },
+                        FunctionCallOutputContentItem::InputText {
+                            text: "</video>".to_string(),
+                        },
+                    ]),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+            ],
+            cwd: Some(std::env::temp_dir()),
+            ..Prompt::default()
+        };
+
+        let (request, _) = build_request(
+            &prompt,
+            &test_model_info(),
+            "kimi-code-video-content-conversation",
+        )
+        .expect("build request");
+        let tool_message = request["messages"]
+            .as_array()
+            .expect("messages array")
+            .iter()
+            .find(|message| message["role"] == json!("tool"))
+            .expect("tool message");
+
+        assert_eq!(
+            tool_message["content"],
+            json!([
+                {
+                    "type": "text",
+                    "text": "<video path=\"/workspace/probe.mp4\">"
+                },
+                {
+                    "type": "video_url",
+                    "video_url": {
+                        "url": "ms://file-123",
+                        "id": "file-123"
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "</video>"
                 }
             ])
         );

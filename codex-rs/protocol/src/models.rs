@@ -1803,8 +1803,10 @@ pub struct ShellCommandToolCallParams {
     pub justification: Option<String>,
 }
 
-/// Responses API compatible content items that can be returned by a tool call.
-/// This is a subset of ContentItem with the types we support as function call outputs.
+/// Structured content items that can be returned by a tool call.
+///
+/// Most variants map directly to Responses API content. Harness adapters may
+/// translate additional media variants into their provider-specific wire shape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FunctionCallOutputContentItem {
@@ -1819,6 +1821,12 @@ pub enum FunctionCallOutputContentItem {
         #[ts(optional)]
         detail: Option<ImageDetail>,
     },
+    InputVideo {
+        video_url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        id: Option<String>,
+    },
     EncryptedContent {
         encrypted_content: String,
     },
@@ -1829,7 +1837,7 @@ pub enum FunctionCallOutputContentItem {
 ///
 /// This conversion is intentionally lossy:
 /// - only `input_text` items are included
-/// - image items are ignored
+/// - media items are ignored
 ///
 /// We use this helper where callers still need a string representation (for
 /// example telemetry previews or legacy string-only output paths) while keeping
@@ -1846,6 +1854,7 @@ pub fn function_call_output_content_items_to_text(
             }
             FunctionCallOutputContentItem::InputText { .. }
             | FunctionCallOutputContentItem::InputImage { .. }
+            | FunctionCallOutputContentItem::InputVideo { .. }
             | FunctionCallOutputContentItem::EncryptedContent { .. } => None,
         })
         .collect::<Vec<_>>();

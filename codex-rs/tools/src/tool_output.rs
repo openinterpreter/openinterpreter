@@ -233,8 +233,14 @@ fn content_items_to_code_mode_result(items: &[FunctionCallOutputContentItem]) ->
                 {
                     Some(image_url.clone())
                 }
+                FunctionCallOutputContentItem::InputVideo { video_url, .. }
+                    if !video_url.trim().is_empty() =>
+                {
+                    Some(video_url.clone())
+                }
                 FunctionCallOutputContentItem::InputText { .. }
                 | FunctionCallOutputContentItem::InputImage { .. }
+                | FunctionCallOutputContentItem::InputVideo { .. }
                 | FunctionCallOutputContentItem::EncryptedContent { .. } => None,
             })
             .collect::<Vec<_>>()
