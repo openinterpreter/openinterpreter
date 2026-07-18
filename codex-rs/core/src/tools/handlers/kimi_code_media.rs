@@ -125,10 +125,18 @@ pub(super) async fn handle(
         (width, height, prepared)
     } else {
         let decoded = image::load_from_memory_with_format(&data, format).map_err(|error| {
-            FunctionCallError::RespondToModel(format!(
-                "Failed to read {}: failed to decode image: {error}",
-                args.path
-            ))
+            let message = if args.region.is_some()
+                && matches!(format, ImageFormat::Png)
+                && error.to_string().contains("CRC error")
+            {
+                format!(
+                    "Cannot read region from \"{}\": Failed to decode the image for cropping: unrecognised content at end of stream",
+                    args.path
+                )
+            } else {
+                format!("Failed to read {}: failed to decode image: {error}", args.path)
+            };
+            FunctionCallError::RespondToModel(message)
         })?;
         let (width, height) = decoded.dimensions();
         let prepared = prepare_image(&args, data, decoded, format, mime_type)?;

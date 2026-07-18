@@ -5075,6 +5075,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kimi_read_media_file_reports_corrupt_cropped_png_like_kimi_code() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let image = BASE64_STANDARD
+            .decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n1EAAAAASUVORK5CYII=",
+            )
+            .expect("decode PNG fixture");
+        std::fs::write(workspace.path().join("pixel.png"), image).expect("write PNG fixture");
+
+        let err = handle_response_item(
+            &workspace,
+            HarnessAliasHandler::ReadMediaFile,
+            "ReadMediaFile",
+            json!({
+                "path": "pixel.png",
+                "region": { "x": 0, "y": 0, "width": 1, "height": 1 },
+                "full_resolution": true,
+            }),
+        )
+        .await
+        .expect_err("corrupt PNG should fail");
+
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(
+                "Cannot read region from \"pixel.png\": Failed to decode the image for cropping: unrecognised content at end of stream"
+                    .to_string(),
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn kimi_read_media_file_accepts_all_provider_image_formats() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         let image = image::DynamicImage::new_rgb8(2, 2);
