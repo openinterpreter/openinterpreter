@@ -21,12 +21,13 @@ pub(super) fn is_todo_list_reminder(message: &Value) -> bool {
 }
 
 pub(super) fn add_todo_list_reminder(messages: &mut Vec<Value>) {
-    if messages.iter().any(is_todo_list_reminder) {
-        return;
-    }
     let mut assistant_turn: usize = 0;
     let mut latest_write = None;
+    let mut latest_reminder_turn = None;
     for message in messages.iter() {
+        if is_todo_list_reminder(message) {
+            latest_reminder_turn = Some(assistant_turn);
+        }
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
             continue;
         }
@@ -60,12 +61,15 @@ pub(super) fn add_todo_list_reminder(messages: &mut Vec<Value>) {
     let Some((write_turn, todos)) = latest_write else {
         return;
     };
-    let turns_since_write = assistant_turn.saturating_sub(write_turn);
-    if todos.is_empty() || turns_since_write < REMINDER_TURNS {
+    let reminder_base_turn = latest_reminder_turn
+        .filter(|reminder_turn| *reminder_turn > write_turn)
+        .unwrap_or(write_turn);
+    let turns_since_reminder_base = assistant_turn.saturating_sub(reminder_base_turn);
+    if todos.is_empty() || turns_since_reminder_base < REMINDER_TURNS {
         return;
     }
 
-    let reminder_turn = write_turn.saturating_add(REMINDER_TURNS);
+    let reminder_turn = reminder_base_turn.saturating_add(REMINDER_TURNS);
     let mut turns_seen = 0usize;
     let insertion_index = messages
         .iter()
@@ -167,5 +171,58 @@ mod tests {
         assert!(is_todo_list_reminder(&messages[12]));
         assert_eq!(messages[13]["role"], "assistant");
         assert_eq!(messages[14]["role"], "tool");
+    }
+
+    #[test]
+    fn repeats_the_stale_reminder_after_ten_more_assistant_turns() {
+        let mut messages = vec![json!({
+            "role": "assistant",
+            "tool_calls": [{
+                "function": {
+                    "name": "TodoList",
+                    "arguments": r#"{"todos":[{"title":"Continue","status":"in_progress"}]}"#,
+                }
+            }],
+        })];
+        messages.extend((0..10).flat_map(|turn| {
+            [
+                json!({
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "function": {
+                            "name": "Read",
+                            "arguments": format!(r#"{{"path":"{turn}"}}"#),
+                        }
+                    }],
+                }),
+                json!({"role": "tool", "content": "contents"}),
+            ]
+        }));
+        add_todo_list_reminder(&mut messages);
+        messages.extend((10..20).flat_map(|turn| {
+            [
+                json!({
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "function": {
+                            "name": "Read",
+                            "arguments": format!(r#"{{"path":"{turn}"}}"#),
+                        }
+                    }],
+                }),
+                json!({"role": "tool", "content": "contents"}),
+            ]
+        }));
+
+        add_todo_list_reminder(&mut messages);
+
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| is_todo_list_reminder(message))
+                .count(),
+            2
+        );
+        assert!(messages.last().is_some_and(is_todo_list_reminder));
     }
 }
