@@ -8,11 +8,8 @@ use codex_protocol::openai_models::ModelInfo;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
-use std::sync::LazyLock;
-use std::sync::Mutex;
 
 const KIMI_CODE_SYSTEM_PROMPT: &str = include_str!("kimi_code_system_prompt.md");
 const KIMI_CODE_TOOLS: &str = include_str!("kimi_code_tools.json");
@@ -26,9 +23,6 @@ const KIMI_CODE_BUILTIN_SKILLS: &str = r#"### Built-in
   Path: builtin://update-config
 - write-goal: Help the user craft a well-specified `/goal` objective for goal mode — turn a rough intention into a completion contract with a clear finish line, proof, boundaries, and stop rule. Use when the user asks for help writing, refining, or improving a go…
   Path: builtin://write-goal"#;
-static KIMI_CODE_SYSTEM_PROMPT_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
 pub(crate) fn build_request(
     prompt: &Prompt,
     model_info: &ModelInfo,
@@ -85,13 +79,9 @@ fn kimi_code_prompt_cache_key(conversation_id: &str) -> String {
 
 fn cached_system_prompt(prompt: &Prompt, conversation_id: &str) -> String {
     let skills = session_skills_listing(prompt);
-    let mut cache = KIMI_CODE_SYSTEM_PROMPT_CACHE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    cache
-        .entry(conversation_id.to_string())
-        .or_insert_with(|| build_system_prompt(prompt, &skills))
-        .clone()
+    super::kimi_code_prompt_cache::get_or_insert(conversation_id, || {
+        build_system_prompt(prompt, &skills)
+    })
 }
 
 /// Renders Kimi Code's source-backed model-facing skill listing.
@@ -291,7 +281,6 @@ mod tests {
     use super::KIMI_CODE_AUTO_PERMISSION_REMINDER;
     use super::add_auto_permission_reminders;
     use super::build_request;
-    use super::cached_system_prompt;
     use super::session_skills_listing;
     use crate::client_common::Prompt;
     use codex_protocol::models::ContentItem;
@@ -300,23 +289,6 @@ mod tests {
     use codex_protocol::models::ResponseItem;
     use codex_protocol::openai_models::ModelInfo;
     use serde_json::json;
-
-    #[test]
-    fn kimi_code_system_prompt_stays_fixed_for_the_session() {
-        let workspace = tempfile::tempdir().expect("temp workspace");
-        let prompt = Prompt {
-            cwd: Some(workspace.path().to_path_buf()),
-            ..Prompt::default()
-        };
-        let initial = cached_system_prompt(&prompt, "fixed-session-system-prompt");
-
-        std::fs::write(workspace.path().join("created-later.txt"), "new")
-            .expect("write later file");
-        let after_workspace_change = cached_system_prompt(&prompt, "fixed-session-system-prompt");
-
-        assert_eq!(after_workspace_change, initial);
-        assert!(!after_workspace_change.contains("created-later.txt"));
-    }
 
     #[test]
     fn kimi_code_todo_reminder_precedes_the_permission_reminder() {
