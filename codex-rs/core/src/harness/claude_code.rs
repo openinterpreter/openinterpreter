@@ -494,7 +494,7 @@ fn current_local_date() -> chrono::NaiveDate {
 enum ClaudeCodeSkillsRendering {
     /// Child-agent requests: the parent session already owns skill routing.
     Omit,
-    /// Full profile: reshape into the captured `<system-reminder>` Skill-tool
+    /// Full profile: reshape into the provider-compatible `<system-reminder>` Skill-tool
     /// list (`- name: description`).
     SkillToolReminder,
     /// Bare profile: no Skill tool exists, so pass the native
@@ -1649,14 +1649,14 @@ fn build_tools(
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<HashSet<_>>();
-        tools.extend(reference_claude_supplemental_tools(
+        tools.extend(claude_code_supplemental_tools(
             &existing_names,
             is_child_agent_request,
             allowed_names.as_ref(),
         )?);
     }
     if !profile.is_bare() {
-        normalize_reference_claude_tool_descriptions(&mut tools);
+        normalize_claude_code_tool_descriptions(&mut tools);
     }
     tools.sort_by_key(|tool| match tool.name.as_str() {
         "Agent" => 0,
@@ -2008,7 +2008,7 @@ Usage:
 - NEVER create documentation files (*.md) or README files unless explicitly requested by the User.
 - Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked."#;
 
-fn normalize_reference_claude_tool_descriptions(tools: &mut [AnthropicTool]) {
+fn normalize_claude_code_tool_descriptions(tools: &mut [AnthropicTool]) {
     for tool in tools {
         match tool.name.as_str() {
             "Agent" => {
@@ -2291,7 +2291,7 @@ fn month_name(month: u32) -> &'static str {
     }
 }
 
-fn reference_claude_supplemental_tools(
+fn claude_code_supplemental_tools(
     existing_names: &HashSet<&str>,
     is_child_agent_request: bool,
     allowed_names: Option<&HashSet<String>>,

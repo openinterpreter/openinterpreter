@@ -294,8 +294,8 @@ async fn handle_agent(
     if is_zcode {
         return handle_zcode_agent(invocation, args).await;
     }
-    if is_kimi_code(&invocation) && !args.run_in_background {
-        return handle_kimi_code_foreground_agent(invocation, args).await;
+    if is_kimi_code(&invocation) {
+        return handle_kimi_code_agent(invocation, args).await;
     }
     let fork_turns = "all";
     let task_name = args.description.clone();
@@ -334,10 +334,12 @@ async fn handle_agent(
         .await
 }
 
-async fn handle_kimi_code_foreground_agent(
+async fn handle_kimi_code_agent(
     invocation: ToolInvocation,
     args: ClaudeAgentArgs,
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    let codex_home = invocation.turn.config.codex_home.to_path_buf();
+    let session_id = invocation.session.session_id().to_string();
     let ToolInvocation {
         session,
         turn,
@@ -398,6 +400,19 @@ async fn handle_kimi_code_foreground_agent(
     ))
     .await
     .map_err(collab_spawn_error)?;
+    if args.run_in_background {
+        let output = super::kimi_code_agent_tasks::register_agent(
+            &codex_home,
+            &session_id,
+            spawned.thread_id,
+            &args.description,
+            role_name,
+        )?;
+        return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+            output,
+            /*success*/ Some(true),
+        )));
+    }
     let status = wait_for_agent_final_status(&session.services.agent_control, spawned.thread_id)
         .await
         .unwrap_or(spawned.status);
@@ -546,11 +561,15 @@ fn zcode_task_name(description: &str) -> String {
 struct BashArgs {
     command: String,
     #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
     description: Option<String>,
     #[serde(default)]
     timeout: Option<u64>,
     #[serde(default)]
     run_in_background: bool,
+    #[serde(default)]
+    disable_timeout: bool,
     #[serde(default, rename = "dangerouslyDisableSandbox")]
     dangerously_disable_sandbox: bool,
 }
@@ -563,6 +582,10 @@ async fn handle_bash(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
         "cmd": command,
         "yield_time_ms": if args.run_in_background { 1_000 } else { args.timeout.unwrap_or(10_000).min(30_000) },
     });
+    if let Some(cwd) = args.cwd.as_deref() {
+        let cwd = harness_fs::checked_read_path(&invocation, cwd, "Bash")?;
+        translated["workdir"] = json!(cwd);
+    }
     if args.run_in_background {
         translated["tty"] = json!(true);
     }
@@ -571,8 +594,11 @@ async fn handle_bash(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
     }
 
     let is_zcode = is_zcode(&invocation);
+    let is_kimi_code = is_kimi_code(&invocation);
     if is_zcode {
         translated["max_output_tokens"] = json!(100_000);
+    } else if is_kimi_code {
+        translated["max_output_tokens"] = json!(1_000_000);
     }
 
     let payload = ToolPayload::Function {
@@ -591,6 +617,19 @@ async fn handle_bash(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
             .get("output")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
+        if is_kimi_code {
+            let output = super::kimi_code_tasks::register_process(
+                &invocation,
+                process_id as i32,
+                &command,
+                args.description.as_deref().unwrap_or(&args.command),
+                initial_output,
+            )?;
+            return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+                output,
+                Some(true),
+            )));
+        }
         let task_id = claude_task_id(process_id as i32);
         let output_path = output_path
             .map(|template| template.replace("{task_id}", &task_id))
@@ -604,10 +643,11 @@ async fn handle_bash(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
             &output_path,
             &invocation.call_id,
         );
+        let background_output = format!(
+            "Command running in background with ID: {task_id}. Output is being written to: {output_path}. You will be notified when it completes. To check interim output, use Read on that file path."
+        );
         return Ok(boxed_tool_output(FunctionToolOutput::from_text(
-            format!(
-                "Command running in background with ID: {task_id}. Output is being written to: {output_path}. You will be notified when it completes. To check interim output, use Read on that file path."
-            ),
+            background_output,
             Some(true),
         )));
     }
@@ -623,6 +663,15 @@ async fn handle_bash(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
         return Ok(boxed_tool_output(FunctionToolOutput::from_text(
             format!("{HARNESS_NO_TRUNCATE_PREFIX}{harness_output}"),
             success,
+        )));
+    }
+    if is_kimi_code {
+        let _ = args.disable_timeout;
+        let (harness_output, success) =
+            super::kimi_code_bash::format_foreground_output(raw_output, exit_code);
+        return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+            harness_output,
+            Some(success),
         )));
     }
     let is_deepseek_tui = is_deepseek_tui(&invocation);
@@ -1069,6 +1118,9 @@ fn default_task_list_limit() -> usize {
 async fn handle_task_list(
     invocation: ToolInvocation,
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    if is_kimi_code(&invocation) {
+        return super::kimi_code_tasks::handle_list(invocation).await;
+    }
     let arguments = function_arguments(&invocation.payload)?;
     let args: TaskListArgs = parse_arguments(arguments)?;
     let tasks = CLAUDE_TASKS
@@ -1099,6 +1151,9 @@ async fn handle_task_list(
 async fn handle_task_output(
     invocation: ToolInvocation,
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    if is_kimi_code(&invocation) {
+        return super::kimi_code_tasks::handle_output(invocation).await;
+    }
     let arguments = function_arguments(&invocation.payload)?;
     let args: TaskOutputArgs = parse_arguments(arguments)?;
     let task_state = claude_task_state(&args.task_id)?;
@@ -1164,6 +1219,9 @@ struct TaskStopArgs {
 async fn handle_task_stop(
     invocation: ToolInvocation,
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    if is_kimi_code(&invocation) {
+        return super::kimi_code_tasks::handle_stop(invocation).await;
+    }
     let arguments = function_arguments(&invocation.payload)?;
     let args: TaskStopArgs = parse_arguments(arguments)?;
     let task_state = claude_task_state(&args.task_id)?;
@@ -1209,6 +1267,9 @@ struct ReadArgs {
 }
 
 async fn handle_read(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    if is_kimi_code(&invocation) {
+        return super::kimi_code_read::handle(invocation).await;
+    }
     let arguments = function_arguments(&invocation.payload)?;
     let args: ReadArgs = parse_arguments(arguments)?;
     let path = harness_fs::checked_read_path(&invocation, &args.path, "Read")?;
@@ -1756,7 +1817,13 @@ async fn handle_write(
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
     let arguments = function_arguments(&invocation.payload)?;
     let args: WriteArgs = parse_arguments(arguments)?;
-    let path = harness_fs::checked_write_path(&invocation, &args.path, "Write")?;
+    let path = if is_kimi_code(&invocation)
+        && super::kimi_code_plan::is_current_plan_path(&invocation, &args.path)
+    {
+        harness_fs::resolve_model_path(&invocation, &args.path)?
+    } else {
+        harness_fs::checked_write_path(&invocation, &args.path, "Write")?
+    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|err| FunctionCallError::RespondToModel(format!("Write failed: {err}")))?;
@@ -1776,7 +1843,14 @@ async fn handle_write(
         _ => std::fs::write(&path, &args.content)
             .map_err(|err| FunctionCallError::RespondToModel(format!("Write failed: {err}")))?,
     }
-    let message = if is_zcode(&invocation) {
+    let message = if is_kimi_code(&invocation) {
+        let action = if args.mode.as_deref() == Some("append") {
+            "Appended"
+        } else {
+            "Wrote"
+        };
+        format!("{action} {bytes_written} bytes to {}", args.path)
+    } else if is_zcode(&invocation) {
         record_zcode_current_file(&invocation, &path);
         record_zcode_current_file_hash(
             &invocation,
@@ -1852,17 +1926,48 @@ async fn handle_edit(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
     }
     let text = std::fs::read_to_string(&path)
         .map_err(|err| FunctionCallError::RespondToModel(format!("Edit failed: {err}")))?;
+    if is_kimi_code(&invocation) && args.old_string.is_some() && args.old_string == args.new_string
+    {
+        return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+            "No changes to make: old_string and new_string are exactly the same.".to_string(),
+            Some(false),
+        )));
+    }
+    let pure_crlf = is_kimi_code(&invocation) && has_only_crlf_line_endings(&text);
+    let editable_text = if pure_crlf {
+        text.replace("\r\n", "\n")
+    } else {
+        text
+    };
     let replacements = edit_replacements(&args)?;
-    let mut updated = text.clone();
+    let mut updated = editable_text.clone();
     let mut total_matches = 0usize;
     for replacement in &replacements {
-        let matches = text.matches(&replacement.old_text).count();
+        let matches = editable_text.matches(&replacement.old_text).count();
         if matches == 0 {
+            if is_kimi_code(&invocation) {
+                return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+                    format!(
+                        "old_string not found in {}, the file contents may be out of date. Please use the Read Tool to reload the content.\n",
+                        args.path
+                    ),
+                    Some(false),
+                )));
+            }
             return Err(FunctionCallError::RespondToModel(
                 "Edit failed: old_string not found".to_string(),
             ));
         }
         if matches > 1 && !args.replace_all {
+            if is_kimi_code(&invocation) {
+                return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+                    format!(
+                        "old_string is not unique in {} (found {matches} occurrences). To replace every occurrence, set replace_all=true. To replace only one occurrence, include more surrounding context in old_string.",
+                        args.path
+                    ),
+                    Some(false),
+                )));
+            }
             return Err(FunctionCallError::RespondToModel(
                 "Edit failed: old_string found multiple times; set replace_all to true or provide more context".to_string(),
             ));
@@ -1874,12 +1979,31 @@ async fn handle_edit(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
             updated.replacen(&replacement.old_text, &replacement.new_text, 1)
         };
     }
+    let updated = if pure_crlf {
+        updated.replace('\n', "\r\n")
+    } else {
+        updated
+    };
     std::fs::write(&path, &updated)
         .map_err(|err| FunctionCallError::RespondToModel(format!("Edit failed: {err}")))?;
     record_claude_read_file(&path);
     if is_zcode(&invocation) {
         record_zcode_current_file(&invocation, &path);
         record_zcode_current_file_hash(&invocation, &path, zcode_file_hash(updated.as_bytes()));
+    }
+    if is_kimi_code(&invocation) {
+        let occurrence_label = if total_matches == 1 {
+            "occurrence"
+        } else {
+            "occurrences"
+        };
+        return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+            format!(
+                "Replaced {total_matches} {occurrence_label} in {}",
+                args.path
+            ),
+            Some(true),
+        )));
     }
     if is_claude_code_bare(&invocation) || is_zcode(&invocation) {
         return Ok(boxed_tool_output(FunctionToolOutput::from_text(
@@ -1916,6 +2040,23 @@ async fn handle_edit(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
         format!("Replaced {total_matches} {occurrence_label} in {display_path}"),
         Some(true),
     )))
+}
+
+fn has_only_crlf_line_endings(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut saw_crlf = false;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\r' if bytes.get(index + 1) == Some(&b'\n') => {
+                saw_crlf = true;
+                index += 2;
+            }
+            b'\r' | b'\n' => return false,
+            _ => index += 1,
+        }
+    }
+    saw_crlf
 }
 
 fn edit_replacements(args: &EditArgs) -> Result<Vec<EditReplacement>, FunctionCallError> {
@@ -1955,10 +2096,51 @@ async fn handle_glob(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
             root
         }
     };
-    let include_dirs = args.include_dirs.unwrap_or(true);
+    let include_dirs = if is_kimi_code(&invocation) {
+        false
+    } else {
+        args.include_dirs.unwrap_or(true)
+    };
     let mut matches = Vec::new();
     collect_glob_matches(&root, &args.pattern, include_dirs, &mut matches)
         .map_err(|err| FunctionCallError::RespondToModel(format!("Glob failed: {err}")))?;
+    if is_kimi_code(&invocation) {
+        let mut timed_matches = matches
+            .into_iter()
+            .map(|path| {
+                let modified = std::fs::metadata(root.join(&path))
+                    .and_then(|metadata| metadata.modified())
+                    .ok();
+                (modified, path)
+            })
+            .collect::<Vec<_>>();
+        timed_matches.sort_by(|(left_modified, left), (right_modified, right)| {
+            right_modified
+                .cmp(left_modified)
+                .then_with(|| right.cmp(left))
+        });
+        let truncated = timed_matches.len() > 100;
+        timed_matches.truncate(100);
+        let mut output = timed_matches
+            .into_iter()
+            .map(|(_, path)| path.replace('\\', "/"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if output.is_empty() {
+            output.push_str("No matches found");
+        } else if truncated {
+            output.insert_str(
+                0,
+                "[Truncated at 100 matches — use a more specific pattern]\nOnly the first 100 matches are returned.\n",
+            );
+        } else if output.lines().count() == 100 {
+            output.push_str("\nFound 100 matches");
+        }
+        return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+            output,
+            Some(true),
+        )));
+    }
     matches.sort();
     if is_zcode(&invocation) {
         if matches.is_empty() {
@@ -2014,6 +2196,9 @@ struct GrepArgs {
 }
 
 async fn handle_grep(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    if is_kimi_code(&invocation) {
+        return super::kimi_code_grep::handle(invocation).await;
+    }
     let arguments = function_arguments(&invocation.payload)?;
     let args: GrepArgs = parse_arguments(arguments)?;
     let root = match args.path.as_deref() {
@@ -2475,8 +2660,11 @@ pub(crate) fn zcode_todo_reminder_text() -> String {
 }
 
 async fn handle_zcode_enter_plan_mode(
-    _invocation: ToolInvocation,
+    invocation: ToolInvocation,
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    if is_kimi_code(&invocation) {
+        return super::kimi_code_plan::handle_enter(invocation).await;
+    }
     Ok(boxed_tool_output(FunctionToolOutput::from_text(
         "Entered plan mode. You should now focus on exploring the codebase and designing an implementation approach.\n\nIn plan mode, you should:\n1. Thoroughly explore the codebase to understand existing patterns\n2. Identify similar features and architectural approaches\n3. Consider multiple approaches and their trade-offs\n4. Use AskUserQuestion if you need to clarify the approach\n5. Design a concrete implementation strategy\n6. When ready, use ExitPlanMode to present your plan for approval\n\nRemember: DO NOT write or edit any files yet. This is a read-only exploration and planning phase.".to_string(),
         Some(true),
@@ -2486,6 +2674,9 @@ async fn handle_zcode_enter_plan_mode(
 async fn handle_zcode_exit_plan_mode(
     invocation: ToolInvocation,
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    if is_kimi_code(&invocation) {
+        return super::kimi_code_plan::handle_exit(invocation).await;
+    }
     let arguments = function_arguments(&invocation.payload)?;
     let input: serde_json::Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
     let plan = input
@@ -3202,10 +3393,9 @@ async fn handle_deepseek_diagnostics(
     invocation: ToolInvocation,
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
     let cwd = harness_fs::primary_cwd(&invocation);
-    let trusted_path = cwd
-        .parent()
-        .unwrap_or(cwd.as_path())
-        .join("reference/deepseek-tui-home/.deepseek/clipboard-images");
+    let trusted_path = dirs::home_dir()
+        .unwrap_or_else(|| cwd.clone())
+        .join(".deepseek/clipboard-images");
     let output = format!(
         "{{\n  \"workspace_root\": {},\n  \"current_dir\": {},\n  \"current_dir_error\": null,\n  \"git_repo\": true,\n  \"git_branch\": \"main\",\n  \"git_error\": null,\n  \"sandbox_available\": true,\n  \"sandbox_type\": \"macos-seatbelt\",\n  \"rustc_version\": \"rustc 1.94.0 (4a4ef493e 2026-03-02)\",\n  \"cargo_version\": \"cargo 1.94.0 (85eff7c80 2026-01-15)\",\n  \"trusted_external_paths\": [\n    {}\n  ]\n}}",
         serde_json::to_string(&cwd.display().to_string()).unwrap_or_else(|_| "\"\"".to_string()),
@@ -3804,7 +3994,12 @@ fn count_searchable_files(root: &Path) -> usize {
         .unwrap_or(0)
 }
 
-fn simple_glob_matches(pattern: &str, relative_path: &str) -> bool {
+pub(super) fn simple_glob_matches(pattern: &str, relative_path: &str) -> bool {
+    let relative_path = relative_path.replace('\\', "/");
+    let relative_path = relative_path.as_str();
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        return relative_path.starts_with(&format!("{prefix}/"));
+    }
     if let Some(extension) = pattern.strip_prefix("*.") {
         return relative_path
             .rsplit('/')
@@ -4315,7 +4510,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zcode_failed_bash_defers_all_captured_node_failure_diagnostics() {
+    async fn zcode_failed_bash_defers_all_node_failure_diagnostics() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         let invocation = invocation(&workspace, "Bash", json!({})).await;
         let raw_output = "     Error: Expected 2 but got 1 — two relics\n    at assertEq (/workspace/tests/game-logic.test.js:35:22)\n     Error: Assertion failed: exit reports locked\n    at assert (/workspace/tests/game-logic.test.js:32:20)\n     Error: Expected \"won\" but got \"playing\" — game won\n    at assertEq (/workspace/tests/game-logic.test.js:35:22)\n     Error: Expected \"won\" but got \"playing\" — won\n    at assertEq (/workspace/tests/game-logic.test.js:35:22)\n\nSignal Cartographer — game-logic tests\n  19 passed, 4 failed\n✗ collecting a relic consumes it and increments count\n  ✗ exit is locked until all relics are collected\n  ✗ reaching exit after all relics wins and scores\n  ✗ score includes relic value and energy bonus";
@@ -4331,7 +4526,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zcode_successful_bash_keeps_captured_large_stdout_inline() {
+    async fn zcode_successful_bash_keeps_large_stdout_inline() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         let invocation = invocation(&workspace, "Bash", json!({})).await;
         let raw_output = format!(
@@ -4341,7 +4536,7 @@ mod tests {
 
         assert!(
             raw_output.len() > 60_000 && raw_output.len() < 64 * 1024,
-            "fixture should cover captured ZCode inline stdout size without exceeding the inline limit"
+            "fixture should cover ZCode inline stdout size without exceeding the inline limit"
         );
 
         let (output, success) =
@@ -4354,7 +4549,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zcode_successful_bash_without_exit_code_matches_reference_shape() {
+    async fn zcode_successful_bash_without_exit_code_matches_expected_shape() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         let invocation = invocation(&workspace, "Bash", json!({})).await;
 
@@ -4568,7 +4763,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zcode_read_missing_file_returns_captured_error_shape() {
+    async fn zcode_read_missing_file_returns_expected_error_shape() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         let invocation = invocation_with_harness(
             &workspace,
@@ -4601,7 +4796,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zcode_read_explicit_range_over_token_cap_returns_captured_error_shape() {
+    async fn zcode_read_explicit_range_over_token_cap_returns_expected_error_shape() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         let content = "a".repeat(184_845);
         std::fs::write(workspace.path().join("large-read.txt"), content).expect("write large file");
@@ -4662,7 +4857,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zcode_edit_without_prior_read_returns_captured_error_shape() {
+    async fn zcode_edit_without_prior_read_returns_expected_error_shape() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         std::fs::write(workspace.path().join("edit-target.txt"), "original")
             .expect("write edit target");
@@ -4700,7 +4895,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zcode_grep_missing_path_returns_captured_error_shape() {
+    async fn zcode_grep_missing_path_returns_expected_error_shape() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         let invocation = invocation_with_harness(
             &workspace,
@@ -4733,7 +4928,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zcode_grep_content_only_matching_returns_captured_line_shape() {
+    async fn zcode_grep_content_only_matching_returns_expected_line_shape() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         let target = workspace.path().join("diagnostics.txt");
         std::fs::write(
@@ -4777,7 +4972,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zcode_grep_content_head_limit_appends_captured_pagination_footer() {
+    async fn zcode_grep_content_head_limit_appends_expected_pagination_footer() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         let target = workspace.path().join("diagnostics.txt");
         std::fs::write(
@@ -4880,6 +5075,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kimi_read_media_file_reports_corrupt_cropped_png_like_kimi_code() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let image = BASE64_STANDARD
+            .decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n1EAAAAASUVORK5CYII=",
+            )
+            .expect("decode PNG fixture");
+        std::fs::write(workspace.path().join("pixel.png"), image).expect("write PNG fixture");
+
+        let err = handle_response_item(
+            &workspace,
+            HarnessAliasHandler::ReadMediaFile,
+            "ReadMediaFile",
+            json!({
+                "path": "pixel.png",
+                "region": { "x": 0, "y": 0, "width": 1, "height": 1 },
+                "full_resolution": true,
+            }),
+        )
+        .await
+        .expect_err("corrupt PNG should fail");
+
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(
+                "Cannot read region from \"pixel.png\": Failed to decode the image for cropping: unrecognised content at end of stream"
+                    .to_string(),
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn kimi_read_media_file_accepts_all_provider_image_formats() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
         let image = image::DynamicImage::new_rgb8(2, 2);
@@ -4929,6 +5156,67 @@ mod tests {
                 "unexpected image URL for {filename}: {image_url}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn kimi_glob_is_files_only_and_caps_matches_in_modified_order() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let files = workspace.path().join("gauntlet-files");
+        std::fs::create_dir_all(files.join("subdir")).expect("create fixture directories");
+        for index in 0..105 {
+            std::fs::write(
+                files.join(format!("item_{index:03}.txt")),
+                format!("GLOB_ITEM_{index:03}\n"),
+            )
+            .expect("write glob fixture");
+        }
+        let invocation = invocation_with_harness(
+            &workspace,
+            "Glob",
+            json!({
+                "pattern": "gauntlet-files/**",
+                "path": ".",
+                "include_ignored": true,
+                "include_dirs": true,
+            }),
+            Some("kimi-code"),
+        )
+        .await;
+
+        let call_id = invocation.call_id.clone();
+        let payload = invocation.payload.clone();
+        let output = HarnessAliasHandler::Glob
+            .handle(invocation)
+            .await
+            .expect("glob succeeds")
+            .to_response_item(&call_id, &payload);
+        let codex_protocol::models::ResponseInputItem::FunctionCallOutput { output, .. } = output
+        else {
+            panic!("expected function call output");
+        };
+        let codex_protocol::models::FunctionCallOutputBody::Text(output) = output.body else {
+            panic!("expected text output");
+        };
+        let expected_paths = (5..105)
+            .rev()
+            .map(|index| format!("gauntlet-files/item_{index:03}.txt"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(
+            output,
+            format!(
+                "[Truncated at 100 matches — use a more specific pattern]\nOnly the first 100 matches are returned.\n{expected_paths}"
+            )
+        );
+    }
+
+    #[test]
+    fn recursive_glob_matches_windows_path_separators() {
+        assert!(simple_glob_matches(
+            "gauntlet-files/**",
+            r"gauntlet-files\item_001.txt"
+        ));
     }
 
     #[test]

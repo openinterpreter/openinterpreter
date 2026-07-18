@@ -110,10 +110,12 @@ async fn handle_agent_swarm(
             .as_str()
             .map(str::to_string)
             .unwrap_or_else(|| result.to_string());
+        let (agent_id, summary) = parse_foreground_agent_result(&text);
         outputs.push(format!(
-            "<subagent item=\"{}\" outcome=\"completed\">{}</subagent>",
+            "<subagent agent_id=\"{}\" item=\"{}\" outcome=\"completed\">{}</subagent>",
+            escape_xml_attribute(agent_id),
             escape_xml_attribute(item),
-            text.trim()
+            summary
         ));
     }
     text_output(format!(
@@ -121,6 +123,18 @@ async fn handle_agent_swarm(
         outputs.len(),
         outputs.join("\n")
     ))
+}
+
+fn parse_foreground_agent_result(output: &str) -> (&str, &str) {
+    let agent_id = output
+        .lines()
+        .find_map(|line| line.strip_prefix("agent_id: "))
+        .unwrap_or_default();
+    let summary = output
+        .split_once("\n[summary]\n")
+        .map(|(_, summary)| summary.trim())
+        .unwrap_or_else(|| output.trim());
+    (agent_id, summary)
 }
 
 #[derive(Deserialize)]
@@ -221,6 +235,17 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::extract_page_text;
+    use super::parse_foreground_agent_result;
+
+    #[test]
+    fn extracts_agent_id_and_summary_for_swarm_results() {
+        assert_eq!(
+            parse_foreground_agent_result(
+                "agent_id: abc-123\nactual_subagent_type: coder\nstatus: completed\n\n[summary]\nSWARM_A_OK"
+            ),
+            ("abc-123", "SWARM_A_OK")
+        );
+    }
 
     #[test]
     fn extracts_readable_page_text() {

@@ -1,34 +1,28 @@
 use crate::client_common::Prompt;
 use crate::harness::kimi_cli;
+use crate::harness::session_skills::SessionSkill;
 use crate::harness::session_skills::parse_session_skills;
 use codex_chat_wire_compat::ToolKinds;
 use codex_chat_wire_compat::ToolOutputKind;
 use codex_protocol::openai_models::ModelInfo;
 use serde_json::Value;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::hash::DefaultHasher;
-use std::hash::Hash;
-use std::hash::Hasher;
 use std::path::Path;
-use std::sync::LazyLock;
-use std::sync::Mutex;
 
 const KIMI_CODE_SYSTEM_PROMPT: &str = include_str!("kimi_code_system_prompt.md");
 const KIMI_CODE_TOOLS: &str = include_str!("kimi_code_tools.json");
 const KIMI_CODE_AUTO_PERMISSION_REMINDER: &str = "<system-reminder>\nAuto permission mode is active. Tool approvals will be handled automatically while this mode remains enabled.\n  - Continue normally without pausing for approval prompts.\n  - Do NOT call AskUserQuestion while auto mode is active. Make a reasonable decision and continue without asking the user.\n  - ExitPlanMode is also approved automatically, without the user reviewing the plan. An auto-approved plan is NOT a signal from the user to start executing — follow the user's original instructions on whether to proceed.\n</system-reminder>";
-const KIMI_CODE_BUILTIN_SKILLS: &str = r#"DISREGARD any earlier skill listings. Current available skills:
-### Built-in
+const KIMI_CODE_SKILLS_HEADER: &str =
+    "DISREGARD any earlier skill listings. Current available skills:";
+const KIMI_CODE_BUILTIN_SKILLS: &str = r#"### Built-in
 - check-kimi-code-docs: Answer questions about the Kimi Code product using the official documentation — CLI usage, configuration, slash commands, features, membership and quota, API onboarding, third-party tool setup, and error codes. Use when the user asks how Kimi Code w…
   Path: builtin://check-kimi-code-docs
 - update-config: Inspect or edit kimi-code's own config — `config.toml` (model, provider, permission, hooks) and `tui.toml` (theme, editor, notifications, auto-update). Use when the user asks what a setting does or wants to change one.
   Path: builtin://update-config
 - write-goal: Help the user craft a well-specified `/goal` objective for goal mode — turn a rough intention into a completion contract with a clear finish line, proof, boundaries, and stop rule. Use when the user asks for help writing, refining, or improving a go…
   Path: builtin://write-goal"#;
-static KIMI_CODE_SYSTEM_PROMPT_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
 pub(crate) fn build_request(
     prompt: &Prompt,
     model_info: &ModelInfo,
@@ -38,13 +32,18 @@ pub(crate) fn build_request(
         "role": "system",
         "content": cached_system_prompt(prompt, conversation_id),
     })];
-    messages.extend(add_auto_permission_reminders(
-        kimi_cli::build_messages_with_options(
-            prompt.get_formatted_input(),
-            kimi_cli::MessageBuildOptions::kimi_code(),
-        )?
-        .collect(),
-    ));
+    let mut conversation_messages = kimi_cli::build_messages_with_options(
+        prompt.get_formatted_input(),
+        kimi_cli::MessageBuildOptions::kimi_code(),
+    )?
+    .collect::<Vec<_>>();
+    super::kimi_code_todo_reminder::add_todo_list_reminder(&mut conversation_messages);
+    super::kimi_code_tool_output::shape_large_outputs(
+        &mut conversation_messages,
+        prompt.cwd.as_deref().unwrap_or_else(|| Path::new(".")),
+        conversation_id,
+    );
+    messages.extend(add_auto_permission_reminders(conversation_messages));
     let tools = build_tools();
     let tool_kinds = tools
         .iter()
@@ -81,44 +80,55 @@ fn kimi_code_prompt_cache_key(conversation_id: &str) -> String {
 }
 
 fn cached_system_prompt(prompt: &Prompt, conversation_id: &str) -> String {
-    let cwd = prompt.cwd.as_deref().unwrap_or_else(|| Path::new("."));
     let skills = session_skills_listing(prompt);
-    let mut skills_hasher = DefaultHasher::new();
-    skills.hash(&mut skills_hasher);
-    let key = format!(
-        "{conversation_id}:{}:{:016x}",
-        cwd.display(),
-        skills_hasher.finish()
-    );
-    let mut cache = KIMI_CODE_SYSTEM_PROMPT_CACHE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    cache
-        .entry(key)
-        .or_insert_with(|| build_system_prompt(prompt, &skills))
-        .clone()
+    super::kimi_code_prompt_cache::get_or_insert(conversation_id, || {
+        build_system_prompt(prompt, &skills)
+    })
 }
 
 /// Renders Kimi Code's source-backed model-facing skill listing.
 fn session_skills_listing(prompt: &Prompt) -> String {
     let session_skills = parse_session_skills(&prompt.input);
-    let mut listing = KIMI_CODE_BUILTIN_SKILLS.to_string();
+    let mut listing = KIMI_CODE_SKILLS_HEADER.to_string();
     if !session_skills.is_empty() {
-        listing.push_str("\n### Open Interpreter");
+        let mut skills_by_name: BTreeMap<String, SessionSkill> = BTreeMap::new();
         for skill in session_skills {
+            let prefer_skill = skills_by_name.get(&skill.name).is_none_or(|current| {
+                !current.path.contains("/.agents/skills/")
+                    && skill.path.contains("/.agents/skills/")
+            });
+            if prefer_skill {
+                skills_by_name.insert(skill.name.clone(), skill);
+            }
+        }
+        listing.push_str("\n### Project");
+        for skill in skills_by_name.into_values() {
             let _ = write!(
                 listing,
                 "\n- {}: {}\n  Path: {}",
-                skill.name, skill.description, skill.path
+                skill.name,
+                kimi_code_skill_description(&skill.description),
+                skill.path
             );
         }
     }
+    listing.push('\n');
+    listing.push_str(KIMI_CODE_BUILTIN_SKILLS);
     listing
+}
+
+fn kimi_code_skill_description(description: &str) -> String {
+    if description.chars().count() <= 250 {
+        return description.to_string();
+    }
+    let mut truncated = description.chars().take(249).collect::<String>();
+    truncated.push('…');
+    truncated
 }
 
 fn add_auto_permission_reminders(messages: Vec<Value>) -> Vec<Value> {
     let mut with_reminders = Vec::with_capacity(messages.len() + 1);
-    for message in messages {
+    for (index, message) in messages.iter().enumerate() {
         let is_user = message
             .get("role")
             .and_then(Value::as_str)
@@ -127,8 +137,25 @@ fn add_auto_permission_reminders(messages: Vec<Value>) -> Vec<Value> {
             .get("content")
             .and_then(Value::as_str)
             .is_some_and(|content| content == KIMI_CODE_AUTO_PERMISSION_REMINDER);
-        with_reminders.push(message);
-        if is_user && !already_reminder {
+        let todo_reminder = super::kimi_code_todo_reminder::is_todo_list_reminder(message);
+        let todo_reminder_follows_user_prompt = index
+            .checked_sub(1)
+            .and_then(|previous_index| messages.get(previous_index))
+            .is_some_and(|previous| {
+                previous.get("role").and_then(Value::as_str) == Some("user")
+                    && !super::kimi_code_todo_reminder::is_todo_list_reminder(previous)
+                    && previous.get("content").and_then(Value::as_str)
+                        != Some(KIMI_CODE_AUTO_PERMISSION_REMINDER)
+            });
+        let next_is_todo_reminder = messages
+            .get(index + 1)
+            .is_some_and(super::kimi_code_todo_reminder::is_todo_list_reminder);
+        with_reminders.push(message.clone());
+        if is_user
+            && !already_reminder
+            && !next_is_todo_reminder
+            && (!todo_reminder || todo_reminder_follows_user_prompt)
+        {
             with_reminders.push(json!({
                 "role": "user",
                 "content": KIMI_CODE_AUTO_PERMISSION_REMINDER,
@@ -142,6 +169,7 @@ fn build_system_prompt(prompt: &Prompt, skills: &str) -> String {
     let cwd = prompt.cwd.as_deref().unwrap_or_else(|| Path::new("."));
     let listing = kimi_work_dir_listing(cwd);
     KIMI_CODE_SYSTEM_PROMPT
+        .replace("\r\n", "\n")
         .replace(
             "{% if KIMI_OS == \"Windows\" %}\n\nIMPORTANT: You are on Windows. The Bash tool runs through Git Bash, so use Unix shell syntax inside Bash commands — `/dev/null` not `NUL`, and forward slashes in paths. For file operations, always prefer the built-in tools (Read, Write, Edit, Glob, Grep) over Bash commands — they work reliably across all platforms.\n{% endif %}",
             "",
@@ -266,7 +294,10 @@ fn build_tools() -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
+    use super::KIMI_CODE_AUTO_PERMISSION_REMINDER;
+    use super::add_auto_permission_reminders;
     use super::build_request;
+    use super::session_skills_listing;
     use crate::client_common::Prompt;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::FunctionCallOutputContentItem;
@@ -274,6 +305,50 @@ mod tests {
     use codex_protocol::models::ResponseItem;
     use codex_protocol::openai_models::ModelInfo;
     use serde_json::json;
+
+    #[test]
+    fn kimi_code_todo_reminder_precedes_the_permission_reminder() {
+        let todo_reminder = json!({
+            "role": "user",
+            "content": "<system-reminder>\nThe TodoList tool has not been updated recently. If you are working on tasks that benefit from progress tracking, consider using TodoList to update task status. Also consider clearing or rewriting the todo list if it has become stale and no longer matches the current work. Only use it if relevant. This is a gentle reminder; ignore it if not applicable. Make sure that you NEVER mention this reminder to the user.\n\nCurrent todo list:\n1. [in_progress] Continue\n</system-reminder>",
+        });
+        let messages = add_auto_permission_reminders(vec![
+            json!({"role": "user", "content": "Continue the task"}),
+            todo_reminder.clone(),
+        ]);
+
+        assert_eq!(
+            messages,
+            vec![
+                json!({"role": "user", "content": "Continue the task"}),
+                todo_reminder,
+                json!({
+                    "role": "user",
+                    "content": KIMI_CODE_AUTO_PERMISSION_REMINDER,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn kimi_code_trailing_todo_reminder_after_tool_omits_permission_reminder() {
+        let todo_reminder = json!({
+            "role": "user",
+            "content": "<system-reminder>\nThe TodoList tool has not been updated recently. If you are working on tasks that benefit from progress tracking, consider using TodoList to update task status. Also consider clearing or rewriting the todo list if it has become stale and no longer matches the current work. Only use it if relevant. This is a gentle reminder; ignore it if not applicable. Make sure that you NEVER mention this reminder to the user.\n\nCurrent todo list:\n1. [in_progress] Continue\n</system-reminder>",
+        });
+        let messages = add_auto_permission_reminders(vec![
+            json!({"role": "tool", "content": "contents"}),
+            todo_reminder.clone(),
+        ]);
+
+        assert_eq!(
+            messages,
+            vec![
+                json!({"role": "tool", "content": "contents"}),
+                todo_reminder,
+            ]
+        );
+    }
 
     #[test]
     fn kimi_code_request_renders_kimi_code_builtin_skills() {
@@ -307,6 +382,7 @@ mod tests {
         assert!(system.contains("- update-config: Inspect or edit kimi-code's own config"));
         assert!(system.contains("Path: builtin://update-config"));
         assert!(system.contains("- write-goal:"));
+        assert!(!system.contains('\r'));
         assert!(!system.contains("{{ KIMI_SKILLS }}"));
         assert!(!system.contains("{% if KIMI_SKILLS %}"));
         assert!(!system.contains("<skills_instructions>"));
@@ -438,12 +514,41 @@ mod tests {
             .as_str()
             .expect("system content");
         assert!(!system.contains("{{ KIMI_SKILLS }}"));
-        assert!(system.contains("### Open Interpreter"));
+        assert!(system.contains("### Project"));
         assert!(
             system.contains("- qa-testing: Run the project's QA test plan against a live build")
         );
         assert!(system.contains("Path: /home/user/skills/.system/qa-testing/SKILL.md"));
         assert!(!system.contains("<skills_instructions>"));
+    }
+
+    #[test]
+    fn kimi_code_request_deduplicates_and_truncates_project_skills() {
+        let description = "x".repeat(251);
+        let skills = format!(
+            "<skills_instructions>\n## Skills\n### Available skills\n- qa-testing: {description} (file: /home/user/.openinterpreter/skills/.system/qa-testing/SKILL.md)\n- qa-testing: {description} (file: /workspace/.agents/skills/qa-testing/SKILL.md)\n### How to use skills\n- Discovery: ...\n</skills_instructions>"
+        );
+        let prompt = Prompt {
+            input: vec![ResponseItem::Message {
+                id: Some("developer".to_string()),
+                role: "developer".to_string(),
+                content: vec![ContentItem::InputText { text: skills }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }],
+            ..Prompt::default()
+        };
+
+        let listing = session_skills_listing(&prompt);
+
+        assert_eq!(listing.matches("- qa-testing:").count(), 1);
+        assert!(listing.contains(&format!("- qa-testing: {}…", "x".repeat(249))));
+        assert!(listing.contains("Path: /workspace/.agents/skills/qa-testing/SKILL.md"));
+        assert!(!listing.contains(".openinterpreter/skills/.system"));
+        assert!(
+            listing.find("### Project").expect("project section")
+                < listing.find("### Built-in").expect("built-in section")
+        );
     }
 
     #[test]

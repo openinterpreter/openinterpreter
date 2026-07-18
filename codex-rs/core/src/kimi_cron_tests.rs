@@ -9,7 +9,7 @@ use super::KimiCronService;
 use super::delivery_for_task;
 
 #[test]
-fn renders_the_captured_same_thread_envelope() {
+fn renders_the_expected_same_thread_envelope() {
     let task = CronTask {
         id: "3957c2ae".to_string(),
         cron: "* * * * *".to_string(),
@@ -20,7 +20,15 @@ fn renders_the_captured_same_thread_envelope() {
     };
 
     assert_eq!(
-        KimiCronFire::new(&task.id, &task.cron, task.recurring, 1, false, &task.prompt,).render(),
+        KimiCronFire::new(
+            &task.id,
+            &task.cron,
+            task.recurring,
+            /*coalesced_count*/ 1,
+            /*stale*/ false,
+            &task.prompt,
+        )
+        .render(),
         "<cron-fire jobId=\"3957c2ae\" cron=\"* * * * *\" recurring=\"false\" coalescedCount=\"1\" stale=\"false\">\n<prompt>\nKIMI_CRON_SAME_THREAD_PROOF\n</prompt>\n</cron-fire>"
     );
 }
@@ -70,7 +78,11 @@ async fn create_list_delete_and_resume_use_stable_shapes() {
     );
 
     let created = service
-        .create("*/5 * * * *", "KIMI_CODE_CRON_CHECK".to_string(), false)
+        .create(
+            "*/5 * * * *",
+            "KIMI_CODE_CRON_CHECK".to_string(),
+            /*recurring*/ false,
+        )
         .await
         .expect("cron should be created");
     let id = created
