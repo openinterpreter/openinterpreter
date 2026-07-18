@@ -49,6 +49,11 @@ const EVENT_STREAM_MIME_TYPE: &str = "text/event-stream";
 const JSON_MIME_TYPE: &str = "application/json";
 const HEADER_SESSION_ID: &str = "Mcp-Session-Id";
 const NON_JSON_RESPONSE_BODY_PREVIEW_BYTES: usize = 8_192;
+/// Upper bound on a single buffered (non-SSE) HTTP response body. A malicious or
+/// broken MCP server could otherwise stream an unbounded body and exhaust memory
+/// before it is parsed. Mirrors `MAX_OAUTH_HTTP_RESPONSE_BODY_BYTES` in
+/// `oauth_http_client.rs`, with more headroom for large data-plane payloads.
+const MAX_STREAMABLE_HTTP_RESPONSE_BODY_BYTES: usize = 100 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct StreamableHttpClientAdapter {
@@ -65,6 +70,8 @@ pub(crate) enum StreamableHttpClientAdapterError {
     HttpRequest(#[from] ExecServerError),
     #[error("invalid HTTP header: {0}")]
     Header(String),
+    #[error("HTTP response body exceeds {limit} bytes")]
+    ResponseBodyTooLarge { limit: usize },
 }
 
 impl StreamableHttpClientAdapter {
@@ -537,6 +544,13 @@ fn parse_json_rpc_error(body: &[u8]) -> Option<ServerJsonRpcMessage> {
     }
 }
 
+/// Returns `true` if appending `chunk_len` bytes to a `current_len`-byte body
+/// keeps it within `limit`. Uses saturating subtraction so it never panics even
+/// if `current_len` somehow already exceeds `limit`.
+fn within_body_limit(current_len: usize, chunk_len: usize, limit: usize) -> bool {
+    chunk_len <= limit.saturating_sub(current_len)
+}
+
 async fn collect_body(
     body_stream: &mut HttpResponseBodyStream,
 ) -> std::result::Result<Vec<u8>, StreamableHttpError<StreamableHttpClientAdapterError>> {
@@ -547,6 +561,17 @@ async fn collect_body(
         .map_err(StreamableHttpClientAdapterError::from)
         .map_err(StreamableHttpError::Client)?
     {
+        if !within_body_limit(
+            body.len(),
+            chunk.len(),
+            MAX_STREAMABLE_HTTP_RESPONSE_BODY_BYTES,
+        ) {
+            return Err(StreamableHttpError::Client(
+                StreamableHttpClientAdapterError::ResponseBodyTooLarge {
+                    limit: MAX_STREAMABLE_HTTP_RESPONSE_BODY_BYTES,
+                },
+            ));
+        }
         body.extend_from_slice(&chunk);
     }
     Ok(body)
