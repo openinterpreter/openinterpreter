@@ -278,11 +278,8 @@ pub(super) fn build_messages_with_options(
                             pending_assistant_content = Some(message_content);
                             continue;
                         }
-                        discard_unanswered_tool_calls(
-                            &mut pending_tool_calls,
-                            &mut awaiting_tool_call_ids,
-                            &mut pending_reasoning_content,
-                        );
+                        pending_tool_calls.clear();
+                        awaiting_tool_call_ids.clear();
                         if options.merge_assistant_text_with_following_tool_calls {
                             push_pending_assistant_content(
                                 &mut messages,
@@ -1531,7 +1528,7 @@ mod tests {
             ResponseItem::Reasoning {
                 id: Some("reasoning-1".to_string()),
                 summary: Vec::new(),
-                content: Some(vec![ReasoningItemContent::Text {
+                content: Some(vec![ReasoningItemContent::ReasoningText {
                     text: "I should create the goal first.".to_string(),
                 }]),
                 encrypted_content: None,
