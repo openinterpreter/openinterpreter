@@ -1937,7 +1937,7 @@ async fn handle_edit(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
     let editable_text = if pure_crlf {
         text.replace("\r\n", "\n")
     } else {
-        text.clone()
+        text
     };
     let replacements = edit_replacements(&args)?;
     let mut updated = editable_text.clone();
