@@ -812,7 +812,30 @@ if (-not [Environment]::Is64BitOperatingSystem) {
     exit 1
 }
 
-$architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+$architecture = $null
+try {
+    $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+} catch {
+    # Older Windows PowerShell / .NET Framework (< 4.7.1) does not expose
+    # RuntimeInformation.OSArchitecture, which throws "The property
+    # 'OSArchitecture' cannot be found on this object." Fall back to the
+    # architecture environment variables, which are available everywhere.
+    $architecture = $null
+}
+if ([string]::IsNullOrWhiteSpace($architecture)) {
+    # PROCESSOR_ARCHITEW6432 holds the real architecture inside a 32-bit
+    # (WOW64) process; PROCESSOR_ARCHITECTURE is correct otherwise. A 64-bit
+    # OS is already required above.
+    $envArchitecture = $env:PROCESSOR_ARCHITEW6432
+    if ([string]::IsNullOrWhiteSpace($envArchitecture)) {
+        $envArchitecture = $env:PROCESSOR_ARCHITECTURE
+    }
+    switch ($envArchitecture) {
+        "AMD64" { $architecture = "X64" }
+        "ARM64" { $architecture = "Arm64" }
+        default { $architecture = $envArchitecture }
+    }
+}
 $target = $null
 $platformLabel = $null
 $npmTag = $null
