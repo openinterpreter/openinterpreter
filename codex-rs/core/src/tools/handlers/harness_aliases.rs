@@ -1759,7 +1759,13 @@ async fn handle_write(
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
     let arguments = function_arguments(&invocation.payload)?;
     let args: WriteArgs = parse_arguments(arguments)?;
-    let path = harness_fs::checked_write_path(&invocation, &args.path, "Write")?;
+    let path = if is_kimi_code(&invocation)
+        && super::kimi_code_plan::is_current_plan_path(&invocation, &args.path)
+    {
+        harness_fs::resolve_model_path(&invocation, &args.path)?
+    } else {
+        harness_fs::checked_write_path(&invocation, &args.path, "Write")?
+    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|err| FunctionCallError::RespondToModel(format!("Write failed: {err}")))?;
@@ -2596,8 +2602,11 @@ pub(crate) fn zcode_todo_reminder_text() -> String {
 }
 
 async fn handle_zcode_enter_plan_mode(
-    _invocation: ToolInvocation,
+    invocation: ToolInvocation,
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    if is_kimi_code(&invocation) {
+        return super::kimi_code_plan::handle_enter(invocation).await;
+    }
     Ok(boxed_tool_output(FunctionToolOutput::from_text(
         "Entered plan mode. You should now focus on exploring the codebase and designing an implementation approach.\n\nIn plan mode, you should:\n1. Thoroughly explore the codebase to understand existing patterns\n2. Identify similar features and architectural approaches\n3. Consider multiple approaches and their trade-offs\n4. Use AskUserQuestion if you need to clarify the approach\n5. Design a concrete implementation strategy\n6. When ready, use ExitPlanMode to present your plan for approval\n\nRemember: DO NOT write or edit any files yet. This is a read-only exploration and planning phase.".to_string(),
         Some(true),
@@ -2607,6 +2616,9 @@ async fn handle_zcode_enter_plan_mode(
 async fn handle_zcode_exit_plan_mode(
     invocation: ToolInvocation,
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    if is_kimi_code(&invocation) {
+        return super::kimi_code_plan::handle_exit(invocation).await;
+    }
     let arguments = function_arguments(&invocation.payload)?;
     let input: serde_json::Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
     let plan = input

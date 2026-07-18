@@ -15,6 +15,7 @@ mod kimi_code_extra;
 mod kimi_code_format;
 mod kimi_code_grep;
 mod kimi_code_media;
+mod kimi_code_plan;
 mod kimi_code_read;
 mod kimi_code_skill;
 mod kimi_code_video;

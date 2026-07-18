@@ -68,7 +68,10 @@ pub(crate) async fn handle(
         }
     };
     if !root.exists() {
-        return Ok(output(format!("{} does not exist", root.display()), false));
+        return Ok(output(
+            format!("{} does not exist", root.display()),
+            /*success*/ false,
+        ));
     }
 
     let pattern = if args.case_insensitive {
@@ -136,7 +139,7 @@ pub(crate) async fn handle(
         ));
     }
 
-    Ok(output(sections.join("\n"), true))
+    Ok(output(sections.join("\n"), /*success*/ true))
 }
 
 fn output(text: String, success: bool) -> Box<dyn ToolOutput> {

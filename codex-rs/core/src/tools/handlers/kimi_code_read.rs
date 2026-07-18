@@ -35,34 +35,48 @@ pub(crate) async fn handle(
     let metadata = match std::fs::metadata(&path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(output(format!("\"{}\" does not exist.", args.path), false));
+            return Ok(output(
+                format!("\"{}\" does not exist.", args.path),
+                /*success*/ false,
+            ));
         }
-        Err(err) => return Ok(output(err.to_string(), false)),
+        Err(err) => return Ok(output(err.to_string(), /*success*/ false)),
     };
     if !metadata.is_file() {
-        return Ok(output(format!("\"{}\" is not a file.", args.path), false));
+        return Ok(output(
+            format!("\"{}\" is not a file.", args.path),
+            /*success*/ false,
+        ));
     }
     let data = match std::fs::read(&path) {
         Ok(data) => data,
-        Err(err) => return Ok(output(err.to_string(), false)),
+        Err(err) => return Ok(output(err.to_string(), /*success*/ false)),
     };
     let text = match String::from_utf8(data) {
         Ok(text) if !text.contains('\0') => text,
-        _ => return Ok(output(not_readable_message(&args.path), false)),
+        _ => {
+            return Ok(output(
+                not_readable_message(&args.path),
+                /*success*/ false,
+            ));
+        }
     };
     let line_offset = args.line_offset.unwrap_or(1);
     if line_offset == 0 || line_offset < -(MAX_LINES as i64) {
         return Ok(output(
             format!("line_offset must be at least -{MAX_LINES} and cannot be zero"),
-            false,
+            /*success*/ false,
         ));
     }
     if args.n_lines == Some(0) {
-        return Ok(output("n_lines must be positive".to_string(), false));
+        return Ok(output(
+            "n_lines must be positive".to_string(),
+            /*success*/ false,
+        ));
     }
     Ok(output(
         render_read(&text, line_offset, args.n_lines.unwrap_or(MAX_LINES)),
-        true,
+        /*success*/ true,
     ))
 }
 
