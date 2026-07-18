@@ -79,13 +79,15 @@ pub(super) fn add_todo_list_reminder(messages: &mut Vec<Value>) {
                 .iter()
                 .enumerate()
                 .find_map(|(index, message)| {
-                    if message.get("role").and_then(Value::as_str) == Some("assistant") {
+                    let role = message.get("role").and_then(Value::as_str);
+                    if role == Some("assistant") {
+                        if turns_seen >= reminder_turn {
+                            return Some(index);
+                        }
                         turns_seen += 1;
                         return None;
                     }
-                    (turns_seen >= reminder_turn
-                        && message.get("role").and_then(Value::as_str) == Some("user"))
-                    .then_some(index + 1)
+                    (turns_seen >= reminder_turn && role == Some("user")).then_some(index + 1)
                 })
                 .unwrap_or(messages.len());
             messages.insert(insertion_index, json!({
@@ -264,5 +266,50 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn inserts_a_due_reminder_before_the_next_uninterrupted_assistant_turn() {
+        let mut messages = vec![json!({
+            "role": "assistant",
+            "tool_calls": [{
+                "function": {
+                    "name": "TodoList",
+                    "arguments": r#"{"todos":[{"title":"Continue","status":"in_progress"}]}"#,
+                }
+            }],
+        })];
+        messages.extend((0..10).flat_map(|turn| {
+            [
+                json!({
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "function": {
+                            "name": "Read",
+                            "arguments": format!(r#"{{"path":"{turn}"}}"#),
+                        }
+                    }],
+                }),
+                json!({"role": "tool", "content": "contents"}),
+            ]
+        }));
+        messages.extend([
+            json!({
+                "role": "assistant",
+                "tool_calls": [{
+                    "function": {
+                        "name": "Read",
+                        "arguments": r#"{"path":"next"}"#,
+                    }
+                }],
+            }),
+            json!({"role": "tool", "content": "next contents"}),
+        ]);
+
+        add_todo_list_reminder(&mut messages);
+
+        assert!(is_todo_list_reminder(&messages[21]));
+        assert_eq!(messages[22]["role"], "assistant");
+        assert_eq!(messages[23]["role"], "tool");
     }
 }
