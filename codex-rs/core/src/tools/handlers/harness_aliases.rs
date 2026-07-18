@@ -5151,11 +5151,20 @@ mod tests {
         )
         .await;
 
+        let call_id = invocation.call_id.clone();
+        let payload = invocation.payload.clone();
         let output = HarnessAliasHandler::Glob
             .handle(invocation)
             .await
             .expect("glob succeeds")
-            .log_preview();
+            .to_response_item(&call_id, &payload);
+        let codex_protocol::models::ResponseInputItem::FunctionCallOutput { output, .. } = output
+        else {
+            panic!("expected function call output");
+        };
+        let codex_protocol::models::FunctionCallOutputBody::Text(output) = output.body else {
+            panic!("expected text output");
+        };
         let expected_paths = (5..105)
             .rev()
             .map(|index| format!("gauntlet-files/item_{index:03}.txt"))
