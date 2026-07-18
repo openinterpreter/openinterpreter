@@ -6640,7 +6640,7 @@
       ]
     },
     "FunctionCallOutputContentItem": {
-      "description": "Responses API compatible content items that can be returned by a tool call. This is a subset of ContentItem with the types we support as function call outputs.",
+      "description": "Structured content items that can be returned by a tool call.\n\nMost variants map directly to Responses API content. Harness adapters may translate additional media variants into their provider-specific wire shape.",
       "oneOf": [
         {
           "properties": {
@@ -6690,6 +6690,32 @@
             "type"
           ],
           "title": "InputImageFunctionCallOutputContentItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "input_video"
+              ],
+              "title": "InputVideoFunctionCallOutputContentItemType",
+              "type": "string"
+            },
+            "video_url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "video_url"
+          ],
+          "title": "InputVideoFunctionCallOutputContentItem",
           "type": "object"
         },
         {

@@ -3,7 +3,7 @@ source: tui/src/history_cell/tests.rs
 expression: rendered
 ---
 ╭────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ ✨ Update available! 0.0.27 -> 9.9.9                                                                   │
+│ ✨ Update available! 0.0.34 -> 9.9.9                                                                   │
 │ Run sh -c 'curl -fsSL https://www.openinterpreter.com/install | CODEX_NON_INTERACTIVE=1 sh' to update. │
 │                                                                                                        │
 │ See full release notes:                                                                                │

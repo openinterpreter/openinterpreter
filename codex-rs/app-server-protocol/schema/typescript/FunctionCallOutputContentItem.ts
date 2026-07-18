@@ -4,7 +4,9 @@
 import type { ImageDetail } from "./ImageDetail";
 
 /**
- * Responses API compatible content items that can be returned by a tool call.
- * This is a subset of ContentItem with the types we support as function call outputs.
+ * Structured content items that can be returned by a tool call.
+ *
+ * Most variants map directly to Responses API content. Harness adapters may
+ * translate additional media variants into their provider-specific wire shape.
  */
-export type FunctionCallOutputContentItem = { "type": "input_text", text: string, } | { "type": "input_image", image_url: string, detail?: ImageDetail, } | { "type": "encrypted_content", encrypted_content: string, };
+export type FunctionCallOutputContentItem = { "type": "input_text", text: string, } | { "type": "input_image", image_url: string, detail?: ImageDetail, } | { "type": "input_video", video_url: string, id?: string, } | { "type": "encrypted_content", encrypted_content: string, };
