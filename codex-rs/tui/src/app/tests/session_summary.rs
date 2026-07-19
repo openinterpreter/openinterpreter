@@ -58,7 +58,7 @@ async fn session_summary_includes_resume_hint_for_persisted_rollout() {
     );
     assert_eq!(
         summary.resume_hint,
-        Some("codex resume 123e4567-e89b-12d3-a456-426614174000".to_string())
+        Some("interpreter resume 123e4567-e89b-12d3-a456-426614174000".to_string())
     );
 }
 
@@ -85,7 +85,7 @@ async fn session_summary_names_picker_item_when_thread_has_name() {
     assert_eq!(
         summary.resume_hint,
         Some(
-            "codex resume, then select my-session (123e4567-e89b-12d3-a456-426614174000)"
+            "interpreter resume, then select my-session (123e4567-e89b-12d3-a456-426614174000)"
                 .to_string()
         )
     );
