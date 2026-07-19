@@ -24,5 +24,5 @@ Press Tab to queue a message when a task is running; otherwise it sends immediat
 [tui.keymap] in ~/.codex/config.toml lets you rebind supported shortcuts.
 See the Codex keymap documentation for supported actions and examples.
 Paste an image with Ctrl+V to attach it to your next message.
-You can resume a previous conversation by running `codex resume`
+You can resume a previous conversation by running `interpreter resume`
 Use /copy or press Ctrl+O to copy the latest agent response as Markdown.

@@ -419,7 +419,7 @@ mod tests {
         );
         assert_eq!(
             productize_open_interpreter_tooltip(
-                "You can resume a previous conversation by running `codex resume`"
+                "You can resume a previous conversation by running `interpreter resume`"
             ),
             Some(
                 "You can resume a previous conversation by running `interpreter resume`"
