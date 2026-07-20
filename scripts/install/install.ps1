@@ -812,7 +812,34 @@ if (-not [Environment]::Is64BitOperatingSystem) {
     exit 1
 }
 
-$architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+# Prefer RuntimeInformation.OSArchitecture when present. Under Set-StrictMode
+# some Windows/PowerShell combinations throw PropertyNotFoundException for that
+# static property (see #1821), so fall back to PROCESSOR_ARCHITECTURE.
+$architecture = $null
+$runtimeInformation = [type]::GetType("System.Runtime.InteropServices.RuntimeInformation")
+if ($null -ne $runtimeInformation -and $null -ne $runtimeInformation.GetProperty("OSArchitecture")) {
+    try {
+        $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+    } catch {
+        $architecture = $null
+    }
+}
+if ([string]::IsNullOrWhiteSpace($architecture)) {
+    $rawArch = if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITEW6432)) {
+        $env:PROCESSOR_ARCHITEW6432
+    } else {
+        $env:PROCESSOR_ARCHITECTURE
+    }
+    switch -Regex ($rawArch) {
+        "^(?i)ARM64$" { $architecture = "Arm64" }
+        "^(?i)AMD64$" { $architecture = "X64" }
+        default {
+            Write-Error "Unsupported architecture: $rawArch"
+            exit 1
+        }
+    }
+}
+
 $target = $null
 $platformLabel = $null
 $npmTag = $null
