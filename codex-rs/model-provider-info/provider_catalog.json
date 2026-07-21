@@ -317,6 +317,40 @@
       ]
     },
     {
+      "id": "google",
+      "name": "Google AI Studio",
+      "env_key": "GEMINI_API_KEY",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "wire_api": "chat",
+      "sort_priority": 3,
+      "models": [
+        {
+          "id": "gemini-3.5-flash",
+          "display_name": "Gemini 3.5 Flash",
+          "description": "gemini-flash • Reasoning • Tool calling • Image input • PDF input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 0
+        },
+        {
+          "id": "gemini-3.1-pro-preview",
+          "display_name": "Gemini 3.1 Pro Preview",
+          "description": "gemini-pro • Reasoning • Tool calling • Image input • PDF input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 1
+        }
+      ]
+    },
+    {
       "id": "openrouter",
       "name": "OpenRouter",
       "env_key": "OPENROUTER_API_KEY",
