@@ -79,6 +79,7 @@
   },
   "sort_priorities": {
     "anthropic": 2,
+    "google": 3,
     "openrouter": 20,
     "groq": 21,
     "github-models": 24,
