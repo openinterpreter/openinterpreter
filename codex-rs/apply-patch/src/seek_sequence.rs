@@ -26,11 +26,24 @@ pub(crate) fn seek_sequence(
     if pattern.len() > lines.len() {
         return None;
     }
-    let search_start = if eof && lines.len() >= pattern.len() {
-        lines.len() - pattern.len()
-    } else {
-        start
-    };
+
+    // Prefer an end-of-file match when requested, then fall back to a normal
+    // scan from `start` so patterns that only appear earlier still resolve.
+    if eof {
+        let eof_start = lines.len() - pattern.len();
+        if let Some(idx) = seek_from(lines, pattern, eof_start) {
+            return Some(idx);
+        }
+        if start < eof_start {
+            return seek_from(lines, pattern, start);
+        }
+        return None;
+    }
+
+    seek_from(lines, pattern, start)
+}
+
+fn seek_from(lines: &[String], pattern: &[String], search_start: usize) -> Option<usize> {
     // Exact match first.
     for i in search_start..=lines.len().saturating_sub(pattern.len()) {
         if lines[i..i + pattern.len()] == *pattern {
@@ -157,6 +170,38 @@ mod tests {
         // Should not panic – must return None when pattern cannot possibly fit.
         assert_eq!(
             seek_sequence(&lines, &pattern, /*start*/ 0, /*eof*/ false),
+            None
+        );
+    }
+
+    #[test]
+    fn test_eof_prefers_end_of_file_match() {
+        // Pattern appears twice; eof should prefer the trailing occurrence.
+        let lines = to_vec(&["alpha", "beta", "gamma", "alpha", "beta"]);
+        let pattern = to_vec(&["alpha", "beta"]);
+        assert_eq!(
+            seek_sequence(&lines, &pattern, /*start*/ 0, /*eof*/ true),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn test_eof_falls_back_to_search_from_start() {
+        // Pattern is not at EOF, so the eof-anchored attempt must fall back.
+        let lines = to_vec(&["alpha", "beta", "gamma", "delta", "epsilon"]);
+        let pattern = to_vec(&["alpha", "beta"]);
+        assert_eq!(
+            seek_sequence(&lines, &pattern, /*start*/ 0, /*eof*/ true),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn test_eof_no_match_returns_none() {
+        let lines = to_vec(&["alpha", "beta", "gamma"]);
+        let pattern = to_vec(&["not", "here"]);
+        assert_eq!(
+            seek_sequence(&lines, &pattern, /*start*/ 0, /*eof*/ true),
             None
         );
     }
