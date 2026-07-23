@@ -902,11 +902,34 @@ package_entrypoint_relative_path() {
   fi
 }
 
+resolve_dir_realpath() {
+  dir="$1"
+
+  ( cd -P "$dir" 2>/dev/null && pwd -P ) || true
+}
+
+reject_self_referential_install_dir() {
+  release_dir="$1"
+  command_relative_path="$2"
+  managed_dir="$release_dir/$(dirname "$command_relative_path")"
+
+  managed_dir_real="$(resolve_dir_realpath "$managed_dir")"
+  bin_dir_real="$(resolve_dir_realpath "$BIN_DIR")"
+
+  if [ -n "$managed_dir_real" ] && [ "$managed_dir_real" = "$bin_dir_real" ]; then
+    echo "CODEX_INSTALL_DIR ($BIN_DIR) resolves to this release's managed executable directory ($managed_dir_real)." >&2
+    echo "Installing here would overwrite the managed executable with a self-referential symlink. Choose a different CODEX_INSTALL_DIR." >&2
+    exit 1
+  fi
+}
+
 update_visible_command() {
   release_dir="$1"
   mkdir -p "$BIN_DIR"
   tmp_link="$BIN_DIR/.$COMMAND_NAME.$$"
   command_relative_path="$(package_entrypoint_relative_path "$release_dir")"
+
+  reject_self_referential_install_dir "$release_dir" "$command_relative_path"
 
   replace_path_with_symlink "$BIN_PATH" "$CURRENT_LINK/$command_relative_path" "$tmp_link"
 
