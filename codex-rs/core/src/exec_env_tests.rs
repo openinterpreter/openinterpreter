@@ -11,6 +11,27 @@ fn make_vars(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 }
 
 #[test]
+fn inject_ai_agent_env_sets_open_interpreter_marker() {
+    let mut env = HashMap::new();
+
+    inject_ai_agent_env(&mut env);
+
+    assert_eq!(
+        env.get(AI_AGENT_ENV_VAR).map(String::as_str),
+        Some("open-interpreter")
+    );
+}
+
+#[test]
+fn inject_ai_agent_env_preserves_explicit_marker() {
+    let mut env = HashMap::from([(AI_AGENT_ENV_VAR.to_string(), "wrapper".to_string())]);
+
+    inject_ai_agent_env(&mut env);
+
+    assert_eq!(env.get(AI_AGENT_ENV_VAR).map(String::as_str), Some("wrapper"));
+}
+
+#[test]
 fn inject_permission_profile_env_overrides_policy_value() {
     let mut env = HashMap::from([(
         CODEX_PERMISSION_PROFILE_ENV_VAR.to_string(),

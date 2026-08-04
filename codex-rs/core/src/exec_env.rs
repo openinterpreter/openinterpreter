@@ -8,6 +8,9 @@ use std::collections::HashMap;
 
 pub use codex_protocol::shell_environment::CODEX_THREAD_ID_ENV_VAR;
 
+const AI_AGENT_ENV_VAR: &str = "AI_AGENT";
+const OPEN_INTERPRETER_AI_AGENT: &str = "open-interpreter";
+
 /// Informational name of the active permission profile. Child processes can
 /// overwrite this value, so it must not be treated as proof of enforcement.
 pub const CODEX_PERMISSION_PROFILE_ENV_VAR: &str = "CODEX_PERMISSION_PROFILE";
@@ -21,13 +24,36 @@ pub const CODEX_PERMISSION_PROFILE_ENV_VAR: &str = "CODEX_PERMISSION_PROFILE";
 /// for [`ShellEnvironmentPolicy`].
 ///
 /// `CODEX_THREAD_ID` is injected when a thread id is provided, even when
-/// `include_only` is set.
+/// `include_only` is set. `AI_AGENT` is always present so child processes can
+/// detect Open Interpreter through a vendor-neutral marker.
 pub fn create_env(
     policy: &ShellEnvironmentPolicy,
     thread_id: Option<ThreadId>,
 ) -> HashMap<String, String> {
     let thread_id = thread_id.map(|thread_id| thread_id.to_string());
-    shell_environment::create_env(policy, thread_id.as_deref())
+    let mut env = shell_environment::create_env(policy, thread_id.as_deref());
+    inject_ai_agent_env(&mut env);
+    env
+}
+
+fn inject_ai_agent_env(env: &mut HashMap<String, String>) {
+    let existing = env.iter().find(|(key, _)| {
+        if cfg!(windows) {
+            key.eq_ignore_ascii_case(AI_AGENT_ENV_VAR)
+        } else {
+            key.as_str() == AI_AGENT_ENV_VAR
+        }
+    });
+    if existing.is_some_and(|(_, value)| !value.trim().is_empty()) {
+        return;
+    }
+    if cfg!(windows) {
+        env.retain(|key, _| !key.eq_ignore_ascii_case(AI_AGENT_ENV_VAR));
+    }
+    env.insert(
+        AI_AGENT_ENV_VAR.to_string(),
+        OPEN_INTERPRETER_AI_AGENT.to_string(),
+    );
 }
 
 /// Injects the selected named permission profile into a shell tool's environment.
