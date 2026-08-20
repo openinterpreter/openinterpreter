@@ -384,21 +384,24 @@ fn build_override_matcher(
 }
 
 fn get_file_path<'a>(path: &'a Path, search_directories: &[PathBuf]) -> Option<(usize, &'a str)> {
-    let mut best_match: Option<(usize, &Path)> = None;
+    let mut best_match: Option<(usize, usize, &'a Path)> = None;
     for (idx, root) in search_directories.iter().enumerate() {
-        if let Ok(rel_path) = path.strip_prefix(root) {
-            let root_depth = root.components().count();
-            match best_match {
-                Some((best_idx, _))
-                    if search_directories[best_idx].components().count() >= root_depth => {}
-                _ => {
-                    best_match = Some((idx, rel_path));
-                }
+        let Ok(rel_path) = path.strip_prefix(root) else {
+            continue;
+        };
+        let root_depth = root.components().count();
+        match best_match {
+            Some((_, best_depth, _)) if best_depth <= root_depth => {
+                // Keep the shortest matching root; if both are equally deep,
+                // retain the earliest root by leaving the current best match in place.
+            }
+            _ => {
+                best_match = Some((idx, root_depth, rel_path));
             }
         }
     }
 
-    let (root_idx, rel_path) = best_match?;
+    let (root_idx, _, rel_path) = best_match?;
     rel_path.to_str().map(|p| (root_idx, p))
 }
 
@@ -707,6 +710,20 @@ mod tests {
     #[test]
     fn file_name_from_path_falls_back_to_full_path() {
         assert_eq!(file_name_from_path(""), "");
+    }
+
+    #[test]
+    fn get_file_path_prefers_shallowest_matching_root() {
+        let roots = vec![
+            PathBuf::from("/workspace"),
+            PathBuf::from("/workspace/project"),
+            PathBuf::from("/workspace/project/packages"),
+        ];
+
+        assert_eq!(
+            get_file_path(Path::new("/workspace/project/packages/lib/mod.rs"), &roots),
+            Some((0, "project/packages/lib/mod.rs"))
+        );
     }
 
     #[derive(Default)]
