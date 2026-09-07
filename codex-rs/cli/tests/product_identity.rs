@@ -114,6 +114,10 @@ fn interpreter_help_version_errors_and_completions_keep_product_identity() -> an
             stdout.to_ascii_lowercase().contains("interpreter"),
             "{shell} completion should target interpreter: {stdout}"
         );
+        assert!(
+            stdout.contains("--chat-completions"),
+            "{shell} completion should include --chat-completions: {stdout}"
+        );
     }
     Ok(())
 }

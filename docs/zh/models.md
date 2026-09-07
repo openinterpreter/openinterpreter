@@ -121,6 +121,25 @@ CODEX_OSS_BASE_URL=http://192.168.1.20:1234/v1 \
 
 远程 Ollama 服务器请使用 `--local-provider ollama`。不要仅仅为了更改任一内置本地提供者的地址而创建单独的 `model_providers` 条目；`CODEX_OSS_BASE_URL` 才是受支持的覆盖方式。
 
+### 本地模型的工具调用
+
+Agent 提示词除了用户输入外，还包含指令和工具 schema。请确保本地服务器实际启用的上下文窗口足以容纳完整请求。例如，即使模型训练时支持 32K 上下文，Ollama 仍可能以较小的服务器默认值运行；可在启动服务器前提高该值：
+
+```bash
+OLLAMA_CONTEXT_LENGTH=32768 ollama serve
+```
+
+如果服务器截断了请求开头，模型可能会猜测文件内容、把工具调用作为普通文本输出，或者要求用户代为运行命令，而不是实际调用工具。这些现象表示模型或服务器存在兼容性问题，并不能证明请求的文件系统操作已经发生。
+
+`qwen-code` harness 使用 Chat Completions 传输。通过 Ollama 使用 Qwen 模型时，请显式选择该传输，使自动推断的 Qwen harness 能使用其原生请求格式：
+
+```bash
+interpreter exec --oss --local-provider ollama --chat-completions \
+  -m qwen2.5-coder:7b "inspect this project"
+```
+
+在自动化任务中，还应在命令退出后直接检查预期文件或其他副作用。请参阅[非交互模式](/docs/exec#完成状态与退出码)。
+
 ### 模型元数据警告
 
 `Model metadata for ... not found` 表示本地服务器返回的模型 ID 未在 Open Interpreter 的兼容性目录中。它本身并不意味着服务器连接失败。请确认服务器暴露的准确 ID，使用相同的值通过 `-m` 传入，并更新 Open Interpreter 以获得最新目录。Open Interpreter 可以继续使用回退元数据，但某些模型特定的控制或行为可能不可用。

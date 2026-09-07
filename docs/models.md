@@ -136,6 +136,35 @@ Use `--local-provider ollama` for a remote Ollama server. Do not create a
 separate `model_providers` entry just to change the address of either built-in
 local provider; `CODEX_OSS_BASE_URL` is the supported override.
 
+### Local model tool use
+
+Agent prompts include instructions and tool schemas in addition to your text.
+Make sure the local server's active context window is large enough for that
+complete request. For example, a model trained for a 32K context can still run
+with Ollama's smaller server default unless you raise it before starting the
+server:
+
+```bash
+OLLAMA_CONTEXT_LENGTH=32768 ollama serve
+```
+
+If the server truncates the beginning of the request, a model may answer from
+guesses, print a tool call as ordinary text, or ask you to run a command instead
+of invoking a tool. These are model/server compatibility symptoms, not evidence
+that the requested filesystem action happened.
+
+The `qwen-code` harness uses the Chat Completions transport. For Qwen models on
+Ollama, select that transport explicitly so the inferred Qwen harness can use
+its native request shape:
+
+```bash
+interpreter exec --oss --local-provider ollama --chat-completions \
+  -m qwen2.5-coder:7b "inspect this project"
+```
+
+For automated work, also verify the expected files or other side effects after
+the command exits. See [Non-Interactive Mode](/docs/exec#completion-and-exit-status).
+
 ### Model metadata warnings
 
 `Model metadata for ... not found` means the local server returned a model ID

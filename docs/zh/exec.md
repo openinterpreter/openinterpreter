@@ -65,6 +65,19 @@ interpreter exec --json "list the files this task would touch"
 
 每一行都是一个 JSON 事件，表示进度、工具调用、文件更改、推理摘要或最终消息。
 
+## 完成状态与退出码
+
+退出码为零表示 agent 回合已到达协议定义的完成状态，并不能证明任意指令所要求的副作用已经发生。例如，本地模型可能返回正常的最终消息，却没有创建提示词要求的文件。
+
+适用时可使用 `--verify` 请求额外的完成检查回合，同时让自动化流程直接检查必要的输出：
+
+```bash
+interpreter exec --verify "create NOTES.md summarizing this project"
+test -s NOTES.md
+```
+
+使用本地模型时，还应确保模型服务器实际启用的上下文窗口足以容纳完整的 agent 提示词和工具 schema。请参阅[本地模型的工具调用](/docs/models#本地模型的工具调用)。
+
 ## 结构化输出
 
 配合 `--output-schema` 使用模式文件：

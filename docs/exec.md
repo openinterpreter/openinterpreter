@@ -68,6 +68,24 @@ interpreter exec --json "list the files this task would touch"
 Each line is a JSON event representing progress, tool calls, file changes,
 reasoning summaries, or the final message.
 
+## Completion And Exit Status
+
+A zero exit status means the agent turn reached the protocol's completed state.
+It does not prove that an arbitrary instruction's intended side effect happened.
+For example, a local model can return a normal final message without creating a
+file that the prompt requested.
+
+Use `--verify` to ask for an additional completion-check turn when appropriate,
+and make automation check its required outputs directly:
+
+```bash
+interpreter exec --verify "create NOTES.md summarizing this project"
+test -s NOTES.md
+```
+
+With local models, also ensure the model server's active context is large enough
+for the full agent prompt and tool schemas. See [Local model tool use](/docs/models#local-model-tool-use).
+
 ## Structured Output
 
 Pair `--output-schema` with a schema file:
