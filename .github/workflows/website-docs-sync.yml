@@ -18,8 +18,16 @@ jobs:
   dispatch:
     runs-on: ubuntu-latest
     steps:
+      - name: Mint website dispatch token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.INTERPRETERWORK_APP_ID }}
+          private-key: ${{ secrets.INTERPRETERWORK_APP_PRIVATE_KEY }}
+          owner: openinterpreter
+          repositories: website
       - name: Dispatch website sync
         env:
-          GH_TOKEN: ${{ secrets.WEBSITE_DOCS_SYNC_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           gh api repos/openinterpreter/website/dispatches --method POST --field event_type=open_interpreter_docs_changed
