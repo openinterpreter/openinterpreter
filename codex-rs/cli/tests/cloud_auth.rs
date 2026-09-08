@@ -85,7 +85,35 @@ async fn cloud_list_only_allows_trusted_credential_destinations() -> Result<()> 
         .args(["cloud", "list", "--limit", "1", "--json"])
         .assert()
         .failure()
-        .stderr(contains("Not signed in. Please run 'codex login'"));
+        .stderr(contains(
+            "Not signed in. Please run 'codex login' to sign in with ChatGPT, then re-run 'codex cloud'.",
+        ));
     auth_server.verify().await;
+
+    let interpreter_home = TempDir::new()?;
+    let interpreter_auth_server = MockServer::start().await;
+    Mock::given(path("/v1/user-auth-credential/whoami"))
+        .and(header("authorization", "Bearer at-synthetic-cloud"))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(1)
+        .mount(&interpreter_auth_server)
+        .await;
+    command()?
+        .env("OPEN_INTERPRETER_BRAND", "1")
+        .env("INTERPRETER_HOME", interpreter_home.path())
+        .env_remove("CODEX_HOME")
+        .env(
+            "CODEX_CLOUD_TASKS_BASE_URL",
+            "https://chatgpt-staging.com/backend-api",
+        )
+        .env("CODEX_ACCESS_TOKEN", "at-synthetic-cloud")
+        .env("CODEX_AUTHAPI_BASE_URL", interpreter_auth_server.uri())
+        .args(["cloud", "list", "--limit", "1", "--json"])
+        .assert()
+        .failure()
+        .stderr(contains(
+            "Not signed in. Please run 'interpreter login' to sign in with ChatGPT, then re-run 'interpreter cloud'.",
+        ));
+    interpreter_auth_server.verify().await;
     Ok(())
 }

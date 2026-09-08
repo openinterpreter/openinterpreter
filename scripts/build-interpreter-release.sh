@@ -18,7 +18,7 @@ installs interpreter/i shims into the visible bin directory.
 EOF
 }
 
-repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 codex_rs_dir="$repo_root/codex-rs"
 target=""
 install_dir="${OPEN_INTERPRETER_INSTALL_DIR:-${CODEX_INSTALL_DIR:-$HOME/.local/bin}}"
@@ -126,6 +126,27 @@ echo "Cargo build jobs: $build_jobs"
 mkdir -p "$releases_dir" "$install_dir"
 rm -rf "$staging_dir"
 
+python_command="${OPEN_INTERPRETER_PYTHON:-}"
+if [[ -n "$python_command" ]]; then
+  if ! command -v "$python_command" >/dev/null 2>&1 ||
+     ! "$python_command" -c 'import tomllib' >/dev/null 2>&1; then
+    echo "OPEN_INTERPRETER_PYTHON must name a Python interpreter with tomllib support" >&2
+    exit 1
+  fi
+else
+  for candidate in python3 python3.13 python3.12 python3.11; do
+    if command -v "$candidate" >/dev/null 2>&1 &&
+       "$candidate" -c 'import tomllib' >/dev/null 2>&1; then
+      python_command="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$python_command" ]]; then
+    echo "Python 3.11 or newer is required to build the release package" >&2
+    exit 1
+  fi
+fi
+
 (
   cd "$repo_root"
   package_args=(
@@ -137,7 +158,9 @@ rm -rf "$staging_dir"
   if [[ -n "$target" ]]; then
     package_args=(--target "$target" "${package_args[@]}")
   fi
-  CARGO_BUILD_JOBS="$build_jobs" python3 scripts/build_codex_package.py "${package_args[@]}"
+  CODEX_REPO_ROOT="$repo_root" \
+    CARGO_BUILD_JOBS="$build_jobs" \
+    "$python_command" scripts/build_codex_package.py "${package_args[@]}"
 )
 
 if [[ -e "$package_dir" || -L "$package_dir" ]]; then

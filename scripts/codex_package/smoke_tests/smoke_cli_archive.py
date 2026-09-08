@@ -59,9 +59,7 @@ def smoke_open_interpreter(root: Path, entrypoint: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--archive", type=Path, required=True)
-    parser.add_argument(
-        "--product", choices=("open-interpreter",), required=True
-    )
+    parser.add_argument("--product", choices=("open-interpreter",), required=True)
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory(prefix="cli-package-smoke-") as temp:

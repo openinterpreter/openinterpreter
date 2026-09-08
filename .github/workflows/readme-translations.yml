@@ -6,6 +6,7 @@ on:
       - README.md
       - README_ES.md
       - README_ZH.md
+      - README_JA.md
       - .github/scripts/check_readme_translations.py
       - .github/workflows/readme-translations.yml
   push:
@@ -15,6 +16,7 @@ on:
       - README.md
       - README_ES.md
       - README_ZH.md
+      - README_JA.md
       - .github/scripts/check_readme_translations.py
       - .github/workflows/readme-translations.yml
 

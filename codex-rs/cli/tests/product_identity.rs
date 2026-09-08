@@ -101,6 +101,12 @@ fn interpreter_help_version_errors_and_completions_keep_product_identity() -> an
             "invalid argument",
             &["--definitely-not-an-interpreter-option"][..],
         ),
+        (
+            "exec invalid argument",
+            &["exec", "--definitely-not-an-interpreter-option"][..],
+        ),
+        ("login help", &["login", "--help"][..]),
+        ("cloud help", &["cloud", "--help"][..]),
         ("debug update error", &["update"][..]),
     ] {
         let (stdout, stderr) = run(&interpreter, args, &envs, &[])?;
@@ -110,15 +116,57 @@ fn interpreter_help_version_errors_and_completions_keep_product_identity() -> an
     for shell in ["bash", "zsh", "fish", "powershell"] {
         let (stdout, stderr) = run(&interpreter, &["completion", shell], &envs, &[])?;
         assert_no_codex_brand(shell, &stdout, &stderr);
+        match shell {
+            "bash" => assert!(
+                stdout.starts_with("_interpreter()"),
+                "bash completion should define _interpreter: {stdout}"
+            ),
+            "zsh" => assert!(
+                stdout.starts_with("#compdef interpreter"),
+                "zsh completion should target interpreter: {stdout}"
+            ),
+            "fish" => assert!(
+                stdout.contains("complete -c interpreter"),
+                "fish completion should target interpreter: {stdout}"
+            ),
+            "powershell" => assert!(
+                stdout.contains("interpreter"),
+                "PowerShell completion should target interpreter: {stdout}"
+            ),
+            _ => unreachable!("unsupported shell {shell}"),
+        }
+        let chat_completions_option = if shell == "fish" {
+            "chat-completions"
+        } else {
+            "--chat-completions"
+        };
         assert!(
-            stdout.to_ascii_lowercase().contains("interpreter"),
-            "{shell} completion should target interpreter: {stdout}"
-        );
-        assert!(
-            stdout.contains("--chat-completions"),
-            "{shell} completion should include --chat-completions: {stdout}"
+            stdout.contains(chat_completions_option),
+            "{shell} completion should include {chat_completions_option}: {stdout}"
         );
     }
+
+    let (stdout, stderr) = run(&interpreter, &["--help"], &envs, &[])?;
+    assert_no_codex_brand("root help examples", &stdout, &stderr);
+    assert!(
+        stdout.contains("interpreter completion bash"),
+        "root help should show completion generation: {stdout}"
+    );
+    assert!(
+        stdout.contains("interpreter --chat-completions"),
+        "root help should show Chat Completions usage: {stdout}"
+    );
+    assert!(
+        stdout.contains("Chat Completions API") && stdout.contains("Responses API"),
+        "root help should explain Chat Completions behavior: {stdout}"
+    );
+
+    let (stdout, stderr) = run(&interpreter, &["cloud", "--help"], &envs, &[])?;
+    assert_no_codex_brand("cloud help", &stdout, &stderr);
+    assert!(
+        stdout.contains("interpreter cloud"),
+        "cloud help should use the public product command: {stdout}"
+    );
     Ok(())
 }
 

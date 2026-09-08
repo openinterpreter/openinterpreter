@@ -30,7 +30,7 @@ interpreter
 ```bash
 ZAI_API_KEY="..." interpreter \
   -c 'model_provider="zai-coding-plan"' \
-  -m glm-5.2
+  -m glm-5.1
 ```
 
 若使用通用 Z.AI API，将提供商改为 `zai`。使用中国区服务的用户应使用 `zhipuai` 或 `zhipuai-coding-plan` 并配合 `ZHIPU_API_KEY`。
@@ -45,7 +45,7 @@ Z.AI 官方提供了 Anthropic 兼容的 Coding Plan 端点，地址为 `https:/
 
 ```toml
 model_provider = "zai-zcode"
-model = "glm-5.2"
+model = "glm-5.1"
 harness = "zcode"
 
 [model_providers.zai-zcode]
@@ -70,7 +70,7 @@ Open Interpreter 会将 ZCode Messages 请求发送至 `/v1/messages`。额外�
 
 ## 选择 GLM 模型
 
-使用 `/model` 而不是维护私有列表。该选择器由维护的提供商来源生成，包含所选服务当前可用的 GLM 模型 ID。例如，捆绑的 Z.AI Coding Plan 目录目前包括 `glm-5.2`、`glm-5.1`、`glm-5-turbo` 以及更低成本的模型。
+使用 `/model` 而不是维护私有列表。该选择器由维护的提供商来源生成，包含所选服务当前可用的 GLM 模型 ID。提供商文档中可作为起点的模型是 `glm-5.1`、`glm-5`、`glm-5-turbo` 和免费轻量级的 `glm-4.7-flash`；请使用所选服务返回的准确 ID，不要猜测版本别名。
 
 Z.AI 可能会在服务器端独立于 Open Interpreter 更新模型映射和计划资格。模型不可用或使用了不同配额倍率时，请查阅其[模型切换指南](https://docs.z.ai/devpack/using5.1)。
 

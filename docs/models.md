@@ -23,6 +23,33 @@ model_reasoning_summary = "auto"
 model_verbosity = "medium"
 ```
 
+## Easy Verified Choices
+
+These are convenient starting points for common providers. The IDs below are
+either inherited from upstream model metadata or documented by the provider's
+current official sources. Availability still depends on the selected account,
+region, plan, and provider `/models` response. Use `/model` to discover what the
+active provider currently offers.
+
+| Provider | Setup | Text model IDs | Wire API |
+| --- | --- | --- | --- |
+| Inherited upstream presets | Use only where the active provider exposes them | `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Provider default |
+| Google AI Studio | Provider `google` and `GEMINI_API_KEY` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite` | `chat` |
+| Anthropic | Provider `anthropic` and `ANTHROPIC_API_KEY` | `claude-fable-5-1`, `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` | Provider default |
+| Z.AI | Provider `zai` or `zai-coding-plan` and `ZAI_API_KEY` | `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7-flash` | `chat` |
+
+The first row contains OpenAI-style choices inherited from the upstream
+`models-manager/models.json`; it is upstream preset metadata, not a guarantee
+that every provider accepts those IDs. Google's current official [Gemini model
+list](https://ai.google.dev/gemini-api/docs/models) includes the listed stable
+Gemini 3 Flash text IDs and identifies `gemini-3.8-flash` as its most intelligent
+Flash model. Its [OpenAI compatibility guide](https://ai.google.dev/gemini-api/docs/openai)
+documents the compatible endpoint. For Z.AI, the [GLM-5.1 guide](https://docs.z.ai/guides/llm/glm-5.1)
+and [GLM-5-Turbo guide](https://docs.z.ai/guides/llm/glm-5-turbo) use the listed
+IDs; use the exact IDs returned for the selected service rather than guessing an
+alias.
+Anthropic's [model lifecycle page](https://platform.claude.com/docs/en/about-claude/model-deprecations) lists the shown Anthropic IDs as active.
+
 ## Where Model Metadata Comes From
 
 Open Interpreter does not keep one hand-written Rust list of every model.

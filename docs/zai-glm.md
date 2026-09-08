@@ -37,7 +37,7 @@ For a direct Z.AI Coding Plan launch:
 ```bash
 ZAI_API_KEY="..." interpreter \
   -c 'model_provider="zai-coding-plan"' \
-  -m glm-5.2
+  -m glm-5.1
 ```
 
 For the general Z.AI API, change the provider to `zai`. Users of the China
@@ -60,7 +60,7 @@ Z.AI officially provides an Anthropic-compatible Coding Plan endpoint at
 
 ```toml
 model_provider = "zai-zcode"
-model = "glm-5.2"
+model = "glm-5.1"
 harness = "zcode"
 
 [model_providers.zai-zcode]
@@ -92,8 +92,9 @@ endpoint and plan-eligibility details.
 
 Use `/model` rather than maintaining a private list. The picker is generated
 from maintained provider sources and includes current GLM model IDs for the
-selected service. For example, the bundled Z.AI Coding Plan catalog currently
-includes `glm-5.2`, `glm-5.1`, `glm-5-turbo`, and lower-cost models.
+selected service. The provider-documented starting choices are `glm-5.1`, `glm-5`,
+`glm-5-turbo`, and the free/lightweight `glm-4.7-flash`; use the exact IDs
+returned for the selected service rather than guessing a versioned alias.
 
 Z.AI may update server-side model mappings and plan eligibility independently
 of Open Interpreter. Check its [model-switching guide](https://docs.z.ai/devpack/using5.1)

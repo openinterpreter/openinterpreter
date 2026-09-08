@@ -17,6 +17,7 @@ use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
 use codex_http_client::RouteAwareClientPool;
 use codex_login::default_client::get_codex_user_agent;
+use codex_product_info::Product;
 use owo_colors::OwoColorize;
 use owo_colors::Stream;
 use std::cmp::Ordering;
@@ -43,6 +44,11 @@ struct BackendContext {
     backend: Arc<dyn codex_cloud_tasks_client::CloudBackend>,
     base_url: String,
     environment_http: RouteAwareClientPool,
+}
+
+pub(crate) fn product_cloud_command() -> String {
+    let command = Product::current().command_name();
+    format!("{command} cloud")
 }
 
 async fn init_backend(user_agent_suffix: &str) -> anyhow::Result<BackendContext> {
@@ -92,8 +98,9 @@ async fn init_backend(user_agent_suffix: &str) -> anyhow::Result<BackendContext>
     let auth = match auth {
         Some(auth) => auth,
         None => {
+            let command_name = Product::current().command_name();
             eprintln!(
-                "Not signed in. Please run 'codex login' to sign in with ChatGPT, then re-run 'codex cloud'."
+                "Not signed in. Please run '{command_name} login' to sign in with ChatGPT, then re-run '{command_name} cloud'."
             );
             std::process::exit(1);
         }
@@ -104,8 +111,9 @@ async fn init_backend(user_agent_suffix: &str) -> anyhow::Result<BackendContext>
     }
 
     if !auth.uses_codex_backend() {
+        let command_name = Product::current().command_name();
         eprintln!(
-            "Not signed in. Please run 'codex login' to sign in with ChatGPT, then re-run 'codex cloud'."
+            "Not signed in. Please run '{command_name} login' to sign in with ChatGPT, then re-run '{command_name} cloud'."
         );
         std::process::exit(1);
     }
@@ -229,17 +237,21 @@ async fn resolve_environment_id(ctx: &BackendContext, requested: &str) -> anyhow
         })
         .collect::<Vec<_>>();
     match label_matches.as_slice() {
-        [] => Err(anyhow!(
-            "environment '{trimmed}' not found; run `codex cloud` to list available environments"
-        )),
+        [] => {
+            let command = product_cloud_command();
+            Err(anyhow!(
+                "environment '{trimmed}' not found; run `{command}` to list available environments"
+            ))
+        }
         [single] => Ok(single.id.clone()),
         [first, rest @ ..] => {
             let first_id = &first.id;
             if rest.iter().all(|row| row.id == *first_id) {
                 Ok(first_id.clone())
             } else {
+                let command = product_cloud_command();
                 Err(anyhow!(
-                    "environment label '{trimmed}' is ambiguous; run `codex cloud` to pick the desired environment id"
+                    "environment label '{trimmed}' is ambiguous; run `{command}` to pick the desired environment id"
                 ))
             }
         }
@@ -582,7 +594,8 @@ async fn run_list_command(args: crate::cli::ListCommand) -> anyhow::Result<()> {
         println!("{line}");
     }
     if let Some(cursor) = page.cursor {
-        let command = format!("codex cloud list --cursor='{cursor}'");
+        let product_command = product_cloud_command();
+        let command = format!("{product_command} list --cursor='{cursor}'");
         if colorize {
             println!(
                 "\nTo fetch the next page, run {}",
@@ -749,7 +762,7 @@ fn spawn_apply(
 
 // (no standalone patch summarizer needed – UI displays raw diffs)
 
-/// Entry point for the `codex cloud` subcommand.
+/// Entry point for the `cloud` subcommand.
 pub async fn run_main(cli: Cli, _codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()> {
     if let Some(command) = cli.command {
         return match command {

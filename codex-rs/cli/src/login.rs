@@ -289,7 +289,7 @@ pub fn read_api_key_from_stdin() -> String {
 pub fn read_access_token_from_stdin() -> String {
     read_stdin_secret(
         &format!(
-            "--with-access-token expects the access token on stdin. Try piping it, e.g. `printenv CODEX_ACCESS_TOKEN | {} login --with-access-token`.",
+            "--with-access-token expects the access token on stdin. Pipe the token into `{} login --with-access-token`.",
             codex_product_info::Product::current().command_name()
         ),
         "Reading access token from stdin...",

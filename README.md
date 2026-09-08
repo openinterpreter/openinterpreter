@@ -3,7 +3,7 @@
 <p align="center">A coding agent optimized for low-cost models. <a href="https://www.openinterpreter.com/blog/open-interpreter?utm_source=github&amp;utm_medium=referral&amp;utm_campaign=readme&amp;utm_content=hero_text"><strong>Blog post ↗</strong></a></p>
 
 <p align="center">
-  <b>English</b> • <a href="README_ES.md">Español</a> • <a href="README_ZH.md">简体中文</a>
+  <b>English</b> • <a href="README_ES.md">Español</a> • <a href="README_ZH.md">简体中文</a> • <a href="README_JA.md">日本語</a>
 </p>
 
 <p align="center">

@@ -24,6 +24,7 @@ codex-core = { workspace = true }
 codex-git-utils = { workspace = true }
 codex-login = { path = "../login" }
 codex-model-provider = { workspace = true }
+codex-product-info = { workspace = true }
 codex-tui = { workspace = true }
 codex-utils-cli = { workspace = true }
 crossterm = { workspace = true, features = ["event-stream"] }

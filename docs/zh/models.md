@@ -23,6 +23,19 @@ model_reasoning_summary = "auto"
 model_verbosity = "medium"
 ```
 
+## 易于验证的模型选择
+
+以下是常见提供商的便捷起点。下面的 ID 要么继承自上游模型元数据，要么记录在提供商当前的官方来源中。实际可用性仍取决于账户、地区、套餐以及提供商返回的 `/models` 列表。使用 `/model` 可查看当前活动提供商实际提供的模型。
+
+| 提供商 | 设置 | 文本模型 ID | Wire API |
+| --- | --- | --- | --- |
+| 上游继承的预设 | 仅在当前提供商提供这些 ID 时使用 | `gpt-6-astra`、`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` | 提供商默认值 |
+| Google AI Studio | 提供商 `google` 和 `GEMINI_API_KEY` | `gemini-3.8-flash`、`gemini-3.7-flash`、`gemini-3.6-flash`、`gemini-3.5-flash`、`gemini-3.5-flash-lite`、`gemini-3.1-flash-lite` | `chat` |
+| Anthropic | 提供商 `anthropic` 和 `ANTHROPIC_API_KEY` | `claude-fable-5-1`、`claude-opus-5`、`claude-sonnet-5`、`claude-haiku-4-5-20251001` | 提供商默认值 |
+| Z.AI | 提供商 `zai` 或 `zai-coding-plan` 和 `ZAI_API_KEY` | `glm-5.1`、`glm-5`、`glm-5-turbo`、`glm-4.7-flash` | `chat` |
+
+第一行的 OpenAI 风格 ID 继承自上游的 `models-manager/models.json`，表示上游预设元数据，并不保证所有提供商都接受这些 ID。Google 当前的[官方 Gemini 模型列表](https://ai.google.dev/gemini-api/docs/models)包含所列的稳定 Gemini 3 Flash 文本 ID，并将 `gemini-3.8-flash` 列为其最智能的 Flash 模型。其[ OpenAI 兼容性指南](https://ai.google.dev/gemini-api/docs/openai)记录了兼容端点。对于 Z.AI，其 [GLM-5.1 指南](https://docs.z.ai/guides/llm/glm-5.1)和 [GLM-5-Turbo 指南](https://docs.z.ai/guides/llm/glm-5-turbo)使用上述 ID；请使用所选服务返回的准确 ID，不要猜测别名。
+
 ## 模型元数据的来源
 
 Open Interpreter 并未维护一份手写的 Rust 列表来列出所有模型。元数据分层如下：

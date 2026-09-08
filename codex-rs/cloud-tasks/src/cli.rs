@@ -14,26 +14,29 @@ pub struct Cli {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
-    /// Submit a new Codex Cloud task without launching the TUI.
+    /// Submit a new hosted cloud task without launching the TUI.
     Exec(ExecCommand),
-    /// Show the status of a Codex Cloud task.
+    /// Show the status of a hosted cloud task.
     Status(StatusCommand),
-    /// List Codex Cloud tasks.
+    /// List hosted cloud tasks.
     List(ListCommand),
-    /// Apply the diff for a Codex Cloud task locally.
+    /// Apply the diff for a hosted cloud task locally.
     Apply(ApplyCommand),
-    /// Show the unified diff for a Codex Cloud task.
+    /// Show the unified diff for a hosted cloud task.
     Diff(DiffCommand),
 }
 
 #[derive(Debug, Args)]
 pub struct ExecCommand {
-    /// Task prompt to run in Codex Cloud.
+    /// Task prompt to run in the hosted cloud service.
     #[arg(value_name = "QUERY")]
     pub query: Option<String>,
 
-    /// Target environment identifier (see `codex cloud` to browse).
-    #[arg(long = "env", value_name = "ENV_ID")]
+    #[arg(
+        long = "env",
+        value_name = "ENV_ID",
+        help = environment_help()
+    )]
     pub environment: String,
 
     /// Number of assistant attempts (best-of-N).
@@ -44,9 +47,14 @@ pub struct ExecCommand {
     )]
     pub attempts: usize,
 
-    /// Git branch to run in Codex Cloud (defaults to current branch).
+    /// Git branch to run in the hosted cloud service (defaults to current branch).
     #[arg(long = "branch", value_name = "BRANCH")]
     pub branch: Option<String>,
+}
+
+fn environment_help() -> String {
+    let command = crate::product_cloud_command();
+    format!("Target environment identifier (see `{command}` to browse).")
 }
 
 fn parse_attempts(input: &str) -> Result<usize, String> {
@@ -73,7 +81,7 @@ fn parse_limit(input: &str) -> Result<i64, String> {
 
 #[derive(Debug, Args)]
 pub struct StatusCommand {
-    /// Codex Cloud task identifier to inspect.
+    /// Hosted cloud task identifier to inspect.
     #[arg(value_name = "TASK_ID")]
     pub task_id: String,
 }
@@ -99,7 +107,7 @@ pub struct ListCommand {
 
 #[derive(Debug, Args)]
 pub struct ApplyCommand {
-    /// Codex Cloud task identifier to apply.
+    /// Hosted cloud task identifier to apply.
     #[arg(value_name = "TASK_ID")]
     pub task_id: String,
 
@@ -110,7 +118,7 @@ pub struct ApplyCommand {
 
 #[derive(Debug, Args)]
 pub struct DiffCommand {
-    /// Codex Cloud task identifier to display.
+    /// Hosted cloud task identifier to display.
     #[arg(value_name = "TASK_ID")]
     pub task_id: String,
 

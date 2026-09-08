@@ -270,7 +270,7 @@ async fn zcode_messages_turn_reaches_anthropic_transport() -> anyhow::Result<()>
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
-                .set_body_string(anthropic_text_sse("glm-5.3", "hello")),
+                .set_body_string(anthropic_text_sse("glm-5.2", "hello")),
         )
         .expect(/*requests*/ 1)
         .mount(&server)
@@ -278,7 +278,7 @@ async fn zcode_messages_turn_reaches_anthropic_transport() -> anyhow::Result<()>
 
     collect_stream_events(
         messages_model_client(&server.uri(), Harness::ZCode),
-        "glm-5.3",
+        "glm-5.2",
         user_prompt("hello"),
     )
     .await

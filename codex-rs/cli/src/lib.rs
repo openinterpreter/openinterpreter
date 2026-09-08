@@ -24,7 +24,7 @@ pub use login::run_logout;
 
 #[derive(Debug, Default, Args)]
 pub struct SandboxStateArgs {
-    /// JSON value from `codex/sandbox-state-meta` to apply directly.
+    /// JSON sandbox-state metadata to apply directly.
     #[arg(
         long = "sandbox-state-json",
         value_name = "JSON",

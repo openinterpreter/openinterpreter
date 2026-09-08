@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "README.md"
-TRANSLATIONS = (ROOT / "README_ES.md", ROOT / "README_ZH.md")
+TRANSLATIONS = (ROOT / "README_ES.md", ROOT / "README_ZH.md", ROOT / "README_JA.md")
 SOURCE_PATTERN = re.compile(
     r"<!-- README translation source: README\.md sha256=([0-9a-f]{64}) -->"
 )

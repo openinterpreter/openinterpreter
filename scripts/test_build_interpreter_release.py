@@ -25,7 +25,11 @@ class BuildInterpreterReleaseTest(unittest.TestCase):
                 """\
                 #!/usr/bin/env bash
                 set -euo pipefail
+                if [[ "${1:-}" == "-c" ]]; then
+                  exit 0
+                fi
                 printf 'jobs=%s\\n' "${CARGO_BUILD_JOBS:-}" > "$TEST_INVOCATION"
+                printf 'repo_root=%s\\n' "${CODEX_REPO_ROOT:-}" >> "$TEST_INVOCATION"
                 printf '%s\\n' "$@" >> "$TEST_INVOCATION"
                 package_dir=""
                 while [[ $# -gt 0 ]]; do
@@ -85,6 +89,20 @@ class BuildInterpreterReleaseTest(unittest.TestCase):
         self.assertIn("--cargo-profile\nrelease\n", invocation)
         self.assertTrue((self.root / "visible-bin" / "interpreter").is_symlink())
         self.assertTrue((self.root / "visible-bin" / "i").is_symlink())
+
+    def test_builder_receives_script_repository_root_from_other_cwd(self) -> None:
+        result = self.run_script(
+            "--install-dir",
+            "visible-bin",
+            "--home",
+            "interpreter-home",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            f"repo_root={REPO_ROOT}\n",
+            self.invocation.read_text(encoding="utf-8"),
+        )
 
     def test_default_jobs_remains_one(self) -> None:
         result = self.run_script(

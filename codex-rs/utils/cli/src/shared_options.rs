@@ -22,8 +22,12 @@ pub struct SharedCliOptions {
     #[arg(long, short = 'm')]
     pub model: Option<String>,
 
-    /// Use the selected provider's OpenAI-compatible Chat Completions API.
-    #[arg(long = "chat-completions", default_value_t = false)]
+    /// Use the selected provider's OpenAI-compatible Chat Completions API instead of Responses.
+    #[arg(
+        long = "chat-completions",
+        default_value_t = false,
+        long_help = chat_completions_help()
+    )]
     pub chat_completions: bool,
 
     /// Use open-source provider.
@@ -74,6 +78,13 @@ pub struct SharedCliOptions {
     /// Additional directories that should be writable alongside the primary workspace.
     #[arg(long = "add-dir", value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     pub add_dir: Vec<PathBuf>,
+}
+
+fn chat_completions_help() -> String {
+    let command = codex_product_info::Product::current().command_name();
+    format!(
+        "Use the selected provider's OpenAI-compatible Chat Completions API instead of the Responses API.\n\nExamples:\n  {command} --chat-completions\n  {command} exec --chat-completions \"summarize this repository\""
+    )
 }
 
 impl SharedCliOptions {
