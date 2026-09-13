@@ -17,6 +17,7 @@ on:
 
 env:
   CODEX_REPO_ROOT: ${{ github.workspace }}
+  CODEX_ZSH_REPOSITORY: openai/codex
   CODEX_ZSH_RELEASE_TAG: codex-zsh-v0.1.0
   CODEX_ZSH_MANIFEST_SHA256: c534eab89dcea7e3d8a5e5b3f49c025c7c64cd4e4d9814ee24871de58a9359a1
 
@@ -363,7 +364,7 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsSL \
-            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${CODEX_ZSH_RELEASE_TAG}/codex-zsh" \
+            "https://github.com/${CODEX_ZSH_REPOSITORY}/releases/download/${CODEX_ZSH_RELEASE_TAG}/codex-zsh" \
             -o "${RUNNER_TEMP}/codex-zsh"
           bash "${GITHUB_WORKSPACE}/.github/scripts/verify-zsh-manifest.sh" \
             "${RUNNER_TEMP}/codex-zsh" "$CODEX_ZSH_MANIFEST_SHA256"
@@ -384,7 +385,7 @@ jobs:
             --zsh-manifest "${RUNNER_TEMP}/codex-zsh"
 
       - name: Build Open Interpreter package archive
-        if: ${{ matrix.bundle == 'primary' }}
+        if: ${{ matrix.bundle == 'primary' && runner.os != 'macOS' }}
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
@@ -616,7 +617,7 @@ jobs:
           zsh_manifest="${RUNNER_TEMP}/codex-zsh-${TARGET}"
           mkdir -p "$signed_root"
           curl -fsSL \
-            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${CODEX_ZSH_RELEASE_TAG}/codex-zsh" \
+            "https://github.com/${CODEX_ZSH_REPOSITORY}/releases/download/${CODEX_ZSH_RELEASE_TAG}/codex-zsh" \
             -o "$zsh_manifest"
           bash "${GITHUB_WORKSPACE}/.github/scripts/verify-zsh-manifest.sh" \
             "$zsh_manifest" "$CODEX_ZSH_MANIFEST_SHA256"

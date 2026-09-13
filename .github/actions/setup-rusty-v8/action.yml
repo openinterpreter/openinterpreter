@@ -42,7 +42,8 @@ runs:
         fi
 
         mkdir -p "${binding_dir}"
-        curl -fsSL "${base_url}/${checksums_name}" -o "${checksums_path}"
+        curl -fsSL --retry 5 --retry-delay 2 --retry-max-time 60 \
+          "${base_url}/${checksums_name}" -o "${checksums_path}"
         # Check the original manifest bytes even when either checksum file uses CRLF.
         expected_manifest_checksum="$(grep -F "  ${checksums_name}" "${trusted_checksums}" | cut -d ' ' -f 1)"
         actual_manifest_checksum="$(python3 -c 'import hashlib, pathlib, sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "${checksums_path}")"
@@ -50,8 +51,10 @@ runs:
           echo "Checksum mismatch for ${checksums_name}: expected ${expected_manifest_checksum}, got ${actual_manifest_checksum}" >&2
           exit 1
         fi
-        curl -fsSL "${base_url}/${archive_name}" -o "${archive_path}"
-        curl -fsSL "${base_url}/${binding_name}" -o "${binding_path}"
+        curl -fsSL --retry 5 --retry-delay 2 --retry-max-time 60 \
+          "${base_url}/${archive_name}" -o "${archive_path}"
+        curl -fsSL --retry 5 --retry-delay 2 --retry-max-time 60 \
+          "${base_url}/${binding_name}" -o "${binding_path}"
 
         if [[ "$(wc -l < "${checksums_path}")" -ne 2 ]]; then
           echo "Expected exactly two checksums for ${TARGET} in ${checksums_path}" >&2
