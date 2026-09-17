@@ -9,6 +9,7 @@ use codex_protocol::models::LocalShellExecAction;
 use codex_protocol::models::LocalShellStatus;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
+use codex_utils_string::take_bytes_at_char_boundary;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
@@ -1314,8 +1315,12 @@ fn limit_output_length(output: &str) -> String {
         return output.to_string();
     }
     let portion_size = TERMINUS_2_OUTPUT_LIMIT_BYTES / 2;
-    let first = &output[..portion_size];
-    let last = &output[output.len() - portion_size..];
+    let first = take_bytes_at_char_boundary(output, portion_size);
+    let mut last_start = output.len() - portion_size;
+    while !output.is_char_boundary(last_start) {
+        last_start += 1;
+    }
+    let last = &output[last_start..];
     let omitted = output.len() - first.len() - last.len();
     format!(
         "{first}\n[... output limited to {TERMINUS_2_OUTPUT_LIMIT_BYTES} bytes; {omitted} interior bytes omitted ...]\n{last}"
@@ -1797,6 +1802,19 @@ mod tests {
             parsed
                 .warning
                 .contains("Extra text detected before JSON object")
+        );
+    }
+
+    #[test]
+    fn limit_output_length_splits_multibyte_output_on_char_boundaries() {
+        let output = "\u{65e5}".repeat(4_000);
+        let portion = "\u{65e5}".repeat(1_666);
+        let omitted = output.len() - 2 * portion.len();
+        assert_eq!(
+            limit_output_length(&output),
+            format!(
+                "{portion}\n[... output limited to {TERMINUS_2_OUTPUT_LIMIT_BYTES} bytes; {omitted} interior bytes omitted ...]\n{portion}"
+            )
         );
     }
 
