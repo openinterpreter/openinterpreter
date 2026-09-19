@@ -5,6 +5,8 @@ use crate::chatwidget::connectors::ConnectorsCacheState;
 use codex_app_server_protocol::HookErrorInfo;
 use codex_app_server_protocol::HooksListEntry;
 use codex_app_server_protocol::HooksListResponse;
+use codex_app_server_protocol::InterpreterProvider;
+use codex_app_server_protocol::WireApiDto;
 use codex_app_server_protocol::MarketplaceLoadErrorInfo;
 use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::PluginAvailability;
@@ -3621,6 +3623,54 @@ async fn model_picker_hides_show_in_picker_false_models_from_cache() {
     assert!(
         !popup.contains("test-hidden-model"),
         "expected hidden model to be excluded from picker:\n{popup}"
+    );
+}
+
+#[tokio::test]
+async fn provider_model_picker_replaces_loading_view() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.6-sol")).await;
+    let provider = InterpreterProvider {
+        id: "opencode".to_string(),
+        name: "OpenCode Zen".to_string(),
+        description: "OpenCode Zen provider".to_string(),
+        is_current: false,
+        base_url: Some("https://opencode.ai/zen/v1".to_string()),
+        wire_api: Some(WireApiDto::Chat),
+        env_key: Some("OPENCODE_API_KEY".to_string()),
+        configured: true,
+        is_default: false,
+    };
+
+    chat.open_model_provider_popup(vec![provider]);
+    assert_eq!(
+        chat.bottom_pane.active_view_id(),
+        Some("model-provider-selection")
+    );
+
+    chat.open_provider_models_loading_popup("OpenCode Zen");
+    assert_eq!(chat.bottom_pane.active_view_id(), Some("model-selection"));
+
+    let preset = chat
+        .model_catalog
+        .try_list_models()
+        .expect("model catalog lock")
+        .into_iter()
+        .find(|preset| preset.show_in_picker)
+        .expect("visible test model");
+    chat.open_model_popup_for_provider(
+        "opencode".to_string(),
+        "OpenCode Zen".to_string(),
+        vec![preset],
+    );
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(
+        popup.contains("Custom model name"),
+        "expected model picker: {popup}"
+    );
+    assert!(
+        !popup.contains("Loading available models..."),
+        "loading view was not replaced: {popup}"
     );
 }
 

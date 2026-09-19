@@ -863,7 +863,7 @@ impl ChatWidget {
         provider_name: String,
         mut presets: Vec<ModelPreset>,
     ) {
-        if self.bottom_pane.active_view_id() != Some(MODEL_PROVIDER_SELECTION_VIEW_ID) {
+        if self.bottom_pane.active_view_id() != Some(MODEL_SELECTION_VIEW_ID) {
             return;
         }
 

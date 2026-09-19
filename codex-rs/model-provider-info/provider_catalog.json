@@ -7493,6 +7493,18 @@
       "sort_priority": 32,
       "models": [
         {
+          "id": "deepseek-flash",
+          "display_name": "DeepSeek Flash",
+          "description": "deepseek-flash \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1000000,
+          "priority": 0
+        },
+        {
           "id": "deepseek-v4-flash",
           "display_name": "DeepSeek V4 Flash",
           "description": "deepseek-flash \u2022 Reasoning \u2022 Tool calling",
@@ -7501,7 +7513,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 0
+          "priority": 1
         },
         {
           "id": "deepseek-v4-pro",
@@ -7512,7 +7524,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 1
+          "priority": 2
         },
         {
           "id": "deepseek-reasoner",
@@ -7523,7 +7535,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 2
+          "priority": 3
         },
         {
           "id": "deepseek-chat",
@@ -7534,7 +7546,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 3
+          "priority": 4
         }
       ]
     },

@@ -107,6 +107,16 @@ mod tests {
             "DEEPSEEK_API_KEY",
             WireApi::Chat,
         ));
+        let flash = models
+            .iter()
+            .find(|model| model.slug == "deepseek-flash")
+            .expect("deepseek-flash model");
+        assert!(flash.input_modalities.iter().any(|modality| {
+            matches!(
+                modality,
+                codex_protocol::openai_models::InputModality::Image
+            )
+        }));
         assert!(models.iter().any(|model| model.slug == "deepseek-v4-pro"));
         let v4_pro = models
             .iter()
