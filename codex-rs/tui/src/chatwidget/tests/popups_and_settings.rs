@@ -6,13 +6,13 @@ use codex_app_server_protocol::HookErrorInfo;
 use codex_app_server_protocol::HooksListEntry;
 use codex_app_server_protocol::HooksListResponse;
 use codex_app_server_protocol::InterpreterProvider;
-use codex_app_server_protocol::WireApiDto;
 use codex_app_server_protocol::MarketplaceLoadErrorInfo;
 use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::PluginAvailability;
 use codex_app_server_protocol::PluginShareContext;
 use codex_app_server_protocol::PluginShareDiscoverability;
 use codex_app_server_protocol::PluginSource;
+use codex_app_server_protocol::WireApiDto;
 use codex_connectors::AppInfo;
 use pretty_assertions::assert_eq;
 
