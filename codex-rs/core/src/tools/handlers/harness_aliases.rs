@@ -31,6 +31,7 @@ use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiTool;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
+use codex_utils_string::take_bytes_at_char_boundary;
 use regex_lite::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -935,6 +936,12 @@ fn zcode_preview_first_2kb(output: &str) -> String {
     for line in output.split_inclusive('\n') {
         let next_len = preview.len() + line.len();
         if next_len > 2_000 {
+            if preview.is_empty() {
+                // First line exceeds the budget; include a truncated portion so
+                // the preview is never blank for single-line outputs (e.g.
+                // minified JSON, base64 blobs, long access-log lines).
+                preview.push_str(take_bytes_at_char_boundary(line, 2_000));
+            }
             break;
         }
         preview.push_str(line);
