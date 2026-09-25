@@ -212,6 +212,89 @@ mod tests {
     }
 
     #[test]
+    fn bundled_provider_picker_excludes_retired_models() {
+        for (name, base_url, env_key, wire_api, excluded) in [
+            (
+                "Google",
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+                "GEMINI_API_KEY",
+                WireApi::Chat,
+                &["gemini-2.0-flash", "gemini-3-pro-preview"][..],
+            ),
+            (
+                "Groq",
+                "https://api.groq.com/openai/v1",
+                "GROQ_API_KEY",
+                WireApi::Chat,
+                &["llama-3.1-8b-instant", "qwen/qwen3-32b"][..],
+            ),
+            (
+                "Anthropic",
+                "https://api.anthropic.com",
+                "ANTHROPIC_API_KEY",
+                WireApi::Messages,
+                &["claude-opus-4-1-20250805", "claude-sonnet-4-20250514"][..],
+            ),
+            (
+                "DeepSeek",
+                "https://api.deepseek.com",
+                "DEEPSEEK_API_KEY",
+                WireApi::Chat,
+                &["deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"][..],
+            ),
+        ] {
+            let models = bundled_provider_model_infos(&provider(name, base_url, env_key, wire_api));
+            for model_id in excluded {
+                assert!(models.iter().all(|model| model.slug != *model_id));
+            }
+        }
+    }
+
+    #[test]
+    fn bundled_provider_picker_has_documented_current_choices() {
+        for (name, base_url, env_key, wire_api, expected) in [
+            (
+                "Anthropic",
+                "https://api.anthropic.com",
+                "ANTHROPIC_API_KEY",
+                WireApi::Messages,
+                &[
+                    "claude-fable-5-1",
+                    "claude-opus-5-5",
+                    "claude-sonnet-5",
+                    "claude-haiku-4-5-20251001",
+                ][..],
+            ),
+            (
+                "Kimi For Coding",
+                "https://api.kimi.com/coding/v1",
+                "KIMI_API_KEY",
+                WireApi::Chat,
+                &["k3", "k3-256k", "kimi-for-coding"][..],
+            ),
+            (
+                "Alibaba Cloud",
+                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                "DASHSCOPE_API_KEY",
+                WireApi::Chat,
+                &["qwen3.8-max", "qwen3.8-flash", "qwen3.7-flash"][..],
+            ),
+            (
+                "DeepSeek",
+                "https://api.deepseek.com",
+                "DEEPSEEK_API_KEY",
+                WireApi::Chat,
+                &["deepseek-flash", "deepseek-v4-pro"][..],
+            ),
+        ] {
+            let models = bundled_provider_model_infos(&provider(name, base_url, env_key, wire_api));
+            for model_id in expected {
+                assert!(models.iter().any(|model| model.slug == *model_id));
+            }
+        }
+    }
+
+    #[test]
     fn bundled_provider_models_seed_anthropic_with_reasoning_and_vision() {
         let models = bundled_provider_model_infos(&provider(
             "Anthropic",

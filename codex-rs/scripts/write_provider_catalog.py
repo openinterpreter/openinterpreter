@@ -178,6 +178,7 @@ def build_provider_entry(
     merge_live_provider_models(provider_id, models, overrides)
     apply_provider_model_additions(provider_id, models, overrides)
     apply_provider_model_overrides(provider_id, models, overrides)
+    apply_provider_model_exclusions(provider_id, models, overrides)
     if model_allowlist is not None:
         models[:] = [model for model in models if model.get("id") in model_allowlist]
         missing = sorted(
@@ -407,6 +408,25 @@ def apply_provider_model_additions(
         next_priority = max(next_priority, priority + 1)
 
 
+def apply_provider_model_exclusions(
+    provider_id: str,
+    models: list[dict],
+    overrides: dict[str, object],
+) -> None:
+    exclusions = overrides.get("provider_model_exclusions", {})
+    if not isinstance(exclusions, dict):
+        raise SystemExit("provider_model_exclusions must be an object")
+    excluded = exclusions.get(provider_id, [])
+    if not isinstance(excluded, list) or not all(
+        isinstance(model_id, str) and model_id for model_id in excluded
+    ):
+        raise SystemExit(
+            f"provider_model_exclusions.{provider_id} must be a list of model IDs"
+        )
+    excluded_ids = set(excluded)
+    models[:] = [model for model in models if model.get("id") not in excluded_ids]
+
+
 def additional_provider_entries(overrides: dict[str, object]) -> list[dict]:
     values = overrides.get("additional_provider_entries", [])
     if not isinstance(values, list):
@@ -489,7 +509,34 @@ def parse_args() -> argparse.Namespace:
             "providers"
         ),
     )
+    parser.add_argument(
+        "--refresh-overrides-only",
+        action="store_true",
+        help="apply overrides to selected providers in the committed catalog without network access",
+    )
     return parser.parse_args()
+
+
+def refresh_existing_catalog(selected_provider_ids: set[str]) -> int:
+    overrides = load_overrides()
+    payload = json.loads(OUTPUT_PATH.read_text(encoding="utf-8"))
+    providers = payload["providers"]
+    existing_ids = {provider["id"] for provider in providers}
+    missing = selected_provider_ids - existing_ids
+    if missing:
+        raise SystemExit(
+            "selected providers are missing: " + ", ".join(sorted(missing))
+        )
+    for provider in providers:
+        if provider["id"] not in selected_provider_ids:
+            continue
+        models = provider["models"]
+        apply_provider_model_additions(provider["id"], models, overrides)
+        apply_provider_model_overrides(provider["id"], models, overrides)
+        apply_provider_model_exclusions(provider["id"], models, overrides)
+    OUTPUT_PATH.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    print(f"Refreshed {len(selected_provider_ids)} provider entries in {OUTPUT_PATH}")
+    return 0
 
 
 def write_catalog(selected_provider_ids: set[str] | None = None) -> int:
@@ -559,4 +606,8 @@ def generated_from(overrides: dict[str, object]) -> str | list[str]:
 if __name__ == "__main__":
     args = parse_args()
     selected_provider_ids = set(args.provider_ids) if args.provider_ids else None
+    if args.refresh_overrides_only:
+        if not selected_provider_ids:
+            raise SystemExit("--refresh-overrides-only requires --provider")
+        sys.exit(refresh_existing_catalog(selected_provider_ids))
     sys.exit(write_catalog(selected_provider_ids))
