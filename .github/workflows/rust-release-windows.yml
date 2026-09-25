@@ -188,7 +188,7 @@ jobs:
           $source = $manifest.sourceArchive
           $directory = Join-Path $env:RUNNER_TEMP "voice-cygwin-snapshot"
           New-Item -ItemType Directory -Path $directory | Out-Null
-          gh release download $pin.tag --repo "${{ github.repository }}" --pattern $pin.name --pattern $source.name --dir $directory
+          gh release download $pin.tag --repo openai/codex --pattern $pin.name --pattern $source.name --dir $directory
           if ($LASTEXITCODE -ne 0) { throw "Cannot obtain the public Cygwin inputs and source" }
           $sourceFile = Join-Path $directory $source.name
           if ((Get-Item $sourceFile).Length -ne $source.bytes -or
