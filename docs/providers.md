@@ -127,6 +127,18 @@ env_key = "APPNZ_API_KEY"
 wire_api = "chat"
 ```
 
+[Cheaper Inference](https://cheaperinference.com/) is a hosted
+OpenAI-compatible chat-completions gateway. Each model costs 15–60% less than
+the list price of its lab. Its provider entry looks like this:
+
+```toml
+[model_providers.cheaperinference]
+name = "Cheaper Inference"
+base_url = "https://api.cheaperinference.com/v1"
+env_key = "CHEAPER_INFERENCE_API_KEY"
+wire_api = "chat"
+```
+
 ## Authentication
 
 Provider auth can come from:
