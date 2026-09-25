@@ -315,9 +315,7 @@ fn convert_message_content(content: &[ContentItem]) -> Option<Value> {
             ContentItem::InputText { text } | ContentItem::OutputText { text } => {
                 json!({ "type": "text", "text": text })
             }
-            ContentItem::InputImage { image, detail } => {
-                chat_image_content_part(image, *detail)
-            }
+            ContentItem::InputImage { image, detail } => chat_image_content_part(image, *detail),
             ContentItem::InputAudio { .. } => {
                 json!({ "type": "text", "text": "[audio content omitted]" })
             }

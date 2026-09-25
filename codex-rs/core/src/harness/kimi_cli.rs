@@ -901,9 +901,7 @@ fn kimi_output_content_item(item: &FunctionCallOutputContentItem) -> Value {
                 safe_kimi_tool_text(text, MessageBuildOptions::kimi_cli())
             },
         }),
-        FunctionCallOutputContentItem::InputImage { image, .. } => {
-            kimi_image_content_part(image)
-        }
+        FunctionCallOutputContentItem::InputImage { image, .. } => kimi_image_content_part(image),
         FunctionCallOutputContentItem::InputVideo { video_url, id } => json!({
             "type": "video_url",
             "video_url": {

@@ -2296,13 +2296,11 @@ impl ModelClientSession {
                 .client
                 .current_client_setup(ClientRouting::ConfiguredProvider)
                 .await?;
-            let transport = self
-                .client
-                .build_api_transport(
-                    &client_setup.api_provider,
-                    CHAT_COMPLETIONS_ENDPOINT,
-                    client_setup.redirect_policy,
-                )?;
+            let transport = self.client.build_api_transport(
+                &client_setup.api_provider,
+                CHAT_COMPLETIONS_ENDPOINT,
+                client_setup.redirect_policy,
+            )?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -2415,13 +2413,11 @@ impl ModelClientSession {
                 .client
                 .current_client_setup(ClientRouting::ConfiguredProvider)
                 .await?;
-            let transport = self
-                .client
-                .build_api_transport(
-                    &client_setup.api_provider,
-                    CHAT_COMPLETIONS_ENDPOINT,
-                    client_setup.redirect_policy,
-                )?;
+            let transport = self.client.build_api_transport(
+                &client_setup.api_provider,
+                CHAT_COMPLETIONS_ENDPOINT,
+                client_setup.redirect_policy,
+            )?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -2546,13 +2542,11 @@ impl ModelClientSession {
                 .client
                 .current_client_setup(ClientRouting::ConfiguredProvider)
                 .await?;
-            let transport = self
-                .client
-                .build_api_transport(
-                    &client_setup.api_provider,
-                    ANTHROPIC_MESSAGES_ENDPOINT,
-                    client_setup.redirect_policy,
-                )?;
+            let transport = self.client.build_api_transport(
+                &client_setup.api_provider,
+                ANTHROPIC_MESSAGES_ENDPOINT,
+                client_setup.redirect_policy,
+            )?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),

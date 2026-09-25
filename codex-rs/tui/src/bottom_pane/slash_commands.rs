@@ -231,9 +231,11 @@ mod tests {
 
     #[test]
     fn personality_command_is_not_advertised_or_parsed() {
-        assert!(!builtins_for_input(all_enabled_flags())
-            .into_iter()
-            .any(|(name, _)| name == "personality"));
+        assert!(
+            !builtins_for_input(all_enabled_flags())
+                .into_iter()
+                .any(|(name, _)| name == "personality")
+        );
         assert_eq!(
             find_builtin_command("personality", all_enabled_flags()),
             None

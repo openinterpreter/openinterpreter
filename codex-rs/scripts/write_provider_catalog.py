@@ -19,9 +19,7 @@ OVERRIDES_PATH = (
 )
 DEFAULT_SORT_PRIORITY = 100
 SUPPORTED_WIRE_APIS = {"chat", "messages", "responses"}
-USER_AGENT = (
-    "OpenInterpreter/1.0 (+https://github.com/openinterpreter/openinterpreter)"
-)
+USER_AGENT = "OpenInterpreter/1.0 (+https://github.com/openinterpreter/openinterpreter)"
 
 
 def load_models_dev_catalog() -> dict[str, dict]:
@@ -181,9 +179,7 @@ def build_provider_entry(
     apply_provider_model_additions(provider_id, models, overrides)
     apply_provider_model_overrides(provider_id, models, overrides)
     if model_allowlist is not None:
-        models[:] = [
-            model for model in models if model.get("id") in model_allowlist
-        ]
+        models[:] = [model for model in models if model.get("id") in model_allowlist]
         missing = sorted(
             model_allowlist
             - {model["id"] for model in models if isinstance(model.get("id"), str)}

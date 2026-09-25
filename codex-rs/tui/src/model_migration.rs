@@ -375,7 +375,6 @@ impl ModelMigrationScreen {
             );
         }
     }
-
 }
 
 // Render the prompt on the terminal's alternate screen so exiting or cancelling

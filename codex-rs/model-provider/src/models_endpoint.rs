@@ -118,16 +118,11 @@ impl OpenAiModelsEndpoint {
             api_provider.base_url = CHATGPT_CODEX_BASE_URL.to_string();
         }
         enforce_managed_residency(&mut api_provider);
-        let codex_home = self
-            .auth_manager
-            .as_deref()
-            .map(AuthManager::codex_home);
+        let codex_home = self.auth_manager.as_deref().map(AuthManager::codex_home);
         let provider_auth =
             resolve_provider_auth(auth.as_ref(), &self.provider_info, codex_home).await?;
-        let credential_fingerprint = crate::auth::provider_credential_fingerprint(
-            &self.provider_info,
-            codex_home,
-        )?;
+        let credential_fingerprint =
+            crate::auth::provider_credential_fingerprint(&self.provider_info, codex_home)?;
         let identity = crate::models_identity::identity_with_credential_fingerprint(
             &self.provider_info,
             auth.as_ref(),
@@ -197,10 +192,8 @@ impl OpenAiModelsEndpoint {
         })
         .await
         .map_err(|_| CodexErr::RequestTimeout)??;
-        let current_credential_fingerprint = crate::auth::provider_credential_fingerprint(
-            &self.provider_info,
-            codex_home,
-        )?;
+        let current_credential_fingerprint =
+            crate::auth::provider_credential_fingerprint(&self.provider_info, codex_home)?;
         if current_credential_fingerprint != credential_fingerprint {
             return Err(CodexErr::Fatal(
                 "provider credentials changed during model listing".to_string(),
@@ -238,10 +231,7 @@ impl ModelsEndpointClient for OpenAiModelsEndpoint {
             .auth_manager
             .as_ref()
             .and_then(|manager| manager.auth_cached());
-        let codex_home = self
-            .auth_manager
-            .as_deref()
-            .map(AuthManager::codex_home);
+        let codex_home = self.auth_manager.as_deref().map(AuthManager::codex_home);
         crate::models_identity::identity_with_codex_home(
             &self.provider_info,
             auth.as_ref(),

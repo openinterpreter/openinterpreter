@@ -4478,14 +4478,13 @@ mod tests {
 
     #[test]
     fn file_image_tool_result_is_explicitly_omitted() {
-        let body = FunctionCallOutputBody::ContentItems(vec![
-            FunctionCallOutputContentItem::InputImage {
+        let body =
+            FunctionCallOutputBody::ContentItems(vec![FunctionCallOutputContentItem::InputImage {
                 image: ImageReference::File {
                     file_id: "file_123".to_string(),
                 },
                 detail: None,
-            },
-        ]);
+            }]);
         let content = build_claude_tool_result_content(
             Some("Read"),
             &body,

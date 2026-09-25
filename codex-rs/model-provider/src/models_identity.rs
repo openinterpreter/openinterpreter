@@ -25,11 +25,7 @@ pub(crate) fn identity_with_codex_home(
     codex_home: Option<&Path>,
 ) -> CoreResult<String> {
     let credential_fingerprint = provider_credential_fingerprint(provider_info, codex_home)?;
-    identity_with_credential_fingerprint(
-        provider_info,
-        auth,
-        credential_fingerprint.as_deref(),
-    )
+    identity_with_credential_fingerprint(provider_info, auth, credential_fingerprint.as_deref())
 }
 
 pub(crate) fn identity_with_credential_fingerprint(

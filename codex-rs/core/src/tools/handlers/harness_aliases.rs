@@ -45,8 +45,8 @@ use crate::agent::child_config::SpawnConfigVersion;
 use crate::agent::child_config::build_agent_spawn_config;
 use crate::agent::child_config::prepare_agent_spawn_config;
 use crate::agent::control::LocalAgentControl;
-use crate::agent::types::SpawnAgentOptions;
 use crate::agent::next_thread_spawn_depth;
+use crate::agent::types::SpawnAgentOptions;
 use crate::function_tool::FunctionCallError;
 use crate::harness::opencode::OPENCODE_SEARCH_AGENT_BASE_INSTRUCTIONS;
 use crate::harness::zcode::ZCODE_COMPACTED_SUMMARY_PREFIX;
@@ -2437,11 +2437,8 @@ async fn handle_zcode_todo_write(
     let old_todos = zcode_todos(&invocation);
     let old_todos = if old_todos.is_empty() {
         let history = invocation.session.clone_history().await;
-        latest_zcode_todos_from_history(
-            history.raw_items(),
-            &invocation.call_id,
-        )
-        .unwrap_or(old_todos)
+        latest_zcode_todos_from_history(history.raw_items(), &invocation.call_id)
+            .unwrap_or(old_todos)
     } else {
         old_todos
     };

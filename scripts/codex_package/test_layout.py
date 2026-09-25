@@ -146,6 +146,7 @@ class PackageLayoutTest(unittest.TestCase):
                             entrypoint_bin=touch_executable(
                                 root / variant.executable_stem
                             ),
+                            managed_codex_bin=None,
                             code_mode_host_bin=touch_executable(
                                 root / "codex-code-mode-host"
                             ),

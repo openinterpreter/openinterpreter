@@ -1055,12 +1055,10 @@ fn map_tool_result_content_item(
                 cache_control: None,
             }),
         },
-        FunctionCallOutputContentItem::InputVideo { .. } => {
-            Some(AnthropicToolResultBlock::Text {
-                text: "[video omitted by zcode harness]".to_string(),
-                cache_control: None,
-            })
-        }
+        FunctionCallOutputContentItem::InputVideo { .. } => Some(AnthropicToolResultBlock::Text {
+            text: "[video omitted by zcode harness]".to_string(),
+            cache_control: None,
+        }),
         FunctionCallOutputContentItem::InputAudio { .. } => None,
         FunctionCallOutputContentItem::EncryptedContent { .. } => None,
     }
