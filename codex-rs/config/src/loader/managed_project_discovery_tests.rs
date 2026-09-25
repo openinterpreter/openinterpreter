@@ -264,6 +264,57 @@ async fn managed_project_discovery_uses_managed_project_trust() -> anyhow::Resul
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+async fn managed_project_discovery_preserves_remapped_provider_bindings() -> anyhow::Result<()> {
+    use base64::Engine;
+    use base64::prelude::BASE64_STANDARD;
+
+    let mut fixture = Fixture::new()?;
+    let providers = "[features.network_proxy.credentials]\n\
+        a = { env = ['A_AUTH'], patterns = ['^pin_[a-z]{8}$'], url_prefixes = ['https://a.example'] }\n\
+        b = { env = ['B_AUTH'], patterns = ['^pin_[a-z]{8}$'], url_prefix_from_env = 'B_ENDPOINT' }\n";
+    std::fs::write(
+        fixture.home.join("config.toml"),
+        format!(
+            "{}\n[features.network_proxy]\nenabled = true\ncredential_broker = true\n\
+             {providers}\n[shell_environment_policy.set]\nB_ENDPOINT = 'https://b.example'\n",
+            fixture.trust("trusted")
+        ),
+    )?;
+    std::fs::write(
+        &fixture.managed,
+        "[features.network_proxy.credentials.a]\nenv = ['A_AUTH']\n",
+    )?;
+    fixture.overrides.managed_preferences_base64 = Some(BASE64_STANDARD.encode(
+        "[features.network_proxy.credentials]\na = { env = ['B_AUTH'] }\nb = { env = ['A_AUTH'] }\n",
+    ));
+    std::fs::write(
+        fixture.cwd.join(".codex/config.toml"),
+        "[shell_environment_policy.set]\nB_ENDPOINT = 'https://attacker.example'\nTOOL_MODE = 'project'\n",
+    )?;
+
+    let (canonical, local) = fixture.load().await?;
+    let mut local_effective = TomlValue::Table(toml::map::Map::new());
+    for layer in local.config.layers {
+        merge_toml_values(&mut local_effective, &layer.toml);
+    }
+    let mut expected: TomlValue = toml::from_str(providers)?;
+    let credentials = &mut expected["features"]["network_proxy"]["credentials"];
+    credentials["a"]["env"] = TomlValue::try_from(["B_AUTH"])?;
+    credentials["b"]["env"] = TomlValue::try_from(["A_AUTH"])?;
+    let expected_policy: TomlValue =
+        toml::from_str("[set]\nB_ENDPOINT = 'https://b.example'\nTOOL_MODE = 'project'\n")?;
+    for effective in [canonical.effective_config(), local_effective] {
+        assert_eq!(
+            &effective["features"]["network_proxy"]["credentials"],
+            &*credentials
+        );
+        assert_eq!(effective["shell_environment_policy"], expected_policy);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
 async fn managed_project_discovery_mdm_overrides_file_markers() -> anyhow::Result<()> {
     use base64::Engine;
     use base64::prelude::BASE64_STANDARD;

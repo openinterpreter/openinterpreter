@@ -599,6 +599,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
             history_base: None,
             subagent_history_start_ordinal: None,
             initial_window_id: "window-1".to_string(),
+            runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(home.path().to_path_buf()),
                 model_provider: "test-provider".to_string(),
@@ -2586,6 +2587,7 @@ async fn create_paginated_subagent_thread(
             history_base,
             subagent_history_start_ordinal,
             initial_window_id: "window-1".to_string(),
+            runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(std::env::current_dir().expect("cwd")),
                 model_provider: "test-provider".to_string(),
@@ -2599,6 +2601,7 @@ async fn create_paginated_subagent_thread(
 fn turn_started(turn_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
         turn_id: turn_id.to_string(),
+        root_turn_id: None,
         trace_id: None,
         started_at: Some(10),
         model_context_window: None,

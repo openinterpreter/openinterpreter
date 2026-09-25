@@ -17,7 +17,9 @@ use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::items::CommandExecutionItem;
 use codex_protocol::items::CommandExecutionStatus;
 use codex_protocol::items::FileChangeItem;
+use codex_protocol::items::ModelInvocationContext;
 use codex_protocol::items::TurnItem;
+use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecCommandSource;
@@ -42,8 +44,11 @@ pub(super) fn truncate_rejection_message(message: &str) -> String {
 
 #[derive(Clone, Copy)]
 pub(crate) struct ToolEventCtx<'a> {
+    pub model_context: Option<&'a ModelInvocationContext>,
     pub session: &'a Session,
     pub turn: &'a TurnContext,
+    /// Model captured by the step that issued this call, including delayed completion events.
+    pub model_info: &'a ModelInfo,
     pub call_id: &'a str,
     pub turn_diff_tracker: Option<&'a SharedTurnDiffTracker>,
 }
@@ -52,12 +57,15 @@ impl<'a> ToolEventCtx<'a> {
     pub fn new(
         session: &'a Session,
         turn: &'a TurnContext,
+        model_info: &'a ModelInfo,
         call_id: &'a str,
         turn_diff_tracker: Option<&'a SharedTurnDiffTracker>,
     ) -> Self {
         Self {
+            model_context: None,
             session,
             turn,
+            model_info,
             call_id,
             turn_diff_tracker,
         }
@@ -117,12 +125,17 @@ async fn emit_exec_command_begin(ctx: ToolEventCtx<'_>, exec_input: &ExecCommand
             ("output_format", operation.output_format),
             ("execution_backend", "unified_exec"),
         ];
-        ctx.turn.session_telemetry.counter(
+        let session_telemetry = ctx
+            .turn
+            .session_telemetry
+            .clone()
+            .with_model(&ctx.model_info.slug, &ctx.model_info.slug);
+        session_telemetry.counter(
             ARTIFACT_OPERATION_STARTED_METRIC,
             /*inc*/ 1,
             &metric_tags,
         );
-        ctx.turn.session_telemetry.histogram(
+        session_telemetry.histogram(
             ARTIFACT_OPERATION_EXPECTED_OUTPUT_COUNT_METRIC,
             i64::from(operation.expected_output_count),
             &metric_tags,
@@ -132,7 +145,7 @@ async fn emit_exec_command_begin(ctx: ToolEventCtx<'_>, exec_input: &ExecCommand
             .analytics_events_client
             .track_artifact_operation(
                 build_track_events_context(
-                    ctx.turn.model_info().slug.clone(),
+                    ctx.model_info.slug.clone(),
                     ctx.session.thread_id.to_string(),
                     ctx.turn.sub_id.clone(),
                     ctx.turn.originator.clone(),
@@ -158,6 +171,7 @@ async fn emit_exec_command_begin(ctx: ToolEventCtx<'_>, exec_input: &ExecCommand
             ctx.turn,
             &TurnItem::CommandExecution(CommandExecutionItem {
                 id: ctx.call_id.to_string(),
+                model_context: ctx.model_context.cloned(),
                 plugin_id,
                 script_path,
                 process_id: exec_input.process_id.map(str::to_owned),
@@ -373,7 +387,7 @@ impl ToolEmitter {
         output: &ExecToolCallOutput,
         ctx: ToolEventCtx<'_>,
     ) -> String {
-        super::format_exec_output_for_model(output, ctx.turn.model_info().truncation_policy.into())
+        super::format_exec_output_for_model(output, ctx.model_info.truncation_policy.into())
     }
 
     pub async fn finish(
@@ -521,7 +535,7 @@ async fn emit_exec_stage(
                 duration: output.duration,
                 formatted_output: format_exec_output_str(
                     &output,
-                    ctx.turn.model_info().truncation_policy.into(),
+                    ctx.model_info.truncation_policy.into(),
                 ),
                 status: if output.exit_code == 0 {
                     ExecCommandStatus::Completed
@@ -571,6 +585,7 @@ async fn emit_exec_end(
             ctx.turn,
             TurnItem::CommandExecution(CommandExecutionItem {
                 id: ctx.call_id.to_string(),
+                model_context: ctx.model_context.cloned(),
                 plugin_id,
                 script_path,
                 process_id: exec_input.process_id.map(str::to_owned),
@@ -697,7 +712,13 @@ mod tests {
             environment_id: None,
         }
         .finish(
-            ToolEventCtx::new(session.as_ref(), turn.as_ref(), "call-id", Some(&tracker)),
+            ToolEventCtx::new(
+                session.as_ref(),
+                turn.as_ref(),
+                turn.model_info(),
+                "call-id",
+                Some(&tracker),
+            ),
             out,
             Some(&delta),
         )
@@ -781,7 +802,13 @@ mod tests {
             .expect("apply patch");
 
             emit_patch_end(
-                ToolEventCtx::new(session.as_ref(), turn.as_ref(), "call-id", Some(&tracker)),
+                ToolEventCtx::new(
+                    session.as_ref(),
+                    turn.as_ref(),
+                    turn.model_info(),
+                    "call-id",
+                    Some(&tracker),
+                ),
                 HashMap::new(),
                 String::new(),
                 String::new(),
@@ -830,7 +857,13 @@ mod tests {
         tracker.lock().await.track_delta("", &delta);
 
         emit_patch_end(
-            ToolEventCtx::new(session.as_ref(), turn.as_ref(), "call-id", Some(&tracker)),
+            ToolEventCtx::new(
+                session.as_ref(),
+                turn.as_ref(),
+                turn.model_info(),
+                "call-id",
+                Some(&tracker),
+            ),
             HashMap::new(),
             String::new(),
             String::new(),

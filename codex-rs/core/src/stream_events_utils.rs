@@ -12,7 +12,9 @@ use tokio_util::sync::CancellationToken;
 use crate::function_tool::FunctionCallError;
 use crate::parse_turn_item;
 use crate::session::session::Session;
+use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
+use crate::tools::call_trace;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::router::ToolRouter;
 use crate::tools::router::tool_log_payload;
@@ -77,12 +79,12 @@ pub(crate) fn raw_assistant_output_text_from_item(item: &ResponseItem) -> Option
 /// Persist a completed model response item and record any cited memory usage.
 pub(crate) async fn record_completed_response_item(
     sess: &Session,
-    turn_context: &TurnContext,
+    step_context: &StepContext,
     item: &ResponseItem,
 ) {
     record_completed_response_item_with_finalized_facts(
         sess,
-        turn_context,
+        step_context,
         item,
         /*finalized_facts*/ None,
     )
@@ -91,12 +93,17 @@ pub(crate) async fn record_completed_response_item(
 
 pub(crate) async fn record_completed_response_item_with_finalized_facts(
     sess: &Session,
-    turn_context: &TurnContext,
+    step_context: &StepContext,
     item: &ResponseItem,
     finalized_facts: Option<&FinalizedTurnItemFacts>,
 ) {
-    sess.record_conversation_items(turn_context, std::slice::from_ref(item))
-        .await;
+    let turn_context = &step_context.turn;
+    sess.record_conversation_items(
+        turn_context,
+        &step_context.settings.model_info,
+        std::slice::from_ref(item),
+    )
+    .await;
     let defers_mailbox_delivery = finalized_facts.map_or_else(
         || {
             completed_item_defers_mailbox_delivery_to_next_turn(
@@ -112,17 +119,20 @@ pub(crate) async fn record_completed_response_item_with_finalized_facts(
             .await;
     }
     mark_thread_memory_mode_polluted_if_external_context(sess, turn_context, item).await;
+    let memory_usage_db = match sess.services.state_db.as_ref() {
+        Some(db) => db
+            .memories_for_version(turn_context.config.memories.version)
+            .await
+            .ok(),
+        None => None,
+    };
     let has_memory_citation = if let Some(memory_citation) =
         finalized_facts.and_then(|facts| facts.memory_citation.as_ref())
     {
-        record_stage1_output_usage_for_memory_citation(
-            sess.services.state_db.as_ref(),
-            memory_citation,
-        )
-        .await
-    } else {
-        record_stage1_output_usage_and_detect_memory_citation(sess.services.state_db.as_ref(), item)
+        record_stage1_output_usage_for_memory_citation(memory_usage_db.as_ref(), memory_citation)
             .await
+    } else {
+        record_stage1_output_usage_and_detect_memory_citation(memory_usage_db.as_ref(), item).await
     };
     if has_memory_citation {
         sess.record_memory_citation_for_turn(&turn_context.sub_id)
@@ -159,7 +169,7 @@ pub(crate) async fn mark_thread_memory_mode_polluted_if_external_context(
 }
 
 async fn record_stage1_output_usage_and_detect_memory_citation(
-    state_db_ctx: Option<&state_db::StateDbHandle>,
+    state_db_ctx: Option<&codex_state::MemoryStore>,
     item: &ResponseItem,
 ) -> bool {
     let Some(raw_text) = raw_assistant_output_text_from_item(item) else {
@@ -174,7 +184,7 @@ async fn record_stage1_output_usage_and_detect_memory_citation(
 }
 
 async fn record_stage1_output_usage_for_memory_citation(
-    state_db_ctx: Option<&state_db::StateDbHandle>,
+    state_db_ctx: Option<&codex_state::MemoryStore>,
     memory_citation: &MemoryCitation,
 ) -> bool {
     let thread_ids = thread_ids_from_memory_citation(memory_citation);
@@ -183,7 +193,7 @@ async fn record_stage1_output_usage_for_memory_citation(
     }
 
     if let Some(db) = state_db_ctx {
-        let _ = db.memories().record_stage1_output_usage(&thread_ids).await;
+        let _ = db.record_stage1_output_usage(&thread_ids).await;
     }
     true
 }
@@ -203,7 +213,7 @@ pub(crate) struct OutputItemResult {
 
 pub(crate) struct HandleOutputCtx {
     pub sess: Arc<Session>,
-    pub turn_context: Arc<TurnContext>,
+    pub step_context: Arc<StepContext>,
     pub turn_store: Arc<ExtensionData>,
     pub tool_runtime: ToolCallRuntime,
     pub cancellation_token: CancellationToken,
@@ -293,16 +303,22 @@ pub(crate) async fn handle_output_item_done(
     previously_active_item: Option<TurnItem>,
 ) -> Result<OutputItemResult> {
     let mut output = OutputItemResult::default();
-    let plan_mode = ctx.turn_context.mode() == ModeKind::Plan;
+    let plan_mode = ctx.step_context.turn.mode() == ModeKind::Plan;
 
     match ToolRouter::build_tool_call(item.clone()) {
         // The model emitted a tool call; log it, persist the item immediately, and queue the tool execution.
         Ok(Some(call)) => {
+            call_trace::received(
+                ctx.sess.thread_id,
+                &call.tool_name,
+                &call.call_id,
+                call_trace::Receipt::ModelTurn(&ctx.step_context.turn.sub_id),
+            );
             ctx.sess
                 .input_queue
                 .accept_mailbox_delivery_for_current_turn(
                     &ctx.sess.active_turn,
-                    &ctx.turn_context.sub_id,
+                    &ctx.step_context.turn.sub_id,
                 )
                 .await;
 
@@ -314,7 +330,7 @@ pub(crate) async fn handle_output_item_done(
                 payload_preview
             );
 
-            record_completed_response_item(ctx.sess.as_ref(), ctx.turn_context.as_ref(), &item)
+            record_completed_response_item(ctx.sess.as_ref(), ctx.step_context.as_ref(), &item)
                 .await;
 
             let cancellation_token = ctx.cancellation_token.child_token();
@@ -329,6 +345,10 @@ pub(crate) async fn handle_output_item_done(
         }
         // No tool call: convert messages/reasoning into turn items and mark them as complete.
         Ok(None) => {
+            ctx.sess
+                .services
+                .executed_tool_calls
+                .observe_non_dispatched_call(&item);
             let finalized_turn_item = finalize_non_tool_response_item(
                 ctx.sess.as_ref(),
                 TurnItemContributorPolicy::Run(ctx.turn_store.as_ref()),
@@ -342,17 +362,20 @@ pub(crate) async fn handle_output_item_done(
             if let Some(finalized_turn_item) = finalized_turn_item {
                 if previously_active_item.is_none() {
                     ctx.sess
-                        .emit_turn_item_started(&ctx.turn_context, &finalized_turn_item.turn_item)
+                        .emit_turn_item_started(
+                            &ctx.step_context.turn,
+                            &finalized_turn_item.turn_item,
+                        )
                         .await;
                 }
 
                 ctx.sess
-                    .emit_turn_item_completed(&ctx.turn_context, finalized_turn_item.turn_item)
+                    .emit_turn_item_completed(&ctx.step_context.turn, finalized_turn_item.turn_item)
                     .await;
             }
             record_completed_response_item_with_finalized_facts(
                 ctx.sess.as_ref(),
-                ctx.turn_context.as_ref(),
+                ctx.step_context.as_ref(),
                 &item,
                 finalized_facts.as_ref(),
             )
@@ -362,6 +385,10 @@ pub(crate) async fn handle_output_item_done(
         }
         // The tool request should be answered directly (or was denied); push that response into the transcript.
         Err(FunctionCallError::RespondToModel(message)) => {
+            ctx.sess
+                .services
+                .executed_tool_calls
+                .observe_non_dispatched_call(&item);
             let response = ResponseInputItem::FunctionCallOutput {
                 call_id: String::new(),
                 output: FunctionCallOutputPayload {
@@ -369,12 +396,13 @@ pub(crate) async fn handle_output_item_done(
                     ..Default::default()
                 },
             };
-            record_completed_response_item(ctx.sess.as_ref(), ctx.turn_context.as_ref(), &item)
+            record_completed_response_item(ctx.sess.as_ref(), ctx.step_context.as_ref(), &item)
                 .await;
             if let Some(response_item) = response_input_to_response_item(&response) {
                 ctx.sess
                     .record_conversation_items(
-                        &ctx.turn_context,
+                        &ctx.step_context.turn,
+                        &ctx.step_context.settings.model_info,
                         std::slice::from_ref(&response_item),
                     )
                     .await;

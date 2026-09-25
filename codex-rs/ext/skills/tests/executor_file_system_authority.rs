@@ -30,6 +30,7 @@ use codex_exec_server::WalkEntry;
 use codex_exec_server::WalkEntryKind;
 use codex_exec_server::WalkOptions;
 use codex_exec_server::WalkOutcome;
+use codex_exec_server::WindowsSandboxSelection;
 use codex_exec_server::WriteFileOptions;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -301,22 +302,42 @@ async fn skill_loading_and_reads_use_the_supplied_executor_file_system() {
 }
 
 #[tokio::test]
-async fn windows_executor_skill_read_rejects_disabled_sandbox_on_any_orchestrator() {
+async fn windows_executor_skill_read_requires_a_requested_sandbox() {
     let provider = ExecutorSkillProvider::new_with_restriction_product(
         Arc::new(EnvironmentManager::default_for_tests()),
         /*restriction_product*/ None,
     );
-    let sandbox = FileSystemSandboxContext::from_permission_profile(
+    let mut sandbox = FileSystemSandboxContext::from_permission_profile(
         PermissionProfile::from_runtime_permissions(
             &FileSystemSandboxPolicy::restricted(Vec::new()),
             NetworkSandboxPolicy::Restricted,
         ),
+        PathUri::parse("file:///C:/skill").expect("Windows resource cwd"),
     );
     let resource = SkillResourceId::environment(
         "skill://windows-root/C:/skill/SKILL.md",
         "local",
         PathUri::parse("file:///C:/skill/SKILL.md").expect("Windows resource URI"),
     );
+    let error = provider
+        .read(SkillReadRequest {
+            _lifetime: PhantomData,
+            authority: SkillAuthority::new(SkillSourceKind::Executor, "windows-root"),
+            package: SkillPackageId("skill://windows-root/C:/skill".into()),
+            resource: resource.clone(),
+            resolved_executor_roots: Vec::new(),
+            sandbox: Some(sandbox.clone()),
+            host_snapshot: None,
+            mcp_resources: None,
+        })
+        .await
+        .expect_err("disabled Windows sandbox must fail closed");
+    assert_eq!(
+        error.message,
+        "executor skill resource requires an unavailable filesystem sandbox"
+    );
+
+    sandbox.windows_sandbox_selection = WindowsSandboxSelection::Mxc;
     let error = provider
         .read(SkillReadRequest {
             _lifetime: PhantomData,
@@ -329,11 +350,12 @@ async fn windows_executor_skill_read_rejects_disabled_sandbox_on_any_orchestrato
             mcp_resources: None,
         })
         .await
-        .expect_err("disabled Windows sandbox must fail closed");
-
-    assert_eq!(
-        error.message,
-        "executor skill resource requires an unavailable filesystem sandbox"
+        .expect_err("synthetic Windows resource should not be readable");
+    assert!(
+        error
+            .message
+            .starts_with("failed to read executor skill resource"),
+        "{error:?}"
     );
 }
 
@@ -592,7 +614,7 @@ async fn executor_discovery_routes_produce_equivalent_catalog_metadata() {
         .snapshot(&executor_roots, &Default::default())
         .await;
     let bundled = provider
-        .list(query(Some(discovery)))
+        .list(query(Some(discovery.clone())))
         .await
         .expect("list bundled executor skills");
 
@@ -640,12 +662,52 @@ async fn executor_discovery_routes_produce_equivalent_catalog_metadata() {
         .find(|entry| entry.name == "catalog:repaired")
         .expect("repaired skill");
     assert_eq!(repaired.description, "Build for AWS: ECS");
+    assert!(repaired.prompt_visible);
     let invalid_metadata = direct
         .entries
         .iter()
         .find(|entry| entry.name == "catalog:invalid-metadata")
         .expect("invalid metadata skill");
     assert_eq!(invalid_metadata.dependencies, None);
+
+    assert!(direct.entries.iter().all(|entry| entry.enabled));
+    // Match the discovery path, including aliases such as macOS's /var -> /private/var.
+    let disabled_path = PathUri::from_host_native_path(&repaired_skill).expect("skill URI");
+    for environment_id in ["local", "other-executor"] {
+        let configured = provider.clone().with_disabled_skill_paths(HashMap::from([(
+            environment_id.to_string(),
+            std::collections::HashSet::from([disabled_path.clone()]),
+        )]));
+        let mut expected = direct.clone();
+        if environment_id == "local" {
+            expected
+                .entries
+                .iter_mut()
+                .find(|entry| entry.name == "catalog:repaired")
+                .expect("repaired skill")
+                .enabled = false;
+        }
+        for discovery in [None, Some(discovery.clone())] {
+            let actual = configured
+                .list(query(discovery))
+                .await
+                .expect("list configured executor skills");
+            assert_eq!(comparable_entries(&actual), comparable_entries(&expected));
+            assert_eq!(actual.warnings, expected.warnings);
+            let visible_names = actual
+                .entries
+                .iter()
+                .filter(|entry| entry.enabled && entry.prompt_visible)
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>();
+            let expected_visible_names = if environment_id == "local" {
+                vec!["catalog:invalid-metadata"]
+            } else {
+                vec!["catalog:invalid-metadata", "catalog:repaired"]
+            };
+            assert_eq!(visible_names, expected_visible_names);
+        }
+    }
 
     std::fs::remove_dir_all(test_root).expect("remove skill directory");
 }
@@ -917,7 +979,10 @@ async fn high_level_discovery_cache_separates_filesystem_permission_contexts() {
         .expect("update executor skill");
     let sandbox_contexts = HashMap::from([(
         "local".to_string(),
-        FileSystemSandboxContext::from_permission_profile(PermissionProfile::Disabled),
+        FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::Disabled,
+            PathUri::from_host_native_path(&test_root).expect("skill root URI"),
+        ),
     )]);
     let second_snapshot = cache.snapshot(&executor_roots, &sandbox_contexts).await;
     let second_discovery = second_snapshot.roots()[0]

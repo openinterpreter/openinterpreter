@@ -60,10 +60,13 @@ members = [
     "exec-server/tests/support",
     "execpolicy",
     "execpolicy-legacy",
+    "ext/agent",
+    "ext/agent-message-board",
     "ext/connectors",
     "ext/extension-api",
     "ext/goal",
     "ext/git-attribution",
+    "ext/guardian-reviewer",
     "ext/guardian-v2",
     "ext/history-notes",
     "ext/image-generation",
@@ -85,6 +88,7 @@ members = [
     "mcp-server",
     "memories/read",
     "memories/write",
+    "mermaid",
     "model-provider-info",
     "mxc-sandbox",
     "models-manager",
@@ -105,7 +109,9 @@ members = [
     "stdio-to-uds",
     "otel",
     "otel-trace-websocket",
+    "tcp-tunnel",
     "tui",
+    "user-verification",
     "tools",
     "v8-poc",
     "websocket-client",
@@ -204,6 +210,7 @@ codex-websocket-client = { path = "websocket-client" }
 codex-config = { path = "config" }
 codex-connectors = { path = "connectors" }
 codex-agent-extension = { path = "ext/agent" }
+codex-agent-message-board-extension = { path = "ext/agent-message-board" }
 codex-connectors-extension = { path = "ext/connectors" }
 codex-context-fragments = { path = "context-fragments" }
 codex-core = { path = "core" }
@@ -221,6 +228,7 @@ codex-extension-api = { path = "ext/extension-api" }
 codex-extension-items = { path = "ext/items" }
 codex-goal-extension = { path = "ext/goal" }
 codex-git-attribution = { path = "ext/git-attribution" }
+codex-guardian-reviewer = { path = "ext/guardian-reviewer" }
 codex-guardian-v2 = { path = "ext/guardian-v2" }
 codex-history-notes-extension = { path = "ext/history-notes" }
 codex-image-generation-extension = { path = "ext/image-generation" }
@@ -239,6 +247,7 @@ codex-keyring-store = { path = "keyring-store" }
 codex-linux-sandbox = { path = "linux-sandbox" }
 codex-lmstudio = { path = "lmstudio" }
 codex-login = { path = "login" }
+codex-mermaid = { path = "mermaid" }
 codex-message-history = { path = "message-history" }
 codex-memories-extension = { path = "ext/memories" }
 codex-web-search-extension = { path = "ext/web-search" }
@@ -278,6 +287,7 @@ codex-terminal-detection = { path = "terminal-detection" }
 codex-test-binary-support = { path = "test-binary-support" }
 codex-thread-store = { path = "thread-store" }
 codex-tools = { path = "tools" }
+codex-tcp-tunnel = { path = "tcp-tunnel" }
 codex-tui = { path = "tui" }
 codex-uds = { path = "uds" }
 codex-utils-absolute-path = { path = "utils/absolute-path" }
@@ -306,6 +316,7 @@ codex-utils-sleep-inhibitor = { path = "utils/sleep-inhibitor" }
 codex-utils-stream-parser = { path = "utils/stream-parser" }
 codex-utils-string = { path = "utils/string" }
 codex-utils-template = { path = "utils/template" }
+codex-user-verification = { path = "user-verification" }
 codex-v8-poc = { path = "v8-poc" }
 codex-workload-identity = { path = "workload-identity" }
 codex-windows-sandbox = { path = "windows-sandbox-rs" }
@@ -335,8 +346,10 @@ aws-types = "1"
 axum = { version = "0.8", default-features = false }
 base64 = "0.22.1"
 bitflags = "2.13.1"
+blake3 = "1.8.2"
 bm25 = "2.3.2"
 bytes = "1.10.1"
+caseless = "0.2.2"
 chardetng = "0.1.17"
 chrono = "0.4.43"
 clap = "4"
@@ -422,6 +435,7 @@ pretty_assertions = "1.4.1"
 pulldown-cmark = { version = "0.10", default-features = false }
 quick-xml = "0.41.0"
 rand = "0.9"
+rand_regex = "0.18.1"
 ratatui = { version = "0.30.2", default-features = false, features = [
     "crossterm",
     "layout-cache",
@@ -433,12 +447,14 @@ rcgen = { version = "0.14.7", default-features = false, features = [
     "pem",
 ] }
 regex = "1.12.3"
+regex-automata = { version = "0.4.13", default-features = false, features = ["std", "syntax", "unicode", "nfa-pikevm"] }
 regex-lite = "0.1.8"
+regex-syntax = "0.8.8"
 reqwest = { version = "0.12", features = ["brotli", "cookies"] }
-rustix = { version = "1.1.4", features = ["net"] }
 rmcp = { version = "=3.2.0", default-features = false }
 runfiles = { git = "https://github.com/dzbarsky/rules_rust", rev = "b56cbaa8465e74127f1ea216f813cd377295ad81" }
-rustls = { version = "0.23", default-features = false, features = [
+rustix = { version = "1.1.4", features = ["net"] }
+rustls = { version = "0.23.45", default-features = false, features = [
     "aws_lc_rs",
     "std",
 ] }
@@ -459,6 +475,7 @@ sha1 = "0.10.6"
 scopeguard = "1.2.0"
 sha2 = "0.10"
 shlex = "1.3.0"
+signal-hook = "0.3.18"
 similar = "2.7.0"
 symphonia = { version = "0.6.0", default-features = false, features = [
     "isomp4",

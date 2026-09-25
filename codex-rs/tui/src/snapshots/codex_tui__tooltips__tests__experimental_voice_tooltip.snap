@@ -1,0 +1,6 @@
+---
+source: tui/src/tooltips.rs
+assertion_line: 382
+expression: "available.into_iter().filter(|tip| *tip ==\nvoice_tip).collect::<Vec<_>>().join(\"\\n\")"
+---
+NEW: Voice conversations can now be enabled from /experimental. Restart Codex after enabling, then use /voice.

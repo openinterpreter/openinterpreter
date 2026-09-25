@@ -121,9 +121,11 @@ def test_app_server_runs_code_mode_through_python_sdk(
             sandbox=Sandbox.workspace_write,
         ).run("run package smoke")
         assert turn.final_response == "Done", turn
+    # The mock also records analytics POSTs, which have no Responses input list.
     output = next(
         item
         for request in responses_server.requests()
+        if request.path == "/v1/responses"
         for item in request.input()
         if item.get("type") == "custom_tool_call_output"
         and item.get("call_id") == "package-smoke"

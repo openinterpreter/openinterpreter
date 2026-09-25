@@ -34,7 +34,7 @@ use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
 use core_test_support::context_snapshot;
 use core_test_support::context_snapshot::ContextSnapshotOptions;
-use core_test_support::context_snapshot::ContextSnapshotRenderMode;
+use core_test_support::context_snapshot::SnapshotEntry;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -97,8 +97,7 @@ fn skills_extensions() -> Arc<ExtensionRegistry<Config>> {
 }
 
 fn context_snapshot_options() -> ContextSnapshotOptions {
-    ContextSnapshotOptions::default()
-        .render_mode(ContextSnapshotRenderMode::KindWithTextPrefix { max_chars: 96 })
+    ContextSnapshotOptions::default().rewrite_known_segments()
 }
 
 fn format_labeled_requests_snapshot(
@@ -141,7 +140,11 @@ fn format_environment_context_subagents_snapshot(subagents: &[&str]) -> String {
             ),
         }],
     })];
-    context_snapshot::format_response_items_snapshot(items.as_slice(), &context_snapshot_options())
+    context_snapshot::format_context_snapshot(
+        "Environment context with subagents",
+        &[SnapshotEntry::items(&items)],
+        &context_snapshot_options(),
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -286,11 +289,6 @@ async fn snapshot_model_visible_layout_turn_overrides() -> Result<()> {
         .with_model("gpt-5.4")
         .with_config(|config| {
             config.update_plan_enabled = true;
-            config
-                .features
-                .enable(Feature::Personality)
-                .expect("test config should allow feature update");
-            config.personality = Some(Personality::Pragmatic);
         });
     let test = builder.build(&server).await?;
     let preturn_context_diff_cwd = test.cwd_path().join(PRETURN_CONTEXT_DIFF_CWD);
@@ -343,7 +341,6 @@ async fn snapshot_model_visible_layout_turn_overrides() -> Result<()> {
                 approval_policy: Some(AskForApproval::OnRequest),
                 sandbox_policy: Some(second_sandbox_policy),
                 permission_profile: second_permission_profile,
-                personality: Some(Personality::Friendly),
                 collaboration_mode: Some(CollaborationMode {
                     mode: ModeKind::Default,
                     settings: Settings {
@@ -366,7 +363,7 @@ async fn snapshot_model_visible_layout_turn_overrides() -> Result<()> {
     insta::assert_snapshot!(
         "model_visible_layout_turn_overrides",
         format_labeled_requests_snapshot(
-            "Second turn changes cwd, approval policy, and personality while keeping model constant.",
+            "Second turn changes cwd and approval policy while keeping model constant.",
             &[
                 ("First Request (Baseline)", &requests[0]),
                 ("Second Request (Turn Overrides)", &requests[1]),
@@ -514,7 +511,7 @@ async fn snapshot_model_visible_layout_resume_with_personality_change() -> Resul
         .with_extensions(skills_extensions())
         .with_config(|config| {
             config.update_plan_enabled = true;
-            config.model = Some("gpt-5.2".to_string());
+            config.model = Some("gpt-5.5".to_string());
         });
     let initial = initial_builder.build(&server).await?;
     let codex = Arc::clone(&initial.codex);
@@ -552,10 +549,6 @@ async fn snapshot_model_visible_layout_resume_with_personality_change() -> Resul
         .with_config(|config| {
             config.update_plan_enabled = true;
             config.model = Some("gpt-5.4".to_string());
-            config
-                .features
-                .enable(Feature::Personality)
-                .expect("test config should allow feature update");
             config.personality = Some(Personality::Pragmatic);
         });
     let resumed = resume_builder.restart(&server, &initial).await?;
@@ -597,6 +590,12 @@ async fn snapshot_model_visible_layout_resume_with_personality_change() -> Resul
     .await;
 
     let resumed_request = resumed_mock.single_request();
+    assert!(
+        resumed_request
+            .message_input_texts("user")
+            .iter()
+            .any(|text| text.contains(&format!("{PRETURN_CONTEXT_DIFF_CWD}</cwd>")))
+    );
     insta::assert_snapshot!(
         "model_visible_layout_resume_with_personality_change",
         format_labeled_requests_snapshot(
@@ -685,6 +684,12 @@ async fn snapshot_model_visible_layout_resume_override_matches_rollout_model() -
     .await;
 
     let resumed_request = resumed_mock.single_request();
+    assert!(
+        resumed_request
+            .message_input_texts("user")
+            .iter()
+            .any(|text| text.contains(&format!("{PRETURN_CONTEXT_DIFF_CWD}</cwd>")))
+    );
     insta::assert_snapshot!(
         "model_visible_layout_resume_override_matches_rollout_model",
         format_labeled_requests_snapshot(

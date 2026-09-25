@@ -7,7 +7,8 @@
     "@ai-sdk/groq"
   ],
   "include_provider_ids": [
-    "google"
+    "google",
+    "openai"
   ],
   "exclude_provider_ids": [
     "cloudflare-workers-ai",
@@ -15,6 +16,7 @@
     "privatemode-ai"
   ],
   "api_base_url_overrides": {
+    "openai": "https://api.openai.com/v1",
     "google": "https://generativelanguage.googleapis.com/v1beta/openai",
     "groq": "https://api.groq.com/openai/v1",
     "anthropic": "https://api.anthropic.com"
@@ -23,6 +25,13 @@
         "google": "GEMINI_API_KEY",
         "zai": "ZAI_API_KEY",
         "zai-coding-plan": "ZAI_API_KEY"
+    },
+    "provider_model_allowlists": {
+        "openai": [
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna"
+        ]
     },
     "provider_model_additions": {
         "google": [

@@ -79,9 +79,8 @@ impl ChatWidget {
         if active_cell_is_empty {
             self.active_hook_cell = None;
         }
-        self.flush_completed_command_activity();
+        self.flush_completed_tool_activity();
         self.bump_active_cell_revision();
-        self.transcript.needs_final_message_separator = true;
         self.app_event_tx
             .send(AppEvent::InsertHistoryCell(Box::new(completed_cell)));
         self.request_pending_usage_output_insertion();
@@ -101,7 +100,6 @@ impl ChatWidget {
             && let Some(cell) = self.active_hook_cell.take()
         {
             self.bump_active_cell_revision();
-            self.transcript.needs_final_message_separator = true;
             self.app_event_tx
                 .send(AppEvent::InsertHistoryCell(Box::new(cell)));
             self.request_pending_usage_output_insertion();
@@ -130,6 +128,7 @@ impl ChatWidget {
 
     pub(super) fn schedule_hook_timer_if_needed(&self) {
         if self.local_settings.tui.animations
+            && self.local_settings.tui.effects.shimmer
             && self
                 .active_hook_cell
                 .as_ref()

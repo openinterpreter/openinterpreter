@@ -70,7 +70,10 @@ pub(crate) fn feedback_success_cell(
         Some(url) if feedback_audience == FeedbackAudience::OpenAiEmployee => {
             lines.extend([
                 "".into(),
-                Line::from(vec!["  ".into(), url.cyan().underlined()]),
+                Line::from(vec![
+                    "  ".into(),
+                    url.fg(crate::style::accent_color()).underlined(),
+                ]),
                 "".into(),
                 Line::from(vec![
                     "  Sentry Feedback ID: ".into(),
@@ -79,7 +82,7 @@ pub(crate) fn feedback_success_cell(
                 Line::from(vec![
                     "  Sentry URL: ".into(),
                     format!("https://go/codex-feedback/{thread_id}")
-                        .cyan()
+                        .fg(crate::style::accent_color())
                         .underlined(),
                 ]),
             ]);
@@ -87,7 +90,10 @@ pub(crate) fn feedback_success_cell(
         Some(url) => {
             lines.extend([
                 "".into(),
-                Line::from(vec!["  ".into(), url.cyan().underlined()]),
+                Line::from(vec![
+                    "  ".into(),
+                    url.fg(crate::style::accent_color()).underlined(),
+                ]),
                 "".into(),
                 Line::from(vec![
                     "  Or mention your thread ID ".into(),
@@ -180,7 +186,7 @@ pub(crate) fn feedback_selection_params(
                 FeedbackCategory::Other,
             ),
         ],
-        ..Default::default()
+        ..super::SelectionViewParams::picker()
     }
 }
 
@@ -195,7 +201,7 @@ pub(crate) fn feedback_disabled_params() -> super::SelectionViewParams {
             dismiss_on_select: true,
             ..Default::default()
         }],
-        ..Default::default()
+        ..super::SelectionViewParams::picker()
     }
 }
 
@@ -332,7 +338,7 @@ pub(crate) fn feedback_upload_consent_params(
         header: Box::new(crate::render::renderable::ColumnRenderable::with(
             header_lines,
         )),
-        ..Default::default()
+        ..super::SelectionViewParams::picker()
     }
 }
 

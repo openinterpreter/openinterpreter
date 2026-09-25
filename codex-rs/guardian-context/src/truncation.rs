@@ -1,4 +1,4 @@
-//! Guardian's shared UTF-8-safe, prefix/suffix text truncation primitive.
+//! Guardian's shared UTF-8-safe, prefix/suffix text truncation and observations.
 //!
 //! The existing XML omission marker is preserved, including returning the whole
 //! marker when a token budget is too small to contain it.
@@ -40,3 +40,11 @@ pub fn truncate_text(text: &str, max_tokens: usize) -> String {
 #[cfg(test)]
 #[path = "truncation_tests.rs"]
 mod tests;
+
+/// Actual evidence reduction, reported by consumers using their existing metrics.
+#[derive(Clone)]
+pub struct TruncationObservation {
+    pub component: &'static str,
+    pub original_bytes: usize,
+    pub retained_bytes: usize,
+}

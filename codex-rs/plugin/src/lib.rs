@@ -1,4 +1,4 @@
-//! Shared plugin package models, source providers, identifiers, and telemetry summaries.
+//! Shared plugin package models, identifiers, and telemetry summaries.
 
 use std::collections::HashSet;
 
@@ -20,7 +20,6 @@ pub use load_outcome::prompt_safe_plugin_description;
 pub use plugin_id::PluginId;
 pub use plugin_id::PluginIdError;
 pub use plugin_id::validate_plugin_segment;
-pub use provider::PluginProvider;
 pub use provider::PluginResourceLocator;
 pub use provider::ResolvedPlugin;
 pub use provider::ResolvedPluginError;

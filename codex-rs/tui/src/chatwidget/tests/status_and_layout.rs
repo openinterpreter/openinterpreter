@@ -1,13 +1,44 @@
+use super::helpers::drain_insert_history_transcript;
 use super::*;
 use crate::bottom_pane::goal_status_indicator_line;
 use crate::chatwidget::ThreadUsageOutcome;
 use crate::chatwidget::rate_limits::NUDGE_MODEL_SLUG;
 use crate::chatwidget::rate_limits::get_limits_duration;
+use crate::chatwidget::realtime::tests::activate_voice_for_thread;
 use codex_app_server_protocol::SpendControlLimitSnapshot;
 use codex_app_server_protocol::ThreadUsage;
 use pretty_assertions::assert_eq;
+use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use serial_test::serial;
+
+#[tokio::test]
+async fn finalized_voice_transcript_renders_beside_the_streamed_cell() {
+    let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.local_settings.tui.animations = false;
+    activate_voice_for_thread(&mut chat, ThreadId::new());
+    chat.update_realtime_footer();
+    chat.transcript.active_cell = Some(Box::new(history_cell::StreamingAgentTailCell::new(
+        vec![Line::from("Agent answer arriving").into()],
+        /*is_first_line*/ true,
+    )));
+    chat.on_realtime_transcript_delta("user".into(), "pick a number".into());
+    for (finalized, snapshot) in [
+        (false, "voice_partial_transcript_hidden"),
+        (true, "voice_live_transcript_and_stream"),
+    ] {
+        if finalized {
+            chat.on_realtime_transcript_done("user".into(), "pick a number".into());
+        }
+        let width = 60;
+        let height = chat.desired_height(width);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
+        terminal
+            .draw(|frame| chat.render(frame.area(), frame.buffer_mut()))
+            .expect("render voice transcript");
+        assert_chatwidget_snapshot!(snapshot, normalized_backend_snapshot(terminal.backend()));
+    }
+}
 
 fn enable_test_ambient_pet(chat: &mut ChatWidget) {
     chat.set_pet_image_support_for_tests(crate::pets::PetImageSupport::Supported(
@@ -120,7 +151,7 @@ async fn app_server_model_verification_renders_warning() {
         vec![AppServerModelVerification::TrustedAccessForCyber],
     );
 
-    let cells = drain_insert_history(&mut rx);
+    let cells = drain_insert_history_transcript(&mut rx);
     assert_eq!(cells.len(), 1);
     let rendered = lines_to_single_string(&cells[0]);
     assert!(rendered.contains("multiple flags for possible cybersecurity risk"));
@@ -583,13 +614,13 @@ async fn rate_limit_usage_warnings_early_threshold_is_scoped_and_deduplicated() 
         usage.plan_type = plan_type;
         usage.primary.as_mut().unwrap().window_duration_mins = window_minutes;
         chat.on_rate_limit_snapshot(Some(usage.clone()));
-        assert!(drain_insert_history(&mut rx).is_empty());
+        assert!(drain_insert_history_transcript(&mut rx).is_empty());
 
         // Rolling updates retain the plan learned from the account usage response.
         usage.plan_type = None;
         usage.primary.as_mut().unwrap().used_percent = 50;
         chat.on_rolling_rate_limit_snapshot(usage.clone());
-        let warnings = drain_insert_history(&mut rx);
+        let warnings = drain_insert_history_transcript(&mut rx);
         assert_eq!(!warnings.is_empty(), should_warn_early);
         if should_warn_early {
             insta::allow_duplicates! {
@@ -601,13 +632,13 @@ async fn rate_limit_usage_warnings_early_threshold_is_scoped_and_deduplicated() 
         }
 
         chat.on_rolling_rate_limit_snapshot(usage.clone());
-        assert!(drain_insert_history(&mut rx).is_empty());
+        assert!(drain_insert_history_transcript(&mut rx).is_empty());
         for used_percent in [75, 90, 95] {
             usage.primary.as_mut().unwrap().used_percent = used_percent;
             chat.on_rolling_rate_limit_snapshot(usage.clone());
-            assert_eq!(drain_insert_history(&mut rx).len(), 1);
+            assert_eq!(drain_insert_history_transcript(&mut rx).len(), 1);
             chat.on_rolling_rate_limit_snapshot(usage.clone());
-            assert!(drain_insert_history(&mut rx).is_empty());
+            assert!(drain_insert_history_transcript(&mut rx).is_empty());
         }
     }
 }
@@ -2532,7 +2563,6 @@ async fn added_history_uses_pet_adjusted_terminal_width() {
     chat.add_to_history(WidthCell(std::sync::Arc::clone(&width)));
 
     assert_eq!(width.load(std::sync::atomic::Ordering::Relaxed), 69);
-    assert!(chat.transcript.needs_final_message_separator);
     let backend = VT100Backend::new(/*width*/ 80, /*height*/ 4);
     let mut terminal = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
     terminal.set_viewport_area(Rect::new(
@@ -2814,7 +2844,7 @@ async fn warning_event_adds_warning_history_cell() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     handle_warning(&mut chat, "test warning message");
 
-    let cells = drain_insert_history(&mut rx);
+    let cells = drain_insert_history_transcript(&mut rx);
     assert_eq!(cells.len(), 1, "expected one warning history cell");
     let rendered = lines_to_single_string(&cells[0]);
     assert!(
@@ -2831,7 +2861,7 @@ async fn unsupported_code_mode_warning_renders_as_warning_history_cell() {
         "Code Mode is enabled in configuration, but model `gpt-5.4` does not advertise Code Mode support. This may degrade model performance. Disable `features.code_mode` and `features.code_mode_only`, or select a model whose metadata enables Code Mode.",
     );
 
-    let cells = drain_insert_history(&mut rx);
+    let cells = drain_insert_history_transcript(&mut rx);
     assert_eq!(cells.len(), 1, "expected one warning history cell");
     insta::assert_snapshot!(
         "unsupported_code_mode_warning",
@@ -2847,7 +2877,7 @@ async fn repeated_model_metadata_warning_is_hidden_for_same_slug() {
     handle_warning(&mut chat, warning);
     handle_warning(&mut chat, warning);
 
-    let cells = drain_insert_history(&mut rx);
+    let cells = drain_insert_history_transcript(&mut rx);
     assert_eq!(cells.len(), 1, "expected one warning history cell");
     let rendered = lines_to_single_string(&cells[0]);
     assert!(
@@ -2879,7 +2909,7 @@ async fn status_line_invalid_items_warn_once() {
     chat.thread_id = Some(ThreadId::new());
 
     chat.refresh_status_line();
-    let cells = drain_insert_history(&mut rx);
+    let cells = drain_insert_history_transcript(&mut rx);
     assert_eq!(cells.len(), 1, "expected one warning history cell");
     let rendered = lines_to_single_string(&cells[0]);
     assert!(
@@ -2888,7 +2918,7 @@ async fn status_line_invalid_items_warn_once() {
     );
 
     chat.refresh_status_line();
-    let cells = drain_insert_history(&mut rx);
+    let cells = drain_insert_history_transcript(&mut rx);
     assert!(
         cells.is_empty(),
         "expected invalid status line warning to emit only once"
@@ -3332,7 +3362,7 @@ async fn completed_turn_refreshes_estimated_thread_cost() {
     ));
 
     chat.on_task_complete(
-        /*last_agent_message*/ None, /*duration_ms*/ None, /*from_replay*/ false,
+        /*last_agent_message*/ None, /*completion*/ None, /*from_replay*/ false,
     );
 
     let request_id = std::iter::from_fn(|| rx.try_recv().ok())
@@ -3384,7 +3414,7 @@ async fn completed_turn_refreshes_credits_only_terminal_title() {
     ));
 
     chat.on_task_complete(
-        /*last_agent_message*/ None, /*duration_ms*/ None, /*from_replay*/ false,
+        /*last_agent_message*/ None, /*completion*/ None, /*from_replay*/ false,
     );
 
     let request_id = std::iter::from_fn(|| rx.try_recv().ok())
@@ -3997,7 +4027,10 @@ async fn terminal_title_model_updates_on_model_change_without_manual_refresh() {
     chat.local_settings.tui.terminal_title = Some(vec!["model".to_string()]);
     chat.refresh_terminal_title();
 
-    assert_eq!(chat.last_terminal_title, Some("gpt-5.4".to_string()));
+    assert_chatwidget_snapshot!(
+        "terminal_title_model_display_name",
+        chat.last_terminal_title.as_deref().expect("terminal title")
+    );
 
     chat.set_model("gpt-5.2");
 
@@ -4296,6 +4329,7 @@ async fn session_configured_clears_goal_status_footer() {
 
     let rollout_file = NamedTempFile::new().unwrap();
     chat.handle_thread_session(crate::session_state::ThreadSessionState {
+        windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
         fork_parent_title: None,
@@ -4518,7 +4552,7 @@ async fn runtime_metrics_websocket_timing_logs_and_final_separator_sums_totals()
     assert!(second_log.contains("TTFT: 80ms (iapi)"));
 
     chat.on_task_complete(
-        /*last_agent_message*/ None, /*duration_ms*/ None, /*from_replay*/ false,
+        /*last_agent_message*/ None, /*completion*/ None, /*from_replay*/ false,
     );
     let mut final_separator = None;
     while let Ok(event) = rx.try_recv() {
@@ -4630,6 +4664,62 @@ async fn deltas_then_same_final_message_are_rendered_snapshot() {
 }
 
 #[tokio::test]
+async fn unterminated_prose_is_visible_before_completion() {
+    for mode in [ModeKind::Default, ModeKind::Plan] {
+        let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+        if mode == ModeKind::Plan {
+            chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
+            let mask = collaboration_modes::mask_for_kind(chat.model_catalog.as_ref(), mode)
+                .expect("plan collaboration mask");
+            chat.set_collaboration_mask(mask);
+        }
+        chat.last_rendered_width.set(Some(26));
+        chat.on_task_started();
+        let (frame_requester, mut draw_rx) = FrameRequester::test_channel();
+        chat.frame_requester = frame_requester;
+        for delta in ["100 200 300 400 ", "500 600 700 800 ", "900 1000 1100 1200"] {
+            if mode == ModeKind::Plan {
+                chat.on_plan_delta(delta.to_string());
+            } else {
+                chat.handle_streaming_delta(delta.to_string());
+            }
+        }
+
+        assert!(draw_rx.try_recv().is_ok());
+        assert!(!chat.bottom_pane.status_indicator_visible());
+        let snapshot = if mode == ModeKind::Plan {
+            assert_eq!(
+                chat.plan_stream_controller.as_ref().unwrap().queued_lines(),
+                0
+            );
+            "unterminated_plan_prose_preview"
+        } else {
+            assert_eq!(chat.stream_controller.as_ref().unwrap().queued_lines(), 0);
+            "unterminated_agent_prose_preview"
+        };
+        let cell = chat.transcript.active_cell.as_ref().unwrap();
+        assert_chatwidget_snapshot!(
+            snapshot,
+            lines_to_single_string(&cell.display_lines(/*width*/ 26))
+        );
+        let preview = cell.display_lines(/*width*/ 26);
+        if mode == ModeKind::Plan {
+            chat.on_plan_delta(" | partial row".to_string());
+        } else {
+            chat.handle_streaming_delta(" | partial row".to_string());
+        }
+        assert_eq!(
+            chat.transcript
+                .active_cell
+                .as_ref()
+                .unwrap()
+                .display_lines(/*width*/ 26),
+            preview,
+        );
+    }
+}
+
+#[tokio::test]
 async fn unterminated_agent_delta_does_not_redraw_unchanged_stream_tail() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.handle_streaming_delta("| Step | Owner |\n".to_string());
@@ -4720,29 +4810,29 @@ async fn regular_commit_tick_clears_orphaned_plan_stream_tail() {
 }
 
 #[tokio::test]
-async fn reasoning_delta_redraws_only_when_header_becomes_visible() {
+async fn reasoning_delta_redraws_when_latest_usable_line_changes() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let (frame_requester, mut draw_rx) = FrameRequester::test_channel();
     chat.frame_requester = frame_requester;
 
-    chat.on_agent_reasoning_delta("still looking".to_string());
+    chat.on_agent_reasoning_delta("**Checking".to_string());
     assert!(matches!(
         draw_rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
     ));
     assert_eq!(chat.reasoning_header, None);
 
-    chat.on_agent_reasoning_delta(" **Checking".to_string());
-    assert!(matches!(
-        draw_rx.try_recv(),
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-    ));
-
     chat.on_agent_reasoning_delta(" files**".to_string());
     assert!(draw_rx.try_recv().is_ok());
     assert_eq!(chat.reasoning_header.as_deref(), Some("Checking files"));
 
-    chat.on_agent_reasoning_delta(" and preparing a response".to_string());
+    chat.on_agent_reasoning_delta("\nPreparing a response".to_string());
+    assert!(draw_rx.try_recv().is_ok());
+    assert_eq!(
+        chat.reasoning_header.as_deref(),
+        Some("Preparing a response")
+    );
+    chat.on_agent_reasoning_delta("".to_string());
     assert!(matches!(
         draw_rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
@@ -4789,7 +4879,7 @@ async fn reasoning_delta_restores_recreated_status_indicator_header() {
         .bottom_pane
         .status_widget()
         .expect("status indicator should be recreated");
-    assert_eq!(status.header(), "Working");
+    assert_eq!(status.header(), "Checking files");
 
     chat.on_agent_reasoning_delta(" and preparing a response".to_string());
 
@@ -4797,7 +4887,7 @@ async fn reasoning_delta_restores_recreated_status_indicator_header() {
         .bottom_pane
         .status_widget()
         .expect("status indicator should remain visible");
-    assert_eq!(status.header(), "Checking files");
+    assert_eq!(status.header(), "Checking files and preparing a response");
 
     let width: u16 = 80;
     let height = chat.desired_height(width);
@@ -5587,6 +5677,7 @@ async fn chatwidget_exec_and_status_layout_vt100_snapshot() {
     handle_exec_begin(
         &mut chat,
         AppServerThreadItem::CommandExecution {
+            model_context: None,
             id: "c1".into(),
             command: codex_shell_command::parse_command::shlex_join(&command),
             cwd: cwd.clone().into(),
@@ -5604,6 +5695,7 @@ async fn chatwidget_exec_and_status_layout_vt100_snapshot() {
     handle_exec_end(
         &mut chat,
         AppServerThreadItem::CommandExecution {
+            model_context: None,
             id: "c1".into(),
             command: codex_shell_command::parse_command::shlex_join(&command),
             cwd: cwd.into(),
@@ -5722,7 +5814,7 @@ printf 'fenced within fenced\n'
 
     // Finalize the stream without sending a final AgentMessage, to flush any tail.
     handle_turn_completed(&mut chat, "turn-1", /*duration_ms*/ None);
-    for lines in drain_insert_history(&mut rx) {
+    for lines in drain_insert_history_normalized(&mut rx) {
         crate::insert_history::insert_history_lines(&mut term, lines)
             .expect("Failed to insert history lines in test");
     }

@@ -175,7 +175,19 @@ impl ChatWidget {
             return false;
         };
 
-        self.add_warning_message(message);
+        self.add_warning_message(message.to_string());
+        // Warnings are collected outside the live transcript. A command the user
+        // just invoked also needs an immediate explanation above the composer.
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Pets unavailable".to_string()),
+            subtitle: Some(message.to_string()),
+            items: vec![SelectionItem {
+                name: "Close".to_string(),
+                dismiss_on_select: true,
+                ..Default::default()
+            }],
+            ..SelectionViewParams::picker()
+        });
         true
     }
 
@@ -302,7 +314,7 @@ impl ChatWidget {
                 is_disabled: true,
                 ..Default::default()
             }],
-            ..Default::default()
+            ..SelectionViewParams::picker()
         });
         self.pet_selection_load_request_id
     }

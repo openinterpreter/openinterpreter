@@ -23,6 +23,7 @@ use codex_protocol::protocol::ThreadMemoryMode as MemoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TokenUsage;
 use codex_rollout::RolloutItem;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
@@ -104,6 +105,9 @@ pub struct CreateThreadParams {
     pub subagent_history_start_ordinal: Option<u64>,
     /// Initial context-window identity captured when the thread was created.
     pub initial_window_id: String,
+    /// Runtime workspace roots at creation, excluding permission-profile roots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
     /// Metadata captured for the newly created thread.
     pub metadata: ThreadPersistenceMetadata,
 }
@@ -149,7 +153,7 @@ pub struct AppendThreadItemsParams {
     pub items: Vec<RolloutItem>,
 }
 
-/// Parameters for loading persisted history for resume, fork, rollback, and memory jobs.
+/// Parameters for loading persisted history for resume, fork, and memory jobs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoadThreadHistoryParams {
     /// Thread id to load.

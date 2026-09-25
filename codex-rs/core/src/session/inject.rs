@@ -1,10 +1,12 @@
 use super::TurnInput as PendingTurnInput;
 use super::session::Session;
 use super::turn_context::TurnContext;
+use codex_analytics::ImagePreparationMetadata;
 use codex_features::Feature;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ModelInfo;
 
 impl Session {
     /// Returns the input if there is no active turn to inject into.
@@ -12,10 +14,10 @@ impl Session {
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
     )]
-    pub async fn inject_if_running(
+    pub(crate) async fn inject_if_running<T: Into<ResponseItemEnvelope>>(
         &self,
-        input: Vec<ResponseItem>,
-    ) -> Result<(), Vec<ResponseItem>> {
+        input: Vec<T>,
+    ) -> Result<(), Vec<T>> {
         let mut active = self.active_turn.lock().await;
         match active.as_mut() {
             Some(active_turn) => {
@@ -24,7 +26,7 @@ impl Session {
                         active_turn.turn_state.as_ref(),
                         input
                             .into_iter()
-                            .map(ResponseItemEnvelope::new)
+                            .map(Into::into)
                             .map(PendingTurnInput::ResponseItem)
                             .collect(),
                     )
@@ -92,7 +94,7 @@ impl Session {
             return;
         }
         drop(active);
-        self.record_annotated_conversation_items(turn_context, items)
+        self.record_annotated_conversation_items(turn_context, turn_context.model_info(), items)
             .await;
     }
 
@@ -110,6 +112,7 @@ impl Session {
     pub(crate) async fn record_annotated_conversation_items(
         &self,
         turn_context: &TurnContext,
+        model_info: &ModelInfo,
         items: Vec<ResponseItemEnvelope>,
     ) {
         if items.iter().all(|item| item.metadata.is_none()) {
@@ -117,17 +120,39 @@ impl Session {
                 .into_iter()
                 .map(ResponseItemEnvelope::into_item)
                 .collect::<Vec<_>>();
-            self.record_conversation_items(turn_context, &items).await;
+            self.record_conversation_items(turn_context, model_info, &items)
+                .await;
             return;
         }
 
+        let (annotated_items, image_preparations) = self
+            .prepare_annotated_conversation_items_for_history(turn_context, model_info, items)
+            .await;
+        self.record_prepared_conversation_items(
+            turn_context,
+            model_info,
+            annotated_items,
+            image_preparations,
+        )
+        .await;
+    }
+
+    pub(super) async fn prepare_annotated_conversation_items_for_history(
+        &self,
+        turn_context: &TurnContext,
+        model_info: &ModelInfo,
+        items: Vec<ResponseItemEnvelope>,
+    ) -> (Vec<ResponseItemEnvelope>, Vec<ImagePreparationMetadata>) {
         let mut annotated_items = Vec::with_capacity(items.len());
         let mut image_preparations = Vec::new();
         for envelope in items {
-            let (prepared_items, prepared_images) = self.prepare_conversation_items_for_history(
-                turn_context,
-                std::slice::from_ref(&envelope.item),
-            );
+            let (prepared_items, prepared_images) = self
+                .prepare_conversation_items_for_history(
+                    turn_context,
+                    model_info,
+                    std::slice::from_ref(&envelope.item),
+                )
+                .await;
             image_preparations.extend(prepared_images);
 
             let mut metadata = envelope.metadata;
@@ -138,8 +163,7 @@ impl Session {
                 }
             }));
         }
-        self.record_prepared_conversation_items(turn_context, annotated_items, image_preparations)
-            .await;
+        (annotated_items, image_preparations)
     }
 
     /// Injects items into active work, or records them without starting a turn.
@@ -159,7 +183,8 @@ impl Session {
                 default_turn_context.as_ref()
             }
         };
-        self.record_conversation_items(turn_context, &items).await;
+        self.record_conversation_items(turn_context, turn_context.model_info(), &items)
+            .await;
     }
 }
 

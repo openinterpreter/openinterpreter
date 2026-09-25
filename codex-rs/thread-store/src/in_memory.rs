@@ -20,6 +20,7 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::RolloutItem;
 use codex_rollout::persisted_rollout_items;
+use codex_utils_absolute_path::AbsolutePathBuf;
 
 use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
@@ -65,6 +66,42 @@ mod tests {
     use crate::ThreadSortKey;
     use codex_protocol::models::BaseInstructions;
     use codex_protocol::protocol::SessionSource;
+
+    #[tokio::test]
+    async fn deletion_cleans_associated_sqlite_and_shared_memory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use codex_utils_absolute_path::test_support::PathExt;
+        use pretty_assertions::assert_eq;
+
+        let home = tempfile::TempDir::new()?;
+        let state_db = codex_state::StateRuntime::init(
+            codex_state::SqliteConfig::new_for_testing(home.path().abs()),
+            "test".to_string(),
+        )
+        .await?;
+        let shared = InMemoryThreadStore::default();
+        let store = shared.with_state_db(Some(state_db.clone()));
+        let thread_id = ThreadId::new();
+        shared
+            .create_thread(create_thread_params(thread_id, ThreadHistoryMode::Legacy))
+            .await?;
+        let metadata = codex_state::ThreadMetadataBuilder::new(
+            thread_id,
+            home.path().join("thread.jsonl"),
+            Utc::now(),
+            SessionSource::Cli,
+        )
+        .build("test");
+        state_db.upsert_thread(&metadata).await?;
+
+        store
+            .delete_thread(DeleteThreadParams { thread_id })
+            .await?;
+
+        assert_eq!(state_db.get_thread(thread_id).await?, None);
+        assert!(!shared.state.lock().await.histories.contains_key(&thread_id));
+        Ok(())
+    }
 
     #[tokio::test]
     async fn default_turn_pagination_methods_return_unsupported() {
@@ -144,6 +181,7 @@ mod tests {
                     history_base: None,
                     subagent_history_start_ordinal: None,
                     initial_window_id: uuid::Uuid::now_v7().to_string(),
+                    runtime_workspace_roots: None,
                     metadata: ThreadPersistenceMetadata {
                         cwd: None,
                         model_provider: "test-provider".to_string(),
@@ -437,6 +475,7 @@ mod tests {
             history_base: None,
             subagent_history_start_ordinal: None,
             initial_window_id: uuid::Uuid::now_v7().to_string(),
+            runtime_workspace_roots: None,
             metadata: thread_metadata(),
         }
     }
@@ -495,8 +534,9 @@ pub struct InMemoryThreadStoreCalls {
 /// service.
 #[derive(Default)]
 pub struct InMemoryThreadStore {
-    state: tokio::sync::Mutex<InMemoryThreadStoreState>,
-    omit_metadata_update_result: AtomicBool,
+    state: Arc<tokio::sync::Mutex<InMemoryThreadStoreState>>,
+    omit_metadata_update_result: Arc<AtomicBool>,
+    state_db: Option<codex_rollout::StateDbHandle>,
 }
 
 #[derive(Default)]
@@ -521,6 +561,15 @@ impl InMemoryThreadStore {
             .entry(id)
             .or_insert_with(|| Arc::new(Self::default()))
             .clone()
+    }
+
+    /// Shares this debug store's thread data while owning cleanup of the caller's SQLite state.
+    pub fn with_state_db(&self, state_db: Option<codex_rollout::StateDbHandle>) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+            omit_metadata_update_result: Arc::clone(&self.omit_metadata_update_result),
+            state_db,
+        }
     }
 
     /// Removes a shared in-memory store for `id`.
@@ -549,6 +598,10 @@ impl InMemoryThreadStore {
             forked_from_id: params.forked_from_id,
             parent_thread_id: params.parent_thread_id,
             cwd: params.metadata.cwd.clone().unwrap_or_default(),
+            runtime_workspace_roots: params
+                .runtime_workspace_roots
+                .as_ref()
+                .map(|roots| roots.iter().map(AbsolutePathBuf::to_path_buf).collect()),
             agent_nickname: params.source.get_nickname(),
             agent_role: params.source.get_agent_role(),
             agent_path: params.source.get_agent_path().map(Into::into),
@@ -823,8 +876,18 @@ impl InMemoryThreadStore {
     }
 
     async fn delete_thread(&self, params: DeleteThreadParams) -> ThreadStoreResult<()> {
+        self.state.lock().await.calls.delete_thread += 1;
+        let deleted_state_rows = if let Some(state_db) = &self.state_db {
+            state_db
+                .delete_threads_strict(&[params.thread_id])
+                .await
+                .map_err(|error| ThreadStoreError::Internal {
+                    message: format!("failed to delete thread state: {error}"),
+                })?
+        } else {
+            0
+        };
         let mut state = self.state.lock().await;
-        state.calls.delete_thread += 1;
         let existed = state.histories.remove(&params.thread_id).is_some();
         state.created_threads.remove(&params.thread_id);
         state.names.remove(&params.thread_id);
@@ -835,7 +898,7 @@ impl InMemoryThreadStore {
         state
             .rollout_paths
             .retain(|_, thread_id| *thread_id != params.thread_id);
-        if existed {
+        if existed || deleted_state_rows > 0 {
             Ok(())
         } else {
             Err(ThreadStoreError::ThreadNotFound {

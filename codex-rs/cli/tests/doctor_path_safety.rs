@@ -1,4 +1,4 @@
-//! Black-box coverage for diagnostics under a repository-controlled PATH.
+//! Black-box coverage for safe diagnostic execution and config error reporting.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -9,6 +9,7 @@ use anyhow::Context;
 use anyhow::Result;
 use app_test_support::TestAppServer;
 use codex_app_server_protocol::RequestId;
+use codex_config::loader::project_trust_key;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -178,6 +179,173 @@ fn startup_and_doctor_do_not_execute_path_helpers() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn non_interactive_dumb_terminal_preserves_other_doctor_failures() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let output = fixture
+        .command()?
+        .args(["doctor", "--json"])
+        // Explicit identity takes precedence over inherited terminal-specific variables.
+        .env("TERM_PROGRAM", "dumb")
+        .env_remove("TERMINFO")
+        .env_remove("TERMINFO_DIRS")
+        .output()?;
+    // The fixture's provider is unreachable, regardless of terminal capabilities.
+    assert_eq!(output.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(report["checks"]["terminal.env"]["status"], "warning");
+    assert_eq!(report["overallStatus"], "fail");
+    Ok(())
+}
+
+#[test]
+fn doctor_reports_only_safe_config_error_metadata() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let user_config_file = fixture.home.join("config.toml");
+    let original = std::fs::read_to_string(&user_config_file)?;
+    // macOS temp directories can use a symlinked path; trust the canonical workspace.
+    let project_key = toml::Value::String(project_trust_key(&fixture.workspace));
+    let original = format!("{original}\n[projects.{project_key}]\ntrust_level = \"trusted\"\n");
+    let project_config_dir = fixture.workspace.join(".codex");
+    std::fs::create_dir(&project_config_dir)?;
+    for (snapshot_name, config_file, config) in [
+        (
+            "doctor_config_error_location",
+            user_config_file.clone(),
+            "custom_header = \"doctor-test-credential\" trailing\n".to_string(),
+        ),
+        (
+            "doctor_config_invalid_data",
+            project_config_dir.join("config.toml"),
+            "custom_header = \"doctor-test-credential\" trailing\n".to_string(),
+        ),
+        (
+            "doctor_config_not_found",
+            user_config_file.clone(),
+            original.replace(
+                "model_provider = \"local\"",
+                "model_provider = \"doctor-test-credential\"",
+            ),
+        ),
+        (
+            "doctor_config_invalid_data",
+            user_config_file.clone(),
+            original.replace(
+                "wire_api = \"responses\"",
+                "wire_api = \"responses\"\nhttp_headers = \"sk-proj-ABC123example\"",
+            ),
+        ),
+    ] {
+        std::fs::write(&user_config_file, &original)?;
+        std::fs::write(&config_file, config)?;
+        for args in [
+            vec!["doctor", "--json"],
+            vec!["doctor", "--json", "--feedback"],
+        ] {
+            let output = fixture.command()?.args(args).output()?;
+            assert_eq!(output.status.code(), Some(1));
+            let report: Value = serde_json::from_slice(&output.stdout)?;
+            let mut check = report["checks"]["config.load"].clone();
+            check
+                .as_object_mut()
+                .expect("config check")
+                .remove("durationMs");
+            if let Some(file) = check["details"]["file"].as_str() {
+                check["details"]["file"] = Value::String(
+                    file.replace(
+                        &fixture.root.path().canonicalize()?.display().to_string(),
+                        "FIXTURE",
+                    )
+                    .replace(&fixture.root.path().display().to_string(), "FIXTURE")
+                    .replace('\\', "/"),
+                );
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(!stdout.contains("doctor-test-credential"));
+            assert!(!stdout.contains("sk-proj-ABC123example"));
+            // Keep snapshots stable across serde_json feature sets in Cargo and Bazel.
+            check.sort_all_objects();
+            insta::assert_snapshot!(snapshot_name, serde_json::to_string_pretty(&check)?);
+        }
+        std::fs::remove_file(config_file)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn doctor_reports_configured_filesystem_paths() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let config_file = fixture.home.join("config.toml");
+    let original = std::fs::read_to_string(&config_file)?;
+    let existing = fixture.workspace.join("probe-existing");
+    let missing = fixture.workspace.join("probe-missing");
+    std::fs::create_dir(&existing)?;
+    let existing_key = toml::Value::String(existing.display().to_string());
+    let missing_key = toml::Value::String(missing.display().to_string());
+    std::fs::write(
+        &config_file,
+        format!(
+            r#"default_permissions = "diagnostic"
+{original}
+[permissions.diagnostic]
+extends = ":read-only"
+[permissions.diagnostic.filesystem]
+{existing_key} = "read"
+{missing_key} = "write"
+"#
+        ),
+    )?;
+    let output = fixture.command()?.args(["doctor", "--json"]).output()?;
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    #[cfg(windows)]
+    assert_eq!(report["checks"]["sandbox.filesystem_paths"]["status"], "ok");
+    let mut details = report["checks"]["sandbox.filesystem_paths"]["details"].clone();
+    // Snapshot outcomes and provenance independently of helper startup speed.
+    details
+        .as_object_mut()
+        .expect("path details")
+        .retain(|key, _| !key.ends_with(" latency"));
+    let canonical_root = fixture.root.path().canonicalize()?;
+    for value in details.as_object_mut().expect("path details").values_mut() {
+        let detail = value
+            .as_str()
+            .expect("scalar path detail")
+            .replace(&canonical_root.display().to_string(), "FIXTURE")
+            .replace(&fixture.root.path().display().to_string(), "FIXTURE")
+            .replace('\\', "/");
+        *value = Value::String(detail);
+    }
+    let snapshot_name = if cfg!(windows) {
+        "doctor_configured_filesystem_paths_windows"
+    } else {
+        "doctor_configured_filesystem_paths"
+    };
+    insta::assert_snapshot!(snapshot_name, serde_json::to_string_pretty(&details)?);
+    Ok(())
+}
+
+#[test]
+fn filesystem_probe_does_not_load_configuration() -> Result<()> {
+    let fixture = Fixture::new()?;
+    std::fs::write(fixture.home.join("config.toml"), "invalid TOML = [")?;
+    for (path, expected) in [
+        (&fixture.workspace, 0),
+        (&fixture.workspace.join("missing"), 2),
+    ] {
+        let output = fixture
+            .command()?
+            .args(["doctor", "--probe-filesystem-path"])
+            .arg(path)
+            .output()?;
+        assert_eq!(
+            output.status.code(),
+            Some(if cfg!(windows) { 5 } else { expected })
+        );
+        assert!(output.stdout.is_empty());
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn interactive_tmux_startup_does_not_execute_workspace_helpers() -> Result<()> {
@@ -237,7 +405,7 @@ async fn interactive_tmux_startup_does_not_execute_workspace_helpers() -> Result
                 .chars()
                 .filter(|character| !character.is_whitespace())
                 .collect();
-            if text.contains("Doyoutrustthecontentsofthisdirectory?") {
+            if text.contains("Trustthisfolder?") {
                 return Ok::<_, anyhow::Error>(());
             }
         }

@@ -169,7 +169,7 @@ async fn opening_existing_rollout_preserves_modified_time() -> std::io::Result<(
     drop(open_log_file(&rollout_path)?);
     assert_eq!(fs::metadata(&rollout_path)?.modified()?, modified);
 
-    drop(open_rollout_for_append(&rollout_path).await?);
+    drop(open_rollout_for_append(&rollout_path, /*writer_lock*/ None).await?);
     assert_eq!(fs::metadata(&rollout_path)?.modified()?, modified);
     Ok(())
 }
@@ -196,6 +196,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
             parent_thread_id: None,
             timestamp: "2026-01-27T12:34:56Z".to_string(),
             cwd: home.path().to_path_buf(),
+            runtime_workspace_roots: None,
             originator: "test".to_string(),
             cli_version: "test".to_string(),
             source: SessionSource::Cli,
@@ -1797,6 +1798,7 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
         item: RolloutItem::TurnContext(TurnContextItem {
             turn_id: Some("turn-1".to_string()),
             root_turn_id: None,
+            disabled_plugin_ids: None,
             cwd: serde_json::from_value(serde_json::json!(&latest_cwd))
                 .expect("absolute latest cwd"),
             workspace_roots: None,

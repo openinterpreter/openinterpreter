@@ -71,16 +71,14 @@ impl SessionRuntimeDelegate for PanickingClosedDelegate {
 #[tokio::test]
 async fn reports_cell_actor_panics_to_the_owner() {
     let (failure_tx, mut failure_rx) = tokio::sync::mpsc::unbounded_channel();
-    let runtime = SessionRuntime::new_with_task_failure_handler(
-        Arc::new(PanickingClosedDelegate),
-        Some(Arc::new(move |reason| {
-            let _ = failure_tx.send(reason);
-        })),
-    );
+    let runtime = SessionRuntime::new_with_task_failure_handler(Some(Arc::new(move |reason| {
+        let _ = failure_tx.send(reason);
+    })));
     let started = runtime
         .execute(
             execute_request(r#"text("done");"#),
             ObserveMode::YieldAfter(Duration::from_secs(1)),
+            Arc::new(PanickingClosedDelegate),
         )
         .await
         .expect("start cell");
@@ -103,9 +101,10 @@ async fn reports_cell_actor_panics_to_the_owner() {
 #[cfg(feature = "v8-runtime")]
 #[tokio::test]
 async fn termination_rejects_a_waiting_store_commit_before_the_next_cell_can_load_it() {
-    let runtime = SessionRuntime::new(Arc::new(RecordingDelegate));
+    let runtime = SessionRuntime::new();
     let cell_state = Arc::new(CellState::new(CancellationToken::new()));
     let host = RuntimeCellHost {
+        delegate: Arc::new(RecordingDelegate),
         cell_id: CellId::new("terminating-writer"),
         inner: Arc::clone(&runtime.inner),
         execution_context: opentelemetry::Context::new(),
@@ -121,7 +120,7 @@ async fn termination_rejects_a_waiting_store_commit_before_the_next_cell_can_loa
     let commit = host.commit_completion(
         HashMap::from([(
             "candidate".to_string(),
-            JsonValue::String("lost".to_string()),
+            Arc::new(JsonValue::String("lost".to_string())),
         )]),
         completion.clone(),
         /*pending_initial_yield_items*/ None,
@@ -160,6 +159,7 @@ async fn termination_rejects_a_waiting_store_commit_before_the_next_cell_can_loa
                 source: r#"text(String(load("candidate")));"#.to_string(),
             },
             ObserveMode::YieldAfter(Duration::from_secs(1)),
+            Arc::new(RecordingDelegate),
         )
         .await
         .unwrap();
@@ -185,7 +185,7 @@ fn execute_request(source: &str) -> CreateCellRequest {
 
 #[tokio::test]
 async fn cell_id_allocation_fails_before_wrapping() {
-    let runtime = SessionRuntime::new(Arc::new(RecordingDelegate));
+    let runtime = SessionRuntime::new();
     runtime
         .inner
         .next_cell_id
@@ -196,6 +196,7 @@ async fn cell_id_allocation_fails_before_wrapping() {
             .execute(
                 execute_request(r#"text("unreachable");"#),
                 ObserveMode::YieldAfter(Duration::from_secs(1)),
+                Arc::new(RecordingDelegate)
             )
             .await
             .err(),
@@ -209,12 +210,13 @@ async fn cell_id_allocation_fails_before_wrapping() {
     reason = "test holds the registry lock to force admission ahead of shutdown"
 )]
 async fn shutdown_rejects_cell_admission_queued_before_the_registry_lock() {
-    let runtime = Arc::new(SessionRuntime::new(Arc::new(RecordingDelegate)));
+    let runtime = Arc::new(SessionRuntime::new());
     let cells = runtime.inner.cells.lock().await;
 
     let execution = runtime.execute(
         execute_request("while (true) {}"),
         ObserveMode::YieldAfter(Duration::from_millis(/*millis*/ 1)),
+        Arc::new(RecordingDelegate),
     );
     tokio::pin!(execution);
     std::future::poll_fn(|context| match execution.as_mut().poll(context) {
@@ -245,11 +247,12 @@ async fn shutdown_rejects_cell_admission_queued_before_the_registry_lock() {
 #[cfg(feature = "v8-runtime")]
 #[tokio::test]
 async fn drop_terminates_cells_when_the_registry_is_locked() {
-    let runtime = SessionRuntime::new(Arc::new(RecordingDelegate));
+    let runtime = SessionRuntime::new();
     let started = runtime
         .execute(
             execute_request("while (true) {}"),
             ObserveMode::YieldAfter(Duration::from_millis(/*millis*/ 1)),
+            Arc::new(RecordingDelegate),
         )
         .await
         .unwrap();

@@ -5,8 +5,6 @@ import inspect
 from pathlib import Path
 from typing import Any
 
-import tomllib
-
 import openai_codex
 import openai_codex.types as public_types
 from openai_codex import (
@@ -16,6 +14,7 @@ from openai_codex import (
     AsyncTurnHandle,
     Codex,
     CodexConfig,
+    ExternalMessage,
     Sandbox,
     Thread,
     TurnHandle,
@@ -23,6 +22,11 @@ from openai_codex import (
 )
 from openai_codex._initialize_metadata import validate_initialize_metadata
 from openai_codex.types import InitializeResponse
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 EXPECTED_ROOT_EXPORTS = [
     "__version__",
@@ -43,6 +47,7 @@ EXPECTED_ROOT_EXPORTS = [
     "Input",
     "InputItem",
     "RunInput",
+    "ExternalMessage",
     "TextInput",
     "ImageInput",
     "LocalImageInput",
@@ -176,13 +181,15 @@ def test_turn_input_methods_accept_string_shortcut() -> None:
         Thread.turn,
         AsyncThread.run,
         AsyncThread.turn,
-        TurnHandle.steer,
-        AsyncTurnHandle.steer,
     ]
 
     assert {fn: inspect.signature(fn).parameters["input"].annotation for fn in funcs} == (
         dict.fromkeys(funcs, "RunInput")
     )
+    assert {
+        fn: inspect.signature(fn).parameters["input"].annotation
+        for fn in (TurnHandle.steer, AsyncTurnHandle.steer)
+    } == dict.fromkeys((TurnHandle.steer, AsyncTurnHandle.steer), "Input | str")
 
 
 def test_root_exports_approval_mode() -> None:
@@ -223,6 +230,7 @@ def test_curated_public_api_has_builtin_help_documentation() -> None:
         "TurnHandle": TurnHandle,
         "AsyncTurnHandle": AsyncTurnHandle,
         "TurnResult": TurnResult,
+        "ExternalMessage": ExternalMessage,
         "Sandbox": Sandbox,
         "thread_start": Codex.thread_start,
         "thread_resume": Codex.thread_resume,
@@ -351,6 +359,7 @@ def test_generated_public_signatures_are_snake_case_and_typed() -> None:
             "config",
             "cwd",
             "developer_instructions",
+            "include_turns",
             "model",
             "model_provider",
             "personality",
@@ -364,6 +373,7 @@ def test_generated_public_signatures_are_snake_case_and_typed() -> None:
             "cwd",
             "developer_instructions",
             "ephemeral",
+            "include_turns",
             "model",
             "model_provider",
             "sandbox",
@@ -379,7 +389,9 @@ def test_generated_public_signatures_are_snake_case_and_typed() -> None:
             "personality",
             "sandbox",
             "service_tier",
+            "source",
             "summary",
+            "turn_service_tier",
         ],
         Thread.run: [
             "approval_mode",
@@ -390,7 +402,9 @@ def test_generated_public_signatures_are_snake_case_and_typed() -> None:
             "personality",
             "sandbox",
             "service_tier",
+            "source",
             "summary",
+            "turn_service_tier",
         ],
         AsyncCodex.thread_start: [
             "approval_mode",
@@ -427,6 +441,7 @@ def test_generated_public_signatures_are_snake_case_and_typed() -> None:
             "config",
             "cwd",
             "developer_instructions",
+            "include_turns",
             "model",
             "model_provider",
             "personality",
@@ -440,6 +455,7 @@ def test_generated_public_signatures_are_snake_case_and_typed() -> None:
             "cwd",
             "developer_instructions",
             "ephemeral",
+            "include_turns",
             "model",
             "model_provider",
             "sandbox",
@@ -455,7 +471,9 @@ def test_generated_public_signatures_are_snake_case_and_typed() -> None:
             "personality",
             "sandbox",
             "service_tier",
+            "source",
             "summary",
+            "turn_service_tier",
         ],
         AsyncThread.run: [
             "approval_mode",
@@ -466,7 +484,9 @@ def test_generated_public_signatures_are_snake_case_and_typed() -> None:
             "personality",
             "sandbox",
             "service_tier",
+            "source",
             "summary",
+            "turn_service_tier",
         ],
     }
 

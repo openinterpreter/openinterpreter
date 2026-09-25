@@ -5,6 +5,7 @@ use codex_client::run_with_retry;
 use codex_http_client::Request;
 use codex_http_client::TransportError;
 use codex_login::CodexAuth;
+use codex_models_manager::bundled_models_response;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
@@ -988,8 +989,10 @@ async fn sse_failure_uses_local_backoff_despite_retry_after() -> Result<()> {
 }
 
 /// Headerless sampled stream rate limits exhaust retries before one terminal error.
+#[test_case::test_case("rate_limit_exceeded"; "rate_limit")]
+#[test_case::test_case("slow_down"; "slow_down")]
 #[tokio::test(flavor = "current_thread")]
-async fn sse_failure_without_retry_after_exhausts_stream_retries() -> Result<()> {
+async fn sse_failure_without_retry_after_exhausts_stream_retries(code: &str) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let mut telemetry = RetryTelemetryCapture::install();
@@ -999,12 +1002,12 @@ async fn sse_failure_without_retry_after_exhausts_stream_retries() -> Result<()>
         vec![
             responses::sse_response(responses::sse_failed(
                 "rate-limited",
-                "rate_limit_exceeded",
+                code,
                 "Rate limit exceeded.",
             )),
             responses::sse_response(responses::sse_failed(
                 "still-rate-limited",
-                "rate_limit_exceeded",
+                code,
                 "Rate limit exceeded.",
             )),
         ],
@@ -1068,8 +1071,10 @@ async fn sse_failure_without_retry_after_exhausts_stream_retries() -> Result<()>
 }
 
 /// Rate-limit messages already provide an exact retry delay without an HTTP header.
+#[test_case::test_case("rate_limit_exceeded"; "rate_limit")]
+#[test_case::test_case("slow_down"; "slow_down")]
 #[tokio::test(flavor = "current_thread")]
-async fn sse_rate_limit_message_uses_server_advised_retry_delay() -> Result<()> {
+async fn sse_rate_limit_message_uses_server_advised_retry_delay(code: &str) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let mut telemetry = RetryTelemetryCapture::install();
@@ -1079,7 +1084,7 @@ async fn sse_rate_limit_message_uses_server_advised_retry_delay() -> Result<()> 
         vec![
             responses::sse_response(responses::sse_failed(
                 "rate-limited",
-                "rate_limit_exceeded",
+                code,
                 "Rate limit exceeded. Please try again in 1s.",
             )),
             responses::sse_response(responses::sse(vec![
@@ -1628,6 +1633,9 @@ async fn websocket_overload_with_nested_retry_after_is_terminal() -> Result<()> 
     .await;
     let test = test_codex()
         .with_config(|config| {
+            // Capture inference retries without unrelated startup model-discovery retries.
+            config.model_catalog =
+                Some(bundled_models_response().expect("bundled models.json should parse"));
             config.model_provider.request_max_retries = Some(2);
             config.model_provider.stream_max_retries = Some(2);
         })
@@ -1709,6 +1717,9 @@ async fn websocket_overload_without_retry_after_is_terminal() -> Result<()> {
     .await;
     let test = test_codex()
         .with_config(|config| {
+            // Capture inference retries without unrelated startup model-discovery retries.
+            config.model_catalog =
+                Some(bundled_models_response().expect("bundled models.json should parse"));
             config.model_provider.request_max_retries = Some(2);
             config.model_provider.stream_max_retries = Some(2);
         })

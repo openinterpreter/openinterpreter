@@ -10,7 +10,7 @@ expression: sanitized
 │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
 │ information on rate limits and credits                                      │
 │                                                                             │
-│  Remote:           unix:///tmp/codex-home/app-server-control/app-server-    │
+│  Server:           unix:///tmp/codex-home/app-server-control/app-server-    │
 │                    control.sock (v0.133.0)                                  │
 │                                                                             │
 │  Model:            gpt-5.1-codex-max (reasoning medium, summaries auto)     │

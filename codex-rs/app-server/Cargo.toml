@@ -40,6 +40,7 @@ codex-aws-auth = { workspace = true }
 codex-cloud-config = { workspace = true }
 codex-code-mode = { workspace = true }
 codex-config = { workspace = true }
+codex-network-proxy = { workspace = true }
 codex-connectors = { workspace = true }
 codex-core = { workspace = true }
 codex-core-plugins = { workspace = true }
@@ -63,6 +64,7 @@ codex-shell-command = { workspace = true }
 codex-skills = { workspace = true }
 codex-skills-extension = { workspace = true }
 codex-utils-cli = { workspace = true }
+codex-user-verification = { workspace = true }
 codex-utils-pty = { workspace = true }
 codex-backend-client = { workspace = true }
 codex-file-search = { workspace = true }
@@ -78,6 +80,7 @@ codex-model-provider = { workspace = true }
 codex-model-provider-info = { workspace = true }
 codex-models-manager = { workspace = true }
 codex-product-info = { workspace = true }
+codex-prompts = { workspace = true }
 codex-protocol = { workspace = true }
 codex-queue-extension = { workspace = true }
 codex-app-server-protocol = { workspace = true }
@@ -123,6 +126,7 @@ tikv-jemallocator = { workspace = true }
 codex-windows-sandbox = { workspace = true }
 
 [dev-dependencies]
+codex-uds = { workspace = true }
 app_test_support = { workspace = true }
 axum = { workspace = true, default-features = false, features = [
     "http1",
@@ -145,6 +149,7 @@ rmcp = { workspace = true, default-features = false, features = [
 ] }
 serial_test = { workspace = true }
 shlex = { workspace = true }
+sqlx = { workspace = true }
 tar = { workspace = true }
 test-case = "3.3.1"
 tokio-tungstenite = { workspace = true }

@@ -1,6 +1,5 @@
 use crate::acl::add_deny_read_ace;
 use crate::acl::revoke_ace;
-use crate::path_normalization::canonicalize_path;
 use anyhow::Context;
 use anyhow::Result;
 use std::collections::HashSet;
@@ -14,17 +13,33 @@ use std::path::PathBuf;
 /// canonical target. The lexical path covers the path users configured and lets
 /// missing exact denies be materialized later; the canonical path also covers
 /// an existing reparse-point target so a sandbox cannot read the same object
-/// through the resolved location.
-pub fn plan_deny_read_acl_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+/// through the resolved location. Filesystem roots are rejected after this
+/// canonicalization so aliases cannot install a root deny ACE.
+pub fn plan_deny_read_acl_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut planned = Vec::new();
     let mut seen = HashSet::new();
     for path in paths {
         push_planned_path(&mut planned, &mut seen, path.to_path_buf());
-        if path.exists() {
-            push_planned_path(&mut planned, &mut seen, canonicalize_path(path));
-        }
+        let canonical = match dunce::canonicalize(path) {
+            Ok(canonical) => canonical,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("canonicalize deny-read path {}", path.display()));
+            }
+        };
+        push_planned_path(&mut planned, &mut seen, canonical);
     }
-    planned
+    if let Some(root) = planned
+        .iter()
+        .find(|path| path.is_absolute() && path.parent().is_none())
+    {
+        anyhow::bail!(
+            "refusing to apply a deny-read ACE to filesystem root {}",
+            root.display()
+        );
+    }
+    Ok(planned)
 }
 
 fn push_planned_path(planned: &mut Vec<PathBuf>, seen: &mut HashSet<String>, path: PathBuf) {
@@ -49,7 +64,7 @@ pub(crate) fn lexical_path_key(path: &Path) -> String {
 /// # Safety
 /// Caller must pass a valid SID pointer for the sandbox principal being denied.
 pub unsafe fn apply_deny_read_acls(paths: &[PathBuf], psid: *mut c_void) -> Result<Vec<PathBuf>> {
-    let planned = plan_deny_read_acl_paths(paths);
+    let planned = plan_deny_read_acl_paths(paths)?;
     let mut applied = Vec::new();
     let mut seen = HashSet::new();
     let mut added_in_this_call: Vec<PathBuf> = Vec::new();
@@ -66,7 +81,7 @@ pub unsafe fn apply_deny_read_acls(paths: &[PathBuf], psid: *mut c_void) -> Resu
             Ok(added) => added,
             Err(err) => {
                 for added_path in &added_in_this_call {
-                    revoke_ace(added_path, psid);
+                    let _ = revoke_ace(added_path, psid);
                 }
                 return Err(err);
             }
@@ -93,7 +108,7 @@ mod tests {
         let missing = tmp.path().join("future-secret.env");
 
         assert_eq!(
-            plan_deny_read_acl_paths(std::slice::from_ref(&missing)),
+            plan_deny_read_acl_paths(std::slice::from_ref(&missing)).expect("plan deny-read ACL"),
             vec![missing]
         );
     }
@@ -105,6 +120,7 @@ mod tests {
         std::fs::write(&existing, "secret").expect("write secret");
 
         let planned: HashSet<PathBuf> = plan_deny_read_acl_paths(std::slice::from_ref(&existing))
+            .expect("plan deny-read ACL")
             .into_iter()
             .collect();
         let expected: HashSet<PathBuf> = [
@@ -115,5 +131,22 @@ mod tests {
         .collect();
 
         assert_eq!(planned, expected);
+    }
+
+    #[test]
+    fn plan_rejects_file_system_root() {
+        let cwd = std::env::current_dir().expect("current directory");
+        let root = cwd.ancestors().last().expect("filesystem root");
+
+        let err = plan_deny_read_acl_paths(&[root.to_path_buf()])
+            .expect_err("filesystem root must not receive a deny-read ACE");
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "refusing to apply a deny-read ACE to filesystem root {}",
+                root.display()
+            )
+        );
     }
 }

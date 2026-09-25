@@ -66,7 +66,7 @@ async fn ordinary_settings_updates_keep_the_running_turn_snapshot() -> Result<()
                 .unwrap()
                 .models
                 .into_iter()
-                .find(|model| model.slug == "gpt-5.4")
+                .find(|model| model.slug == "gpt-5.5")
                 .unwrap();
             config.model_catalog = Some(ModelsResponse {
                 models: ["snapshot-model-a", "snapshot-model-b"]

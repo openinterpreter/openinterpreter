@@ -3,10 +3,17 @@ name: python-runtime-build
 on:
   workflow_call:
     inputs:
+      source_ref:
+        description: "Source revision to build; defaults to the calling workflow revision."
+        required: false
+        type: string
       runtime_version:
         description: "Runtime version to build, for example 0.136.0, 0.136.0a2, or 0.136.0a2.post1."
         required: true
         type: string
+    outputs:
+      python_version:
+        value: ${{ jobs.build-python-runtime.outputs.python_version }}
 
 jobs:
   build-python-runtime:
@@ -15,11 +22,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      python_version: ${{ steps.python_runtime.outputs.python_version }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ inputs.source_ref || github.sha }}
           persist-credentials: false
 
       - name: Validate and resolve Python runtime release

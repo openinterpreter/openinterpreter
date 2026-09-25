@@ -96,7 +96,11 @@ pub(super) async fn handle(
     };
     invocation
         .session
-        .record_conversation_items(invocation.turn.as_ref(), &[message])
+        .record_conversation_items(
+            invocation.turn.as_ref(),
+            invocation.turn.model_info(),
+            &[message],
+        )
         .await;
 
     Ok(boxed_tool_output(FunctionToolOutput::from_text(

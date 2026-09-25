@@ -13,4 +13,4 @@ Budget:
 
 Adjust the current turn to pursue the updated objective. Avoid continuing work that only served the previous objective unless it also helps the updated objective.
 
-Do not call update_goal unless the updated goal is actually complete.
+Do not call update_goal unless the updated goal is actually complete or the user explicitly requests a pause.

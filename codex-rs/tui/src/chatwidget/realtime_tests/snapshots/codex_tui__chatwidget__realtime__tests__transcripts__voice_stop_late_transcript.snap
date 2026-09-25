@@ -1,0 +1,8 @@
+---
+source: tui/src/chatwidget/realtime_tests/transcripts.rs
+assertion_line: 500
+expression: rendered
+---
+• First
+• First and last
+• Voice conversation ended: requested

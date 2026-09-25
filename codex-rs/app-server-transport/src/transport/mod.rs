@@ -11,6 +11,7 @@ use codex_core::config::find_codex_home;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -45,7 +46,6 @@ pub use stdio::start_stdio_connection;
 pub use unix_socket::AppServerStartupLock;
 pub use unix_socket::DaemonShutdownAccess;
 pub use unix_socket::acquire_app_server_startup_lock;
-pub use unix_socket::prepare_control_socket_path;
 pub use unix_socket::start_control_socket_acceptor;
 pub use websocket::start_websocket_acceptor;
 
@@ -55,6 +55,13 @@ const OVERLOADED_ERROR_CODE: i64 = -32001;
 const APP_SERVER_CONTROL_SOCKET_DIR_NAME: &str = "app-server-control";
 const APP_SERVER_CONTROL_SOCKET_FILE_NAME: &str = "app-server-control.sock";
 const APP_SERVER_STARTUP_LOCK_FILE_NAME: &str = "app-server-startup.lock";
+const DAEMON_RECOVERY_FILE_NAME: &str = "loaded-threads.json";
+
+pub fn daemon_recovery_file_path(codex_home: &Path) -> PathBuf {
+    codex_home
+        .join("app-server-daemon")
+        .join(DAEMON_RECOVERY_FILE_NAME)
+}
 
 pub fn app_server_control_socket_path(codex_home: &Path) -> std::io::Result<AbsolutePathBuf> {
     AbsolutePathBuf::from_absolute_path(
@@ -176,6 +183,7 @@ pub enum TransportEvent {
     ConnectionOpened {
         connection_id: ConnectionId,
         origin: ConnectionOrigin,
+        auth: Option<crate::ConnectionAuth>,
         writer: mpsc::Sender<QueuedOutgoingMessage>,
         disconnect_sender: Option<CancellationToken>,
     },

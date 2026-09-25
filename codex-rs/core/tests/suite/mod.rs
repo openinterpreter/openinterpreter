@@ -39,6 +39,7 @@ mod additional_context;
 mod agent_execution;
 mod agent_websocket;
 mod agents_md;
+mod app_tool_exposure;
 mod apply_patch_cli;
 mod apply_patch_serialization;
 #[cfg(not(target_os = "windows"))]
@@ -54,11 +55,11 @@ mod client_websockets;
 mod cloud_config;
 mod code_mode;
 mod code_mode_elicitation;
+mod codex_apps_protocol;
 mod codex_delegate;
 mod collaboration_instructions;
 mod compact;
 mod compact_remote;
-mod compact_remote_parity;
 mod compact_resume_fork;
 mod context_annotations;
 mod current_time_reminder;
@@ -66,6 +67,7 @@ mod cyber_access_program;
 mod cyber_exec_policy;
 mod daybreak_access;
 mod deprecation_notice;
+mod direct_tool_metadata;
 mod exec;
 mod exec_policy;
 #[cfg(not(target_os = "windows"))]
@@ -74,9 +76,22 @@ mod external_auth;
 mod fork_thread;
 mod git_enrichment;
 mod guardian_authorization;
+#[path = "guardian_cached_score_tests.rs"]
+mod guardian_cached_score;
+#[path = "guardian_checkpoint_migration_tests.rs"]
+mod guardian_checkpoint_migration;
+// Uses the same command-approval harness as guardian_review below.
+mod canonical_plugin_connectors;
+mod gateway_auth;
+#[cfg(not(target_os = "windows"))]
+mod guardian_context_budget;
 mod guardian_history;
 mod guardian_mcp_elicitation;
+#[cfg(not(target_os = "windows"))]
+#[path = "guardian_persistence_tests.rs"]
+mod guardian_persistence;
 mod guardian_retained_context;
+mod guardian_retry;
 #[cfg(not(target_os = "windows"))]
 mod guardian_review;
 #[cfg(not(target_os = "windows"))]
@@ -96,24 +111,33 @@ mod interrupt_hooks;
 mod items;
 mod json_result;
 mod live_cli;
+#[path = "managed_threads_tests.rs"]
+mod managed_threads;
 mod mcp_auth_elicitation;
 mod mcp_auth_refresh;
+mod mcp_ema_config;
+mod mcp_extension_protocol;
 mod mcp_optional_startup_grace;
 #[cfg(unix)]
 mod mcp_refresh_cleanup;
 mod mcp_startup_refresh_http_proxy;
+mod mcp_subagent_elicitation;
 mod mcp_tool_cache;
 mod mcp_tool_exposure;
 mod mcp_turn_metadata;
 mod mcp_user_verification;
 mod model_overrides;
+#[path = "model_provider_requirements_tests.rs"]
+mod model_provider_requirements;
 mod model_runtime_selectors;
 mod model_switching;
 mod model_visible_layout;
+mod models_cache_auth;
 mod models_cache_ttl;
 mod models_etag_responses;
 mod multi_agent_mode;
 mod multi_agent_resume;
+mod multi_agent_tool_descriptions;
 #[cfg(unix)]
 mod multi_exec_server_sandbox;
 mod network_approval;
@@ -121,6 +145,7 @@ mod openai_file_mcp;
 mod otel;
 mod override_updates;
 mod pending_input;
+mod pending_input_persistence;
 mod permissions_messages;
 mod personality;
 mod plugins;
@@ -130,6 +155,7 @@ mod prompt_debug_tests;
 mod quota_exceeded;
 mod realtime_conversation;
 mod realtime_initial_items;
+mod realtime_misalignment;
 mod realtime_sideband_endpoint;
 mod reasoning_effort_override;
 mod remote_env;
@@ -156,6 +182,7 @@ mod rollout_compression;
 mod rollout_list_find;
 mod safety_buffering;
 mod safety_check_downgrade;
+mod scenarios;
 mod search_tool;
 mod settings_commits;
 mod settings_constraints;
@@ -165,6 +192,7 @@ mod skills;
 mod skills_extension;
 mod spawn_agent_description;
 mod sqlite_state;
+mod startup_cancellation;
 mod step_settings;
 mod step_settings_snapshots;
 mod stream_error_allows_next_turn;
@@ -197,3 +225,6 @@ mod window_headers;
 mod windows_sandbox;
 mod workspace_roots;
 mod worktree_trust;
+
+#[path = "guardian_sender_messages_tests.rs"]
+mod guardian_sender_messages;

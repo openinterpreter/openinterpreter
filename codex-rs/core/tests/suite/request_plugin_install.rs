@@ -5,6 +5,8 @@ use anyhow::Result;
 use codex_config::types::ToolSuggestDisabledTool;
 use codex_config::types::ToolSuggestDiscoverable;
 use codex_config::types::ToolSuggestDiscoverableType;
+use codex_core::NewThread;
+use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_core::config::Config;
 use codex_core_plugins::startup_sync::curated_plugins_repo_path;
@@ -26,6 +28,8 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
 use codex_utils_path_uri::PathUri;
@@ -137,10 +141,10 @@ fn configure_apps_without_search_tool(config: &mut Config, apps_base_url: &str) 
     let model = model_catalog
         .models
         .iter_mut()
-        .find(|model| model.slug == "gpt-5.4")
-        .expect("gpt-5.4 exists in bundled models.json");
+        .find(|model| model.slug == "gpt-5.5")
+        .expect("gpt-5.5 exists in bundled models.json");
     config.chatgpt_base_url = apps_base_url.to_string();
-    config.model = Some("gpt-5.4".to_string());
+    config.model = Some("gpt-5.5".to_string());
     config.tool_suggest.discoverables = vec![ToolSuggestDiscoverable {
         kind: ToolSuggestDiscoverableType::Connector,
         id: DISCOVERABLE_GMAIL_ID.to_string(),
@@ -746,6 +750,117 @@ async fn unavailable_recommendations_preserve_legacy_workflow(
     Ok(())
 }
 
+#[test_case(false; "legacy connector")]
+#[test_case(true; "recommended plugin")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subagent_install_request_returns_root_only_error(
+    recommended_plugins_enabled: bool,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let apps_server = AppsTestServer::mount(&server).await?;
+    let (recommendations, arguments) = if recommended_plugins_enabled {
+        (
+            json!({
+                "enabled": true,
+                "plugins": [{
+                    "id": REMOTE_CALENDAR_PLUGIN_ID,
+                    "name": "calendar",
+                    "display_name": "Calendar"
+                }]
+            }),
+            json!({
+                "plugin_id": REMOTE_CALENDAR_PLUGIN_CONFIG_ID,
+                "suggest_reason": "Use Calendar for this task"
+            }),
+        )
+    } else {
+        (
+            json!({"enabled": false, "plugins": []}),
+            json!({
+                "tool_type": "connector",
+                "action_type": "install",
+                "tool_id": DISCOVERABLE_GMAIL_ID,
+                "suggest_reason": "Use Gmail for this task"
+            }),
+        )
+    };
+    mount_recommendations(
+        &server,
+        ResponseTemplate::new(200).set_body_json(recommendations),
+    )
+    .await;
+    let call_id = "subagent-plugin-install";
+    let mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(
+                    call_id,
+                    REQUEST_PLUGIN_INSTALL_TOOL_NAME,
+                    &arguments.to_string(),
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+    let test = build_test(&server, &apps_server).await?;
+    let NewThread {
+        thread: subagent, ..
+    } = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: test.session_configured.thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            ..StartThreadOptions::new(test.config.clone())
+        })
+        .await?;
+    subagent
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "Use the requested integration.".to_string(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
+                approval_policy: Some(AskForApproval::Never),
+                permission_profile: Some(PermissionProfile::Disabled),
+                ..Default::default()
+            }),
+        )
+        .await?;
+    wait_for_event(&subagent, |event| {
+        assert!(
+            !matches!(event, EventMsg::ElicitationRequest(_)),
+            "subagents must not request plugin installation"
+        );
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1].function_call_output_text(call_id).as_deref(),
+        Some("request_plugin_install can only be used by the root thread")
+    );
+    subagent.shutdown_and_wait().await?;
+    test.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
 #[test_case(true; "enabled plugin skill")]
 #[test_case(false; "disabled plugin skill")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1059,7 +1174,7 @@ async fn run_remote_plugin_install_metadata_case() -> Result<()> {
                 "source": "endpoint_recommendation",
                 "thread_id": thread_id,
                 "turn_id": turn_id,
-                "model_slug": "gpt-5.4",
+                "model_slug": "gpt-5.5",
                 "product_client_id": codex_login::default_client::originator().value,
             }
         })

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -7,6 +6,7 @@ use anyhow::Result;
 use codex_config::HookStateToml;
 use codex_config::McpServerConfig;
 use codex_config::test_support::CloudConfigBundleFixture;
+use codex_core::ForkSnapshot;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInput;
 use codex_core::TurnInputRequest;
@@ -15,16 +15,21 @@ use codex_core::config::Config;
 use codex_core::config::Constrained;
 use codex_core::config::ThreadStoreConfig;
 use codex_features::Feature;
+use codex_history::InitialHistory;
 use codex_history::RolloutItem;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::built_in_model_providers;
+use codex_models_manager::bundled_models_response;
 use codex_plugin::PluginHookSource;
 use codex_plugin::PluginId;
 use codex_protocol::items::parse_hook_prompt_fragment;
+use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::NetworkPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ModelsResponse;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -33,9 +38,13 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::TurnSettingsUpdate;
+use codex_protocol::protocol::TurnSettingsUpdateOutcome;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
+use codex_protocol::request_user_input::RequestUserInputAnswer;
+use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_protocol::user_input::UserInput;
 use codex_thread_store::InMemoryThreadStore;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -67,10 +76,12 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::test_target_os;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_match;
 use core_test_support::wait_for_mcp_server;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -1613,6 +1624,157 @@ async fn session_start_runs_before_user_prompt_submit_on_first_turn() -> Result<
 }
 
 #[tokio::test]
+async fn forked_thread_matches_fork_session_start_without_repeating_startup_context() -> Result<()>
+{
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![ev_completed("resp-1")]),
+            sse(vec![ev_completed("resp-2")]),
+            sse(vec![ev_completed("resp-fork")]),
+        ],
+    )
+    .await;
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            let script_path = home.join("session_start_hook.py");
+            fs::write(
+                &script_path,
+                r#"import json
+import sys
+
+source = json.load(sys.stdin)["source"]
+print(json.dumps({"hookSpecificOutput": {
+    "hookEventName": "SessionStart",
+    "additionalContext": source + " hook context"
+}}))
+"#,
+            )
+            .expect("write session start hook");
+            let groups = ["^startup$", "^fork$"].map(|matcher| {
+                serde_json::json!({
+                    "matcher": matcher,
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!("python3 {}", script_path.display()),
+                    }],
+                })
+            });
+            fs::write(
+                home.join("hooks.json"),
+                serde_json::json!({"hooks": {"SessionStart": groups}}).to_string(),
+            )
+            .expect("write hooks.json");
+        })
+        .with_config(trust_discovered_hooks);
+    // Command hooks run on the host and require a host-native working directory.
+    let test = builder.build(&server).await?;
+    test.submit_turn("first prompt").await?;
+    test.submit_turn("second prompt").await?;
+    test.codex.flush_rollout().await?;
+
+    let forked = test
+        .thread_manager
+        .fork_thread(
+            ForkSnapshot::TruncateBeforeNthUserMessage(1),
+            StartThreadOptions::new(test.config.clone()),
+            test.codex.rollout_path().expect("parent rollout path"),
+        )
+        .await?
+        .thread;
+    forked
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "edited second prompt".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&forked, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 3);
+    let hook_contexts = requests[2]
+        .message_input_texts("developer")
+        .into_iter()
+        .filter(|message| {
+            matches!(
+                message.as_str(),
+                "startup hook context" | "fork hook context"
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        hook_contexts,
+        vec!["startup hook context", "fork hook context"]
+    );
+
+    forked.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_history_runs_resume_session_start_hook() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let response = mount_sse_once(&server, sse(vec![ev_completed("resp-resume")])).await;
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            write_resume_and_compact_session_start_hook_with_context(
+                home,
+                "resume hook context",
+                "compact hook context",
+            )
+            .expect("write resume session start hook");
+        })
+        .with_config(trust_discovered_hooks);
+    // Command hooks run on the host and require a host-native working directory.
+    let test = builder.build(&server).await?;
+    let history = InitialHistory::Forked(vec![RolloutItem::ResponseItem(
+        responses::user_message_item("supplied history").into(),
+    )]);
+    let resumed = test
+        .thread_manager
+        .resume_thread_with_history(
+            test.config.clone(),
+            history,
+            test.thread_manager.auth_manager(),
+            /*parent_trace*/ None,
+            ClientMcpExtensions::default(),
+        )
+        .await?
+        .thread;
+    resumed
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "continue".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&resumed, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let hook_inputs = read_session_start_hook_inputs(test.codex_home_path())?;
+    assert_eq!(
+        hook_inputs
+            .iter()
+            .filter_map(|input| input.get("source").and_then(Value::as_str))
+            .collect::<Vec<_>>(),
+        vec!["resume"],
+    );
+    assert!(
+        response
+            .single_request()
+            .message_input_texts("developer")
+            .iter()
+            .any(|message| message == "resume hook context"),
+    );
+
+    resumed.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn async_hook_context_is_injected_into_the_active_turn() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -2673,11 +2835,11 @@ async fn blocked_queued_prompt_does_not_strand_earlier_accepted_prompt(
             body: sse_event(ev_output_text_delta("first ")),
         },
         StreamingSseChunk {
-            gate: None,
+            gate: Some(gate_completed_rx),
             body: sse_event(ev_message_item_done("msg-1", "first response")),
         },
         StreamingSseChunk {
-            gate: Some(gate_completed_rx),
+            gate: None,
             body: sse_event(ev_completed("resp-1")),
         },
     ];
@@ -2745,7 +2907,10 @@ async fn blocked_queued_prompt_does_not_strand_earlier_accepted_prompt(
     .into_iter()
     .collect::<Vec<_>>();
 
-    sleep(Duration::from_millis(100)).await;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
 
     assert_eq!(requests.len(), 2);
 
@@ -2780,7 +2945,9 @@ async fn blocked_queued_prompt_does_not_strand_earlier_accepted_prompt(
     );
     assert_eq!(
         retained["next_order"],
-        json!(if thread_context_enabled { 3 } else { 0 })
+        // Three accepted input positions (including the blocked prompt), then
+        // the two completed assistant messages.
+        json!(if thread_context_enabled { 5 } else { 0 })
     );
 
     let hook_inputs = read_user_prompt_submit_hook_inputs(test.codex_home_path())?;
@@ -3447,6 +3614,143 @@ async fn pre_tool_use_json_deny_blocks_exec_command_before_execution() -> Result
             .as_str()
             .is_some_and(|turn_id| !turn_id.is_empty())
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pre_tool_use_hook_model_tracks_step_after_a_turn_update() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let request_user_input_call_id = "pause-before-pretooluse-exec-command";
+    let call_id = "pretooluse-exec-command";
+    let model_a = "pretooluse-attribution-a";
+    let model_b = "pretooluse-attribution-b";
+    let command = "echo attribution";
+    let args = serde_json::json!({ "cmd": command });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(
+                    request_user_input_call_id,
+                    "request_user_input",
+                    r#"{"questions":[{"id":"continue","header":"Continue","question":"Continue?","options":[{"label":"Yes (Recommended)","description":"Run it."},{"label":"No","description":"Stop."}]}]}"#,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                core_test_support::responses::ev_function_call(
+                    call_id,
+                    "exec_command",
+                    &serde_json::to_string(&args)?,
+                ),
+                ev_completed("resp-2"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-3"),
+                ev_assistant_message("msg-1", "hook blocked it"),
+                ev_completed("resp-3"),
+            ]),
+        ],
+    )
+    .await;
+
+    let base_model = bundled_models_response()
+        .expect("bundled models should parse")
+        .models
+        .into_iter()
+        .find(|model| model.slug == "gpt-5.4")
+        .expect("bundled gpt-5.4 model");
+    let models = [model_a, model_b]
+        .into_iter()
+        .map(|slug| {
+            let mut model = base_model.clone();
+            model.slug = slug.to_string();
+            model
+        })
+        .collect();
+    let mut builder = test_codex()
+        .with_model(model_a)
+        .with_pre_build_hook(|home| {
+            write_pre_tool_use_hook(home, Some("^Bash$"), "json_deny", "blocked by pre hook")
+                .expect("failed to write pre tool use hook test fixture");
+        })
+        .with_config(move |config| {
+            trust_discovered_hooks(config);
+            for feature in [
+                Feature::StepModelSwitching,
+                Feature::DefaultModeRequestUserInput,
+            ] {
+                config
+                    .features
+                    .enable(feature)
+                    .expect("test config should allow feature update");
+            }
+            config.model_catalog = Some(ModelsResponse { models });
+        });
+    let test = builder.build(&server).await?;
+
+    let (sandbox_policy, permission_profile) =
+        turn_permission_fields(PermissionProfile::Disabled, test.config.cwd.as_path());
+    test.codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "run the blocked shell command".to_string(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
+                approval_policy: Some(AskForApproval::Never),
+                sandbox_policy: Some(sandbox_policy),
+                permission_profile,
+                ..Default::default()
+            }),
+        )
+        .await?;
+
+    let request = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::RequestUserInput(request) => Some(request.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(request.call_id, request_user_input_call_id);
+    let (reply, outcome) = oneshot::channel();
+    test.codex
+        .submit(Op::TurnSettings {
+            turn_id: request.turn_id.clone(),
+            update: TurnSettingsUpdate {
+                model: Some(model_b.to_string()),
+                effort: Some(Some(ReasoningEffort::High)),
+                ..Default::default()
+            },
+            reply,
+        })
+        .await?;
+    assert_eq!(outcome.await?, TurnSettingsUpdateOutcome::Applied);
+    test.codex
+        .submit(Op::UserInputAnswer {
+            id: request.turn_id,
+            response: RequestUserInputResponse {
+                answers: HashMap::from([(
+                    "continue".to_string(),
+                    RequestUserInputAnswer {
+                        answers: vec!["Yes (Recommended)".to_string()],
+                    },
+                )]),
+            },
+        })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    assert_eq!(responses.requests().len(), 3);
+    let hook_inputs = read_pre_tool_use_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(hook_inputs[0]["model"], model_b);
 
     Ok(())
 }

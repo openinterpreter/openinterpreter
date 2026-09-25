@@ -1,9 +1,15 @@
 //! The chat composer is the bottom-pane text input state machine.
 //!
-//! It edits the [`TextArea`] buffer and attachment elements, routes popup keys, promotes
-//! completed slash commands to atomic elements, and handles Enter submission/newlines.
-//! It also shows Luna Reserve's yellow prompt arrow and detects unbracketed paste bursts
-//! from raw key streams, particularly on Windows.
+//! It edits [`TextArea`] and attachments, routes popup keys, makes completed slash commands atomic,
+//! and handles Enter/newlines. It shows Luna Reserve's yellow arrow and detects unbracketed paste
+//! bursts, especially on Windows. Copy shortcuts and right clicks preserve selected draft text.
+//! The live voice strip renders after effort ignition, followed by the Astra sparkle when eligible.
+//! Owned transcripts keep persistent status below the composer and hints on a separate final row.
+//! Shortcut help expands above the composer, with its close hint replacing the final shortcuts row
+//! so input and persistent status stay anchored when help opens or closes.
+//! Escape dismisses visible shortcut help before editing, transcript backtracking, or interruption.
+//! Transcript interactions borrow the hint footer through `ComposerRenderOptions`;
+//! its resolved presentation drives height, painting, and the focused cursor together.
 //!
 //! The plain-text preset keeps command prefixes literal, including `!`, so Enter and Tab
 //! submit ordinary text without enabling shell mode.
@@ -26,6 +32,13 @@
 //! Backspace on an empty Vim search query cancels search and any pending operator.
 //!
 //! # Completion and Popup Dismissal
+//!
+//! All completion suggestions render above the composer and preserve its footer.
+//! Owned transcript frames overlay suggestions with blank rows above and below, without reserving
+//! layout space. Those rows show scroll arrows when suggestions extend beyond the visible menu.
+//! Warning and transcript views hide suggestions without losing the draft, query, or selection.
+//! Measurement, painting, and cursor placement share that layout, including clipped views.
+//! Unified mention tabs retain their position across filters; Left/Right also works at a bare `@`.
 //!
 //! Popup targeting resolves an editable token range around the cursor and treats atomic text
 //! elements as hard boundaries. When that range begins immediately after an atomic element, the
@@ -59,6 +72,7 @@
 //! Recall moves the cursor to the end. Question editors copy primary history on recall/search;
 //! draft capture cancels previews, and restoration resets traversal.
 //! Ctrl+R searches history in the footer and previews matches in the composer.
+//! Typing and pasting edit the active search query, including large pastes and image paths.
 //! Enter accepts the preview; Esc restores the original draft.
 //! Vim undo/redo snapshots complete drafts and groups direct edits with active Vim transactions.
 //! An active edit keeps one separately capped snapshot; canceling does not evict committed history.
@@ -73,8 +87,10 @@
 //!
 //! # Startup Draft Handoff
 //!
-//! Startup uses a provisional plain-text composer: editing remains available, but submission,
-//! popups, attachments, and other actions are disabled. [`ComposerDraftSnapshot`] transfers its
+//! Startup uses a provisional plain-text composer: editing remains available while its owner
+//! records one submit intent. Popups, attachments, and direct dispatch stay disabled. After the
+//! protected startup gates finish, `prepare_startup_submission` applies normal submission parsing
+//! once, including expansion of paste placeholders. [`ComposerDraftSnapshot`] transfers its
 //! text, cursor, pending paste placeholders, local history, and recent activity to the fully
 //! initialized composer.
 //! `ChatWidget` merges the draft with any existing initial prompt and attachments, rebasing cursor
@@ -102,12 +118,15 @@
 //! When these paths clear the visible textarea after a successful submit or slash-command
 //! dispatch, they intentionally preserve the textarea kill buffer. That lets users `Ctrl+K` part
 //! of a draft, perform a composer action such as changing reasoning level, and then `Ctrl+Y` the
-//! killed text back into the now-empty draft.
+//! killed text back into the now-empty draft. Replacing the chat widget carries that buffer into
+//! the fresh composer so Vim yanks survive `/new` and thread switches.
 //!
 //! The numeric auto-submit path used by the slash popup performs the same pending-paste expansion
 //! and attachment pruning, and clears pending paste state on success.
 //! Slash commands with arguments (like `/plan` and `/review`) reuse the same preparation path so
 //! pasted content and text elements are preserved when extracting args.
+//! Commands requiring dispatch validation retain their draft and defer busy-state checks to
+//! `ChatWidget`, which has the thread state needed to accept or reject the command.
 //!
 //! # Parent-Owned Thread Mode
 //!
@@ -117,8 +136,11 @@
 //! navigation slash commands remain available so users can leave or manage the view. Transcript
 //! exports also remain available, including an explicit destination filename.
 //!
-//! During reconnection, `handle_disconnected_key` edits the draft directly without
-//! popup dispatch or submission. Enter and Tab leave the draft intact until reconnection succeeds.
+//! During reconnection, `handle_restricted_key` edits the draft directly without popup dispatch,
+//! composer shortcuts, or submission; `?` becomes literal input. Enter and Tab leave the draft
+//! intact until reconnection succeeds, except for the local `/warnings` command.
+//! When connected but the thread is unavailable, configured
+//! submit keys may dispatch explicitly allowed recovery and local commands; other drafts stay put.
 //! Collapsed pastes expand into editable text so the full draft can be copied before quitting.
 //!
 //! # Reasoning Effort Animations
@@ -130,6 +152,36 @@
 //! Repeated selections do not restart either effect, dropping below Max clears them, and
 //! restoration clears any transition queued while replaying the saved session. Rendering advances
 //! active transitions through the frame requester until they finish.
+//!
+//! # Astra Sparkle Eligibility
+//!
+//! A confirmed new task can offer one flourish when it starts with Astra or the user switches to
+//! Astra through `/model` before entering ordinary prompt content. The draft tracks whether it is
+//! untouched, contains a recognized slash command, or is permanently dismissed. An eligible slash
+//! command keeps the opportunity while being typed, dispatched, or erased; a fresh Astra response
+//! can arm the effect while the command is still pending. Stars stay hidden until the composer is
+//! empty. Commands that insert draft content, ordinary typed, pasted, or restored drafts,
+//! attachments, and real work dismiss the opportunity even if that content is later cleared.
+//! Ordinary disconnected edits also dismiss it immediately, even when erased before rendering;
+//! a recognized command typed and erased offline still preserves the opportunity.
+//! Opening history search, typing or pasting its query, and canceling it with `Esc` or `Ctrl+C`
+//! temporarily hide an active field without restarting its deadline. Any buffered keys are
+//! integrated into the original draft without being classified again. A preview does not count
+//! as a draft until the user accepts a nonempty match.
+//! Toggling shortcut help on an empty composer also hides an active field until help closes,
+//! without restarting its deadline, and leaves an unused opportunity intact. A literal `?` is
+//! ordinary prompt content.
+//! Startup draft snapshots carry this distinction so erased ordinary input does not become
+//! untouched on handoff.
+//!
+//! Sparkle key and paste handling runs only for input routed to the composer; ordinary characters
+//! are observed before the paste-burst buffer can hide the first edit. An edit that flushes and
+//! erases a held slash also clears the tracked command. An empty main-composer `Esc`
+//! can stop the active flourish. Once shown, it fades out by 15 seconds; command entry, popups, and
+//! focus loss hide the field without restarting that deadline. Rendering runs after the textarea,
+//! placeholder, effort ignition, and voice strip, and draws only in eligible blank cells without
+//! overwriting the placeholder or normal cursor. Hidden frames do not schedule animation redraws;
+//! motion settings, the starfield preference, and true-color support also gate the effect.
 //!
 //! # Large Paste Placeholders
 //!
@@ -164,7 +216,7 @@
 //! # Non-bracketed Paste Bursts
 //!
 //! On some terminals (especially on Windows), pastes arrive as a rapid sequence of
-//! `KeyCode::Char` and `KeyCode::Enter` key events instead of a single paste event.
+//! `KeyCode::Char`, `KeyCode::Enter`, and `KeyCode::Tab` key events instead of a single paste event.
 //!
 //! To avoid misinterpreting these bursts as real typing (and to prevent transient UI effects like
 //! shortcut overlays toggling on a pasted `?`), we feed text-producing character events (plain,
@@ -184,6 +236,7 @@
 //! The burst detector can also be disabled (`disable_paste_burst`), which bypasses the state
 //! machine and treats the key stream as normal typing. When toggling from enabled → disabled, the
 //! composer flushes/clears any in-flight burst state so it cannot leak into subsequent input.
+//! Mouse edits flush pending typing; selection and copy behavior lives in [`mouse`].
 //!
 //! For the detailed burst state machine, see `codex-rs/tui/src/bottom_pane/paste_burst.rs`.
 //!
@@ -195,9 +248,12 @@
 //!   input to either buffer it or insert normally.
 //! - [`ChatComposer::handle_non_ascii_char`]: handles the non-ASCII/IME path without holding the
 //!   first char, while still allowing paste detection via retro-capture.
+//! - Unmodified Tab joins detected bursts, including short Unicode prefixes, before popup dispatch.
+//!   Expired bursts are flushed first so manual Tab keeps its normal shortcut behavior.
 //! - [`ChatComposer::flush_paste_burst_if_due`]/[`ChatComposer::handle_paste_burst_flush`]: called
-//!   from UI ticks to turn a pending burst into either an explicit paste (`handle_paste`) or a
-//!   normal typed character.
+//!   from UI ticks to integrate a pending burst via [`ChatComposer::apply_paste`] or insert a
+//!   held single character. Explicit terminal paste events use [`ChatComposer::handle_paste`] to
+//!   classify input first; buffered keys have already been classified.
 //!
 //! # Input Disabled Mode
 //!
@@ -281,7 +337,7 @@ use super::skill_popup::MentionItem;
 use super::skill_popup::SkillPopup;
 use super::slash_commands::ServiceTierCommand;
 use super::slash_commands::SlashCommandItem;
-use crate::bottom_pane::paste_burst::FlushResult;
+use super::voice_strip::VoiceStrip;
 use crate::history_cell::sanitize_user_text;
 use crate::key_hint::KeyBindingListExt;
 use crate::keymap::EditorKeymap;
@@ -304,21 +360,31 @@ use codex_protocol::user_input::TextElement;
 mod agents_navigation;
 mod attachment_state;
 mod completion_target;
+mod composer_layout;
 mod draft_state;
 mod footer_state;
 mod history_search;
 mod inline_input;
+mod mouse;
+mod paste_input;
 mod popup_state;
 mod reconnect;
+pub(crate) use reconnect::RestrictedInputMode;
 mod slash_input;
 mod sparkle;
+mod status_surface;
 mod vim_history;
 mod vim_search;
+mod warning_notice;
 
 use self::attachment_state::AttachmentState;
 use self::draft_state::ComposerMentionBinding;
 use self::draft_state::DraftState;
+pub(crate) use self::footer_state::CommandPopupPlacement;
+use self::footer_state::ComposerLayout;
+pub(crate) use self::footer_state::ComposerRenderOptions;
 use self::footer_state::FooterState;
+pub(crate) use self::footer_state::TranscriptFooter;
 use self::history_search::HistorySearchSession;
 use self::popup_state::ActivePopup;
 use self::popup_state::DismissedToken;
@@ -332,6 +398,7 @@ use crate::app_event::ConnectorsSnapshot;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::LocalImageAttachment;
 use crate::bottom_pane::MentionBinding;
+use crate::bottom_pane::textarea::KillBufferSnapshot;
 use crate::bottom_pane::textarea::TextArea;
 use crate::clipboard_paste::normalize_pasted_path;
 use crate::clipboard_paste::pasted_image_format;
@@ -420,7 +487,6 @@ fn parent_owned_command_is_allowed(command: SlashCommand, args: &str) -> bool {
                 | SlashCommand::Vim
                 | SlashCommand::Keymap
                 | SlashCommand::ElevateSandbox
-                | SlashCommand::SandboxReadRoot
                 | SlashCommand::Experimental
                 | SlashCommand::Memories
                 | SlashCommand::Quit
@@ -434,6 +500,8 @@ fn parent_owned_command_is_allowed(command: SlashCommand, args: &str) -> bool {
                 | SlashCommand::Import
                 | SlashCommand::Hooks
                 | SlashCommand::Status
+                | SlashCommand::Warnings
+                | SlashCommand::Daemon
                 | SlashCommand::Usage
                 | SlashCommand::Ide
                 | SlashCommand::DebugConfig
@@ -523,10 +591,11 @@ pub(crate) struct ChatComposer {
     footer: FooterState,
     has_focus: bool,
     frame_requester: Option<FrameRequester>,
+    sparkle: sparkle::Sparkle,
     effort_tier: Option<EffortTier>,
     effort_animation_style: Option<IgnitionStyle>,
     effort_ignition: Option<EffortIgnition>,
-    astra_sparkle: Option<sparkle::Sparkle>,
+    voice_strip: Option<VoiceStrip>,
     effort_status_line_transition: Option<EffortStatusLineTransition>,
     effort_observed: bool,
     luna_reserve_active: bool,
@@ -553,7 +622,7 @@ pub(crate) struct ChatComposer {
     service_tier_commands: Vec<ServiceTierCommand>,
     mentions_v2_enabled: bool,
     goal_command_enabled: bool,
-    personality_command_enabled: bool,
+    voice_command_enabled: bool,
     worktrees_enabled: bool,
     windows_degraded_sandbox_active: bool,
     side_conversation_active: bool,
@@ -597,9 +666,8 @@ pub(crate) struct ComposerDraftSnapshot {
     pub(crate) pending_pastes: Vec<(String, String)>,
     pub(crate) startup_local_history: Vec<HistoryEntry>,
     pub(crate) last_composer_activity_at: Option<Instant>,
+    pub(crate) sparkle_draft: sparkle::SparkleDraft,
 }
-
-const FOOTER_SPACING_HEIGHT: u16 = 0;
 
 impl ChatComposer {
     fn slash_input(&self) -> SlashInput<'_> {
@@ -672,8 +740,13 @@ impl ChatComposer {
                 active_agent_label: None,
                 external_editor_key: default_keymap
                     .primary_hint(KeymapContext::Global, "open_external_editor"),
+                warning_notice_area: std::cell::Cell::default(),
+                show_warnings_key: default_keymap
+                    .primary_hint(KeymapContext::Global, "open_warnings"),
                 show_transcript_key: default_keymap
                     .primary_hint(KeymapContext::Global, "open_transcript"),
+                find_transcript_key: default_keymap
+                    .primary_hint(KeymapContext::Global, "find_transcript"),
                 insert_newline_key: footer_insert_newline_key(
                     &default_keymap.editor.insert_newline,
                     use_shift_enter_hint,
@@ -691,10 +764,11 @@ impl ChatComposer {
             },
             has_focus: has_input_focus,
             frame_requester: None,
+            sparkle: sparkle::Sparkle::default(),
             effort_tier: None,
             effort_animation_style: None,
             effort_ignition: None,
-            astra_sparkle: None,
+            voice_strip: None,
             effort_status_line_transition: None,
             effort_observed: false,
             luna_reserve_active: false,
@@ -717,7 +791,7 @@ impl ChatComposer {
             service_tier_commands: Vec::new(),
             mentions_v2_enabled: false,
             goal_command_enabled: false,
-            personality_command_enabled: false,
+            voice_command_enabled: false,
             worktrees_enabled: false,
             windows_degraded_sandbox_active: false,
             side_conversation_active: false,
@@ -924,6 +998,16 @@ impl ChatComposer {
         self.goal_command_enabled = enabled;
     }
 
+    pub fn set_voice_command_enabled(&mut self, enabled: bool) {
+        self.voice_command_enabled = enabled;
+    }
+
+    /// Refresh the event destination when a retained editor survives reconnection.
+    #[allow(dead_code, reason = "Used by later layers of the TUI refresh stack.")]
+    pub(crate) fn set_app_event_sender(&mut self, app_event_tx: AppEventSender) {
+        self.app_event_tx = app_event_tx;
+    }
+
     /// Replace composer, editor, and footer-hint key bindings from one runtime snapshot.
     ///
     /// Submit and queue bindings are cached here because composer dispatch must
@@ -941,8 +1025,11 @@ impl ChatComposer {
         self.draft.textarea.set_keymap_bindings(keymap);
         self.footer.external_editor_key =
             keymap.primary_hint(KeymapContext::Global, "open_external_editor");
+        self.footer.show_warnings_key = keymap.primary_hint(KeymapContext::Global, "open_warnings");
         self.footer.show_transcript_key =
             keymap.primary_hint(KeymapContext::Global, "open_transcript");
+        self.footer.find_transcript_key =
+            keymap.primary_hint(KeymapContext::Global, "find_transcript");
         self.footer.insert_newline_key =
             match keymap.primary_hint(KeymapContext::Editor, "insert_newline") {
                 hint @ Some(ShortcutHint::Chord { .. }) => hint,
@@ -993,10 +1080,6 @@ impl ChatComposer {
         self.footer.ide_context_active = active;
     }
 
-    pub fn set_personality_command_enabled(&mut self, enabled: bool) {
-        self.personality_command_enabled = enabled;
-    }
-
     pub fn set_side_conversation_active(&mut self, active: bool) {
         self.side_conversation_active = active;
     }
@@ -1020,97 +1103,11 @@ impl ChatComposer {
     pub fn set_windows_degraded_sandbox_active(&mut self, enabled: bool) {
         self.windows_degraded_sandbox_active = enabled;
     }
-    fn layout_areas(&self, area: Rect) -> [Rect; 4] {
-        self.layout_areas_with_textarea_right_reserve(area, /*textarea_right_reserve*/ 0)
-    }
-
-    fn layout_areas_with_textarea_right_reserve(
-        &self,
-        area: Rect,
-        textarea_right_reserve: u16,
-    ) -> [Rect; 4] {
-        let footer_props = self.footer_props();
-        let footer_hint_height = self
-            .custom_footer_height()
-            .unwrap_or_else(|| footer_height(&footer_props));
-        let footer_spacing = Self::footer_spacing(footer_hint_height);
-        let footer_total_height = footer_hint_height + footer_spacing;
-        let popup_constraint = match &self.popups.active {
-            ActivePopup::Command(popup) => {
-                Constraint::Max(popup.calculate_required_height(area.width))
-            }
-            ActivePopup::File(popup) => Constraint::Max(popup.calculate_required_height()),
-            ActivePopup::Skill(popup) => {
-                Constraint::Max(popup.calculate_required_height(area.width))
-            }
-            ActivePopup::MentionV2(popup) => {
-                Constraint::Max(popup.calculate_required_height(area.width))
-            }
-            ActivePopup::None => Constraint::Max(footer_total_height),
-        };
-        let [composer_rect, popup_rect] =
-            Layout::vertical([Constraint::Min(3), popup_constraint]).areas(area);
-        let mut textarea_rect = composer_rect.inset(Insets::tlbr(
-            /*top*/ 1,
-            LIVE_PREFIX_COLS,
-            /*bottom*/ 1,
-            /*right*/ 1u16.saturating_add(textarea_right_reserve),
-        ));
-        let remote_images_height = self
-            .attachments
-            .remote_image_lines()
-            .len()
-            .try_into()
-            .unwrap_or(u16::MAX)
-            .min(textarea_rect.height.saturating_sub(1));
-        let remote_images_separator = u16::from(remote_images_height > 0);
-        let consumed = remote_images_height.saturating_add(remote_images_separator);
-        let remote_images_rect = Rect {
-            x: textarea_rect.x,
-            y: textarea_rect.y,
-            width: textarea_rect.width,
-            height: remote_images_height,
-        };
-        textarea_rect.y = textarea_rect.y.saturating_add(consumed);
-        textarea_rect.height = textarea_rect.height.saturating_sub(consumed);
-        [composer_rect, remote_images_rect, textarea_rect, popup_rect]
-    }
-
-    fn footer_spacing(footer_hint_height: u16) -> u16 {
-        if footer_hint_height == 0 {
-            0
-        } else {
-            FOOTER_SPACING_HEIGHT
-        }
-    }
 
     pub fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        self.cursor_pos_with_textarea_right_reserve(area, /*textarea_right_reserve*/ 0)
+        self.cursor_pos_with_options(area, ComposerRenderOptions::default())
     }
 
-    pub(crate) fn cursor_pos_with_textarea_right_reserve(
-        &self,
-        area: Rect,
-        textarea_right_reserve: u16,
-    ) -> Option<(u16, u16)> {
-        if !self.draft.input_enabled || self.attachments.selected_remote_image_index.is_some() {
-            return None;
-        }
-
-        if let Some(pos) = self
-            .vim_search_cursor_pos(area)
-            .or_else(|| self.history_search_cursor_pos(area))
-        {
-            return Some(pos);
-        }
-
-        let [_, _, textarea_rect, _] =
-            self.layout_areas_with_textarea_right_reserve(area, textarea_right_reserve);
-        let state = *self.draft.textarea_state.borrow();
-        self.draft
-            .textarea
-            .cursor_pos_with_state(textarea_rect, state)
-    }
     /// Returns true if the composer currently contains no user-entered input.
     pub(crate) fn is_empty(&self) -> bool {
         self.draft.textarea.is_empty() && !self.draft.is_bash_mode && self.attachments.is_empty()
@@ -1201,56 +1198,6 @@ impl ChatComposer {
         self.history.record_replayed_submission(entry);
     }
 
-    /// Integrate pasted text into the composer.
-    ///
-    /// Acts as the only place where paste text is integrated, both for:
-    ///
-    /// - Real/explicit paste events surfaced by the terminal, and
-    /// - Non-bracketed "paste bursts" that [`PasteBurst`](super::paste_burst::PasteBurst) buffers
-    ///   and later flushes here.
-    ///
-    /// Behavior:
-    ///
-    /// - If the paste is larger than `LARGE_PASTE_CHAR_THRESHOLD` chars, inserts a placeholder
-    ///   element (expanded on submit) and stores the full text in `pending_pastes`.
-    /// - Otherwise, if the paste looks like an image path, attaches the image and inserts a
-    ///   trailing space so the user can keep typing naturally.
-    /// - Otherwise, inserts the pasted text directly into the textarea.
-    ///
-    /// In all cases, clears any paste-burst Enter suppression state so a real paste cannot affect
-    /// the next user Enter key, then syncs popup state.
-    pub fn handle_paste(&mut self, pasted: String) -> bool {
-        let pasted = pasted.replace("\r\n", "\n").replace('\r', "\n");
-        let pasted = sanitize_user_text(pasted.into());
-        if let Some(query) = self.draft.textarea.vim_query_mut() {
-            query.editor.insert_str(&pasted);
-            return true;
-        }
-        let started_vim_edit = self.begin_direct_vim_edit();
-        let char_count = pasted.chars().count();
-        if char_count > LARGE_PASTE_CHAR_THRESHOLD {
-            let placeholder = self.next_large_paste_placeholder(char_count);
-            self.draft.textarea.insert_element(&placeholder);
-            self.draft
-                .pending_pastes
-                .push((placeholder, pasted.into_owned()));
-        } else if char_count > 1
-            && self.image_paste_enabled()
-            && self.handle_paste_image_path(&pasted)
-        {
-            let cursor = self.draft.textarea.cursor();
-            self.draft.textarea.insert_str_at(cursor, " ");
-        } else {
-            self.insert_str(&pasted);
-        }
-        self.draft.paste_burst.clear_after_explicit_paste();
-        self.sync_popups();
-        if started_vim_edit {
-            self.finish_vim_edit();
-        }
-        true
-    }
-
     pub fn handle_paste_image_path(&mut self, pasted: &str) -> bool {
         let Some(path_buf) = normalize_pasted_path(pasted) else {
             return false;
@@ -1274,41 +1221,13 @@ impl ChatComposer {
         }
     }
 
-    /// Enable or disable paste-burst handling.
-    ///
-    /// `disable_paste_burst` is an escape hatch for terminals/platforms where the burst heuristic
-    /// is unwanted or has already been handled elsewhere.
-    ///
-    /// When transitioning from enabled → disabled, we "defuse" any in-flight burst state so it
-    /// cannot affect subsequent normal typing:
-    ///
-    /// - First, flush any held/buffered text immediately via
-    ///   [`PasteBurst::flush_before_modified_input`], and feed it through `handle_paste(String)`.
-    ///   This preserves user input and routes it through the same integration path as explicit
-    ///   pastes (large-paste placeholders, image-path detection, and popup sync).
-    /// - Then clear the burst timing and Enter-suppression window via
-    ///   [`PasteBurst::clear_after_explicit_paste`].
-    ///
-    /// We intentionally do not use `clear_window_after_non_char()` here: it clears timing state
-    /// without emitting any buffered text, which can leave a non-empty buffer unable to flush
-    /// later (because `flush_if_due()` relies on `last_plain_char_time` to time out).
-    pub(crate) fn set_disable_paste_burst(&mut self, disabled: bool) {
-        let was_disabled = self.draft.disable_paste_burst;
-        self.draft.disable_paste_burst = disabled;
-        if disabled && !was_disabled {
-            if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
-                self.handle_paste(pasted);
-            }
-            self.draft.paste_burst.clear_after_explicit_paste();
-        }
-    }
-
     /// Replace the composer content with text from an external editor.
     /// Clears pending paste placeholders and keeps only attachments whose
     /// placeholder labels still appear in the new text. Image placeholders
     /// are renumbered to `[Image #M+1]..[Image #N]` (where `M` is the number of
     /// remote images). Cursor is placed at the end after rebuilding elements.
     pub(crate) fn apply_external_edit(&mut self, text: String) {
+        self.note_sparkle_replaced_text(&text);
         self.vim_history = VimHistory::default();
         self.draft.pending_pastes.clear();
         let (text, _) = self.imported_text_for_textarea(text, Vec::new());
@@ -1394,7 +1313,7 @@ impl ChatComposer {
     /// footer mode so the visible hints match the new editing surface.
     pub(crate) fn set_vim_enabled(&mut self, enabled: bool) {
         if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
-            self.handle_paste(pasted);
+            self.apply_paste(pasted);
         }
         self.draft.textarea.enable_vim_search();
         self.draft.textarea.set_vim_enabled(enabled);
@@ -1412,6 +1331,14 @@ impl ChatComposer {
     /// Resume text entry after a parent view takes focus, preserving Vim undo history.
     pub(crate) fn resume_text_entry(&mut self) {
         self.draft.textarea.enter_vim_insert_mode();
+    }
+
+    pub(crate) fn take_kill_buffer_snapshot(&mut self) -> KillBufferSnapshot {
+        self.draft.textarea.take_kill_buffer_snapshot()
+    }
+
+    pub(crate) fn restore_kill_buffer_snapshot(&mut self, snapshot: KillBufferSnapshot) {
+        self.draft.textarea.restore_kill_buffer_snapshot(snapshot);
     }
 
     /// Restore draft history transferred from the startup composer.
@@ -1532,6 +1459,9 @@ impl ChatComposer {
     }
 
     pub(crate) fn set_remote_image_urls(&mut self, urls: Vec<String>) {
+        if !self.sparkle.history_preview && !urls.is_empty() {
+            self.dismiss_sparkle();
+        }
         self.attachments
             .set_remote_image_urls(urls, &mut self.draft.textarea);
         self.sync_popups();
@@ -1577,6 +1507,13 @@ impl ChatComposer {
         local_image_paths: Vec<PathBuf>,
         mention_bindings: Vec<MentionBinding>,
     ) {
+        if !self.sparkle.history_preview {
+            if local_image_paths.is_empty() {
+                self.note_sparkle_replaced_text(&text);
+            } else {
+                self.dismiss_sparkle();
+            }
+        }
         // Clear any existing content, placeholders, and attachments first.
         self.footer.flash = None;
         self.vim_history = VimHistory::default();
@@ -1741,7 +1678,7 @@ impl ChatComposer {
     /// Flush buffered typing before clearing so cancellation preserves the complete draft in history.
     pub(crate) fn clear_for_ctrl_c(&mut self) -> Option<String> {
         if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
-            self.handle_paste(pasted);
+            self.apply_paste(pasted);
         }
         if self.is_empty() {
             return None;
@@ -1826,6 +1763,7 @@ impl ChatComposer {
             pending_pastes: self.pending_pastes(),
             startup_local_history: self.history.startup_local_history().to_vec(),
             last_composer_activity_at: None,
+            sparkle_draft: self.sparkle.draft.get(),
         }
     }
 
@@ -1863,9 +1801,12 @@ impl ChatComposer {
 
     /// Insert an attachment placeholder and track it for the next submission.
     pub fn attach_image(&mut self, path: PathBuf) {
+        self.dismiss_sparkle();
         let started_vim_edit = self.begin_direct_vim_edit();
+        let elements_before = self.draft.textarea.element_payloads();
         self.attachments
             .attach_image(&mut self.draft.textarea, path);
+        self.reconcile_deleted_elements(elements_before);
         if started_vim_edit {
             self.finish_vim_edit();
         }
@@ -1885,7 +1826,8 @@ impl ChatComposer {
     ///
     /// Call this from a UI tick to turn paste-burst transient state into explicit textarea edits:
     ///
-    /// - If a burst times out, flush it via `handle_paste(String)`.
+    /// - If a burst times out, integrate it via [`Self::apply_paste`]. Its key events have already
+    ///   been classified; [`Self::handle_paste`] classifies explicit terminal pastes instead.
     /// - If only the first ASCII char was held (flicker suppression) and no burst followed, emit it
     ///   as normal typed input.
     ///
@@ -1952,9 +1894,14 @@ impl ChatComposer {
     }
 
     /// Clear the "press again to quit" hint immediately.
+    ///
+    /// Key routing calls this before dispatching ordinary input, so unrelated footer modes
+    /// such as shortcut help must remain available to their own toggle handlers.
     pub fn clear_quit_shortcut_hint(&mut self, has_focus: bool) {
         self.footer.quit_shortcut_expires_at = None;
-        self.footer.mode = reset_mode_after_activity(self.footer.mode);
+        if self.footer.mode == FooterMode::QuitShortcutReminder {
+            self.footer.mode = reset_mode_after_activity(self.footer.mode);
+        }
         self.set_has_focus(has_focus);
     }
 
@@ -1993,16 +1940,6 @@ impl ChatComposer {
         }
     }
 
-    pub(crate) fn insert_str(&mut self, text: &str) {
-        let started_vim_edit = self.begin_direct_vim_edit();
-        self.draft.textarea.insert_str(text);
-        self.sync_bash_mode_from_text();
-        self.sync_popups();
-        if started_vim_edit {
-            self.finish_vim_edit();
-        }
-    }
-
     /// Handle a key event coming from the main UI.
     pub fn handle_key_event(&mut self, key_event: KeyEvent) -> (InputResult, bool) {
         if !self.draft.input_enabled {
@@ -2013,6 +1950,13 @@ impl ChatComposer {
             return (InputResult::None, false);
         }
 
+        let before = self.before_sparkle_key(key_event);
+        let result = self.handle_key_event_inner(key_event);
+        self.after_sparkle_key(before, &result.0);
+        result
+    }
+
+    fn handle_key_event_inner(&mut self, key_event: KeyEvent) -> (InputResult, bool) {
         if self.history_search.is_none()
             && !self.popups.active()
             && self.draft.textarea.wants_vim_search_key(key_event)
@@ -2030,6 +1974,10 @@ impl ChatComposer {
 
         if Self::is_history_search_key(&key_event, &self.history_search_previous_keys) {
             return self.begin_history_search();
+        }
+
+        if self.handle_paste_tab(key_event, Instant::now()) {
+            return (InputResult::None, true);
         }
 
         let result = match &mut self.popups.active {
@@ -2106,7 +2054,7 @@ impl ChatComposer {
             // any existing burst buffer (including a pending first char from the ASCII path) so
             // we don't carry that transient state forward.
             if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
-                self.handle_paste(pasted);
+                self.apply_paste(pasted);
             }
             if let Some(decision) = self.draft.paste_burst.on_plain_char_no_hold(now) {
                 match decision {
@@ -2143,14 +2091,11 @@ impl ChatComposer {
             }
         }
         if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
-            self.handle_paste(pasted);
+            self.apply_paste(pasted);
         }
+        let elements_before = self.draft.textarea.element_payloads();
         self.draft.textarea.input(input);
-
-        let text_after = self.draft.textarea.text();
-        self.draft
-            .pending_pastes
-            .retain(|(placeholder, _)| text_after.contains(placeholder));
+        self.reconcile_deleted_elements(elements_before);
         (InputResult::None, true)
     }
 
@@ -2328,7 +2273,7 @@ impl ChatComposer {
             return (InputResult::None, true);
         }
         self.footer.mode = reset_mode_after_activity(self.footer.mode);
-        let can_switch_search_mode = self.current_editable_at_token().is_some();
+        let can_switch_search_mode = self.current_mentions_v2_token_range().is_some();
 
         let ActivePopup::MentionV2(popup) = &mut self.popups.active else {
             unreachable!();
@@ -2732,15 +2677,6 @@ impl ChatComposer {
         allow_empty: bool,
     ) -> Option<(Range<usize>, String)> {
         self.current_editable_prefixed_token_range('@', allow_empty)
-    }
-
-    fn current_editable_at_token_with_options(&self, allow_empty: bool) -> Option<String> {
-        self.current_editable_at_token_range_with_options(allow_empty)
-            .map(|(_, token)| token)
-    }
-
-    fn current_editable_at_token(&self) -> Option<String> {
-        self.current_editable_at_token_with_options(/*allow_empty*/ false)
     }
 
     fn current_mentions_v2_token_range(&self) -> Option<(Range<usize>, String)> {
@@ -3182,6 +3118,15 @@ impl ChatComposer {
         result
     }
 
+    /// Prepare a startup-confirmed draft through the normal queue parser, independent of keymaps.
+    pub(super) fn prepare_startup_submission(&mut self) -> InputResult {
+        // Startup's plain-text editor cannot show shell mode; require confirmation here.
+        if self.is_bang_shell_command() {
+            return InputResult::None;
+        }
+        self.handle_submission(/*should_queue*/ true).0
+    }
+
     fn reset_vim_mode_after_successful_dispatch(&mut self, result: &InputResult) {
         if matches!(
             result,
@@ -3210,7 +3155,7 @@ impl ChatComposer {
         }
         if should_queue {
             if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
-                self.handle_paste(pasted);
+                self.apply_paste(pasted);
             }
             let visible_shell_command = self.is_bang_shell_command();
             let original_input = self.current_text();
@@ -3365,8 +3310,11 @@ impl ChatComposer {
             return Some(InputResult::None);
         }
         self.stage_slash_command_history(&command);
-        self.draft.textarea.set_text_clearing_elements("");
-        self.draft.is_bash_mode = false;
+        if !matches!(command, SlashCommandItem::Builtin(cmd) if cmd.requires_dispatch_validation())
+        {
+            self.draft.textarea.set_text_clearing_elements("");
+            self.draft.is_bash_mode = false;
+        }
         Some(match command {
             SlashCommandItem::Builtin(cmd) => InputResult::Command(cmd),
             SlashCommandItem::ServiceTier(command) => InputResult::ServiceTierCommand(command),
@@ -3429,7 +3377,10 @@ impl ChatComposer {
     }
 
     fn reject_slash_command_if_unavailable(&self, command: &SlashCommandItem) -> bool {
-        if !self.is_task_running || command.available_during_task() {
+        if !self.is_task_running
+            || command.available_during_task()
+            || matches!(command, SlashCommandItem::Builtin(cmd) if cmd.requires_dispatch_validation())
+        {
             return false;
         }
         let message = format!(
@@ -3485,6 +3436,9 @@ impl ChatComposer {
         &mut self,
         key_event: &KeyEvent,
     ) -> Option<(InputResult, bool)> {
+        if self.draft.textarea.mouse_selection_range().is_some() {
+            return None;
+        }
         let removes_remote_image = matches!(key_event.code, KeyCode::Delete | KeyCode::Backspace)
             && self.attachments.selected_remote_image_index.is_some();
         let started_vim_edit = removes_remote_image && self.begin_direct_vim_edit();
@@ -3510,7 +3464,7 @@ impl ChatComposer {
         }
         if self.draft.is_bash_mode && key_event.code == KeyCode::Esc {
             if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
-                self.handle_paste(pasted);
+                self.apply_paste(pasted);
             }
             if self.draft.textarea.is_empty() {
                 self.draft.is_bash_mode = false;
@@ -3591,9 +3545,11 @@ impl ChatComposer {
             )
         };
         if history_up_pressed || history_down_pressed {
-            if self
-                .history
-                .should_handle_navigation(&self.current_text(), self.history_navigation_cursor())
+            if self.draft.textarea.mouse_selection_range().is_none()
+                && self.history.should_handle_navigation(
+                    &self.current_text(),
+                    self.history_navigation_cursor(),
+                )
             {
                 let replace_entry = if history_up_pressed {
                     self.history.navigate_up(&self.app_event_tx)
@@ -3619,28 +3575,6 @@ impl ChatComposer {
         self.is_bang_shell_command()
             .then_some(())
             .map(|_| Line::from(vec![Span::from("Shell mode").light_red()]))
-    }
-
-    /// Applies any due `PasteBurst` flush at time `now`.
-    ///
-    /// Converts [`PasteBurst::flush_if_due`] results into concrete textarea mutations.
-    ///
-    /// Callers:
-    ///
-    /// - UI ticks via [`ChatComposer::flush_paste_burst_if_due`], so held first-chars can render.
-    /// - Input handling via [`ChatComposer::handle_input_basic`], so a due burst does not lag.
-    fn handle_paste_burst_flush(&mut self, now: Instant) -> bool {
-        match self.draft.paste_burst.flush_if_due(now) {
-            FlushResult::Paste(pasted) => {
-                self.handle_paste(pasted);
-                true
-            }
-            FlushResult::Typed(ch) => {
-                self.insert_str(ch.to_string().as_str());
-                true
-            }
-            FlushResult::None => false,
-        }
     }
 
     /// Handles keys that mutate the textarea, including paste-burst detection.
@@ -3687,7 +3621,10 @@ impl ChatComposer {
         if matches!(input.code, KeyCode::Enter)
             && !self.draft.disable_paste_burst
             && self.draft.paste_burst.is_active()
-            && self.draft.paste_burst.append_newline_if_active(now)
+            && self
+                .draft
+                .paste_burst
+                .append_control_char_if_active('\n', now)
         {
             return (InputResult::None, true);
         }
@@ -3754,7 +3691,7 @@ impl ChatComposer {
                 }
             }
             if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
-                self.handle_paste(pasted);
+                self.apply_paste(pasted);
             }
         }
 
@@ -3767,7 +3704,7 @@ impl ChatComposer {
         if !matches!(input.code, KeyCode::Char(_) | KeyCode::Enter)
             && let Some(pasted) = self.draft.paste_burst.flush_before_modified_input()
         {
-            self.handle_paste(pasted);
+            self.apply_paste(pasted);
         }
         // For non-char inputs (or after flushing), handle normally.
         // Track element removals so we can drop any corresponding placeholders without scanning
@@ -3845,13 +3782,17 @@ impl ChatComposer {
             .remove_deleted_local_placeholders(&removed_payloads, &mut self.draft.textarea);
     }
 
-    /// Handle empty-prompt agents navigation and the shortcut-overlay toggle.
+    /// Handle empty-prompt agents navigation and shortcut-overlay toggling or dismissal.
     ///
     /// This only toggles when the composer is empty and no paste burst is in
     /// progress, so typing/pasting `?` still inserts text instead of opening
     /// help. The bound key list intentionally supports terminal-variant
     /// modifier reporting (for example `?` vs `shift-?`).
     fn handle_empty_prompt_shortcut(&mut self, key_event: &KeyEvent) -> bool {
+        if self.shortcut_overlay_visible() && key_hint::plain(KeyCode::Esc).is_press(*key_event) {
+            self.footer.mode = reset_mode_after_activity(self.footer.mode);
+            return true;
+        }
         if key_event.kind != KeyEventKind::Press {
             return false;
         }
@@ -3862,23 +3803,29 @@ impl ChatComposer {
             return true;
         }
 
-        let toggles = self.footer.hint_override.is_none()
+        let Some(next) = self.empty_prompt_shortcut_toggle(key_event) else {
+            return false;
+        };
+        self.footer.mode = next;
+        true
+    }
+
+    fn empty_prompt_shortcut_toggle(&self, key_event: &KeyEvent) -> Option<FooterMode> {
+        if key_event.kind == KeyEventKind::Press
+            && self.footer.hint_override.is_none()
             && self.toggle_shortcuts_keys.is_pressed(*key_event)
             && self.is_empty()
-            && !self.is_in_paste_burst();
-
-        if !toggles {
-            return false;
+            && !self.is_in_paste_burst()
+        {
+            let next = toggle_shortcut_mode(
+                self.footer.mode,
+                self.quit_shortcut_hint_visible(),
+                self.is_empty(),
+            );
+            (next != self.footer.mode).then_some(next)
+        } else {
+            None
         }
-
-        let next = toggle_shortcut_mode(
-            self.footer.mode,
-            self.quit_shortcut_hint_visible(),
-            self.is_empty(),
-        );
-        let changed = next != self.footer.mode;
-        self.footer.mode = next;
-        changed
     }
 
     fn footer_props(&self) -> FooterProps {
@@ -3897,7 +3844,6 @@ impl ChatComposer {
         FooterProps {
             mode,
             esc_backtrack_hint: self.footer.esc_backtrack_hint,
-            use_shift_enter_hint: self.footer.use_shift_enter_hint,
             is_task_running: self.is_task_running,
             queue_submissions: self.queue_submissions,
             quit_shortcut_key: self.footer.quit_shortcut_key,
@@ -3915,6 +3861,7 @@ impl ChatComposer {
                 external_editor: self.footer.external_editor_key,
                 edit_previous: Some(key_hint::plain(KeyCode::Esc).into()),
                 show_transcript: self.footer.show_transcript_key,
+                find_transcript: self.footer.find_transcript_key,
                 history_search: self.footer.history_search_key,
                 reasoning_down: self.footer.reasoning_down_key,
                 reasoning_up: self.footer.reasoning_up_key,
@@ -3980,7 +3927,7 @@ impl ChatComposer {
             self.popups.dismissed_mention_token = None;
             return;
         }
-        if !self.popups_enabled() {
+        if !self.popups_enabled() || self.draft.textarea.mouse_selection_range().is_some() {
             self.popups.active = ActivePopup::None;
             return;
         }
@@ -4602,7 +4549,7 @@ fn find_next_mention_token_range(text: &str, token: &str, from: usize) -> Option
 
 impl Renderable for ChatComposer {
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        self.cursor_pos_with_textarea_right_reserve(area, /*textarea_right_reserve*/ 0)
+        self.cursor_pos_with_options(area, ComposerRenderOptions::default())
     }
 
     fn cursor_style(&self, _area: Rect) -> crossterm::cursor::SetCursorStyle {
@@ -4614,7 +4561,7 @@ impl Renderable for ChatComposer {
     }
 
     fn desired_height(&self, width: u16) -> u16 {
-        self.desired_height_with_textarea_right_reserve(width, /*textarea_right_reserve*/ 0)
+        self.desired_height_with_options(width, ComposerRenderOptions::default())
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
@@ -4630,74 +4577,86 @@ impl ChatComposer {
         self.luna_reserve_active = active;
         true
     }
-
-    pub(crate) fn desired_height_with_textarea_right_reserve(
-        &self,
-        width: u16,
-        textarea_right_reserve: u16,
-    ) -> u16 {
-        let footer_props = self.footer_props();
-        let footer_hint_height = self
-            .custom_footer_height()
-            .unwrap_or_else(|| footer_height(&footer_props));
-        let footer_spacing = Self::footer_spacing(footer_hint_height);
-        let footer_total_height = footer_hint_height + footer_spacing;
-        const COLS_WITH_MARGIN: u16 = LIVE_PREFIX_COLS + 1;
-        let inner_width =
-            width.saturating_sub(COLS_WITH_MARGIN.saturating_add(textarea_right_reserve));
-        let remote_images_height: u16 = self
-            .attachments
-            .remote_image_lines()
-            .len()
-            .try_into()
-            .unwrap_or(u16::MAX);
-        let remote_images_separator = u16::from(remote_images_height > 0);
-        self.draft.textarea.desired_height(inner_width)
-            + remote_images_height
-            + remote_images_separator
-            + 2
-            + match &self.popups.active {
-                ActivePopup::None => footer_total_height,
-                ActivePopup::Command(c) => c.calculate_required_height(width),
-                ActivePopup::File(c) => c.calculate_required_height(),
-                ActivePopup::Skill(c) => c.calculate_required_height(width),
-                ActivePopup::MentionV2(c) => c.calculate_required_height(width),
-            }
-    }
 }
 
 impl ChatComposer {
     pub(crate) fn render_with_mask(&self, area: Rect, buf: &mut Buffer, mask_char: Option<char>) {
-        self.render_with_mask_and_textarea_right_reserve(
-            area, buf, mask_char, /*textarea_right_reserve*/ 0,
-        );
+        self.render_with_options(area, buf, mask_char, ComposerRenderOptions::default());
     }
 
-    pub(crate) fn render_with_mask_and_textarea_right_reserve(
+    pub(crate) fn render_with_options(
         &self,
         area: Rect,
         buf: &mut Buffer,
         mask_char: Option<char>,
-        textarea_right_reserve: u16,
+        options: ComposerRenderOptions<'_>,
     ) {
-        let [composer_rect, remote_images_rect, textarea_rect, popup_rect] =
-            self.layout_areas_with_textarea_right_reserve(area, textarea_right_reserve);
-        match &self.popups.active {
-            ActivePopup::Command(popup) => {
-                popup.render_ref(popup_rect, buf);
+        let ComposerLayout {
+            status,
+            composer: composer_rect,
+            remote_images: remote_images_rect,
+            textarea: textarea_rect,
+            popup: popup_rect,
+            footer: footer_rect,
+        } = self.layout_with_options(area, options);
+        self.render_status_surface(status, buf);
+        if self.popups.active.is_above_composer()
+            && options.command_popup_placement != CommandPopupPlacement::Hidden
+        {
+            let popup_rect = if options.command_popup_placement == CommandPopupPlacement::Overlay {
+                let height = self
+                    .popups
+                    .active
+                    .required_height(composer_rect.width, /*footer_total_height*/ 0)
+                    .min(composer_rect.y.saturating_sub(buf.area.y));
+                // Command and unified mention menus can render in a single row.
+                let height = if matches!(
+                    self.popups.active,
+                    ActivePopup::Command(_) | ActivePopup::MentionV2(_)
+                ) || height > 2
+                {
+                    height
+                } else {
+                    0
+                };
+                Rect::new(
+                    composer_rect.x,
+                    composer_rect.y - height,
+                    composer_rect.width,
+                    height,
+                )
+            } else {
+                popup_rect
+            };
+            // Overlay rows must erase both glyphs and styles from the transcript underneath.
+            ratatui::widgets::Clear.render(popup_rect, buf);
+            match &self.popups.active {
+                ActivePopup::Command(popup) => popup.render_ref(popup_rect, buf),
+                ActivePopup::MentionV2(popup) => popup.render_ref(popup_rect, buf),
+                ActivePopup::File(popup) => popup.render_ref(popup_rect, buf),
+                ActivePopup::Skill(popup) => popup.render_ref(popup_rect, buf),
+                ActivePopup::None => {
+                    unreachable!("only suggestion menus use above-composer placement")
+                }
             }
-            ActivePopup::File(popup) => {
-                popup.render_ref(popup_rect, buf);
+        }
+        let transcript_hint_area = inset_footer_hint_area(footer_rect);
+        let warning_notice = self.warning_notice_layout(transcript_hint_area, options);
+        let warning_area = warning_notice.as_ref().map(|(area, _)| *area);
+        match options.footer {
+            Some(footer) => {
+                self.render_transcript_footer(transcript_hint_area, buf, footer, warning_area);
             }
-            ActivePopup::Skill(popup) => {
-                popup.render_ref(popup_rect, buf);
+            None if self.shortcuts_above_composer(options) => {
+                let props = self.hint_footer_props(options);
+                super::shortcut_overlay::render(&props, inset_footer_hint_area(popup_rect), buf);
+                super::shortcut_overlay::close_hint(&props, transcript_hint_area.width)
+                    .render(transcript_hint_area, buf);
             }
-            ActivePopup::MentionV2(popup) => {
-                popup.render_ref(popup_rect, buf);
-            }
-            ActivePopup::None => {
-                let footer_props = self.footer_props();
-                let show_cycle_hint = !footer_props.is_task_running
+            None => {
+                let footer_props = self.hint_footer_props(options);
+                let show_cycle_hint = self.status_surface_height(options) == 0
+                    && !footer_props.is_task_running
                     && self.footer.collaboration_mode_indicator.is_some();
                 let show_shortcuts_hint = match footer_props.mode {
                     FooterMode::ComposerEmpty => !self.is_in_paste_burst(),
@@ -4715,19 +4674,16 @@ impl ChatComposer {
                     | FooterMode::ShortcutOverlay
                     | FooterMode::EscHint => false,
                 };
-                let custom_height = self.custom_footer_height();
-                let footer_hint_height =
-                    custom_height.unwrap_or_else(|| footer_height(&footer_props));
-                let footer_spacing = Self::footer_spacing(footer_hint_height);
-                let hint_rect = if footer_spacing > 0 && footer_hint_height > 0 {
-                    let [_, hint_rect] = Layout::vertical([
-                        Constraint::Length(footer_spacing),
-                        Constraint::Length(footer_hint_height),
-                    ])
-                    .areas(popup_rect);
-                    hint_rect
+                let hint_rect = if let Some(warning_area) = warning_area {
+                    Rect {
+                        width: warning_area
+                            .x
+                            .saturating_sub(footer_rect.x)
+                            .saturating_sub(/*rhs*/ 2),
+                        ..footer_rect
+                    }
                 } else {
-                    popup_rect
+                    footer_rect
                 };
                 if let Some(input) = self.draft.textarea.vim_query() {
                     input.render(inset_footer_hint_area(hint_rect), buf);
@@ -4768,11 +4724,12 @@ impl ChatComposer {
                     } else {
                         None
                     };
-                    let left_mode_indicator = if status_line_active {
-                        None
-                    } else {
-                        self.footer.collaboration_mode_indicator
-                    };
+                    let left_mode_indicator =
+                        if status_line_active || self.status_surface_height(options) > 0 {
+                            None
+                        } else {
+                            self.footer.collaboration_mode_indicator
+                        };
                     let active_footer_hint_override = self.footer.hint_override.as_ref();
                     let mut left_width = if self.footer.flash_visible() {
                         self.footer
@@ -4801,7 +4758,7 @@ impl ChatComposer {
                             Some(side_conversation_context_line(label))
                         } else if let Some(line) = self.shell_mode_footer_line() {
                             Some(line)
-                        } else if transition_active {
+                        } else if self.status_surface_height(options) > 0 || transition_active {
                             None
                         } else if status_line_active {
                             let full = self.mode_indicator_line(show_cycle_hint);
@@ -4943,6 +4900,10 @@ impl ChatComposer {
                 }
             }
         }
+        self.footer.warning_notice_area.set(warning_area);
+        if let Some((warning_area, line)) = warning_notice {
+            line.render(warning_area, buf);
+        }
         let style = user_message_style();
         Block::default().style(style).render(composer_rect, buf);
         if !remote_images_rect.is_empty() {
@@ -5052,12 +5013,15 @@ impl ChatComposer {
             }
         }
         drop(state);
-        if self.astra_sparkle.is_some() {
-            self.render_sparkle(
-                composer_rect,
-                self.cursor_pos_with_textarea_right_reserve(area, textarea_right_reserve),
-                buf,
-            );
+        self.render_voice_strip(composer_rect, buf);
+        self.render_sparkle(
+            composer_rect,
+            textarea_rect,
+            self.cursor_pos_with_options(area, options),
+            buf,
+        );
+        if options.footer.is_some_and(|footer| footer.is_interactive) {
+            buf.set_style(composer_rect, Style::default().dim());
         }
     }
 }
@@ -5073,6 +5037,18 @@ mod effort_tests;
 #[cfg(test)]
 #[path = "chat_composer/embedded_input_tests.rs"]
 mod embedded_input_tests;
+
+#[cfg(test)]
+#[path = "chat_composer/paste_tests.rs"]
+mod paste_tests;
+
+#[cfg(test)]
+#[path = "chat_composer/snapshot_tests.rs"]
+mod snapshot_tests;
+
+#[cfg(test)]
+#[path = "chat_composer/mentions_layout_tests.rs"]
+mod mentions_layout_tests;
 
 #[cfg(test)]
 mod tests {
@@ -5154,39 +5130,6 @@ mod tests {
                 composer.footer.mode = FooterMode::ShortcutOverlay;
             },
         );
-    }
-
-    #[test]
-    fn parent_owned_thread_allows_bare_navigation_commands() {
-        for (command, expected) in [
-            ("/agents", SlashCommand::Agents),
-            ("/subagents", SlashCommand::MultiAgents),
-            ("/side", SlashCommand::Side),
-            ("/btw", SlashCommand::Btw),
-            ("/diff ", SlashCommand::Diff),
-        ] {
-            let (mut composer, _rx) = new_test_composer();
-            composer.set_parent_owned_thread();
-            composer.set_text_content(command.to_string(), Vec::new(), Vec::new());
-
-            assert_eq!(
-                composer.handle_submission(/*should_queue*/ false).0,
-                InputResult::Command(expected)
-            );
-        }
-    }
-
-    #[test]
-    fn parent_owned_thread_allows_safe_command_selected_from_prefix() {
-        let (mut composer, _rx) = new_test_composer();
-        composer.set_parent_owned_thread();
-        type_chars_humanlike(&mut composer, &['/', 'a', 'g']);
-
-        let result = composer
-            .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .0;
-
-        assert_eq!(result, InputResult::Command(SlashCommand::Agents));
     }
 
     #[test]
@@ -5375,9 +5318,8 @@ mod tests {
         );
         setup(&mut composer);
         let footer_props = composer.footer_props();
-        let footer_lines = footer_height(&footer_props);
-        let footer_spacing = ChatComposer::footer_spacing(footer_lines);
-        let height = footer_lines + footer_spacing + 8;
+        let footer_lines = footer_height(&footer_props, width);
+        let height = footer_lines + 8;
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|f| composer.render(f.area(), f.buffer_mut()))
@@ -9494,16 +9436,22 @@ mod tests {
         // Type "/mo" humanlike so paste-burst doesn’t interfere.
         type_chars_humanlike(&mut composer, &['/', 'm', 'o']);
 
-        let mut terminal = match Terminal::new(TestBackend::new(60, 5)) {
-            Ok(t) => t,
-            Err(e) => panic!("Failed to create terminal: {e}"),
-        };
-        terminal
-            .draw(|f| composer.render(f.area(), f.buffer_mut()))
-            .unwrap_or_else(|e| panic!("Failed to draw composer: {e}"));
+        for (height, snapshot, cursor) in [
+            (3, "slash_popup_mo_clipped", (5, 1)),
+            (5, "slash_popup_mo", (5, 2)),
+        ] {
+            let mut terminal =
+                Terminal::new(TestBackend::new(/*width*/ 60, height)).expect("create terminal");
+            terminal
+                .draw(|f| {
+                    composer.render(f.area(), f.buffer_mut());
+                    assert_eq!(composer.cursor_pos(f.area()), Some(cursor));
+                })
+                .expect("draw composer");
 
-        // Visual snapshot should show the slash popup with /model as the first entry.
-        insta::assert_snapshot!("slash_popup_mo", terminal.backend());
+            // The picker sits above the draft; clipping must keep the draft and cursor visible.
+            insta::assert_snapshot!(snapshot, terminal.backend());
+        }
     }
 
     #[test]
@@ -9978,13 +9926,13 @@ mod tests {
         composer
             .draft
             .textarea
-            .set_text_clearing_elements("/review these changes");
+            .set_text_clearing_elements("/compact");
 
         let (result, _needs_redraw) =
             composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert_eq!(InputResult::None, result);
-        assert_eq!("/review these changes", composer.draft.textarea.text());
+        assert_eq!("/compact", composer.draft.textarea.text());
 
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
@@ -12356,7 +12304,7 @@ mod tests {
 
         let count = 32;
         let mut now = Instant::now();
-        let step = Duration::from_millis(1);
+        let step = Duration::from_millis(/*millis*/ 1);
         for _ in 0..count {
             let _ = composer.handle_input_basic_with_time(
                 KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
@@ -12403,7 +12351,7 @@ mod tests {
 
         let count = LARGE_PASTE_CHAR_THRESHOLD + 1; // > threshold to trigger placeholder
         let mut now = Instant::now();
-        let step = Duration::from_millis(1);
+        let step = Duration::from_millis(/*millis*/ 1);
         for _ in 0..count {
             let _ = composer.handle_input_basic_with_time(
                 KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),

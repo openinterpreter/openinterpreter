@@ -20,7 +20,7 @@ OVERRIDES_PATH = (
 DEFAULT_SORT_PRIORITY = 100
 SUPPORTED_WIRE_APIS = {"chat", "messages", "responses"}
 USER_AGENT = (
-    "OpenInterpreter/1.0 (+https://github.com/KillianLucas/open-interpreter-next)"
+    "OpenInterpreter/1.0 (+https://github.com/openinterpreter/openinterpreter)"
 )
 
 
@@ -56,6 +56,29 @@ def excluded_provider_ids(overrides: dict[str, object]) -> set[str]:
     if not isinstance(values, list):
         raise SystemExit("exclude_provider_ids must be a list")
     return {value for value in values if isinstance(value, str) and value}
+
+
+def provider_model_allowlist(
+    provider_id: str,
+    overrides: dict[str, object],
+) -> set[str] | None:
+    values = overrides.get("provider_model_allowlists", {})
+    if not isinstance(values, dict):
+        raise SystemExit("provider_model_allowlists must be an object")
+    allowlist = values.get(provider_id)
+    if allowlist is None:
+        return None
+    if not isinstance(allowlist, list) or not all(
+        isinstance(model_id, str) and model_id for model_id in allowlist
+    ):
+        raise SystemExit(
+            f"provider_model_allowlists.{provider_id} must be a list of non-empty strings"
+        )
+    if len(set(allowlist)) != len(allowlist):
+        raise SystemExit(
+            f"provider_model_allowlists.{provider_id} must not contain duplicates"
+        )
+    return set(allowlist)
 
 
 def model_description(metadata: dict) -> str | None:
@@ -115,6 +138,18 @@ def build_provider_entry(
     if not isinstance(base_url, str) or not base_url:
         raise SystemExit(f"missing api/base_url for provider {provider_id}")
 
+    source_models = provider.get("models") or {}
+    if not isinstance(source_models, dict):
+        raise SystemExit(f"models.dev provider {provider_id}.models must be an object")
+    model_allowlist = provider_model_allowlist(provider_id, overrides)
+    if model_allowlist is not None:
+        missing = sorted(model_allowlist - set(source_models))
+        if missing:
+            raise SystemExit(
+                f"provider_model_allowlists.{provider_id} missing from models.dev: "
+                + ", ".join(missing)
+            )
+
     env_key_overrides = overrides.get("env_key_overrides", {})
     if not isinstance(env_key_overrides, dict):
         env_key_overrides = {}
@@ -126,9 +161,9 @@ def build_provider_entry(
     wire_api = wire_api_for_provider(provider_id, provider, overrides)
 
     models: list[dict] = []
-    for priority, (model_id, model) in enumerate(
-        (provider.get("models") or {}).items()
-    ):
+    for priority, (model_id, model) in enumerate(source_models.items()):
+        if model_allowlist is not None and model_id not in model_allowlist:
+            continue
         if not isinstance(model, dict) or not include_model(model):
             continue
         models.append(
@@ -145,6 +180,21 @@ def build_provider_entry(
     merge_live_provider_models(provider_id, models, overrides)
     apply_provider_model_additions(provider_id, models, overrides)
     apply_provider_model_overrides(provider_id, models, overrides)
+    if model_allowlist is not None:
+        models[:] = [
+            model for model in models if model.get("id") in model_allowlist
+        ]
+        missing = sorted(
+            model_allowlist
+            - {model["id"] for model in models if isinstance(model.get("id"), str)}
+        )
+        if missing:
+            raise SystemExit(
+                f"provider_model_allowlists.{provider_id} models were filtered out: "
+                + ", ".join(missing)
+            )
+        for priority, model in enumerate(models):
+            model["priority"] = priority
 
     return {
         "id": provider_id,

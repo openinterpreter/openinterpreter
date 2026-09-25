@@ -281,7 +281,7 @@ impl App {
         ) {
             label_parts.push(format!("{} to switch", binding.display_label()));
         }
-        label_parts.push("ctrl + c to close".to_string());
+        label_parts.push("ctrl+c to close".to_string());
         self.chat_widget
             .set_side_conversation_context_label(Some(format!("Side {}", label_parts.join(" · "))));
     }
@@ -408,7 +408,14 @@ impl App {
         };
 
         self.select_agent_thread(tui, app_server, target_thread_id)
-            .await
+            .await?;
+        if self.active_thread_id == Some(target_thread_id)
+            && self.active_side_parent_thread_id().is_none()
+        {
+            self.surface_pending_inactive_thread_interactive_requests()
+                .await?;
+        }
+        Ok(())
     }
 
     pub(super) async fn discard_side_thread(
@@ -418,14 +425,14 @@ impl App {
     ) -> bool {
         if let Err(message) = self.interrupt_side_thread(app_server, thread_id).await {
             tracing::warn!("{message}");
-            self.chat_widget.add_error_message(message);
+            self.add_agents_overview_error(message);
             return false;
         }
         if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
             let message =
                 format!("Failed to close side conversation {thread_id}; it is still open: {err}");
             tracing::warn!("{message}");
-            self.chat_widget.add_error_message(message);
+            self.add_agents_overview_error(message);
             return false;
         }
         self.abandoned_side_threads.insert(thread_id);
@@ -438,6 +445,9 @@ impl App {
         app_server: &mut AppServerSession,
         thread_id: ThreadId,
     ) {
+        self.abandoned_side_threads.insert(thread_id);
+        self.pending_app_server_requests
+            .cancel_thread_verification(&thread_id.to_string());
         let turn_id = self
             .active_turn_id_for_thread(thread_id)
             .await
@@ -447,7 +457,6 @@ impl App {
         let retry_interrupt_request_id = app_server.next_request_id();
         let unsubscribe_request_id = app_server.next_request_id();
 
-        self.abandoned_side_threads.insert(thread_id);
         self.discard_thread_local_state(thread_id).await;
 
         tokio::spawn(async move {
@@ -497,6 +506,8 @@ impl App {
     }
 
     pub(super) async fn discard_thread_local_state(&mut self, thread_id: ThreadId) {
+        self.pending_app_server_requests
+            .cancel_thread_verification(&thread_id.to_string());
         let app_event_tx = self.app_event_tx.clone();
         self.dynamic_tool_tasks
             .retain(|request_id, (source, task)| {
@@ -524,6 +535,7 @@ impl App {
         } else {
             self.refresh_pending_thread_approvals().await;
         }
+        self.forget_realtime_replay_thread(thread_id);
         self.sync_active_agent_label();
     }
 

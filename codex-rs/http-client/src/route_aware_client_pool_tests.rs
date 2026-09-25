@@ -1,3 +1,4 @@
+use crate::route_aware_redirect::MAX_REDIRECTS;
 use std::collections::HashMap;
 use std::io;
 use std::io::Read;
@@ -123,7 +124,9 @@ fn request_builder_debug_redacts_url_secrets() {
         format!("{request:?}"),
         concat!(
             "RouteAwareRequestBuilder { pool: RouteAwareClientPool { ",
-            "http_client_factory: HttpClientFactory { outbound_proxy_policy: ReqwestDefault }, ",
+            "http_client_factory: HttpClientFactory { outbound_proxy_policy: ReqwestDefault, ",
+            "system_proxy_fallback: false, ",
+            "network_policy: NetworkPolicy { managed: false, .. } }, ",
             "route_class: Api, .. }, method: Some(GET), ",
             "url: Some(\"<redacted>\"), .. }"
         )
@@ -402,6 +405,13 @@ async fn reqwest_default_route_preserves_transport_redirects() {
                     Err(error) => panic!("redirect server should accept: {error}"),
                 }
             };
+            // Accepted sockets inherit the listener's nonblocking mode on macOS.
+            stream
+                .set_nonblocking(false)
+                .expect("redirect stream should become blocking");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("redirect stream should get a read timeout");
             let mut buffer = [0_u8; 1024];
             let size = stream
                 .read(&mut buffer)

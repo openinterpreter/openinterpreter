@@ -13,6 +13,8 @@ from unittest.mock import patch
 
 from assemble_package import assemble
 from package_runtime import runtime_files
+from release_runtime import seal
+from release_runtime import stage
 from runtime import PLUGINS, digest, required_library_paths
 
 
@@ -159,6 +161,193 @@ class AssembleTests(unittest.TestCase):
                 (root / "runtime.json").write_text(json.dumps(receipt))
                 with self.assertRaisesRegex(ValueError, "required libraries"):
                     runtime_files(root.resolve(), target)
+
+    def test_alpha_package_preserves_release_version_and_matching_build(self):
+        self.commit = "b" * 40
+        target = "aarch64-apple-darwin"
+        runtime, _ = self.make_runtime(target, "plugins/libgst{}.dylib")
+        staged = self.root / "staged"
+        stage(runtime, staged, target)
+        signed_library = staged / "lib/libgio-2.0.0.dylib"
+        signed_library.write_bytes(signed_library.read_bytes() + b"signed")
+        seal(staged, target)
+        self.metadata["version"] = "0.154.0-alpha.8"
+        self.metadata["target"] = target
+        (self.package / "codex-package.json").write_text(json.dumps(self.metadata))
+        assemble(
+            self.package,
+            self.helper,
+            target,
+            self.commit,
+            self.output,
+            runtime=staged,
+            release_version="0.154.0-alpha.8",
+        )
+        manifest = json.loads(
+            (self.output / "codex-resources/voice/manifest.json").read_text()
+        )
+        self.assertEqual(manifest["appVersion"], "0.154.0-alpha.8")
+        self.assertEqual(manifest["buildCommit"], self.commit)
+        notice_root = self.output / "codex-resources/voice"
+        for source in (Path(__file__).with_name("licenses")).iterdir():
+            relative = f"codex-resources/voice/licenses/{source.name}"
+            self.assertEqual(
+                (notice_root / "licenses" / source.name).read_bytes(),
+                source.read_bytes(),
+            )
+            self.assertEqual(manifest["sha256"][relative], digest(source))
+        self.assertEqual(
+            (self.output / "codex-resources/voice/lib/libgio-2.0.0.dylib").read_bytes(),
+            signed_library.read_bytes(),
+        )
+
+        self.output.rename(self.root / "previous output")
+        with self.assertRaisesRegex(ValueError, "package version"):
+            assemble(
+                self.package,
+                self.helper,
+                target,
+                self.commit,
+                self.output,
+                runtime=staged,
+                release_version="0.154.0-alpha.7",
+            )
+
+        with self.assertRaisesRegex(ValueError, "runtime receipt"):
+            assemble(
+                self.package,
+                self.helper,
+                target,
+                self.commit,
+                self.output,
+                runtime=runtime,
+                release_version="0.154.0-alpha.8",
+            )
+
+    def test_alpha_receipt_requires_matching_signed_hashes(self):
+        target = "x86_64-apple-darwin"
+        runtime, _ = self.make_runtime(target, "plugins/libgst{}.dylib")
+        secret = self.root / "outside-secret"
+        secret.write_bytes(b"must not enter signing artifacts")
+        (runtime / "unlisted-file").write_bytes(b"unlisted")
+        try:
+            (runtime / "unlisted-secret").symlink_to(secret)
+        except OSError:
+            # Windows runners may not grant symlink creation to this process.
+            pass
+        staged = self.root / "staged"
+        stage(runtime, staged, target)
+        self.assertFalse((staged / "unlisted-file").exists())
+        self.assertFalse((staged / "unlisted-secret").exists())
+        seal(staged, target)
+        self.assertTrue(runtime_files(staged.resolve(), target, public_release=True))
+        with self.assertRaisesRegex(ValueError, "runtime receipt"):
+            runtime_files(staged.resolve(), target)
+        (staged / "lib/libgio-2.0.0.dylib").write_bytes(b"tampered")
+        with self.assertRaisesRegex(ValueError, "digest mismatch"):
+            runtime_files(staged.resolve(), target, public_release=True)
+
+    def test_beta_and_stable_release_versions_package_the_same_runtime(self):
+        self.commit = "b" * 40
+        target = "aarch64-apple-darwin"
+        runtime, _ = self.make_runtime(target, "plugins/libgst{}.dylib")
+        staged = self.root / "staged"
+        stage(runtime, staged, target)
+        seal(staged, target)
+        self.metadata["target"] = target
+        for version in ("0.154.0-beta.2", "0.154.0"):
+            with self.subTest(version=version):
+                self.metadata["version"] = version
+                (self.package / "codex-package.json").write_text(
+                    json.dumps(self.metadata)
+                )
+                output = self.root / f"package-{version}"
+                assemble(
+                    self.package,
+                    self.helper,
+                    target,
+                    self.commit,
+                    output,
+                    runtime=staged,
+                    release_version=version,
+                )
+                manifest = json.loads(
+                    (output / "codex-resources/voice/manifest.json").read_text()
+                )
+                self.assertEqual(manifest["appVersion"], version)
+
+    def test_linux_release_pairs_musl_app_with_gnu_voice_runtime(self):
+        self.commit = "b" * 40
+        target = "aarch64-unknown-linux-gnu"
+        runtime, _ = self.make_runtime(target)
+        staged = self.root / "staged"
+        stage(runtime, staged, target)
+        seal(staged, target)
+        for version in ("0.154.0-alpha.8", "0.154.0-beta.2", "0.154.0"):
+            with self.subTest(version=version):
+                self.metadata["version"] = version
+                (self.package / "codex-package.json").write_text(
+                    json.dumps(self.metadata)
+                )
+                output = self.root / f"linux-{version}"
+                assemble(
+                    self.package,
+                    self.helper,
+                    target,
+                    self.commit,
+                    output,
+                    runtime=staged,
+                    release_version=version,
+                )
+                voice = output / "codex-resources/voice"
+                manifest = json.loads((voice / "manifest.json").read_text())
+                self.assertEqual(manifest["appTarget"], "aarch64-unknown-linux-musl")
+                self.assertEqual(manifest["voiceTarget"], target)
+                self.assertEqual(
+                    manifest["sha256"]["codex-resources/voice/runtime.json"],
+                    digest(staged / "runtime.json"),
+                )
+
+    def test_windows_release_packages_signed_receipt_and_exe_helper(self):
+        self.commit = "b" * 40
+        for target in ("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"):
+            with self.subTest(target=target):
+                runtime, _ = self.make_runtime(target, "bin/gst{}.dll")
+                staged = self.root / f"signed-{target}"
+                stage(runtime, staged, target)
+                library = staged / "bin/gio-2.0-0.dll"
+                library.write_bytes(library.read_bytes() + b"signed")
+                seal(staged, target)
+                self.metadata.update(
+                    target=target,
+                    entrypoint="bin/codex.exe",
+                    version="0.154.0-beta.2",
+                )
+                (self.package / "bin/codex.exe").write_bytes(b"unchanged app")
+                (self.package / "codex-package.json").write_text(
+                    json.dumps(self.metadata)
+                )
+                output = self.root / f"windows-{target}"
+                assemble(
+                    self.package,
+                    self.helper,
+                    target,
+                    self.commit,
+                    output,
+                    runtime=staged,
+                    release_version="0.154.0-beta.2",
+                )
+                voice = output / "codex-resources/voice"
+                self.assertEqual(
+                    (voice / "bin/codex-voice-host.exe").read_bytes(),
+                    self.helper.read_bytes(),
+                )
+                self.assertEqual(
+                    (voice / "bin/gio-2.0-0.dll").read_bytes(), library.read_bytes()
+                )
+                self.assertTrue(
+                    runtime_files(voice.resolve(), target, public_release=True)
+                )
 
     def test_rejects_invalid_runtime_receipts_before_creating_package(self):
         runtime, original = self.make_runtime()

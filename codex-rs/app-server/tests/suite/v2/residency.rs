@@ -27,7 +27,7 @@ enum ModelTransport {
     Websocket,
 }
 
-fn write_provider_config(
+async fn write_provider_config(
     codex_home: &Path,
     model_base_url: &str,
     transport: ModelTransport,
@@ -60,7 +60,7 @@ supports_websockets = {supports_websockets}
 "#
     );
     std::fs::write(codex_home.join("config.toml"), config)?;
-    write_models_cache(codex_home)?;
+    write_models_cache(codex_home).await?;
     Ok(())
 }
 
@@ -98,7 +98,7 @@ async fn managed_residency_overrides_provider_headers(transport: ModelTransport)
     };
 
     let codex_home = TempDir::new()?;
-    write_provider_config(codex_home.path(), &model_base_url, transport)?;
+    write_provider_config(codex_home.path(), &model_base_url, transport).await?;
     std::fs::write(
         codex_home.path().join("requirements.toml"),
         "enforce_residency = \"us\"\n",

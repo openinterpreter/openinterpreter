@@ -97,7 +97,7 @@ supports_websockets = false
 "#
         ))
         .write(codex_home.path())?;
-    write_models_cache(codex_home.path())?;
+    write_models_cache(codex_home.path()).await?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .with_env_overrides(&[("OPENAI_API_KEY", None)])

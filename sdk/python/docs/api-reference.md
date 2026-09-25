@@ -31,6 +31,7 @@ from openai_codex import (
     LocalImageInput,
     SkillInput,
     MentionInput,
+    ExternalMessage,
 )
 from openai_codex.types import (
     Account,
@@ -39,6 +40,7 @@ from openai_codex.types import (
     CancelLoginAccountStatus,
     GetAccountResponse,
     InitializeResponse,
+    Personality,
     ThreadItem,
     ThreadTokenUsage,
     TurnError,
@@ -67,8 +69,8 @@ Properties/methods:
 - `logout() -> None`
 - `thread_start(*, approval_mode=ApprovalMode.auto_review, base_instructions=None, config=None, cwd=None, developer_instructions=None, ephemeral=None, model=None, model_provider=None, personality=None, sandbox: Sandbox | None = None) -> Thread`
 - `thread_list(*, archived=None, cursor=None, cwd=None, limit=None, model_providers=None, sort_key=None, source_kinds=None) -> ThreadListResponse`
-- `thread_resume(thread_id: str, *, approval_mode=ApprovalMode.auto_review, base_instructions=None, config=None, cwd=None, developer_instructions=None, model=None, model_provider=None, personality=None, sandbox: Sandbox | None = None) -> Thread`
-- `thread_fork(thread_id: str, *, approval_mode=ApprovalMode.auto_review, base_instructions=None, config=None, cwd=None, developer_instructions=None, model=None, model_provider=None, sandbox: Sandbox | None = None) -> Thread`
+- `thread_resume(thread_id: str, *, approval_mode=None, base_instructions=None, config=None, cwd=None, developer_instructions=None, include_turns: bool | None = None, model=None, model_provider=None, personality=None, sandbox: Sandbox | None = None, service_tier=None) -> Thread`
+- `thread_fork(thread_id: str, *, approval_mode=None, base_instructions=None, config=None, cwd=None, developer_instructions=None, ephemeral=None, include_turns: bool | None = None, model=None, model_provider=None, sandbox: Sandbox | None = None, service_tier=None) -> Thread`
 - `thread_archive(thread_id: str) -> ThreadArchiveResponse`
 - `thread_unarchive(thread_id: str) -> Thread`
 - `models(*, include_hidden: bool = False) -> ModelListResponse`
@@ -79,6 +81,34 @@ Context manager:
 with Codex() as codex:
     ...
 ```
+
+`thread_resume(...)` and `thread_fork(...)` accept `include_turns` to control
+whether the server loads turn history into its response. `False` skips that
+work; `True` requests it. Omitting the option, or passing `None`, preserves the
+server's default behavior. This does not remove history from the model's
+context. Both methods return a thread handle; use `thread.read(include_turns=True)`
+to retrieve its history.
+
+### Deprecated personality selection
+
+`thread_start(...)`, `thread_resume(...)`, and the thread's `run(...)` and
+`turn(...)` still accept `personality` for compatibility. The current app-server
+accepts `Personality.friendly` and `Personality.pragmatic`, but they no longer
+select a style; model instructions define the tone.
+
+Python `None` or omitting the option leaves it unset. Explicit `Personality.none`
+(wire value `"none"`) strips the literal `# Personality` section the next time
+Codex prepares instructions from the model catalog, such as when starting a
+thread or switching models. It does not change explicitly supplied base
+instructions or rewrite an existing thread's instructions when resuming or
+starting a turn. Either legacy value can replace a previous `Personality.none`
+setting for future model instructions. The old `features.personality` flag is
+ignored.
+
+Models returned by `models(...)` still expose `supports_personality` for
+compatibility. This field is deprecated and always `False` on the current
+app-server; it describes selectable personality, not the separate
+`Personality.none` opt-out.
 
 ## AsyncCodex (async parity)
 
@@ -107,11 +137,14 @@ Properties/methods:
 - `logout() -> Awaitable[None]`
 - `thread_start(*, approval_mode=ApprovalMode.auto_review, base_instructions=None, config=None, cwd=None, developer_instructions=None, ephemeral=None, model=None, model_provider=None, personality=None, sandbox: Sandbox | None = None) -> Awaitable[AsyncThread]`
 - `thread_list(*, archived=None, cursor=None, cwd=None, limit=None, model_providers=None, sort_key=None, source_kinds=None) -> Awaitable[ThreadListResponse]`
-- `thread_resume(thread_id: str, *, approval_mode=ApprovalMode.auto_review, base_instructions=None, config=None, cwd=None, developer_instructions=None, model=None, model_provider=None, personality=None, sandbox: Sandbox | None = None) -> Awaitable[AsyncThread]`
-- `thread_fork(thread_id: str, *, approval_mode=ApprovalMode.auto_review, base_instructions=None, config=None, cwd=None, developer_instructions=None, ephemeral=None, model=None, model_provider=None, sandbox: Sandbox | None = None) -> Awaitable[AsyncThread]`
+- `thread_resume(thread_id: str, *, approval_mode=None, base_instructions=None, config=None, cwd=None, developer_instructions=None, include_turns: bool | None = None, model=None, model_provider=None, personality=None, sandbox: Sandbox | None = None, service_tier=None) -> Awaitable[AsyncThread]`
+- `thread_fork(thread_id: str, *, approval_mode=None, base_instructions=None, config=None, cwd=None, developer_instructions=None, ephemeral=None, include_turns: bool | None = None, model=None, model_provider=None, sandbox: Sandbox | None = None, service_tier=None) -> Awaitable[AsyncThread]`
 - `thread_archive(thread_id: str) -> Awaitable[ThreadArchiveResponse]`
 - `thread_unarchive(thread_id: str) -> Awaitable[AsyncThread]`
 - `models(*, include_hidden: bool = False) -> Awaitable[ModelListResponse]`
+
+The [deprecated personality selection](#deprecated-personality-selection)
+notes also apply to the async methods and model results.
 
 Async context manager:
 
@@ -150,23 +183,23 @@ attempt. API-key login completes synchronously and does not return a handle.
 
 ### Thread
 
-- `run(input: str | Input, *, approval_mode=None, cwd=None, effort=None, model=None, output_schema=None, personality=None, sandbox: Sandbox | None = None, service_tier=None, summary=None) -> TurnResult`
-- `turn(input: str | Input, *, approval_mode=None, cwd=None, effort=None, model=None, output_schema=None, personality=None, sandbox: Sandbox | None = None, service_tier=None, summary=None) -> TurnHandle`
+- `run(input: RunInput, *, approval_mode=None, cwd=None, effort=None, model=None, output_schema=None, personality=None, sandbox: Sandbox | None = None, service_tier=None, source=None, summary=None, turn_service_tier=None) -> TurnResult`
+- `turn(input: RunInput, *, approval_mode=None, cwd=None, effort=None, model=None, output_schema=None, personality=None, sandbox: Sandbox | None = None, service_tier=None, source=None, summary=None, turn_service_tier=None) -> TurnHandle`
 - `read(*, include_turns: bool = False) -> ThreadReadResponse`
 - `set_name(name: str) -> ThreadSetNameResponse`
 - `compact() -> ThreadCompactStartResponse`
 
 ### AsyncThread
 
-- `run(input: str | Input, *, approval_mode=None, cwd=None, effort=None, model=None, output_schema=None, personality=None, sandbox: Sandbox | None = None, service_tier=None, summary=None) -> Awaitable[TurnResult]`
-- `turn(input: str | Input, *, approval_mode=None, cwd=None, effort=None, model=None, output_schema=None, personality=None, sandbox: Sandbox | None = None, service_tier=None, summary=None) -> Awaitable[AsyncTurnHandle]`
+- `run(input: RunInput, *, approval_mode=None, cwd=None, effort=None, model=None, output_schema=None, personality=None, sandbox: Sandbox | None = None, service_tier=None, source=None, summary=None, turn_service_tier=None) -> Awaitable[TurnResult]`
+- `turn(input: RunInput, *, approval_mode=None, cwd=None, effort=None, model=None, output_schema=None, personality=None, sandbox: Sandbox | None = None, service_tier=None, source=None, summary=None, turn_service_tier=None) -> Awaitable[AsyncTurnHandle]`
 - `read(*, include_turns: bool = False) -> Awaitable[ThreadReadResponse]`
 - `set_name(name: str) -> Awaitable[ThreadSetNameResponse]`
 - `compact() -> Awaitable[ThreadCompactStartResponse]`
 
-`run(...)` is the common-case convenience path. It accepts plain strings, starts
-the turn, consumes notifications until completion, and returns a small result
-object with:
+`run(...)` is the common-case convenience path. It accepts the same input and
+options as `turn(...)`, consumes notifications until completion, and returns a
+small result object with:
 
 - `id: str`
 - `status: TurnStatus`
@@ -183,6 +216,25 @@ phase-less assistant message item.
 
 Use `turn(...)` when you need low-level turn control (`stream()`, `steer()`,
 `interrupt()`) before collecting the turn result.
+
+### Turn options
+
+These options have the same behavior on sync and async `run(...)` and `turn(...)`:
+
+| Option | Behavior |
+| --- | --- |
+| `personality: Personality \| None = None` | `Personality.friendly` and `Personality.pragmatic` are deprecated and no longer select a style. See [deprecated personality selection](#deprecated-personality-selection). |
+| `service_tier: str | None = None` | Sets the thread's service tier for this and subsequent turns. |
+| `turn_service_tier: str | None = None` | Overrides the tier for a newly started turn only. `None` inherits the thread setting; `"default"` selects standard speed. Does not change the thread default and is ignored when input joins an active turn. |
+| `source: str | None = None` | Labels the caller that initiated a new turn, such as `"review_ui"`. This is metadata; it does not schedule work or grant authority. Ignored when input joins an active turn. |
+
+`ExternalMessage`, `turn_service_tier`, `source`, and explicit `include_turns`
+on resume/fork require Codex CLI 0.151.0 or newer. The SDK raises `CodexError`
+before sending these options to an older runtime, which would otherwise ignore
+them. Published SDK releases install a matching runtime automatically; when
+using `CodexConfig.codex_bin`, choose a compatible executable. Unversioned local
+builds are checked lazily against their experimental schema before these options
+are sent. A custom `launch_args_override` must report a supported version.
 
 ## Sandbox
 
@@ -206,6 +258,9 @@ When `sandbox=` is omitted, Codex uses its configured default. A sandbox
 passed to `run(...)` or `turn(...)` applies to that turn and subsequent turns.
 
 ## TurnHandle / AsyncTurnHandle
+
+A `thread.turn(...)` handle receives events from when the call sends its request.
+Other handles start when they join; use `thread.read(include_turns=True)` for earlier history.
 
 ### TurnHandle
 
@@ -242,7 +297,7 @@ Behavior notes:
 
 InputItem = TextInput | ImageInput | LocalImageInput | SkillInput | MentionInput
 Input = list[InputItem] | InputItem
-RunInput = Input | str
+RunInput = Input | str | ExternalMessage
 ```
 
 Use `ImageInput` with a base64-encoded `data:image/...` URL. HTTP and HTTPS image URLs are
@@ -250,6 +305,58 @@ deprecated; download remote images and pass their local paths with `LocalImageIn
 
 Use a plain `str` as shorthand for `TextInput(...)` anywhere a turn input is accepted:
 `thread.run("...")`, `thread.turn("...")`, and `turn.steer("...")`.
+
+### ExternalMessage
+
+`ExternalMessage` supplies **untrusted content** from another agent, tool, or
+application. Content reaches the model with tool-level authority, below user
+and developer instructions. It does not establish user authorization or
+approval. Keep the thread's sandbox and approval policies appropriate for the
+work the user has authorized.
+
+```python
+from openai_codex import ExternalMessage
+
+message = ExternalMessage(
+    tool_name="notifications",
+    namespace="slack",
+    content="Deployment notification: the staging checks failed.",
+)
+result = thread.run(message)
+```
+
+| Field | Meaning |
+| --- | --- |
+| `tool_name: str` | Required, nonempty name of the tool or application delivering the message. |
+| `content` | Required text, or a sequence of structured content dictionaries or generated `FunctionCallOutputContentItem` models. Structured image content requires inline data URLs. |
+| `namespace: str | None = None` | Optional namespace for the tool name. |
+
+Pass one `ExternalMessage` as the complete input to `run(...)` or `turn(...)`.
+It starts a turn when the thread is idle or joins an active regular turn. It
+appears in saved history and item notifications as a `functionCallOutput`
+item, retaining tool authority. No preceding tool call or call ID is required.
+Tool names and namespaces identify the source; they are not proof of its
+identity or permission to act.
+
+When a message joins an active turn, both handles can stream or collect the
+result independently. A joining handle receives previously completed items and
+the latest usage, followed by live notifications. Consumed transient events such
+as token deltas are discarded. Both handles collect the complete result, and
+closing one stream leaves the other active.
+
+The async calls use the same object:
+
+```python
+result = await async_thread.run(message)
+```
+
+Use `await async_thread.turn(message)` to collect a handle for streaming and
+interruption. An `ExternalMessage` cannot be mixed into a user-input list.
+`TurnHandle.steer(...)` accepts user input; deliver an external message to an
+active turn through `thread.turn(message)`.
+
+See the [external message examples](../examples/16_external_message) for a user
+request followed by an external notification.
 
 ## Public Types
 
@@ -267,6 +374,23 @@ from openai_codex.types import (
     TurnStatus,
 )
 ```
+
+### Notifications and generated models
+
+Known notifications have typed `Notification.payload` values, including
+authentication recovery, thread queue/project changes, thread reversion, and
+realtime item updates. The `Notification.payload` type covers every registered
+event. Unknown methods and payloads that fail validation still produce
+`UnknownNotification`, with the raw data in
+`.params`. When an event gains a typed payload, read its named fields instead
+of `.params`.
+
+Returned models include the current CLI's thread metadata, richer turn errors,
+and `functionCallOutput` history items. Code that imports generated
+`HookMetadata` directly must access the handler through `.root`, inspect its
+`handler_type`, and then read the fields for that handler. For example, only a
+`"command"` handler has a `command` field. This reflects the app-server's
+separate command, MCP tool, prompt, and agent hook variants.
 
 ## Retry + errors
 

@@ -17,6 +17,7 @@ use crate::types::AuthCredentialsStoreMode;
 use crate::types::FeedbackConfigToml;
 use crate::types::History;
 use crate::types::MarketplaceConfig;
+use crate::types::McpEnterpriseManagedAuthConfig;
 use crate::types::McpServerConfig;
 use crate::types::MemoriesToml;
 use crate::types::Notice;
@@ -55,6 +56,7 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path::normalize_for_path_comparison;
+use codex_utils_path_uri::Platform;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Deserializer;
@@ -177,6 +179,12 @@ pub struct ConfigToml {
     /// only to tokens after the carried prefix in the current compaction window.
     pub model_auto_compact_token_limit_scope: Option<AutoCompactTokenLimitScope>,
 
+    /// Percentage of the usable context window that triggers compaction after a final
+    /// response. Existing auto-compaction limits still apply. Omitted or zero disables
+    /// turn-end compaction; valid values are 0–100.
+    #[schemars(range(min = 0, max = 100))]
+    pub model_post_turn_compact_threshold_percent: Option<u8>,
+
     /// Default approval policy for executing commands.
     #[schemars(with = "Option<crate::schema::ConfigAskForApproval>")]
     pub approval_policy: Option<AskForApproval>,
@@ -281,6 +289,10 @@ pub struct ConfigToml {
     // Uses the raw MCP input shape (custom deserialization) rather than `McpServerConfig`.
     #[schemars(schema_with = "crate::schema::mcp_servers_schema")]
     pub mcp_servers: HashMap<String, McpServerConfig>,
+
+    /// Trusted enterprise IdP shared by EMA-enabled MCP servers and plugins.
+    #[serde(default)]
+    pub mcp_enterprise_managed_auth: Option<McpEnterpriseManagedAuthConfig>,
 
     /// Preferred backend for storing MCP OAuth credentials.
     /// keyring: Use an OS-specific keyring service.
@@ -387,7 +399,7 @@ pub struct ConfigToml {
     /// Per-thread `config` overrides are accepted but do not reapply this (no-ops).
     pub model_catalog_json: Option<AbsolutePathBuf>,
 
-    /// Optionally specify a personality for the model
+    /// Deprecated: `friendly` and `pragmatic` no longer select a style.
     pub personality: Option<Personality>,
 
     /// Optional explicit service tier request id for new turns (for example
@@ -557,6 +569,8 @@ pub enum ThreadStoreToml {
 pub struct AutoReviewToml {
     /// Additional policy instructions inserted into the guardian prompt.
     pub policy: Option<String>,
+    /// Experimental full Guardian prompt template containing the tenant policy placeholder.
+    pub experimental_policy_template: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
@@ -751,8 +765,28 @@ pub struct GhostSnapshotToml {
     pub disable_warnings: Option<bool>,
 }
 
+/// Apply the executor's sandbox availability to an already selected sandbox mode.
+///
+/// Call this before resolving workspace-write settings so unused writable roots
+/// do not affect the read-only fallback. Named permission profiles are resolved
+/// separately and must not be downgraded through this helper.
+pub fn effective_sandbox_mode(
+    mode: SandboxMode,
+    platform: Platform,
+    windows_sandbox_level: WindowsSandboxLevel,
+) -> SandboxMode {
+    if platform == Platform::Windows
+        && windows_sandbox_level == WindowsSandboxLevel::Disabled
+        && mode == SandboxMode::WorkspaceWrite
+    {
+        SandboxMode::ReadOnly
+    } else {
+        mode
+    }
+}
+
 impl ConfigToml {
-    /// Derive the effective permission profile from legacy sandbox config.
+    /// Derive the effective permission profile from sandbox config.
     ///
     /// Call this only after ruling out `default_permissions`: named
     /// `[permissions]` profiles must be compiled through the permissions
@@ -768,30 +802,17 @@ impl ConfigToml {
         let resolved_sandbox_mode = configured_sandbox_mode
             .or_else(|| {
                 // If no sandbox_mode is set but this directory has a trust decision,
-                // default to workspace-write except on unsandboxed Windows where we
-                // default to read-only.
+                // default to workspace-write before applying the platform fallback.
                 active_project
                     .filter(|project| project.is_trusted() || project.is_untrusted())
-                    .map(|_| {
-                        if cfg!(target_os = "windows")
-                            && windows_sandbox_level == WindowsSandboxLevel::Disabled
-                        {
-                            SandboxMode::ReadOnly
-                        } else {
-                            SandboxMode::WorkspaceWrite
-                        }
-                    })
+                    .map(|_| SandboxMode::WorkspaceWrite)
             })
             .unwrap_or_default();
-        let effective_sandbox_mode = if cfg!(target_os = "windows")
-            // If the experimental Windows sandbox is enabled, do not force a downgrade.
-            && windows_sandbox_level == WindowsSandboxLevel::Disabled
-            && matches!(resolved_sandbox_mode, SandboxMode::WorkspaceWrite)
-        {
-            SandboxMode::ReadOnly
-        } else {
-            resolved_sandbox_mode
-        };
+        let effective_sandbox_mode = effective_sandbox_mode(
+            resolved_sandbox_mode,
+            Platform::native(),
+            windows_sandbox_level,
+        );
 
         let permission_profile = match effective_sandbox_mode {
             SandboxMode::ReadOnly => PermissionProfile::read_only(),
@@ -936,10 +957,14 @@ pub fn validate_model_providers(
 ) -> Result<(), String> {
     validate_reserved_model_provider_ids(model_providers)?;
     for (key, provider) in model_providers {
-        if !matches!(
+        if matches!(
             key.as_str(),
             AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID
         ) {
+            provider
+                .validate_bedrock_override()
+                .map_err(|message| format!("model_providers.{key} {message}"))?;
+        } else {
             if provider.aws.is_some() {
                 return Err(format!(
                     "model_providers.{key}: provider aws is only supported for \
@@ -997,6 +1022,37 @@ mod tests {
 
     const WORKSPACE_ID_A: &str = "123e4567-e89b-42d3-a456-426614174000";
     const WORKSPACE_ID_B: &str = "123e4567-e89b-42d3-a456-426614174001";
+
+    #[test]
+    fn sandbox_mode_uses_executor_platform_and_sandbox_level() {
+        use Platform::Linux;
+        use Platform::Macos;
+        use Platform::Unknown;
+        use Platform::Windows;
+        use SandboxMode::DangerFullAccess;
+        use SandboxMode::ReadOnly;
+        use SandboxMode::WorkspaceWrite;
+        use WindowsSandboxLevel::Disabled;
+        use WindowsSandboxLevel::Elevated;
+        use WindowsSandboxLevel::RestrictedToken;
+
+        for (mode, platform, level, expected) in [
+            (WorkspaceWrite, Windows, Disabled, ReadOnly),
+            (WorkspaceWrite, Windows, RestrictedToken, WorkspaceWrite),
+            (WorkspaceWrite, Windows, Elevated, WorkspaceWrite),
+            (WorkspaceWrite, Linux, Disabled, WorkspaceWrite),
+            (WorkspaceWrite, Macos, Disabled, WorkspaceWrite),
+            (WorkspaceWrite, Unknown, Disabled, WorkspaceWrite),
+            (ReadOnly, Windows, Disabled, ReadOnly),
+            (DangerFullAccess, Windows, Disabled, DangerFullAccess),
+        ] {
+            assert_eq!(
+                effective_sandbox_mode(mode, platform, level),
+                expected,
+                "{mode:?}, {platform:?}, {level:?}"
+            );
+        }
+    }
 
     #[test]
     fn thread_unload_delay_requires_nonnegative_seconds() {

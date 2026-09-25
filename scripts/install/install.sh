@@ -10,14 +10,28 @@ PACKAGE_ASSET_STEM="${OPEN_INTERPRETER_PACKAGE_ASSET_STEM:-${CODEX_PACKAGE_ASSET
 COMMAND_NAME="${OPEN_INTERPRETER_COMMAND_NAME:-${CODEX_COMMAND_NAME:-interpreter}}"
 ALIAS_COMMAND_NAMES="${OPEN_INTERPRETER_ALIAS_COMMAND_NAMES:-${CODEX_ALIAS_COMMAND_NAMES:-i}}"
 RELEASE_TAG_PREFIX="${OPEN_INTERPRETER_RELEASE_TAG_PREFIX:-${CODEX_RELEASE_TAG_PREFIX:-rust-v}}"
+DAEMON_ONLY="${CODEX_INSTALL_DAEMON_ONLY:-0}"
+release_source="github"
 
 BIN_DIR="${OPEN_INTERPRETER_INSTALL_DIR:-${CODEX_INSTALL_DIR:-$HOME/.local/bin}}"
 BIN_PATH="$BIN_DIR/$COMMAND_NAME"
 CODE_MODE_HOST_BIN_PATH="$BIN_DIR/codex-code-mode-host"
 INTERPRETER_HOME_DIR="${INTERPRETER_HOME:-${CODEX_HOME:-$HOME/.openinterpreter}}"
+CODEX_HOME_DIR="$INTERPRETER_HOME_DIR"
 STANDALONE_ROOT="$INTERPRETER_HOME_DIR/packages/standalone"
+if [ "$DAEMON_ONLY" = "1" ]; then
+  STANDALONE_ROOT="$CODEX_HOME_DIR/packages/app-server-daemon"
+fi
 RELEASES_DIR="$STANDALONE_ROOT/releases"
 CURRENT_LINK="$STANDALONE_ROOT/current"
+if [ "${CODEX_INSTALL_DEFER_SELECTION:-0}" = "1" ]; then
+  if [ "$DAEMON_ONLY" != "1" ]; then
+    echo "Deferred selection requires a daemon-only installation." >&2
+    exit 1
+  fi
+  CURRENT_LINK="$STANDALONE_ROOT/.migration-current"
+fi
+AUTO_UPDATE_VERSION="$STANDALONE_ROOT/auto-update-version"
 LOCK_FILE="$STANDALONE_ROOT/install.lock"
 LOCK_DIR="$STANDALONE_ROOT/install.lock.d"
 LOCK_STALE_AFTER_SECS=600
@@ -596,11 +610,12 @@ cleanup_stale_install_artifacts() {
   find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -name '.staging.*' -exec rm -rf {} +
   find "$STANDALONE_ROOT" -mindepth 1 -maxdepth 1 -name '.current.*' -exec rm -f {} +
 
-  if [ -d "$BIN_DIR" ]; then
+  if [ "$DAEMON_ONLY" != "1" ] && [ -d "$BIN_DIR" ]; then
     find "$BIN_DIR" -mindepth 1 -maxdepth 1 -name ".$COMMAND_NAME.*" -exec rm -f {} +
     for alias_name in $ALIAS_COMMAND_NAMES; do
       find "$BIN_DIR" -mindepth 1 -maxdepth 1 -name ".$alias_name.*" -exec rm -f {} +
     done
+    find "$BIN_DIR" -mindepth 1 -maxdepth 1 -name '.codex.*' -exec rm -f {} +
   fi
 }
 
@@ -1058,7 +1073,9 @@ fi
 step "Detected platform: $platform_label"
 step "Resolved version: $resolved_version"
 
-detect_conflicting_install
+if [ "$DAEMON_ONLY" != "1" ]; then
+  detect_conflicting_install
+fi
 
 tmp_dir="$(mktemp -d)"
 cleanup() {
@@ -1067,13 +1084,75 @@ cleanup() {
     rm -rf "$tmp_dir"
   fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 acquire_install_lock
+if [ "${CODEX_INSTALL_DEFER_SELECTION:-0}" = "1" ] &&
+  { [ -e "$STANDALONE_ROOT/current" ] || [ -L "$STANDALONE_ROOT/current" ]; }; then
+  echo "A dedicated daemon is already selected; retry the update." >&2
+  exit 1
+fi
+updater_record="$CODEX_HOME_DIR/app-server-daemon/app-server-updater.pid"
+if [ "$DAEMON_ONLY" = "1" ]; then
+  updater_record="$CODEX_HOME_DIR/app-server-daemon/daemon-updater.pid"
+fi
+old_updater_parent="false"
+if [ "${CODEX_INSTALL_IF_LATEST:-}" != "1" ] && [ "${CODEX_INSTALL_IF_CURRENT:-}" != "1" ] && [ -f "$updater_record" ]; then
+  updater_pid="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$updater_record" | head -n 1)"
+  recorded_start="$(sed -n 's/.*"processStartTime"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$updater_record" | head -n 1)"
+  if [ -r "/proc/$$/stat" ]; then
+    parent_pid="$(sed 's/^.*) //' "/proc/$$/stat" | awk '{ print $2 }')"
+  else
+    parent_pid="$(ps -p "$$" -o ppid= 2>/dev/null)" || parent_pid=""
+    parent_pid="$(printf '%s' "$parent_pid" | tr -d ' ')"
+  fi
+  if [ -n "$updater_pid" ] && [ "$updater_pid" = "$parent_pid" ]; then
+    actual_details="$(ps -p "$updater_pid" -o stat= -o lstart= 2>/dev/null)" || actual_details=""
+    actual_start="$(printf '%s' "$actual_details" | sed 's/^[^[:space:]]*[[:space:]]*//; s/[[:space:]]*$//')"
+    if [ -n "$recorded_start" ] && [ "$recorded_start" = "$actual_start" ]; then
+      old_updater_parent="true"
+    fi
+  fi
+  if [ "$RELEASE" = "latest" ] && [ -n "$updater_pid" ] &&
+    { [ -z "$parent_pid" ] || { [ "$updater_pid" = "$parent_pid" ] &&
+      { [ -z "$recorded_start" ] || [ -z "$actual_start" ]; }; }; } &&
+    kill -0 "$updater_pid" 2>/dev/null; then
+    warn "Cannot verify whether an older updater launched this installer; skipping latest update."
+    exit 0
+  fi
+fi
+if [ "${CODEX_INSTALL_IF_LATEST:-}" = "1" ] || [ "${CODEX_INSTALL_IF_CURRENT:-}" = "1" ] || [ "$old_updater_parent" = "true" ]; then
+  guarded_release="${CODEX_UPDATE_FROM_RELEASE:-}"
+  if [ "$old_updater_parent" = "true" ]; then
+    guarded_release="$(cat "$AUTO_UPDATE_VERSION" 2>/dev/null || true)"
+  fi
+  current_release_dir="$(cd -P "$CURRENT_LINK" 2>/dev/null && pwd)" || exit 0
+  releases_dir="$(cd -P "$RELEASES_DIR" 2>/dev/null && pwd)" || exit 0
+  if [ "$RELEASE" != "latest" ] || [ -z "$guarded_release" ] ||
+    [ "$current_release_dir" != "$releases_dir/$guarded_release" ]; then
+    if [ "${CODEX_INSTALL_IF_CURRENT:-}" = "1" ]; then
+      echo "Daemon selection changed; retry the update." >&2
+      exit 1
+    fi
+    exit 0
+  fi
+  # An explicit daemon update may leave a local or pinned release. Scheduled
+  # updates still require the selected release to follow the latest channel.
+  if [ "${CODEX_INSTALL_IF_CURRENT:-}" != "1" ] &&
+    [ "$(cat "$AUTO_UPDATE_VERSION" 2>/dev/null || true)" != "$guarded_release" ]; then
+    exit 0
+  fi
+fi
 cleanup_stale_install_artifacts
 
 if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target" "$install_layout"; then
   if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
+    if [ "$DAEMON_ONLY" = "1" ]; then
+      echo "Refusing to overwrite existing daemon release $release_dir." >&2
+      exit 1
+    fi
     warn "Found incomplete existing release at $release_dir; reinstalling."
   fi
 
@@ -1099,7 +1178,31 @@ if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target"
     install_legacy_platform_npm_release "$release_dir" "$archive_path" "$vendor_target"
   fi
 fi
+if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target" "$install_layout"; then
+  echo "Installed $PRODUCT_NAME command did not report expected version $resolved_version." >&2
+  exit 1
+fi
+if [ "$DAEMON_ONLY" = "1" ] && [ "${CODEX_INSTALL_DEFER_SELECTION:-0}" != "1" ]; then
+  installed_codex="$release_dir/$COMMAND_NAME"
+  if [ "$install_layout" = "package" ]; then
+    installed_codex="$release_dir/$(package_entrypoint_relative_path "$release_dir")"
+  fi
+  if ! "$installed_codex" app-server daemon pid-update-loop --check-package-ownership >/dev/null 2>&1; then
+    echo "The production release does not support daemon-owned packages; the current selection was left unchanged." >&2
+    exit 1
+  fi
+fi
 update_current_link "$release_dir"
+if [ "$RELEASE" = "latest" ]; then
+  printf '%s' "$release_name" > "$AUTO_UPDATE_VERSION.tmp.$$"
+  mv -f "$AUTO_UPDATE_VERSION.tmp.$$" "$AUTO_UPDATE_VERSION"
+else
+  rm -f "$AUTO_UPDATE_VERSION"
+fi
+if [ "$DAEMON_ONLY" = "1" ]; then
+  release_install_lock
+  exit 0
+fi
 update_visible_command "$release_dir"
 add_to_path
 verify_visible_command

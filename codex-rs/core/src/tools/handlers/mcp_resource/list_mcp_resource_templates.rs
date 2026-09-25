@@ -72,7 +72,7 @@ impl ListMcpResourceTemplatesHandler {
             arguments: arguments.clone(),
         };
 
-        run_resource_operation(&session, turn.as_ref(), &call_id, invocation, async {
+        run_resource_operation(&session, &step_context, &call_id, invocation, async {
             if let Some((server_name, params)) = args.target(turn.as_ref())? {
                 let result = mcp
                     .list_resource_templates(&server_name, params)

@@ -3,7 +3,8 @@
 //! - [`EventBroker`] holds the shared crossterm stream so multiple callers reuse the same
 //!   input source and can drop/recreate it on pause/resume without rebuilding consumers.
 //! - [`TuiEventStream`] wraps a draw event subscription plus the shared [`EventBroker`] and maps crossterm
-//!   events into [`TuiEvent`].
+//!   events into [`TuiEvent`]. The broker also owns the tmux size monitor; its samples
+//!   wake the draw subscription and become resize events before rendering.
 //! - [`EventSource`] abstracts the underlying event producer; the real implementation is
 //!   [`CrosstermEventSource`] and tests can swap in [`FakeEventSource`].
 //!
@@ -34,6 +35,7 @@ use tokio_stream::wrappers::WatchStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use super::TuiEvent;
+use super::size_monitor::SizeMonitor;
 
 /// Result type produced by an event source.
 pub type EventResult = std::io::Result<Event>;
@@ -51,6 +53,7 @@ pub trait EventSource: Send + 'static {
 pub struct EventBroker<S: EventSource = CrosstermEventSource> {
     state: Mutex<EventBrokerState<S>>,
     resume_events_tx: watch::Sender<()>,
+    pub(super) size_monitor: Option<SizeMonitor>,
 }
 
 /// Tracks state of underlying [`EventSource`].
@@ -83,11 +86,15 @@ impl<S: EventSource + Default> EventBroker<S> {
         Self {
             state: Mutex::new(EventBrokerState::Start),
             resume_events_tx,
+            size_monitor: None,
         }
     }
 
     /// Drop the underlying event source
     pub fn pause_events(&self) {
+        if let Some(monitor) = &self.size_monitor {
+            monitor.set_active(/*active*/ false);
+        }
         let mut state = self
             .state
             .lock()
@@ -97,6 +104,9 @@ impl<S: EventSource + Default> EventBroker<S> {
 
     /// Create a new instance of the underlying event source
     pub fn resume_events(&self) {
+        if let Some(monitor) = &self.size_monitor {
+            monitor.set_active(/*active*/ true);
+        }
         let mut state = self
             .state
             .lock()
@@ -186,7 +196,7 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
 
     /// Poll the shared crossterm stream for the next mapped `TuiEvent`.
     ///
-    /// This skips events we don't use (mouse events, etc.) and keeps polling until it yields
+    /// This skips events we don't use and keeps polling until it yields
     /// a mapped event, hits `Pending`, or sees EOF/error. When the broker is paused, it drops
     /// the underlying stream and returns `Pending` to fully release stdin.
     pub fn poll_crossterm_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<TuiEvent>> {
@@ -238,16 +248,22 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
     /// Poll the draw broadcast stream for the next draw event. Draw events are used to trigger a redraw of the TUI.
     pub fn poll_draw_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<TuiEvent>> {
         match Pin::new(&mut self.draw_stream).poll_next(cx) {
-            Poll::Ready(Some(Ok(()))) => Poll::Ready(Some(TuiEvent::Draw)),
-            Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(_)))) => {
-                Poll::Ready(Some(TuiEvent::Draw))
+            Poll::Ready(Some(Ok(())))
+            | Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(_)))) => {
+                let event = self
+                    .broker
+                    .size_monitor
+                    .as_ref()
+                    .and_then(SizeMonitor::take_resize)
+                    .map_or(TuiEvent::Draw, TuiEvent::Resize);
+                Poll::Ready(Some(event))
             }
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
     }
 
-    /// Map a crossterm event to a [`TuiEvent`], skipping events we don't use (mouse events, etc.).
+    /// Map a crossterm event to a [`TuiEvent`], preserving mouse coordinates and modifiers.
     fn map_crossterm_event(&mut self, event: Event) -> Option<TuiEvent> {
         match event {
             Event::Key(key_event) => {
@@ -268,7 +284,11 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
                 Some(TuiEvent::Key(key_event))
             }
             Event::Resize(width, height) => {
-                Some(TuiEvent::Resize(ratatui::layout::Size { width, height }))
+                let size = ratatui::layout::Size { width, height };
+                if let Some(monitor) = &self.broker.size_monitor {
+                    monitor.observe(size);
+                }
+                Some(TuiEvent::Resize(size))
             }
             Event::Paste(pasted) => Some(TuiEvent::Paste(pasted)),
             Event::FocusGained => {
@@ -281,7 +301,7 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
                 self.terminal_focused.store(false, Ordering::Relaxed);
                 Some(TuiEvent::FocusLost)
             }
-            _ => None,
+            Event::Mouse(mouse) => Some(TuiEvent::Mouse(mouse)),
         }
     }
 }
@@ -417,26 +437,24 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn key_event_skips_unmapped() {
+    async fn mouse_events_preserve_coordinates_and_do_not_consume_the_next_key() {
         let (broker, handle, _draw_tx, draw_rx, terminal_focused) = setup();
         let mut stream = make_stream(broker, draw_rx, terminal_focused);
-
-        handle.send(Ok(Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Moved,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        })));
-        handle.send(Ok(Event::Key(KeyEvent::new(
-            KeyCode::Char('a'),
-            KeyModifiers::NONE,
-        ))));
-
-        let next = stream.next().await.unwrap();
-        match next {
-            TuiEvent::Key(key) => {
-                assert_eq!(key, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-            }
+        let expected = MouseEvent {
+            kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: 123,
+            row: 42,
+            modifiers: KeyModifiers::SHIFT,
+        };
+        handle.send(Ok(Event::Mouse(expected)));
+        match stream.next().await {
+            Some(TuiEvent::Mouse(actual)) => assert_eq!(actual, expected),
+            other => panic!("expected mouse event, got {other:?}"),
+        }
+        let expected = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        handle.send(Ok(Event::Key(expected)));
+        match stream.next().await {
+            Some(TuiEvent::Key(actual)) => assert_eq!(actual, expected),
             other => panic!("expected key event, got {other:?}"),
         }
     }

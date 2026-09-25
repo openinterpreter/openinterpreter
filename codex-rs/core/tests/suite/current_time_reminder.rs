@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -31,6 +33,7 @@ use core_test_support::assert_regex_match;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
@@ -53,6 +56,8 @@ const SECOND_REMINDER: &str =
     "<current_time_reminder>It is 2026-06-17 17:35:15 UTC.</current_time_reminder>";
 const THIRD_REMINDER: &str =
     "<current_time_reminder>It is 2026-06-17 17:36:15 UTC.</current_time_reminder>";
+const CLOCK_UNAVAILABLE: &str =
+    "<current_time_unavailable>failed to read current time</current_time_unavailable>";
 const FIRST_TIME_UNIX_SECONDS: i64 = 1_781_717_655;
 
 #[derive(Clone, Copy)]
@@ -68,6 +73,7 @@ enum ClockSetup {
 struct TestTimeProvider {
     current_time: AtomicI64,
     sleep_seconds: AtomicU64,
+    scripted_current_time: Option<Mutex<VecDeque<Result<i64, &'static str>>>>,
 }
 
 impl Default for TestTimeProvider {
@@ -75,14 +81,24 @@ impl Default for TestTimeProvider {
         Self {
             current_time: AtomicI64::new(FIRST_TIME_UNIX_SECONDS),
             sleep_seconds: AtomicU64::new(0),
+            scripted_current_time: None,
         }
     }
 }
 
 impl TimeProvider for TestTimeProvider {
     fn current_time(&self, _thread_id: ThreadId) -> TimeFuture<'_> {
-        let timestamp = self.current_time.fetch_add(60, Ordering::Relaxed);
+        let timestamp = if let Some(script) = &self.scripted_current_time {
+            script
+                .lock()
+                .expect("test clock script should not be poisoned")
+                .pop_front()
+                .expect("unexpected test clock read")
+        } else {
+            Ok(self.current_time.fetch_add(60, Ordering::Relaxed))
+        };
         Box::pin(async move {
+            let timestamp = timestamp.map_err(anyhow::Error::msg)?;
             Ok(DateTime::<Utc>::from_timestamp(timestamp, 0)
                 .expect("test timestamp should be valid"))
         })
@@ -645,6 +661,160 @@ async fn time_provider_failure_stops_before_inference() -> Result<()> {
     .await;
     assert!(responses.requests().is_empty());
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opted_in_clock_failures_reach_the_model_without_aborting() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const CALL_ID: &str = "failed-current-time";
+    let server = start_mock_server().await;
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call_with_namespace(CALL_ID, "clock", "curr_time", "{}"),
+                ev_completed_with_tokens("resp-1", /*total_tokens*/ 80),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_function_call_with_namespace("clock-before-compact", "clock", "curr_time", "{}"),
+                ev_completed_with_tokens("resp-2", /*total_tokens*/ 500),
+            ]),
+            sse(vec![
+                ev_response_created("resp-compact"),
+                ev_assistant_message("msg-compact", "compact summary"),
+                ev_completed("resp-compact"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-3"),
+                ev_completed_with_tokens("resp-3", /*total_tokens*/ 80),
+            ]),
+        ],
+    )
+    .await;
+    let mut model_provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
+    model_provider.name = "OpenAI-compatible test provider".to_string();
+    model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    model_provider.supports_websockets = false;
+    let test = test_codex()
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+            config.model_auto_compact_token_limit = Some(200);
+            enable_current_time_reminder(config, /*interval*/ 0, CurrentTimeSource::External);
+            config.include_environment_context = true;
+            config
+                .features
+                .enable(Feature::NonfatalClockReadErrors)
+                .unwrap();
+        })
+        .with_external_time_provider(Arc::new(FailingTimeProvider))
+        .build_with_auto_env(&server)
+        .await?;
+
+    test.submit_turn("continue in a new context window").await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        requests[1].function_call_output_text(CALL_ID),
+        Some("failed to read current time".to_string()),
+    );
+    for index in [0, 1, 3] {
+        let request = &requests[index];
+        let developer_messages = request.message_input_texts("developer");
+        assert_eq!(
+            developer_messages
+                .iter()
+                .map(|text| text.matches(CLOCK_UNAVAILABLE).count())
+                .sum::<usize>(),
+            1,
+            "request {index} developer messages: {developer_messages:?}",
+        );
+        assert!(current_time_reminders(request).is_empty());
+        assert!(
+            !request
+                .message_input_texts("user")
+                .iter()
+                .any(|text| text.contains("<current_date>"))
+        );
+    }
+    Ok(())
+}
+
+/// Consecutive failures share one notice, but a new outage after recovery is reported in the same turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opted_in_clock_failures_are_reported_again_after_recovery() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut model_responses = Vec::new();
+    for (response_id, message_id) in [
+        ("resp-1", "msg-1"),
+        ("resp-2", "msg-2"),
+        ("resp-3", "msg-3"),
+    ] {
+        let mut completion = ev_completed(response_id);
+        completion["response"]["end_turn"] = json!(false);
+        model_responses.push(sse(vec![
+            ev_response_created(response_id),
+            ev_assistant_message(message_id, "continue"),
+            completion,
+        ]));
+    }
+    model_responses.push(sse(vec![
+        ev_response_created("resp-4"),
+        ev_completed("resp-4"),
+    ]));
+    let responses = mount_sse_sequence(&server, model_responses).await;
+    let clock = TestTimeProvider {
+        scripted_current_time: Some(Mutex::new(VecDeque::from([
+            Err("test clock unavailable"),
+            Err("test clock unavailable"),
+            Ok(FIRST_TIME_UNIX_SECONDS),
+            Err("test clock unavailable"),
+        ]))),
+        ..TestTimeProvider::default()
+    };
+    let test = test_codex()
+        .with_config(|config| {
+            enable_current_time_reminder(config, /*interval*/ 0, CurrentTimeSource::External);
+            config
+                .features
+                .enable(Feature::NonfatalClockReadErrors)
+                .unwrap();
+        })
+        .with_external_time_provider(Arc::new(clock))
+        .build_with_auto_env(&server)
+        .await?;
+
+    test.submit_turn("keep going while the clock changes")
+        .await?;
+
+    let clock_messages = responses
+        .requests()
+        .iter()
+        .map(|request| {
+            request
+                .message_input_texts("developer")
+                .into_iter()
+                .filter(|text| {
+                    text == CLOCK_UNAVAILABLE || text.starts_with("<current_time_reminder>")
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        clock_messages,
+        vec![
+            vec![CLOCK_UNAVAILABLE],
+            vec![CLOCK_UNAVAILABLE],
+            vec![CLOCK_UNAVAILABLE, FIRST_REMINDER],
+            vec![CLOCK_UNAVAILABLE, FIRST_REMINDER, CLOCK_UNAVAILABLE],
+        ]
+    );
     Ok(())
 }
 

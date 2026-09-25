@@ -1,4 +1,5 @@
 //! Interactive recovery when starting an archived session.
+//! Retries preserve the launch-resolved local presentation settings from the first attempt.
 
 use crate::app::AppExitInfo;
 use crate::app::ExitReason;
@@ -7,6 +8,7 @@ use crate::app_server_session::AppServerStartedThread;
 use crate::app_server_session::ForkPermissionMode;
 use crate::app_server_session::ResumeModelSettings;
 use crate::legacy_core::config::Config;
+use crate::local_settings::LocalSettings;
 use crate::resume_picker::SessionTarget;
 use crate::unarchive_prompt::UnarchiveChoice;
 use color_eyre::Result;
@@ -30,19 +32,19 @@ impl SessionStartAction {
         self,
         app_server: &mut AppServerSession,
         config: &Config,
+        local_settings: &LocalSettings,
         target: &SessionTarget,
     ) -> Result<AppServerStartedThread> {
-        let local_settings = crate::local_settings::LocalSettings::from(config);
         match self {
             Self::Resume(settings) => {
                 app_server
-                    .resume_thread(&local_settings, config.clone(), target.thread_id, settings)
+                    .resume_thread(local_settings, config.clone(), target.thread_id, settings)
                     .await
             }
             Self::Fork(permission_mode) => {
                 app_server
                     .fork_thread_with_permission_mode(
-                        &local_settings,
+                        local_settings,
                         config.clone(),
                         target.thread_id,
                         permission_mode,
@@ -53,16 +55,31 @@ impl SessionStartAction {
     }
 }
 
+#[derive(Debug)]
+pub(crate) enum SessionStartOutcome {
+    Started(Box<AppServerStartedThread>),
+    CommandCenter,
+    Exit,
+}
+
+/// The first attempt's session configuration and launch-resolved presentation settings.
+/// Archived-session retries must reuse both so thread configuration cannot change ownership.
+pub(crate) struct SessionStartConfig<'a> {
+    pub(crate) config: &'a Config,
+    pub(crate) local_settings: &'a LocalSettings,
+}
+
 pub(crate) async fn complete_session_start(
     app_server: &mut AppServerSession,
-    config: &Config,
+    config: SessionStartConfig<'_>,
+    app_server_target: &crate::AppServerTarget,
     target: &SessionTarget,
     action: SessionStartAction,
     initial_result: Result<AppServerStartedThread>,
     confirm: impl AsyncFnOnce() -> Result<UnarchiveChoice>,
-) -> Result<Option<AppServerStartedThread>> {
+) -> Result<SessionStartOutcome> {
     match initial_result {
-        Ok(started) => return Ok(Some(started)),
+        Ok(started) => return Ok(SessionStartOutcome::Started(Box::new(started))),
         Err(err) => {
             // Match the requested ID as well as the server's archive guidance: an unrelated
             // startup failure must never cause us to unarchive a session.
@@ -75,8 +92,16 @@ pub(crate) async fn complete_session_start(
         }
     }
 
-    if confirm().await? == UnarchiveChoice::Cancel {
-        return Ok(None);
+    match confirm().await? {
+        UnarchiveChoice::Cancel => {
+            return Ok(match app_server_target {
+                crate::AppServerTarget::LocalDaemon { .. }
+                | crate::AppServerTarget::Remote { .. } => SessionStartOutcome::CommandCenter,
+                crate::AppServerTarget::Embedded => SessionStartOutcome::Exit,
+            });
+        }
+        UnarchiveChoice::Quit => return Ok(SessionStartOutcome::Exit),
+        UnarchiveChoice::Unarchive => {}
     }
 
     app_server
@@ -85,9 +110,9 @@ pub(crate) async fn complete_session_start(
         .wrap_err_with(|| format!("Failed to unarchive session {}", target.thread_id))?;
     // Retry by ID, not by the old rollout path, which unarchiving may have moved.
     action
-        .start(app_server, config, target)
+        .start(app_server, config.config, config.local_settings, target)
         .await
-        .map(Some)
+        .map(|started| SessionStartOutcome::Started(Box::new(started)))
         .map_err(|err| session_start_error(action.verb(), target, err))
 }
 

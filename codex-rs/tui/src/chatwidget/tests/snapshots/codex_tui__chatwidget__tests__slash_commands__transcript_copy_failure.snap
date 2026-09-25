@@ -1,0 +1,17 @@
+---
+source: tui/src/chatwidget/tests/slash_commands.rs
+assertion_line: 3677
+expression: "render_bottom_popup(&chat, 80)"
+---
+  Warnings · 1 of 1 · Warning
+
+  selected café
+
+
+
+
+
+
+
+
+  Copy failed: clipboard unavailable

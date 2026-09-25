@@ -133,7 +133,7 @@ fn strict_config_is_not_supported_for_cloud_command() -> Result<()> {
 async fn features_enable_writes_feature_flag_to_config() -> Result<()> {
     let codex_home = TempDir::new()?;
 
-    for feature in ["unified_exec", "transcript_v2"] {
+    for feature in ["unified_exec", "shell_tool"] {
         let mut cmd = codex_command(codex_home.path())?;
         cmd.args(["features", "enable", feature])
             .assert()
@@ -296,5 +296,92 @@ async fn features_list_honors_cloud_managed_feature_requirements() -> Result<()>
     );
     server.verify().await;
 
+    Ok(())
+}
+
+#[test]
+fn remote_start_rejects_add_dir_before_connecting() -> Result<()> {
+    let home = TempDir::new()?;
+    let output = codex_command(home.path())?
+        .env("TERM", "xterm-256color")
+        .args(["--remote", "ws://127.0.0.1:1", "--add-dir", "remote-extra"])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    insta::assert_snapshot!(String::from_utf8(output)?);
+    Ok(())
+}
+
+#[test]
+fn remote_start_rejects_writable_root_overrides_before_connecting() -> Result<()> {
+    for config_override in [
+        "sandbox_workspace_write.writable_roots=[\"./extra\"]",
+        "sandbox_workspace_write={writable_roots=[\"./extra\"],network_access=true}",
+    ] {
+        let home = TempDir::new()?;
+        let output = codex_command(home.path())?
+            .env("TERM", "xterm-256color")
+            .args(["--remote", "ws://127.0.0.1:1", "-c", config_override])
+            .assert()
+            .failure()
+            .get_output()
+            .stderr
+            .clone();
+        let output = String::from_utf8(output)?;
+        insta::allow_duplicates! {
+            insta::assert_snapshot!(output, @"Error: sandbox_workspace_write.writable_roots overrides are not supported with --remote. Configure additional workspace roots on the server.");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn remote_start_allows_network_access_overrides_before_requiring_terminal() -> Result<()> {
+    for config_override in [
+        "sandbox_workspace_write.network_access=true",
+        "sandbox_workspace_write={network_access=true}",
+    ] {
+        let home = TempDir::new()?;
+        codex_command(home.path())?
+            .env("TERM", "xterm-256color")
+            .args(["--remote", "ws://127.0.0.1:1", "-c", config_override])
+            .assert()
+            .failure()
+            .stderr(contains("stdin is not a terminal"));
+    }
+    Ok(())
+}
+
+#[test]
+fn no_daemon_rejects_agents_and_explicit_remote_targets() -> Result<()> {
+    for args in [
+        "--no-daemon agents",
+        "agents --no-daemon",
+        "--no-daemon queue --thread example --message hello",
+        "--no-daemon --remote ws://localhost:9999 agents",
+        "--no-daemon --remote ws://localhost:9999",
+        "--no-daemon --remote ws://localhost:9999 archive example",
+        "--no-daemon --remote ws://localhost:9999 queue --thread example --message hello",
+        "--remote ws://localhost:9999 resume --no-daemon --last",
+        "--no-daemon fork --remote ws://localhost:9999 session-name",
+    ] {
+        let args = args.split_whitespace().collect::<Vec<_>>();
+        let home = TempDir::new()?;
+        let expected = if args.contains(&"agents") {
+            "--no-daemon cannot be used with codex agents."
+        } else if args.contains(&"queue") && !args.contains(&"--remote") {
+            "--no-daemon cannot be used with codex queue."
+        } else {
+            "--no-daemon cannot be used with --remote."
+        };
+        codex_command(home.path())?
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(contains(expected));
+        assert!(!home.path().join("app-server-daemon").exists());
+    }
     Ok(())
 }

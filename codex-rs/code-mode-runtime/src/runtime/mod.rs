@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 #[cfg(feature = "v8-runtime")]
 use std::panic::catch_unwind;
+use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 #[cfg(feature = "v8-runtime")]
 use std::thread;
@@ -77,7 +78,7 @@ pub(crate) enum RuntimeEvent {
         text: String,
     },
     Result {
-        stored_value_writes: HashMap<String, JsonValue>,
+        stored_value_writes: HashMap<String, Arc<JsonValue>>,
         error_text: Option<String>,
     },
     ThreadPanicked,
@@ -116,7 +117,7 @@ pub(crate) fn spawn_runtime(
 
 #[cfg(feature = "v8-runtime")]
 pub(crate) fn spawn_runtime(
-    stored_values: HashMap<String, JsonValue>,
+    stored_values: HashMap<String, Arc<JsonValue>>,
     request: ExecuteRequest,
     event_tx: mpsc::UnboundedSender<RuntimeEvent>,
     pending_mode: PendingRuntimeMode,
@@ -147,7 +148,9 @@ pub(crate) fn spawn_runtime(
         stored_values,
     };
 
+    let runtime_handle = tokio::runtime::Handle::current();
     spawn_supervised_runtime_thread(event_tx.clone(), task_failure_handler, move || {
+        let _runtime_guard = runtime_handle.enter();
         run_runtime(
             config,
             event_tx,
@@ -187,7 +190,7 @@ struct RuntimeConfig {
     tool_call_id: String,
     enabled_tools: Vec<EnabledToolMetadata>,
     source: String,
-    stored_values: HashMap<String, JsonValue>,
+    stored_values: HashMap<String, Arc<JsonValue>>,
 }
 
 #[cfg(feature = "v8-runtime")]
@@ -195,8 +198,8 @@ pub(super) struct RuntimeState {
     event_tx: mpsc::UnboundedSender<RuntimeEvent>,
     pending_tool_calls: HashMap<String, v8::Global<v8::PromiseResolver>>,
     pending_timeouts: HashMap<u64, timers::ScheduledTimeout>,
-    stored_values: HashMap<String, JsonValue>,
-    stored_value_writes: HashMap<String, JsonValue>,
+    stored_values: HashMap<String, Arc<JsonValue>>,
+    stored_value_writes: HashMap<String, Arc<JsonValue>>,
     enabled_tools: Vec<EnabledToolMetadata>,
     next_tool_call_id: u64,
     next_timeout_id: u64,
@@ -209,7 +212,7 @@ pub(super) struct RuntimeState {
 pub(super) enum CompletionState {
     Pending,
     Completed {
-        stored_value_writes: HashMap<String, JsonValue>,
+        stored_value_writes: HashMap<String, Arc<JsonValue>>,
         error_text: Option<String>,
     },
 }
@@ -371,7 +374,7 @@ fn capture_scope_send_error(
 #[cfg(feature = "v8-runtime")]
 fn send_result(
     event_tx: &mpsc::UnboundedSender<RuntimeEvent>,
-    stored_value_writes: HashMap<String, JsonValue>,
+    stored_value_writes: HashMap<String, Arc<JsonValue>>,
     error_text: Option<String>,
 ) {
     let _ = event_tx.send(RuntimeEvent::Result {
@@ -563,5 +566,71 @@ await new Promise(() => {});
         runtime_control_tx
             .send(RuntimeControlCommand::Terminate)
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn timers_release_tasks_when_cleared_or_the_cell_finishes() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (_runtime_tx, _runtime_control_tx, _runtime_terminate_handle) = spawn_runtime(
+            HashMap::new(),
+            execute_request(
+                r#"
+clearTimeout(setTimeout(() => text("cancelled"), 3_600_000));
+await new Promise((resolve) => setTimeout(resolve, 3_600_000));
+text("done");
+setTimeout(() => text("late"), 3_600_000);
+"#,
+            ),
+            event_tx,
+            PendingRuntimeMode::Continue,
+            /*task_failure_handler*/ None,
+        )
+        .unwrap();
+
+        loop {
+            match tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+                .await
+                .unwrap()
+            {
+                Some(RuntimeEvent::Pending) => break,
+                Some(_) => {}
+                None => panic!("runtime closed before the timer was pending"),
+            }
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(
+            tokio::runtime::Handle::current()
+                .metrics()
+                .num_alive_tasks(),
+            1
+        );
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(3_600)).await;
+        tokio::time::resume();
+
+        let mut output = Vec::new();
+        while let Some(event) = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("timer runtime should finish")
+        {
+            match event {
+                RuntimeEvent::ContentItem(item) => output.push(item),
+                RuntimeEvent::Result { error_text, .. } => assert_eq!(error_text, None),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            output,
+            vec![FunctionCallOutputContentItem::InputText {
+                text: "done".to_string()
+            }]
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(
+            tokio::runtime::Handle::current()
+                .metrics()
+                .num_alive_tasks(),
+            0
+        );
     }
 }

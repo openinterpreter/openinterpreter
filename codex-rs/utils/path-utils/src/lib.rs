@@ -1,4 +1,4 @@
-//! Path normalization, symlink resolution, and atomic writes shared across Codex crates.
+//! Path normalization, replacement, symlink resolution, and atomic writes.
 
 pub(crate) mod env;
 pub use env::is_wsl;
@@ -8,6 +8,7 @@ pub use system_commands::system_path;
 
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::HashSet;
+use std::hash::Hash;
 use std::io;
 use std::io::Write;
 use std::path::Path;
@@ -30,6 +31,24 @@ pub fn paths_match_after_normalization(left: impl AsRef<Path>, right: impl AsRef
         return left == right;
     }
     left.as_ref() == right.as_ref()
+}
+
+/// Replace paths equal to `old_path` and remove duplicates, preserving their order.
+///
+/// Other paths, including descendants of `old_path`, remain unchanged. This uses
+/// path equality without filesystem access or normalization; callers validate paths.
+pub fn replace_path_and_deduplicate<P>(mut paths: Vec<P>, old_path: &Path, new_path: P) -> Vec<P>
+where
+    P: AsRef<Path> + Clone + Eq + Hash,
+{
+    for path in &mut paths {
+        if path.as_ref() == old_path {
+            *path = new_path.clone();
+        }
+    }
+    let mut seen = HashSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
+    paths
 }
 
 pub fn normalize_for_native_workdir(path: impl AsRef<Path>) -> PathBuf {

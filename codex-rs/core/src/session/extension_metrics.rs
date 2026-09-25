@@ -15,6 +15,17 @@ impl ExtensionMetrics for SessionTelemetryExtensionMetrics {
     fn histogram(&self, name: &str, value: i64, tags: &[(&str, &str)]) {
         self.session_telemetry.histogram(name, value, tags);
     }
+
+    fn histogram_with_boundaries(
+        &self,
+        name: &str,
+        value: i64,
+        boundaries: &[f64],
+        tags: &[(&str, &str)],
+    ) {
+        self.session_telemetry
+            .histogram_with_boundaries(name, value, boundaries, tags);
+    }
 }
 
 pub(crate) fn from_session_telemetry(

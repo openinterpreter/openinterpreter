@@ -86,10 +86,11 @@ async fn check_negotiation(runtime: Arc<dyn webrtc::runtime::Runtime>) {
             for _ in candidates.len()..MAX_REMOTE_CANDIDATES {
                 answer.push_str(&format!("{}\r\n", candidates[0]));
             }
-            local
+            let outcome = local
                 .apply_answer(answer)
                 .await
                 .unwrap_or_else(|error| panic!("tcp={tcp}: {error}"));
+            assert_eq!(outcome, super::AnswerOutcome::Ready);
             let channel = channels.recv().await.unwrap();
             assert_eq!(
                 (

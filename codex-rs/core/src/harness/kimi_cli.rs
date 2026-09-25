@@ -7,6 +7,7 @@ use codex_chat_wire_compat::ToolOutputKind;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::LocalShellAction;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
@@ -769,6 +770,25 @@ fn convert_user_message_content(
     collapse_message_parts(convert_user_message_parts(content, options))
 }
 
+fn kimi_image_content_part(image: &ImageReference) -> Value {
+    match image {
+        ImageReference::Inline { image_url } => json!({
+            "type": "image_url",
+            "image_url": {
+                "url": image_url,
+                "id": null,
+            }
+        }),
+        ImageReference::File { file_id } => json!({
+            "type": "image_url",
+            "image_url": {
+                "url": null,
+                "id": file_id,
+            }
+        }),
+    }
+}
+
 fn convert_message_parts(content: &[ContentItem]) -> Vec<Value> {
     content
         .iter()
@@ -777,13 +797,7 @@ fn convert_message_parts(content: &[ContentItem]) -> Vec<Value> {
                 "type": "text",
                 "text": text,
             }),
-            ContentItem::InputImage { image_url, .. } => json!({
-                "type": "image_url",
-                "image_url": {
-                    "url": image_url,
-                    "id": null,
-                }
-            }),
+            ContentItem::InputImage { image, .. } => kimi_image_content_part(image),
             ContentItem::InputAudio { audio_url } => json!({
                 "type": "input_audio",
                 "audio_url": audio_url,
@@ -807,13 +821,7 @@ fn convert_user_message_parts(content: &[ContentItem], options: MessageBuildOpti
                     "text": text,
                 })
             }
-            ContentItem::InputImage { image_url, .. } => json!({
-                "type": "image_url",
-                "image_url": {
-                    "url": image_url,
-                    "id": null,
-                }
-            }),
+            ContentItem::InputImage { image, .. } => kimi_image_content_part(image),
             ContentItem::InputAudio { audio_url } => json!({
                 "type": "input_audio",
                 "audio_url": audio_url,
@@ -893,13 +901,9 @@ fn kimi_output_content_item(item: &FunctionCallOutputContentItem) -> Value {
                 safe_kimi_tool_text(text, MessageBuildOptions::kimi_cli())
             },
         }),
-        FunctionCallOutputContentItem::InputImage { image_url, .. } => json!({
-            "type": "image_url",
-            "image_url": {
-                "url": image_url,
-                "id": null,
-            }
-        }),
+        FunctionCallOutputContentItem::InputImage { image, .. } => {
+            kimi_image_content_part(image)
+        }
         FunctionCallOutputContentItem::InputVideo { video_url, id } => json!({
             "type": "video_url",
             "video_url": {
@@ -1567,7 +1571,9 @@ mod tests {
                     text: "Describe this screenshot.\n".to_string(),
                 },
                 ContentItem::InputImage {
-                    image_url: "data:image/png;base64,KIMIVISION".to_string(),
+                    image: ImageReference::Inline {
+                        image_url: "data:image/png;base64,KIMIVISION".to_string(),
+                    },
                     detail: None,
                 },
             ],
@@ -1598,6 +1604,22 @@ mod tests {
                     }
                 ],
             })]
+        );
+    }
+
+    #[test]
+    fn kimi_user_messages_preserve_image_file_id() {
+        assert_eq!(
+            kimi_image_content_part(&ImageReference::File {
+                file_id: "file_123".to_string(),
+            }),
+            json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": null,
+                    "id": "file_123",
+                }
+            })
         );
     }
 
@@ -2736,7 +2758,9 @@ mod tests {
                             text: "screenshot.png".to_string(),
                         },
                         FunctionCallOutputContentItem::InputImage {
-                            image_url: "data:image/png;base64,TOOLVISION".to_string(),
+                            image: ImageReference::Inline {
+                                image_url: "data:image/png;base64,TOOLVISION".to_string(),
+                            },
                             detail: None,
                         },
                     ]),

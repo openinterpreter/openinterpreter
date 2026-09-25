@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::app_event::TranscriptExportDestination;
+use crate::bottom_pane::popup_consts::picker_hint_line_for_keymap;
 
 impl ChatWidget {
     pub(crate) fn copy_transcript_to_clipboard(&mut self, markdown: &str) {
@@ -9,12 +10,9 @@ impl ChatWidget {
             markdown,
             crate::clipboard_copy::CopyFormat::PlainText,
         ) {
-            Ok(lease) => {
-                self.clipboard_lease = lease;
-                self.add_info_message(
-                    "Copied conversation to clipboard".to_string(),
-                    /*hint*/ None,
-                );
+            Ok(outcome) => {
+                let status = outcome.store(&mut self.clipboard_lease);
+                self.add_info_message(status.message("conversation"), /*hint*/ None);
             }
             Err(error) => self.add_error_message(format!("Copy failed: {error}")),
         }
@@ -22,9 +20,14 @@ impl ChatWidget {
 
     pub(super) fn show_transcript_export_popup(&mut self) {
         self.show_selection_view(SelectionViewParams {
-            title: Some("Export conversation".to_string()),
-            subtitle: Some("Save the complete conversation as Markdown".to_string()),
-            footer_hint: Some(standard_popup_hint_line()),
+            header: Box::new(
+                Paragraph::new(vec![
+                    Line::from("Export conversation".bold()),
+                    Line::from("Save the complete conversation as Markdown".dim()),
+                ])
+                .wrap(Wrap { trim: false }),
+            ),
+            footer_hint: Some(picker_hint_line_for_keymap(&self.bottom_pane.list_keymap())),
             items: vec![
                 SelectionItem {
                     name: "Copy to clipboard".to_string(),
@@ -48,7 +51,7 @@ impl ChatWidget {
                     ..Default::default()
                 },
             ],
-            ..Default::default()
+            ..SelectionViewParams::picker()
         });
         self.defer_input_until_settings_applied();
         self.request_redraw();

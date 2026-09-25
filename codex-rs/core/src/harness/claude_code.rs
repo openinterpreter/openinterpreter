@@ -25,6 +25,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
@@ -994,13 +995,19 @@ fn map_tool_result_content_item(
         // Real Claude Code returns image file reads as an image tool-result
         // block (`source: {type: base64, media_type, data}`), so pass the image
         // through to the multimodal model instead of omitting it.
-        FunctionCallOutputContentItem::InputImage { image_url, .. } => {
-            parse_base64_data_url(image_url).map(|(media_type, data)| {
-                AnthropicToolResultBlock::Image {
-                    source: AnthropicImageSource::base64(media_type, data),
-                }
-            })
-        }
+        FunctionCallOutputContentItem::InputImage { image, .. } => match image {
+            ImageReference::Inline { image_url } => {
+                parse_base64_data_url(image_url).map(|(media_type, data)| {
+                    AnthropicToolResultBlock::Image {
+                        source: AnthropicImageSource::base64(media_type, data),
+                    }
+                })
+            }
+            ImageReference::File { file_id } => Some(AnthropicToolResultBlock::Text {
+                text: format!("[image file {file_id} omitted by claude-code harness]"),
+                cache_control: None,
+            }),
+        },
         FunctionCallOutputContentItem::InputVideo { .. } => Some(AnthropicToolResultBlock::Text {
             text: "[video omitted by claude-code harness]".to_string(),
             cache_control: None,
@@ -4448,7 +4455,9 @@ mod tests {
     fn read_image_tool_result_serializes_to_anthropic_image_block() {
         let body =
             FunctionCallOutputBody::ContentItems(vec![FunctionCallOutputContentItem::InputImage {
-                image_url: "data:image/png;base64,AAAB".to_string(),
+                image: ImageReference::Inline {
+                    image_url: "data:image/png;base64,AAAB".to_string(),
+                },
                 detail: None,
             }]);
         let content = build_claude_tool_result_content(
@@ -4463,6 +4472,32 @@ mod tests {
             serde_json::json!([{
                 "type": "image",
                 "source": { "type": "base64", "media_type": "image/png", "data": "AAAB" }
+            }])
+        );
+    }
+
+    #[test]
+    fn file_image_tool_result_is_explicitly_omitted() {
+        let body = FunctionCallOutputBody::ContentItems(vec![
+            FunctionCallOutputContentItem::InputImage {
+                image: ImageReference::File {
+                    file_id: "file_123".to_string(),
+                },
+                detail: None,
+            },
+        ]);
+        let content = build_claude_tool_result_content(
+            Some("Read"),
+            &body,
+            /*is_error*/ false,
+            /*todo_reminder_text*/ None,
+        );
+        let json = serde_json::to_value(&content).expect("serialize tool result");
+        assert_eq!(
+            json,
+            serde_json::json!([{
+                "type": "text",
+                "text": "[image file file_123 omitted by claude-code harness]"
             }])
         );
     }

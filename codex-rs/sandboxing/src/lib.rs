@@ -17,6 +17,9 @@ mod windows_mxc;
 pub use bwrap::find_system_bwrap_in_path;
 #[cfg(target_os = "linux")]
 pub use bwrap::system_bwrap_warning;
+pub use codex_mxc_sandbox::CODEX_WINDOWS_MXC_ARG1;
+pub use codex_mxc_sandbox::is_available as windows_mxc_available;
+pub use codex_mxc_sandbox::run_main as run_windows_mxc_main;
 pub use codex_windows_sandbox::WindowsSandboxProxySettingsMode;
 pub use denial::is_likely_executor_managed_sandbox_denied;
 pub use denial::is_likely_sandbox_denied;
@@ -69,6 +72,9 @@ impl From<SandboxTransformError> for CodexErr {
                 CodexErr::LandlockSandboxExecutableNotProvided
             }
             SandboxTransformError::EnvironmentNetworkProxy(message) => {
+                CodexErr::UnsupportedOperation(message)
+            }
+            SandboxTransformError::WindowsMxcPreparation(message) => {
                 CodexErr::UnsupportedOperation(message)
             }
             #[cfg(target_os = "macos")]

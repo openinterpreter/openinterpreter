@@ -26,6 +26,7 @@ pub enum SessionStartSource {
     Resume,
     Clear,
     Compact,
+    Fork,
 }
 
 impl SessionStartSource {
@@ -35,6 +36,7 @@ impl SessionStartSource {
             Self::Resume => "resume",
             Self::Clear => "clear",
             Self::Compact => "compact",
+            Self::Fork => "fork",
         }
     }
 }

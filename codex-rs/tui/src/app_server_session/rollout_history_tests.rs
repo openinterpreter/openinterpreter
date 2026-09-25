@@ -214,7 +214,7 @@ async fn viewing_thread_reads_history_without_resuming_it() -> Result<()> {
     )?;
     let mut app_server = crate::start_embedded_app_server_for_picker(&config).await?;
     let next_request_id = app_server.next_request_id;
-    let viewed = app_server
+    let (viewed, notice) = app_server
         .read_thread_for_viewing(
             &config,
             &crate::local_settings::LocalSettings::from(&config),
@@ -222,6 +222,7 @@ async fn viewing_thread_reads_history_without_resuming_it() -> Result<()> {
         )
         .await?;
 
+    assert_eq!(notice, None);
     assert_eq!(viewed.session.thread_id, thread_id);
     assert!(!viewed.turns.is_empty());
     assert!(!viewed.blocks_direct_input);
@@ -286,7 +287,8 @@ async fn cached_legacy_resume_revalidates_history_across_migration_settings() ->
         [(false, false), (false, true), (true, false), (true, true)]
     {
         let codex_home = tempfile::tempdir().expect("tempdir");
-        let config = build_config(&codex_home).await;
+        // Keep the large setup futures off the test thread's stack.
+        let config = Box::pin(build_config(&codex_home)).await;
         let legacy_thread_id = ThreadId::from_string(
             &create_fake_rollout(
                 codex_home.path(),
@@ -314,18 +316,19 @@ async fn cached_legacy_resume_revalidates_history_across_migration_settings() ->
         let maintenance_guard =
             codex_rollout::try_acquire_rollout_maintenance_lock(codex_home.path())?
                 .expect("acquire rollout maintenance lock");
-        let mut app_server = crate::start_embedded_app_server_for_picker(&startup_config).await?;
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&startup_config)).await?;
         app_server.remember_thread_history_mode(legacy_thread_id, ThreadHistoryMode::Legacy);
         let local_settings = crate::local_settings::LocalSettings::from(&resume_config);
         let next_request_id = app_server.next_request_id;
         let legacy = {
-            let resume = app_server.resume_thread(
+            // Keep the large resume future off the Windows test thread's stack.
+            let mut resume = Box::pin(app_server.resume_thread(
                 &local_settings,
                 resume_config.clone(),
                 legacy_thread_id,
                 ResumeModelSettings::RestoreFromThread,
-            );
-            tokio::pin!(resume);
+            ));
             drop(maintenance_guard);
             // This current-thread test polls resume before yielding to the startup worker.
             // Resume must acquire its guard before waiting for metadata revalidation.

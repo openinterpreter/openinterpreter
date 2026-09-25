@@ -51,6 +51,7 @@ use tokio::sync::Semaphore;
 
 #[derive(Clone, Copy)]
 enum InjectedFailure {
+    MetadataNotFound,
     Metadata(io::ErrorKind),
     MetadataBlocked,
     MetadataBlockedByFilenamePrefix(&'static str),
@@ -128,13 +129,16 @@ impl FailingFileSystem {
         options: GetMetadataOptions,
         sandbox: Option<&FileSystemSandboxContext>,
     ) -> io::Result<FileMetadata> {
-        let path_abs = path.to_abs_path()?;
         self.metadata_calls
             .paths
             .lock()
             .expect("metadata paths lock")
             .push(path.clone());
         self.metadata_calls.started.notify_one();
+        if matches!(self.failure, InjectedFailure::MetadataNotFound) {
+            return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
+        let path_abs = path.to_abs_path()?;
         match self.failure {
             InjectedFailure::Metadata(kind) if path_abs == self.path => {
                 Err(io::Error::new(kind, "injected metadata failure"))
@@ -165,7 +169,8 @@ impl FailingFileSystem {
             InjectedFailure::MetadataPending if path_abs == self.path => {
                 std::future::pending().await
             }
-            InjectedFailure::Metadata(_)
+            InjectedFailure::MetadataNotFound
+            | InjectedFailure::Metadata(_)
             | InjectedFailure::MetadataBlocked
             | InjectedFailure::MetadataBlockedByFilenamePrefix(_)
             | InjectedFailure::MetadataPending
@@ -370,7 +375,7 @@ fn resolved_local_environments<const N: usize>(
                             allow_login_shell: true,
                             workspace_roots: Vec::new(),
                             windows_sandbox_level: WindowsSandboxLevel::Disabled,
-                            windows_sandbox_private_desktop: true,
+                            windows_sandbox_type: codex_protocol::sandbox::SandboxType::None,
                             use_legacy_landlock: false,
                             permission_profile: PermissionProfileSnapshot::legacy(
                                 PermissionProfile::read_only(),
@@ -418,6 +423,7 @@ fn foreign_agents_md_uses_environment_native_paths() {
     let source_path = cwd.join("AGENTS.md").expect("AGENTS.md URI");
     let loaded = LoadedAgentsMd {
         user_instructions: None,
+        thread_instructions: None,
         entries: vec![InstructionEntry {
             contents: "remote instructions".to_string(),
             provenance: InstructionProvenance::Project {
@@ -451,6 +457,7 @@ fn multi_environment_agents_md_renders_mixed_path_conventions() {
         .expect("Windows AGENTS.md URI");
     let loaded = LoadedAgentsMd {
         user_instructions: None,
+        thread_instructions: None,
         entries: vec![
             InstructionEntry {
                 contents: "POSIX instructions".to_string(),
@@ -509,7 +516,7 @@ async fn make_config(root: &TempDir, limit: usize, instructions: Option<&str>) -
 
     let user_instructions = instructions.map(|text| Instructions {
         text: text.to_owned(),
-        source: config.codex_home.join(DEFAULT_AGENTS_MD_FILENAME),
+        source: Some(config.codex_home.join(DEFAULT_AGENTS_MD_FILENAME)),
     });
     TestConfig {
         config,
@@ -558,7 +565,7 @@ async fn make_config_with_project_root_markers(
     config.project_doc_max_bytes = limit;
     let user_instructions = instructions.map(|text| Instructions {
         text: text.to_owned(),
-        source: config.codex_home.join(DEFAULT_AGENTS_MD_FILENAME),
+        source: Some(config.codex_home.join(DEFAULT_AGENTS_MD_FILENAME)),
     });
     TestConfig {
         config,
@@ -608,6 +615,7 @@ fn empty_loaded_instructions_are_empty() {
 fn loaded_instructions_with_only_empty_or_whitespace_entries_are_empty() {
     let empty = LoadedAgentsMd {
         user_instructions: None,
+        thread_instructions: None,
         entries: vec![InstructionEntry {
             contents: String::new(),
             provenance: InstructionProvenance::Internal,
@@ -615,6 +623,7 @@ fn loaded_instructions_with_only_empty_or_whitespace_entries_are_empty() {
     };
     let whitespace = LoadedAgentsMd {
         user_instructions: None,
+        thread_instructions: None,
         entries: vec![InstructionEntry {
             contents: " \n\t".to_string(),
             provenance: InstructionProvenance::Internal,
@@ -686,6 +695,7 @@ async fn total_byte_limit_truncates_later_project_docs() {
     let loaded = load_agents_md(&config).await.expect("project instructions");
     let expected = LoadedAgentsMd {
         user_instructions: None,
+        thread_instructions: None,
         entries: vec![
             InstructionEntry {
                 contents: "root".to_string(),
@@ -1100,16 +1110,16 @@ async fn zero_byte_limit_disables_docs() {
     );
 }
 
-/// When both system instructions and AGENTS.md docs are present the two
-/// should be concatenated with the separator.
+/// User instructions precede project docs without consuming their byte budget.
 #[tokio::test]
 async fn merges_existing_instructions_with_agents_md() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    fs::write(tmp.path().join("AGENTS.md"), "proj doc").unwrap();
+    fs::write(tmp.path().join("AGENTS.md"), "proj document").unwrap();
 
     const INSTRUCTIONS: &str = "base instructions";
+    let limit = "proj doc".len();
 
-    let res = get_user_instructions(&make_config(&tmp, /*limit*/ 4096, Some(INSTRUCTIONS)).await)
+    let res = get_user_instructions(&make_config(&tmp, limit, Some(INSTRUCTIONS)).await)
         .await
         .expect("should produce a combined instruction string");
 
@@ -1173,11 +1183,13 @@ secondary doc"#,
         loaded.sources().collect::<Vec<_>>(),
         vec![
             PathUri::from_abs_path(
-                &config
+                config
                     .user_instructions
                     .as_ref()
                     .expect("global instructions")
-                    .source,
+                    .source
+                    .as_ref()
+                    .expect("global instruction source"),
             ),
             PathUri::from_abs_path(&primary.path().join("AGENTS.md").abs()),
             PathUri::from_abs_path(&primary_nested.join("AGENTS.md").abs()),
@@ -1376,6 +1388,7 @@ async fn concatenates_root_and_cwd_docs() {
     let crate_agents = cfg.cwd.join("AGENTS.md");
     let expected = LoadedAgentsMd {
         user_instructions: None,
+        thread_instructions: None,
         entries: vec![
             InstructionEntry {
                 contents: "root doc".to_string(),
@@ -1513,8 +1526,9 @@ async fn instruction_sources_include_global_before_agents_md_docs() {
     let expected = LoadedAgentsMd {
         user_instructions: Some(Instructions {
             text: "global doc".to_string(),
-            source: global_agents.clone(),
+            source: Some(global_agents.clone()),
         }),
+        thread_instructions: None,
         entries: vec![InstructionEntry {
             contents: "project doc".to_string(),
             provenance: project_provenance(project_agents.clone(), cfg.cwd.clone()),
@@ -1555,6 +1569,72 @@ async fn agents_local_md_preferred() {
         discovery[0].basename().as_deref(),
         Some(LOCAL_AGENTS_MD_FILENAME)
     );
+}
+
+#[tokio::test]
+async fn fallback_paths_are_rejected_before_filesystem_probes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut cfg = make_config_with_project_root_markers(
+        &tmp,
+        /*limit*/ 4096,
+        /*instructions*/ None,
+        &[],
+    )
+    .await;
+    let windows_paths = [
+        r"..\AGENTS.md",
+        r"nested\AGENTS.md",
+        r"\AGENTS.md",
+        r"C:\AGENTS.md",
+        "C:AGENTS.md",
+        r"\\server\share\AGENTS.md",
+        r"\\?\UNC\server\share\AGENTS.md",
+        r"\\.\pipe\instructions",
+        "AGENTS.md:stream",
+    ];
+    cfg.project_doc_fallback_filenames = [
+        "",
+        ".",
+        "..",
+        "/AGENTS.md",
+        "../AGENTS.md",
+        "nested/AGENTS.md",
+        "//server/share/AGENTS.md",
+        "AGENTS\0.md",
+    ]
+    .into_iter()
+    .chain(windows_paths)
+    .chain(["WORKFLOW.md", "WORKFLOW.md", ".instructions.md"])
+    .map(str::to_owned)
+    .collect();
+
+    // Backslashes and colons are ordinary filename characters on POSIX executors.
+    for (cwd, extra_filenames) in [
+        ("file:///repo", windows_paths.as_slice()),
+        ("file:///C:/repo", &[][..]),
+    ] {
+        let cwd: PathUri = cwd.parse().expect("cwd URI");
+        let metadata_calls = Arc::new(MetadataCallCounts::default());
+        let filesystem = FailingFileSystem {
+            path: tmp.abs(),
+            failure: InjectedFailure::MetadataNotFound,
+            metadata_calls: Arc::clone(&metadata_calls),
+        };
+        let paths = super::agents_md_paths(&cfg, &cwd, &filesystem, /*sandbox*/ None)
+            .await
+            .expect("discover paths");
+
+        assert_eq!(paths, Vec::<PathUri>::new());
+        assert_eq!(
+            *metadata_calls.paths.lock().expect("metadata paths lock"),
+            ["AGENTS.override.md", "AGENTS.md"]
+                .into_iter()
+                .chain(extra_filenames.iter().copied())
+                .chain(["WORKFLOW.md", ".instructions.md"])
+                .map(|name| cwd.join(name).expect("filename"))
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 /// When AGENTS.md is absent but a configured fallback exists, the fallback is used.

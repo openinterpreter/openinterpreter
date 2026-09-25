@@ -7,8 +7,11 @@
 
 ## Why does the SDK install a runtime package?
 
-The SDK version tracks the corresponding Codex CLI release. Each SDK release
-pins and installs its matching runtime dependency automatically.
+Stable CLI releases publish the SDK with the same version and an exact runtime
+pin. CLI prereleases do not trigger Python package publishing. Independent SDK
+beta releases can still be published manually with a different version number,
+but must pin a compatible runtime. The dependency is installed automatically.
+See [Python SDK releases](../RELEASING.md) for publishing and retry instructions.
 
 ## Thread vs turn
 
@@ -33,6 +36,52 @@ Choose `run()` for most apps. Choose `stream()` for progress UIs, custom timeout
   entry or first awaited API use.
 
 If your app is not already async, stay with `Codex`.
+
+## How do I pass untrusted external content?
+
+Use `ExternalMessage` for messages from other agents, tools, or applications:
+
+```python
+from openai_codex import ExternalMessage
+
+result = thread.run(ExternalMessage(
+    tool_name="notifications",
+    namespace="slack",
+    content="Deployment notification: the staging checks failed.",
+))
+```
+
+The content has tool-level authority, below user and developer instructions.
+It does not authorize actions or approve requests. Establish the user's task
+separately and keep the thread's sandbox and approval policies in place.
+Plain strings and `TextInput` represent user input.
+
+An external message starts a turn or joins an active regular turn and is
+preserved in history. Pass it as the entire input to `thread.run(...)` or
+`thread.turn(...)`; the async methods accept the same object. See the
+[API reference](api-reference.md#externalmessage) and
+[runnable example](../examples/16_external_message).
+
+External messages and the new `include_turns`, `turn_service_tier`, and `source`
+options require CLI 0.151.0 or newer. If a custom executable is too old, the SDK
+raises `CodexError` before sending the request. Upgrade that executable or use
+the runtime installed with a matching SDK release.
+
+## Does `include_turns=False` remove the conversation's context?
+
+No. On `thread_resume(...)` and `thread_fork(...)`, it only skips loading turn
+history into the server's response. Omitting it preserves the server's
+existing default. Retrieve saved history with `thread.read(include_turns=True)`.
+
+## How do I change the service tier for just one turn?
+
+Pass `turn_service_tier=` to `thread.run(...)` or `thread.turn(...)`.
+`None` inherits the thread setting, and `"default"` selects standard speed.
+The override applies only when starting a new turn. Use `service_tier=` when
+you want to change the thread's setting for subsequent turns too.
+
+`source=` on those methods only labels what initiated the turn. It does not
+schedule work or grant authority, and it is ignored when joining an active turn.
 
 ## How do I log in?
 

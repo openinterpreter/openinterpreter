@@ -64,6 +64,7 @@ codex-plugin = { workspace = true }
 codex-product-info = { workspace = true }
 codex-protocol = { workspace = true }
 codex-responses-api-proxy = { workspace = true }
+codex-tcp-tunnel = { workspace = true }
 codex-rmcp-client = { workspace = true }
 codex-rollout = { workspace = true }
 codex-rollout-trace = { workspace = true }
@@ -76,7 +77,9 @@ codex-thread-store = { workspace = true }
 codex-tui = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-path = { workspace = true }
-crossterm = { workspace = true }
+codex-utils-path-uri = { workspace = true }
+crossterm = { workspace = true, features = ["event-stream"] }
+futures = { workspace = true }
 http = { workspace = true }
 libc = { workspace = true }
 os_info = { workspace = true }
@@ -124,13 +127,13 @@ assert_matches = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 codex-utils-pty = { workspace = true }
 flate2 = { workspace = true }
-futures = { workspace = true }
 insta = { workspace = true }
 predicates = { workspace = true }
 pretty_assertions = { workspace = true }
 sqlx = { workspace = true }
 tar = { workspace = true }
 tokio-tungstenite = { workspace = true }
+vt100 = { workspace = true }
 wiremock = { workspace = true }
 zstd = { workspace = true }
 

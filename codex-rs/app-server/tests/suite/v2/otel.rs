@@ -48,7 +48,7 @@ async fn account_switch_reloads_telemetry_collectors_and_preserves_trace_context
             .email(INITIAL_EMAIL),
         AuthCredentialsStoreMode::File,
     )?;
-    write_models_cache(codex_home.path())?;
+    write_models_cache(codex_home.path()).await?;
 
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -128,6 +128,10 @@ async fn account_switch_reloads_telemetry_collectors_and_preserves_trace_context
     assert!(
         next_metrics.contains("codex.thread.started"),
         "the next account's metrics did not reach its collector: {next_metrics}"
+    );
+    assert!(
+        next_metrics.contains("is_worktree"),
+        "the thread-start worktree tag did not reach its collector: {next_metrics}"
     );
 
     Ok(())

@@ -37,18 +37,22 @@ impl ChatWidget {
         if !self.status_state.thread_title_generation_pending {
             return value;
         }
-        let spinner = if self.local_settings.tui.animations {
-            self.terminal_title_spinner_frame_at(now)
-        } else {
-            TERMINAL_TITLE_SPINNER_FRAMES[0]
-        };
-        let value = value.unwrap_or_else(|| "renaming...".to_string());
-        Some(format!("{value} {spinner}"))
+        let spinner =
+            if self.local_settings.tui.animations && self.local_settings.tui.effects.progress {
+                self.terminal_title_spinner_frame_at(now)
+            } else {
+                TERMINAL_TITLE_SPINNER_FRAMES[0]
+            };
+        Some(match value {
+            Some(value) => format!("{value} {spinner}"),
+            None => spinner.to_string(),
+        })
     }
 
     pub(crate) fn refresh_thread_title_progress_for_time_tick(&mut self) {
         if self.status_state.thread_title_generation_pending
             && self.local_settings.tui.animations
+            && self.local_settings.tui.effects.progress
             && self.configured_status_line_items().iter().any(|item| {
                 matches!(
                     item.parse::<StatusLineItem>(),

@@ -14,6 +14,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::plaintext_agent_message_content;
@@ -1041,14 +1042,25 @@ fn map_tool_result_content_item(
             text: zcode_visible_tool_text(text).to_string(),
             cache_control: None,
         }),
-        FunctionCallOutputContentItem::InputImage { image_url, .. } => {
-            parse_base64_data_url(image_url).map(|(media_type, data)| {
-                AnthropicToolResultBlock::Image {
-                    source: AnthropicImageSource::base64(media_type, data),
-                }
+        FunctionCallOutputContentItem::InputImage { image, .. } => match image {
+            ImageReference::Inline { image_url } => {
+                parse_base64_data_url(image_url).map(|(media_type, data)| {
+                    AnthropicToolResultBlock::Image {
+                        source: AnthropicImageSource::base64(media_type, data),
+                    }
+                })
+            }
+            ImageReference::File { file_id } => Some(AnthropicToolResultBlock::Text {
+                text: format!("[image file {file_id} omitted by zcode harness]"),
+                cache_control: None,
+            }),
+        },
+        FunctionCallOutputContentItem::InputVideo { .. } => {
+            Some(AnthropicToolResultBlock::Text {
+                text: "[video omitted by zcode harness]".to_string(),
+                cache_control: None,
             })
         }
-        FunctionCallOutputContentItem::InputVideo { .. } => None,
         FunctionCallOutputContentItem::InputAudio { .. } => None,
         FunctionCallOutputContentItem::EncryptedContent { .. } => None,
     }

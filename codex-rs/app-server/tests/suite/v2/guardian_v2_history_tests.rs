@@ -1,4 +1,4 @@
-//! Exercises both reviewers' evidence delivery through real compaction and rollback.
+//! Exercises both reviewers' evidence delivery through real compaction and resume.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -14,21 +14,16 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::header;
 use axum::routing::get;
-use axum::routing::post;
 use codex_app_server_protocol::ApprovalsReviewer;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::GuardianApprovalReview;
 use codex_app_server_protocol::GuardianApprovalReviewStatus;
-use codex_app_server_protocol::GuardianRiskLevel;
-use codex_app_server_protocol::GuardianUserAuthorization;
 use codex_app_server_protocol::ItemGuardianApprovalReviewCompletedNotification;
 use codex_app_server_protocol::ThreadCompactStartParams;
 use codex_app_server_protocol::ThreadCompactStartResponse;
 use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
-use codex_app_server_protocol::ThreadRollbackParams;
-use codex_app_server_protocol::ThreadRollbackResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnStartParams;
@@ -102,7 +97,8 @@ enum ReviewCheckpoint {
 #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "incompatible checkpoint")]
 #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), None, 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "unknown Luna compatibility")]
 #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some(""), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "empty Luna compatibility")]
-#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, None, Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "unknown producer remains unknown after model switch")]
+#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, None, Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "unknown producer preserves retained evidence")]
+#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some(""), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "empty producer preserves retained evidence")]
 #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 140, EvidenceSize::Normal, ReviewCheckpoint::Valid; "source call evicted")]
 #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::OversizedAnswer, ReviewCheckpoint::Valid; "incomplete answers reject fresh low score")]
 #[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "legacy answers remain runtime only")]
@@ -111,7 +107,7 @@ enum ReviewCheckpoint {
 #[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 140, EvidenceSize::Normal, ReviewCheckpoint::Valid; "legacy source call evicted")]
 #[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::OversizedAnswer, ReviewCheckpoint::Valid; "legacy answer truncation")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollback(
+async fn guardians_retain_evidence_after_compaction_and_resume(
     context_path: ContextPath,
     checkpoint_reuse: CheckpointReuse,
     parent_hash: Option<&str>,
@@ -184,12 +180,33 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
             get(luna_websocket).post({
                 let parent_requests = Arc::clone(&parent_requests);
                 let review_requests = Arc::clone(&review_requests);
+                let compact_requests = Arc::clone(&compact_requests);
+                let checkpoint = checkpoint.clone();
                 move |State(classifier): State<Arc<MockResponsesState>>,
                       Json(request): Json<Value>| {
                     let parent_requests = Arc::clone(&parent_requests);
                     let review_requests = Arc::clone(&review_requests);
+                    let compact_requests = Arc::clone(&compact_requests);
+                    let checkpoint = checkpoint.clone();
                     async move {
-                        let events = if request["model"] == "gpt-5.6-luna" {
+                        let events = if request["input"].as_array().is_some_and(|input| {
+                            input
+                                .iter()
+                                .any(|item| item["type"] == "compaction_trigger")
+                        }) {
+                            compact_requests
+                                .lock()
+                                .expect("request log lock")
+                                .push(request);
+                            vec![
+                                responses::ev_assistant_message("summary", SUMMARY),
+                                json!({
+                                    "type": "response.output_item.done",
+                                    "item": checkpoint,
+                                }),
+                                responses::ev_completed("compact"),
+                            ]
+                        } else if request["model"] == "gpt-5.6-luna" {
                             luna_response(&classifier, request).await
                         } else if request["client_metadata"]["x-openai-subagent"] == "guardian" {
                             review_requests
@@ -243,29 +260,6 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                 }
             }),
         )
-        .route(
-            "/v1/responses/compact",
-            post({
-                let compact_requests = Arc::clone(&compact_requests);
-                let checkpoint = checkpoint.clone();
-                move |Json(request): Json<Value>| {
-                    let compact_requests = Arc::clone(&compact_requests);
-                    let checkpoint = checkpoint.clone();
-                    async move {
-                        compact_requests
-                            .lock()
-                            .expect("request log lock")
-                            .push(request);
-                        Json(json!({"output": [
-                            {"type": "message", "role": "assistant", "content": [
-                                {"type": "output_text", "text": SUMMARY}
-                            ]},
-                            checkpoint
-                        ]}))
-                    }
-                }
-            }),
-        )
         .with_state(Arc::clone(&classifier));
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let responses_url = format!("http://{}", listener.local_addr()?);
@@ -286,9 +280,7 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
         .with_root_config("approvals_reviewer = \"auto_review\"\nmodel_auto_compact_token_limit = 1000000")
         .enable_feature(Feature::DefaultModeRequestUserInput)
         .enable_feature(Feature::GuardianApproval)
-        .enable_feature(Feature::GuardianReuseParentCompaction)
         .disable_feature(Feature::EnableRequestCompression)
-        .disable_feature(Feature::RemoteCompactionV2)
         .disable_feature(Feature::TokenBudget)
         .with_extra_config(&format!(
             "[mcp_servers.{TEST_SERVER_NAME}]\nurl = \"{mcp_url}/mcp\"\ndefault_tools_approval_mode = \"prompt\"\n\n[features.guardianv2]\nenabled = true\nthread_context = {thread_context_enabled}\npersist_scores = true\nreuse_parent_compaction = {reuse_parent_compaction}\n\n[features.guardianv2.review_scope]\ncomputer_use_only = false"
@@ -314,12 +306,12 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
         info
     })
     .collect();
-    write_models_cache_with_models(codex_home.path(), models)?;
     write_chatgpt_auth(
         codex_home.path(),
         ChatGptAuthFixture::new("access-chatgpt").plan_type("pro"),
         AuthCredentialsStoreMode::File,
     )?;
+    write_models_cache_with_models(codex_home.path(), models).await?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .with_env_overrides(&[("OPENAI_API_KEY", None)])
@@ -340,8 +332,6 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
         restriction.as_str(),
         "Recheck the repository.",
         "Inspect after resume.",
-        "Inspect after partial rollback.",
-        "Inspect a different repository.",
     ]
     .into_iter()
     .enumerate()
@@ -374,15 +364,6 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                 timeout(TIMEOUT, app_server.read_notification("turn/completed")).await??;
             assert_eq!(completed.turn.status, TurnStatus::Completed);
             assert_eq!(compact_requests.lock().expect("request log lock").len(), 1);
-        } else if index >= 3 {
-            let id = app_server
-                .send_thread_rollback_request(ThreadRollbackParams {
-                    thread_id: thread_id.clone(),
-                    num_turns: if index == 3 { 1 } else { 3 },
-                })
-                .await?;
-            let _: ThreadRollbackResponse =
-                timeout(TIMEOUT, app_server.read_response(id)).await??;
         }
 
         let id = app_server
@@ -417,7 +398,7 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
             .await?;
             classifier.allow_luna.notify_one();
         }
-        if reject_sync_checkpoint && (1..=2).contains(&index) {
+        if reject_sync_checkpoint && index > 0 {
             let notification = timeout(
                 TIMEOUT,
                 app_server.read_stream_until_matching_notification(
@@ -449,8 +430,8 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                 assessment.review,
                 GuardianApprovalReview {
                     status: GuardianApprovalReviewStatus::Denied,
-                    risk_level: Some(GuardianRiskLevel::High),
-                    user_authorization: Some(GuardianUserAuthorization::Unknown),
+                    risk_level: None,
+                    user_authorization: None,
                     rationale: Some(format!("Automatic approval review failed: {reason}")),
                 }
             );
@@ -458,7 +439,7 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
         let completed: TurnCompletedNotification =
             timeout(TIMEOUT, app_server.read_notification("turn/completed")).await??;
         assert_eq!(completed.turn.status, TurnStatus::Completed);
-        if reject_sync_checkpoint && (1..=2).contains(&index) {
+        if reject_sync_checkpoint && index > 0 {
             // The first review established a cached session before compaction. Neither
             // that session nor a new one may review unusable evidence, including after resume.
             let reviews = review_requests.lock().expect("request log lock");
@@ -479,9 +460,9 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                 })
                 .expect("declined tool result");
             assert!(
-                output
-                    .to_string()
-                    .contains("This action was rejected due to unacceptable risk."),
+                output.to_string().contains(
+                    "This is a review failure, not a determination that the action is unsafe."
+                ),
                 "tool must not execute: {output}",
             );
             assert_eq!(
@@ -498,7 +479,7 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
             }
             continue;
         }
-        if requires_sync && (1..=3).contains(&index) {
+        if requires_sync && index > 0 {
             let reviews = review_requests.lock().expect("request log lock");
             assert_eq!(
                 reviews.len(),
@@ -517,12 +498,6 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                 assert!(
                     text.contains(prompt),
                     "current user input missing from sync review: {text}"
-                );
-            }
-            if index == 3 {
-                assert!(
-                    !text.contains("Inspect after resume."),
-                    "rolled-back user input remains in sync review: {text}"
                 );
             }
             assert!(text.contains(USER_INPUT_RESTRICTION));
@@ -581,11 +556,8 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
             let review = &reviews[index];
             let sync_input = review["input"].as_array().expect("request input array");
             let async_input = request["input"].as_array().expect("request input array");
-            assert_eq!(sync_input.contains(&checkpoint), (1..=3).contains(&index));
-            assert_eq!(
-                async_input.contains(&checkpoint),
-                (1..=3).contains(&index) && compatible
-            );
+            assert_eq!(sync_input.contains(&checkpoint), index > 0);
+            assert_eq!(async_input.contains(&checkpoint), index > 0 && compatible);
             let sync_text = sync_input
                 .iter()
                 .filter(|item| item["role"] == "user")
@@ -597,14 +569,6 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                 sync_text.contains(prompt),
                 "current user input missing from sync review: {sync_text}"
             );
-            if index == 3 {
-                for (consumer, text) in [("sync", sync_text.as_str()), ("async", transcript)] {
-                    assert!(
-                        !text.contains("Inspect after resume."),
-                        "rolled-back user input remains in {consumer} review: {text}"
-                    );
-                }
-            }
             if index == 0 {
                 let input = parent[2]["input"].as_array().expect("request input array");
                 let output = input
@@ -616,10 +580,17 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                 let output = output["output"].as_str().expect("tool output text");
                 assert!(output.contains(&expected_output), "{output}");
             } else {
-                let parent_input = serde_json::to_string(&parent[index * 2 + 1]["input"])?;
-                assert!(!parent_input.contains(RESTRICTION));
+                let parent_items = parent[index * 2 + 1]["input"]
+                    .as_array()
+                    .expect("request input array");
+                let parent_input = serde_json::to_string(parent_items)?;
+                // V2 keeps bounded user history while replacing old tool output with a checkpoint.
+                assert!(parent_input.contains(RESTRICTION));
                 assert!(!parent_input.contains(EVIDENCE));
-                if index <= 3 {
+                assert!(!parent_items.iter().any(|item| {
+                    item["type"] == "function_call_output" && item["call_id"] == "inspect-1"
+                }));
+                {
                     assert!(sync_text.contains(RESTRICTION));
                     if matches!(context_path, ContextPath::ThreadOwned) {
                         assert!(
@@ -652,7 +623,7 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                         compact_output.contains(&expected_output),
                         "{compact_output}"
                     );
-                    assert!(parent_input.contains(SUMMARY));
+                    assert!(parent_items.contains(&checkpoint));
                     if matches!(context_path, ContextPath::ThreadOwned) {
                         assert!(
                             content.contains(RESTRICTION),
@@ -662,7 +633,8 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                             !transcript.contains(&expected_output),
                             "raw tool result must not survive the parent checkpoint"
                         );
-                        assert!(transcript.contains(SUMMARY));
+                        assert!(transcript.contains(RESTRICTION));
+                        assert!(!transcript.contains(SUMMARY));
                     } else {
                         assert!(
                             transcript.contains(RESTRICTION),
@@ -676,17 +648,10 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                             assert!(!transcript.contains("tool request_user_input call:"));
                         }
                     }
-                } else {
-                    assert!(!sync_text.contains(RESTRICTION));
-                    assert!(!sync_text.contains(EVIDENCE));
-                    assert!(!transcript.contains(RESTRICTION));
-                    assert!(!transcript.contains(EVIDENCE));
-                    assert!(!transcript.contains("Recheck the repository."));
-                    assert!(!transcript.contains("\"echoed\":\"current inspection\""));
                 }
             }
             for (consumer, text) in [("async", &content), ("sync", &sync_text)] {
-                if index < 4 && (matches!(context_path, ContextPath::ThreadOwned) || index == 0) {
+                if matches!(context_path, ContextPath::ThreadOwned) || index == 0 {
                     let answers = text
                         .split_once(">>> TRUSTED USER ANSWERS START")
                         .unwrap_or_else(|| {
@@ -713,9 +678,6 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                         },
                     }
                 } else {
-                    if index == 4 {
-                        assert!(!text.contains(USER_INPUT_RESTRICTION));
-                    }
                     assert!(!text.contains(">>> TRUSTED USER ANSWERS START"));
                 }
             }
@@ -816,10 +778,8 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                             .metadata
                             .as_ref()
                             .and_then(|metadata| metadata.compaction_model_hash.as_deref()),
-                        matches!(context_path, ContextPath::ThreadOwned)
-                            .then_some(parent_hash)
-                            .flatten(),
-                        "only the enabled path records checkpoint producer provenance",
+                        parent_hash,
+                        "every compaction records its producer provenance",
                     );
                 }
             }

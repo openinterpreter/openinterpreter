@@ -102,6 +102,7 @@ enum AppsTestToolsListBehavior {
     AlwaysAvailable,
     AvailableWhen(Arc<AtomicBool>),
     AlwaysUnavailable,
+    Custom(Arc<Mutex<Vec<Value>>>),
 }
 
 impl AppsTestServer {
@@ -226,6 +227,13 @@ impl AppsTestServer {
         .await
     }
 
+    pub async fn mount_with_tools(
+        server: &MockServer,
+        tools: Arc<Mutex<Vec<Value>>>,
+    ) -> Result<Self> {
+        Self::mount_with_tools_list_behavior(server, AppsTestToolsListBehavior::Custom(tools)).await
+    }
+
     pub async fn mount_without_tools(server: &MockServer) -> Result<Self> {
         Self::mount_with_tools_list_behavior(server, AppsTestToolsListBehavior::AlwaysUnavailable)
             .await
@@ -257,9 +265,9 @@ pub fn configure_search_capable_model(config: &mut Config) {
     let model = model_catalog
         .models
         .iter_mut()
-        .find(|model| model.slug == "gpt-5.4")
-        .expect("gpt-5.4 exists in bundled models.json");
-    config.model = Some("gpt-5.4".to_string());
+        .find(|model| model.slug == "gpt-5.5")
+        .expect("gpt-5.5 exists in bundled models.json");
+    config.model = Some("gpt-5.5".to_string());
     model.supports_search_tool = true;
     config.model_catalog = Some(model_catalog);
 }
@@ -551,7 +559,8 @@ impl Respond for CodexAppsJsonRpcResponder {
             "notifications/initialized" => ResponseTemplate::new(202),
             "tools/list" => {
                 let tools_available = match &self.tools_list_behavior {
-                    AppsTestToolsListBehavior::AlwaysAvailable => true,
+                    AppsTestToolsListBehavior::AlwaysAvailable
+                    | AppsTestToolsListBehavior::Custom(_) => true,
                     AppsTestToolsListBehavior::AvailableWhen(tools_available) => {
                         tools_available.load(Ordering::SeqCst)
                     }
@@ -660,6 +669,14 @@ impl Respond for CodexAppsJsonRpcResponder {
                         "nextCursor": null
                     }
                 });
+                if let AppsTestToolsListBehavior::Custom(tools) = &self.tools_list_behavior {
+                    response["result"]["tools"] = json!(
+                        tools
+                            .lock()
+                            .expect("Apps test tools lock should not be poisoned")
+                            .clone()
+                    );
+                }
                 if !tools_available
                     && let Some(tools) = response
                         .pointer_mut("/result/tools")

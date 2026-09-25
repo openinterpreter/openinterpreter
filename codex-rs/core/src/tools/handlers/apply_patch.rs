@@ -37,6 +37,7 @@ use crate::tools::registry::ToolExecutor;
 use crate::tools::runtimes::apply_patch::ApplyPatchRequest;
 use crate::tools::runtimes::apply_patch::ApplyPatchRuntime;
 use crate::tools::sandboxing::ToolCtx;
+use crate::windows_sandbox::windows_sandbox_level_for_legacy_checks;
 use codex_apply_patch::ApplyPatchAction;
 use codex_apply_patch::ApplyPatchFileChange;
 use codex_apply_patch::ApplyPatchFileUpdateMode;
@@ -552,16 +553,14 @@ async fn execute_verified_patch(
 ) -> Result<String, FunctionCallError> {
     let cwd = action.cwd.clone();
     let sandbox_context = turn_environment.sandbox_context(/*additional_permissions*/ None);
-    let Some(policy_context) = file_system_sandbox_policy_context_for_cwd(&sandbox_context, &cwd)
-    else {
-        return Err(FunctionCallError::RespondToModel(
-            "apply_patch requires an executor cwd".to_string(),
-        ));
-    };
+    let policy_context = file_system_sandbox_policy_context_for_cwd(&sandbox_context, &cwd);
     let sandbox_route = if turn_environment.environment.is_remote() {
         PatchSandboxRoute::ExecutorManaged
     } else {
-        PatchSandboxRoute::Platform(turn_environment.config().windows_sandbox_level)
+        PatchSandboxRoute::Platform(windows_sandbox_level_for_legacy_checks(
+            turn_environment.config().windows_sandbox_type,
+            turn_environment.config().windows_sandbox_level,
+        ))
     };
     let (file_paths, effective_additional_permissions, file_system_sandbox_policy) =
         effective_patch_permissions(
@@ -589,6 +588,7 @@ async fn execute_verified_patch(
     let event_ctx = ToolEventCtx::new(
         tool_ctx.session.as_ref(),
         tool_ctx.step_context.turn.as_ref(),
+        &tool_ctx.step_context.settings.model_info,
         &tool_ctx.call_id,
         tracker,
     );
@@ -616,6 +616,7 @@ async fn execute_verified_patch(
     let event_ctx = ToolEventCtx::new(
         tool_ctx.session.as_ref(),
         tool_ctx.step_context.turn.as_ref(),
+        &tool_ctx.step_context.settings.model_info,
         &tool_ctx.call_id,
         tracker,
     );

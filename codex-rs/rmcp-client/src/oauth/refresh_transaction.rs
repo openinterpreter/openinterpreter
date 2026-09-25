@@ -5,6 +5,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
+use anyhow::Error;
 use anyhow::Result;
 use codex_keyring_store::DefaultKeyringStore;
 use codex_keyring_store::KeyringStore;
@@ -24,6 +25,7 @@ use super::OAuthPersistorInner;
 use super::StoredOAuthTokens;
 use super::WrappedOAuthTokenResponse;
 use super::compute_expires_at_millis;
+use super::expires_in_from_timestamp;
 use super::refresh_lock::RefreshCredentialLock;
 use super::token_needs_refresh;
 use super::validate_refresh_token_issuer;
@@ -155,8 +157,7 @@ impl OAuthPersistor {
             return Ok(());
         }
 
-        // Preserve RMCP's `AuthorizationRequired` marker only for credentials known to be
-        // unrefreshable. Network and provider failures below remain ordinary errors.
+        // Without a refresh token, authorization is required before contacting the provider.
         if !latest.has_refresh_token() {
             return Err(AuthError::AuthorizationRequired).with_context(|| {
                 format!(
@@ -192,8 +193,8 @@ impl OAuthPersistor {
                 refreshed_tokens(token_response, &latest, &self.inner)
             }
             Ok(Err(error @ AuthError::TokenRefreshRejected(_))) => {
-                // RMCP 3 distinguishes definitive refresh-token rejection from transient
-                // provider failures. Only a rejected token requires a fresh authorization.
+                // Definitive rejection requires authorization even if the access token has not
+                // expired yet. Other refresh failures below check actual access-token expiry.
                 warn!(
                     error = %error,
                     "MCP OAuth refresh token was rejected; reauthorization required"
@@ -210,22 +211,26 @@ impl OAuthPersistor {
                     error = %error,
                     "MCP OAuth provider refresh failed"
                 );
-                return Err(error).with_context(|| {
-                    format!(
-                        "failed to refresh OAuth tokens for server {}",
-                        self.inner.server_name
-                    )
-                });
+                let error = Error::new(error).context(format!(
+                    "failed to refresh OAuth tokens for server {}",
+                    self.inner.server_name
+                ));
+                return self
+                    .recover_after_failed_refresh(keyring_store, &mut guard, &latest, error)
+                    .await;
             }
             Err(_) => {
                 warn!(
                     timeout_ms = refresh_request_timeout.as_millis(),
                     "MCP OAuth provider refresh timed out; the outcome is unknown and a later serialized retry is permitted"
                 );
-                anyhow::bail!(
+                let error = anyhow::anyhow!(
                     "timed out after {refresh_request_timeout:?} refreshing OAuth tokens for server {}",
                     self.inner.server_name
                 );
+                return self
+                    .recover_after_failed_refresh(keyring_store, &mut guard, &latest, error)
+                    .await;
             }
         };
 
@@ -267,6 +272,63 @@ impl OAuthPersistor {
         debug!("persisted refreshed MCP OAuth credentials and completed the transaction");
         Ok(())
     }
+
+    async fn recover_after_failed_refresh<K: KeyringStore + Clone + 'static>(
+        &self,
+        keyring_store: &K,
+        manager: &mut AuthorizationManager,
+        previous: &StoredOAuthTokens,
+        error: Error,
+    ) -> Result<()> {
+        // A failed proactive refresh does not require a new login while the access token is
+        // still valid. Use actual expiry, not the 30-second refresh buffer.
+        if !token_has_expired(previous.expires_at) {
+            return Err(error);
+        }
+
+        // Browser login can finish while the provider request is pending. Reread the pinned
+        // authority before prompting, and never delete or overwrite a replacement credential.
+        let replacement = self.inner.credential_store.load(
+            keyring_store,
+            &self.inner.server_name,
+            &self.inner.url,
+        )?;
+        if let Some(replacement) = replacement
+            && !token_has_expired(replacement.expires_at)
+            && !replacement.client_id.trim().is_empty()
+            && !replacement
+                .token_response
+                .0
+                .access_token()
+                .secret()
+                .trim()
+                .is_empty()
+        {
+            // Match the existing pre-refresh adoption rule: refresh credentials must remain
+            // bound to the issuer already validated for this authorization manager.
+            if replacement.has_refresh_token()
+                && (replacement.bound_issuer().is_none()
+                    || replacement.bound_issuer() != previous.bound_issuer())
+            {
+                return Err(AuthError::AuthorizationRequired).context(
+                    "replacement MCP OAuth refresh credentials do not match the validated issuer",
+                );
+            }
+            debug!("adopting new MCP OAuth credentials after a failed refresh");
+            install_tokens_in_manager(manager, &replacement).await?;
+            *self.inner.last_credentials.lock().await = Some(replacement);
+            return Ok(());
+        }
+
+        warn!("MCP OAuth access token is expired and refresh failed; reauthorization required");
+        // Keep AuthorizationRequired as the source so both startup classification and runtime
+        // tool-call recovery recognize it; retain the original failure as diagnostic context.
+        Err(Error::new(AuthError::AuthorizationRequired).context(error))
+    }
+}
+
+fn token_has_expired(expires_at: Option<u64>) -> bool {
+    expires_at.is_some_and(|expires_at| expires_in_from_timestamp(expires_at).is_none())
 }
 
 /// Installs tokens without resolving metadata again, so callers can pin the validated snapshot.

@@ -35,15 +35,15 @@ fn map_api_error_preserves_retry_delay() {
         assert_eq!(
             (
                 err.to_codex_protocol_error(),
-                err.retry_delay(),
-                err.is_retryable(),
+                err.retry_delay(/*retry_count*/ 1),
+                err.server_retry_delay(),
                 err.http_status_code_value(),
                 err.to_string(),
             ),
             (
                 expected_code,
                 Some(retry_delay),
-                true,
+                Some(retry_delay),
                 None,
                 expected_message.to_string(),
             )
@@ -52,21 +52,32 @@ fn map_api_error_preserves_retry_delay() {
 }
 
 #[test]
-fn map_api_error_maps_server_overloaded_from_503_body() {
-    let body = serde_json::json!({
-        "error": {
-            "code": "server_is_overloaded"
-        }
-    })
-    .to_string();
-    let err = map_api_error(ApiError::Transport(TransportError::Http {
-        status: http::StatusCode::SERVICE_UNAVAILABLE,
-        url: Some("http://example.com/v1/responses".to_string()),
-        headers: None,
-        body: Some(body),
-    }));
-
-    assert!(matches!(err.details(), CodexErrorDetails::ServerOverloaded));
+fn map_api_error_distinguishes_capacity_from_slow_down() {
+    for (code, expected, retryable) in [
+        (
+            "server_is_overloaded",
+            CodexErrorInfo::ServerOverloaded,
+            false,
+        ),
+        ("slow_down", CodexErrorInfo::RateLimitExceeded, true),
+        ("unknown_error", CodexErrorInfo::Other, true),
+    ] {
+        let err = map_api_error(ApiError::Transport(TransportError::Http {
+            status: http::StatusCode::SERVICE_UNAVAILABLE,
+            url: None,
+            headers: None,
+            body: Some(
+                serde_json::json!({"error": {"code": code, "message": "retry later"}}).to_string(),
+            ),
+        }));
+        assert_eq!(
+            (
+                err.to_codex_protocol_error(),
+                err.retry_delay(/*retry_count*/ 1).is_some()
+            ),
+            (expected, retryable)
+        );
+    }
 }
 
 #[test]
@@ -174,6 +185,53 @@ fn map_api_error_uses_cyber_policy_fallback_for_missing_message() {
 }
 
 #[test]
+fn map_api_error_preserves_bio_policy() {
+    let err = map_api_error(ApiError::BioPolicy {
+        message: "This request was blocked by bio policy.".to_string(),
+    });
+    assert_eq!(err.to_codex_protocol_error(), CodexErrorInfo::BioPolicy);
+    assert_eq!(err.to_string(), "This request was blocked by bio policy.");
+    assert_eq!(err.retry_delay(/*retry_count*/ 1), None);
+}
+
+#[test]
+fn map_api_error_maps_http_and_wrapped_websocket_bio_policy() {
+    for wrapped in [false, true] {
+        for message in [
+            Some("This request was blocked by bio policy."),
+            None,
+            Some(""),
+            Some("  "),
+        ] {
+            let mut body = serde_json::json!({"error": {"code": "bio_policy"}});
+            if let Some(message) = message {
+                body["error"]["message"] = serde_json::json!(message);
+            }
+            if wrapped {
+                body["type"] = serde_json::json!("error");
+                body["status"] = serde_json::json!(400);
+            }
+            let err = map_api_error(ApiError::Transport(TransportError::Http {
+                status: http::StatusCode::BAD_REQUEST,
+                url: None,
+                headers: None,
+                body: Some(body.to_string()),
+            }));
+
+            let expected = message
+                .filter(|message| !message.trim().is_empty())
+                .unwrap_or("This content was flagged for possible biological risk.");
+            let CodexErrorDetails::BioPolicy { message } = err.details() else {
+                panic!("expected CodexErrorDetails::BioPolicy, got {err:?}");
+            };
+            assert_eq!(message, expected);
+            assert_eq!(err.to_codex_protocol_error(), CodexErrorInfo::BioPolicy);
+            assert_eq!(err.retry_delay(/*retry_count*/ 1), None);
+        }
+    }
+}
+
+#[test]
 fn map_api_error_maps_misalignment_policy_violation_from_400_body() {
     assert_misalignment_policy_violation_from_http_body(http::StatusCode::BAD_REQUEST);
 }
@@ -208,7 +266,7 @@ fn assert_misalignment_policy_violation_from_http_body(status: http::StatusCode)
     };
     assert_eq!(message, "This request violated the misalignment policy.");
     assert_eq!(misalignment, &None);
-    assert!(!err.is_retryable());
+    assert_eq!(err.retry_delay(/*retry_count*/ 1), None);
 }
 
 #[test]
@@ -250,7 +308,7 @@ fn map_api_error_preserves_misalignment_details_from_403_body() {
             }),
         })
     );
-    assert!(!err.is_retryable());
+    assert_eq!(err.retry_delay(/*retry_count*/ 1), None);
 }
 
 #[test]
@@ -297,7 +355,7 @@ fn map_api_error_preserves_misalignment_details_from_wrapped_websocket_error() {
             }),
         })
     );
-    assert!(!err.is_retryable());
+    assert_eq!(err.retry_delay(/*retry_count*/ 1), None);
 }
 
 #[test]
@@ -320,6 +378,36 @@ fn map_api_error_keeps_unknown_400_errors_generic() {
         panic!("expected CodexErrorDetails::InvalidRequest, got {err:?}");
     };
     assert_eq!(message, &body);
+}
+
+#[test]
+fn map_api_error_distinguishes_http_quota_errors_from_rate_limits() {
+    for error in [
+        serde_json::json!({"type": "insufficient_quota"}),
+        serde_json::json!({"code": "insufficient_quota"}),
+        serde_json::json!({"code": "credit_balance_exhausted"}),
+        serde_json::json!({"code": "organization_spend_limit_exceeded"}),
+        serde_json::json!({"code": "project_spend_limit_exceeded"}),
+        serde_json::json!({"code": "organization_usage_limit_exceeded"}),
+        serde_json::json!({"type": "rate_limit_error", "code": "rate_limit_exceeded"}),
+        serde_json::json!({"type": "rate_limit_error", "code": "slow_down"}),
+    ] {
+        let expected = if error["type"] == "rate_limit_error" {
+            CodexErrorInfo::ResponseTooManyFailedAttempts {
+                http_status_code: Some(429),
+            }
+        } else {
+            CodexErrorInfo::UsageLimitExceeded
+        };
+        let err = map_api_error(ApiError::Transport(TransportError::Http {
+            status: http::StatusCode::TOO_MANY_REQUESTS,
+            url: None,
+            headers: None,
+            body: Some(serde_json::json!({"error": error}).to_string()),
+        }));
+
+        assert_eq!(err.to_codex_protocol_error(), expected, "{error}");
+    }
 }
 
 #[test]

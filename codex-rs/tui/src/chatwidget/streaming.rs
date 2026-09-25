@@ -4,18 +4,78 @@
 //! cells, commit ticks, and interrupt deferral.
 
 use super::*;
+use crate::markdown_render::ListSpacing;
+
+fn latest_summary_line(text: &str) -> Option<String> {
+    text.lines().rev().find_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("<!--") {
+            return None;
+        }
+        let line = line.trim_start_matches('#').trim();
+        let line = if let Some(stripped) = line.strip_prefix("**") {
+            let (bold, trailing) = stripped.split_once("**")?;
+            format!("{bold}{trailing}")
+        } else {
+            line.to_string()
+        };
+        (!line.is_empty()).then_some(line)
+    })
+}
 
 impl ChatWidget {
-    pub(super) fn restore_reasoning_status_header(&mut self) {
-        if self.reasoning_header.is_none() {
-            self.reasoning_header = extract_first_bold(&self.reasoning_buffer);
+    pub(super) fn on_reasoning_item_started(&mut self, id: String) {
+        if self.status_state.reasoning_resume_turn_id.take().is_some()
+            && self.status_state.reasoning_item_id.as_ref() != Some(&id)
+        {
+            self.on_agent_reasoning_final();
         }
+        if self.status_state.reasoning_item_id.as_ref() == Some(&id) {
+            return;
+        }
+        self.status_state.reasoning_item_id = Some(id);
+        self.status_state.reasoning_recovered_after_refresh = false;
+        self.reasoning_buffer.clear();
+        self.reasoning_summary_parts.clear();
+        self.restore_reasoning_status_header();
+    }
+
+    pub(super) fn restore_reasoning_status_header(&mut self) {
+        if self.safety_buffering_is_waiting()
+            || self.unified_exec_wait_streak.is_some()
+            || self.status_state.compaction.is_some()
+            || !self.status_state.pending_guardian_review_status.is_empty()
+        {
+            return;
+        }
+        self.reasoning_header =
+            latest_summary_line(&self.reasoning_buffer).or(self.reasoning_header.take());
         if let Some(header) = self.reasoning_header.clone() {
             self.status_state.terminal_title_status_kind = TerminalTitleStatusKind::Thinking;
             self.set_status_header(header);
-        } else if self.bottom_pane.is_task_running() {
+        } else if self.bottom_pane.is_task_running()
+            || self.status_state.current_status.is_guardian_review()
+        {
             self.status_state.terminal_title_status_kind = TerminalTitleStatusKind::Working;
             self.set_status_header(String::from("Working"));
+        }
+    }
+
+    /// Preserve received answer and plan source before ordinary turn termination.
+    pub(super) fn flush_answer_and_plan_streams(&mut self) {
+        self.flush_answer_stream_with_separator();
+        if let Some(mut controller) = self.plan_stream_controller.take() {
+            self.clear_active_stream_tail();
+            let (cell, source) = controller.finalize();
+            if let Some(cell) = cell {
+                self.add_boxed_history(cell);
+            }
+            if let Some(source) = source {
+                self.note_stream_consolidation_queued();
+                self.app_event_tx
+                    .send(AppEvent::ConsolidateProposedPlan(source));
+            }
+            self.request_pending_usage_output_insertion_after_stream_shutdown();
         }
     }
 
@@ -155,21 +215,31 @@ impl ChatWidget {
             // Before starting a plan stream, flush any active exec cell group.
             self.flush_unified_exec_wait_streak();
             self.flush_active_cell();
-            self.plan_stream_controller = Some(PlanStreamController::new(
-                self.current_stream_width(/*reserved_cols*/ 4),
-                &self.config.cwd,
-                self.history_render_mode(),
-            ));
+            self.plan_stream_controller = Some(
+                PlanStreamController::new(
+                    self.current_stream_width(/*reserved_cols*/ 4),
+                    &self.config.cwd,
+                    self.history_render_mode(),
+                )
+                .with_list_spacing(
+                    if self.local_settings.transcript_mode.is_owned() {
+                        ListSpacing::Compact
+                    } else {
+                        ListSpacing::AfterMultiline
+                    },
+                ),
+            );
         }
-        if let Some(controller) = self.plan_stream_controller.as_mut()
-            && controller.push(&delta)
-        {
+        let changed = self
+            .plan_stream_controller
+            .as_mut()
+            .is_some_and(|controller| controller.push(&delta));
+        if (changed || delta.contains('\n')) && self.sync_active_stream_tail() {
+            self.request_redraw();
+        }
+        if changed {
             self.app_event_tx.send(AppEvent::StartCommitAnimation);
             self.run_catch_up_commit_tick();
-        }
-        // Unterminated source is buffered by the controller and cannot change the visible tail.
-        if delta.contains('\n') && self.sync_active_stream_tail() {
-            self.request_redraw();
         }
     }
 
@@ -195,10 +265,10 @@ impl ChatWidget {
         self.transcript.saw_plan_item_this_turn = true;
         let (finalized_streamed_cell, consolidated_plan_source) =
             if let Some(mut controller) = self.plan_stream_controller.take() {
-                let had_live_tail = controller.has_live_tail();
+                let source_only = controller.has_live_tail() && controller.tail_starts_stream();
                 self.clear_active_stream_tail();
                 let (cell, source) = controller.finalize();
-                if had_live_tail {
+                if source_only {
                     (None, source)
                 } else {
                     (cell, source)
@@ -230,9 +300,7 @@ impl ChatWidget {
     }
 
     pub(super) fn on_agent_reasoning_delta(&mut self, delta: String) {
-        // For reasoning deltas, do not stream to history. Accumulate the
-        // current reasoning block and extract the first bold element
-        // (between **/**) as the chunk header. Show this header as status.
+        // Accumulate the current reasoning block for history and activity text.
         self.reasoning_buffer.push_str(&delta);
 
         if self.safety_buffering_is_waiting() {
@@ -244,11 +312,14 @@ impl ChatWidget {
             return;
         }
 
-        if self.reasoning_header.is_none() {
-            self.reasoning_header = extract_first_bold(&self.reasoning_buffer);
+        if !self.status_state.pending_guardian_review_status.is_empty() {
+            return;
         }
+
+        self.reasoning_header =
+            latest_summary_line(&self.reasoning_buffer).or(self.reasoning_header.take());
         let Some(header) = self.reasoning_header.as_deref() else {
-            // Fallback while we don't yet have a bold header: leave existing header as-is.
+            // No usable summary has arrived yet.
             return;
         };
 
@@ -279,13 +350,34 @@ impl ChatWidget {
             self.reasoning_summary_parts
                 .push(std::mem::take(&mut self.reasoning_buffer));
         }
+        self.reasoning_header = self
+            .reasoning_summary_parts
+            .iter()
+            .rev()
+            .find_map(|part| latest_summary_line(part))
+            .or(self.reasoning_header.take());
         if !self.reasoning_summary_parts.is_empty() {
             let reasoning_parts = std::mem::take(&mut self.reasoning_summary_parts);
-            let cell = history_cell::new_reasoning_summary_block(reasoning_parts, &self.config.cwd);
-            self.add_boxed_history(cell);
+            let mut cell =
+                history_cell::new_reasoning_summary_block(reasoning_parts, &self.config.cwd);
+            if let Some(id) = &self.status_state.reasoning_item_id {
+                cell.set_source_item_id(id.clone());
+            }
+            let cell: Box<dyn HistoryCell> = cell;
+            let result = match self.transcript.active_cell.as_mut() {
+                Some(active) => active.append_reasoning(cell),
+                None => Err(cell),
+            };
+            match result {
+                Ok(()) => self.bump_active_cell_revision(),
+                Err(cell) => self.add_boxed_history(cell),
+            }
         }
         self.reasoning_buffer.clear();
-        self.reasoning_header = None;
+        // Keep the last useful summary through tools and later empty items.
+        self.status_state.reasoning_item_id = None;
+        self.status_state.reasoning_resume_turn_id = None;
+        self.status_state.reasoning_recovered_after_refresh = false;
         self.reasoning_summary_parts.clear();
         self.request_redraw();
     }
@@ -296,7 +388,6 @@ impl ChatWidget {
             self.reasoning_summary_parts
                 .push(std::mem::take(&mut self.reasoning_buffer));
         }
-        self.reasoning_header = None;
     }
 
     pub(super) fn on_stream_error(&mut self, message: String, additional_details: Option<String>) {
@@ -355,9 +446,7 @@ impl ChatWidget {
         } else {
             self.finalize_completed_assistant_message(Some(parsed.visible_markdown.as_str()));
         }
-        if matches!(item.phase, Some(MessagePhase::FinalAnswer) | None)
-            && !parsed.visible_markdown.is_empty()
-        {
+        if !parsed.visible_markdown.is_empty() {
             self.transcript
                 .record_agent_markdown(parsed.visible_markdown.clone(), message);
         }
@@ -447,6 +536,12 @@ impl ChatWidget {
         self.interrupts = mgr;
     }
 
+    pub(super) fn flush_interrupt_activity(&mut self) {
+        let mut mgr = std::mem::take(&mut self.interrupts);
+        mgr.flush_activity(self);
+        self.interrupts = mgr;
+    }
+
     /// Move a lifecycle payload into the interrupt queue or its immediate handler.
     #[inline]
     pub(super) fn defer_or_handle<T>(
@@ -487,22 +582,32 @@ impl ChatWidget {
                     thread_id,
                 )
             });
-            self.stream_controller = Some(StreamController::new_with_inline_visualizations(
-                self.current_stream_width(/*reserved_cols*/ 2),
-                &self.config.cwd,
-                self.history_render_mode(),
-                inline_visualization_context,
-            ));
+            self.stream_controller = Some(
+                StreamController::new_with_inline_visualizations(
+                    self.current_stream_width(/*reserved_cols*/ 2),
+                    &self.config.cwd,
+                    self.history_render_mode(),
+                    inline_visualization_context,
+                )
+                .with_list_spacing(
+                    if self.local_settings.transcript_mode.is_owned() {
+                        ListSpacing::Compact
+                    } else {
+                        ListSpacing::AfterMultiline
+                    },
+                ),
+            );
         }
-        if let Some(controller) = self.stream_controller.as_mut()
-            && controller.push(&delta)
-        {
+        let changed = self
+            .stream_controller
+            .as_mut()
+            .is_some_and(|controller| controller.push(&delta));
+        if (changed || delta.contains('\n')) && self.sync_active_stream_tail() {
+            self.request_redraw();
+        }
+        if changed {
             self.app_event_tx.send(AppEvent::StartCommitAnimation);
             self.run_catch_up_commit_tick();
-        }
-        // Unterminated source is buffered by the controller and cannot change the visible tail.
-        if delta.contains('\n') && self.sync_active_stream_tail() {
-            self.request_redraw();
         }
     }
 

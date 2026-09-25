@@ -69,11 +69,43 @@ fn retryability_preserves_error_details_distinctions() {
 
     for (err, expected) in errors {
         assert_eq!(
-            err.is_retryable(),
+            err.retry_delay(/*retry_count*/ 1).is_some(),
             expected,
             "unexpected retryability for {err:?}"
         );
     }
+}
+
+/// Retryable errors prefer server advice and otherwise back off by attempt; advice does not
+/// make a terminal error retryable.
+#[test]
+fn retry_delay_distinguishes_server_advice_backoff_and_terminal_errors() {
+    let error = CodexErr::InternalServerError;
+    for (retry_count, expected_millis) in [(1, 180..220), (3, 720..880)] {
+        let delay = error.retry_delay(retry_count).expect("retryable error");
+        assert!(expected_millis.contains(&delay.as_millis()));
+    }
+    assert_eq!(error.server_retry_delay(), None);
+
+    let advice = Duration::ZERO;
+    let error = error.with_retry_delay(advice);
+    assert_eq!(
+        (
+            error.retry_delay(/*retry_count*/ 1),
+            error.retry_delay(/*retry_count*/ 3),
+            error.server_retry_delay(),
+        ),
+        (Some(advice), Some(advice), Some(advice)),
+    );
+
+    let error = CodexErr::QuotaExceeded.with_retry_delay(advice);
+    assert_eq!(
+        (
+            error.retry_delay(/*retry_count*/ 1),
+            error.server_retry_delay(),
+        ),
+        (None, Some(advice)),
+    );
 }
 
 fn rate_limit_snapshot() -> RateLimitSnapshot {
@@ -127,7 +159,7 @@ fn usage_limit_reached_error_formats_plus_plan() {
     };
     assert_eq!(
         err.to_string(),
-        "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later."
+        "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later."
     );
 }
 
@@ -136,7 +168,7 @@ fn usage_limit_reached_error_formats_rate_limit_reached_types() {
     let cases = [
         (
             RateLimitReachedType::RateLimitReached,
-            "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.",
+            "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.",
         ),
         (
             RateLimitReachedType::WorkspaceOwnerCreditsDepleted,
@@ -289,7 +321,7 @@ fn usage_limit_reached_error_formats_free_plan() {
     };
     assert_eq!(
         err.to_string(),
-        "You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again later."
+        "You’ve hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again later."
     );
 }
 
@@ -304,7 +336,7 @@ fn usage_limit_reached_error_formats_go_plan() {
     };
     assert_eq!(
         err.to_string(),
-        "You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again later."
+        "You’ve hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again later."
     );
 }
 
@@ -319,7 +351,7 @@ fn usage_limit_reached_error_formats_default_when_none() {
     };
     assert_eq!(
         err.to_string(),
-        "You've hit your usage limit. Try again later."
+        "You’ve hit your usage limit. Try again later."
     );
 }
 
@@ -337,7 +369,7 @@ fn usage_limit_reached_error_formats_team_plan() {
             rate_limit_reached_type: None,
         };
         let expected = format!(
-            "You've hit your usage limit. To get more access now, send a request to your admin or try again at {expected_time}."
+            "You’ve hit your usage limit. To get more access now, send a request to your admin or try again at {expected_time}."
         );
         assert_eq!(err.to_string(), expected);
     });
@@ -359,7 +391,7 @@ fn usage_limit_reached_error_formats_business_plan_without_reset() {
         };
         assert_eq!(
             err.to_string(),
-            "You've hit your usage limit. To get more access now, send a request to your admin or try again later."
+            "You’ve hit your usage limit. To get more access now, send a request to your admin or try again later."
         );
     }
 }
@@ -375,7 +407,7 @@ fn usage_limit_reached_error_formats_self_serve_business_prolite_plan() {
     };
     assert_eq!(
         err.to_string(),
-        "You've hit your usage limit. To get more access now, send a request to your admin or try again later."
+        "You’ve hit your usage limit. To get more access now, send a request to your admin or try again later."
     );
 }
 
@@ -390,7 +422,7 @@ fn usage_limit_reached_error_formats_self_serve_business_usage_based_plan() {
     };
     assert_eq!(
         err.to_string(),
-        "You've hit your usage limit. To get more access now, send a request to your admin or try again later."
+        "You’ve hit your usage limit. To get more access now, send a request to your admin or try again later."
     );
 }
 
@@ -405,7 +437,7 @@ fn usage_limit_reached_error_formats_enterprise_cbp_usage_based_plan() {
     };
     assert_eq!(
         err.to_string(),
-        "You've hit your usage limit. To get more access now, send a request to your admin or try again later."
+        "You’ve hit your usage limit. To get more access now, send a request to your admin or try again later."
     );
 }
 
@@ -426,7 +458,7 @@ fn usage_limit_reached_error_formats_default_for_other_plans() {
         };
         assert_eq!(
             err.to_string(),
-            "You've hit your usage limit. Try again later."
+            "You’ve hit your usage limit. Try again later."
         );
     }
 }
@@ -445,7 +477,7 @@ fn usage_limit_reached_error_formats_pro_plan_with_reset() {
             rate_limit_reached_type: None,
         };
         let expected = format!(
-            "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at {expected_time}."
+            "You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at {expected_time}."
         );
         assert_eq!(err.to_string(), expected);
     });
@@ -472,7 +504,7 @@ fn usage_limit_reached_error_hides_upsell_for_non_codex_limit_name() {
             rate_limit_reached_type: None,
         };
         let expected = format!(
-            "You've hit your usage limit for codex_other. Switch to another model now, or try again at {expected_time}."
+            "You’ve hit your usage limit for codex_other. Switch to another model now, or try again at {expected_time}."
         );
         assert_eq!(err.to_string(), expected);
     });
@@ -491,7 +523,7 @@ fn usage_limit_reached_includes_minutes_when_available() {
             promo_message: None,
             rate_limit_reached_type: None,
         };
-        let expected = format!("You've hit your usage limit. Try again at {expected_time}.");
+        let expected = format!("You’ve hit your usage limit. Try again at {expected_time}.");
         assert_eq!(err.to_string(), expected);
     });
 }
@@ -636,7 +668,7 @@ fn usage_limit_reached_includes_hours_and_minutes() {
             rate_limit_reached_type: None,
         };
         let expected = format!(
-            "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at {expected_time}."
+            "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at {expected_time}."
         );
         assert_eq!(err.to_string(), expected);
     });
@@ -656,7 +688,7 @@ fn usage_limit_reached_includes_days_hours_minutes() {
             promo_message: None,
             rate_limit_reached_type: None,
         };
-        let expected = format!("You've hit your usage limit. Try again at {expected_time}.");
+        let expected = format!("You’ve hit your usage limit. Try again at {expected_time}.");
         assert_eq!(err.to_string(), expected);
     });
 }
@@ -674,7 +706,7 @@ fn usage_limit_reached_less_than_minute() {
             promo_message: None,
             rate_limit_reached_type: None,
         };
-        let expected = format!("You've hit your usage limit. Try again at {expected_time}.");
+        let expected = format!("You’ve hit your usage limit. Try again at {expected_time}.");
         assert_eq!(err.to_string(), expected);
     });
 }
@@ -695,7 +727,7 @@ fn usage_limit_reached_with_promo_message() {
             rate_limit_reached_type: None,
         };
         let expected = format!(
-            "You've hit your usage limit. To continue using Codex, start a free trial of <PLAN> today, or try again at {expected_time}."
+            "You’ve hit your usage limit. To continue using Codex, start a free trial of <PLAN> today, or try again at {expected_time}."
         );
         assert_eq!(err.to_string(), expected);
     });

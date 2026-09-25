@@ -57,7 +57,10 @@ async fn load_refresh_config(
 ) -> io::Result<Config> {
     let thread_config = thread.config().await;
     config_manager
-        .load_latest_config_for_thread(thread_config.as_ref())
+        .load_latest_config_with_session_layers(
+            &thread_config.config_layer_stack,
+            &thread_config.cwd,
+        )
         .await
 }
 
@@ -65,7 +68,6 @@ async fn load_refresh_config(
 mod tests {
     use super::*;
     use crate::extensions::ThreadExtensionDependencies;
-    use crate::extensions::guardian_agent_spawner;
     use crate::extensions::thread_extensions;
     use codex_arg0::Arg0DispatchPaths;
     use codex_config::CloudConfigBundleLoader;
@@ -326,22 +328,20 @@ enabled = false
                 codex_core::CodexAppsToolsCache::default(),
                 SessionSource::Exec,
                 Arc::clone(&environment_manager),
-                thread_extensions(
-                    guardian_agent_spawner(thread_manager.clone()),
-                    ThreadExtensionDependencies {
-                        event_sink: Arc::new(NoopExtensionEventSink),
-                        auth_manager: auth_manager.clone(),
-                        state_db: Some(state_db.clone()),
-                        analytics_events_client: codex_analytics::AnalyticsEventsClient::disabled(),
-                        thread_manager: thread_manager.clone(),
-                        goal_service: Arc::new(codex_goal_extension::GoalService::new()),
-                        environment_manager: Arc::clone(&environment_manager),
-                        executor_skill_provider: Arc::clone(&executor_skill_provider),
-                        git_attribution_base_url: good_config.chatgpt_base_url.clone(),
-                        http_client_factory: good_config.http_client_factory(),
-                        queue_service: None,
-                    },
-                ),
+                thread_extensions(ThreadExtensionDependencies {
+                    event_sink: Arc::new(NoopExtensionEventSink),
+                    auth_manager: auth_manager.clone(),
+                    state_db: Some(state_db.clone()),
+                    analytics_events_client: codex_analytics::AnalyticsEventsClient::disabled(),
+                    thread_manager: thread_manager.clone(),
+                    goal_service: Arc::new(codex_goal_extension::GoalService::new()),
+                    environment_manager: Arc::clone(&environment_manager),
+                    executor_skill_provider: Arc::clone(&executor_skill_provider),
+                    git_attribution_base_url: good_config.chatgpt_base_url.clone(),
+                    http_client_factory: good_config.http_client_factory(),
+                    queue_service: None,
+                    turn_start_admission: None,
+                }),
                 Arc::new(CodexHomeUserInstructionsProvider::new(
                     good_config.codex_home.clone(),
                 )),

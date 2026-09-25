@@ -124,6 +124,23 @@ mod tests {
     }
 
     #[test]
+    fn openai_catalog_entry_contains_only_current_gpt6_models() {
+        let provider = bundled_provider_catalog_entry("openai").expect("OpenAI provider");
+        assert_eq!(provider.base_url, "https://api.openai.com/v1");
+
+        let mut model_ids = provider
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>();
+        model_ids.sort_unstable();
+        assert_eq!(
+            model_ids,
+            vec!["gpt-6-astra", "gpt-6-luna", "gpt-6-sol"]
+        );
+    }
+
+    #[test]
     fn zai_zcode_catalog_entry_has_messages_endpoint_auth_metadata() {
         let provider = bundled_provider_catalog_entry("zai-zcode").expect("ZCode provider");
         assert_eq!(provider.base_url, "https://api.z.ai/api/anthropic");

@@ -69,7 +69,7 @@ fn spawn_legacy_process(
     command: &[String],
     cwd: &Path,
     env_map: &HashMap<String, String>,
-    use_private_desktop: bool,
+    private_desktop_name: Option<&str>,
     tty: bool,
     stdin_open: bool,
     stdout_tx: broadcast::Sender<Vec<u8>>,
@@ -78,15 +78,17 @@ fn spawn_legacy_process(
     logs_base_dir: Option<&Path>,
 ) -> Result<LegacyProcessHandles> {
     let h_token = security.h_token;
-    let launch_desktop = LaunchDesktop::prepare_legacy(
-        use_private_desktop,
-        permissions,
-        cwd,
-        env_map,
-        security,
-        additional_deny_write_paths,
-        logs_base_dir,
-    )?;
+    let launch_desktop = match private_desktop_name {
+        Some(name) => LaunchDesktop::open_private(name)?,
+        None => LaunchDesktop::prepare_legacy(
+            permissions,
+            cwd,
+            env_map,
+            security,
+            additional_deny_write_paths,
+            logs_base_dir,
+        )?,
+    };
     let (pi, job, output_join, writer_handle, hpc, conpty_owner, desktop) = if tty {
         let (pi, mut conpty) =
             spawn_conpty_process_as_user(h_token, command, cwd, env_map, launch_desktop)?;
@@ -324,7 +326,7 @@ pub(crate) async fn spawn_windows_sandbox_session_legacy(
     additional_deny_write_paths: &[AbsolutePathBuf],
     tty: bool,
     stdin_open: bool,
-    use_private_desktop: bool,
+    private_desktop_name: Option<String>,
 ) -> Result<SpawnedProcess> {
     let common = prepare_legacy_spawn_context(
         permission_profile,
@@ -403,7 +405,7 @@ pub(crate) async fn spawn_windows_sandbox_session_legacy(
         &command,
         cwd,
         &env_map,
-        use_private_desktop,
+        private_desktop_name.as_deref(),
         tty,
         stdin_open,
         stdout_tx,

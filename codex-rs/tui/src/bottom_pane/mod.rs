@@ -15,6 +15,11 @@
 //! hint. The pane schedules redraws so those hints can expire even when the UI is otherwise idle.
 //! Inline banners sit above the composer. Number shortcuts apply only to an empty, idle composer;
 //! drafts, paste bursts, and active dialogs keep their normal input routing.
+pub(crate) use chat_composer::CommandPopupPlacement;
+pub(crate) use chat_composer::ComposerRenderOptions;
+pub(crate) use chat_composer::TranscriptFooter;
+pub(crate) use footer::footer_hint_items_line;
+pub(crate) use footer::inset_footer_hint_area;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
@@ -65,6 +70,7 @@ mod app_link_view;
 mod apply_patch_header;
 mod approval_overlay;
 mod async_questions;
+mod empty_state_policy;
 mod hook_status;
 mod mcp_server_elicitation;
 mod multi_select_picker;
@@ -77,6 +83,10 @@ mod status_line_setup;
 mod status_line_style;
 mod status_surface_preview;
 mod title_setup;
+pub(crate) mod user_verification;
+mod voice_strip;
+mod warnings;
+mod warnings_view;
 pub(crate) use action_required_title::ACTION_REQUIRED_PREVIEW_PREFIX;
 pub(crate) use action_required_title::build_action_required_title_text;
 pub(crate) use actionable_banner::ActionableBanner;
@@ -99,6 +109,8 @@ pub(crate) use mcp_server_elicitation::McpServerElicitationFormRequest;
 pub(crate) use mcp_server_elicitation::McpServerElicitationOverlay;
 pub(crate) use request_user_input::RequestUserInputOverlay;
 pub(crate) use status_line_style::status_line_from_segments;
+pub(crate) use voice_strip::VoiceStripPhase;
+pub(crate) use voice_strip::VoiceStripState;
 mod bottom_pane_view;
 mod effort_ignition;
 
@@ -128,7 +140,14 @@ mod footer;
 mod list_selection_view;
 mod memories_settings_view;
 mod mentions_v2;
+mod picker_presets;
+mod picker_rows;
+mod picker_style;
+mod shortcut_overlay;
+pub(crate) use picker_style::active_tab_style;
+pub(crate) use picker_style::selection_style;
 pub(crate) mod prompt_args;
+mod selection_picker_layout;
 mod skill_popup;
 mod skills_toggle_view;
 pub(crate) mod slash_commands;
@@ -139,6 +158,7 @@ pub(crate) use footer::goal_status_indicator_line;
 pub(crate) use list_selection_view::ColumnWidthMode;
 pub(crate) use list_selection_view::ListSelectionView;
 pub(crate) use list_selection_view::OnSelectionChangedCallback;
+pub(crate) use list_selection_view::PickerSurface;
 pub(crate) use list_selection_view::SelectionDescriptionLayout;
 pub(crate) use list_selection_view::SelectionRowDisplay;
 pub(crate) use list_selection_view::SelectionToggle;
@@ -170,13 +190,21 @@ pub(crate) use title_setup::preview_line_for_title_items;
 mod paste_burst;
 mod pending_input_preview;
 mod pending_thread_approvals;
+mod picker_option;
+pub(crate) use picker_option::picker_option_list;
+pub(crate) use picker_option::picker_option_row;
 pub(crate) mod popup_consts;
 mod scroll_state;
 mod selection_popup_common;
+pub(crate) use selection_popup_common::menu_surface_padding_height;
+pub(crate) use selection_popup_common::render_menu_surface;
 mod selection_row_layout;
 mod selection_tabs;
+pub(crate) use selection_tabs::render_filled_tab_bar;
 mod startup;
 mod textarea;
+pub(crate) use textarea::TextArea;
+pub(crate) use textarea::TextAreaState;
 mod unified_exec_footer;
 pub(crate) use feedback_note_view::FeedbackNoteView;
 pub(crate) use hooks_browser_view::HooksBrowserView;
@@ -217,7 +245,9 @@ pub(crate) use chat_composer::ChatComposerConfig;
 pub(crate) use chat_composer::ComposerDraftSnapshot;
 pub(crate) use chat_composer::InputResult;
 pub(crate) use chat_composer::QueuedInputAction;
+pub(crate) use chat_composer::RestrictedInputMode;
 pub(crate) use chat_composer_history::HistoryEntry;
+pub(crate) use textarea::KillBufferSnapshot;
 
 use crate::status_indicator_widget::StatusDetailsCapitalization;
 use crate::status_indicator_widget::StatusIndicatorWidget;
@@ -228,6 +258,7 @@ pub(crate) use list_selection_view::SELECTION_TOGGLE_BLOCKED_PREFIX;
 pub(crate) use list_selection_view::SELECTION_TOGGLE_UNAVAILABLE_PREFIX;
 pub(crate) use list_selection_view::SelectionAction;
 pub(crate) use list_selection_view::SelectionItem;
+pub(crate) use list_selection_view::SelectionSecondaryAction;
 
 struct DelayedApprovalRequest {
     request: ApprovalRequest,
@@ -246,6 +277,7 @@ pub(crate) struct BottomPane {
 
     /// Stack of views displayed instead of the composer (e.g. popups/modals).
     view_stack: Vec<Box<dyn BottomPaneView>>,
+    warnings_view: Option<warnings_view::WarningsView>,
     pub(crate) questions: Option<Box<AsyncQuestions>>,
     delayed_approval_requests: VecDeque<DelayedApprovalRequest>,
     last_composer_activity_at: Option<Instant>,
@@ -260,6 +292,7 @@ pub(crate) struct BottomPane {
     is_task_running: bool,
     esc_backtrack_hint: bool,
     animations_enabled: bool,
+    effects: codex_config::types::TuiEffects,
 
     /// Inline status indicator shown above the composer while a task is running.
     status: Option<StatusIndicatorWidget>,
@@ -290,6 +323,7 @@ pub(crate) struct BottomPaneParams {
     pub(crate) placeholder_text: String,
     pub(crate) disable_paste_burst: bool,
     pub(crate) animations_enabled: bool,
+    pub(crate) effects: codex_config::types::TuiEffects,
     pub(crate) skills: Option<Vec<SkillMetadata>>,
 }
 
@@ -311,6 +345,7 @@ impl BottomPane {
             placeholder_text,
             disable_paste_burst,
             animations_enabled,
+            effects,
             skills,
         } = params;
         let mut composer = ChatComposer::new_with_config(
@@ -328,6 +363,7 @@ impl BottomPane {
         Self {
             composer,
             view_stack: Vec::new(),
+            warnings_view: None,
             questions: None,
             delayed_approval_requests: VecDeque::new(),
             last_composer_activity_at: None,
@@ -347,6 +383,7 @@ impl BottomPane {
             pending_thread_approvals: PendingThreadApprovals::new(),
             esc_backtrack_hint: false,
             animations_enabled,
+            effects,
             context_window_percent: None,
             context_window_used_tokens: None,
             keymap,
@@ -370,7 +407,7 @@ impl BottomPane {
     /// visible frame can play a one-shot Max/Ultra effect.
     pub(crate) fn set_active_reasoning_effort(&mut self, effort: Option<&ReasoningEffort>) {
         let animations_enabled = effort_ignition::effort_animation_enabled(
-            self.animations_enabled,
+            self.animations_enabled && self.effects.effort,
             effective_stdout_color_level(),
         );
         if self
@@ -462,6 +499,9 @@ impl BottomPane {
     /// overlays and selection views to continue using the previous bindings.
     pub fn set_keymap_bindings(&mut self, keymap: &RuntimeKeymap) {
         self.keymap = keymap.clone();
+        if let Some(view) = &mut self.warnings_view {
+            view.set_keymap(keymap);
+        }
         self.composer.set_keymap_bindings(keymap);
         if let Some(questions) = &mut self.questions {
             questions.set_keymap(keymap);
@@ -526,11 +566,6 @@ impl BottomPane {
         self.request_redraw();
     }
 
-    pub fn set_personality_command_enabled(&mut self, enabled: bool) {
-        self.composer.set_personality_command_enabled(enabled);
-        self.request_redraw();
-    }
-
     pub fn set_service_tier_commands_enabled(&mut self, enabled: bool) {
         self.composer.set_service_tier_commands_enabled(enabled);
         self.request_redraw();
@@ -543,6 +578,11 @@ impl BottomPane {
 
     pub fn set_goal_command_enabled(&mut self, enabled: bool) {
         self.composer.set_goal_command_enabled(enabled);
+        self.request_redraw();
+    }
+
+    pub fn set_voice_command_enabled(&mut self, enabled: bool) {
+        self.composer.set_voice_command_enabled(enabled);
         self.request_redraw();
     }
 
@@ -580,6 +620,14 @@ impl BottomPane {
             questions.set_vim_enabled(enabled);
         }
         self.request_redraw();
+    }
+
+    pub(crate) fn take_kill_buffer_snapshot(&mut self) -> KillBufferSnapshot {
+        self.composer.take_kill_buffer_snapshot()
+    }
+
+    pub(crate) fn restore_kill_buffer_snapshot(&mut self, snapshot: KillBufferSnapshot) {
+        self.composer.restore_kill_buffer_snapshot(snapshot);
     }
 
     pub(crate) fn toggle_vim_enabled(&mut self) -> bool {
@@ -675,7 +723,7 @@ impl BottomPane {
         })
     }
 
-    fn record_composer_activity_at(&mut self, now: Instant) {
+    pub(crate) fn record_composer_activity_at(&mut self, now: Instant) {
         self.last_composer_activity_at = Some(now);
         if self.has_pending_approval()
             && let Some(delay) = self.approval_prompt_delay_remaining(now)
@@ -713,14 +761,20 @@ impl BottomPane {
         self.push_view(Box::new(modal));
     }
 
-    /// Edit the draft without invoking popups, submissions, or remote actions.
-    pub(crate) fn handle_disconnected_key(&mut self, key: KeyEvent) {
+    /// Preserve restricted drafts, allowing recovery commands only for connected unavailable threads.
+    pub(crate) fn handle_restricted_key(
+        &mut self,
+        key: KeyEvent,
+        mode: RestrictedInputMode,
+    ) -> InputResult {
         self.view_stack.clear();
+        self.warnings_view = None;
         self.delayed_approval_requests.clear();
         self.composer
             .set_input_enabled(/*enabled*/ true, /*placeholder*/ None);
-        self.composer.handle_disconnected_key(key);
+        let result = self.composer.handle_restricted_key(key, mode);
         self.request_redraw();
+        result
     }
 
     /// Forward a key event to the active view or the composer.
@@ -736,6 +790,20 @@ impl BottomPane {
                         | KeyCode::Enter
                         | KeyCode::Tab
                 );
+        if self.warnings_active() {
+            if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                self.record_composer_activity_at(Instant::now());
+            }
+            if self
+                .warnings_view
+                .as_mut()
+                .is_some_and(|view| view.handle_key(key_event))
+            {
+                self.warnings_view = None;
+            }
+            self.request_redraw();
+            return InputResult::None;
+        }
         if self.view_stack.is_empty()
             && let Some(questions) = self.questions.as_mut().filter(|q| q.expanded)
         {
@@ -828,6 +896,11 @@ impl BottomPane {
 
     /// Return the contexts whose ordinary handlers can consume the next key.
     pub(crate) fn keymap_contexts(&self) -> KeymapContextSet {
+        if self.warnings_active()
+            && let Some(view) = &self.warnings_view
+        {
+            return view.keymap_contexts();
+        }
         if let Some(view) = self.view_stack.last() {
             view.keymap_contexts()
         } else if let Some(questions) = self.questions.as_ref().filter(|q| q.expanded) {
@@ -847,6 +920,11 @@ impl BottomPane {
     /// was received, but it does not decide whether the process should exit; `ChatWidget` owns the
     /// quit/interrupt state machine and uses the result to decide what happens next.
     pub(crate) fn on_ctrl_c(&mut self) -> CancellationEvent {
+        if self.warnings_active() {
+            self.warnings_view = None;
+            self.request_redraw();
+            return CancellationEvent::Handled;
+        }
         if self.view_stack.is_empty()
             && let Some(questions) = self.questions.as_mut().filter(|q| q.expanded)
         {
@@ -879,6 +957,13 @@ impl BottomPane {
     }
 
     pub fn handle_paste(&mut self, pasted: String) {
+        if self.warnings_active() {
+            if !pasted.is_empty() {
+                self.record_composer_activity_at(Instant::now());
+            }
+            self.request_redraw();
+            return;
+        }
         if self.view_stack.is_empty()
             && let Some(questions) = self.questions.as_mut().filter(|q| q.expanded)
         {
@@ -1008,6 +1093,7 @@ impl BottomPane {
 
     pub(crate) fn show_shutdown_in_progress(&mut self) {
         self.view_stack.clear();
+        self.warnings_view = None;
         self.composer.show_shutdown_in_progress();
         self.request_redraw();
     }
@@ -1069,7 +1155,16 @@ impl BottomPane {
     }
 
     pub(crate) fn set_footer_hint_override(&mut self, items: Option<Vec<(String, String)>>) {
+        if let Some(view) = &mut self.warnings_view {
+            view.pending_hint = items.clone();
+        }
         self.composer.set_footer_hint_override(items);
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_voice_strip(&mut self, state: Option<VoiceStripState>) {
+        self.composer
+            .set_voice_strip(state, self.frame_requester.clone());
         self.request_redraw();
     }
 
@@ -1193,6 +1288,7 @@ impl BottomPane {
                         self.app_event_tx.clone(),
                         self.frame_requester.clone(),
                         self.animations_enabled,
+                        self.effects,
                     ));
                 }
                 if let Some(status) = self.status.as_mut() {
@@ -1229,6 +1325,7 @@ impl BottomPane {
                     self.app_event_tx.clone(),
                     self.frame_requester.clone(),
                     self.animations_enabled,
+                    self.effects,
                 )
             });
             if let Some(status) = self.status.as_mut() {
@@ -1282,6 +1379,18 @@ impl BottomPane {
     }
 
     fn apply_standard_popup_hint(&self, params: &mut list_selection_view::SelectionViewParams) {
+        // Configured list actions take precedence over optional row shortcuts.
+        for item in &mut params.items {
+            if item.secondary_action.as_ref().is_some_and(|secondary| {
+                let (code, modifiers) = secondary.key.parts();
+                self.keymap
+                    .list
+                    .action_for(KeyEvent::new(code, modifiers))
+                    .is_some()
+            }) {
+                item.secondary_action = None;
+            }
+        }
         if !params.allow_cancel {
             if params.footer_hint.is_none()
                 || params.footer_hint.as_ref() == Some(&popup_consts::standard_popup_hint_line())
@@ -1293,7 +1402,7 @@ impl BottomPane {
         if params.footer_hint.is_none()
             || params.footer_hint.as_ref() == Some(&popup_consts::standard_popup_hint_line())
         {
-            params.footer_hint = Some(self.standard_popup_hint_line());
+            params.footer_hint = Some(popup_consts::picker_hint_line_for_keymap(&self.keymap.list));
         }
     }
 
@@ -1351,10 +1460,6 @@ impl BottomPane {
         }
         self.request_redraw();
         true
-    }
-
-    pub(crate) fn standard_popup_hint_line(&self) -> Line<'static> {
-        popup_consts::standard_popup_hint_line_for_keymap(&self.keymap.list)
     }
 
     pub(crate) fn replace_view_if_present(
@@ -1570,6 +1675,8 @@ impl BottomPane {
             .is_some_and(|(name, _, _)| matches!(name, "agents" | "subagents"));
 
         self.keymap.chat.interrupt_turn.is_pressed(key_event)
+            && !(self.shortcut_overlay_visible()
+                && key_hint::plain(KeyCode::Esc).is_press(key_event))
             && self.is_task_running
             && !(is_agent_command && key_event.code == KeyCode::Esc)
             && self.no_modal_or_popup_active()
@@ -1586,6 +1693,11 @@ impl BottomPane {
     }
 
     pub(crate) fn has_active_view(&self) -> bool {
+        self.warnings_view.is_some() || self.has_active_modal()
+    }
+
+    /// Warnings own input without replacing the composer with an interactive modal.
+    pub(crate) fn has_active_modal(&self) -> bool {
         !self.view_stack.is_empty()
     }
 
@@ -1605,15 +1717,18 @@ impl BottomPane {
     /// use Esc-Esc for backtracking from the main view.
     pub(crate) fn is_normal_backtrack_mode(&self) -> bool {
         !self.is_task_running
-            && !self.questions.as_ref().is_some_and(|q| q.expanded)
-            && self.view_stack.is_empty()
-            && !self.composer.popup_active()
+            && !self.shortcut_overlay_visible()
+            && self.can_launch_external_editor()
             && !self.inline_banner_accepts_dismissal()
+    }
+
+    pub(crate) fn shortcut_overlay_visible(&self) -> bool {
+        self.no_modal_or_popup_active() && self.composer.shortcut_overlay_visible()
     }
 
     /// Return true when no popups or modal views are active, regardless of task state.
     pub(crate) fn can_launch_external_editor(&self) -> bool {
-        self.view_stack.is_empty()
+        !self.has_active_view()
             && !self.composer.popup_active()
             && !self.questions.as_ref().is_some_and(|q| q.expanded)
     }
@@ -1625,6 +1740,33 @@ impl BottomPane {
     /// running and some are not.
     pub(crate) fn no_modal_or_popup_active(&self) -> bool {
         self.can_launch_external_editor()
+    }
+
+    pub(crate) fn end_composer_drag(&mut self) {
+        self.composer.end_mouse_drag();
+    }
+
+    pub(crate) fn copy_composer_selection(
+        &mut self,
+        event: &crate::tui::TuiEvent,
+        copy: impl FnOnce(&str) -> Result<crate::clipboard_copy::CopyStatus, String>,
+    ) -> Option<(usize, Result<crate::clipboard_copy::CopyStatus, String>)> {
+        if self.has_active_view() || self.questions.as_ref().is_some_and(|q| q.expanded) {
+            return None;
+        }
+        self.composer.copy_selection(event, copy)
+    }
+
+    pub(crate) fn prepare_composer_mouse(&mut self, event: crossterm::event::MouseEvent) -> bool {
+        if self.has_active_view() || self.questions.as_ref().is_some_and(|q| q.expanded) {
+            self.composer.end_mouse_drag();
+            return false;
+        }
+        self.composer.prepare_mouse(event)
+    }
+
+    pub(crate) fn handle_composer_mouse(&mut self, event: crossterm::event::MouseEvent) -> bool {
+        self.composer.handle_mouse(event)
     }
 
     pub(crate) fn show_view(&mut self, view: Box<dyn BottomPaneView>) {
@@ -1931,7 +2073,7 @@ impl BottomPane {
     }
 
     pub(crate) fn attach_image(&mut self, path: PathBuf) {
-        if self.view_stack.is_empty() {
+        if !self.has_active_view() {
             self.composer.attach_image(path);
             self.request_redraw();
         }
@@ -1957,13 +2099,18 @@ impl BottomPane {
     }
 
     fn as_renderable(&'_ self) -> RenderableItem<'_> {
-        self.as_renderable_with_composer_right_reserve(/*composer_right_reserve*/ 0)
+        self.as_renderable_with_options(ComposerRenderOptions::default())
     }
 
-    pub(crate) fn as_renderable_with_composer_right_reserve(
-        &'_ self,
-        composer_right_reserve: u16,
-    ) -> RenderableItem<'_> {
+    pub(crate) fn as_renderable_with_options<'a>(
+        &'a self,
+        mut options: ComposerRenderOptions<'a>,
+    ) -> RenderableItem<'a> {
+        if self.warnings_active()
+            && let Some(warnings) = &self.warnings_view
+        {
+            return RenderableItem::Borrowed(warnings);
+        }
         if (self.is_task_running || !self.view_stack.is_empty())
             && let Some(banner) = &self.inline_banner
         {
@@ -1993,7 +2140,7 @@ impl BottomPane {
                     /*flex*/ 0,
                     RenderableItem::Owned(Box::new(hook_status::HookStatus {
                         message,
-                        animations_enabled: self.animations_enabled,
+                        animations_enabled: self.animations_enabled && self.effects.shimmer,
                     })),
                 );
             }
@@ -2047,7 +2194,17 @@ impl BottomPane {
             {
                 flex.push(/*flex*/ 0, RenderableItem::Owned("".into()));
             }
-            if let Some(summary) = self.question_summary(Instant::now()) {
+            let question_summary = self.question_summary(Instant::now());
+            // History overlays must not clear the status and previews above this composer.
+            if options.command_popup_placement == CommandPopupPlacement::Overlay
+                && (has_status_or_footer
+                    || has_inline_previews
+                    || self.inline_banner.is_some()
+                    || question_summary.is_some())
+            {
+                options.command_popup_placement = CommandPopupPlacement::AboveComposer;
+            }
+            if let Some(summary) = question_summary {
                 flex.push(
                     /*flex*/ 0,
                     RenderableItem::Owned(Box::new(Paragraph::new(summary))),
@@ -2057,17 +2214,32 @@ impl BottomPane {
             flex2.push(/*flex*/ 1, RenderableItem::Owned(flex.into()));
             let composer: RenderableItem<'_> = if let Some(questions) = question_editor {
                 RenderableItem::Borrowed(questions.as_ref())
-            } else if composer_right_reserve == 0 {
+            } else if options.textarea_right_reserve == 0
+                && options.warning_count == 0
+                && options.footer.is_none()
+                && !options.separate_status_line
+                && options.command_popup_placement == CommandPopupPlacement::AboveComposer
+            {
                 RenderableItem::Borrowed(&self.composer)
             } else {
-                RenderableItem::Owned(Box::new(ChatComposerRightReserveRenderable {
+                RenderableItem::Owned(Box::new(ChatComposerPresentation {
                     composer: &self.composer,
-                    right_reserve: composer_right_reserve,
+                    options: self.composer.resolve_render_options(options),
                 }))
             };
             flex2.push(/*flex*/ 0, composer);
             RenderableItem::Owned(Box::new(flex2))
         }
+    }
+
+    pub(crate) fn show_footer_flash(&mut self, line: Line<'static>, duration: Duration) {
+        if self.warnings_active()
+            && let Some(view) = &mut self.warnings_view
+        {
+            view.flash = Some((line.clone(), Instant::now() + duration));
+        }
+        self.composer.show_footer_flash(line, duration);
+        self.request_redraw();
     }
 
     pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) {
@@ -2111,33 +2283,36 @@ impl BottomPane {
     }
 }
 
-struct ChatComposerRightReserveRenderable<'a> {
+struct ChatComposerPresentation<'a> {
     composer: &'a chat_composer::ChatComposer,
-    right_reserve: u16,
+    options: ComposerRenderOptions<'a>,
 }
 
-impl Renderable for ChatComposerRightReserveRenderable<'_> {
+impl Renderable for ChatComposerPresentation<'_> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        self.composer.render_with_mask_and_textarea_right_reserve(
-            area,
-            buf,
-            /*mask_char*/ None,
-            self.right_reserve,
-        );
+        self.composer
+            .render_with_options(area, buf, /*mask_char*/ None, self.options);
     }
 
     fn desired_height(&self, width: u16) -> u16 {
         self.composer
-            .desired_height_with_textarea_right_reserve(width, self.right_reserve)
+            .desired_height_with_options(width, self.options)
     }
 
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        self.composer
-            .cursor_pos_with_textarea_right_reserve(area, self.right_reserve)
+        self.composer.cursor_pos_with_options(area, self.options)
     }
 
     fn cursor_style(&self, area: Rect) -> crossterm::cursor::SetCursorStyle {
-        self.composer.cursor_style(area)
+        if self
+            .options
+            .footer
+            .is_some_and(|footer| footer.is_interactive)
+        {
+            crossterm::cursor::SetCursorStyle::SteadyBar
+        } else {
+            self.composer.cursor_style(area)
+        }
     }
 }
 
@@ -2161,6 +2336,8 @@ impl Renderable for BottomPane {
 mod tests {
     #[path = "actionable_banner_tests.rs"]
     mod actionable_banner_tests;
+    #[path = "picker_hint_tests.rs"]
+    mod picker_hint_tests;
 
     use super::*;
     use crate::app::app_server_requests::ResolvedAppServerRequest;
@@ -2218,6 +2395,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         })
     }
@@ -2317,6 +2495,35 @@ mod tests {
         assert!(!pane.is_normal_backtrack_mode());
         pane.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(pane.is_normal_backtrack_mode());
+    }
+
+    #[test]
+    fn escape_closes_shortcut_help_before_inline_banner() {
+        let (tx, _rx) = unbounded_channel();
+        let mut pane = test_pane(AppEventSender::new(tx));
+        pane.set_inline_banner(Some(ActionableBanner {
+            title: "Continue working".into(),
+            description: "Keep this notice while dismissing shortcut help".into(),
+            ..Default::default()
+        }));
+        let width = 80;
+        let area = Rect::new(
+            /*x*/ 0,
+            /*y*/ 0,
+            width,
+            pane.desired_height(width),
+        );
+        let _ = render_snapshot(&pane, area);
+        assert_eq!(pane.inline_banner_lifecycle(), (true, false));
+        pane.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(pane.shortcut_overlay_visible());
+
+        pane.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!pane.shortcut_overlay_visible());
+        assert_eq!(pane.inline_banner_lifecycle(), (true, false));
+
+        pane.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(pane.inline_banner_lifecycle(), (true, true));
     }
 
     #[test]
@@ -2450,6 +2657,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: true,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
         pane.push_approval_request(exec_request(), &features);
@@ -2470,6 +2678,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: true,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
         pane.insert_str("draft");
@@ -2503,6 +2712,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
 
@@ -2542,24 +2752,51 @@ mod tests {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
         let features = Features::with_defaults();
-        let mut pane = test_pane(tx);
-        let now = Instant::now();
-        pane.last_composer_activity_at = Some(now);
+        for source in [
+            "composer",
+            "warning open",
+            "warning navigation",
+            "warning paste",
+        ] {
+            let mut pane = test_pane(tx.clone());
+            match source {
+                "warning open" => pane.show_warnings(Vec::new()),
+                "warning navigation" => {
+                    pane.show_warnings(Vec::new());
+                    pane.last_composer_activity_at = None;
+                    pane.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+                }
+                "warning paste" => {
+                    pane.show_warnings(Vec::new());
+                    pane.last_composer_activity_at = None;
+                    pane.handle_paste("query".into());
+                }
+                _ => pane.last_composer_activity_at = Some(Instant::now()),
+            }
+            let now = pane
+                .last_composer_activity_at
+                .expect("typing activity recorded");
 
-        pane.push_approval_request(exec_request(), &features);
+            pane.push_approval_request(exec_request(), &features);
 
-        assert!(pane.view_stack.is_empty());
-        assert_eq!(pane.delayed_approval_requests.len(), 1);
+            assert!(pane.view_stack.is_empty());
+            assert_eq!(pane.delayed_approval_requests.len(), 1);
+            if source == "warning navigation" {
+                pane.handle_key_event(KeyCode::Enter.into());
+                assert!(pane.warnings_active());
+            }
+            let now = pane.last_composer_activity_at.unwrap_or(now);
 
-        pane.pre_draw_tick_at(
-            now + APPROVAL_PROMPT_TYPING_IDLE_DELAY - Duration::from_millis(/*millis*/ 1),
-        );
-        assert!(pane.view_stack.is_empty());
-        assert_eq!(pane.delayed_approval_requests.len(), 1);
+            pane.pre_draw_tick_at(
+                now + APPROVAL_PROMPT_TYPING_IDLE_DELAY - Duration::from_millis(/*millis*/ 1),
+            );
+            assert!(pane.view_stack.is_empty());
+            assert_eq!(pane.delayed_approval_requests.len(), 1);
 
-        pane.pre_draw_tick_at(now + APPROVAL_PROMPT_TYPING_IDLE_DELAY);
-        assert_eq!(pane.view_stack.len(), 1);
-        assert!(pane.delayed_approval_requests.is_empty());
+            pane.pre_draw_tick_at(now + APPROVAL_PROMPT_TYPING_IDLE_DELAY);
+            assert_eq!(pane.view_stack.len(), 1);
+            assert!(pane.delayed_approval_requests.is_empty());
+        }
     }
 
     #[test]
@@ -2599,7 +2836,10 @@ mod tests {
         assert_eq!(pane.composer_text(), "ya");
         assert!(pane.view_stack.is_empty());
         assert_eq!(pane.delayed_approval_requests.len(), 1);
-        pane.handle_disconnected_key(KeyEvent::new(KeyCode::Null, KeyModifiers::NONE));
+        pane.handle_restricted_key(
+            KeyEvent::new(KeyCode::Null, KeyModifiers::NONE),
+            RestrictedInputMode::Disconnected,
+        );
         pane.pre_draw_tick_at(Instant::now() + APPROVAL_PROMPT_TYPING_IDLE_DELAY);
         pane.handle_paste(" kept".into());
         assert_eq!(pane.composer_text(), "ya kept");
@@ -2798,6 +3038,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
 
@@ -2865,6 +3106,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
 
@@ -2939,6 +3181,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
 
@@ -2970,6 +3213,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
 
@@ -2993,6 +3237,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
 
@@ -3022,6 +3267,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
 
@@ -3059,6 +3305,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
 
@@ -3091,6 +3338,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
 
@@ -3122,6 +3370,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
 
@@ -3151,6 +3400,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
 
@@ -3174,6 +3424,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(vec![SkillMetadata {
                 name: "test-skill".to_string(),
                 description: "test skill".to_string(),
@@ -3222,6 +3473,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
 
@@ -3234,6 +3486,27 @@ mod tests {
             pane.composer.popup_active(),
             "expected command popup after typing `/rev`"
         );
+
+        // Owned transcript mode must reserve the popup's rows while task status is visible.
+        let overlay = pane.as_renderable_with_options(ComposerRenderOptions {
+            command_popup_placement: CommandPopupPlacement::Overlay,
+            ..Default::default()
+        });
+        let inline = pane.as_renderable();
+        let area = Rect::new(
+            /*x*/ 0,
+            /*y*/ 0,
+            /*width*/ 60,
+            inline.desired_height(/*width*/ 60),
+        );
+        let mut expected = Buffer::empty(area);
+        let mut actual = Buffer::empty(area);
+        inline.render(area, &mut expected);
+        overlay.render(area, &mut actual);
+        assert_eq!(overlay.desired_height(/*width*/ 60), area.height);
+        assert_eq!(actual, expected);
+        assert_eq!(overlay.cursor_pos(area), inline.cursor_pos(area));
+        drop((overlay, inline));
 
         pane.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
@@ -3269,6 +3542,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
 
@@ -3305,6 +3579,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
 
@@ -3353,6 +3628,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
 
@@ -3478,6 +3754,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
 
@@ -3526,6 +3803,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
 
@@ -3604,6 +3882,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
 

@@ -142,12 +142,12 @@ impl ChatWidget {
                     status.details_max_lines,
                 );
             } else if self.status_state.current_status.is_guardian_review() {
-                self.set_status_header(String::from("Working"));
+                self.restore_reasoning_status_header();
             }
         } else if self.status_state.pending_guardian_review_status.is_empty()
             && self.status_state.current_status.is_guardian_review()
         {
-            self.set_status_header(String::from("Working"));
+            self.restore_reasoning_status_header();
         }
 
         if ev.status == GuardianAssessmentStatus::Approved {
@@ -376,14 +376,18 @@ impl ChatWidget {
                     self.bottom_pane
                         .push_approval_request(request, &self.config.features);
                 }
-                McpServerElicitationRequest::UserVerification { .. } => {
-                    self.app_event_tx.resolve_elicitation(
+                McpServerElicitationRequest::UserVerification {
+                    title, description, ..
+                } => {
+                    self.bottom_pane.push_user_verification_request(
                         thread_id,
-                        params.server_name,
-                        request_id,
-                        codex_app_server_protocol::McpServerElicitationAction::Cancel,
-                        /*content*/ None,
-                        /*meta*/ None,
+                        crate::bottom_pane::user_verification::UserVerificationRequest {
+                            thread_label: None,
+                            server_name: params.server_name,
+                            request_id,
+                            title,
+                            description,
+                        },
                     );
                 }
                 McpServerElicitationRequest::OpenAiForm { .. }
@@ -410,6 +414,21 @@ impl ChatWidget {
     pub(crate) fn push_approval_request(&mut self, request: ApprovalRequest) {
         self.bottom_pane
             .push_approval_request(request, &self.config.features);
+        self.set_ambient_pet_notification(
+            crate::pets::PetNotificationKind::Waiting,
+            /*body*/ None,
+        );
+        self.request_redraw();
+    }
+
+    pub(crate) fn push_user_verification_request(
+        &mut self,
+        thread_id: ThreadId,
+        request: crate::bottom_pane::user_verification::UserVerificationRequest,
+    ) {
+        // Inactive-thread prompts must leave the foreground stream and command activity intact.
+        self.bottom_pane
+            .push_user_verification_request(thread_id, request);
         self.set_ambient_pet_notification(
             crate::pets::PetNotificationKind::Waiting,
             /*body*/ None,

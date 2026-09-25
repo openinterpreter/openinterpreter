@@ -6,10 +6,13 @@
 //! keeps doctor safe to run while the user is debugging startup or update-loop
 //! issues.
 
+use std::io::Read;
+use std::num::NonZeroU32;
 use std::path::Path;
 
 use codex_core::config::Config;
 use codex_product_info::Product;
+use serde::Deserialize;
 
 use super::CheckStatus;
 use super::DoctorCheck;
@@ -19,6 +22,19 @@ const STATE_DIR_NAME: &str = "app-server-daemon";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const PID_FILE_NAME: &str = "app-server.pid";
 const UPDATE_PID_FILE_NAME: &str = "app-server-updater.pid";
+const MAX_SETTINGS_BYTES: u64 = 16 * 1024;
+
+#[derive(Deserialize)]
+struct ConfiguredSettings {
+    updater: Option<ConfiguredUpdater>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfiguredUpdater {
+    auto_update_enabled: Option<bool>,
+    update_interval_minutes: Option<NonZeroU32>,
+}
 
 /// Builds the app-server status row from existing daemon state.
 ///
@@ -40,6 +56,17 @@ pub(super) async fn background_server_check(config: &Config) -> DoctorCheck {
         "update-loop pid file",
         &state_dir.join(UPDATE_PID_FILE_NAME),
     );
+    push_file_detail(
+        &mut details,
+        "dedicated pid file",
+        &state_dir.join("daemon.pid"),
+    );
+    push_file_detail(
+        &mut details,
+        "dedicated update-loop pid file",
+        &state_dir.join("daemon-updater.pid"),
+    );
+    push_configured_updater(&mut details, &state_dir.join(SETTINGS_FILE_NAME));
 
     let socket_path = match codex_app_server::app_server_control_socket_path(&config.codex_home) {
         Ok(socket_path) => socket_path,
@@ -91,6 +118,34 @@ fn push_file_detail(details: &mut Vec<String>, label: &str, path: &Path) {
             details.push(format!("{label}: {} (missing)", path.display()));
         }
         Err(err) => details.push(format!("{label}: {} ({err})", path.display())),
+    }
+}
+
+fn push_configured_updater(details: &mut Vec<String>, path: &Path) {
+    if !path.is_file() {
+        return;
+    }
+    let mut contents = Vec::new();
+    let read = std::fs::File::open(path)
+        .and_then(|file| file.take(MAX_SETTINGS_BYTES + 1).read_to_end(&mut contents));
+    let settings = read
+        .ok()
+        .filter(|_| contents.len() as u64 <= MAX_SETTINGS_BYTES)
+        .and_then(|_| serde_json::from_slice::<ConfiguredSettings>(&contents).ok());
+    let Some(settings) = settings else {
+        details.push("configured updater settings: unreadable or invalid".into());
+        return;
+    };
+    if let Some(updater) = settings.updater {
+        if let Some(enabled) = updater.auto_update_enabled {
+            details.push(format!(
+                "automatic updates: {} (configured)",
+                if enabled { "enabled" } else { "disabled" }
+            ));
+        }
+        if let Some(minutes) = updater.update_interval_minutes {
+            details.push(format!("update interval: {minutes} minutes (configured)"));
+        }
     }
 }
 
@@ -259,5 +314,56 @@ mod tests {
                 .iter()
                 .any(|detail| detail.starts_with("app-server version: unavailable ("))
         );
+    }
+
+    #[tokio::test]
+    async fn configured_updates_and_missing_updater_record_are_visible() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_dir = temp.path().join(STATE_DIR_NAME);
+        std::fs::create_dir(&state_dir).expect("state dir");
+        std::fs::write(
+            state_dir.join(SETTINGS_FILE_NAME),
+            r#"{"updater":{"autoUpdateEnabled":false,"updateIntervalMinutes":90}}"#,
+        )
+        .expect("settings");
+        let config = test_config(temp.path().to_path_buf()).await;
+
+        let check = background_server_check(&config).await;
+        let details = check
+            .details
+            .iter()
+            .filter(|detail| {
+                detail.starts_with("automatic updates:")
+                    || detail.starts_with("update interval:")
+                    || detail.starts_with("update-loop pid file:")
+                    || detail.starts_with("dedicated")
+            })
+            .map(|detail| {
+                detail
+                    .replace(&temp.path().display().to_string(), "CODEX_HOME")
+                    .replace('\\', "/")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        insta::assert_snapshot!("configured_updater", details);
+    }
+
+    #[test]
+    fn invalid_settings_are_not_reported_as_effective() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join(SETTINGS_FILE_NAME);
+        for contents in [
+            r#"{"updater":{"autoUpdateEnabled":"no"}}"#,
+            r#"{"updater":{"updateIntervalMinutes":0}}"#,
+        ] {
+            std::fs::write(&path, contents).expect("settings");
+            let mut details = Vec::new();
+
+            push_configured_updater(&mut details, &path);
+
+            insta::allow_duplicates! {
+                insta::assert_snapshot!(details.join("\n"), @"configured updater settings: unreadable or invalid");
+            }
+        }
     }
 }

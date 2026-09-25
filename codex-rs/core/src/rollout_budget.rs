@@ -8,9 +8,11 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::OnceLock;
 
-pub(crate) struct RolloutBudgetReminder {
-    pub(crate) remaining_tokens: i64,
-    reminder_index: i64,
+/// Budget reminder returned by a controller and acknowledged after history insertion.
+pub struct RolloutBudgetReminder {
+    pub remaining_tokens: i64,
+    /// Backend-defined reminder position, returned unchanged on acknowledgement.
+    pub reminder_index: i64,
 }
 
 /// Shared accounting and reminder state for one root-thread session tree.
@@ -107,14 +109,6 @@ impl RolloutBudget {
                 reminder_index: reminder.reminder_index,
             },
         );
-    }
-
-    /// Forces the next sampling request for `thread_id` to restate the current remainder.
-    pub(crate) fn rearm_reminder(&self, thread_id: ThreadId) {
-        let Some(mut state) = self.lock() else {
-            return;
-        };
-        state.deliveries.remove(&thread_id);
     }
 
     fn lock(&self) -> Option<MutexGuard<'_, RolloutBudgetState>> {

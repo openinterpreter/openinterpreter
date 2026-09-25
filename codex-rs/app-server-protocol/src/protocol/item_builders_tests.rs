@@ -109,6 +109,7 @@ fn guardian_stdin_reviews_preserve_parent_command_history() {
     let start_turn = |turn_id: &str| {
         RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
             turn_id: turn_id.into(),
+            root_turn_id: None,
             trace_id: None,
             started_at: None,
             model_context_window: None,
@@ -130,6 +131,7 @@ fn guardian_stdin_reviews_preserve_parent_command_history() {
 
     let assessment = GuardianAssessmentEvent {
         review_reason: None,
+        model_context: None,
         id: "review-stdin".into(),
         target_item_id: Some("terminal-command".into()),
         plugin_id: None,

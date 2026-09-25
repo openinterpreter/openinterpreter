@@ -1,6 +1,11 @@
 use super::*;
+use crate::model_catalog::ModelCatalog;
+use codex_config::ConfigPathContext;
 use codex_core::config::permission_profile_catalog;
 use codex_hooks::HookListEntryHandler;
+use codex_utils_absolute_path::AbsolutePathBufGuard;
+use codex_utils_path_uri::PathConvention;
+use codex_utils_path_uri::PathUri;
 use futures::StreamExt;
 
 #[derive(Clone)]
@@ -11,6 +16,7 @@ pub(crate) struct CatalogRequestProcessor {
     pub(super) auth_manager: Arc<AuthManager>,
     pub(super) config: Arc<Config>,
     pub(super) config_manager: ConfigManager,
+    model_catalog: Arc<ModelCatalog>,
 }
 
 const SKILLS_LIST_CWD_CONCURRENCY: usize = 5;
@@ -122,6 +128,7 @@ impl CatalogRequestProcessor {
         auth_manager: Arc<AuthManager>,
         config: Arc<Config>,
         config_manager: ConfigManager,
+        model_catalog: Arc<ModelCatalog>,
     ) -> Self {
         Self {
             outgoing,
@@ -130,6 +137,7 @@ impl CatalogRequestProcessor {
             auth_manager,
             config,
             config_manager,
+            model_catalog,
         }
     }
 
@@ -173,13 +181,9 @@ impl CatalogRequestProcessor {
         &self,
         params: ModelListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.list_models(
-            self.thread_manager.clone(),
-            self.config.http_client_factory(),
-            params,
-        )
-        .await
-        .map(|response| Some(response.into()))
+        self.list_models(params)
+            .await
+            .map(|response| Some(response.into()))
     }
 
     pub(crate) async fn interpreter_provider_list(
@@ -208,16 +212,12 @@ impl CatalogRequestProcessor {
         params: InterpreterModelListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         let response = self
-            .list_models(
-                self.thread_manager.clone(),
-                self.config.http_client_factory(),
-                ModelListParams {
-                    cursor: None,
-                    limit: None,
-                    include_hidden: params.include_hidden,
-                    model_provider: params.model_provider,
-                },
-            )
+            .list_models(ModelListParams {
+                cursor: None,
+                limit: None,
+                include_hidden: params.include_hidden,
+                model_provider: params.model_provider,
+            })
             .await?;
         Ok(Some(
             InterpreterModelListResponse {
@@ -331,8 +331,6 @@ impl CatalogRequestProcessor {
 
     async fn list_models(
         &self,
-        thread_manager: Arc<ThreadManager>,
-        http_client_factory: codex_http_client::HttpClientFactory,
         params: ModelListParams,
     ) -> Result<ModelListResponse, JSONRPCErrorError> {
         let ModelListParams {
@@ -349,11 +347,18 @@ impl CatalogRequestProcessor {
                     self.auth_manager.clone(),
                     provider_id.as_str(),
                     include_hidden,
-                    http_client_factory,
+                    self.config.http_client_factory(),
                 )
                 .await
             }
-            None => supported_models(thread_manager, include_hidden, http_client_factory).await,
+            None => {
+                let presets = self
+                    .model_catalog
+                    .list_models(codex_models_manager::manager::RefreshStrategy::OnlineIfUncached)
+                    .await
+                    .map_err(|err| config_load_error(&err))?;
+                supported_models(presets, include_hidden)
+            }
         };
         let total = models.len();
 
@@ -451,7 +456,10 @@ impl CatalogRequestProcessor {
                     .map_err(|_| invalid_request(format!("thread not found: {thread_id}")))?;
                 let thread_config = thread.config().await;
                 self.config_manager
-                    .load_latest_config_for_thread(thread_config.as_ref())
+                    .load_latest_config_with_session_layers(
+                        &thread_config.config_layer_stack,
+                        &thread_config.cwd,
+                    )
                     .await
                     .map_err(|err| internal_error(format!("failed to reload config: {err}")))?
             }
@@ -537,22 +545,26 @@ impl CatalogRequestProcessor {
         params: PermissionProfileListParams,
     ) -> Result<PermissionProfileListResponse, JSONRPCErrorError> {
         let PermissionProfileListParams { cursor, limit, cwd } = params;
-        let config_layer_stack = match cwd {
-            Some(cwd) => {
-                let cwd = PathBuf::from(cwd);
-                let (_, config_layer_stack) = self
-                    .resolve_cwd_config(&cwd)
-                    .await
-                    .map_err(|err| internal_error(format!("failed to reload config: {err}")))?;
-                config_layer_stack
-            }
-            None => self
-                .config_manager
-                .load_config_layers(/*cwd*/ None)
+        let (cwd, config_layer_stack) = match cwd {
+            Some(cwd) => self
+                .resolve_cwd_config(&PathBuf::from(cwd))
                 .await
                 .map_err(|err| internal_error(format!("failed to reload config: {err}")))?,
+            None => (
+                self.config.cwd.clone(),
+                self.config_manager
+                    .load_config_layers(/*cwd*/ None)
+                    .await
+                    .map_err(|err| internal_error(format!("failed to reload config: {err}")))?,
+            ),
         };
-        let profiles = permission_profile_catalog(&config_layer_stack)
+        let context = ConfigPathContext::new(
+            PathConvention::native(),
+            Some(PathUri::from_abs_path(&cwd)),
+            AbsolutePathBufGuard::home_directory()
+                .and_then(|home| PathUri::from_host_native_path(home).ok()),
+        );
+        let profiles = permission_profile_catalog(&config_layer_stack, &context)
             .map_err(|err| internal_error(format!("failed to resolve permission profiles: {err}")))?
             .into_iter()
             .map(|profile| PermissionProfileSummary {

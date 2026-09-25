@@ -5,6 +5,26 @@ use crate::bottom_pane::BottomPaneView;
 use crate::clipboard_copy::CopyFormat;
 
 impl ChatWidget {
+    pub(crate) fn end_composer_drag(&mut self) {
+        self.bottom_pane.end_composer_drag();
+    }
+
+    pub(crate) fn copy_composer_selection(
+        &mut self,
+        event: &crate::tui::TuiEvent,
+        copy: impl FnOnce(&str) -> Result<crate::clipboard_copy::CopyStatus, String>,
+    ) -> Option<(usize, Result<crate::clipboard_copy::CopyStatus, String>)> {
+        self.bottom_pane.copy_composer_selection(event, copy)
+    }
+
+    pub(crate) fn handle_composer_mouse(&mut self, event: crossterm::event::MouseEvent) -> bool {
+        self.bottom_pane.handle_composer_mouse(event)
+    }
+
+    pub(crate) fn prepare_composer_mouse(&mut self, event: crossterm::event::MouseEvent) -> bool {
+        self.bottom_pane.prepare_composer_mouse(event)
+    }
+
     pub(crate) fn set_agents_navigation_enabled(&mut self, enabled: bool) {
         self.bottom_pane.set_agents_navigation_enabled(enabled);
     }
@@ -14,6 +34,9 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) {
+        if self.handle_startup_submission_key(key_event) {
+            return;
+        }
         if self.handle_question_key(key_event) {
             return;
         }
@@ -27,8 +50,9 @@ impl ChatWidget {
                     ..
                 } if modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'c')
             )
-            && !key_hint::ctrl(KeyCode::Char('r')).is_press(key_event)
-            && !key_hint::ctrl(KeyCode::Char('u')).is_press(key_event)
+            && (self.bottom_pane.warnings_active()
+                || (!key_hint::ctrl(KeyCode::Char('r')).is_press(key_event)
+                    && !key_hint::ctrl(KeyCode::Char('u')).is_press(key_event)))
         {
             let should_pause_active_goal = self
                 .bottom_pane
@@ -39,6 +63,29 @@ impl ChatWidget {
             }
             if self.bottom_pane.no_modal_or_popup_active() {
                 self.on_modal_or_popup_closed();
+            }
+            return;
+        }
+
+        if self.shortcut_overlay_visible() && key_hint::plain(KeyCode::Esc).is_press(key_event) {
+            self.bottom_pane.handle_key_event(key_event);
+            return;
+        }
+
+        if (self.chat_keymap.interrupt_turn.is_pressed(key_event)
+            || key_hint::ctrl(KeyCode::Char('c')).is_press(key_event))
+            && self.bottom_pane.no_modal_or_popup_active()
+            && !self.should_handle_vim_insert_escape(key_event)
+            && self.pending_image_submission.is_some()
+        {
+            if self.is_cancellable_work_active() {
+                self.requeue_image_submission();
+                self.input_queue.recovered_queue = true;
+                if self.submit_op(AppCommand::interrupt()) {
+                    self.pause_active_goal_for_interrupt();
+                }
+            } else {
+                self.cancel_image_submission();
             }
             return;
         }
@@ -57,6 +104,18 @@ impl ChatWidget {
             self.quit_shortcut_expires_at = None;
             self.quit_shortcut_key = None;
             self.copy_last_agent_markdown();
+            return;
+        }
+
+        if key_event.kind == KeyEventKind::Press
+            && self.chat_keymap.toggle_voice.is_pressed(key_event)
+            && self.bottom_pane.no_modal_or_popup_active()
+        {
+            self.toggle_realtime_conversation();
+            return;
+        }
+
+        if self.handle_realtime_microphone_shortcut(key_event) {
             return;
         }
 
@@ -120,13 +179,16 @@ impl ChatWidget {
 
         if key_event.kind == KeyEventKind::Press
             && self.chat_keymap.edit_queued_message.is_pressed(key_event)
-            && self.has_queued_follow_up_messages()
+            && (self.has_queued_follow_up_messages() || self.pending_image_submission.is_some())
             && self.bottom_pane.no_modal_or_popup_active()
         {
             if let Some(composer) = self.pop_latest_queued_composer_state() {
                 self.restore_composer_state(composer);
+                self.refresh_startup_recovery();
                 self.refresh_pending_input_preview();
                 self.request_redraw();
+            } else {
+                self.cancel_image_submission();
             }
             return;
         }
@@ -184,6 +246,13 @@ impl ChatWidget {
                 let should_pause_active_goal =
                     self.bottom_pane.should_interrupt_running_task(key_event);
                 let input_result = self.bottom_pane.handle_key_event(key_event);
+                if matches!(
+                    input_result,
+                    InputResult::None | InputResult::ParentOwnedInputBlocked
+                ) {
+                    self.refresh_startup_recovery();
+                }
+                crate::startup_recovery::submitted(&input_result);
                 self.sync_backend_banner_view();
                 if should_pause_active_goal {
                     self.pause_active_goal_for_interrupt();
@@ -207,6 +276,7 @@ impl ChatWidget {
         }
         tracing::info!("attach_image path={path:?}");
         self.bottom_pane.attach_image(path);
+        self.refresh_startup_recovery();
         self.request_redraw();
     }
 
@@ -216,6 +286,7 @@ impl ChatWidget {
 
     pub(crate) fn apply_external_edit(&mut self, text: String) {
         self.bottom_pane.apply_external_edit(text);
+        self.refresh_startup_recovery();
         self.request_redraw();
     }
 
@@ -228,6 +299,11 @@ impl ChatWidget {
     }
 
     pub(crate) fn set_footer_hint_override(&mut self, items: Option<Vec<(String, String)>>) {
+        if items.is_some() {
+            // Active input instructions supersede transient feedback from a previous action.
+            self.bottom_pane
+                .show_footer_flash(Line::default(), Duration::ZERO);
+        }
         self.bottom_pane.set_footer_hint_override(items);
     }
 
@@ -266,6 +342,10 @@ impl ChatWidget {
             .replace_selection_view_if_present(view_id, params)
     }
 
+    pub(crate) fn shortcut_overlay_visible(&self) -> bool {
+        self.bottom_pane.shortcut_overlay_visible()
+    }
+
     pub(crate) fn no_modal_or_popup_active(&self) -> bool {
         self.bottom_pane.no_modal_or_popup_active()
     }
@@ -297,21 +377,24 @@ impl ChatWidget {
     /// Inner implementation with an injectable clipboard backend for testing.
     pub(super) fn copy_last_agent_markdown_with(
         &mut self,
-        copy_fn: impl FnOnce(&str) -> Result<Option<crate::clipboard_copy::ClipboardLease>, String>,
+        copy_fn: impl FnOnce(&str) -> Result<crate::clipboard_copy::CopyOutcome, String>,
     ) {
+        // The shortcut bypasses composer submission, which normally reveals local feedback.
+        self.app_event_tx.send(AppEvent::FollowTranscript);
         match self.transcript.last_agent_markdown.clone() {
-            Some(markdown) if !markdown.is_empty() => match copy_fn(&markdown) {
-                Ok(lease) => {
-                    self.clipboard_lease = lease;
-                    self.add_to_history(history_cell::new_info_event(
-                        "Copied last message to clipboard".into(),
-                        /*hint*/ None,
-                    ));
+            Some(markdown) if !markdown.is_empty() => {
+                match self.write_clipboard(&markdown, copy_fn) {
+                    Ok(status) => {
+                        self.add_to_history(history_cell::new_info_event(
+                            status.message("last message"),
+                            /*hint*/ None,
+                        ));
+                    }
+                    Err(error) => self.add_to_history(history_cell::new_error_event(format!(
+                        "Copy failed: {error}"
+                    ))),
                 }
-                Err(error) => self.add_to_history(history_cell::new_error_event(format!(
-                    "Copy failed: {error}"
-                ))),
-            },
+            }
             _ => self.add_to_history(history_cell::new_error_event(
                 "No agent response to copy".into(),
             )),
@@ -319,102 +402,30 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    pub(super) fn show_copy_picker(&mut self) {
-        let mut choices = Vec::new();
-        if let Some(status_targets) = &self.transcript.last_status_copy_targets {
-            choices.push((
-                "Whole status".to_string(),
-                Arc::<str>::from(status_targets.handle.copy_text()),
-                CopyFormat::PlainText,
-            ));
-            choices.extend(
-                status_targets
-                    .fields
-                    .iter()
-                    .cloned()
-                    .map(|(label, text)| (label, text, CopyFormat::PlainText)),
-            );
-        } else if let Some(markdown) = self
-            .transcript
-            .last_agent_markdown
-            .as_deref()
-            .filter(|markdown| !markdown.is_empty())
-        {
-            choices.push((
-                "Whole response".to_string(),
-                Arc::<str>::from(markdown),
-                CopyFormat::Markdown,
-            ));
-            let source = self
-                .transcript
-                .last_agent_source
-                .as_deref()
-                .unwrap_or(markdown);
-            choices.extend(
-                crate::markdown::extract_copy_targets(source)
-                    .into_iter()
-                    .filter_map(|target| match target {
-                        crate::markdown::CopyTarget::Code { language, content } => Some((
-                            language.map_or_else(
-                                || "Code block".to_string(),
-                                |language| format!("{language} code"),
-                            ),
-                            content,
-                            CopyFormat::PlainText,
-                        )),
-                        crate::markdown::CopyTarget::Quote(content) => {
-                            let content: String = content
-                                .split_inclusive('\n')
-                                .map(|line| {
-                                    crate::git_action_directives::strip_line_directives(line).0
-                                })
-                                .collect();
-                            (!content.trim().is_empty()).then(|| {
-                                (
-                                    "Blockquote".to_string(),
-                                    Arc::from(content),
-                                    CopyFormat::PlainText,
-                                )
-                            })
-                        }
-                    }),
-            );
-        }
-        if choices.is_empty() {
-            self.copy_last_agent_markdown();
-            return;
-        }
+    /// Report a transcript copy without adding history and return its outcome to the viewport.
+    pub(crate) fn copy_transcript_selection(
+        &mut self,
+        text: &str,
+    ) -> Result<crate::clipboard_copy::CopyStatus, String> {
+        self.copy_transcript_selection_with(text, |text| {
+            crate::clipboard_copy::copy_to_clipboard(text, CopyFormat::PlainText)
+        })
+    }
 
-        let items = choices
-            .into_iter()
-            .map(|(label, text, format)| {
-                let description = text
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .map(|line| line.trim().chars().take(72).collect());
-                SelectionItem {
-                    name: label.clone(),
-                    description,
-                    actions: vec![Box::new(move |tx| {
-                        tx.send(AppEvent::CopySelection {
-                            text: Arc::clone(&text),
-                            label: label.clone(),
-                            format,
-                        });
-                    })],
-                    dismiss_on_select: true,
-                    ..Default::default()
-                }
-            })
-            .collect();
-
-        self.show_selection_view(SelectionViewParams {
-            title: Some("Copy to clipboard".to_string()),
-            footer_hint: Some(standard_popup_hint_line()),
-            items,
-            ..Default::default()
-        });
-        self.defer_input_until_settings_applied();
+    /// The owned viewport renders its own copy feedback above the composer.
+    pub(super) fn copy_transcript_selection_with(
+        &mut self,
+        text: &str,
+        copy_fn: impl FnOnce(&str) -> Result<crate::clipboard_copy::CopyOutcome, String>,
+    ) -> Result<crate::clipboard_copy::CopyStatus, String> {
+        let result = self.write_clipboard(text, copy_fn);
+        let line = match &result {
+            Ok(status) => Line::from(status.message("selection").dim()),
+            Err(error) => Line::from(format!("Copy failed: {error}").red()),
+        };
+        self.bottom_pane
+            .show_footer_flash(line, Duration::from_secs(/*secs*/ 3));
+        result
     }
 
     pub(crate) fn copy_selection(&mut self, text: Arc<str>, label: String, format: CopyFormat) {
@@ -427,16 +438,21 @@ impl ChatWidget {
         &mut self,
         text: &str,
         label: &str,
-        copy_fn: impl FnOnce(&str) -> Result<Option<crate::clipboard_copy::ClipboardLease>, String>,
+        copy_fn: impl FnOnce(&str) -> Result<crate::clipboard_copy::CopyOutcome, String>,
     ) {
-        match copy_fn(text) {
-            Ok(lease) => {
-                self.clipboard_lease = lease;
-                self.add_info_message(format!("Copied {label} to clipboard"), /*hint*/ None);
-            }
+        match self.write_clipboard(text, copy_fn) {
+            Ok(status) => self.add_info_message(status.message(label), /*hint*/ None),
             Err(error) => self.add_error_message(format!("Copy failed: {error}")),
         }
         self.request_redraw();
+    }
+
+    fn write_clipboard(
+        &mut self,
+        text: &str,
+        copy_fn: impl FnOnce(&str) -> Result<crate::clipboard_copy::CopyOutcome, String>,
+    ) -> Result<crate::clipboard_copy::CopyStatus, String> {
+        Ok(copy_fn(text)?.store(&mut self.clipboard_lease))
     }
 
     #[cfg(test)]
@@ -512,15 +528,20 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_paste(&mut self, text: String) {
-        if self.external_writer_view {
+        if self.external_writer_view && !self.bottom_pane.has_active_view() {
             return;
         }
+        if !self.startup_submission_has_protected_input() {
+            self.cancel_startup_submission();
+        }
         self.bottom_pane.handle_paste(text);
+        self.refresh_startup_recovery();
     }
 
     // Returns true if caller should skip rendering this frame (a future frame is scheduled).
     pub(crate) fn handle_paste_burst_tick(&mut self, frame_requester: FrameRequester) -> bool {
         if self.bottom_pane.flush_paste_burst_if_due() {
+            self.refresh_startup_recovery();
             // A paste just flushed; request an immediate redraw and skip this frame.
             self.request_redraw();
             true
@@ -554,6 +575,7 @@ impl ChatWidget {
                 KeyModifiers::CONTROL,
             ));
         if self.bottom_pane.on_ctrl_c() == CancellationEvent::Handled {
+            self.refresh_startup_recovery();
             if DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED {
                 if modal_or_popup_active {
                     self.quit_shortcut_expires_at = None;
@@ -569,6 +591,15 @@ impl ChatWidget {
             if modal_or_popup_active && self.bottom_pane.no_modal_or_popup_active() {
                 self.on_modal_or_popup_closed();
             }
+            return;
+        }
+
+        if self
+            .bottom_pane
+            .selected_index_for_active_view(crate::app::AGENTS_OVERVIEW_VIEW_ID)
+            .is_some()
+        {
+            self.request_quit_without_confirmation();
             return;
         }
 

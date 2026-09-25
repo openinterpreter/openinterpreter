@@ -1,7 +1,7 @@
 //! Agent turn lifecycle and runtime bookkeeping for `ChatWidget`.
 //!
 //! This module owns task start/completion state, runtime metrics, plan updates,
-//! and final-message separator handling.
+//! and completion metadata rendering.
 
 use super::*;
 
@@ -74,6 +74,7 @@ impl ChatWidget {
     // Raw reasoning uses the same flow as summarized reasoning
 
     pub(super) fn on_task_started(&mut self) {
+        self.bottom_pane.dismiss_composer_sparkle();
         self.clear_context_compaction();
         self.input_queue.user_turn_pending_start = false;
         self.reset_safety_buffering_for_turn_start();
@@ -103,6 +104,8 @@ impl ChatWidget {
         self.reasoning_summary_parts.clear();
         self.reasoning_buffer.clear();
         self.reasoning_header = None;
+        self.status_state.reasoning_item_id = None;
+        self.status_state.reasoning_resume_turn_id = None;
         self.set_ambient_pet_notification(
             crate::pets::PetNotificationKind::Running,
             /*body*/ None,
@@ -113,9 +116,12 @@ impl ChatWidget {
     pub(super) fn on_task_complete(
         &mut self,
         last_agent_message: Option<String>,
-        duration_ms: Option<i64>,
+        completion: Option<history_cell::FinalMessageSeparator>,
         from_replay: bool,
     ) {
+        if self.status_state.reasoning_resume_turn_id.is_some() {
+            self.on_agent_reasoning_final();
+        }
         self.input_queue.submit_pending_steers_after_interrupt = false;
         let sanitized_last_agent_message = last_agent_message.as_deref().map(|message| {
             parse_assistant_markdown(message, self.config.cwd.as_path()).visible_markdown
@@ -136,49 +142,26 @@ impl ChatWidget {
             .unwrap_or_default();
         self.transcript.saw_copy_source_this_turn = false;
         // If a stream is currently active, finalize it.
-        self.flush_answer_stream_with_separator();
-        if let Some(mut controller) = self.plan_stream_controller.take() {
-            let had_live_tail = controller.has_live_tail();
-            self.clear_active_stream_tail();
-            let (cell, source) = controller.finalize();
-            if !had_live_tail && let Some(cell) = cell {
-                self.add_boxed_history(cell);
-            }
-            if let Some(source) = source {
-                self.note_stream_consolidation_queued();
-                self.app_event_tx
-                    .send(AppEvent::ConsolidateProposedPlan(source));
-            }
-            self.request_pending_usage_output_insertion_after_stream_shutdown();
-        }
+        self.flush_answer_and_plan_streams();
+        self.flush_interrupt_activity();
+        self.finish_dynamic_activity();
         self.flush_unified_exec_wait_streak();
+        self.flush_completed_tool_activity();
         if !from_replay {
             self.collect_runtime_metrics_delta();
-            let runtime_metrics =
-                (!self.turn_runtime_metrics.is_empty()).then_some(self.turn_runtime_metrics);
-            let show_work_separator = self.transcript.had_work_activity
-                && (self.transcript.needs_final_message_separator || runtime_metrics.is_some());
-            if show_work_separator || runtime_metrics.is_some() {
-                let elapsed_seconds = if show_work_separator {
-                    duration_ms
-                        .and_then(|duration_ms| u64::try_from(duration_ms).ok())
-                        .map(|duration_ms| duration_ms / 1_000)
-                        .or_else(|| {
-                            self.bottom_pane
-                                .status_elapsed()
-                                .map(|elapsed| elapsed.as_secs())
-                        })
-                } else {
-                    None
-                };
-                self.add_to_history(history_cell::FinalMessageSeparator::new(
-                    elapsed_seconds,
-                    runtime_metrics,
-                ));
-            }
-            self.turn_runtime_metrics = RuntimeMetricsSummary::default();
-            self.transcript.needs_final_message_separator = false;
-            self.transcript.had_work_activity = false;
+        }
+        let runtime_metrics = (!from_replay && !self.turn_runtime_metrics.is_empty())
+            .then_some(self.turn_runtime_metrics);
+        if let Some(completion) = completion {
+            self.add_to_history(completion.with_runtime_metrics(runtime_metrics));
+        } else if let Some(runtime_metrics) = runtime_metrics {
+            self.add_to_history(history_cell::FinalMessageSeparator::new(
+                /*elapsed_seconds*/ None,
+                Some(runtime_metrics),
+            ));
+        }
+        self.turn_runtime_metrics = RuntimeMetricsSummary::default();
+        if !from_replay {
             self.request_status_line_branch_refresh();
             self.request_status_line_git_summary_refresh();
             self.refresh_thread_usage_after_turn();
@@ -186,6 +169,9 @@ impl ChatWidget {
         // Mark task stopped and request redraw now that all content is in history.
         self.clear_context_compaction();
         self.status_state.pending_status_indicator_restore = false;
+        self.status_state.reasoning_item_id = None;
+        self.status_state.reasoning_resume_turn_id = None;
+        self.reasoning_header = None;
         self.input_queue.user_turn_pending_start = false;
         self.clear_active_hook_cell();
         self.clear_guardian_review_status();
@@ -213,23 +199,27 @@ impl ChatWidget {
         if !from_replay {
             self.transcript.saw_plan_item_this_turn = false;
         }
-        // If there is a queued user message, send exactly one now to begin the next turn.
-        let follow_up_started = self.maybe_send_next_queued_input();
-        let active_goal_continuing = self
-            .current_goal_status
-            .as_ref()
-            .is_some_and(GoalStatusState::is_active);
-        // Emit a notification when the agent is truly waiting for the user.
-        // Queued follow-up input and active goal continuation both start the
-        // next turn immediately, so notifying at that boundary would feel like
-        // a false "needs attention".
-        if !follow_up_started && !active_goal_continuing {
-            self.notify(Notification::AgentTurnComplete {
-                response: notification_response,
-            });
+        if !from_replay {
+            // Emit a notification only when the live agent is waiting for the user.
+            let follow_up_started = self.maybe_send_next_queued_input();
+            let active_goal_continuing = self
+                .current_goal_status
+                .as_ref()
+                .is_some_and(GoalStatusState::is_active);
+            if !follow_up_started
+                && !active_goal_continuing
+                && !self
+                    .turn_lifecycle
+                    .last_turn_id
+                    .as_deref()
+                    .is_some_and(|turn_id| self.should_hide_realtime_delegation(turn_id))
+            {
+                self.notify(Notification::AgentTurnComplete {
+                    response: notification_response,
+                });
+            }
+            self.maybe_show_pending_rate_limit_prompt();
         }
-
-        self.maybe_show_pending_rate_limit_prompt();
     }
 
     pub(super) fn maybe_prompt_plan_implementation(&mut self) {
@@ -322,6 +312,15 @@ impl ChatWidget {
     /// This does not clear MCP startup tracking, because MCP startup can overlap with turn cleanup
     /// and should continue to drive the bottom-pane running indicator while it is in progress.
     pub(super) fn finalize_turn(&mut self) {
+        self.flush_answer_and_plan_streams();
+        self.flush_interrupt_activity();
+        self.finish_dynamic_activity();
+        if self.status_state.reasoning_resume_turn_id.is_some() {
+            self.on_agent_reasoning_final();
+        }
+        self.status_state.reasoning_item_id = None;
+        self.status_state.reasoning_resume_turn_id = None;
+        self.reasoning_header = None;
         self.clear_context_compaction();
         self.clear_safety_buffering();
         // Drop preview-only stream tail content on any termination path before
@@ -367,14 +366,13 @@ impl ChatWidget {
             message
         };
 
-        self.add_to_history(history_cell::new_warning_event(message));
+        self.add_to_history(history_cell::new_error_event(message));
         self.request_redraw();
         self.maybe_send_next_queued_input();
     }
 
     fn on_error(&mut self, message: String) {
         self.input_queue.submit_pending_steers_after_interrupt = false;
-        self.flush_answer_stream_with_separator();
         self.finalize_turn();
         self.add_to_history(history_cell::new_error_event(message));
         self.set_ambient_pet_notification(

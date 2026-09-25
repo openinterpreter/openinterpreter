@@ -1,0 +1,10 @@
+---
+source: tui/src/chatwidget/tests/history_replay.rs
+expression: "normalize_completion_timestamps(& (render_bottom_popup(&chat, 80)))"
+---
+• Working (0s • esc to interrupt)
+
+
+› Ask Codex to do anything
+
+  GPT-5.6-Sol default · /tmp/project

@@ -177,7 +177,7 @@ impl<'a> SlashInput<'a> {
                 token_activity_command_enabled: self.command_flags.token_activity_command_enabled,
                 service_tier_commands_enabled: self.command_flags.service_tier_commands_enabled,
                 goal_command_enabled: self.command_flags.goal_command_enabled,
-                personality_command_enabled: self.command_flags.personality_command_enabled,
+                voice_command_enabled: self.command_flags.voice_command_enabled,
                 worktrees_enabled: self.command_flags.worktrees_enabled,
                 windows_degraded_sandbox_active: self.command_flags.allow_elevate_sandbox,
                 side_conversation_active: self.command_flags.side_conversation_active,
@@ -215,7 +215,7 @@ impl ChatComposer {
             token_activity_command_enabled: self.token_activity_command_enabled,
             service_tier_commands_enabled: self.service_tier_commands_enabled,
             goal_command_enabled: self.goal_command_enabled,
-            personality_command_enabled: self.personality_command_enabled,
+            voice_command_enabled: self.voice_command_enabled,
             worktrees_enabled: self.worktrees_enabled,
             allow_elevate_sandbox: self.windows_degraded_sandbox_active,
             side_conversation_active: self.side_conversation_active,
@@ -386,8 +386,11 @@ impl ChatComposer {
                     }
 
                     self.stage_selected_slash_command_history(&sel);
-                    self.draft.textarea.set_text_clearing_elements("");
-                    self.draft.is_bash_mode = false;
+                    if !matches!(sel, CommandItem::Builtin(cmd) if cmd.requires_dispatch_validation())
+                    {
+                        self.draft.textarea.set_text_clearing_elements("");
+                        self.draft.is_bash_mode = false;
+                    }
                     return (
                         match sel {
                             CommandItem::Builtin(cmd) => InputResult::Command(cmd),
@@ -682,6 +685,6 @@ mod tests {
             press(&mut composer, KeyCode::Enter),
             InputResult::Command(SlashCommand::Review)
         );
-        assert!(composer.draft.textarea.is_empty());
+        assert_eq!(composer.draft.textarea.text(), "/review ");
     }
 }

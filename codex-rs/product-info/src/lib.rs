@@ -7,7 +7,7 @@ pub const OPEN_INTERPRETER_NON_INTERACTIVE_ENV_VAR: &str = "OPEN_INTERPRETER_NON
 ///
 /// Open Interpreter has an independent product version, so backend compatibility
 /// checks must not interpret that product version as the embedded Codex version.
-pub const OPEN_INTERPRETER_CODEX_COMPATIBILITY_VERSION: &str = "0.154.0";
+pub const OPEN_INTERPRETER_CODEX_COMPATIBILITY_VERSION: &str = "0.156.1";
 
 const CODEX_RELEASE_NOTES_URL: &str = "https://github.com/openai/codex/releases/latest";
 const OPEN_INTERPRETER_RELEASE_NOTES_URL: &str =

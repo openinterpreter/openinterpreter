@@ -12,7 +12,6 @@ pub(super) struct Identity {
 
 impl OutgoingMessageSender {
     /// Trusted host activation enables a UI integration after its signing path is available.
-    #[allow(dead_code)] // Called by the subsequent host activation change.
     pub(crate) async fn enable_user_verification_connection(&self, connection_id: ConnectionId) {
         self.verification_connections
             .lock()

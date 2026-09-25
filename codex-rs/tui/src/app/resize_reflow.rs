@@ -13,6 +13,9 @@
 //! The row cap is enforced while rendering from `HistoryCell` source, not after writing to the
 //! terminal. Initial resume replay uses the same display-line buffering contract so large sessions
 //! do not write more retained rows than resize replay would later be willing to rebuild.
+//!
+//! Owned-screen sessions lay out their retained transcript during drawing. Their entry points drop
+//! queued scrollback work and request a frame instead of clearing or replaying terminal history.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -107,6 +110,10 @@ impl App {
         cell: &dyn HistoryCell,
         width: u16,
     ) {
+        if tui.is_owned_screen() {
+            tui.frame_requester().schedule_frame();
+            return;
+        }
         let display = self.display_lines_for_history_insert(cell, width);
         if display.is_empty() {
             return;
@@ -157,6 +164,11 @@ impl App {
         let Some(buffer) = self.initial_history_replay_buffer.take() else {
             return;
         };
+        if tui.is_owned_screen() {
+            self.discard_scrollback_render_work(tui);
+            tui.frame_requester().schedule_frame();
+            return;
+        }
 
         if buffer.render_from_transcript_tail || self.overlay.is_some() {
             // Reflow clears any pre-replay or partially emitted history and applies the reserved
@@ -194,6 +206,10 @@ impl App {
         cell: &dyn HistoryCell,
         width: u16,
     ) {
+        if tui.is_owned_screen() {
+            tui.frame_requester().schedule_frame();
+            return;
+        }
         if self
             .initial_history_replay_buffer
             .as_ref()
@@ -274,6 +290,9 @@ impl App {
     }
 
     fn clear_terminal_for_resize_replay(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        if tui.is_owned_screen() {
+            return Ok(());
+        }
         if tui.is_alt_screen_active() {
             tui.terminal.clear_visible_screen()?;
         } else {
@@ -295,6 +314,11 @@ impl App {
     /// source-backed reflow so terminal scrollback reflects the finalized cell instead of the
     /// transient stream rows.
     pub(super) fn maybe_finish_stream_reflow(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        if tui.is_owned_screen() {
+            self.discard_scrollback_render_work(tui);
+            tui.frame_requester().schedule_frame();
+            return Ok(());
+        }
         if self.transcript_reflow.take_stream_finish_reflow_needed() {
             self.schedule_immediate_resize_reflow(tui);
             let screen_size = tui.terminal.last_known_screen_size;
@@ -306,7 +330,11 @@ impl App {
     }
 
     pub(super) fn schedule_immediate_resize_reflow(&mut self, tui: &mut tui::Tui) {
-        self.transcript_reflow.schedule_immediate();
+        if tui.is_owned_screen() {
+            self.discard_scrollback_render_work(tui);
+        } else {
+            self.transcript_reflow.schedule_immediate();
+        }
         tui.frame_requester().schedule_frame();
     }
 
@@ -316,6 +344,11 @@ impl App {
     /// replaced as one styled source-backed cell. If this reflow is skipped after a stream-time
     /// resize, the visible scrollback can keep the pre-consolidation wrapping.
     pub(super) fn finish_required_stream_reflow(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        if tui.is_owned_screen() {
+            self.discard_scrollback_render_work(tui);
+            tui.frame_requester().schedule_frame();
+            return Ok(());
+        }
         // Capped initial replay normally buffers per-cell display rows. A live stream tail is
         // consolidated directly into `transcript_cells`, so any retained rows no longer describe
         // the canonical transcript. Let the replay-end event render the capped transcript tail
@@ -397,6 +430,18 @@ impl App {
         tui: &mut tui::Tui,
         size: ratatui::layout::Size,
     ) -> Result<()> {
+        self.flush_native_history(tui);
+        if tui.is_owned_screen() {
+            let width = self.transcript_reflow.note_width(size.width);
+            if width.changed || width.initialized {
+                self.chat_widget.on_terminal_resize(size.width);
+            }
+            if size != tui.terminal.last_known_screen_size {
+                self.refresh_status_line();
+            }
+            self.discard_scrollback_render_work(tui);
+            return Ok(());
+        }
         let should_rebuild_transcript = self.handle_draw_size_change(
             size,
             tui.terminal.last_known_screen_size,
@@ -423,6 +468,10 @@ impl App {
         tui: &mut tui::Tui,
         screen_size: ratatui::layout::Size,
     ) -> Result<()> {
+        if tui.is_owned_screen() {
+            self.discard_scrollback_render_work(tui);
+            return Ok(());
+        }
         let Some(deadline) = self.transcript_reflow.pending_until() else {
             return Ok(());
         };
@@ -466,6 +515,11 @@ impl App {
         tui: &mut tui::Tui,
         terminal_width: TerminalWidth,
     ) -> Result<TerminalWidth> {
+        if tui.is_owned_screen() {
+            self.discard_scrollback_render_work(tui);
+            tui.frame_requester().schedule_frame();
+            return Ok(terminal_width);
+        }
         let width = self.chat_widget.history_wrap_width(terminal_width.0);
         if self.transcript_cells.is_empty() {
             // Drop any queued pre-resize/pre-consolidation inserts before rebuilding from cells.
@@ -474,6 +528,7 @@ impl App {
             return Ok(terminal_width);
         }
 
+        self.native_history.replayed();
         let reflow_result = self.render_transcript_lines_for_reflow(width);
         let reflowed_lines = reflow_result.lines;
         let reflowed_rows = reflowed_lines.len();
@@ -489,16 +544,21 @@ impl App {
                 self.history_line_wrap_policy(),
             );
         }
-        self.last_rendered_history_tail =
-            self.transcript_cells
-                .last()
-                .map(|cell| super::history_ui::RenderedHistoryTail {
+        self.last_rendered_history_tail = self
+            .native_history
+            .replayable_cells(&self.transcript_cells)
+            .iter()
+            .rev()
+            .find_map(|cell| {
+                let lines = cell.display_hyperlink_lines_for_mode(
+                    width,
+                    self.chat_widget.history_render_mode(),
+                );
+                (!lines.is_empty()).then(|| super::history_ui::RenderedHistoryTail {
                     cell: Arc::downgrade(cell),
-                    lines: cell.display_hyperlink_lines_for_mode(
-                        width,
-                        self.chat_widget.history_render_mode(),
-                    ),
-                });
+                    lines,
+                })
+            });
         if let Some(status_history) = self.last_thread_usage_status_cell.as_mut()
             && let Some(cell) = status_history.cell.upgrade()
         {
@@ -547,6 +607,12 @@ impl App {
         tui: &mut tui::Tui,
         terminal_width: TerminalWidth,
     ) -> Result<()> {
+        if tui.is_owned_screen() {
+            self.discard_scrollback_render_work(tui);
+            tui.frame_requester().schedule_frame();
+            return Ok(());
+        }
+        self.native_history.replayed();
         let width = self.chat_widget.history_wrap_width(terminal_width.0);
         let reflowed_lines = if self.transcript_cells.is_empty() {
             self.reset_history_emission_state();
@@ -569,6 +635,14 @@ impl App {
         Ok(())
     }
 
+    /// Discard terminal render products while preserving the canonical cells and view position.
+    fn discard_scrollback_render_work(&mut self, tui: &mut tui::Tui) {
+        self.transcript_reflow.clear_pending_reflow();
+        self.transcript_reflow.clear_stream_flags();
+        self.reset_history_emission_state();
+        tui.clear_pending_history_lines();
+    }
+
     /// Render transcript cells for the current resize rebuild.
     ///
     /// Rendering walks backward from the transcript tail so row-capped sessions avoid formatting the
@@ -580,7 +654,10 @@ impl App {
         let row_cap = self.resize_reflow_max_rows();
         let mut cell_displays = VecDeque::new();
         let mut rendered_rows = 0usize;
-        let mut start = self.transcript_cells.len();
+        let mut start = self
+            .native_history
+            .replayable_cells(&self.transcript_cells)
+            .len();
         let mut history_was_truncated = false;
 
         while start > 0 {

@@ -72,14 +72,25 @@ jobs:
     with:
       runtime_version: ${{ needs.resolve-python-release.outputs.runtime_version }}
 
-  # Always publish the exact pinned runtime from this top-level workflow before
-  # building the SDK package. PyPI does not support reusable workflows as
-  # Trusted Publishers.
+  build-python-sdk:
+    name: build-python-sdk
+    needs: resolve-python-release
+    permissions:
+      contents: read
+    uses: ./.github/workflows/python-sdk-build.yml
+    with:
+      sdk_version: ${{ needs.resolve-python-release.outputs.sdk_version }}
+      runtime_version: ${{ needs.resolve-python-release.outputs.runtime_version }}
+
+  # Publish from the top-level workflow: PyPI does not support reusable
+  # workflows as Trusted Publishers. The runtime must be available before
+  # publishing the SDK that depends on it.
   publish-python-runtime:
     if: github.repository == 'openai/codex'
     name: publish-python-runtime
     needs:
       - prepare-python-runtime
+      - build-python-sdk
       - resolve-python-release
     runs-on: ubuntu-latest
     environment: pypi
@@ -88,6 +99,11 @@ jobs:
       id-token: write # Required for PyPI trusted publishing.
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
       - name: Download Python runtime wheels
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -100,121 +116,24 @@ jobs:
           packages-dir: dist/python-runtime
           skip-existing: true
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.3"
+
       - name: Verify Python runtime wheels are available on PyPI
         env:
           PYTHON_RUNTIME_VERSION: ${{ needs.resolve-python-release.outputs.runtime_version }}
         run: |
-          set -euo pipefail
-          for attempt in {1..30}; do
-            if python3 - <<'PY'
-          import json
-          import os
-          import urllib.error
-          import urllib.request
-
-          version = os.environ["PYTHON_RUNTIME_VERSION"]
-          tags = {
-              "macosx_10_9_x86_64",
-              "macosx_11_0_arm64",
-              "manylinux_2_17_aarch64",
-              "manylinux_2_17_x86_64",
-              "musllinux_1_1_aarch64",
-              "musllinux_1_1_x86_64",
-              "win_amd64",
-              "win_arm64",
-          }
-          expected = {
-              f"openai_codex_cli_bin-{version}-py3-none-{tag}.whl"
-              for tag in tags
-          }
-
-          try:
-              with urllib.request.urlopen(
-                  f"https://pypi.org/pypi/openai-codex-cli-bin/{version}/json",
-                  timeout=30,
-              ) as response:
-                  payload = json.load(response)
-          except urllib.error.URLError as error:
-              print(f"Could not read runtime {version} from PyPI: {error}.")
-              raise SystemExit(1) from error
-
-          actual = {file["filename"] for file in payload["urls"]}
-          if actual != expected:
-              print(f"Missing runtime wheels: {sorted(expected - actual)}")
-              print(f"Unexpected runtime files: {sorted(actual - expected)}")
-              raise SystemExit(1)
-          PY
-            then
-              exit 0
-            fi
-            echo "Runtime wheels are not available on PyPI yet; retrying (${attempt}/30)."
-            sleep 10
-          done
-
-          echo "Runtime wheels did not become available on PyPI."
-          exit 1
-
-  build-python-sdk:
-    if: github.repository == 'openai/codex'
-    name: build-python-sdk
-    needs:
-      - publish-python-runtime
-      - resolve-python-release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Build Python SDK package
-        shell: bash
-        env:
-          SDK_VERSION: ${{ needs.resolve-python-release.outputs.sdk_version }}
-        run: |
-          set -euo pipefail
-
-          # Build in a glibc Linux image so release type generation installs
-          # the pinned manylinux runtime wheel.
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp/codex-python-sdk-home \
-            -e UV_LINK_MODE=copy \
-            -e SDK_VERSION \
-            -e SDK_STAGE_DIR="${RUNNER_TEMP}/openai-codex" \
-            -e SDK_DIST_DIR="${GITHUB_WORKSPACE}/dist/python-sdk" \
-            -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" \
-            -v "${RUNNER_TEMP}:${RUNNER_TEMP}" \
-            -w "${GITHUB_WORKSPACE}/sdk/python" \
-            python:3.12-slim \
-            sh -euxc '
-              python -m venv /tmp/release-tools
-              /tmp/release-tools/bin/python -m pip install build twine uv==0.11.3
-              /tmp/release-tools/bin/uv sync --group dev --frozen
-              /tmp/release-tools/bin/uv run --frozen --no-sync python scripts/update_sdk_artifacts.py \
-                stage-sdk "${SDK_STAGE_DIR}" \
-                --sdk-version "${SDK_VERSION}"
-              /tmp/release-tools/bin/python -m build \
-                --wheel \
-                --sdist \
-                --outdir "${SDK_DIST_DIR}" \
-                "${SDK_STAGE_DIR}"
-              /tmp/release-tools/bin/python -m twine check --strict "${SDK_DIST_DIR}/"*
-            '
-
-      - name: Upload Python SDK package
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: python-sdk-package
-          path: dist/python-sdk/*
-          if-no-files-found: error
+          uv run --no-project --with packaging==26.2 python .github/scripts/verify_pypi_release.py \
+            openai-codex-cli-bin "$PYTHON_RUNTIME_VERSION"
 
   publish-python-sdk:
     name: publish-python-sdk
-    needs: build-python-sdk
+    needs:
+      - build-python-sdk
+      - publish-python-runtime
+      - resolve-python-release
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -222,6 +141,11 @@ jobs:
       id-token: write # Required for PyPI trusted publishing.
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
       - name: Download Python SDK package
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -232,3 +156,14 @@ jobs:
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist/python-sdk
+          skip-existing: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.3"
+
+      - name: Verify Python SDK is available on PyPI
+        env:
+          SDK_VERSION: ${{ needs.resolve-python-release.outputs.sdk_version }}
+        run: uv run --no-project --with packaging==26.2 python .github/scripts/verify_pypi_release.py openai-codex "$SDK_VERSION"

@@ -6,6 +6,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageDetail;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::LocalShellAction;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
@@ -314,8 +315,8 @@ fn convert_message_content(content: &[ContentItem]) -> Option<Value> {
             ContentItem::InputText { text } | ContentItem::OutputText { text } => {
                 json!({ "type": "text", "text": text })
             }
-            ContentItem::InputImage { image_url, detail } => {
-                chat_image_content_part(image_url, *detail)
+            ContentItem::InputImage { image, detail } => {
+                chat_image_content_part(image, *detail)
             }
             ContentItem::InputAudio { .. } => {
                 json!({ "type": "text", "text": "[audio content omitted]" })
@@ -347,8 +348,8 @@ fn minimal_tool_output_content(output: &FunctionCallOutputPayload) -> Value {
                 FunctionCallOutputContentItem::InputText { text } => {
                     json!({ "type": "text", "text": text })
                 }
-                FunctionCallOutputContentItem::InputImage { image_url, detail } => {
-                    chat_image_content_part(image_url, *detail)
+                FunctionCallOutputContentItem::InputImage { image, detail } => {
+                    chat_image_content_part(image, *detail)
                 }
                 FunctionCallOutputContentItem::InputAudio { .. } => json!({
                     "type": "text",
@@ -380,15 +381,23 @@ fn minimal_tool_output_content(output: &FunctionCallOutputPayload) -> Value {
     json!(output.to_string())
 }
 
-fn chat_image_content_part(image_url: &str, detail: Option<ImageDetail>) -> Value {
-    let mut image_url_value = json!({ "url": image_url });
-    if let Some(detail) = detail {
-        image_url_value["detail"] = json!(detail);
+fn chat_image_content_part(image: &ImageReference, detail: Option<ImageDetail>) -> Value {
+    match image {
+        ImageReference::Inline { image_url } => {
+            let mut image_url_value = json!({ "url": image_url });
+            if let Some(detail) = detail {
+                image_url_value["detail"] = json!(detail);
+            }
+            json!({
+                "type": "image_url",
+                "image_url": image_url_value,
+            })
+        }
+        ImageReference::File { file_id } => json!({
+            "type": "file",
+            "file": { "file_id": file_id },
+        }),
     }
-    json!({
-        "type": "image_url",
-        "image_url": image_url_value,
-    })
 }
 
 #[cfg(test)]
@@ -650,7 +659,9 @@ mod tests {
                         text: "describe this".to_string(),
                     },
                     ContentItem::InputImage {
-                        image_url: "data:image/png;base64,AAA".to_string(),
+                        image: ImageReference::Inline {
+                            image_url: "data:image/png;base64,AAA".to_string(),
+                        },
                         detail: Some(ImageDetail::High),
                     },
                 ],
@@ -690,7 +701,9 @@ mod tests {
         let output = FunctionCallOutputPayload {
             body: FunctionCallOutputBody::ContentItems(vec![
                 FunctionCallOutputContentItem::InputImage {
-                    image_url: "data:image/png;base64,BBB".to_string(),
+                    image: ImageReference::Inline {
+                        image_url: "data:image/png;base64,BBB".to_string(),
+                    },
                     detail: Some(ImageDetail::High),
                 },
             ]),
@@ -705,6 +718,29 @@ mod tests {
                     "url": "data:image/png;base64,BBB",
                     "detail": "high"
                 }
+            }])
+        );
+    }
+
+    #[test]
+    fn view_image_tool_output_preserves_file_id() {
+        let output = FunctionCallOutputPayload {
+            body: FunctionCallOutputBody::ContentItems(vec![
+                FunctionCallOutputContentItem::InputImage {
+                    image: ImageReference::File {
+                        file_id: "file_123".to_string(),
+                    },
+                    detail: None,
+                },
+            ]),
+            success: Some(true),
+        };
+
+        assert_eq!(
+            minimal_tool_output_content(&output),
+            json!([{
+                "type": "file",
+                "file": { "file_id": "file_123" },
             }])
         );
     }

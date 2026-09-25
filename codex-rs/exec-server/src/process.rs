@@ -35,6 +35,7 @@ pub(crate) fn sandbox_type_from_protocol(
         Some(ProcessSandboxType::WindowsRestrictedToken) => {
             Some(SandboxType::WindowsRestrictedToken)
         }
+        Some(ProcessSandboxType::WindowsMxc) => Some(SandboxType::WindowsMxc),
     }
 }
 

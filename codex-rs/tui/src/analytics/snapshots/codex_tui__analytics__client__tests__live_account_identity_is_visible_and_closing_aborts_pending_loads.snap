@@ -1,0 +1,28 @@
+---
+source: tui/src/analytics/client_tests.rs
+expression: terminal.backend().to_string()
+---
+" Usage · analytics@example.test                                                                     "
+"                                                                                                    "
+" ────────────────────────────────────────────────────────────────────────────────────────────────── "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+" No history has been reported.                                                                      "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+" esc back                                                                                           "
+" R retry                                                                                            "

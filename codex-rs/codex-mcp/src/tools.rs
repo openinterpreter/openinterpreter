@@ -21,7 +21,7 @@ use crate::mcp::sanitize_responses_api_tool_name;
 
 const LEGACY_MCP_TOOL_NAME_PREFIX: &str = "mcp__";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolInfo {
     /// Raw MCP server name used for routing the tool call.
     pub server_name: String,

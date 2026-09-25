@@ -20,19 +20,19 @@ use crate::responses_metadata::MAX_EXTRA_METADATA_VALUE_BYTES;
 use crate::responses_metadata::PARENT_TURN_ID_KEY;
 use crate::responses_metadata::ROOT_TURN_ID_KEY;
 use crate::responses_metadata::TurnMetadataWorkspace;
-use crate::responses_metadata::TurnToolNamespacesInfo;
 use crate::responses_metadata::filter_extra_metadata;
 use crate::responses_metadata::subagent_header_value;
 use crate::responses_metadata::subagent_metadata_kind;
 use crate::sandbox_tags::SandboxTags;
 use crate::sandbox_tags::record_policy_metadata;
+use crate::session::step_settings::ResolvedStepSettings;
+use codex_file_system::WindowsSandboxSelection;
 use codex_git_utils::SanitizedGitUrl;
 use codex_git_utils::get_git_remote_urls_assume_git_repo;
 use codex_git_utils::get_has_changes_in_repo;
 use codex_git_utils::get_head_commit_hash;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
-use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
@@ -50,10 +50,48 @@ const REASONING_EFFORT_KEY: &str = "reasoning_effort";
 const USER_INPUT_REQUESTED_DURING_TURN_KEY: &str = "user_input_requested_during_turn";
 const WORKSPACE_KIND_KEY: &str = "workspace_kind";
 
-pub(crate) struct McpTurnMetadataContext<'a> {
+/// Captured execution settings shared by Responses and MCP metadata.
+pub(crate) struct ExecutionMetadata<'a> {
     pub(crate) model: &'a str,
     pub(crate) reasoning_effort: Option<ReasoningEffortConfig>,
     pub(crate) node_repl_disabled: bool,
+    pub(crate) auto_review_enabled: bool,
+    pub(crate) node_repl_auto_review_required: bool,
+}
+
+impl<'a> ExecutionMetadata<'a> {
+    pub(crate) fn from_settings(settings: &'a ResolvedStepSettings) -> Self {
+        Self {
+            model: settings.model_info.slug.as_str(),
+            reasoning_effort: settings.effective_reasoning_effort(),
+            node_repl_disabled: settings.model_info.node_repl_disabled,
+            auto_review_enabled: crate::guardian::routes_approval_policy_to_guardian(
+                settings.approval_policy(),
+                settings.approvals_reviewer(),
+            ),
+            node_repl_auto_review_required: settings.model_info.computer_use_review_required(),
+        }
+    }
+
+    pub(crate) fn apply_to(&self, metadata: &mut CodexResponsesMetadata) {
+        metadata.auto_review_enabled = Some(self.auto_review_enabled);
+        metadata.node_repl_auto_review_required = Some(self.node_repl_auto_review_required);
+        metadata.node_repl_disabled = Some(self.node_repl_disabled);
+        metadata
+            .extra
+            .insert(MODEL_KEY.to_string(), self.model.to_string());
+        match &self.reasoning_effort {
+            Some(reasoning_effort) => {
+                metadata.extra.insert(
+                    REASONING_EFFORT_KEY.to_string(),
+                    reasoning_effort.to_string(),
+                );
+            }
+            None => {
+                metadata.extra.remove(REASONING_EFFORT_KEY);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -99,6 +137,7 @@ pub async fn detached_memory_responses_metadata(
         root_turn_id: Some(turn_id),
         request_kind: Some(CodexResponsesRequestKind::Memory),
         thread_source: Some(ThreadSource::MemoryConsolidation),
+        turn_trigger: Some("memory_consolidation".to_owned()),
         subagent_header: subagent_header_value(session_source),
         sandbox: sandbox.map(ToString::to_string),
         workspaces: memory_workspaces(
@@ -135,7 +174,6 @@ pub(crate) struct TurnMetadataState {
     node_repl_auto_review_required: bool,
     node_repl_disabled: bool,
     enriched_workspaces: RwLock<Option<BTreeMap<String, TurnMetadataWorkspace>>>,
-    tool_namespaces_info: RwLock<Option<TurnToolNamespacesInfo>>,
     turn_started_at_unix_ms: RwLock<Option<i64>>,
     responses_api_metadata: RwLock<BTreeMap<String, String>>,
     responsesapi_client_metadata: RwLock<BTreeMap<String, String>>,
@@ -186,7 +224,7 @@ impl TurnMetadataState {
         turn_id: String,
         cwd: AbsolutePathBuf,
         permission_profile: &PermissionProfile,
-        windows_sandbox_level: WindowsSandboxLevel,
+        windows_sandbox_selection: impl Into<WindowsSandboxSelection>,
         enforce_managed_network: bool,
         auto_review_enabled: bool,
         model_info: &ModelInfo,
@@ -194,7 +232,7 @@ impl TurnMetadataState {
         let sandbox_tags = SandboxTags::new(
             permission_profile,
             cwd.as_path(),
-            windows_sandbox_level,
+            windows_sandbox_selection.into(),
             enforce_managed_network,
         );
         let agent_name = session_source
@@ -221,7 +259,6 @@ impl TurnMetadataState {
             node_repl_auto_review_required: model_info.computer_use_review_required(),
             node_repl_disabled: model_info.node_repl_disabled,
             enriched_workspaces: RwLock::new(None),
-            tool_namespaces_info: RwLock::new(None),
             turn_started_at_unix_ms: RwLock::new(None),
             responses_api_metadata: RwLock::new(BTreeMap::new()),
             responsesapi_client_metadata: RwLock::new(BTreeMap::new()),
@@ -233,11 +270,10 @@ impl TurnMetadataState {
 
     pub(crate) fn current_meta_value_for_mcp_request(
         &self,
-        context: McpTurnMetadataContext<'_>,
+        execution: ExecutionMetadata<'_>,
     ) -> Option<serde_json::Value> {
         let mut responses_metadata = self.mcp_metadata_template();
-        // Use the issuing step's Node REPL restriction.
-        responses_metadata.node_repl_disabled = Some(context.node_repl_disabled);
+        execution.apply_to(&mut responses_metadata);
         // Never serialize harness-owned tool inventory for external MCP servers.
         responses_metadata.tool_namespaces_info = None;
         let Value::Object(mut metadata) = responses_metadata.turn_metadata_value()? else {
@@ -247,24 +283,9 @@ impl TurnMetadataState {
         metadata.remove(PARENT_TURN_ID_KEY);
         metadata.remove(ROOT_TURN_ID_KEY);
         metadata.insert(
-            MODEL_KEY.to_string(),
-            Value::String(context.model.to_string()),
-        );
-        metadata.insert(
             CODEX_VERSION_KEY.to_string(),
             Value::String(env!("CARGO_PKG_VERSION").to_string()),
         );
-        match context.reasoning_effort {
-            Some(reasoning_effort) => {
-                metadata.insert(
-                    REASONING_EFFORT_KEY.to_string(),
-                    Value::String(reasoning_effort.to_string()),
-                );
-            }
-            None => {
-                metadata.remove(REASONING_EFFORT_KEY);
-            }
-        }
         if self
             .user_input_requested_during_turn
             .load(Ordering::Relaxed)
@@ -298,14 +319,6 @@ impl TurnMetadataState {
             .store(true, Ordering::Relaxed);
     }
 
-    pub(crate) fn set_tool_namespaces_info(&self, tool_namespaces_info: TurnToolNamespacesInfo) {
-        *self
-            .tool_namespaces_info
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            (!tool_namespaces_info.is_empty()).then_some(tool_namespaces_info);
-    }
-
     pub(crate) fn set_parent_turn_id(&self, parent_turn_id: String) {
         if parent_turn_id.trim().is_empty() {
             return;
@@ -337,6 +350,10 @@ impl TurnMetadataState {
             return;
         }
         let _ = self.turn_trigger.set(turn_trigger);
+    }
+
+    pub(crate) fn current_turn_trigger(&self) -> Option<String> {
+        self.turn_trigger.get().cloned()
     }
 
     pub(crate) fn root_turn_id(&self) -> Option<String> {
@@ -425,11 +442,7 @@ impl TurnMetadataState {
             node_repl_auto_review_required: Some(self.node_repl_auto_review_required),
             node_repl_disabled: Some(self.node_repl_disabled),
             workspaces: self.current_workspaces(),
-            tool_namespaces_info: self
-                .tool_namespaces_info
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone(),
+            tool_namespaces_info: None,
             turn_started_at_unix_ms: self.current_turn_started_at_unix_ms(),
             extra,
             ..CodexResponsesMetadata::new(

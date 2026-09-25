@@ -1150,8 +1150,9 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 ClientRequest::TurnStart {
                     request_id: request_ids.next(),
                     params: TurnStartParams {
+                        disabled_plugin_ids: None,
                         thread_id: primary_thread_id_for_span.clone(),
-                        turn_trigger: None,
+                        turn_trigger: Some("exec".to_string()),
                         client_user_message_id: None,
                         input: items.into_iter().map(Into::into).collect(),
                         tool_output: None,

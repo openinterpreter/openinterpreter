@@ -172,3 +172,9 @@ jobs:
           files: dist/**
           # Keep zsh artifact releases out of Codex's normal "latest release" channel.
           prerelease: true
+
+      - name: Publish DotSlash manifest
+        uses: ./.github/actions/publish-dotslash
+        with:
+          tag: ${{ needs.metadata.outputs.release_tag }}
+          configs: .github/dotslash-zsh-config.json

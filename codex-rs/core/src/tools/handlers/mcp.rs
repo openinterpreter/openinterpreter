@@ -157,9 +157,9 @@ impl ToolExecutor<ToolInvocation> for McpHandler {
                 .map(str::to_string),
         });
 
-        ToolSearchInfo::from_spec(
+        ToolSearchInfo::from_shared_spec(
             build_mcp_search_text(&self.tool_info),
-            self.spec(),
+            Arc::clone(&self.spec),
             source_info,
         )
     }
@@ -184,6 +184,15 @@ impl McpHandler {
                 self.tool_info.tool.name.as_ref(),
             )
             .await;
+        // Use the executed call's binding; a later catalog refresh must not change eligibility.
+        let result_metadata_capture_allowed = invocation
+            .session
+            .services
+            .analytics_events_client
+            .is_enabled()
+            && prepared_mcp_call
+                .as_ref()
+                .is_some_and(codex_mcp::PreparedMcpCall::is_host_owned_apps);
         let mcp_tool = prepared_mcp_call.as_ref().map(|call| {
             McpToolContext::from_prepared_call(
                 call,
@@ -197,7 +206,7 @@ impl McpHandler {
         });
         notify_tool_start(&invocation, mcp_tool.as_ref()).await;
 
-        let originating_item_id = invocation.originating_item_id().await;
+        let originating_call = invocation.originating_call().await;
         let ToolInvocation {
             session,
             step_context,
@@ -207,7 +216,6 @@ impl McpHandler {
             payload,
             ..
         } = invocation;
-        let turn = Arc::clone(&step_context.turn);
 
         let payload = match payload {
             ToolPayload::Function { arguments } => arguments,
@@ -223,14 +231,14 @@ impl McpHandler {
             .as_ref()
             .and_then(codex_mcp::PreparedMcpCall::output_token_limit)
             .map(TruncationPolicy::Tokens)
-            .unwrap_or(turn.model_info().truncation_policy.into());
+            .unwrap_or(step_context.settings.model_info.truncation_policy.into());
         let started = Instant::now();
         let result = handle_mcp_tool_call(
             Arc::clone(&session),
             &step_context,
             &cancellation_token,
             call_id.clone(),
-            originating_item_id,
+            originating_call,
             &self.tool_info,
             prepared_mcp_call,
             self.hook_tool_name(),
@@ -242,8 +250,11 @@ impl McpHandler {
         Ok(boxed_tool_output(McpToolOutput {
             result: result.result,
             tool_input: result.tool_input,
+            result_metadata_capture_allowed,
             wall_time: started.elapsed(),
-            original_image_detail_supported: can_request_original_image_detail(turn.model_info()),
+            original_image_detail_supported: can_request_original_image_detail(
+                &step_context.settings.model_info,
+            ),
             truncation_policy,
         }))
     }
@@ -284,12 +295,11 @@ impl CoreToolRuntime for McpHandler {
     }
 
     fn on_tool_result_accepted(&self, invocation: &ToolInvocation, result: &dyn ToolOutput) {
-        // Direct calls also record sources, before the Code Mode-only evidence path below.
-        if let Some(recorder) = invocation.session.services.executed_tool_calls.as_ref()
-            && let Some(sources) = result.tool_result_sources()
-        {
-            recorder.record_tool_result_sources(&invocation.source, &invocation.call_id, sources);
-        }
+        invocation
+            .session
+            .services
+            .executed_tool_calls
+            .record_accepted_result(&invocation.source, &invocation.call_id, result);
         let ToolCallSource::CodeMode { cell_id, .. } = &invocation.source else {
             return;
         };
@@ -363,7 +373,10 @@ impl CoreToolRuntime for McpHandler {
                         load_data_url_for_prompt_uncached(&image_url, PromptImageMode::Original)
                             .ok()?;
                         captured_image_bytes = next_image_bytes;
-                        Some(UserInput::Image { image_url, detail })
+                        Some(UserInput::Image {
+                            image: codex_protocol::models::ImageReference::Inline { image_url },
+                            detail,
+                        })
                     }
                     _ => None,
                 }
@@ -566,6 +579,7 @@ mod tests {
     use crate::tools::registry::PostToolUsePayload;
     use crate::tools::registry::PreToolUsePayload;
     use crate::turn_diff_tracker::TurnDiffTracker;
+    use codex_features::Feature;
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use std::time::Duration;
@@ -692,11 +706,23 @@ mod tests {
                     "file_id": "file_123"
                 }
             }),
+            result_metadata_capture_allowed: false,
             wall_time: Duration::from_millis(42),
             original_image_detail_supported: true,
             truncation_policy: codex_utils_output_truncation::TruncationPolicy::Bytes(1024),
         };
         let (session, turn) = make_session_and_context().await;
+        let mut session = session;
+        let mut turn = turn;
+        Arc::make_mut(&mut turn.config)
+            .features
+            .enable(Feature::ExecutedToolCallMetadata)
+            .expect("test feature must be configurable");
+        let recorder = crate::tools::executed_tool_calls::ExecutedToolCalls::new(
+            &turn.config.features,
+            &codex_history::InitialHistory::New,
+        );
+        session.services.executed_tool_calls = recorder.clone();
         let turn = Arc::new(turn);
         let handler = McpHandler::new(tool_info("filesystem", "filesystem", "read_file"))
             .expect("MCP tool spec should build");
@@ -729,6 +755,42 @@ mod tests {
                     "structuredContent": { "bytes": 5 }
                 }),
             })
+        );
+
+        // Nested MCP result metadata still reaches the owning Code Mode cell.
+        let cell_id = codex_code_mode::CellId::new("mcp-cell".to_string());
+        recorder.start_cell(&cell_id, "exec-mcp-post");
+        let mut invocation = invocation;
+        invocation.source = ToolCallSource::CodeMode {
+            cell_id: cell_id.as_str().to_string(),
+            runtime_tool_call_id: "mcp-runtime-call".to_string(),
+        };
+        let mut output = output;
+        output.result.meta = Some(json!({ "provider/custom": { "items": [1, null] } }));
+        output.result_metadata_capture_allowed = true;
+        recorder.record_tool_call(
+            &crate::tools::router::ToolCall {
+                tool_name: invocation.tool_name.clone(),
+                call_id: invocation.call_id.clone(),
+                payload: invocation.payload.clone(),
+                encrypted_function_args: None,
+            },
+            &invocation.source,
+            &invocation.step_context,
+        );
+        handler.on_tool_result_accepted(&invocation, &output);
+        let mut items = [serde_json::from_value(json!({
+            "type": "custom_tool_call_output", "call_id": "exec-mcp-post", "output": "notes",
+        }))
+        .expect("Code Mode output")];
+        recorder.attach_to_prompt(&mut items, &mut Default::default());
+        assert_eq!(
+            serde_json::to_value(items[0].executed_tool_call_metadata()).unwrap()["executed_tool_calls"],
+            json!([{
+                "name": codex_tools::code_mode_name_for_tool_name(&invocation.tool_name),
+                "arguments": { "path": "/tmp/notes.txt" },
+                "tool_result_metadata": { "provider/custom": { "items": [1, null] } },
+            }]),
         );
     }
 

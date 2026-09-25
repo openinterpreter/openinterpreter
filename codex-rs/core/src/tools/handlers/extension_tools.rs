@@ -2,6 +2,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::Weak;
 
+use codex_history::ResponseItemEnvelope;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
@@ -26,7 +27,7 @@ use crate::tools::handlers::apply_granted_turn_permissions;
 use crate::tools::lifecycle::extension_tool_call_source;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
-use crate::turn_metadata::McpTurnMetadataContext;
+use crate::turn_metadata::ExecutionMetadata;
 
 pub(crate) struct ExtensionToolAdapter(
     Arc<dyn for<'call> codex_tools::ToolExecutor<ExtensionToolCall<'call>>>,
@@ -166,16 +167,24 @@ impl TurnItemEmitter for CoreTurnItemEmitter {
 }
 
 async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall<'_> {
-    let conversation_history =
-        ConversationHistory::new(invocation.session.clone_history().await.into_raw_items());
+    let history = invocation
+        .session
+        .clone_history()
+        .await
+        .into_shared_annotated_items();
+    let conversation_history = ConversationHistory::new_deferred(move || {
+        Arc::unwrap_or_clone(history)
+            .into_iter()
+            .map(ResponseItemEnvelope::into_item)
+            .collect()
+    });
+    let settings = &invocation.step_context.settings;
     let codex_turn_metadata = invocation
         .turn
         .turn_metadata_state
-        .current_meta_value_for_mcp_request(McpTurnMetadataContext {
-            model: invocation.turn.model_info().slug.as_str(),
-            reasoning_effort: invocation.turn.effective_reasoning_effort(),
-            node_repl_disabled: invocation.turn.model_info().node_repl_disabled,
-        })
+        .current_meta_value_for_mcp_request(ExecutionMetadata::from_settings(
+            &invocation.step_context.settings,
+        ))
         .and_then(|metadata| to_ascii_json_string(&metadata).ok());
     let mut environments = Vec::new();
     for environment in invocation.step_context.environments.turn_environments() {
@@ -206,9 +215,9 @@ async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall<'_>
         turn_id: invocation.turn.sub_id.clone(),
         call_id: invocation.call_id.clone(),
         tool_name: invocation.tool_name.clone(),
-        model: invocation.turn.model_info().slug.clone(),
+        model: settings.model_info.slug.clone(),
         codex_turn_metadata,
-        truncation_policy: invocation.turn.model_info().truncation_policy.into(),
+        truncation_policy: settings.model_info.truncation_policy.into(),
         source: extension_tool_call_source(invocation.source.clone()),
         conversation_history,
         turn_item_emitter: Arc::new(CoreTurnItemEmitter {
@@ -302,7 +311,7 @@ mod tests {
 
     struct CapturingExtensionExecutor {
         captured_call: Arc<Mutex<Option<codex_tools::ToolCall<'static>>>>,
-        captured_sandbox_cwds: Arc<Mutex<Vec<Option<PathUri>>>>,
+        captured_sandbox_cwds: Arc<Mutex<Vec<PathUri>>>,
     }
 
     impl<'call> codex_extension_api::ToolExecutor<codex_tools::ToolCall<'call>>
@@ -419,7 +428,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn passes_turn_fields_and_scoped_turn_item_emitter_to_extension_call() {
+    async fn passes_step_node_repl_flag_and_scoped_turn_item_emitter_to_extension_call() {
         let captured_call = Arc::new(Mutex::new(None));
         let captured_sandbox_cwds = Arc::new(Mutex::new(Vec::new()));
         let handler = ExtensionToolAdapter::new(Arc::new(CapturingExtensionExecutor {
@@ -433,9 +442,9 @@ mod tests {
         let model = turn.model_info().slug.clone();
         let truncation_policy = turn.model_info().truncation_policy.into();
         let expected_sandbox_cwds = turn
-            .environments
+            .initial_environments
             .turn_environments()
-            .map(|environment| Some(environment.cwd().clone()))
+            .map(|environment| environment.cwd().clone())
             .collect::<Vec<_>>();
         let history_item = ResponseItem::Message {
             id: None,
@@ -447,7 +456,11 @@ mod tests {
             internal_chat_message_metadata_passthrough: None,
         };
         session
-            .record_conversation_items(&turn, std::slice::from_ref(&history_item))
+            .record_conversation_items(
+                &turn,
+                turn.model_info(),
+                std::slice::from_ref(&history_item),
+            )
             .await;
         let expected_history_item = strip_response_item_id(
             session
@@ -466,7 +479,15 @@ mod tests {
             strip_response_item_id(raw_history_item.item),
             expected_history_item
         );
-        let step_context = StepContext::for_test(Arc::clone(&turn));
+        let mut step_context = StepContext::for_test(Arc::clone(&turn));
+        let settings = Arc::make_mut(
+            &mut Arc::get_mut(&mut step_context)
+                .expect("unshared step")
+                .settings,
+        );
+        let model_info = Arc::make_mut(&mut settings.model_info);
+        model_info.node_repl_disabled = !turn.model_info().node_repl_disabled;
+        let node_repl_disabled = model_info.node_repl_disabled;
         let invocation = ToolInvocation {
             session,
             step_context,
@@ -499,6 +520,14 @@ mod tests {
         );
         assert_eq!(captured_call.model, model);
         assert_eq!(captured_call.truncation_policy, truncation_policy);
+        let metadata: serde_json::Value = serde_json::from_str(
+            captured_call
+                .codex_turn_metadata
+                .as_deref()
+                .expect("turn metadata"),
+        )
+        .expect("metadata JSON");
+        assert_eq!(metadata["node_repl_disabled"], json!(node_repl_disabled));
         assert_eq!(
             captured_call.source,
             ExtensionToolCallSource::CodeMode {
@@ -553,6 +582,7 @@ mod tests {
             failure: None,
             saved_path: None,
             imagegen_request_id: None,
+            generation_id: None,
         });
         let expected_completed_item = ExtensionItem::ImageGeneration(ImageGenerationItem {
             id: "call-image".to_string(),
@@ -563,6 +593,7 @@ mod tests {
             failure: None,
             saved_path: Some(expected_path.clone()),
             imagegen_request_id: None,
+            generation_id: None,
         });
         codex_tools::TurnItemEmitter::emit_started(
             &emitter,

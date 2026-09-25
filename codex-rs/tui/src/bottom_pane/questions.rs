@@ -13,7 +13,14 @@ impl BottomPane {
         self.request_redraw();
     }
 
-    fn question_editor(&mut self) -> &mut AsyncQuestions {
+    pub(crate) fn clear_pending_questions(&mut self) {
+        if let Some(questions) = &mut self.questions {
+            questions.clear_pending();
+            self.request_redraw();
+        }
+    }
+
+    pub(crate) fn question_editor(&mut self) -> &mut AsyncQuestions {
         self.questions.get_or_insert_with(|| {
             let mut questions = AsyncQuestions::new(
                 self.app_event_tx.clone(),
@@ -55,7 +62,10 @@ impl BottomPane {
             countdown.dim(),
         ])];
         if let Some(binding) = self.pending_input_preview.edit_binding {
-            lines.push(Line::from(vec!["    ".into(), binding.into(), " to answer".into()]).dim());
+            let mut hint = Line::from("    ");
+            hint.spans.extend(binding.spans());
+            hint.spans.push(" to answer".dim());
+            lines.push(hint);
         }
         Some(lines)
     }

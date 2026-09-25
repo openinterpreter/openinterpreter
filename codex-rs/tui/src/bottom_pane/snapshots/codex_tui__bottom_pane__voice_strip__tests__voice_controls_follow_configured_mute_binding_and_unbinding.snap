@@ -1,0 +1,52 @@
+---
+source: tui/src/bottom_pane/voice_strip_tests.rs
+assertion_line: 165
+expression: "layouts.join(\"\\n\\n\")"
+---
+'f8', muted=false, width=80:
+ voice ● listening                                      f8 mute     /voice stop
+   mic ▆▅▄▃▂▁  codex ▁▃▄▅▆█
+
+'f8', muted=false, width=22:
+ voice    /voice stop
+   mic ▃▂▁  codex ▅▆█
+
+'f8', muted=true, width=80:
+ voice ◌ muted                                          f8 unmute   /voice stop
+   mic ▁▁▁▁▁▁  codex ▁▃▄▅▆█
+
+'f8', muted=true, width=22:
+ voice    /voice stop
+   mic ▁▁▁  codex ▅▆█
+
+'ctrl-x m', muted=false, width=80:
+ voice ● listening                                ctrl+x m mute     /voice stop
+   mic ▆▅▄▃▂▁  codex ▁▃▄▅▆█
+
+'ctrl-x m', muted=false, width=22:
+ voice    /voice stop
+   mic ▃▂▁  codex ▅▆█
+
+'ctrl-x m', muted=true, width=80:
+ voice ◌ muted                                    ctrl+x m unmute   /voice stop
+   mic ▁▁▁▁▁▁  codex ▁▃▄▅▆█
+
+'ctrl-x m', muted=true, width=22:
+ voice    /voice stop
+   mic ▁▁▁  codex ▅▆█
+
+[], muted=false, width=80:
+ voice ● listening                                    /voice mute   /voice stop
+   mic ▆▅▄▃▂▁  codex ▁▃▄▅▆█
+
+[], muted=false, width=22:
+ voice    /voice stop
+   mic ▃▂▁  codex ▅▆█
+
+[], muted=true, width=80:
+ voice ◌ muted                                        /voice mute   /voice stop
+   mic ▁▁▁▁▁▁  codex ▁▃▄▅▆█
+
+[], muted=true, width=22:
+ voice    /voice stop
+   mic ▁▁▁  codex ▅▆█

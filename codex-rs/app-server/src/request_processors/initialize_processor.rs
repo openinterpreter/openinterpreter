@@ -8,10 +8,13 @@ use codex_login::default_client::USER_AGENT_SUFFIX;
 use codex_login::default_client::get_codex_user_agent;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::default_client::set_default_originator;
+use codex_protocol::mcp::ClientMcpExtensions;
+use codex_protocol::mcp::OPENAI_ELICITATION_EXTENSION_ID;
 
 use super::*;
 use crate::message_processor::ConnectionSessionState;
 use crate::message_processor::InitializedConnectionSessionState;
+use crate::transport::ConnectionOrigin;
 
 const NON_ORIGINATING_CLIENT_NAMES: &[&str] = &["codex_app_server_daemon", "codex-backend"];
 
@@ -22,6 +25,7 @@ pub(crate) struct InitializeRequestProcessor {
     config: Arc<Config>,
     config_warnings: Arc<Vec<ConfigWarningNotification>>,
     rpc_transport: AppServerRpcTransport,
+    user_verification: Arc<crate::user_verification::Service>,
 }
 
 impl InitializeRequestProcessor {
@@ -31,6 +35,7 @@ impl InitializeRequestProcessor {
         config: Arc<Config>,
         config_warnings: Vec<ConfigWarningNotification>,
         rpc_transport: AppServerRpcTransport,
+        user_verification: Arc<crate::user_verification::Service>,
     ) -> Self {
         Self {
             outgoing,
@@ -38,6 +43,7 @@ impl InitializeRequestProcessor {
             config,
             config_warnings: Arc::new(config_warnings),
             rpc_transport,
+            user_verification,
         }
     }
 
@@ -71,7 +77,7 @@ impl InitializeRequestProcessor {
         let experimental_api_enabled = capabilities.experimental_api;
         let request_attestation = capabilities.request_attestation;
         let extensions = capabilities.extensions.as_ref();
-        let client_mcp_extensions = codex_mcp::client_mcp_extensions(
+        let mut client_mcp_extensions = codex_mcp::client_mcp_extensions(
             extensions,
             capabilities.mcp_server_openai_form_elicitation,
         );
@@ -90,6 +96,31 @@ impl InitializeRequestProcessor {
                 "Invalid clientInfo.name: '{name}'. Must be a valid HTTP header value."
             )));
         }
+        // Activate only the embedded TUI and local desktop host. Client-supplied
+        // extensions cannot opt other hosts into verification.
+        let user_verification_enabled = experimental_api_enabled
+            && matches!(
+                (session.origin, name.as_str()),
+                (ConnectionOrigin::InProcess, "codex-tui")
+                    | (ConnectionOrigin::Stdio, "Codex Desktop")
+            )
+            && tokio::task::spawn_blocking(self.user_verification.device_supported)
+                .await
+                .unwrap_or(false);
+        if user_verification_enabled {
+            let mut extensions = client_mcp_extensions
+                .iter()
+                .map(|(id, value)| (id.to_string(), value.clone()))
+                .collect::<std::collections::HashMap<_, _>>();
+            let settings = extensions
+                .entry(OPENAI_ELICITATION_EXTENSION_ID.to_string())
+                .or_insert_with(|| serde_json::json!({}));
+            if !settings.is_object() {
+                *settings = serde_json::json!({});
+            }
+            settings["userVerification"] = serde_json::json!({});
+            client_mcp_extensions = ClientMcpExtensions::new(extensions);
+        }
         let originator = name.clone();
         let user_agent_suffix = format!("{name}; {version}");
         let mutates_global_identity = !NON_ORIGINATING_CLIENT_NAMES.contains(&name.as_str());
@@ -106,6 +137,11 @@ impl InitializeRequestProcessor {
             .is_err()
         {
             return Err(invalid_request("Already initialized"));
+        }
+        if user_verification_enabled {
+            self.outgoing
+                .enable_user_verification_connection(connection_id)
+                .await;
         }
 
         if mutates_global_identity {
@@ -136,6 +172,22 @@ impl InitializeRequestProcessor {
         set_default_client_residency_requirement(self.config.enforce_residency.value());
         if mutates_global_identity && let Ok(mut suffix) = USER_AGENT_SUFFIX.lock() {
             *suffix = Some(user_agent_suffix);
+        }
+
+        #[cfg(windows)]
+        if matches!(session.origin, ConnectionOrigin::Stdio) && name == "Codex Desktop" {
+            // Uninstall ownership must not depend on account sign-in or sandbox setup.
+            // Keep this bounded attempt ahead of the response; background registration can race uninstall.
+            let home = codex_home.clone();
+            if !matches!(
+                tokio::task::spawn_blocking(move || {
+                    codex_windows_sandbox::register_desktop_installation(&home)
+                })
+                .await,
+                Ok(Ok(()))
+            ) {
+                tracing::warn!("could not register desktop uninstall ownership");
+            }
         }
 
         let user_agent = get_codex_user_agent();

@@ -26,8 +26,6 @@ use rama_core::extensions::ExtensionsRef;
 use rama_core::futures::stream::Stream as FuturesStream;
 use rama_core::rt::Executor;
 use rama_core::service::service_fn;
-use rama_core::stream::PeekStream;
-use rama_core::stream::StackReader;
 use rama_core::stream::Stream;
 use rama_http::Body;
 use rama_http::BodyDataStream;
@@ -40,10 +38,10 @@ use rama_http::Uri;
 use rama_http::header::HOST;
 use rama_http::layer::remove_header::RemoveRequestHeaderLayer;
 use rama_http::layer::remove_header::RemoveResponseHeaderLayer;
+use rama_http::uri::Scheme;
 use rama_http_backend::server::HttpServer;
 use rama_net::proxy::ProxyTarget;
 use rama_net::stream::SocketInfo;
-use rama_net::tls::server::TlsPeekStream;
 use rama_tls_rustls::dep::rustls;
 use rama_tls_rustls::server::TlsAcceptorData;
 use rama_tls_rustls::server::TlsAcceptorLayer;
@@ -51,9 +49,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context as TaskContext;
 use std::task::Poll;
-use std::time::Duration;
-use tokio::io::AsyncReadExt;
-use tokio::time::timeout;
 use tracing::info;
 use tracing::warn;
 
@@ -74,6 +69,7 @@ pub(crate) struct MitmUpstreamConfig {
 struct MitmPolicyContext {
     target_host: String,
     target_port: u16,
+    scheme: Scheme,
     mode: NetworkMode,
     app_state: Arc<NetworkProxyState>,
 }
@@ -94,52 +90,6 @@ enum MitmPolicyDecision {
 
 const MITM_INSPECT_BODIES: bool = false;
 const MITM_MAX_BODY_BYTES: usize = 4096;
-const TLS_PREFIX_LEN: usize = 5;
-const TLS_PREFIX_FIRST_BYTE_TIMEOUT: Duration = Duration::from_millis(250);
-
-/// Peeks enough bytes to distinguish a TLS handshake from an opaque CONNECT stream.
-///
-/// The first-byte timeout preserves server-first protocols. Once the client starts a possible TLS
-/// prefix, all five record-header bytes are accumulated so fragmented handshakes cannot bypass
-/// interception. Every byte read is replayed through `TlsPeekStream`.
-pub(crate) async fn peek_tls_prefix<S>(mut stream: S) -> Result<(bool, TlsPeekStream<S>)>
-where
-    S: Stream + Unpin + ExtensionsMut,
-{
-    let mut peek_buf = [0_u8; TLS_PREFIX_LEN];
-    let mut bytes_read =
-        match timeout(TLS_PREFIX_FIRST_BYTE_TIMEOUT, stream.read(&mut peek_buf)).await {
-            Ok(result) => result.context("read TLS prefix")?,
-            Err(_) => 0,
-        };
-    while bytes_read > 0 && bytes_read < TLS_PREFIX_LEN {
-        let possible_tls_prefix = matches!(
-            &peek_buf[..bytes_read],
-            [0x16] | [0x16, 0x03] | [0x16, 0x03, 0x00..=0x04, ..]
-        );
-        if !possible_tls_prefix {
-            break;
-        }
-        let read = stream
-            .read(&mut peek_buf[bytes_read..])
-            .await
-            .context("read TLS prefix")?;
-        if read == 0 {
-            break;
-        }
-        bytes_read += read;
-    }
-
-    let is_tls = bytes_read == TLS_PREFIX_LEN && matches!(peek_buf, [0x16, 0x03, 0x00..=0x04, ..]);
-    let offset = TLS_PREFIX_LEN - bytes_read;
-    if offset > 0 {
-        peek_buf.copy_within(0..bytes_read, offset);
-    }
-    let mut peek = StackReader::new(peek_buf);
-    peek.skip(offset);
-    Ok((is_tls, PeekStream::new(peek, stream)))
-}
-
 impl std::fmt::Debug for MitmState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Avoid dumping internal state (CA material, connectors, etc.) to logs.
@@ -184,8 +134,8 @@ impl MitmState {
     }
 }
 
-/// Terminate a raw client stream with a generated leaf cert and proxy inner HTTPS traffic.
-pub(crate) async fn mitm_stream<S>(stream: S) -> Result<()>
+/// Proxy inner HTTP traffic, terminating TLS with a generated leaf certificate for HTTPS.
+pub(crate) async fn mitm_stream<S>(stream: S, scheme: Scheme) -> Result<()>
 where
     S: Stream + Unpin + ExtensionsMut,
 {
@@ -207,7 +157,11 @@ where
         .clone();
     let target_host = normalize_host(&target.host.to_string());
     let target_port = target.port;
-    let acceptor_data = mitm.tls_acceptor_data_for_host(&target_host)?;
+    let acceptor_data = if scheme == Scheme::HTTPS {
+        Some(mitm.tls_acceptor_data_for_host(&target_host)?)
+    } else {
+        None
+    };
     let mode = stream
         .extensions()
         .get::<NetworkMode>()
@@ -228,6 +182,7 @@ where
         policy: MitmPolicyContext {
             target_host,
             target_port,
+            scheme,
             mode,
             app_state,
         },
@@ -243,8 +198,9 @@ where
 
     let http_service = HttpServer::auto(executor).service(
         (
-            RemoveResponseHeaderLayer::hop_by_hop(),
-            RemoveRequestHeaderLayer::hop_by_hop(),
+            (request_ctx.policy.scheme == Scheme::HTTPS)
+                .then(RemoveResponseHeaderLayer::hop_by_hop),
+            (request_ctx.policy.scheme == Scheme::HTTPS).then(RemoveRequestHeaderLayer::hop_by_hop),
         )
             .into_layer(service_fn({
                 let request_ctx = request_ctx.clone();
@@ -255,14 +211,17 @@ where
             })),
     );
 
-    let https_service = TlsAcceptorLayer::new(acceptor_data)
-        .with_store_client_hello(true)
-        .into_layer(http_service);
-
-    https_service
-        .serve(stream)
-        .await
-        .map_err(|err| anyhow!("MITM serve error: {err}"))?;
+    match acceptor_data {
+        Some(acceptor_data) => {
+            TlsAcceptorLayer::new(acceptor_data)
+                .with_store_client_hello(true)
+                .into_layer(http_service)
+                .serve(stream)
+                .await
+        }
+        None => http_service.serve(stream).await,
+    }
+    .map_err(|err| anyhow!("MITM serve error: {err}"))?;
     Ok(())
 }
 
@@ -295,13 +254,23 @@ async fn forward_request(req: Request, request_ctx: &MitmRequestContext) -> Resu
     let log_path = path_for_log(req.uri());
 
     let (mut parts, body) = req.into_parts();
+    let authority = authority_header_value(&target_host, target_port, &request_ctx.policy.scheme);
+    parts.uri = Uri::builder()
+        .scheme(request_ctx.policy.scheme.clone())
+        .authority(authority.as_str())
+        .path_and_query(path.as_str())
+        .build()?;
+    // Server-wide OPTIONS must not borrow authority from a narrower credential URL prefix.
+    let credential_path = if path == "*" { "/" } else { &path };
+    let credential_destination = format!(
+        "{}://{authority}{credential_path}",
+        request_ctx.policy.scheme
+    );
     request_ctx
         .policy
         .app_state
-        .inject_request_credentials(&target_host, &mut parts.headers);
+        .inject_request_credentials(&credential_destination, &mut parts.headers);
     apply_mitm_hook_actions(&mut parts.headers, hook_actions.as_ref());
-    let authority = authority_header_value(&target_host, target_port);
-    parts.uri = build_https_uri(&authority, &path)?;
     parts
         .headers
         .insert(HOST, HeaderValue::from_str(&authority)?);
@@ -323,7 +292,11 @@ async fn forward_request(req: Request, request_ctx: &MitmRequestContext) -> Resu
     };
 
     let upstream_req = Request::from_parts(parts, body);
-    let upstream_resp = request_ctx.upstream.serve(upstream_req).await?;
+    let upstream_resp = if request_ctx.policy.scheme == Scheme::HTTP {
+        crate::brokered_tunnel::forward_http_request(upstream_req, &request_ctx.upstream).await?
+    } else {
+        request_ctx.upstream.serve(upstream_req).await?
+    };
     respond_with_inspection(
         upstream_resp,
         inspect,
@@ -349,6 +322,34 @@ async fn evaluate_mitm_policy(
     req: &Request,
     policy: &MitmPolicyContext,
 ) -> Result<MitmPolicyDecision> {
+    if policy.scheme == Scheme::HTTP {
+        let matches_target = |authority: &rama_http::uri::Authority| {
+            !authority.as_str().contains('@')
+                && normalize_host(authority.host()) == policy.target_host
+                && authority.port_u16().unwrap_or(80) == policy.target_port
+        };
+        let invalid_destination = req
+            .uri()
+            .scheme()
+            .is_some_and(|scheme| scheme != &Scheme::HTTP)
+            || req
+                .uri()
+                .authority()
+                .is_some_and(|authority| !matches_target(authority))
+            || req.headers().get_all(HOST).iter().any(|value| {
+                value
+                    .to_str()
+                    .ok()
+                    .and_then(|value| value.parse::<rama_http::uri::Authority>().ok())
+                    .is_none_or(|authority| !matches_target(&authority))
+            });
+        if invalid_destination {
+            return Ok(MitmPolicyDecision::Block(text_response(
+                StatusCode::BAD_REQUEST,
+                "tunnel destination mismatch",
+            )));
+        }
+    }
     if req.method().as_str() == "CONNECT" {
         return Ok(MitmPolicyDecision::Block(text_response(
             StatusCode::METHOD_NOT_ALLOWED,
@@ -395,7 +396,7 @@ async fn evaluate_mitm_policy(
                 client: client.clone(),
                 method: Some(method.clone()),
                 mode: Some(policy.mode),
-                protocol: "https".to_string(),
+                protocol: policy.scheme.to_string(),
                 decision: None,
                 source: None,
                 port: Some(policy.target_port),
@@ -423,7 +424,7 @@ async fn evaluate_mitm_policy(
                     client: client.clone(),
                     method: Some(method.clone()),
                     mode: Some(policy.mode),
-                    protocol: "https".to_string(),
+                    protocol: policy.scheme.to_string(),
                     decision: None,
                     source: None,
                     port: Some(policy.target_port),
@@ -440,7 +441,10 @@ async fn evaluate_mitm_policy(
         HookEvaluation::NoHooksForHost => None,
     };
 
-    if !policy.mode.allows_method(&method) {
+    let opaque_http_upgrade = policy.scheme == Scheme::HTTP
+        && policy.mode == NetworkMode::Limited
+        && req.headers().contains_key(rama_http::header::UPGRADE);
+    if !policy.mode.allows_method(&method) || opaque_http_upgrade {
         let _ = policy
             .app_state
             .record_blocked(BlockedRequest::new(BlockedRequestArgs {
@@ -449,7 +453,7 @@ async fn evaluate_mitm_policy(
                 client: client.clone(),
                 method: Some(method.clone()),
                 mode: Some(policy.mode),
-                protocol: "https".to_string(),
+                protocol: policy.scheme.to_string(),
                 decision: None,
                 source: None,
                 port: Some(policy.target_port),
@@ -596,24 +600,20 @@ fn extract_request_host(req: &Request) -> Option<String> {
         .or_else(|| req.uri().authority().map(|a| a.as_str().to_string()))
 }
 
-fn authority_header_value(host: &str, port: u16) -> String {
+fn authority_header_value(host: &str, port: u16, scheme: &Scheme) -> String {
     // Host header / URI authority formatting.
+    let default_port = if scheme == &Scheme::HTTP { 80 } else { 443 };
     if host.contains(':') {
-        if port == 443 {
+        if port == default_port {
             format!("[{host}]")
         } else {
             format!("[{host}]:{port}")
         }
-    } else if port == 443 {
+    } else if port == default_port {
         host.to_string()
     } else {
         format!("{host}:{port}")
     }
-}
-
-fn build_https_uri(authority: &str, path: &str) -> Result<Uri> {
-    let target = format!("https://{authority}{path}");
-    Ok(target.parse()?)
 }
 
 fn path_and_query(uri: &Uri) -> String {

@@ -1,4 +1,5 @@
 use crate::memory_extensions_root;
+use codex_protocol::MemoryVersion;
 use codex_protocol::openai_models::ModelInfo;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::truncate_text;
@@ -13,10 +14,22 @@ static CONSOLIDATION_PROMPT_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
         "memories/consolidation.md",
     )
 });
+static CONSOLIDATION_V2_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
+    parse_embedded_template(
+        include_str!("../templates/memories/consolidation_v2.md"),
+        "memories/consolidation_v2.md",
+    )
+});
 static STAGE_ONE_INPUT_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
     parse_embedded_template(
         include_str!("../templates/memories/stage_one_input.md"),
         "memories/stage_one_input.md",
+    )
+});
+static STAGE_ONE_INPUT_V2_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
+    parse_embedded_template(
+        include_str!("../templates/memories/stage_one_input_v2.md"),
+        "memories/stage_one_input_v2.md",
     )
 });
 static MEMORY_EXTENSIONS_FOLDER_STRUCTURE_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
@@ -41,6 +54,13 @@ fn parse_embedded_template(source: &'static str, template_name: &str) -> Templat
 
 /// Builds the consolidation subagent prompt for a specific memory root.
 pub fn build_consolidation_prompt(memory_root: &Path) -> String {
+    build_consolidation_prompt_for_version(memory_root, MemoryVersion::V1)
+}
+
+pub(crate) fn build_consolidation_prompt_for_version(
+    memory_root: &Path,
+    version: MemoryVersion,
+) -> String {
     let memory_extensions_root = memory_extensions_root(memory_root);
     let memory_extensions_exist = memory_extensions_root.is_dir();
     let memory_root = memory_root.display().to_string();
@@ -62,8 +82,11 @@ pub fn build_consolidation_prompt(memory_root: &Path) -> String {
     } else {
         String::new()
     };
-    CONSOLIDATION_PROMPT_TEMPLATE
-        .render([
+    let template = match version {
+        MemoryVersion::V1 => &CONSOLIDATION_PROMPT_TEMPLATE,
+        MemoryVersion::V2 => &CONSOLIDATION_V2_TEMPLATE,
+    };
+    template.render([
             ("memory_root", memory_root.as_str()),
             (
                 "memory_extensions_folder_structure",
@@ -95,6 +118,16 @@ fn render_memory_extensions_block(template: &Template, memory_extensions_root: &
         })
 }
 
+pub(crate) fn rollout_token_limit(model_info: &ModelInfo) -> usize {
+    model_info
+        .resolved_context_window()
+        .and_then(|limit| (limit > 0).then_some(limit))
+        .map(|limit| limit.saturating_mul(model_info.effective_context_window_percent) / 100)
+        .map(|limit| (limit.saturating_mul(crate::stage_one::CONTEXT_WINDOW_PERCENT) / 100).max(1))
+        .and_then(|limit| usize::try_from(limit).ok())
+        .unwrap_or(crate::stage_one::DEFAULT_ROLLOUT_TOKEN_LIMIT)
+}
+
 /// Builds the stage-1 user message containing rollout metadata and content.
 ///
 /// Large rollout payloads are truncated to 70% of the active model's effective
@@ -105,13 +138,7 @@ pub fn build_stage_one_input_message(
     rollout_cwd: &Path,
     rollout_contents: &str,
 ) -> anyhow::Result<String> {
-    let rollout_token_limit = model_info
-        .resolved_context_window()
-        .and_then(|limit| (limit > 0).then_some(limit))
-        .map(|limit| limit.saturating_mul(model_info.effective_context_window_percent) / 100)
-        .map(|limit| (limit.saturating_mul(crate::stage_one::CONTEXT_WINDOW_PERCENT) / 100).max(1))
-        .and_then(|limit| usize::try_from(limit).ok())
-        .unwrap_or(crate::stage_one::DEFAULT_ROLLOUT_TOKEN_LIMIT);
+    let rollout_token_limit = rollout_token_limit(model_info);
     let truncated_rollout_contents = truncate_text(
         rollout_contents,
         TruncationPolicy::Tokens(rollout_token_limit),
@@ -123,6 +150,23 @@ pub fn build_stage_one_input_message(
         ("rollout_path", rollout_path.as_str()),
         ("rollout_cwd", rollout_cwd.as_str()),
         ("rollout_contents", truncated_rollout_contents.as_str()),
+    ])?)
+}
+
+pub(crate) fn build_stage_one_input_v2(
+    rollout_path: &Path,
+    rollout_cwd: &Path,
+    rollout_git_branch: Option<&str>,
+    rollout_contents: &str,
+) -> anyhow::Result<String> {
+    Ok(STAGE_ONE_INPUT_V2_TEMPLATE.render([
+        ("rollout_path", rollout_path.display().to_string().as_str()),
+        ("rollout_cwd", rollout_cwd.display().to_string().as_str()),
+        (
+            "rollout_git_branch",
+            rollout_git_branch.unwrap_or("unknown"),
+        ),
+        ("rollout_contents", rollout_contents),
     ])?)
 }
 

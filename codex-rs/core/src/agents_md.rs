@@ -2,6 +2,8 @@
 //!
 //! Project-level documentation is primarily stored in files named `AGENTS.md`.
 //! Additional fallback filenames can be configured via `project_doc_fallback_filenames`.
+//! Fallback entries containing path syntax for the executor's OS are ignored
+//! before any filesystem probes use them.
 //! We include the concatenation of all files found along the path from the
 //! project root to the current working directory as follows:
 //!
@@ -30,6 +32,7 @@ use codex_file_system::FileSystemSandboxContext;
 use codex_file_system::FindUpErrorPolicy;
 use codex_file_system::find_nearest_ancestor_with_markers;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
 use futures::StreamExt;
 use std::io;
@@ -118,6 +121,7 @@ pub(crate) async fn load_project_instructions(
 /// discovered doc. If no documentation file is found the function returns
 /// `Ok(None)`. Unexpected I/O failures bubble up as `Err` so callers can
 /// decide how to handle them.
+#[tracing::instrument(name = "agents_md.load", skip_all, fields(max_total = max_total))]
 async fn read_agents_md(
     config: &Config,
     fs: &dyn ExecutorFileSystem,
@@ -184,6 +188,7 @@ async fn read_agents_md(
 
 /// Discovers AGENTS.md files from the project root to the current working
 /// directory, inclusive. Symlinks are allowed.
+#[tracing::instrument(name = "agents_md.discover", skip_all)]
 async fn agents_md_paths(
     config: &Config,
     cwd: &PathUri,
@@ -234,7 +239,7 @@ async fn agents_md_paths(
         vec![dir]
     };
 
-    let candidate_filenames = candidate_filenames(config);
+    let candidate_filenames = candidate_filenames(config, cwd);
     let candidate_filenames = &candidate_filenames;
     let mut results = futures::stream::iter(search_dirs)
         .map(|directory| async move {
@@ -264,13 +269,23 @@ async fn agents_md_paths(
     Ok(found)
 }
 
-fn candidate_filenames(config: &Config) -> Vec<&str> {
+fn candidate_filenames<'a>(config: &'a Config, cwd: &PathUri) -> Vec<&'a str> {
     let mut names: Vec<&str> = Vec::with_capacity(2 + config.project_doc_fallback_filenames.len());
     names.push(LOCAL_AGENTS_MD_FILENAME);
     names.push(DEFAULT_AGENTS_MD_FILENAME);
     for candidate in &config.project_doc_fallback_filenames {
         let candidate = candidate.as_str();
         if candidate.is_empty() {
+            continue;
+        }
+        // Use the executor's path convention, not the host's: resolving a Windows
+        // network path can send ambient credentials even during metadata probes.
+        if matches!(candidate, "." | "..")
+            || candidate.contains(['/', '\0'])
+            || cwd.infer_path_convention() == Some(PathConvention::Windows)
+                && candidate.contains(['\\', ':'])
+        {
+            tracing::warn!("ignoring project_doc_fallback_filenames entry that is not a filename");
             continue;
         }
         if !names.contains(&candidate) {
@@ -284,8 +299,11 @@ fn candidate_filenames(config: &Config) -> Vec<&str> {
 /// guidance.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LoadedAgentsMd {
-    /// Host-provided user instructions.
+    /// Account- or home-scoped instructions supplied by the host.
     user_instructions: Option<Instructions>,
+
+    /// Thread-scoped instructions supplied by the host.
+    thread_instructions: Option<Instructions>,
 
     /// Ordered instructions and their provenance.
     entries: Vec<InstructionEntry>,
@@ -300,8 +318,9 @@ impl LoadedAgentsMd {
         Self {
             user_instructions: Some(Instructions {
                 text: contents,
-                source: path,
+                source: Some(path),
             }),
+            thread_instructions: None,
             entries: Vec::new(),
         }
     }
@@ -310,8 +329,21 @@ impl LoadedAgentsMd {
         Self {
             user_instructions: user_instructions
                 .filter(|instructions| !instructions.text.trim().is_empty()),
+            thread_instructions: None,
             entries: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_instructions(
+        mut self,
+        user_instructions: Option<Instructions>,
+        thread_instructions: Option<Instructions>,
+    ) -> Option<Self> {
+        self.user_instructions =
+            user_instructions.filter(|instructions| !instructions.text.trim().is_empty());
+        self.thread_instructions =
+            thread_instructions.filter(|instructions| !instructions.text.trim().is_empty());
+        (!self.is_empty()).then_some(self)
     }
 
     /// Creates source-less user instructions for tests.
@@ -325,6 +357,7 @@ impl LoadedAgentsMd {
         }
         Self {
             user_instructions: None,
+            thread_instructions: None,
             entries: vec![InstructionEntry {
                 contents,
                 provenance: InstructionProvenance::Internal,
@@ -334,6 +367,7 @@ impl LoadedAgentsMd {
 
     fn is_empty(&self) -> bool {
         self.user_instructions.is_none()
+            && self.thread_instructions.is_none()
             && self
                 .entries
                 .iter()
@@ -353,7 +387,14 @@ impl LoadedAgentsMd {
         let mut output = String::new();
         let mut has_previous = false;
         let mut previous_was_project = false;
-        if let Some(instructions) = &self.user_instructions {
+        for instructions in self
+            .user_instructions
+            .iter()
+            .chain(self.thread_instructions.iter())
+        {
+            if has_previous {
+                output.push_str("\n\n");
+            }
             output.push_str(&instructions.text);
             has_previous = true;
         }
@@ -381,7 +422,14 @@ impl LoadedAgentsMd {
         let mut output = String::new();
         let mut has_previous = false;
         let mut previous_environment: Option<(&str, &PathUri)> = None;
-        if let Some(instructions) = &self.user_instructions {
+        for instructions in self
+            .user_instructions
+            .iter()
+            .chain(self.thread_instructions.iter())
+        {
+            if has_previous {
+                output.push_str("\n\n");
+            }
             output.push_str(&instructions.text);
             has_previous = true;
         }
@@ -441,7 +489,8 @@ impl LoadedAgentsMd {
     pub fn sources(&self) -> impl Iterator<Item = PathUri> + '_ {
         self.user_instructions
             .iter()
-            .map(|instructions| PathUri::from_abs_path(&instructions.source))
+            .chain(self.thread_instructions.iter())
+            .filter_map(|instructions| instructions.source.as_ref().map(PathUri::from_abs_path))
             .chain(
                 self.entries
                     .iter()

@@ -32656,6 +32656,52 @@
       ]
     },
     {
+      "id": "openai",
+      "name": "OpenAI",
+      "env_key": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1",
+      "wire_api": "chat",
+      "sort_priority": 100,
+      "models": [
+        {
+          "id": "gpt-6-astra",
+          "display_name": "GPT-6 Astra",
+          "description": "gpt-astra \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1050000,
+          "priority": 0
+        },
+        {
+          "id": "gpt-6-luna",
+          "display_name": "GPT-6 Luna",
+          "description": "gpt-luna \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1050000,
+          "priority": 1
+        },
+        {
+          "id": "gpt-6-sol",
+          "display_name": "GPT-6 Sol",
+          "description": "gpt-sol \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1050000,
+          "priority": 2
+        }
+      ]
+    },
+    {
       "id": "orcarouter",
       "name": "OrcaRouter",
       "env_key": "ORCAROUTER_API_KEY",

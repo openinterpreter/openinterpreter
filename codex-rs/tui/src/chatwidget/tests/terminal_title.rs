@@ -172,7 +172,12 @@ async fn terminal_title_action_required_respects_spinner_setting() {
 #[tokio::test]
 async fn terminal_title_action_required_blinks_when_animations_are_enabled() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.local_settings.tui.effects.title = false;
     chat.bottom_pane.set_task_running(/*running*/ true);
+    assert!(chat.should_animate_terminal_title_spinner());
+    chat.local_settings.tui.effects.progress = false;
+    assert!(!chat.should_animate_terminal_title_spinner());
+    chat.local_settings.tui.effects.title = true;
     chat.refresh_terminal_title();
 
     let request = ExecApprovalRequestEvent {
@@ -201,6 +206,13 @@ async fn terminal_title_action_required_blinks_when_animations_are_enabled() {
         Some("[ . ] Action Required | project".to_string())
     );
     assert!(chat.should_animate_terminal_title_action_required());
+    chat.local_settings.tui.effects.title = false;
+    chat.refresh_terminal_title();
+    assert_eq!(
+        chat.last_terminal_title,
+        Some("[ ! ] Action Required | project".into())
+    );
+    assert!(!chat.should_animate_terminal_title_action_required());
 }
 
 #[tokio::test]
@@ -312,14 +324,14 @@ async fn thread_title_progress_animates_when_main_turn_is_idle() {
     chat.terminal_title_animation_origin = now;
     assert_eq!(
         chat.terminal_title_value_for_item(TerminalTitleItem::ThreadName, now),
-        Some("renaming... ⠋".to_string())
+        Some("⠋".to_string())
     );
     assert_eq!(
         chat.terminal_title_value_for_item(
             TerminalTitleItem::ThreadName,
             now + Duration::from_millis(/*millis*/ 100)
         ),
-        Some("renaming... ⠙".to_string())
+        Some("⠙".to_string())
     );
     chat.refresh_thread_title_progress_for_time_tick();
     assert!(draw_rx.try_recv().is_ok());
@@ -335,7 +347,7 @@ async fn thread_title_progress_animates_when_main_turn_is_idle() {
     chat.local_settings.tui.animations = false;
     chat.refresh_status_surfaces();
     assert!(chat.terminal_title_next_refresh.is_none());
-    assert_eq!(chat.last_terminal_title, Some("renaming... ⠋".to_string()));
+    assert_eq!(chat.last_terminal_title, Some("⠋".to_string()));
     chat.local_settings.tui.animations = true;
     chat.set_thread_title_generation_pending(/*pending*/ false);
     assert_eq!(chat.last_terminal_title, None);

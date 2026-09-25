@@ -1,4 +1,7 @@
+use super::session_lifecycle_requests::recorded_params;
+use super::session_lifecycle_requests::start_recording_remote_app_server;
 use super::*;
+use crate::ThreadParamsMode;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
@@ -14,6 +17,175 @@ use pretty_assertions::assert_eq;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::unbounded_channel;
 
+#[tokio::test]
+async fn windows_sandbox_setup_uses_local_app_server_connection() {
+    let mut app = make_test_app().await;
+    app.chat_widget.windows_sandbox_local_server = true;
+    assert!(app.windows_sandbox_setup_is_local());
+
+    let endpoint = crate::RemoteAppServerEndpoint::WebSocket {
+        websocket_url: "ws://127.0.0.1:4500".to_string(),
+        auth_token: None,
+    };
+    app.app_server_target = crate::AppServerTarget::LocalDaemon {
+        allow_embedded_fallback: true,
+        endpoint: endpoint.clone(),
+    };
+    assert!(app.windows_sandbox_setup_is_local());
+
+    app.app_server_target = crate::AppServerTarget::Remote { endpoint };
+    assert!(!app.windows_sandbox_setup_is_local());
+}
+
+#[tokio::test]
+async fn windows_sandbox_setup_uses_observed_thread_host() {
+    let mut app = make_test_app().await;
+    app.chat_widget.windows_sandbox_local_server = true;
+    app.chat_widget.windows_sandbox_elevated_setup_complete = true;
+    for (ids, expected) in [
+        (None, WindowsSandboxHost::Unknown),
+        (Some(vec![]), WindowsSandboxHost::Unknown),
+        (
+            Some(vec![codex_exec_server::LOCAL_ENVIRONMENT_ID]),
+            WindowsSandboxHost::Local,
+        ),
+        (Some(vec!["remote"]), WindowsSandboxHost::Remote),
+        (
+            Some(vec!["remote", codex_exec_server::LOCAL_ENVIRONMENT_ID]),
+            WindowsSandboxHost::Mixed,
+        ),
+    ] {
+        let environments = ids.map(|ids| {
+            ids.into_iter()
+                .map(|id| codex_app_server_protocol::ThreadEnvironment {
+                    environment_id: id.to_string(),
+                    cwd: codex_utils_absolute_path::AbsolutePathBuf::try_from(std::env::temp_dir())
+                        .unwrap()
+                        .into(),
+                    runtime_workspace_roots: Vec::new(),
+                })
+                .collect::<Vec<_>>()
+        });
+        let mut session = test_thread_session(ThreadId::new(), app.config.cwd.to_path_buf());
+        session.windows_sandbox_host =
+            crate::windows_sandbox::host_from_environments(environments.as_deref());
+        app.chat_widget.handle_thread_session(session);
+        assert!(app.chat_widget.windows_sandbox_elevated_setup_complete);
+        assert_eq!(app.windows_sandbox_host(), expected);
+        assert_eq!(
+            app.windows_sandbox_setup_is_local(),
+            expected == WindowsSandboxHost::Local
+        );
+    }
+    app.chat_widget.windows_sandbox_host = WindowsSandboxHost::Local;
+    app.chat_widget.windows_sandbox_local_server = false;
+    assert!(!app.windows_sandbox_setup_is_local());
+}
+
+#[tokio::test]
+async fn uncertain_windows_sandbox_setup_keeps_intent_and_input_locked() {
+    use crate::app_event::WindowsSandboxEnableMode;
+    use codex_app_server_protocol::WindowsSandboxSetupStartResponse;
+    let preset = builtin_approval_presets()
+        .into_iter()
+        .find(|preset| preset.id == "auto")
+        .expect("auto preset");
+
+    for response in [
+        Ok(Err(TypedRequestError::Transport {
+            method: "windowsSandbox/setupStart".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "connection closed"),
+        })),
+        tokio::time::timeout(
+            Duration::ZERO,
+            std::future::pending::<
+                std::result::Result<WindowsSandboxSetupStartResponse, TypedRequestError>,
+            >(),
+        )
+        .await,
+    ] {
+        let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+        while events.try_recv().is_ok() {}
+        app.windows_sandbox.pending_setup =
+            Some((WindowsSandboxEnableMode::Elevated, preset.clone(), None));
+        app.windows_sandbox.setup_started_at = Some(Instant::now());
+        app.chat_widget.show_windows_sandbox_setup_status();
+        let transport_error = matches!(&response, Ok(Err(TypedRequestError::Transport { .. })));
+
+        app.finish_windows_sandbox_setup_start(response);
+
+        assert!(app.windows_sandbox.pending_setup.is_some());
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.chat_widget.composer_text_with_pending().is_empty());
+        let cell = match events.try_recv() {
+            Ok(AppEvent::InsertHistoryCell(cell)) => cell,
+            other => panic!("expected setup error message, got {other:?}"),
+        };
+        let rendered = lines_to_single_string(&cell.display_lines(/*width*/ 160));
+        if transport_error {
+            insta::assert_snapshot!(rendered, @"■ Windows sandbox setup response was lost. Waiting for completion or reconnection.");
+        } else {
+            insta::assert_snapshot!(rendered, @"■ Windows sandbox setup request timed out. Waiting for completion; restart Codex if it does not finish.");
+        }
+    }
+}
+
+#[tokio::test]
+async fn windows_sandbox_setup_completion_requires_matching_pending_mode() -> Result<()> {
+    use crate::app_event::WindowsSandboxEnableMode;
+    use codex_app_server_protocol::WindowsSandboxSetupCompletedNotification;
+    use codex_app_server_protocol::WindowsSandboxSetupMode;
+
+    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+    app.chat_widget.windows_sandbox_local_server = true;
+    while events.try_recv().is_ok() {}
+    let app_server =
+        crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
+    let preset = builtin_approval_presets()
+        .into_iter()
+        .find(|preset| preset.id == "auto")
+        .expect("auto preset");
+    app.windows_sandbox.pending_setup = Some((WindowsSandboxEnableMode::Elevated, preset, None));
+    app.windows_sandbox.setup_started_at = Some(Instant::now());
+
+    for mode in [
+        WindowsSandboxSetupMode::Unelevated,
+        WindowsSandboxSetupMode::Elevated,
+    ] {
+        app.handle_app_server_event(
+            &app_server,
+            codex_app_server_client::AppServerEvent::ServerNotification(Box::new(
+                ServerNotification::WindowsSandboxSetupCompleted(
+                    WindowsSandboxSetupCompletedNotification {
+                        mode,
+                        success: true,
+                        error: None,
+                    },
+                ),
+            )),
+        )
+        .await;
+        assert_eq!(
+            app.windows_sandbox.pending_setup.is_some(),
+            mode == WindowsSandboxSetupMode::Unelevated
+        );
+    }
+    assert!(!app.chat_widget.windows_sandbox_elevated_setup_complete);
+    assert!(app.windows_sandbox_blocks_thread_switch());
+    assert!(matches!(
+        events.try_recv(),
+        Ok(AppEvent::EnableWindowsSandboxForAgentMode {
+            mode: WindowsSandboxEnableMode::Elevated,
+            ..
+        })
+    ));
+    assert!(events.try_recv().is_err());
+
+    app_server.shutdown().await?;
+    Ok(())
+}
+
 fn startup_bottom_pane() -> (BottomPane, UnboundedReceiver<AppEvent>) {
     let (app_event_tx, app_event_rx) = unbounded_channel();
     (
@@ -25,6 +197,7 @@ fn startup_bottom_pane() -> (BottomPane, UnboundedReceiver<AppEvent>) {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: true,
             animations_enabled: true,
+            effects: Default::default(),
             skills: None,
         }),
         app_event_rx,
@@ -58,74 +231,6 @@ async fn terminal_color_probe_waits_for_startup_sandbox_choice() {
     assert!(matches!(
         app_event_rx.try_recv(),
         Ok(AppEvent::BeginWindowsSandboxLegacySetup { .. })
-    ));
-    assert!(app.ready_for_terminal_color_probe(/*has_pending_app_events*/ false));
-}
-
-#[tokio::test]
-async fn terminal_color_probe_waits_for_delayed_world_writable_scan_failure() {
-    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
-    app.startup_protected_input_boundary = true;
-    app.windows_sandbox.startup_world_writable_scan_pending = true;
-    while app_event_rx.try_recv().is_ok() {}
-
-    assert!(!app.ready_for_terminal_color_probe(/*has_pending_app_events*/ false));
-
-    app.app_event_tx
-        .send(AppEvent::OpenWorldWritableWarningConfirmation {
-            preset: None,
-            profile_selection: None,
-            sample_paths: Vec::new(),
-            extra_count: 0,
-            failed_scan: true,
-        });
-    app.app_event_tx
-        .send(AppEvent::StartupWorldWritableScanCompleted);
-    assert!(!app.ready_for_terminal_color_probe(/*has_pending_app_events*/ true));
-
-    let warning = app_event_rx
-        .try_recv()
-        .expect("the delayed scan should queue its warning before completion");
-    let AppEvent::OpenWorldWritableWarningConfirmation {
-        preset,
-        profile_selection,
-        sample_paths,
-        extra_count,
-        failed_scan,
-    } = warning
-    else {
-        panic!("the delayed scan should open a protected warning before completion");
-    };
-    app.chat_widget.open_world_writable_warning_confirmation(
-        preset,
-        profile_selection,
-        sample_paths,
-        extra_count,
-        failed_scan,
-    );
-    assert!(matches!(
-        app_event_rx.try_recv(),
-        Ok(AppEvent::StartupWorldWritableScanCompleted)
-    ));
-    app.windows_sandbox.startup_world_writable_scan_pending = false;
-
-    assert!(!app.windows_sandbox.startup_world_writable_scan_pending);
-    assert!(!app.ready_for_terminal_color_probe(/*has_pending_app_events*/ false));
-    for character in "20;rgb:2222/ffff/ffff".chars() {
-        app.chat_widget
-            .handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
-        assert!(app_event_rx.try_recv().is_err());
-    }
-
-    app.chat_widget
-        .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(matches!(
-        app_event_rx.try_recv(),
-        Ok(AppEvent::UpdateWorldWritableWarningAcknowledged(true))
-    ));
-    assert!(matches!(
-        app_event_rx.try_recv(),
-        Ok(AppEvent::PersistWorldWritableWarningAcknowledged)
     ));
     assert!(app.ready_for_terminal_color_probe(/*has_pending_app_events*/ false));
 }
@@ -489,6 +594,8 @@ async fn startup_draft_delayed_approval_becomes_protected_on_redraw() -> Result<
     let mut pending_startup_draft = Some(draft);
     app.chat_widget
         .restore_startup_draft_when_ready(&mut pending_startup_draft);
+    // The warning panel owns input but must not mask a later protected modal.
+    app.chat_widget.open_warnings(&[]);
 
     let approval_request =
         exec_approval_request(thread_id, "turn-1", "call-1", /*approval_id*/ None);
@@ -503,7 +610,8 @@ async fn startup_draft_delayed_approval_becomes_protected_on_redraw() -> Result<
         .try_recv()
         .expect("approval should be queued on the active thread");
     app.handle_thread_event_now(approval_event);
-    assert!(!app.chat_widget.has_active_view());
+    assert!(app.chat_widget.has_active_view());
+    assert!(!app.chat_widget.has_active_modal());
     assert!(app.startup_pending_protected_request);
 
     app.handle_tui_event(
@@ -515,12 +623,12 @@ async fn startup_draft_delayed_approval_becomes_protected_on_redraw() -> Result<
     assert!(app.startup_protected_input_boundary);
     assert!(app.startup_pending_protected_request);
 
-    tokio::time::sleep(Duration::from_millis(/*millis*/ 75)).await;
+    tokio::time::sleep(Duration::from_millis(/*millis*/ 1100)).await;
     let redraw_result = app
         .handle_tui_event(&mut tui, &mut app_server, TuiEvent::Draw)
         .await;
 
-    assert!(app.chat_widget.has_active_view());
+    assert!(app.chat_widget.has_active_modal());
     assert!(!tui.terminal.viewport_area.is_empty());
     while let Ok(event) = app_event_rx.try_recv() {
         assert!(
@@ -906,12 +1014,7 @@ async fn queued_startup_app_event_owns_protected_view_before_draft_restore() -> 
 
     while let Ok(event) = app_event_rx.try_recv() {
         assert!(
-            !matches!(
-                event,
-                AppEvent::StartFileSearch(_)
-                    | AppEvent::UpdateWorldWritableWarningAcknowledged(_)
-                    | AppEvent::PersistWorldWritableWarningAcknowledged
-            ),
+            !matches!(event, AppEvent::StartFileSearch(_)),
             "protected startup app event must own input before draft side effects: {event:?}"
         );
     }
@@ -1048,6 +1151,113 @@ async fn startup_thread_started_submits_queued_startup_input() {
         ),
         other => panic!("expected queued startup input submission, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn fresh_startup_notice_follows_session_attachment() {
+    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+    app.pending_startup_thread_start = true;
+    app.pending_server_version_notice =
+        Some(crate::status::remote_connection::ServerVersionNotice {
+            message: "Older server notice".to_string(),
+            offer_update: false,
+        });
+    assert!(events.try_recv().is_err());
+
+    let mut app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+        .await
+        .expect("embedded app server");
+    app.handle_startup_thread_started(
+        &mut app_server,
+        Ok(AppServerStartedThread {
+            session: test_thread_session(ThreadId::new(), test_path_buf("/tmp/project")),
+            turns: Vec::new(),
+            blocks_direct_input: false,
+            task_tools_available: false,
+        }),
+    )
+    .await
+    .expect("startup thread should attach");
+
+    let cells = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => Some(cell),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(cells.len() > 1, "session history should precede the notice");
+    insta::assert_snapshot!(lines_to_single_string(&cells.last().unwrap().transcript_lines(/*width*/ 80)), @"⚠ Older server notice");
+    assert_eq!(app.pending_server_version_notice, None);
+}
+
+#[tokio::test]
+async fn remote_overview_startup_hides_disabled_older_server_notice() -> Result<()> {
+    let mut app = make_test_app().await;
+    app.local_settings.tui.show_server_version_notice = false;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = crate::resolve_remote_addr(&format!("ws://{}", listener.local_addr()?))?;
+    app.app_server_target = AppServerTarget::Remote {
+        endpoint: endpoint.clone(),
+    };
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        super::disconnect::serve_reconnect_requests(
+            tokio_tungstenite::accept_async(stream).await?,
+            |_request| std::future::ready(None),
+        )
+        .await
+    });
+    let session = AppServerSession::new(
+        crate::connect_remote_app_server(endpoint).await?,
+        ThreadParamsMode::Remote,
+    );
+
+    assert_eq!(
+        app.initialize_server_version_notice("2.1.0", session.server_version()),
+        None
+    );
+    let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 80);
+    assert!(!rendered.contains("Service v"));
+    app.chat_widget.remote_connection =
+        crate::status::remote_connection::remote_connection_status_value(
+            &app.app_server_target,
+            session.server_version(),
+        );
+    assert_eq!(
+        app.chat_widget
+            .remote_connection
+            .as_ref()
+            .expect("remote status")
+            .version,
+        "v2.0.0"
+    );
+    app.local_settings.tui.show_server_version_notice = true;
+    app.refresh_server_version_overview_notice("2.1.0");
+    let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 80);
+    assert!(rendered.contains("Service v2.0.0 < Codex CLI v2.1.0"));
+    app.pending_server_version_notice =
+        Some(crate::status::remote_connection::ServerVersionNotice {
+            message: "Older service".to_string(),
+            offer_update: false,
+        });
+    app.reconnect.seen_version_notice = Some("old-key".to_string());
+    app.local_settings.tui.show_server_version_notice = false;
+    app.refresh_server_version_overview_notice("2.1.0");
+    assert_eq!(app.pending_server_version_notice, None);
+    assert_eq!(app.reconnect.seen_version_notice, None);
+    assert_eq!(
+        app.agents_overview
+            .view_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .server_version_notice,
+        None
+    );
+    session.shutdown().await?;
+    server.await??;
+    Ok(())
 }
 
 #[tokio::test]
@@ -1189,7 +1399,7 @@ async fn owned_subagent_approval_before_thread_started_is_preserved() -> Result<
     let codex_home = tempdir()?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
-    let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
     let parent = app_server.start_thread(&app.config).await?;
     let parent_thread_id = parent.session.thread_id;
     app.enqueue_primary_thread_session(parent.session, parent.turns)
@@ -1406,9 +1616,11 @@ async fn ignore_same_thread_resume_allows_retrying_read_only_view() -> Result<()
         &app_server,
         thread_id,
         ThreadEventSnapshot {
+            delegated_turns: Vec::new(),
             session: Some(session),
             turns: vec![test_turn("running", TurnStatus::InProgress, Vec::new())],
             events: Vec::new(),
+            active_reasoning_item: None,
             input_state: None,
         },
         /*resume_restored_queue*/ false,
@@ -1441,5 +1653,59 @@ async fn external_writer_startup_keeps_initial_prompt_as_draft() -> Result<()> {
             } | AppEvent::CodexOp(Op::UserTurn { .. })
         )
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn windows_sandbox_config_refresh_uses_connected_server() -> Result<()> {
+    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+    let (server, requests, proxy) = start_recording_remote_app_server(&app.config).await?;
+    std::fs::write(
+        app.config.codex_home.join("config.toml"),
+        "[windows]\nsandbox = \"unelevated\"\n",
+    )?;
+    app.chat_widget.windows_sandbox_config.mode =
+        Some(codex_app_server_protocol::WindowsSandboxSetupMode::Elevated);
+    assert!(app.refresh_windows_sandbox_config(&server).await);
+    let loaded_config = crate::windows_sandbox::WindowsSandboxConfig {
+        mxc_selected: false,
+        mode: Some(codex_app_server_protocol::WindowsSandboxSetupMode::Unelevated),
+        requirements: Some(None),
+    };
+    assert_eq!(app.chat_widget.windows_sandbox_config, loaded_config);
+    assert_eq!(
+        recorded_params(&requests, "config/read")[0]["cwd"],
+        app.config.cwd.display().to_string()
+    );
+    assert_eq!(
+        recorded_params(&requests, "configRequirements/read").len(),
+        1
+    );
+    proxy.abort();
+    let _ = proxy.await;
+    set_test_initial_prompt(&mut app, "keep this draft".to_string());
+    app.chat_widget.windows_sandbox_elevated_setup_complete = true;
+    while events.try_recv().is_ok() {}
+    assert!(!app.refresh_windows_sandbox_config(&server).await);
+    let cell = match events.try_recv()? {
+        AppEvent::InsertHistoryCell(cell) => cell,
+        other => panic!("expected configuration error message, got {other:?}"),
+    };
+    insta::assert_snapshot!(lines_to_single_string(&cell.display_lines(/*width*/ 160)), @"■ Could not read Windows sandbox configuration and requirements from the app server.");
+    assert!(app.chat_widget.windows_sandbox_elevated_setup_complete);
+    assert_eq!(
+        app.chat_widget.composer_text_with_pending(),
+        "keep this draft"
+    );
+    assert!(app.chat_widget.initial_user_message.is_none());
+    let mut recovered = crate::start_embedded_app_server_for_picker(&app.config).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.chat_widget.windows_sandbox_local_server = true;
+    app.chat_widget.windows_sandbox_host = WindowsSandboxHost::Local;
+    Box::pin(app.handle_event(&mut tui, &mut recovered, AppEvent::OpenPermissionsPopup)).await?;
+    assert_eq!(app.chat_widget.windows_sandbox_config, loaded_config);
+    assert!(app.chat_widget.has_active_view());
+    recovered.shutdown().await?;
+    server.shutdown().await?;
     Ok(())
 }

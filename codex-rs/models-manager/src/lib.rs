@@ -35,10 +35,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bundled_visible_models_do_not_require_a_newer_codex_client() {
+        let catalog = bundled_models_response().expect("bundled model catalog");
+        let version =
+            client_version_to_whole_for_product(codex_product_info::Product::OpenInterpreter);
+        let parse_version = |value: &str| {
+            value
+                .split('.')
+                .map(|part| part.parse::<u32>().expect("numeric version component"))
+                .collect::<Vec<_>>()
+        };
+        let client_version = parse_version(&version);
+        let models = serde_json::to_value(catalog).expect("serializable catalog");
+        for model in models["models"].as_array().expect("model list") {
+            if model["visibility"] != "list" {
+                continue;
+            }
+            let Some(minimum) = model["minimal_client_version"].as_str() else {
+                continue;
+            };
+            assert!(
+                client_version >= parse_version(minimum),
+                "{} requires Codex {minimum}, but OIX advertises {version}",
+                model["slug"],
+            );
+        }
+    }
+
+    #[test]
     fn open_interpreter_advertises_embedded_codex_compatibility_version() {
         assert_eq!(
             client_version_to_whole_for_product(codex_product_info::Product::OpenInterpreter),
-            "0.154.0"
+            "0.156.1"
         );
     }
 }

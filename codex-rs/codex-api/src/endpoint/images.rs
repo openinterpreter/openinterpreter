@@ -191,6 +191,7 @@ mod tests {
             background: Some(ImageBackground::Opaque),
             data: vec![ImageData {
                 b64_json: "REDACT".to_string(),
+                generation_id: None,
             }],
             quality: Some(ImageQuality::Medium),
             size: Some("1024x1536".to_string()),
@@ -253,6 +254,45 @@ mod tests {
                 "quality": "medium",
                 "size": "1024x1536",
             }))
+        );
+    }
+
+    #[tokio::test]
+    async fn preserves_distinct_generation_ids_on_image_data() {
+        let body = serde_json::to_vec(&json!({
+            "created": 1,
+            "data": [
+                {"b64_json": "first", "generation_id": "gen-first"},
+                {"b64_json": "second", "generation_id": "gen-second"},
+                {"b64_json": "legacy"}
+            ]
+        }))
+        .expect("serialize response");
+        let transport = CapturingTransport::new(body);
+        let client = ImagesClient::new(transport, provider(), Arc::new(DummyAuth));
+
+        let (response, _) = client
+            .generate(
+                &ImageGenerationRequest {
+                    prompt: "test".to_string(),
+                    background: None,
+                    model: "gpt-image-2".to_string(),
+                    n: None,
+                    quality: None,
+                    size: None,
+                },
+                HeaderMap::new(),
+            )
+            .await
+            .expect("image response should parse");
+
+        assert_eq!(
+            response
+                .data
+                .iter()
+                .map(|image| image.generation_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("gen-first"), Some("gen-second"), None]
         );
     }
 

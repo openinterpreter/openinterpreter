@@ -1,0 +1,18 @@
+---
+source: tui/src/history_cell/computer_activity_tests.rs
+expression: transcript
+---
+• Called cua_repl.js({"title":"Open browser","code":"await cua.getState()"})
+  └ Error: No browser is available
+
+    ## Computer Use
+    Full tool documentation
+• Called cua_repl.js({"title":"Connect to Chrome","code":"await cua.getState()"})
+  └ connected
+• Called cua_repl.js({"title":"Reproduce the clear-command bug","code":"await cua.getState()"})
+  └ reproduced
+• Called cua_repl.js({"title":"Capture the reproduced bug","code":"await cua.getState()"})
+  └ screenshot metadata
+    Returned image
+• Called cua_repl.js({"title":"Check the final page","code":"await cua.getState()"})
+  └ checked

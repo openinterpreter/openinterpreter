@@ -6,6 +6,7 @@ use std::future::Future;
 use std::io;
 use std::time::Duration;
 
+use codex_utils_pty::Command;
 use futures::FutureExt;
 use rmcp::service::RoleClient;
 use rmcp::service::RxJsonRpcMessage;
@@ -15,15 +16,13 @@ use rmcp::transport::async_rw::AsyncRwTransport;
 use tokio::process::ChildStderr;
 use tokio::process::ChildStdin;
 use tokio::process::ChildStdout;
-use tokio::process::Command;
 
 use crate::bounded_stdio_transport::BoundedStdioTransport;
-use crate::local_child;
-use crate::local_child::LocalChild;
 use crate::protocol_mode::McpProtocolMode;
+use codex_utils_pty::Child;
 
 pub(super) struct LocalStdioTransport {
-    child: LocalChild,
+    child: Box<Child>,
     transport: StdioTransport,
 }
 
@@ -40,7 +39,7 @@ impl LocalStdioTransport {
         program_name: String,
         protocol_mode: McpProtocolMode,
     ) -> io::Result<(Self, Option<ChildStderr>)> {
-        let mut child = local_child::spawn(command)?;
+        let mut child = command.spawn()?;
         let stdin = child
             .stdin
             .take()
@@ -56,7 +55,13 @@ impl LocalStdioTransport {
                 StdioTransport::V20260728(BoundedStdioTransport::new(stdin, stdout, program_name))
             }
         };
-        Ok((Self { child, transport }, stderr))
+        Ok((
+            Self {
+                child: Box::new(child),
+                transport,
+            },
+            stderr,
+        ))
     }
 
     pub(super) fn id(&self) -> Option<u32> {

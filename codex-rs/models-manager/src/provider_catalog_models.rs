@@ -173,6 +173,32 @@ mod tests {
     }
 
     #[test]
+    fn bundled_provider_models_seed_native_openai_gpt6_choices() {
+        let provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+        let models = bundled_provider_model_infos(&provider);
+
+        for model_id in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+            assert_eq!(
+                models.iter().filter(|model| model.slug == model_id).count(),
+                1,
+                "expected exactly one {model_id} model"
+            );
+            let model = models
+                .iter()
+                .find(|model| model.slug == model_id)
+                .expect("model should be present");
+            assert_eq!(model.visibility, ModelVisibility::List);
+            assert_eq!(model.context_window, Some(1_050_000));
+            assert!(model.input_modalities.iter().any(|modality| {
+                matches!(
+                    modality,
+                    codex_protocol::openai_models::InputModality::Image
+                )
+            }));
+        }
+    }
+
+    #[test]
     fn bundled_provider_models_seed_zai_zcode() {
         let models = bundled_provider_model_infos(&provider(
             "Z.AI ZCode",

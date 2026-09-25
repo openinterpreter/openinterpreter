@@ -1,5 +1,6 @@
 //! Experimental controls with popup-owned discovery and configured enablement.
 //! Failed saves retain intent for explicit retry; cancellation remains available.
+//! Server voice discovery is gated by the client package's native runtime.
 
 use crate::experimental_features::FeatureWriteResult;
 use codex_app_server_protocol::ExperimentalFeature;
@@ -21,7 +22,9 @@ use ratatui::layout::Rect;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Block;
+use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
+use ratatui::widgets::Wrap;
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
@@ -29,19 +32,17 @@ use crate::key_hint;
 use crate::key_hint::KeyBindingListExt;
 use crate::keymap::ListAction;
 use crate::keymap::ListKeymap;
-use crate::render::Insets;
-use crate::render::RectExt as _;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
 use crate::style::user_message_style;
 
 use super::CancellationEvent;
 use super::bottom_pane_view::BottomPaneView;
+use super::picker_rows::measure_rows_height;
+use super::picker_rows::render_rows;
 use super::popup_consts::MAX_POPUP_ROWS;
 use super::scroll_state::ScrollState;
 use super::selection_popup_common::GenericDisplayRow;
-use super::selection_popup_common::measure_rows_height;
-use super::selection_popup_common::render_rows;
 
 pub(crate) struct ExperimentalFeatureItem {
     pub key: String,
@@ -53,6 +54,7 @@ pub(crate) struct ExperimentalFeatureItem {
 
 pub(crate) struct ExperimentalFeaturesView {
     features: Vec<ExperimentalFeatureItem>,
+    voice_supported: bool,
     initial_enabled: Vec<bool>,
     unconfirmed: Vec<String>,
     catalog_rx: Option<oneshot::Receiver<Result<Vec<ExperimentalFeature>, String>>>,
@@ -82,6 +84,7 @@ impl ExperimentalFeaturesView {
             }
             .to_string(),
             thread_id,
+            voice_supported: codex_realtime_webrtc::RealtimeWebrtcSession::is_supported(),
             write_rx: None,
             catalog_rx,
             unconfirmed: Vec::new(),
@@ -99,13 +102,15 @@ impl ExperimentalFeaturesView {
 
     fn header(&self, width: u16) -> impl Renderable {
         let mut header = ColumnRenderable::new();
-        header.push(Line::from("Experimental features".bold()));
+        header.push(
+            Paragraph::new(Line::from("Experimental features".bold())).wrap(Wrap { trim: false }),
+        );
         for text in [
             "Checked features are configured on. Some experimental features take effect only in new tasks or after restarting the Codex server.",
             self.discovery_status.as_str(),
         ].into_iter().filter(|text| !text.is_empty()) {
             for line in textwrap::wrap(text, usize::from(width.max(1))) {
-                header.push(Line::from(line.into_owned().dim()));
+                header.push(Paragraph::new(Line::from(line.into_owned().dim())).wrap(Wrap { trim: false }));
             }
         }
         header
@@ -116,6 +121,16 @@ impl ExperimentalFeaturesView {
             self.state.selected_idx = None;
         } else if self.state.selected_idx.is_none() {
             self.state.selected_idx = Some(0);
+        }
+    }
+
+    fn current_hint(&self) -> Line<'static> {
+        if self.write_rx.is_some() {
+            Line::from("Saving… Closing this popup will not cancel the write.")
+        } else if !self.unconfirmed.is_empty() {
+            Line::from("Selections retained. Save to retry, or cancel to close.")
+        } else {
+            self.footer_hint.clone()
         }
     }
 
@@ -136,6 +151,8 @@ impl ExperimentalFeaturesView {
             let read_only = if item.writable { "" } else { " (read-only)" };
             let name = format!("{prefix} [{marker}] {}{read_only}", item.name);
             rows.push(GenericDisplayRow {
+                selection_style: Some(super::picker_style::selection_style()),
+                wrap_indent: Some(6),
                 name,
                 description: Some(item.description.clone()),
                 is_disabled: !item.writable || self.write_rx.is_some(),
@@ -253,10 +270,6 @@ impl ExperimentalFeaturesView {
             self.complete = true;
         }
     }
-
-    fn rows_width(total_width: u16) -> u16 {
-        total_width.saturating_sub(2)
-    }
 }
 
 impl BottomPaneView for ExperimentalFeaturesView {
@@ -312,7 +325,10 @@ impl BottomPaneView for ExperimentalFeaturesView {
             Ok(features) => {
                 let mut count = 0;
                 for feature in features {
-                    if feature.stage != ExperimentalFeatureStage::Beta {
+                    if feature.stage != ExperimentalFeatureStage::Beta
+                        || (feature.name == Feature::RealtimeConversation.key()
+                            && !self.voice_supported)
+                    {
                         continue;
                     }
                     self.initial_enabled.push(feature.enabled);
@@ -404,8 +420,16 @@ impl Renderable for ExperimentalFeaturesView {
             return;
         }
 
-        let [content_area, footer_area] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
+        let hint = self.current_hint();
+        let hint_lines = super::selection_popup_common::wrap_styled_line(
+            &hint,
+            area.width.saturating_sub(/*rhs*/ 2),
+        );
+        let [content_area, footer_area] = Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(hint_lines.len() as u16),
+        ])
+        .areas(area);
 
         Block::default()
             .style(user_message_style())
@@ -414,29 +438,14 @@ impl Renderable for ExperimentalFeaturesView {
         let header = self.header(content_area.width.saturating_sub(4));
         let header_height = header.desired_height(content_area.width.saturating_sub(4));
         let rows = self.build_rows();
-        let rows_width = Self::rows_width(content_area.width);
-        let rows_height = measure_rows_height(
-            &rows,
-            &self.state,
-            MAX_POPUP_ROWS,
-            rows_width.saturating_add(1),
-        );
-        let [header_area, _, list_area] = Layout::vertical([
-            Constraint::Max(header_height),
-            Constraint::Max(1),
-            Constraint::Length(rows_height),
-        ])
-        .areas(content_area.inset(Insets::vh(/*v*/ 1, /*h*/ 2)));
+        let rows_height =
+            measure_rows_height(&rows, &self.state, MAX_POPUP_ROWS, content_area.width);
+        let [header_area, _, render_area] =
+            super::picker_rows::layout(content_area, header_height, /*search*/ 0, rows_height);
 
         header.render(header_area, buf);
 
-        if list_area.height > 0 && (!rows.is_empty() || self.catalog_rx.is_none()) {
-            let render_area = Rect {
-                x: list_area.x.saturating_sub(2),
-                y: list_area.y,
-                width: rows_width.max(1),
-                height: list_area.height,
-            };
+        if render_area.height > 0 && (!rows.is_empty() || self.catalog_rx.is_none()) {
             render_rows(
                 render_area,
                 buf,
@@ -453,42 +462,38 @@ impl Renderable for ExperimentalFeaturesView {
             width: footer_area.width.saturating_sub(2),
             height: footer_area.height,
         };
-        let hint = if self.write_rx.is_some() {
-            Line::from("Saving… Closing this popup will not cancel the write.")
-        } else if !self.unconfirmed.is_empty() {
-            Line::from("Selections retained. Save to retry, or cancel to close.")
-        } else {
-            self.footer_hint.clone()
-        };
-        hint.dim().render(hint_area, buf);
+        Paragraph::new(hint_lines).dim().render(hint_area, buf);
     }
 
     fn desired_height(&self, width: u16) -> u16 {
         let rows = self.build_rows();
-        let rows_width = Self::rows_width(width);
-        let rows_height = measure_rows_height(
-            &rows,
-            &self.state,
-            MAX_POPUP_ROWS,
-            rows_width.saturating_add(1),
-        );
+        let rows_height = measure_rows_height(&rows, &self.state, MAX_POPUP_ROWS, width);
 
         let mut height = self
             .header(width.saturating_sub(4))
             .desired_height(width.saturating_sub(4));
         height = height.saturating_add(rows_height + 3);
-        height.saturating_add(1)
+        height.saturating_add(
+            super::selection_popup_common::wrap_styled_line(
+                &self.current_hint(),
+                width.saturating_sub(/*rhs*/ 2),
+            )
+            .len() as u16,
+        )
     }
 }
 
 fn experimental_popup_hint_line(keymap: &ListKeymap) -> Line<'static> {
-    let mut spans = vec![
-        "Press ".into(),
-        key_hint::plain(KeyCode::Char(' ')).into(),
-        " to select".into(),
-    ];
+    let mut spans = vec![key_hint::plain(KeyCode::Char(' ')).into(), " toggle".into()];
     if let Some(accept) = keymap.primary_hint(ListAction::Accept) {
-        spans.extend([" or ".into(), accept.into(), " to save".into()]);
+        spans.push(" · ".into());
+        spans.extend(accept.spans());
+        spans.push(" save".into());
+    }
+    if let Some(cancel) = keymap.primary_hint(ListAction::Cancel) {
+        spans.push(" · ".into());
+        spans.extend(cancel.spans());
+        spans.push(" save/close".into());
     }
     Line::from(spans)
 }

@@ -21,15 +21,24 @@ const GITHUB_CLOUD_HOST_SUFFIXES: &[&str] = &[".ghe.com"];
 
 pub(super) static PROVIDER: CredentialProvider = CredentialProvider {
     context_env_vars: &[GH_HOST_ENV_VAR],
+    credential_prefixes: GITHUB_TOKEN_PREFIXES,
+    ignored_credential_prefixes: &[],
+    credential_watermark: None,
+    minimum_credential_len: GITHUB_TOKEN_MIN_LEN,
     sources: &[
         CredentialSource {
             env_vars: GITHUB_CLOUD_TOKEN_ENV_VARS,
             binding_env_vars: &[],
+            invalidates_host_binding: |_| false,
             host_binding: github_cloud_binding,
         },
         CredentialSource {
             env_vars: GITHUB_ENTERPRISE_TOKEN_ENV_VARS,
             binding_env_vars: &[GH_HOST_ENV_VAR],
+            invalidates_host_binding: |env| {
+                env_value(env, GH_HOST_ENV_VAR).is_some()
+                    && github_host_hint(env).is_none_or(|host| github_cloud_host(&host))
+            },
             host_binding: github_enterprise_binding,
         },
     ],
@@ -56,7 +65,7 @@ fn insert_request_header(headers: &mut HeaderMap, value: HeaderValue) {
     headers.insert(AUTHORIZATION, value);
 }
 
-fn translate_request_header(
+pub(super) fn translate_request_header(
     headers: &HeaderMap,
     expected_value: &str,
     replacement_value: &str,
@@ -68,16 +77,27 @@ fn translate_request_header(
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(value)
             .ok()?;
-        let separator = decoded.iter().position(|byte| *byte == b':')?;
         let mut translated = Vec::with_capacity(decoded.len() + replacement_value.len());
-        if &decoded[..separator] == expected_value.as_bytes() {
-            translated.extend_from_slice(replacement_value.as_bytes());
-            translated.extend_from_slice(&decoded[separator..]);
-        } else if &decoded[separator + 1..] == expected_value.as_bytes() {
-            translated.extend_from_slice(&decoded[..=separator]);
+        if decoded == expected_value.as_bytes() {
             translated.extend_from_slice(replacement_value.as_bytes());
         } else {
-            return None;
+            let separator = decoded.iter().position(|byte| *byte == b':')?;
+            let username = &decoded[..separator];
+            let password = &decoded[separator + 1..];
+            if username != expected_value.as_bytes() && password != expected_value.as_bytes() {
+                return None;
+            }
+            translated.extend_from_slice(if username == expected_value.as_bytes() {
+                replacement_value.as_bytes()
+            } else {
+                username
+            });
+            translated.push(b':');
+            translated.extend_from_slice(if password == expected_value.as_bytes() {
+                replacement_value.as_bytes()
+            } else {
+                password
+            });
         }
         let encoded = base64::engine::general_purpose::STANDARD.encode(translated);
         HeaderValue::from_str(&format!("{scheme} {encoded}")).ok()
@@ -125,7 +145,27 @@ fn github_token_prefix(value: &str) -> &str {
 }
 
 fn github_host_hint(env: &HashMap<String, String>) -> Option<String> {
-    env_value(env, GH_HOST_ENV_VAR)
-        .map(normalize_host)
-        .filter(|host| !host.is_empty())
+    let value = env_value(env, GH_HOST_ENV_VAR)?.trim();
+    if value.is_empty() || value.contains(['/', '\\', '@', '?', '#', '*']) {
+        return None;
+    }
+    let authority = if value.parse::<std::net::IpAddr>().is_ok()
+        || crate::policy::unscoped_ip_literal(value).is_some()
+    {
+        format!("[{value}]")
+    } else {
+        value.to_string()
+    };
+    let parsed = authority.parse::<rama_http::uri::Authority>().ok()?;
+    let suffix = authority.strip_prefix(parsed.host())?;
+    if !suffix.is_empty() {
+        suffix.strip_prefix(':')?.parse::<u16>().ok()?;
+    }
+    let host = normalize_host(parsed.host());
+    let ip_literal = host.parse::<std::net::IpAddr>().is_ok()
+        || crate::policy::unscoped_ip_literal(&host).is_some();
+    if !ip_literal && (parsed.host().starts_with('[') || url::Host::parse(&host).is_err()) {
+        return None;
+    }
+    Some(host)
 }

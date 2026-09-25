@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Iterator
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import copy_context
 from typing import AsyncIterator, Callable, ParamSpec, TypeVar
 
 from pydantic import BaseModel
 
 from ._goal import _GoalOperationState
+from ._message_router import _TurnSubscription
 from .client import CodexClient, CodexConfig
 from .generated.v2_all import (
     AccountLoginCompletedNotification,
@@ -47,6 +49,9 @@ from .models import InitializeResponse, JsonObject, Notification
 ModelT = TypeVar("ModelT", bound=BaseModel)
 ParamsT = ParamSpec("ParamsT")
 ReturnT = TypeVar("ReturnT")
+
+# Bound workers while allowing cancellation cleanup to outlive an asyncio waiter.
+_TURN_START_EXECUTOR = ThreadPoolExecutor(thread_name_prefix="codex-turn-start")
 
 
 class AsyncCodexClient:
@@ -96,6 +101,9 @@ class AsyncCodexClient:
     async def initialize(self) -> InitializeResponse:
         """Initialize the Codex session."""
         return await self._call_sync(self._sync.initialize)
+
+    def _subscribe_turn_notifications(self, turn_id: str) -> _TurnSubscription:
+        return self._sync._subscribe_turn_notifications(turn_id)
 
     def register_turn_notifications(self, turn_id: str) -> None:
         """Register a turn notification queue on the wrapped sync client."""
@@ -287,8 +295,35 @@ class AsyncCodexClient:
         input_items: list[JsonObject] | JsonObject | str,
         params: V2TurnStartParams | JsonObject | None = None,
     ) -> TurnStartResponse:
-        """Start a turn using the wrapped sync client."""
-        return await self._call_sync(self._sync.turn_start, thread_id, input_items, params)
+        """Start a turn, releasing an unclaimed result if the caller is cancelled."""
+        return (await self._start_turn(thread_id, input_items, params, for_handle=False))[0]
+
+    async def _start_turn(
+        self,
+        thread_id: str,
+        input_items: list[JsonObject] | JsonObject | str,
+        params: V2TurnStartParams | JsonObject | None,
+        for_handle: bool,
+    ) -> tuple[TurnStartResponse, _TurnSubscription | None]:
+        operation = _TURN_START_EXECUTOR.submit(
+            copy_context().run, self._sync._start_turn, thread_id, input_items, params, for_handle
+        )
+        try:
+            return await asyncio.wrap_future(operation)
+        except asyncio.CancelledError:
+
+            def discard_cancelled_result(
+                completed: Future[tuple[TurnStartResponse, _TurnSubscription | None]],
+            ) -> None:
+                try:
+                    _, subscription = completed.result()
+                except BaseException:
+                    return
+                if subscription is not None:
+                    subscription.close()
+
+            operation.add_done_callback(discard_cancelled_result)
+            raise
 
     async def turn_interrupt(self, thread_id: str, turn_id: str) -> TurnInterruptResponse:
         """Interrupt a turn using the wrapped sync client."""

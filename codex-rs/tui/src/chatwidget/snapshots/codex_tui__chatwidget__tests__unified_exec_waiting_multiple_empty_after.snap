@@ -1,5 +1,10 @@
 ---
-source: tui/src/chatwidget/tests.rs
+source: tui/src/chatwidget/tests/exec_flow.rs
 expression: combined
 ---
+Chat:
+  [completion time]
+
+Transcript:
 • Waited for background terminal · just fix
+  [completion time]

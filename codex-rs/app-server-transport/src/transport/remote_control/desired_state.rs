@@ -1,15 +1,12 @@
 use super::RemoteControlEnableError;
-use super::RemoteControlHandle;
+use super::RemoteControlSession;
 use super::RemoteControlUnavailable;
-use super::enroll::update_persisted_remote_control_enrollment;
 use super::protocol::normalize_remote_control_url;
 use super::publish_current_enrollment;
 use super::websocket::RemoteControlStatusPublisher;
 use codex_app_server_protocol::RemoteControlStatusChangedNotification;
 use codex_state::RemoteControlEnrollmentRecord;
 use std::io;
-use tokio::sync::Semaphore;
-use tokio::sync::SemaphorePermit;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RemoteControlDesiredState {
@@ -31,10 +28,6 @@ impl RemoteControlDesiredState {
     }
 }
 
-pub(super) async fn acquire_persistence_lock(lock: &Semaphore) -> SemaphorePermit<'_> {
-    lock.acquire().await.unwrap_or_else(|_| unreachable!())
-}
-
 pub(super) fn desired_state_from_persisted_enrollment(
     enrollment: Option<RemoteControlEnrollmentRecord>,
 ) -> RemoteControlDesiredState {
@@ -47,7 +40,7 @@ pub(super) fn desired_state_from_persisted_enrollment(
     }
 }
 
-impl RemoteControlHandle {
+impl RemoteControlSession {
     pub async fn resolve_persisted_preference(
         &self,
         app_server_client_name: Option<&str>,
@@ -74,6 +67,8 @@ impl RemoteControlHandle {
         let auth = super::auth::load_remote_control_auth(&self.auth_manager).await?;
         let remote_control_target = normalize_remote_control_url(&self.remote_control_url)?;
         let app_server_client_name = self.pairing_persistence_key(app_server_client_name)?;
+        let _persistence =
+            super::persistence::read_lock(&self.auth_manager, &self.persistence).await?;
         let enrollment = state_db
             .get_remote_control_enrollment(
                 &remote_control_target.websocket_url,
@@ -133,31 +128,20 @@ impl RemoteControlHandle {
             ));
         }
 
-        let _persistence = acquire_persistence_lock(&self.desired_state_persistence_lock).await;
-        let updated = state_db
-            .set_remote_control_enabled(
-                &remote_control_target.websocket_url,
-                &auth.account_id,
-                app_server_client_name,
-                /*remote_control_enabled*/ true,
-            )
-            .await
-            .map_err(io::Error::other)?;
-        if updated == 0 {
-            update_persisted_remote_control_enrollment(
-                Some(state_db),
-                &remote_control_target,
-                &auth.account_id,
-                app_server_client_name,
-                Some(&enrollment),
-                Some(true),
-            )
-            .await?;
-        }
+        self.set_preference(
+            state_db,
+            &remote_control_target,
+            &auth.account_id,
+            app_server_client_name,
+            /*enabled*/ true,
+            Some(&enrollment),
+        )
+        .await?;
         publish_current_enrollment(&mut current_enrollment, &enrollment);
         self.enable_with_preference(Some(true)).map_err(|err| {
             let kind = match err {
                 RemoteControlEnableError::Unavailable(_) => io::ErrorKind::NotFound,
+                RemoteControlEnableError::AuthenticationChanged => io::ErrorKind::Interrupted,
                 RemoteControlEnableError::DisabledByRequirements(_) => {
                     io::ErrorKind::PermissionDenied
                 }

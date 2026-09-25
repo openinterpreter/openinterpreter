@@ -76,7 +76,7 @@ async fn model_guardian_policy_controls_cua(
         computer_use: Some(computer_use),
         ..Default::default()
     });
-    write_models_cache_with_models(codex_home.path(), vec![model])?;
+    write_models_cache_with_models(codex_home.path(), vec![model]).await?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(TIMEOUT)

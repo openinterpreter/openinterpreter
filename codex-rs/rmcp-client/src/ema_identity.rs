@@ -1,4 +1,5 @@
-//! An enterprise IdP session is independent of Codex account authentication.
+//! Shared enterprise IdP discovery and stored refresh-token resolution.
+//! Login and token exchange require published metadata bound to the configured issuer.
 
 use std::sync::Arc;
 
@@ -11,6 +12,8 @@ use codex_keyring_store::DefaultKeyringStore;
 use codex_keyring_store::KeyringStore;
 use oauth2::TokenResponse;
 use rmcp::transport::AuthorizationManager;
+use rmcp::transport::auth::AuthorizationMetadata;
+use rmcp::transport::auth::OAuthHttpClient;
 
 use crate::ema_auth_policy::advertised_capability;
 use crate::ema_auth_policy::ema_reauthentication_required;
@@ -55,6 +58,36 @@ pub fn stored_ema_identity_is_usable(
         && stored_oidc_identity(tokens).is_ok()
 }
 
+pub(crate) async fn resolve_ema_idp_authorization_manager(
+    issuer: &str,
+    http_client: Arc<dyn OAuthHttpClient>,
+) -> Result<(AuthorizationManager, AuthorizationMetadata)> {
+    validate_ema_oauth_endpoint(issuer, "enterprise IdP issuer")?;
+    let mut manager = AuthorizationManager::new_with_oauth_http_client(issuer, http_client)
+        .await
+        .context("failed to create enterprise IdP metadata discovery client")?;
+    manager.set_allow_missing_issuer(false);
+    let resolution = manager
+        .resolve_metadata()
+        .await
+        .context("failed to discover enterprise IdP authorization metadata")?;
+    if !resolution.source.is_discovered() {
+        bail!("enterprise IdP must publish authorization metadata");
+    }
+    let metadata = resolution.metadata;
+    if metadata.issuer.as_deref() != Some(issuer) {
+        bail!("enterprise IdP authorization metadata issuer does not match configuration");
+    }
+    validate_ema_oauth_endpoint(&metadata.token_endpoint, "enterprise IdP token endpoint")?;
+    validate_ema_public_client_auth(
+        metadata
+            .additional_fields
+            .get("token_endpoint_auth_methods_supported"),
+        "enterprise IdP",
+    )?;
+    Ok((manager, metadata))
+}
+
 /// Resolve a stored refresh-token subject against the configured enterprise IdP metadata.
 pub async fn resolve_ema_idp_identity(
     request: EmaIdpIdentityRequest<'_>,
@@ -69,7 +102,6 @@ async fn resolve_ema_idp_identity_in<K: KeyringStore + Clone + 'static>(
     if request.issuer.trim().is_empty() || request.client_id.trim().is_empty() {
         bail!("ema_auth requires a non-empty enterprise IdP issuer and client ID");
     }
-    validate_ema_oauth_endpoint(request.issuer, "enterprise IdP issuer")?;
     let credentials = request.credentials.credentials();
     if credentials.url != request.issuer
         || credentials.bound_issuer() != Some(request.issuer)
@@ -85,22 +117,8 @@ async fn resolve_ema_idp_identity_in<K: KeyringStore + Clone + 'static>(
         /*has_configured_headers*/ false,
         request.redirect_mode,
     )?;
-    let mut manager = AuthorizationManager::new_with_oauth_http_client(
-        request.issuer.to_string(),
-        Arc::new(client),
-    )
-    .await
-    .context("failed to create enterprise IdP metadata discovery client")?;
-    manager.set_allow_missing_issuer(false);
-    let metadata = manager
-        .resolve_metadata()
-        .await
-        .context("failed to discover enterprise IdP authorization metadata")?
-        .metadata;
-    if metadata.issuer.as_deref() != Some(request.issuer) {
-        bail!("enterprise IdP authorization metadata issuer does not match configuration");
-    }
-    validate_ema_oauth_endpoint(&metadata.token_endpoint, "enterprise IdP token endpoint")?;
+    let (_, metadata) =
+        resolve_ema_idp_authorization_manager(request.issuer, Arc::new(client)).await?;
     for (name, expected) in [
         (
             "identity_chaining_requested_token_types_supported",
@@ -116,12 +134,6 @@ async fn resolve_ema_idp_identity_in<K: KeyringStore + Clone + 'static>(
             );
         }
     }
-    validate_ema_public_client_auth(
-        metadata
-            .additional_fields
-            .get("token_endpoint_auth_methods_supported"),
-        "enterprise IdP",
-    )?;
     let credential_lock =
         RefreshCredentialLock::acquire_for_server(&credentials.server_name, &credentials.url)
             .await?;

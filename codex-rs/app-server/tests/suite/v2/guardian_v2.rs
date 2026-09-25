@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -24,6 +25,7 @@ use axum::routing::post;
 use codex_app_server_protocol::ApprovalsReviewer;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::ImageReference;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemGuardianApprovalReviewStartedNotification;
 use codex_app_server_protocol::McpServerElicitationRequest;
@@ -35,12 +37,9 @@ use codex_app_server_protocol::ThreadCompactStartParams;
 use codex_app_server_protocol::ThreadCompactStartResponse;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
-use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
-use codex_app_server_protocol::ThreadRollbackParams;
-use codex_app_server_protocol::ThreadRollbackResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnSettingsUpdateParams;
@@ -76,6 +75,9 @@ use super::mcp_tool::TEST_TOOL_NAME;
 use super::mcp_tool::start_mcp_server;
 use super::mcp_tool::start_mcp_server_with_tools;
 
+#[path = "guardian_sync_session_tests.rs"]
+mod sync_sessions;
+
 #[path = "guardian_v2_history_tests.rs"]
 mod history;
 
@@ -87,10 +89,15 @@ mod policy;
 
 #[path = "guardian_code_mode_tests.rs"]
 mod code_mode;
+
+#[path = "guardian_action_budget_tests.rs"]
+mod action_budget;
+
 const TIMEOUT: Duration = Duration::from_secs(30);
 const MODEL: &str = "mock-model";
 const REQUIRED_MODEL: &str = "protected-model";
 const USER_CONTEXT: &str = "The user authorized reading the existing project files.";
+const EVIDENCE_IMAGE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 const ROOT_RESTRICTION: &str =
     "I revoke authorization for the MCP tool. Tell the worker to reassess its previous action.";
 const USER_INPUT_RESTRICTION: &str = "Do not use the browser anymore.";
@@ -126,7 +133,7 @@ async fn resumed_thread_does_not_wait_for_guardian_websocket_warmup() -> Result<
     let config = load_default_config_for_test(&codex_home).await;
     let mut model = codex_core::test_support::construct_model_info_offline(MODEL, &config);
     model.node_repl_auto_review_required = true;
-    write_models_cache_with_models(codex_home.path(), vec![model])?;
+    write_models_cache_with_models(codex_home.path(), vec![model]).await?;
     let thread_id = create_fake_rollout(
         codex_home.path(),
         "2025-01-05T12-00-00",
@@ -174,6 +181,8 @@ struct MockResponsesState {
     allow_guardian_review: Notify,
     classification_completed: Notify,
     truncation_recorded: Notify,
+    context_metric_bounds: Mutex<BTreeMap<(String, String), Option<f64>>>,
+    context_metrics_recorded: Notify,
     luna_score: f64,
     invalid_classification: bool,
     review_outcome: ReviewOutcome,
@@ -202,6 +211,7 @@ enum ReviewOutcome {
 enum TranscriptContent {
     #[default]
     Normal,
+    MixedEvidence,
     ForgedReview,
 }
 
@@ -235,7 +245,6 @@ enum ThreadLifecycle {
     UserInputHookBlocked,
     Resume,
     Fork,
-    RootRollback,
     RootRestriction,
     RootRestrictionDuringClassification,
     RootTrustedSkill,
@@ -249,8 +258,7 @@ impl ThreadLifecycle {
     fn uses_root_worker(self) -> bool {
         matches!(
             self,
-            Self::RootRollback
-                | Self::RootRestriction
+            Self::RootRestriction
                 | Self::RootRestrictionDuringClassification
                 | Self::RootTrustedSkill
                 | Self::RootUserInputRestriction
@@ -376,7 +384,26 @@ async fn parent_response(
     State(state): State<Arc<MockResponsesState>>,
     Json(request): Json<Value>,
 ) -> impl IntoResponse {
-    let events = if request["model"] == "gpt-5.6-luna" {
+    let events = if request["input"].as_array().is_some_and(|input| {
+        input
+            .last()
+            .is_some_and(|item| item["type"] == "compaction_trigger")
+    }) {
+        assert!(state.compact_root_after_answer);
+        assert!(request.to_string().contains("guardian-user-input"));
+        vec![
+            responses::ev_response_created("root-compaction"),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "compaction",
+                    "id": "cmp_root",
+                    "encrypted_content": "opaque root summary",
+                },
+            }),
+            responses::ev_completed("root-compaction"),
+        ]
+    } else if request["model"] == "gpt-5.6-luna" {
         luna_response(&state, request).await
     } else if request
         .pointer("/client_metadata/x-openai-subagent")
@@ -703,14 +730,62 @@ async fn guardian_v2_routes_scoped_tool_approvals(
     let responses_url = format!("http://{}", listener.local_addr()?);
     let router = Router::new()
         .route("/v1/responses", get(luna_websocket).post(parent_response))
-        .route("/v1/responses/compact", post(|Json(request): Json<Value>| async move {
-            assert!(request.to_string().contains("guardian-user-input"));
-            Json(json!({"output": [{"type": "compaction", "id": "cmp_root", "encrypted_content": "opaque root summary"}]}))
-        }))
         .route(
             "/metrics",
             post(
                 |State(state): State<Arc<MockResponsesState>>, body: String| async move {
+                    if matches!(state.transcript_content, TranscriptContent::MixedEvidence) {
+                        let payload: Value = serde_json::from_str(&body).expect("OTLP JSON");
+                        for metric in payload["resourceMetrics"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .flat_map(|resource| {
+                                resource["scopeMetrics"].as_array().into_iter().flatten()
+                            })
+                            .flat_map(|scope| scope["metrics"].as_array().into_iter().flatten())
+                            .filter(|metric| {
+                                matches!(
+                                    metric["name"].as_str(),
+                                    Some(
+                                        "codex.guardian.context.request_tokens"
+                                            | "codex.guardian.context.section_cost"
+                                    )
+                                )
+                            })
+                        {
+                            let name = metric["name"].as_str().expect("context metric name");
+                            for point in metric["histogram"]["dataPoints"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                            {
+                                let attributes =
+                                    point["attributes"].as_array().expect("metric attributes");
+                                for target in ["sync", "async"] {
+                                    if attributes.iter().any(|attr| {
+                                        attr["key"] == "target"
+                                            && attr["value"]["stringValue"] == target
+                                    }) {
+                                        let mut bounds = state
+                                            .context_metric_bounds
+                                            .lock()
+                                            .expect("context metric bounds");
+                                        bounds.insert(
+                                            (name.to_owned(), target.to_owned()),
+                                            point["explicitBounds"]
+                                                .as_array()
+                                                .and_then(|bounds| bounds.last())
+                                                .and_then(Value::as_f64),
+                                        );
+                                        if bounds.len() == 4 {
+                                            state.context_metrics_recorded.notify_one();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if body.contains("codex.guardian_v2.classification") {
                         state.classification_completed.notify_one();
                     }
@@ -731,7 +806,8 @@ async fn guardian_v2_routes_scoped_tool_approvals(
     let codex_home = TempDir::new()?;
     let analytics_server = responses::start_mock_server().await;
     mount_analytics_capture(&analytics_server, codex_home.path()).await?;
-    let root_skill = if matches!(lifecycle, ThreadLifecycle::RootTrustedSkill) {
+    let mixed_evidence = matches!(transcript_content, TranscriptContent::MixedEvidence);
+    let root_skill = if matches!(lifecycle, ThreadLifecycle::RootTrustedSkill) || mixed_evidence {
         let path = codex_home.path().join("skills/root-trusted/SKILL.md");
         std::fs::create_dir_all(path.parent().expect("root skill parent"))?;
         std::fs::write(
@@ -817,7 +893,6 @@ async fn guardian_v2_routes_scoped_tool_approvals(
     if matches!(lifecycle, ThreadLifecycle::RootUserInputCompaction) {
         mock_config = mock_config
             .with_provider_name("OpenAI")
-            .disable_feature(Feature::RemoteCompactionV2)
             .disable_feature(Feature::TokenBudget)
             .disable_feature(Feature::EnableRequestCompression);
     }
@@ -826,7 +901,7 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         let config = load_default_config_for_test(&codex_home).await;
         let mut model_info = codex_core::test_support::construct_model_info_offline(MODEL, &config);
         model_info.node_repl_auto_review_required = true;
-        write_models_cache_with_models(codex_home.path(), vec![model_info])?;
+        write_models_cache_with_models(codex_home.path(), vec![model_info]).await?;
     }
     let original_thread_id = match lifecycle {
         ThreadLifecycle::New
@@ -835,7 +910,6 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         | ThreadLifecycle::UserInputEmpty
         | ThreadLifecycle::UserInputHookFeedback
         | ThreadLifecycle::UserInputHookBlocked
-        | ThreadLifecycle::RootRollback
         | ThreadLifecycle::RootRestriction
         | ThreadLifecycle::RootRestrictionDuringClassification
         | ThreadLifecycle::RootTrustedSkill
@@ -884,7 +958,6 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         | ThreadLifecycle::UserInputEmpty
         | ThreadLifecycle::UserInputHookFeedback
         | ThreadLifecycle::UserInputHookBlocked
-        | ThreadLifecycle::RootRollback
         | ThreadLifecycle::RootRestriction
         | ThreadLifecycle::RootRestrictionDuringClassification
         | ThreadLifecycle::RootTrustedSkill
@@ -896,8 +969,6 @@ async fn guardian_v2_routes_scoped_tool_approvals(
                 .start_thread(ThreadStartParams {
                     approval_policy: Some(AskForApproval::OnRequest),
                     approvals_reviewer: Some(requested_reviewer),
-                    history_mode: matches!(lifecycle, ThreadLifecycle::RootRollback)
-                        .then_some(ThreadHistoryMode::Legacy),
                     ..Default::default()
                 })
                 .await?;
@@ -959,6 +1030,14 @@ async fn guardian_v2_routes_scoped_tool_approvals(
             path: skill_path.clone(),
         });
     }
+    if mixed_evidence {
+        turn_input.push(UserInput::Image {
+            image: ImageReference::Inline {
+                url: EVIDENCE_IMAGE.to_owned(),
+            },
+            detail: None,
+        });
+    }
     let turn_request_id = app_server
         .send_turn_start_request(TurnStartParams {
             thread_id: thread_id.clone(),
@@ -1000,7 +1079,7 @@ async fn guardian_v2_routes_scoped_tool_approvals(
                             == json!(["guardian.trusted_skills"])
                 })
                 .and_then(|item| item["content"][0]["text"].as_str())
-                .expect("delegated workers should inherit invoked root-user skills");
+                .expect("invoked user-owned skills should retain trusted developer delivery");
             let (_, evidence) = trusted_message
                 .split_once('\n')
                 .expect("trusted skill message should contain JSON evidence");
@@ -1014,7 +1093,11 @@ async fn guardian_v2_routes_scoped_tool_approvals(
                 .as_array()
                 .expect("Luna input should be an array")
                 .iter()
-                .filter(|item| item["role"] == "developer")
+                .filter(|item| {
+                    item["role"] == "developer"
+                        && item["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
+                            == json!(["guardian.trusted_tool"])
+                })
                 .filter_map(|item| item["content"].as_array())
                 .flatten()
                 .filter_map(|entry| entry["text"].as_str())
@@ -1090,6 +1173,73 @@ async fn guardian_v2_routes_scoped_tool_approvals(
             submit_user_input_response(&mut app_server, answers).await?;
         }
         let second_sample = wait_for_luna_request(responses_state.as_ref(), /*index*/ 1).await?;
+        if mixed_evidence {
+            let input = second_sample["input"].as_array().expect("Luna input");
+            assert_eq!(
+                input
+                    .iter()
+                    .map(|item| json!([
+                        item["type"],
+                        item["role"],
+                        item["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
+                    ]))
+                    .collect::<Vec<_>>(),
+                vec![
+                    json!(["additional_tools", "developer", null]),
+                    json!(["message", "developer", ["guardian.classifier_instructions"]]),
+                    json!(["message", "user", null]),
+                    json!(["message", "developer", null]),
+                    json!(["message", "developer", ["guardian.trusted_tool"]]),
+                    json!(["message", "developer", ["guardian.trusted_skills"]]),
+                    json!(["message", "user", null]),
+                ],
+            );
+            let history = input[2]["content"].as_array().expect("untrusted history");
+            let history_texts = history
+                .iter()
+                .filter_map(|item| item["text"].as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                history_texts.first().copied(),
+                Some(">>> TRANSCRIPT START\n")
+            );
+            assert!(history_texts.iter().any(|text| text.contains(USER_CONTEXT)));
+            assert!(history_texts.iter().any(|text| text.contains("guardian-0")));
+            assert_eq!(
+                history_texts.last().copied(),
+                Some(">>> TRANSCRIPT END\n\n")
+            );
+            assert!(history.iter().all(|item| item["type"] == "input_text"));
+
+            let content = input[6]["content"].as_array().expect("action and images");
+            let action_texts = content
+                .iter()
+                .filter_map(|item| item["text"].as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                &action_texts[..2],
+                &[
+                    "The Codex agent has requested the following action:\n",
+                    ">>> APPROVAL REQUEST START\n",
+                ],
+            );
+            assert_eq!(
+                action_texts.last().copied(),
+                Some(">>> APPROVAL REQUEST END\n")
+            );
+            assert!(
+                content[..content.len() - 1]
+                    .iter()
+                    .all(|item| item["type"] == "input_text")
+            );
+            let image = content
+                .last()
+                .expect("transcript image follows planned action");
+            assert_eq!(
+                json!([image["type"], image["image_url"], image["detail"]]),
+                json!(["input_image", EVIDENCE_IMAGE, null]),
+            );
+        }
         let reviews = sync_review_fragments(&second_sample);
         if lifecycle.has_user_answer() {
             let answer_items = second_sample["input"]
@@ -1230,6 +1380,62 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         responses_state.guardian_reviews.load(Ordering::SeqCst),
         expected_guardian_reviews
     );
+    if mixed_evidence {
+        let reviews = responses_state
+            .guardian_requests
+            .lock()
+            .expect("Guardian requests");
+        assert_eq!(
+            reviews[0]["client_metadata"]["thread_id"],
+            reviews[1]["client_metadata"]["thread_id"]
+        );
+        for (review, start, end) in [
+            (&reviews[0], ">>> TRANSCRIPT START", ">>> TRANSCRIPT END"),
+            (
+                &reviews[1],
+                ">>> TRANSCRIPT DELTA START",
+                ">>> TRANSCRIPT DELTA END",
+            ),
+        ] {
+            let message = review["input"]
+                .as_array()
+                .expect("sync input")
+                .iter()
+                .rfind(|item| item["role"] == "user")
+                .expect("latest review input");
+            let text = message["content"]
+                .as_array()
+                .expect("review content")
+                .iter()
+                .filter_map(|item| item["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains(start));
+            assert!(text.contains(end));
+            assert!(text.find(start) < text.find(end));
+            assert!(text.contains("Planned action JSON:"));
+        }
+    }
+    if mixed_evidence {
+        timeout(TIMEOUT, responses_state.context_metrics_recorded.notified())
+            .await
+            .expect("sync and async request/section metrics should all be exported");
+        let bounds = responses_state
+            .context_metric_bounds
+            .lock()
+            .expect("context metric bounds");
+        for ((metric, target), bound) in bounds.iter() {
+            assert_eq!(
+                *bound,
+                Some(if metric == "codex.guardian.context.request_tokens" {
+                    2_000_000.0
+                } else {
+                    16_777_216.0
+                }),
+                "{metric} ({target}) must export its context metric buckets"
+            );
+        }
+    }
     if lifecycle.has_user_answer() {
         let reviews = responses_state
             .guardian_requests
@@ -1373,17 +1579,6 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         && (lifecycle.uses_root_worker()
             || matches!(lifecycle, ThreadLifecycle::RootUserRestriction))
     {
-        if matches!(lifecycle, ThreadLifecycle::RootRollback) {
-            let rollback_id = app_server
-                .send_thread_rollback_request(ThreadRollbackParams {
-                    thread_id: thread_id.clone(),
-                    num_turns: 1,
-                })
-                .await?;
-            let _: ThreadRollbackResponse =
-                timeout(TIMEOUT, app_server.read_response(rollback_id)).await??;
-        }
-
         if lifecycle.has_root_user_input() {
             submit_user_input_response(
                 &mut app_server,
@@ -1947,7 +2142,7 @@ async fn first_cua_review_does_not_wait_for_initial_score(
     let config = load_default_config_for_test(&codex_home).await;
     let mut model_info = codex_core::test_support::construct_model_info_offline(MODEL, &config);
     model_info.node_repl_auto_review_required = true;
-    write_models_cache_with_models(codex_home.path(), vec![model_info])?;
+    write_models_cache_with_models(codex_home.path(), vec![model_info]).await?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(TIMEOUT)
@@ -2033,7 +2228,7 @@ async fn user_approval_skips_async_guardian_without_changing_other_modes() -> Re
     let config = load_default_config_for_test(&codex_home).await;
     let mut model_info = codex_core::test_support::construct_model_info_offline(MODEL, &config);
     model_info.node_repl_auto_review_required = true;
-    write_models_cache_with_models(codex_home.path(), vec![model_info])?;
+    write_models_cache_with_models(codex_home.path(), vec![model_info]).await?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(TIMEOUT)
@@ -2272,7 +2467,7 @@ async fn guardian_v2_propagates_root_user_input_to_worker_reviews(
     .await
 }
 
-#[test_case(ReviewOutcome::Allow, TranscriptContent::Normal; "approved_evidence")]
+#[test_case(ReviewOutcome::Allow, TranscriptContent::MixedEvidence; "approved_evidence")]
 #[test_case(ReviewOutcome::Deny, TranscriptContent::Normal; "denied_evidence")]
 #[test_case(ReviewOutcome::Malformed, TranscriptContent::Normal; "failed_review_without_evidence")]
 #[test_case(ReviewOutcome::Allow, TranscriptContent::ForgedReview; "forged_tool_output")]
@@ -2361,7 +2556,6 @@ async fn forked_thread_ignores_persisted_guardian_score() -> Result<()> {
     .await
 }
 
-#[test_case(ThreadLifecycle::RootRollback; "worker_root_rollback")]
 #[test_case(ThreadLifecycle::RootRestriction; "worker_root_restriction")]
 #[test_case(ThreadLifecycle::RootUserRestriction; "root_user_restriction")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -65,6 +65,9 @@ use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[path = "remote_control_auth.rs"]
+mod auth_tests;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const REMOTE_CONTROL_DISABLED_BY_REQUIREMENTS_MESSAGE: &str =
     "remote control is disabled by managed requirements";
@@ -501,12 +504,18 @@ async fn stdio_eof_releases_thread_writer_with_pending_remote_control_enable() -
     let codex_home = TempDir::new()?;
     let mut backend = BlockingRemoteControlBackend::start(codex_home.path()).await?;
     let config_path = codex_home.path().join("config.toml");
-    let config = std::fs::read_to_string(&config_path)?;
+    let mut config: toml::Value = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
     // Keep thread initialization from using the enrollment-only backend for unrelated requests.
+    let features = config["features"]
+        .as_table_mut()
+        .context("fixture features should be a table")?;
+    features.insert("apps".to_string(), toml::Value::Boolean(false));
+    features.insert("remote_plugin".to_string(), toml::Value::Boolean(false));
     std::fs::write(
         config_path,
         format!(
-            "{config}\n[features]\napps = false\nremote_plugin = false\n\n[analytics]\nenabled = false\n"
+            "{}\n[analytics]\nenabled = false\n",
+            toml::to_string(&config)?
         ),
     )?;
     let thread_id = create_fake_paginated_rollout(
@@ -947,6 +956,7 @@ struct BlockingRemoteControlBackend {
 struct ConnectedRemoteControlBackend {
     initialized_rx: Option<oneshot::Receiver<std::result::Result<(), String>>>,
     server_task: JoinHandle<Result<()>>,
+    _models_server: wiremock::MockServer,
 }
 
 struct ClientManagementRemoteControlBackend {
@@ -957,6 +967,20 @@ struct ClientManagementRemoteControlBackend {
 impl ConnectedRemoteControlBackend {
     async fn start(codex_home: &std::path::Path) -> Result<Self> {
         let listener = configured_remote_control_listener(codex_home).await?;
+        // Model refreshes can arrive after enrollment, when this listener expects a WebSocket.
+        let models_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/v1/models"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(/*s*/ 200)
+                    .set_body_json(serde_json::json!({ "models": [] })),
+            )
+            .mount(&models_server)
+            .await;
+        let remote_control_url = format!("http://{}/backend-api/", listener.local_addr()?);
+        MockResponsesConfig::new(&models_server.uri())
+            .with_root_config(&format!("chatgpt_base_url = \"{remote_control_url}\""))
+            .write(codex_home)?;
         let (initialized_tx, initialized_rx) = oneshot::channel();
         let server_task = tokio::spawn(async move {
             let mut initialized_tx = Some(initialized_tx);
@@ -1052,6 +1076,7 @@ impl ConnectedRemoteControlBackend {
         Ok(Self {
             initialized_rx: Some(initialized_rx),
             server_task,
+            _models_server: models_server,
         })
     }
 
@@ -1322,8 +1347,18 @@ struct HttpRequest {
 async fn configured_remote_control_listener(codex_home: &std::path::Path) -> Result<TcpListener> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let remote_control_url = format!("http://{}/backend-api/", listener.local_addr()?);
+    let catalog_path = codex_home.join("models.json");
+    std::fs::write(
+        &catalog_path,
+        serde_json::to_vec(&codex_models_manager::bundled_models_response()?)?,
+    )?;
     MockResponsesConfig::new(&remote_control_url)
         .with_root_config(&format!("chatgpt_base_url = \"{remote_control_url}\""))
+        .with_root_config(&format!(
+            "model_catalog_json = {}",
+            serde_json::to_string(&catalog_path)?
+        ))
+        .disable_feature(codex_features::Feature::Plugins)
         .write(codex_home)?;
     write_chatgpt_auth(
         codex_home,

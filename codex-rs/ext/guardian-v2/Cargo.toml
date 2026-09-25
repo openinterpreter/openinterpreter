@@ -13,19 +13,22 @@ doctest = false
 workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
 codex-analytics = { workspace = true }
 codex-api = { workspace = true }
+codex-config = { workspace = true }
+codex-context-fragments = { workspace = true }
 codex-core = { workspace = true }
 codex-extension-api = { workspace = true }
 codex-features = { workspace = true }
 codex-guardian-context = { workspace = true }
+codex-guardian-reviewer = { workspace = true }
 codex-history = { workspace = true }
 codex-http-client = { workspace = true }
 codex-login = { workspace = true }
 codex-model-provider = { workspace = true }
-codex-models-manager = { workspace = true }
-codex-network-proxy = { workspace = true }
 codex-protocol = { workspace = true }
+codex-prompts = { workspace = true }
 dirs = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
@@ -35,8 +38,8 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-anyhow = { workspace = true }
 codex-model-provider-info = { workspace = true }
 core_test_support = { workspace = true }
 pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

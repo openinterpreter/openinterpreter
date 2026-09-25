@@ -15,6 +15,7 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentStatus;
@@ -31,7 +32,6 @@ use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiTool;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
-use codex_utils_string::take_bytes_at_char_boundary;
 use regex_lite::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -40,9 +40,13 @@ use sha2::Digest;
 use sha2::Sha256;
 use uuid::Uuid;
 
-use crate::agent::control::SpawnAgentOptions;
+use crate::agent::child_config::SpawnConfigOptions;
+use crate::agent::child_config::SpawnConfigVersion;
+use crate::agent::child_config::build_agent_spawn_config;
+use crate::agent::child_config::prepare_agent_spawn_config;
+use crate::agent::control::LocalAgentControl;
+use crate::agent::types::SpawnAgentOptions;
 use crate::agent::next_thread_spawn_depth;
-use crate::agent::role::apply_role_to_config;
 use crate::function_tool::FunctionCallError;
 use crate::harness::opencode::OPENCODE_SEARCH_AGENT_BASE_INSTRUCTIONS;
 use crate::harness::zcode::ZCODE_COMPACTED_SUMMARY_PREFIX;
@@ -57,10 +61,6 @@ use crate::tools::handlers::RequestUserInputHandler;
 use crate::tools::handlers::WriteStdinHandler;
 use crate::tools::handlers::harness_fs;
 use crate::tools::handlers::harness_fs::WalkEntryKind;
-use crate::tools::handlers::multi_agents_common::apply_requested_spawn_agent_model_overrides;
-use crate::tools::handlers::multi_agents_common::apply_spawn_agent_runtime_overrides;
-use crate::tools::handlers::multi_agents_common::apply_spawn_agent_service_tier;
-use crate::tools::handlers::multi_agents_common::build_agent_spawn_config;
 use crate::tools::handlers::multi_agents_common::collab_spawn_error;
 use crate::tools::handlers::multi_agents_common::parse_collab_input;
 use crate::tools::handlers::multi_agents_common::thread_spawn_source;
@@ -349,10 +349,11 @@ async fn handle_kimi_code_foreground_agent(
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
     let ToolInvocation {
         session,
-        turn,
+        step_context,
         call_id,
         ..
     } = invocation;
+    let turn = step_context.turn.as_ref();
     let role_name = args
         .subagent_type
         .as_deref()
@@ -361,21 +362,20 @@ async fn handle_kimi_code_foreground_agent(
         .unwrap_or("coder");
     let task_name = zcode_task_name(&args.description);
     let child_depth = next_thread_spawn_depth(&turn.session_source);
-    let mut config =
-        build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
-    apply_requested_spawn_agent_model_overrides(
+    let config = prepare_agent_spawn_config(
         &session,
-        turn.as_ref(),
-        &mut config,
-        args.model.as_deref(),
-        /*requested_reasoning_effort*/ None,
+        step_context.as_ref(),
+        SpawnConfigOptions {
+            version: SpawnConfigVersion::V2,
+            full_history_fork: false,
+            role_name: Some(role_name),
+            model: args.model.as_deref(),
+            reasoning_effort: None,
+        },
     )
-    .await?;
-    apply_role_to_config(&mut config, Some(role_name))
-        .await
-        .map_err(FunctionCallError::RespondToModel)?;
-    apply_spawn_agent_service_tier(&session, &mut config).await?;
-    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+    .await
+    .map_err(FunctionCallError::RespondToModel)?
+    .config;
 
     let parent_thread_id = session.thread_id();
     let spawn_source = thread_spawn_source(
@@ -395,7 +395,6 @@ async fn handle_kimi_code_foreground_agent(
         SpawnAgentOptions {
             fork_parent_spawn_call_id: Some(call_id),
             parent_thread_id: Some(parent_thread_id),
-            environments: Some(turn.environments.to_selections()),
             ..Default::default()
         },
     ))
@@ -433,10 +432,11 @@ async fn handle_zcode_agent(
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
     let ToolInvocation {
         session,
-        turn,
+        step_context,
         call_id,
         ..
     } = invocation;
+    let turn = step_context.turn.as_ref();
     let role_name = args
         .subagent_type
         .as_deref()
@@ -445,21 +445,20 @@ async fn handle_zcode_agent(
         .unwrap_or("Explore");
     let task_name = zcode_task_name(&args.description);
     let child_depth = next_thread_spawn_depth(&turn.session_source);
-    let mut config =
-        build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
-    apply_requested_spawn_agent_model_overrides(
+    let config = prepare_agent_spawn_config(
         &session,
-        turn.as_ref(),
-        &mut config,
-        args.model.as_deref(),
-        /*requested_reasoning_effort*/ None,
+        step_context.as_ref(),
+        SpawnConfigOptions {
+            version: SpawnConfigVersion::V2,
+            full_history_fork: false,
+            role_name: Some(role_name),
+            model: args.model.as_deref(),
+            reasoning_effort: None,
+        },
     )
-    .await?;
-    apply_role_to_config(&mut config, Some(role_name))
-        .await
-        .map_err(FunctionCallError::RespondToModel)?;
-    apply_spawn_agent_service_tier(&session, &mut config).await?;
-    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+    .await
+    .map_err(FunctionCallError::RespondToModel)?
+    .config;
 
     let parent_thread_id = session.thread_id();
     let spawn_source = thread_spawn_source(
@@ -480,7 +479,6 @@ async fn handle_zcode_agent(
         SpawnAgentOptions {
             fork_parent_spawn_call_id: Some(call_id),
             parent_thread_id: Some(parent_thread_id),
-            environments: Some(turn.environments.to_selections()),
             ..Default::default()
         },
     ))
@@ -936,12 +934,6 @@ fn zcode_preview_first_2kb(output: &str) -> String {
     for line in output.split_inclusive('\n') {
         let next_len = preview.len() + line.len();
         if next_len > 2_000 {
-            if preview.is_empty() {
-                // First line exceeds the budget; include a truncated portion so
-                // the preview is never blank for single-line outputs (e.g.
-                // minified JSON, base64 blobs, long access-log lines).
-                preview.push_str(take_bytes_at_char_boundary(line, 2_000));
-            }
             break;
         }
         preview.push_str(line);
@@ -1248,7 +1240,7 @@ async fn handle_read(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
         record_claude_read_file(&path);
         return Ok(boxed_tool_output(FunctionToolOutput::from_content(
             vec![FunctionCallOutputContentItem::InputImage {
-                image_url,
+                image: ImageReference::Inline { image_url },
                 detail: None,
             }],
             Some(true),
@@ -1521,8 +1513,13 @@ async fn zcode_history_has_current_file_state(
     path: &Path,
     current_hash: &str,
 ) -> bool {
-    let history = invocation.session.clone_history().await.into_raw_items();
-    zcode_history_has_current_file_state_for_items(&history, invocation, path, current_hash)
+    let history = invocation.session.clone_history().await;
+    zcode_history_has_current_file_state_for_items(
+        history.raw_items(),
+        invocation,
+        path,
+        current_hash,
+    )
 }
 
 async fn zcode_current_file_hash_applies(
@@ -1533,15 +1530,17 @@ async fn zcode_current_file_hash_applies(
     if zcode_current_file_hash(invocation, path).as_deref() != Some(current_hash) {
         return false;
     }
-    let history = invocation.session.clone_history().await.into_raw_items();
-    if !zcode_history_has_compacted_summary(&history) {
+    let history = invocation.session.clone_history().await;
+    if !zcode_history_has_compacted_summary(history.raw_items()) {
         return true;
     }
-    zcode_history_retains_read_reminder_for_path(&history, invocation, path)
+    zcode_history_retains_read_reminder_for_path(history.raw_items(), invocation, path)
 }
 
-fn zcode_history_has_compacted_summary(history: &[ResponseItem]) -> bool {
-    history.iter().any(|item| {
+fn zcode_history_has_compacted_summary<'a>(
+    history: impl IntoIterator<Item = &'a ResponseItem>,
+) -> bool {
+    history.into_iter().any(|item| {
         let ResponseItem::Message { content, .. } = item else {
             return false;
         };
@@ -1554,12 +1553,12 @@ fn zcode_history_has_compacted_summary(history: &[ResponseItem]) -> bool {
     })
 }
 
-fn zcode_history_retains_read_reminder_for_path(
-    history: &[ResponseItem],
+fn zcode_history_retains_read_reminder_for_path<'a>(
+    history: impl IntoIterator<Item = &'a ResponseItem>,
     invocation: &ToolInvocation,
     path: &Path,
 ) -> bool {
-    history.iter().any(|item| {
+    history.into_iter().any(|item| {
         let ResponseItem::Message { content, .. } = item else {
             return false;
         };
@@ -1585,12 +1584,13 @@ fn zcode_retained_read_reminder_arguments(text: &str) -> Option<&str> {
     )
 }
 
-fn zcode_history_has_current_file_state_for_items(
-    history: &[ResponseItem],
+fn zcode_history_has_current_file_state_for_items<'a>(
+    history: impl IntoIterator<Item = &'a ResponseItem>,
     invocation: &ToolInvocation,
     path: &Path,
     current_hash: &str,
 ) -> bool {
+    let history = history.into_iter().collect::<Vec<_>>();
     let mut current = false;
     let mut index = 0;
     while index < history.len() {
@@ -1599,7 +1599,7 @@ fn zcode_history_has_current_file_state_for_items(
             arguments,
             call_id,
             ..
-        } = &history[index]
+        } = history[index]
         else {
             index += 1;
             continue;
@@ -1616,7 +1616,7 @@ fn zcode_history_has_current_file_state_for_items(
             index += 1;
             continue;
         }
-        let output = history.get(index + 1).and_then(|item| match item {
+        let output = history.get(index + 1).copied().and_then(|item| match item {
             ResponseItem::FunctionCallOutput {
                 call_id: output_call_id,
                 output,
@@ -2436,8 +2436,9 @@ async fn handle_zcode_todo_write(
     let args: ZCodeTodoWriteArgs = parse_arguments(arguments)?;
     let old_todos = zcode_todos(&invocation);
     let old_todos = if old_todos.is_empty() {
+        let history = invocation.session.clone_history().await;
         latest_zcode_todos_from_history(
-            &invocation.session.clone_history().await.into_raw_items(),
+            history.raw_items(),
             &invocation.call_id,
         )
         .unwrap_or(old_todos)
@@ -2460,11 +2461,12 @@ async fn handle_zcode_todo_write(
     )))
 }
 
-fn latest_zcode_todos_from_history(
-    history: &[ResponseItem],
+fn latest_zcode_todos_from_history<'a>(
+    history: impl IntoIterator<Item = &'a ResponseItem>,
     current_call_id: &str,
 ) -> Option<Vec<ZCodeTodoItem>> {
-    history.iter().rev().find_map(|item| {
+    let history = history.into_iter().collect::<Vec<_>>();
+    history.into_iter().rev().find_map(|item| {
         let ResponseItem::FunctionCall {
             name,
             arguments,
@@ -2886,17 +2888,19 @@ async fn handle_opencode_task(
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
     let ToolInvocation {
         session,
-        turn,
+        step_context,
         payload,
         ..
     } = invocation;
+    let turn = step_context.turn.as_ref();
     let args: OpenCodeTaskArgs = parse_arguments(function_arguments(&payload)?)?;
     let child_depth = next_thread_spawn_depth(&turn.session_source);
     let base_instructions = BaseInstructions {
         text: OPENCODE_SEARCH_AGENT_BASE_INSTRUCTIONS.to_string(),
         provenance: None,
     };
-    let mut config = build_agent_spawn_config(&base_instructions, turn.as_ref())?;
+    let mut config = build_agent_spawn_config(&base_instructions, step_context.as_ref())
+        .map_err(FunctionCallError::RespondToModel)?;
     config.base_instructions = Some(OPENCODE_SEARCH_AGENT_BASE_INSTRUCTIONS.to_string());
     let role_name = args.subagent_type.as_deref();
     let parent_thread_id = session.thread_id();
@@ -2914,7 +2918,6 @@ async fn handle_opencode_task(
         Some(spawn_source),
         SpawnAgentOptions {
             parent_thread_id: Some(parent_thread_id),
-            environments: Some(turn.environments.to_selections()),
             ..Default::default()
         },
     ))
@@ -2966,7 +2969,7 @@ fn opencode_task_name(description: &str) -> String {
 }
 
 async fn zcode_agent_result_with_footer(
-    agent_control: &crate::agent::AgentControl,
+    agent_control: &LocalAgentControl,
     thread_id: ThreadId,
     result: String,
     fallback_duration_ms: i64,
@@ -3040,7 +3043,7 @@ fn zcode_agent_rollout_stats(
 }
 
 async fn wait_for_agent_final_status(
-    agent_control: &crate::agent::AgentControl,
+    agent_control: &LocalAgentControl,
     thread_id: codex_protocol::ThreadId,
 ) -> Option<AgentStatus> {
     let mut status_rx = agent_control.subscribe_status(thread_id).await.ok()?;
@@ -5139,7 +5142,11 @@ mod tests {
                 ),
             }
         );
-        let FunctionCallOutputContentItem::InputImage { image_url, detail } = &items[1] else {
+        let FunctionCallOutputContentItem::InputImage {
+            image: ImageReference::Inline { image_url },
+            detail,
+        } = &items[1]
+        else {
             panic!("expected image item");
         };
         assert!(image_url.starts_with("data:image/png;base64,"));
@@ -5199,7 +5206,11 @@ mod tests {
             else {
                 panic!("expected content items");
             };
-            let FunctionCallOutputContentItem::InputImage { image_url, .. } = &items[1] else {
+            let FunctionCallOutputContentItem::InputImage {
+                image: ImageReference::Inline { image_url },
+                ..
+            } = &items[1]
+            else {
                 panic!("expected image item");
             };
             assert!(
