@@ -111,7 +111,11 @@ class MacosReleaseArtifactsTest(unittest.TestCase):
                 root = Path(tmp)
                 release = root / "target" / target / "release"
                 release.mkdir(parents=True)
-                binaries = ("codex", "codex-code-mode-host", "codex-responses-api-proxy")
+                binaries = (
+                    "codex",
+                    "codex-code-mode-host",
+                    "codex-responses-api-proxy",
+                )
                 for binary in binaries:
                     (release / binary).write_bytes(b"binary")
                 script = stage.split("run: |\n", 1)[1]

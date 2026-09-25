@@ -33,9 +33,13 @@ class WindowsReleaseArtifactsTest(unittest.TestCase):
     def test_packaged_unsigned_voice_is_verified_without_a_signature(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         packaging = step(workflow, "Build Codex package archives")
-        self.assertIn('voice_args=(--voice-release-dir "$VOICE_RELEASE_DIR")', packaging)
+        self.assertIn(
+            'voice_args=(--voice-release-dir "$VOICE_RELEASE_DIR")', packaging
+        )
         verification = step(workflow, "Verify packaged Windows voice closure")
-        self.assertIn('if ("${{ inputs.signing_mode }}" -eq \'signed\') {', verification)
+        self.assertIn(
+            "if (\"${{ inputs.signing_mode }}\" -eq 'signed') {", verification
+        )
         self.assertIn("Get-AuthenticodeSignature $helper", verification)
         self.assertIn("public_release=True", verification)
 
