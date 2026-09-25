@@ -154,15 +154,11 @@ jobs:
           - target: x86_64-pc-windows-msvc
             arch: x86_64
             python_arch: x64
-            runs_on:
-              group: ${{ github.event.repository.name }}-runners
-              labels: ${{ github.event.repository.name }}-windows-x64
+            runs_on: windows-2025
           - target: aarch64-pc-windows-msvc
             arch: aarch64
             python_arch: arm64
-            runs_on:
-              group: ${{ github.event.repository.name }}-runners
-              labels: ${{ github.event.repository.name }}-windows-arm64
+            runs_on: windows-11-arm
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
