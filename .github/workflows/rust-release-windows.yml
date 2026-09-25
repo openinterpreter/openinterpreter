@@ -411,6 +411,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Sign Windows voice helper and native DLLs
+        if: ${{ inputs.signing_mode == 'signed' }}
         uses: azure/trusted-signing-action@1d365fec12862c4aa68fcac418143d73f0cea293 # v0.5.11
         with:
           endpoint: ${{ secrets.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
@@ -433,10 +434,12 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
-      - name: Seal and verify signed voice output
+      - name: Seal and verify mode-selected voice output
         shell: pwsh
         run: |
           $target = "${{ matrix.target }}"
+          $signingMode = "${{ inputs.signing_mode }}"
+          if ($signingMode -notin @('signed', 'unsigned')) { throw "Invalid signing mode: $signingMode" }
           $signed = Join-Path $env:GITHUB_WORKSPACE "signed-voice/$target"
           python (Join-Path $env:GITHUB_WORKSPACE 'third_party/voice/windows_crt.py') --root (Join-Path $signed 'runtime') --target $target --helper (Join-Path $signed 'codex-voice-host.exe')
           if ($LASTEXITCODE -ne 0) { throw 'Cannot stage verified Microsoft CRT' }
@@ -445,12 +448,14 @@ jobs:
               ForEach-Object FullName
           )
           if ($files.Count -lt 8) { throw "Voice DLL closure is incomplete" }
-          foreach ($file in $files) {
-            $signature = Get-AuthenticodeSignature $file
-            if ($signature.Status -ne 'Valid') { throw "Unsigned voice file: $file ($($signature.Status))" }
+          if ($signingMode -eq 'signed') {
+            foreach ($file in $files) {
+              $signature = Get-AuthenticodeSignature $file
+              if ($signature.Status -ne 'Valid') { throw "Unsigned voice file: $file ($($signature.Status))" }
+            }
           }
           python (Join-Path $env:GITHUB_WORKSPACE 'third_party/voice/release_runtime.py') seal --target $target --output (Join-Path $signed 'runtime')
-          if ($LASTEXITCODE -ne 0) { throw 'Cannot seal signed voice runtime' }
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot seal mode-selected voice runtime' }
           "VOICE_RELEASE_DIR=$signed" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Stage artifacts
@@ -501,10 +506,12 @@ jobs:
           $voice = Join-Path $package 'codex-resources/voice'
           $helper = Join-Path $voice 'bin/codex-voice-host.exe'
           if (-not (Test-Path $helper) -or -not (Test-Path (Join-Path $voice 'bin/gstreamer-1.0-0.dll'))) {
-            throw 'Signed Windows voice files are missing from the canonical package'
+            throw 'Windows voice files are missing from the canonical package'
           }
-          $signature = Get-AuthenticodeSignature $helper
-          if ($signature.Status -ne 'Valid') { throw "Packaged helper signature: $($signature.Status)" }
+          if ("${{ inputs.signing_mode }}" -eq 'signed') {
+            $signature = Get-AuthenticodeSignature $helper
+            if ($signature.Status -ne 'Valid') { throw "Packaged helper signature: $($signature.Status)" }
+          }
           python -c 'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[3]); from package_runtime import runtime_files; runtime_files(Path(sys.argv[1]), sys.argv[2], public_release=True)' $voice $target (Join-Path $env:GITHUB_WORKSPACE 'third_party/voice')
           if ($LASTEXITCODE -ne 0) { throw 'Packaged runtime receipt verification failed' }
 
