@@ -216,7 +216,8 @@ jobs:
           BUILDBUDDY_API_KEY: ""
         run: |
           (cd codex-rs && cargo update --workspace)
-          python .github/scripts/watch_voice_bazel.py "$(cygpath -w "$BASH")" ./.github/scripts/run-bazel-ci.sh \
+          bash .github/scripts/test-retry-voice-bazel.sh
+          bash .github/scripts/retry-voice-bazel.sh python .github/scripts/watch_voice_bazel.py "$(cygpath -w "$BASH")" ./.github/scripts/run-bazel-ci.sh \
             --remote-download-toplevel \
             --print-failed-action-summary \
             --windows-msvc-host-platform \
