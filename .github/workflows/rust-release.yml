@@ -1056,6 +1056,7 @@ jobs:
   package-macos:
     needs:
       - build
+      - build-macos-voice
       - resolve_macos_signing_mode
       - sign-macos-binaries
       - prepare-unsigned-macos
@@ -1063,6 +1064,7 @@ jobs:
       ${{
         always() &&
         needs.build.result == 'success' &&
+        needs.build-macos-voice.result == 'success' &&
         (
           (needs.resolve_macos_signing_mode.outputs.signing_mode == 'signed' && needs.sign-macos-binaries.result == 'success') ||
           (needs.resolve_macos_signing_mode.outputs.signing_mode == 'unsigned' && needs.prepare-unsigned-macos.result == 'success')
@@ -1119,23 +1121,36 @@ jobs:
           name: ${{ matrix.target }}-${{ needs.resolve_macos_signing_mode.outputs.signing_mode }}-resources
           path: codex-rs/macos-resources/${{ matrix.target }}
 
-      - name: Download signed voice runtime
+      - name: Download mode-selected voice runtime
         if: ${{ matrix.bundle == 'primary' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: voice-${{ matrix.target }}-signed
-          path: ${{ runner.temp }}/signed-voice
+          name: voice-${{ matrix.target }}-${{ needs.resolve_macos_signing_mode.outputs.signing_mode }}
+          path: ${{ runner.temp }}/release-voice
 
-      - name: Verify signed voice runtime
+      - name: Prepare and verify mode-selected voice runtime
         if: ${{ matrix.bundle == 'primary' }}
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
+          MACOS_SIGNING_MODE: ${{ needs.resolve_macos_signing_mode.outputs.signing_mode }}
         run: |
           set -euo pipefail
-          root="${RUNNER_TEMP}/signed-voice/${TARGET}"
+          root="${RUNNER_TEMP}/release-voice/${TARGET}"
           mkdir -p "$root"
-          tar -xzf "${RUNNER_TEMP}/signed-voice/signed-voice-${TARGET}.tar.gz" -C "$root"
+          if [[ "$MACOS_SIGNING_MODE" == "signed" ]]; then
+            archive="signed-voice-${TARGET}.tar.gz"
+          else
+            archive="voice-unsigned-${TARGET}.tar.gz"
+          fi
+          tar -xzf "${RUNNER_TEMP}/release-voice/${archive}" -C "$root"
+          if [[ "$MACOS_SIGNING_MODE" == "unsigned" ]]; then
+            mv "$root/runtime" "$root/development-runtime"
+            python3 "${GITHUB_WORKSPACE}/third_party/voice/release_runtime.py" stage \
+              --target "$TARGET" --source "$root/development-runtime" --output "$root/runtime"
+            python3 "${GITHUB_WORKSPACE}/third_party/voice/release_runtime.py" seal \
+              --target "$TARGET" --output "$root/runtime"
+          fi
           case "$TARGET" in
             aarch64-apple-darwin) arch=arm64 ;;
             x86_64-apple-darwin) arch=x86_64 ;;
@@ -1149,10 +1164,14 @@ jobs:
           PY
           while IFS= read -r -d '' binary; do
             lipo "$binary" -verify_arch "$arch"
-            codesign --verify --strict --verbose=2 "$binary"
+            if [[ "$MACOS_SIGNING_MODE" == "signed" ]]; then
+              codesign --verify --strict --verbose=2 "$binary"
+            fi
           done < <(find "$root/runtime" -name '*.dylib' -type f -print0)
           lipo "$root/codex-voice-host" -verify_arch "$arch"
-          codesign --verify --strict --verbose=2 "$root/codex-voice-host"
+          if [[ "$MACOS_SIGNING_MODE" == "signed" ]]; then
+            codesign --verify --strict --verbose=2 "$root/codex-voice-host"
+          fi
 
       - name: Verify mode-selected macOS binaries and helpers
         shell: bash
@@ -1225,7 +1244,7 @@ jobs:
           set -euo pipefail
           voice_args=()
           if [[ "$BUNDLE" == "primary" ]]; then
-            voice_args+=(--voice-release-dir "${RUNNER_TEMP}/signed-voice/${TARGET}")
+            voice_args+=(--voice-release-dir "${RUNNER_TEMP}/release-voice/${TARGET}")
             voice_args+=(--release-version "${GITHUB_REF_NAME#rust-v}")
           fi
           bash "${GITHUB_WORKSPACE}/.github/scripts/build-codex-package-archive.sh" \
@@ -1233,8 +1252,8 @@ jobs:
             --bundle "$BUNDLE" \
             --entrypoint-dir "target/${TARGET}/release" \
             --archive-dir "dist/${TARGET}" \
-            --rg-bin "signed-resources/${TARGET}/rg" \
-            --zsh-bin "signed-resources/${TARGET}/zsh" \
+            --rg-bin "macos-resources/${TARGET}/rg" \
+            --zsh-bin "macos-resources/${TARGET}/zsh" \
             ${voice_args[@]+"${voice_args[@]}"}
 
       - name: Build unsigned macOS DMG
@@ -1336,8 +1355,8 @@ jobs:
             --bundle primary \
             --entrypoint-dir "target/${{ matrix.target }}/release" \
             --archive-dir "$wheel_archives" \
-            --rg-bin "signed-resources/${{ matrix.target }}/rg" \
-            --zsh-bin "signed-resources/${{ matrix.target }}/zsh"
+            --rg-bin "macos-resources/${{ matrix.target }}/rg" \
+            --zsh-bin "macos-resources/${{ matrix.target }}/zsh"
           wheel_archive="${wheel_archives}/codex-package-${{ matrix.target }}.tar.gz"
           python3 - "$wheel_archive" <<'PY'
           import sys
@@ -1706,9 +1725,15 @@ jobs:
             [[ "$("$helper" --build-commit)" == "$VOICE_BUILD_COMMIT" ]]
             while IFS= read -r -d '' library; do
               lipo "$library" -verify_arch "$expected_arch"
-              codesign --verify --strict --verbose=2 "$library"
+              if [[ "$MACOS_SIGNING_MODE" == "signed" ]]; then
+                codesign --verify --strict --verbose=2 "$library"
+              fi
             done < <(find "$voice" -name '*.dylib' -type f -print0)
-            verify_signed_binary "$helper" "codex-voice-host"
+            if [[ "$MACOS_SIGNING_MODE" == "signed" ]]; then
+              verify_signed_binary "$helper" "codex-voice-host"
+            else
+              lipo "$helper" -verify_arch "$expected_arch"
+            fi
           fi
 
           if [[ "${{ matrix.verify_dmg }}" != "true" ]]; then
