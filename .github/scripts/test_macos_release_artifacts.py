@@ -1,6 +1,8 @@
 """Guard both signing-mode artifact paths in the macOS release workflow."""
 
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -99,6 +101,37 @@ class MacosReleaseArtifactsTest(unittest.TestCase):
         )
         self.assertIn(
             'else\n              lipo "$helper" -verify_arch "$expected_arch"', verify
+        )
+
+    def test_primary_stages_binaries_before_dmg_exists(self) -> None:
+        packaging = job("package-macos")
+        stage = step(packaging, "Stage macOS artifacts")
+        for target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                release = root / "target" / target / "release"
+                release.mkdir(parents=True)
+                binaries = ("codex", "codex-code-mode-host", "codex-responses-api-proxy")
+                for binary in binaries:
+                    (release / binary).write_bytes(b"binary")
+                script = stage.split("run: |\n", 1)[1]
+                for expression, value in (
+                    ("${{ matrix.target }}", target),
+                    ("${{ matrix.bundle }}", "primary"),
+                    ("${{ matrix.binaries }}", " ".join(binaries)),
+                    ("${{ matrix.build_dmg }}", "true"),
+                ):
+                    script = script.replace(expression, value)
+                subprocess.run(["bash", "-c", script], cwd=root, check=True)
+                dist = root / "dist" / target
+                self.assertEqual(
+                    sorted(path.name for path in dist.iterdir()),
+                    sorted(f"{binary}-{target}" for binary in binaries),
+                )
+        dmg = step(packaging, "Build unsigned macOS DMG")
+        self.assertLess(
+            dmg.index('if [[ ! -f "$dmg_path" ]]'),
+            dmg.index('cp "$dmg_path" "$dest/"'),
         )
 
 

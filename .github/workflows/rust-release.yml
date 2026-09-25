@@ -1230,11 +1230,6 @@ jobs:
             cp "target/${{ matrix.target }}/release/${binary}" "$dest/${binary}-${{ matrix.target }}"
           done
 
-          if [[ "${{ matrix.build_dmg }}" == "true" ]]; then
-            cp "target/${{ matrix.target }}/release/codex-${{ matrix.target }}.dmg" \
-              "$dest/codex-${{ matrix.target }}.dmg"
-          fi
-
       - name: Build Codex package archive
         shell: bash
         env:
@@ -1301,6 +1296,8 @@ jobs:
             echo "DMG $dmg_path not found after build"
             exit 1
           fi
+          dest="dist/${target}"
+          cp "$dmg_path" "$dest/"
 
       - name: Upload unsigned macOS DMG
         if: ${{ matrix.build_dmg == 'true' }}
