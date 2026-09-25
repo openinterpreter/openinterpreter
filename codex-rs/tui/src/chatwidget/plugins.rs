@@ -865,14 +865,26 @@ impl ChatWidget {
             "Install the required Apps in ChatGPT to continue:"
         };
         let mut header = ColumnRenderable::new();
-        header.push(Line::from("Plugins".bold()));
-        header.push(Line::from(
-            format!("{} plugin installed.", flow.plugin_display_name).bold(),
-        ));
-        header.push(Line::from(
-            format!("App setup {current}/{total}: {}", app.name).dim(),
-        ));
-        header.push(Line::from(status_label.dim()));
+        header.push(
+            ratatui::widgets::Paragraph::new(Line::from("Plugins".bold()))
+                .wrap(ratatui::widgets::Wrap { trim: false }),
+        );
+        header.push(
+            ratatui::widgets::Paragraph::new(Line::from(
+                format!("{} plugin installed.", flow.plugin_display_name).bold(),
+            ))
+            .wrap(ratatui::widgets::Wrap { trim: false }),
+        );
+        header.push(
+            ratatui::widgets::Paragraph::new(Line::from(
+                format!("App setup {current}/{total}: {}", app.name).dim(),
+            ))
+            .wrap(ratatui::widgets::Wrap { trim: false }),
+        );
+        header.push(
+            ratatui::widgets::Paragraph::new(Line::from(status_label.dim()))
+                .wrap(ratatui::widgets::Wrap { trim: false }),
+        );
 
         let mut items = Vec::new();
 
@@ -948,7 +960,7 @@ impl ChatWidget {
             footer_hint: Some(plugin_detail_hint_line()),
             items,
             col_width_mode: ColumnWidthMode::AutoAllRows,
-            ..Default::default()
+            ..SelectionViewParams::picker()
         })
     }
 

@@ -43,28 +43,6 @@ impl From<CyberAccessProgram> for AccessPrograms {
     }
 }
 
-/// Canonical input payload for the compaction endpoint.
-#[derive(Debug, Clone, Serialize)]
-pub struct CompactionInput<'a> {
-    pub model: &'a str,
-    pub input: &'a [ResponseItem],
-    #[serde(skip_serializing_if = "str::is_empty")]
-    pub instructions: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<ResponsesApiTools>,
-    pub parallel_tool_calls: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<Reasoning>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub service_tier: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt_cache_key: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<TextControls>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub access_programs: Option<AccessPrograms>,
-}
-
 /// Canonical input payload for the memory summarize endpoint.
 #[derive(Debug, Clone, Serialize)]
 pub struct MemorySummarizeInput {
@@ -94,7 +72,7 @@ pub struct MemorySummarizeOutput {
     pub memory_summary: String,
 }
 
-/// The server response currently being handled, shared with tool-review extensions.
+/// The latest server response ID received in this turn, shared with tool-review extensions.
 #[derive(Clone, Debug)]
 pub struct ResponseId(pub String);
 

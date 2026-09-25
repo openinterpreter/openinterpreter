@@ -4,7 +4,6 @@ use codex_app_server_protocol::Model;
 use codex_app_server_protocol::ModelServiceTier;
 use codex_app_server_protocol::ModelUpgradeInfo;
 use codex_app_server_protocol::ReasoningEffortOption;
-use codex_core::ThreadManager;
 use codex_core::build_models_manager;
 use codex_core::config::Config;
 use codex_http_client::HttpClientFactory;
@@ -13,17 +12,12 @@ use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffortPreset;
 
-pub async fn supported_models(
-    thread_manager: Arc<ThreadManager>,
-    include_hidden: bool,
-    http_client_factory: HttpClientFactory,
-) -> Vec<Model> {
-    models_from_presets(
-        thread_manager
-            .list_models(RefreshStrategy::OnlineIfUncached, http_client_factory)
-            .await,
-        include_hidden,
-    )
+pub fn supported_models(models: Vec<ModelPreset>, include_hidden: bool) -> Vec<Model> {
+    models
+        .into_iter()
+        .filter(|preset| include_hidden || preset.show_in_picker)
+        .map(model_from_preset)
+        .collect()
 }
 
 pub async fn supported_models_for_provider(
@@ -100,6 +94,7 @@ fn model_from_preset(preset: ModelPreset) -> Model {
             })
             .collect(),
         default_service_tier: preset.default_service_tier,
+        available_access_programs: preset.available_access_programs.map(Into::into),
         is_default: preset.is_default,
     }
 }

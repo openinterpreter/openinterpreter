@@ -1,0 +1,7 @@
+---
+source: tui/src/app/tests/realtime_requests.rs
+assertion_line: 1083
+expression: "rendered.join(\"\\n\").replace(&thread_id.to_string(), \"<thread-id>\")"
+---
+• An answer to keep.
+■ Voice conversation failed: thread/realtime/appendSpeech failed in TUI: thread/realtime/appendSpeech failed: thread not found: <thread-id> (code -32600)

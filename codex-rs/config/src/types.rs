@@ -3,6 +3,8 @@
 // Note this file should generally be restricted to simple struct/enum
 // definitions that do not contain business logic.
 
+pub use crate::mcp_ema::McpEnterpriseManagedAuthConfig;
+pub use crate::mcp_ema::McpServerIdpOAuthConfig;
 pub use crate::mcp_types::AppToolApproval;
 pub use crate::mcp_types::McpServerAuth;
 pub use crate::mcp_types::McpServerConfig;
@@ -18,6 +20,7 @@ pub use codex_protocol::config_types::ApprovalsReviewer;
 pub use codex_protocol::config_types::ModeKind;
 pub use codex_protocol::config_types::Personality;
 pub use codex_protocol::config_types::ServiceTier;
+use codex_protocol::config_types::ToolExposureSurface;
 pub use codex_protocol::config_types::WebSearchMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::BTreeMap;
@@ -28,6 +31,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
+pub use crate::tui_effects::TuiEffects;
 pub use crate::tui_keymap::KeybindingSpec;
 pub use crate::tui_keymap::KeybindingsSpec;
 pub use crate::tui_keymap::MAX_FUNCTION_KEY;
@@ -43,6 +47,7 @@ pub use crate::tui_keymap::TuiPagerKeymap;
 pub use crate::tui_keymap::TuiVimNormalKeymap;
 pub use crate::tui_keymap::TuiVimOperatorKeymap;
 pub use crate::tui_keymap::TuiVimSearchKeymap;
+pub use crate::tui_rendering::TuiRendering;
 
 pub const DEFAULT_OTEL_ENVIRONMENT: &str = "dev";
 pub const DEFAULT_MEMORIES_MAX_ROLLOUTS_PER_STARTUP: usize = 2;
@@ -160,15 +165,13 @@ impl Default for AuthKeyringBackendKind {
 pub enum WindowsSandboxModeToml {
     Elevated,
     Unelevated,
+    Mxc,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct WindowsToml {
     pub sandbox: Option<WindowsSandboxModeToml>,
-    /// Defaults to `true`. Set to `false` to launch the final sandboxed child
-    /// process on `Winsta0\\Default` instead of a private desktop.
-    pub sandbox_private_desktop: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, JsonSchema)]
@@ -286,10 +289,16 @@ pub struct ToolSuggestConfig {
     pub disabled_tools: Vec<ToolSuggestDisabledTool>,
 }
 
+pub use codex_protocol::MemoryVersion;
+
 /// Memories settings loaded from config.toml.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct MemoriesToml {
+    /// Selects the memory pipeline; v1 remains the default.
+    pub version: Option<MemoryVersion>,
+    /// Generate both versions while the selected version supplies context.
+    pub dual_write: Option<bool>,
     /// When `true`, external context sources mark the thread `memory_mode` as `"polluted"`.
     #[serde(alias = "no_memories_if_mcp_or_web_search")]
     pub disable_on_external_context: Option<bool>,
@@ -323,6 +332,8 @@ pub struct MemoriesToml {
 /// Effective memories settings after defaults are applied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MemoriesConfig {
+    pub version: MemoryVersion,
+    pub dual_write: bool,
     pub disable_on_external_context: bool,
     pub generate_memories: bool,
     pub use_memories: bool,
@@ -340,6 +351,8 @@ pub struct MemoriesConfig {
 impl Default for MemoriesConfig {
     fn default() -> Self {
         Self {
+            version: MemoryVersion::V1,
+            dual_write: false,
             disable_on_external_context: false,
             generate_memories: true,
             use_memories: true,
@@ -360,6 +373,8 @@ impl From<MemoriesToml> for MemoriesConfig {
     fn from(toml: MemoriesToml) -> Self {
         let defaults = Self::default();
         Self {
+            version: toml.version.unwrap_or(defaults.version),
+            dual_write: toml.dual_write.unwrap_or(defaults.dual_write),
             disable_on_external_context: toml
                 .disable_on_external_context
                 .unwrap_or(defaults.disable_on_external_context),
@@ -484,6 +499,12 @@ pub struct AppConfig {
     /// When `false`, Codex does not surface this app.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+
+    /// Model-facing surfaces from which this connector's tools must be omitted,
+    /// in addition to any server-level omissions. `None` leaves lower-priority
+    /// configuration unchanged; an empty list clears connector-level omissions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omit_tools_from: Option<Vec<ToolExposureSurface>>,
 
     /// Reviewer for approval prompts from this app, overriding the thread default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -731,15 +752,26 @@ pub struct Tui {
     #[serde(default = "default_true")]
     pub animations: bool,
 
-    /// Enable decorative effects such as Astra composer stars. Also requires animations.
-    /// Defaults to `true`.
-    #[serde(default = "default_true")]
-    pub whimsy: bool,
+    /// Records the one-time screen-reader detection attempt. Either value skips detection.
+    pub screen_reader_detection_done: Option<bool>,
+
+    /// Individual visual effects. Each also requires animations to be enabled.
+    #[serde(default)]
+    pub effects: TuiEffects,
+
+    /// Rich content rendering. Independent of animations and visual effects.
+    #[serde(default)]
+    pub rendering: TuiRendering,
 
     /// Show startup tooltips in the TUI welcome screen.
     /// Defaults to `true`.
     #[serde(default = "default_true")]
     pub show_tooltips: bool,
+
+    /// Show informational notices about connected app server version differences.
+    /// Defaults to `true`; this does not control compatibility errors or version status.
+    #[serde(default = "default_true")]
+    pub show_server_version_notice: bool,
 
     /// Generate automatic conversation recaps when the terminal is unfocused.
     /// Defaults to `true`. Disabling this leaves `/recap` available on demand.
@@ -765,6 +797,11 @@ pub struct Tui {
     /// Defaults to `false`.
     #[serde(default)]
     pub raw_output_mode: bool,
+
+    /// Own the fullscreen transcript, including scrolling, selection, and search.
+    /// Defaults to `false`; alternate-screen restrictions take precedence.
+    #[serde(default)]
+    pub fullscreen_transcript: bool,
 
     /// Controls whether the TUI uses the terminal's alternate screen buffer.
     ///
@@ -906,13 +943,17 @@ pub struct PluginConfig {
 /// Policy settings for a plugin-provided MCP server.
 ///
 /// This intentionally excludes transport settings: plugin manifests own how the
-/// MCP server is launched, while user config owns enablement and tool policy.
+/// MCP server is launched, while host config owns enablement, auth, and tool policy.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct PluginMcpServerConfig {
     /// When `false`, Codex skips initializing this plugin MCP server.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+
+    /// Host-configured EMA registration; the plugin still owns its endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ema_auth: Option<PluginMcpServerEmaAuthConfig>,
 
     /// Approval mode for tools in this server unless a tool override exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -935,11 +976,54 @@ impl Default for PluginMcpServerConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            ema_auth: None,
             default_tools_approval_mode: None,
             enabled_tools: None,
             disabled_tools: None,
             tools: HashMap::new(),
         }
+    }
+}
+
+/// Resource registration applied through an existing per-plugin policy overlay.
+/// The enterprise IdP is selected separately by trusted host configuration.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PluginMcpServerEmaAuthConfig {
+    /// Exact plugin endpoint approved by the host; never overrides the declaration.
+    pub url: String,
+    pub client_id: String,
+    pub authorization_server_issuer: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    pub resource: String,
+}
+
+impl PluginMcpServerEmaAuthConfig {
+    pub fn apply(&self, server: &mut McpServerConfig) {
+        let registration_error = if self.resource.trim().is_empty() {
+            Some("plugin EMA registration requires a resource")
+        } else if !server.matches_requirement(&crate::McpServerRequirement::Identity {
+            identity: crate::McpServerIdentity::Url {
+                url: self.url.clone(),
+            },
+        }) {
+            Some("plugin endpoint does not match its EMA registration")
+        } else {
+            None
+        };
+        if registration_error.is_some() && server.enabled {
+            server.enabled = false;
+            server.disabled_reason = Some(crate::McpServerDisabledReason::EmaRegistration);
+        }
+        server.auth = McpServerAuth::EmaAuth;
+        let oauth = server.oauth.get_or_insert_default();
+        oauth.client_id = Some(self.client_id.clone());
+        oauth.authorization_server_issuer = Some(self.authorization_server_issuer.clone());
+        server.scopes = Some(self.scopes.clone());
+        oauth.ema_registration = None;
+        oauth.ema_registration_error = registration_error;
+        server.oauth_resource = Some(self.resource.clone());
     }
 }
 

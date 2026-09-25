@@ -1,6 +1,9 @@
+mod analytics_session;
 mod client;
 pub(crate) mod types;
 
+pub use analytics_session::AnalyticsAccount;
+pub use analytics_session::AnalyticsSession;
 pub use client::AddCreditsNudgeCreditType;
 pub use client::ChatgptThreadTurnCosts;
 pub use client::ChatgptTurnCost;
@@ -8,6 +11,14 @@ pub use client::Client;
 pub use client::RequestError;
 pub use client::ThreadUsage;
 pub use client::ThreadUsageBreakdownGroup;
+pub use client::analytics::AnalyticsReport;
+pub use client::analytics::AnalyticsResponse;
+pub use client::profile::AccountProfile;
+pub use client::profile::ProfileIdentity;
+pub use client::profile::ProfileInvocation;
+pub use client::profile::ProfileInvocationKind;
+pub use client::profile::ProfileMetadata;
+pub use client::profile::ProfileStats;
 pub use client::turn_usage::ApiKeyResponseCost;
 pub use client::turn_usage::ApiKeyTurnCost;
 pub use client::turn_usage::ApiKeyTurnCostStatus;
@@ -36,3 +47,18 @@ pub use types::TokenUsageProfile;
 pub use types::TokenUsageProfileDailyBucket;
 pub use types::TokenUsageProfileStats;
 pub use types::TurnAttemptsSiblingTurnsResponse;
+
+pub use client::plan_history::PlanLimitBreakdown;
+pub use client::plan_history::PlanLimitDimension;
+pub use client::plan_history::PlanLimitHistory;
+pub use client::plan_history::PlanLimitPeriod;
+pub use client::plan_history::PlanLimitValue;
+
+pub use client::task_usage::TaskCredits;
+pub use client::task_usage::TaskUsage;
+pub use client::task_usage::TaskUsageAmounts;
+pub use client::task_usage::TaskUsageGroup;
+pub use client::task_usage::TaskUsageResponse;
+pub use client::task_usage::TaskUsageStatus;
+pub use client::task_usage::TaskUsageThread;
+pub use codex_backend_openapi_models::models::analytics as analytics_models;

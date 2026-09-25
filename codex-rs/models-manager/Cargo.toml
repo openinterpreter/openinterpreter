@@ -22,6 +22,7 @@ codex-model-provider-info = { workspace = true }
 codex-otel = { workspace = true }
 codex-product-info = { workspace = true }
 codex-protocol = { workspace = true }
+codex-prompts = { workspace = true }
 codex-utils-output-truncation = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

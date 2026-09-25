@@ -243,8 +243,7 @@ mod tests {
             )
             .expect("child session file");
             let _owner_guard = owner
-                .writer_lock_coordinator
-                .acquire(child_thread_id)
+                .acquire_writer_lock(child_thread_id)
                 .expect("acquire child writer lock");
 
             let error = store

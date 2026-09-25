@@ -21,6 +21,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::client_async;
 use tokio_tungstenite::tungstenite::Bytes;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_util::sync::CancellationToken;
 
 #[test]
@@ -77,6 +78,26 @@ async fn control_socket_acceptor_upgrades_and_forwards_websocket_text_messages_a
         .await
         .expect("websocket upgrade should complete");
     assert_eq!(response.status().as_u16(), 101);
+    let advertised_max = response
+        .headers()
+        .get("x-codex-websocket-max-unfragmented-message-bytes")
+        .expect("byte cap header should be advertised")
+        .to_str()
+        .expect("byte cap header should be ASCII")
+        .parse::<usize>()
+        .expect("byte cap header should be a number");
+    let websocket_config = WebSocketConfig::default();
+    assert_eq!(
+        advertised_max,
+        [
+            websocket_config.max_frame_size,
+            websocket_config.max_message_size,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .expect("default websocket config should have an incoming size limit")
+    );
 
     let opened = timeout(Duration::from_secs(1), transport_event_rx.recv())
         .await
@@ -248,11 +269,43 @@ async fn app_server_startup_lock_serializes_waiters() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn control_socket_rejects_writable_parent_without_changing_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    let path = AbsolutePathBuf::from_absolute_path(directory.path().join("rpc.sock")).unwrap();
+    let (tx, _rx) = mpsc::channel(CHANNEL_CAPACITY);
+    let error = start_control_socket_acceptor(
+        path.clone(),
+        tx,
+        CancellationToken::new(),
+        DaemonShutdownAccess::Disabled,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        std::fs::metadata(directory.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o777
+    );
+    assert!(std::fs::symlink_metadata(path).is_err());
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn control_socket_file_is_private_after_bind() {
     use std::os::unix::fs::PermissionsExt;
 
     let temp_dir = tempfile::TempDir::new().expect("temp dir");
     let socket_path = test_socket_path(temp_dir.path());
+    let parent = socket_path.as_path().parent().unwrap();
+    std::fs::create_dir_all(parent).unwrap();
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755)).unwrap();
     let (transport_event_tx, _transport_event_rx) =
         mpsc::channel::<TransportEvent>(CHANNEL_CAPACITY);
     let shutdown_token = CancellationToken::new();
@@ -269,9 +322,60 @@ async fn control_socket_file_is_private_after_bind() {
         .await
         .expect("socket metadata should exist");
     assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        std::fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    let physical_path = std::fs::read_link(socket_path.as_path()).expect("rendezvous symlink");
+    assert_eq!(
+        physical_path.parent(),
+        Some(
+            codex_uds::shared_daemon_socket_directory()
+                .unwrap()
+                .as_path()
+        )
+    );
 
     shutdown_token.cancel();
     accept_handle.await.expect("acceptor should join");
+    assert!(!physical_path.exists());
+    assert!(std::fs::symlink_metadata(socket_path.as_path()).is_err());
+
+    // Simulate a dangling rendezvous left by an interrupted cleanup.
+    std::os::unix::fs::symlink(&physical_path, socket_path.as_path()).unwrap();
+    let (sender, _receiver) = mpsc::channel::<TransportEvent>(CHANNEL_CAPACITY);
+    let shutdown = CancellationToken::new();
+    let (first, second) = tokio::join!(
+        start_control_socket_acceptor(
+            socket_path.clone(),
+            sender.clone(),
+            shutdown.clone(),
+            DaemonShutdownAccess::Disabled,
+        ),
+        start_control_socket_acceptor(
+            socket_path.clone(),
+            sender,
+            shutdown.clone(),
+            DaemonShutdownAccess::Disabled,
+        ),
+    );
+    let (acceptor, error) = match (first, second) {
+        (Ok(acceptor), Err(error)) | (Err(error), Ok(acceptor)) => (acceptor, error),
+        _ => panic!("exactly one concurrent restart should replace the stale symlink"),
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+    let _client = connect_to_socket(socket_path.as_path()).await.unwrap();
+
+    // Cleanup must not remove a replacement at the advertised path.
+    std::fs::remove_file(socket_path.as_path()).unwrap();
+    std::fs::write(socket_path.as_path(), b"replacement").unwrap();
+    shutdown.cancel();
+    acceptor.await.unwrap();
+    assert_eq!(
+        std::fs::read(socket_path.as_path()).unwrap(),
+        b"replacement"
+    );
+    assert!(!physical_path.exists());
 }
 
 #[cfg(windows)]

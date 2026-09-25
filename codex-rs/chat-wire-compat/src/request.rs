@@ -5,6 +5,7 @@ use codex_api::TextControls;
 use codex_api::TextFormat;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::LocalShellAction;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
@@ -519,13 +520,8 @@ fn convert_message_content(content: &[ContentItem]) -> Option<Value> {
             ContentItem::InputText { text } | ContentItem::OutputText { text } => {
                 return Some(json!(text));
             }
-            ContentItem::InputImage { image_url, .. } => {
-                return Some(json!([
-                    {
-                        "type": "image_url",
-                        "image_url": { "url": image_url }
-                    }
-                ]));
+            ContentItem::InputImage { image, .. } => {
+                return Some(json!([convert_image_content(image)]));
             }
             ContentItem::InputAudio { audio_url } => {
                 return Some(json!([
@@ -546,10 +542,7 @@ fn convert_message_content(content: &[ContentItem]) -> Option<Value> {
                     "type": "text",
                     "text": text,
                 }),
-                ContentItem::InputImage { image_url, .. } => json!({
-                    "type": "image_url",
-                    "image_url": { "url": image_url },
-                }),
+                ContentItem::InputImage { image, .. } => convert_image_content(image),
                 ContentItem::InputAudio { audio_url } => json!({
                     "type": "input_audio",
                     "audio_url": audio_url,
@@ -557,6 +550,19 @@ fn convert_message_content(content: &[ContentItem]) -> Option<Value> {
             })
             .collect(),
     ))
+}
+
+fn convert_image_content(image: &ImageReference) -> Value {
+    match image {
+        ImageReference::Inline { image_url } => json!({
+            "type": "image_url",
+            "image_url": { "url": image_url },
+        }),
+        ImageReference::File { file_id } => json!({
+            "type": "file",
+            "file": { "file_id": file_id },
+        }),
+    }
 }
 
 fn tool_output_text(output: &FunctionCallOutputPayload) -> String {
@@ -991,6 +997,43 @@ mod tests {
         assert_eq!(
             tool_kinds.get("shell_command"),
             Some(&ToolOutputKind::Function)
+        );
+    }
+
+    #[test]
+    fn convert_message_content_preserves_inline_urls_and_file_ids() {
+        let inline = ContentItem::InputImage {
+            image: ImageReference::Inline {
+                image_url: "data:image/png;base64,abc".to_string(),
+            },
+            detail: None,
+        };
+        let file = ContentItem::InputImage {
+            image: ImageReference::File {
+                file_id: "file_123".to_string(),
+            },
+            detail: None,
+        };
+
+        assert_eq!(
+            convert_message_content(std::slice::from_ref(&inline)),
+            Some(json!([{
+                "type": "image_url",
+                "image_url": { "url": "data:image/png;base64,abc" },
+            }]))
+        );
+        assert_eq!(
+            convert_message_content(&[inline, file]),
+            Some(json!([
+                {
+                    "type": "image_url",
+                    "image_url": { "url": "data:image/png;base64,abc" },
+                },
+                {
+                    "type": "file",
+                    "file": { "file_id": "file_123" },
+                }
+            ]))
         );
     }
 

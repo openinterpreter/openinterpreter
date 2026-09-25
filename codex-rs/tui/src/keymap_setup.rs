@@ -22,6 +22,10 @@ mod capture;
 mod debug;
 mod picker;
 
+#[cfg(test)]
+#[path = "keymap_setup/menu_tests.rs"]
+mod menu_tests;
+
 pub(crate) use actions::KeymapActionFilter;
 use capture::KeymapCaptureView;
 pub(crate) use debug::build_keymap_debug_view;
@@ -42,21 +46,21 @@ use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
+use ratatui::widgets::Paragraph;
+use ratatui::widgets::Wrap;
 
 use crate::app_event::AppEvent;
 use crate::app_event::KeymapCaptureMode;
 use crate::app_event::KeymapEditIntent;
 use crate::app_event_sender::AppEventSender;
-use crate::bottom_pane::ColumnWidthMode;
-use crate::bottom_pane::SelectionDescriptionLayout;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
-use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+use crate::bottom_pane::popup_consts::picker_hint_line_for_keymap;
 use crate::key_hint::KeyBinding;
 use crate::keymap::RuntimeKeymap;
 use crate::keymap::bindings_for_action;
 use crate::keymap::keymap_action_id;
-use crate::render::renderable::ColumnRenderable;
+use crate::style::accent_color;
 use actions::KEYMAP_ACTIONS;
 use actions::action_label;
 use actions::binding_slot;
@@ -66,7 +70,6 @@ use debug::KeymapDebugView;
 
 pub(crate) const KEYMAP_ACTION_MENU_VIEW_ID: &str = "keymap-action-menu";
 pub(crate) const KEYMAP_REPLACE_BINDING_MENU_VIEW_ID: &str = "keymap-replace-binding-menu";
-const KEYMAP_ACTION_MENU_MIN_DESCRIPTION_WIDTH: u16 = 24;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum KeymapEditOutcome {
@@ -84,17 +87,8 @@ fn key_binding_span(binding: &str) -> ratatui::text::Span<'static> {
     if binding == "unbound" {
         binding.to_string().dim()
     } else {
-        binding.to_string().cyan()
+        binding.to_string().fg(accent_color())
     }
-}
-
-fn keymap_action_menu_hint_line() -> Line<'static> {
-    Line::from(vec![
-        "enter".cyan(),
-        " select · ".dim(),
-        "esc".cyan(),
-        " back".dim(),
-    ])
 }
 
 fn open_capture_action(
@@ -173,28 +167,25 @@ pub(crate) fn build_keymap_action_menu_params(
     let remove_action = action.clone();
     let config_path = format!("tui.keymap.{context}.{action}");
     let source = if custom_binding {
-        "Custom root override".cyan()
+        "Custom root override".fg(accent_color())
     } else {
         "Default keymap".dim()
     };
-    let mut header = ColumnRenderable::new();
-    header.push(Line::from("Edit Shortcut".bold()));
-    header.push(Line::from(vec![
-        label.bold(),
-        " · ".dim(),
-        context_label.dim(),
-    ]));
-    header.push(Line::from(vec![
-        "Current ".dim(),
-        key_binding_span(&current_binding),
-        " · ".dim(),
-        source,
-    ]));
-    header.push(Line::from(vec![
-        "Config ".dim(),
-        format!("`{config_path}`").cyan(),
-    ]));
-    header.push(Line::from(description.to_string().dim()));
+    let header = vec![
+        Line::from("Edit Shortcut".bold()),
+        Line::from(vec![label.bold(), " · ".dim(), context_label.dim()]),
+        Line::from(vec![
+            "Current ".dim(),
+            key_binding_span(&current_binding),
+            " · ".dim(),
+            source,
+        ]),
+        Line::from(vec![
+            "Config ".dim(),
+            format!("`{config_path}`").fg(accent_color()),
+        ]),
+        Line::from(description.to_string().dim()),
+    ];
 
     let mut items = Vec::new();
     match active_binding_count {
@@ -307,19 +298,15 @@ pub(crate) fn build_keymap_action_menu_params(
 
     SelectionViewParams {
         view_id: Some(KEYMAP_ACTION_MENU_VIEW_ID),
-        header: Box::new(header),
+        header: Box::new(Paragraph::new(header).wrap(Wrap { trim: false })),
         footer_note: Some(Line::from(vec![
             "Changes write the root ".dim(),
-            "`tui.keymap.*`".cyan(),
+            "`tui.keymap.*`".fg(accent_color()),
             " override.".dim(),
         ])),
-        footer_hint: Some(keymap_action_menu_hint_line()),
+        footer_hint: Some(picker_hint_line_for_keymap(&runtime_keymap.list)),
         items,
-        col_width_mode: ColumnWidthMode::AutoAllRows,
-        description_layout: SelectionDescriptionLayout::StackBelowWhenNarrow {
-            min_description_width: KEYMAP_ACTION_MENU_MIN_DESCRIPTION_WIDTH,
-        },
-        ..Default::default()
+        ..SelectionViewParams::picker()
     }
 }
 
@@ -330,14 +317,15 @@ pub(crate) fn build_keymap_replace_binding_menu_params(
 ) -> SelectionViewParams {
     let bindings = active_binding_specs(runtime_keymap, &context, &action).unwrap_or_default();
     let label = action_label(&action);
-    let mut header = ColumnRenderable::new();
-    header.push(Line::from("Replace Binding".bold()));
-    header.push(Line::from(vec![
-        label.bold(),
-        " · ".dim(),
-        format!("{context}.{action}").dim(),
-    ]));
-    header.push(Line::from("Choose the binding to replace.".dim()));
+    let header = vec![
+        Line::from("Replace Binding".bold()),
+        Line::from(vec![
+            label.bold(),
+            " · ".dim(),
+            format!("{context}.{action}").dim(),
+        ]),
+        Line::from("Choose the binding to replace.".dim()),
+    ];
 
     let items = bindings
         .into_iter()
@@ -375,11 +363,10 @@ pub(crate) fn build_keymap_replace_binding_menu_params(
 
     SelectionViewParams {
         view_id: Some(KEYMAP_REPLACE_BINDING_MENU_VIEW_ID),
-        header: Box::new(header),
-        footer_hint: Some(keymap_action_menu_hint_line()),
+        header: Box::new(Paragraph::new(header).wrap(Wrap { trim: false })),
+        footer_hint: Some(picker_hint_line_for_keymap(&runtime_keymap.list)),
         items,
-        col_width_mode: ColumnWidthMode::Fixed,
-        ..Default::default()
+        ..SelectionViewParams::picker()
     }
 }
 
@@ -389,6 +376,7 @@ pub(crate) fn build_keymap_conflict_params(
     key: String,
     intent: KeymapEditIntent,
     error: String,
+    runtime_keymap: &RuntimeKeymap,
 ) -> SelectionViewParams {
     let capture_mode = if key.contains(' ') {
         KeymapCaptureMode::Chord
@@ -396,10 +384,15 @@ pub(crate) fn build_keymap_conflict_params(
         KeymapCaptureMode::SingleKey
     };
     SelectionViewParams {
-        title: Some("Shortcut Conflict".to_string()),
-        subtitle: Some(format!("{context}.{action} cannot use `{key}`.")),
-        footer_note: Some(Line::from(error)),
-        footer_hint: Some(standard_popup_hint_line()),
+        header: Box::new(
+            Paragraph::new(vec![
+                Line::from("Shortcut Conflict".bold()),
+                Line::from(format!("{context}.{action} cannot use `{key}`.").dim()),
+                Line::from(error.red()),
+            ])
+            .wrap(Wrap { trim: false }),
+        ),
+        footer_hint: Some(picker_hint_line_for_keymap(&runtime_keymap.list)),
         items: vec![
             SelectionItem {
                 name: "Pick another key".to_string(),
@@ -415,8 +408,7 @@ pub(crate) fn build_keymap_conflict_params(
                 ..Default::default()
             },
         ],
-        col_width_mode: ColumnWidthMode::Fixed,
-        ..Default::default()
+        ..SelectionViewParams::picker()
     }
 }
 
@@ -797,6 +789,7 @@ mod tests {
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: false,
+            effects: Default::default(),
             skills: Some(Vec::new()),
         });
         (pane, tx, rx)
@@ -1017,6 +1010,26 @@ mod tests {
             .join("\n");
 
         assert_snapshot!("keymap_picker_first_actions", snapshot);
+        let agents = all_tab
+            .items
+            .iter()
+            .filter(|item| {
+                item.search_value
+                    .as_deref()
+                    .unwrap_or_default()
+                    .starts_with("Agents ")
+            })
+            .map(|item| {
+                format!(
+                    "{} | {} | {}",
+                    item.name,
+                    item.description.as_deref().unwrap_or_default(),
+                    item.search_value.as_deref().unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_snapshot!("keymap_picker_agents_actions", agents);
     }
 
     #[test]
@@ -1150,6 +1163,22 @@ mod tests {
             .expect("redo row should render");
 
         assert_snapshot!("keymap_picker_redo", redo_row);
+    }
+
+    #[test]
+    fn picker_voice_toggle_snapshot() {
+        assert_snapshot!(
+            "keymap_voice_toggle",
+            render_picker(
+                build_keymap_action_menu_params(
+                    "chat".into(),
+                    "toggle_voice".into(),
+                    &RuntimeKeymap::defaults(),
+                    &TuiKeymap::default(),
+                ),
+                /*width*/ 80,
+            )
+        );
     }
 
     #[test]
@@ -1465,7 +1494,7 @@ mod tests {
         let mut view = build_keymap_debug_view(&RuntimeKeymap::defaults(), &TuiKeymap::default());
         view.show_delayed_hint_for_test();
 
-        view.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        view.handle_key_event(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE));
 
         let rendered = render_debug(&view, /*width*/ 100);
         assert!(!rendered.contains("Still waiting?"));

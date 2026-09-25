@@ -18,6 +18,7 @@ use tokio::sync::Semaphore;
 
 use http::HeaderValue;
 
+use crate::NetworkPolicy;
 use crate::chatgpt_cloudflare_cookies::ChatGptCookieStore;
 use crate::custom_ca::BuildCustomCaTransportError;
 use crate::custom_ca::build_reqwest_client_with_custom_ca;
@@ -165,12 +166,16 @@ impl fmt::Debug for OutboundProxyRoute {
 #[derive(Clone)]
 pub struct HttpClientFactory {
     outbound_proxy_policy: OutboundProxyPolicy,
+    system_proxy_fallback: bool,
     chatgpt_cookie_store: Option<Arc<ChatGptCookieStore>>,
+    network_policy: NetworkPolicy,
 }
 
 impl PartialEq for HttpClientFactory {
     fn eq(&self, other: &Self) -> bool {
         self.outbound_proxy_policy == other.outbound_proxy_policy
+            && self.system_proxy_fallback == other.system_proxy_fallback
+            && self.network_policy == other.network_policy
             && self
                 .chatgpt_cookie_store
                 .as_ref()
@@ -188,6 +193,8 @@ impl fmt::Debug for HttpClientFactory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpClientFactory")
             .field("outbound_proxy_policy", &self.outbound_proxy_policy)
+            .field("system_proxy_fallback", &self.system_proxy_fallback)
+            .field("network_policy", &self.network_policy)
             .finish()
     }
 }
@@ -197,8 +204,38 @@ impl HttpClientFactory {
     pub const fn new(outbound_proxy_policy: OutboundProxyPolicy) -> Self {
         Self {
             outbound_proxy_policy,
+            system_proxy_fallback: false,
             chatgpt_cookie_store: None,
+            network_policy: NetworkPolicy::unmanaged(),
         }
+    }
+
+    /// Carries the account/configuration owner's application policy into every transport.
+    pub fn with_network_policy(mut self, policy: NetworkPolicy) -> Self {
+        self.network_policy = policy;
+        self
+    }
+
+    pub fn network_policy(&self) -> &NetworkPolicy {
+        &self.network_policy
+    }
+
+    /// Changes the route policy while retaining the configured cookies and network policy.
+    pub fn with_outbound_proxy_policy(mut self, policy: OutboundProxyPolicy) -> Self {
+        self.outbound_proxy_policy = policy;
+        self
+    }
+
+    /// Allows bootstrap callers to retry through the system proxy when their request is safe
+    /// to replay. This does not change routing or enable retries for ordinary HTTP requests.
+    pub fn with_system_proxy_fallback(mut self) -> Self {
+        self.system_proxy_fallback = true;
+        self
+    }
+
+    pub fn allows_system_proxy_fallback(&self) -> bool {
+        self.system_proxy_fallback
+            && self.outbound_proxy_policy == OutboundProxyPolicy::ReqwestDefault
     }
 
     /// Adds process-scoped cookies to requests made by ChatGPT cookie-store clients.

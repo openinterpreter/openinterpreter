@@ -6,6 +6,7 @@ use codex_login::ExternalAuthFuture;
 use codex_login::ExternalAuthRefreshContext;
 use codex_login::auth::BedrockAccessKeysAuth;
 use codex_model_provider_info::AwsAuthRefreshConfig;
+use codex_model_provider_info::AwsCredentialExportConfig;
 use codex_model_provider_info::ModelProviderAwsAuthInfo;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
@@ -16,16 +17,21 @@ use codex_protocol::user_input::UserInput;
 use codex_utils_redacted_string::RedactedString;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_response_sequence;
 use core_test_support::responses::mount_sse_once;
+use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
+use core_test_support::wait_for_event;
 use http::HeaderMap;
 use http::HeaderValue;
 use http::header::AUTHORIZATION;
 use pretty_assertions::assert_eq;
 use std::num::NonZeroU64;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::process::Command;
@@ -200,6 +206,7 @@ async fn amazon_bedrock_managed_access_keys_sign_requests() -> anyhow::Result<()
         ModelProviderInfo::create_amazon_bedrock_provider(Some(ModelProviderAwsAuthInfo {
             profile: None,
             region: Some("us-east-1".to_string()),
+            credential_export: None,
             auth_refresh: None,
         }));
     provider.base_url = Some(format!("{}/v1", server.uri()));
@@ -231,6 +238,191 @@ async fn amazon_bedrock_managed_access_keys_sign_requests() -> anyhow::Result<()
     Ok(())
 }
 
+fn bedrock_credential_export_config(
+    credentials_path: &Path,
+    invocations_path: &Path,
+) -> anyhow::Result<AwsCredentialExportConfig> {
+    #[cfg(unix)]
+    let (command, args) = {
+        let script_path = credentials_path.with_extension("sh");
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\nprintf 'invoked\\n' >> \"$1\"\ncat \"$2\"\n",
+        )?;
+        let mut permissions = std::fs::metadata(&script_path)?.permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o755);
+        }
+        std::fs::set_permissions(&script_path, permissions)?;
+        (
+            script_path.to_string_lossy().into_owned(),
+            vec![
+                invocations_path.to_string_lossy().into_owned(),
+                credentials_path.to_string_lossy().into_owned(),
+            ],
+        )
+    };
+
+    #[cfg(windows)]
+    let (command, args) = {
+        let script_path = credentials_path.with_extension("cmd");
+        std::fs::write(
+            &script_path,
+            "@echo off\r\n>> \"%~1\" echo invoked\r\ntype \"%~2\"\r\n",
+        )?;
+        (
+            "cmd.exe".to_string(),
+            vec![
+                "/D".to_string(),
+                "/Q".to_string(),
+                "/C".to_string(),
+                script_path.to_string_lossy().into_owned(),
+                invocations_path.to_string_lossy().into_owned(),
+                credentials_path.to_string_lossy().into_owned(),
+            ],
+        )
+    };
+
+    Ok(AwsCredentialExportConfig {
+        command,
+        args: args.into_iter().map(RedactedString::from).collect(),
+        timeout_ms: NonZeroU64::new(5_000).expect("timeout should be non-zero"),
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn amazon_bedrock_credential_export_precedence_and_caching() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let fixture = tempfile::tempdir()?;
+    let credentials_path = fixture.path().join("credentials.json");
+    let invocations_path = fixture.path().join("invocations.txt");
+    std::fs::write(
+        &credentials_path,
+        serde_json::to_vec(&serde_json::json!({
+            "Credentials": {
+                "AccessKeyId": "exported-access-key-id",
+                "SecretAccessKey": "exported-secret-access-key",
+                "SessionToken": "exported-session-token",
+                "Expiration": "2099-01-01T00:00:00Z",
+            },
+        }))?,
+    )?;
+
+    let server = start_mock_server().await;
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+            sse(vec![ev_response_created("resp-2"), ev_completed("resp-2")]),
+        ],
+    )
+    .await;
+    let mut provider =
+        ModelProviderInfo::create_amazon_bedrock_provider(Some(ModelProviderAwsAuthInfo {
+            profile: None,
+            region: Some("us-east-1".to_string()),
+            credential_export: Some(bedrock_credential_export_config(
+                &credentials_path,
+                &invocations_path,
+            )?),
+            auth_refresh: None,
+        }));
+    provider.base_url = Some(format!("{}/v1", server.uri()));
+    provider.request_max_retries = Some(0);
+    provider.stream_max_retries = Some(2);
+
+    let mut builder = test_codex()
+        .with_model("openai.gpt-5.5")
+        .with_auth(CodexAuth::BedrockAccessKeys(BedrockAccessKeysAuth {
+            access_key_id: "managed-access-key-id".to_string(),
+            secret_access_key: "managed-secret-access-key".to_string(),
+            session_token: Some("managed-session-token".to_string()),
+        }))
+        .with_config(move |config| {
+            config.model_provider_id = provider.name.clone();
+            config.model_provider = provider;
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+
+    test.submit_turn("first request").await?;
+    test.submit_turn("second request").await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        let authorization = request
+            .header("authorization")
+            .expect("exported AWS credentials should produce SigV4 authorization");
+        assert!(authorization.starts_with("AWS4-HMAC-SHA256 "));
+        assert!(authorization.contains("Credential=exported-access-key-id/"));
+        assert_eq!(
+            request.header("x-amz-security-token").as_deref(),
+            Some("exported-session-token")
+        );
+    }
+    let invocations = std::fs::read_to_string(&invocations_path)?;
+    assert_eq!(invocations.lines().collect::<Vec<_>>(), vec!["invoked"]);
+
+    std::fs::write(
+        &credentials_path,
+        serde_json::to_vec(&serde_json::json!({
+            "Credentials": {
+                "AccessKeyId": "rotated-access-key-id",
+                "SecretAccessKey": "rotated-secret-access-key",
+                "SessionToken": "rotated-session-token",
+                "Expiration": "2099-01-01T00:00:00Z",
+            },
+        }))?,
+    )?;
+    let rotated_response_mock = mount_response_sequence(
+        &server,
+        vec![
+            ResponseTemplate::new(403).set_body_string("ExpiredTokenException"),
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(vec![
+                    ev_response_created("resp-3"),
+                    ev_completed("resp-3"),
+                ])),
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(vec![
+                    ev_response_created("resp-4"),
+                    ev_completed("resp-4"),
+                ])),
+        ],
+    )
+    .await;
+
+    test.submit_turn("recover expired credentials").await?;
+    test.submit_turn("reuse rotated credentials").await?;
+
+    let rotated_requests = rotated_response_mock.requests();
+    assert_eq!(rotated_requests.len(), 3);
+    for (request, (access_key_id, session_token)) in rotated_requests.iter().zip([
+        ("exported-access-key-id", "exported-session-token"),
+        ("rotated-access-key-id", "rotated-session-token"),
+        ("rotated-access-key-id", "rotated-session-token"),
+    ]) {
+        let authorization = request
+            .header("authorization")
+            .expect("exported AWS credentials should produce SigV4 authorization");
+        assert!(authorization.contains(&format!("Credential={access_key_id}/")));
+        assert_eq!(
+            request.header("x-amz-security-token").as_deref(),
+            Some(session_token)
+        );
+    }
+    let invocations = std::fs::read_to_string(invocations_path)?;
+    assert_eq!(
+        invocations.lines().collect::<Vec<_>>(),
+        vec!["invoked", "invoked"]
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn amazon_bedrock_aws_auth_refresh_resigns() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
@@ -252,32 +444,77 @@ async fn amazon_bedrock_aws_auth_refresh_resigns() -> anyhow::Result<()> {
         let inherited_path = std::env::var_os("PATH").unwrap_or_default();
         let mut paths = std::env::split_paths(&inherited_path).collect::<Vec<_>>();
         paths.insert(/*index*/ 0, fixture.path().to_path_buf());
-        let credentials = fixture.path().join("credentials");
-        std::fs::write(&credentials, OLD)?;
-        let mut command = Command::new(test_executable);
-        command
-            .arg("--exact")
-            .arg(TEST_NAME)
-            .env(SUBPROCESS_ENV, "1")
-            .env("PATH", std::env::join_paths(paths)?)
-            .env("AWS_SHARED_CREDENTIALS_FILE", &credentials)
-            .env("AWS_CONFIG_FILE", &credentials)
-            .env("AWS_EC2_METADATA_DISABLED", "true")
-            .env_remove("AWS_ACCESS_KEY_ID")
-            .env_remove("AWS_SECRET_ACCESS_KEY")
-            .env_remove("AWS_BEARER_TOKEN_BEDROCK")
-            .env_remove("AWS_WEB_IDENTITY_TOKEN_FILE")
-            .env_remove("AWS_ROLE_ARN");
-        let output = command.output().await?;
-        assert!(output.status.success(), "{output:?}");
+        let path = std::env::join_paths(paths)?;
+        for mode in ["profile", "export", "export-failure", "export-expired"] {
+            let credentials = fixture.path().join(format!("{mode}-credentials"));
+            std::fs::write(&credentials, OLD)?;
+            let mut command = Command::new(&test_executable);
+            command
+                .arg("--exact")
+                .arg(TEST_NAME)
+                .env(SUBPROCESS_ENV, mode)
+                .env("PATH", &path)
+                .env("AWS_SHARED_CREDENTIALS_FILE", &credentials)
+                .env("AWS_CONFIG_FILE", &credentials)
+                .env("AWS_EC2_METADATA_DISABLED", "true")
+                .env_remove("AWS_ACCESS_KEY_ID")
+                .env_remove("AWS_SECRET_ACCESS_KEY")
+                .env_remove("AWS_BEARER_TOKEN_BEDROCK")
+                .env_remove("AWS_WEB_IDENTITY_TOKEN_FILE")
+                .env_remove("AWS_ROLE_ARN");
+            let output = command.output().await?;
+            assert!(output.status.success(), "{mode}: {output:?}");
+        }
         return Ok(());
     }
 
+    let mode = std::env::var(SUBPROCESS_ENV)?;
+    let persistent_export_failure = mode == "export-failure";
+    let credentials_path = PathBuf::from(std::env::var("AWS_SHARED_CREDENTIALS_FILE")?);
+    let refresh_invocations = credentials_path.with_extension("refreshes");
     if std::env::args().any(|argument| argument == HELPER_ARG) {
-        std::fs::write(std::env::var("AWS_SHARED_CREDENTIALS_FILE")?, NEW)?;
+        std::fs::write(&credentials_path, NEW)?;
+        if !persistent_export_failure {
+            std::fs::write(
+                credentials_path.with_extension("json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "Version": 1,
+                    "AccessKeyId": "NEW",
+                    "SecretAccessKey": "s",
+                    "SessionToken": "exported-session-token",
+                }))?,
+            )?;
+        }
+        let mut invocations = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&refresh_invocations)?;
+        std::io::Write::write_all(&mut invocations, b"refresh\n")?;
         return Ok(());
     }
 
+    let export_mode = mode.starts_with("export");
+    if mode == "export-expired" {
+        std::fs::write(
+            credentials_path.with_extension("json"),
+            serde_json::to_vec(&serde_json::json!({
+                "Version": 1,
+                "AccessKeyId": "OLD",
+                "SecretAccessKey": "s",
+                "Expiration": "2000-01-01T00:00:00Z",
+            }))?,
+        )?;
+    }
+    let export_invocations = credentials_path.with_extension("exports");
+    let credential_export = if export_mode {
+        // Login creates or replaces this file after the initial export fails.
+        Some(bedrock_credential_export_config(
+            &credentials_path.with_extension("json"),
+            &export_invocations,
+        )?)
+    } else {
+        None
+    };
     let server = start_mock_server().await;
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
@@ -294,14 +531,19 @@ async fn amazon_bedrock_aws_auth_refresh_resigns() -> anyhow::Result<()> {
                     .set_body_string(sse(vec![ev_response_created("r"), ev_completed("r")]))
             }
         })
-        .expect(2)
+        .expect(match mode.as_str() {
+            "profile" => 2,
+            "export-failure" => 0,
+            _ => 1,
+        })
         .mount(&server)
         .await;
 
     let mut provider =
         ModelProviderInfo::create_amazon_bedrock_provider(Some(ModelProviderAwsAuthInfo {
-            profile: Some("default".to_string()),
+            profile: (!export_mode).then(|| "default".to_string()),
             region: Some("us-east-1".to_string()),
+            credential_export,
             auth_refresh: Some(AwsAuthRefreshConfig {
                 command: "aws".to_string(),
                 args: Vec::from(
@@ -312,7 +554,9 @@ async fn amazon_bedrock_aws_auth_refresh_resigns() -> anyhow::Result<()> {
         }));
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.request_max_retries = Some(0);
-    provider.stream_max_retries = Some(0);
+    let stream_max_retries = if export_mode { 2 } else { 0 };
+    provider.stream_max_retries = Some(stream_max_retries);
+    let recovery_attempts = stream_max_retries as usize + 1;
 
     let mut builder = test_codex()
         .with_model("openai.gpt-5.5")
@@ -321,6 +565,47 @@ async fn amazon_bedrock_aws_auth_refresh_resigns() -> anyhow::Result<()> {
             config.model_provider = provider;
         });
     let test = builder.build_with_auto_env(&server).await?;
+    if persistent_export_failure {
+        test.codex
+            .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "fail export even after login".into(),
+                text_elements: Vec::new(),
+            }]))
+            .await?;
+        let EventMsg::TurnComplete(completed) = wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await
+        else {
+            unreachable!("predicate guarantees a turn complete event");
+        };
+        let error = completed.error.expect("failed export should fail the turn");
+        assert!(
+            error
+                .message
+                .contains("AWS credential export command exited with"),
+            "{error:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(refresh_invocations)?,
+            "refresh\n".repeat(recovery_attempts)
+        );
+        assert_eq!(
+            std::fs::read_to_string(export_invocations)?
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["invoked"; 2 * recovery_attempts]
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("mock server should capture requests")
+                .is_empty()
+        );
+        server.verify().await;
+        return Ok(());
+    }
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
             text: "hello".to_string(),
@@ -357,6 +642,86 @@ async fn amazon_bedrock_aws_auth_refresh_resigns() -> anyhow::Result<()> {
             ),
         ]
     );
+    server.verify().await;
+    assert_eq!(std::fs::read_to_string(&refresh_invocations)?, "refresh\n");
+    if export_mode {
+        assert_eq!(
+            std::fs::read_to_string(&export_invocations)?
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["invoked", "invoked"]
+        );
+        let requests = server
+            .received_requests()
+            .await
+            .expect("mock server should capture the exported request");
+        assert_eq!(
+            requests[0].headers.get("x-amz-security-token"),
+            Some(&HeaderValue::from_static("exported-session-token"))
+        );
+    }
+
+    server.reset().await;
+    let rejected = mount_response_sequence(
+        &server,
+        vec![
+            ResponseTemplate::new(403).set_body_string("ExpiredTokenException");
+            2 * recovery_attempts
+        ],
+    )
+    .await;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "reject the refreshed credentials too".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let EventMsg::Error(error) =
+        wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await
+    else {
+        unreachable!("predicate guarantees an error event");
+    };
+    assert!(error.message.contains("ExpiredTokenException"), "{error:?}");
+    let EventMsg::TurnComplete(completed) = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await
+    else {
+        unreachable!("predicate guarantees a turn complete event");
+    };
+    assert_eq!(completed.error, Some(error));
+    assert_eq!(rejected.requests().len(), 2 * recovery_attempts);
+    assert_eq!(
+        std::fs::read_to_string(refresh_invocations)?,
+        "refresh\n".repeat(1 + recovery_attempts)
+    );
+    if export_mode {
+        assert_eq!(
+            std::fs::read_to_string(export_invocations)?
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["invoked"; 2 + recovery_attempts]
+        );
+
+        // A transient auth rejection can succeed on an outer stream retry.
+        server.reset().await;
+        let retried = mount_response_sequence(
+            &server,
+            vec![
+                ResponseTemplate::new(403).set_body_string("ExpiredTokenException"),
+                ResponseTemplate::new(403).set_body_string("ExpiredTokenException"),
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse(vec![
+                        ev_response_created("retried"),
+                        ev_completed("retried"),
+                    ])),
+            ],
+        )
+        .await;
+        test.submit_turn("retry a temporary auth failure").await?;
+        assert_eq!(retried.requests().len(), 3);
+    }
     server.verify().await;
     Ok(())
 }

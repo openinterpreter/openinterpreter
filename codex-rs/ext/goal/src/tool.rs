@@ -29,6 +29,7 @@ use crate::spec::create_update_goal_tool;
 
 #[derive(Clone)]
 pub(crate) struct GoalToolExecutor {
+    pub(crate) execution_allowed: bool,
     kind: GoalToolKind,
     thread_id: ThreadId,
     state_db: Arc<codex_state::StateRuntime>,
@@ -84,6 +85,7 @@ impl GoalToolExecutor {
     ) -> Self {
         Self {
             kind: GoalToolKind::Get,
+            execution_allowed: true,
             thread_id,
             state_db,
             accounting_state,
@@ -105,6 +107,7 @@ impl GoalToolExecutor {
     ) -> Self {
         Self {
             kind: GoalToolKind::Create,
+            execution_allowed: true,
             thread_id,
             state_db,
             accounting_state,
@@ -125,6 +128,7 @@ impl GoalToolExecutor {
     ) -> Self {
         Self {
             kind: GoalToolKind::Update,
+            execution_allowed: true,
             thread_id,
             state_db,
             accounting_state,
@@ -161,6 +165,11 @@ impl<'call> ToolExecutor<ToolCall<'call>> for GoalToolExecutor {
         'call: 'a,
     {
         Box::pin(async move {
+            if !self.execution_allowed {
+                return Err(FunctionCallError::RespondToModel(
+                    "Goal tools require a persistent thread.".to_string(),
+                ));
+            }
             match self.kind {
                 GoalToolKind::Get => self.handle_get(invocation).await,
                 GoalToolKind::Create => self.handle_create(invocation).await,
@@ -238,10 +247,10 @@ impl GoalToolExecutor {
         let args: UpdateGoalArgs = parse_arguments(invocation.function_arguments()?)?;
         if !matches!(
             args.status,
-            ThreadGoalStatus::Complete | ThreadGoalStatus::Blocked
+            ThreadGoalStatus::Complete | ThreadGoalStatus::Blocked | ThreadGoalStatus::Paused
         ) {
             return Err(FunctionCallError::RespondToModel(
-                "update_goal can only mark the existing goal complete or blocked; pause, resume, budget-limited, and usage-limited status changes are controlled by the user or system"
+                "update_goal can only mark the existing goal complete, blocked, or paused at the user's explicit request; resume, budget-limited, and usage-limited status changes are controlled by the user or system"
                     .to_string(),
             ));
         }
@@ -249,9 +258,10 @@ impl GoalToolExecutor {
         self.account_active_goal_progress(
             match args.status {
                 ThreadGoalStatus::Complete => codex_state::GoalAccountingMode::ActiveOrComplete,
-                ThreadGoalStatus::Blocked => codex_state::GoalAccountingMode::ActiveOrStopped,
+                ThreadGoalStatus::Blocked | ThreadGoalStatus::Paused => {
+                    codex_state::GoalAccountingMode::ActiveOrStopped
+                }
                 ThreadGoalStatus::Active
-                | ThreadGoalStatus::Paused
                 | ThreadGoalStatus::UsageLimited
                 | ThreadGoalStatus::BudgetLimited => unreachable!("status validated above"),
             },

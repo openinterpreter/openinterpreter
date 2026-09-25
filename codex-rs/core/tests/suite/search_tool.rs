@@ -702,7 +702,7 @@ async fn tool_search_returns_deferred_tools_without_follow_up_tool_injection() -
         apps_tool_call
             .pointer("/params/_meta/x-codex-turn-metadata/model")
             .and_then(Value::as_str),
-        Some("gpt-5.4")
+        Some("gpt-5.5")
     );
     let first_request_reasoning_effort = first_request_body
         .pointer("/reasoning/effort")

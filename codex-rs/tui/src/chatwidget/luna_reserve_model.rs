@@ -1,6 +1,7 @@
 //! The Reserve-only /model picker uses normal-model metadata while keeping Reserve routing.
 
 use super::*;
+use crate::bottom_pane::popup_consts::picker_hint_line_for_keymap;
 use crate::model_catalog::LUNA_MODEL;
 use crate::model_catalog::LUNA_RESERVE_MODEL;
 
@@ -43,20 +44,23 @@ impl ChatWidget {
             "Select Model",
             "Other models return when ordinary usage is available again.",
         );
-        self.show_model_selection_view(SelectionViewParams {
-            view_id: Some(view_id),
-            header,
-            footer_hint: Some(self.bottom_pane.standard_popup_hint_line()),
-            items: vec![SelectionItem {
-                name,
-                description,
-                is_current: true,
-                actions,
-                dismiss_on_select: single_supported_effort,
-                dismiss_parent_on_child_accept: !single_supported_effort,
-                ..Default::default()
-            }],
-            ..Default::default()
-        });
+        self.show_model_selection_view(
+            vec![LUNA_RESERVE_MODEL.to_string()],
+            SelectionViewParams {
+                view_id: Some(view_id),
+                header,
+                footer_hint: Some(picker_hint_line_for_keymap(&self.bottom_pane.list_keymap())),
+                items: vec![SelectionItem {
+                    name,
+                    description,
+                    is_current: true,
+                    actions,
+                    dismiss_on_select: single_supported_effort,
+                    dismiss_parent_on_child_accept: !single_supported_effort,
+                    ..Default::default()
+                }],
+                ..SelectionViewParams::picker()
+            },
+        );
     }
 }

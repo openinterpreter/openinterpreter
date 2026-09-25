@@ -9,6 +9,7 @@ use codex_app_server_protocol::RequestId;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::login_with_bedrock_api_key;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::path::Path;
@@ -122,11 +123,10 @@ async fn setup_bedrock_profile_and_environment() -> Result<()> {
     let codex_home = TempDir::new()?;
     let config_path = codex_home.path().join("config.toml");
     let dotenv_path = codex_home.path().join(".env");
-    std::fs::write(
-        &config_path,
-        "[model_providers.amazon-bedrock]\nhttp_headers = { X-Existing = \"preserved\" }\n\
-         [model_providers.amazon-bedrock.aws]\nprofile = \"old\"\nregion = \"us-east-1\"\n",
-    )?;
+    let existing_config = "[model_providers.amazon-bedrock]\nhttp_headers = { X-Existing = \"preserved\" }\n\
+         [model_providers.amazon-bedrock.aws]\nprofile = \"old\"\nregion = \"us-east-1\"\n\
+         auth_refresh = { command = \"aws\", args = [\"login\"] }\n";
+    std::fs::write(&config_path, existing_config)?;
     let existing_dotenv = "# existing configuration\nUNRELATED=value\nAWS_ACCESS_KEY_ID=old-id\n\
          export AWS_SECRET_ACCESS_KEY=old-secret\nAWS_SESSION_TOKEN=stale-token\n";
     std::fs::write(&dotenv_path, existing_dotenv)?;
@@ -153,10 +153,15 @@ async fn setup_bedrock_profile_and_environment() -> Result<()> {
     let config: toml::Value = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
     assert_eq!(
         serde_json::to_value(&config["model_providers"]["amazon-bedrock"]["aws"])?,
-        json!({"profile": "engineering", "region": "us-west-2"})
+        json!({
+            "profile": "engineering",
+            "region": "us-west-2",
+            "auth_refresh": {"command": "aws", "args": ["login"]}
+        })
     );
     assert_eq!(std::fs::read_to_string(&dotenv_path)?, existing_dotenv);
 
+    std::fs::write(&config_path, existing_config)?;
     let response: BedrockSetupResponse = app_server
         .request(|request_id| ClientRequest::BedrockSetup {
             request_id,
@@ -170,7 +175,10 @@ async fn setup_bedrock_profile_and_environment() -> Result<()> {
     let config: toml::Value = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
     assert_eq!(
         serde_json::to_value(&config["model_providers"]["amazon-bedrock"]["aws"])?,
-        json!({"region": "us-east-1"})
+        json!({
+            "region": "us-east-1",
+            "auth_refresh": {"command": "aws", "args": ["login"]}
+        })
     );
 
     let config: toml::Value = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
@@ -184,6 +192,7 @@ async fn setup_bedrock_profile_and_environment() -> Result<()> {
 
             [model_providers.amazon-bedrock.aws]
             region = "us-east-1"
+            auth_refresh = { command = "aws", args = ["login"] }
         }
         .into()
     );
@@ -318,6 +327,65 @@ async fn setup_bedrock_rejects_invalid_or_conflicting_credentials() -> Result<()
         "Amazon Bedrock login is disabled. Use ChatGPT login instead."
     );
     assert!(!home.path().join(".env").exists());
+
+    for source_file in ["selected.config.toml", "config.toml", "managed_config.toml"] {
+        let layered_home = TempDir::new()?;
+        let layered_home_path =
+            AbsolutePathBuf::from_absolute_path(layered_home.path().canonicalize()?)?
+                .into_path_buf();
+        let config_path = layered_home_path.join("config.toml");
+        let source_path = layered_home_path.join(source_file);
+        let active_path = layered_home_path.join("selected.config.toml");
+        let exporter_config = "[model_providers.amazon-bedrock.aws.credential_export]\n\
+             command = \"secret-command\"\nargs = [\"secret-argument\"]\n";
+        std::fs::write(&config_path, "")?;
+        std::fs::write(&active_path, "")?;
+        std::fs::write(&source_path, exporter_config)?;
+        let active_config_path = active_path.to_string_lossy();
+        let mut app_server = bedrock_app_server(
+            &layered_home_path,
+            &[(
+                "CODEX_APP_SERVER_TEST_USER_CONFIG_FILE",
+                Some(active_config_path.as_ref()),
+            )],
+        )
+        .await?;
+        let expected_config = std::fs::read_to_string(&config_path)?;
+        let expected_active = std::fs::read_to_string(&active_path)?;
+        let expected_error = "Amazon Bedrock is configured to use `aws.credential_export`. Please clear this setting to use another sign-in method.";
+
+        for (method, params) in [
+            (
+                "account/bedrock/setup",
+                json!({"type": "profile", "profile": "engineering", "region": "us-west-2"}),
+            ),
+            (
+                "account/bedrock/setup",
+                json!({"type": "environment", "region": "us-west-2"}),
+            ),
+            (
+                "account/login/start",
+                json!({"type": "amazonBedrock", "apiKey": "new-key", "region": "us-west-2"}),
+            ),
+            (
+                "account/login/start",
+                json!({"type": "amazonBedrockAccessKeys", "accessKeyId": "new-id", "secretAccessKey": "new-secret", "region": "us-west-2"}),
+            ),
+        ] {
+            let request_id = app_server.send_raw_request(method, Some(params)).await?;
+            let error = timeout(
+                READ_TIMEOUT,
+                app_server.read_stream_until_error_message(RequestId::Integer(request_id)),
+            )
+            .await??;
+            assert_eq!(error.error.message, expected_error);
+        }
+        assert_eq!(std::fs::read_to_string(&config_path)?, expected_config);
+        assert_eq!(std::fs::read_to_string(&source_path)?, exporter_config);
+        assert_eq!(std::fs::read_to_string(&active_path)?, expected_active);
+        assert!(!layered_home.path().join("auth.json").exists());
+        assert!(!layered_home.path().join(".env").exists());
+    }
 
     Ok(())
 }

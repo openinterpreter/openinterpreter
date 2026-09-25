@@ -1,0 +1,6 @@
+---
+source: tui/src/chatwidget/realtime_tests/lifecycle.rs
+assertion_line: 1425
+expression: "rendered.join(\"\\n\")"
+---
+• Voice connection timed out. Retrying once after cleanup.

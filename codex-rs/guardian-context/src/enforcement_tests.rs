@@ -1,0 +1,379 @@
+//! Aggregate budgets preserve required evidence and explicit message boundaries.
+
+use super::*;
+use crate::budget::section_tokens;
+use crate::composition::user_message;
+use codex_protocol::models::ImageReference;
+use codex_protocol::models::ResponseItem;
+use pretty_assertions::assert_eq;
+
+fn text(value: &str) -> ContentItem {
+    ContentItem::InputText {
+        text: value.to_owned(),
+    }
+}
+
+#[test]
+fn recovery_shortens_older_history_only_after_optional_evidence() {
+    let older = format!("[1] user: {}original suffix", "é🙂\"\n".repeat(/*n*/ 6_000));
+    let commentary = text(&"optional commentary ".repeat(/*n*/ 1_000));
+    let approval = text("[3] developer: user approved this action");
+    let restriction = text("[4] user: only modify scratch files");
+    let action = text("complete action");
+    let notice = SectionOutput {
+        id: "budget_omission",
+        delivery: SectionDelivery::UserContent(vec![Budgeted::required(text(
+            "evidence omitted or shortened",
+        ))]),
+    };
+    let context = ComposedContext {
+        sections: vec![SectionOutput {
+            id: "conversation_transcript",
+            delivery: SectionDelivery::UserContent(vec![
+                Budgeted::historical(text(&older)),
+                Budgeted::optional(commentary.clone(), BudgetPriority::Commentary),
+                Budgeted::historical(approval.clone()),
+                Budgeted::historical(restriction.clone()),
+                Budgeted::required(action.clone()),
+            ]),
+        }],
+        truncations: Vec::new(),
+    };
+    for reduction in [0, 4_000] {
+        let available = context.estimated_tokens() - content_tokens(&commentary)
+            + section_tokens(&notice)
+            - reduction;
+        let budget = RequestBudget {
+            max_input_tokens: available + 2_000,
+            existing_context_tokens: 2_000,
+        };
+        if reduction > 0 {
+            assert!(
+                context
+                    .clone()
+                    .enforce_budget(
+                        budget,
+                        "evidence omitted or shortened".to_owned(),
+                        HistoryTruncation::Preserve
+                    )
+                    .is_err()
+            );
+        }
+        let selected = context
+            .clone()
+            .enforce_budget(
+                budget,
+                "evidence omitted or shortened".to_owned(),
+                HistoryTruncation::Allow,
+            )
+            .unwrap();
+        assert!(selected.estimated_tokens() <= available);
+        let SectionDelivery::UserContent(content) = &selected.sections[0].delivery else {
+            panic!("expected user evidence")
+        };
+        let ContentItem::InputText { text: retained } = &content[0].content else {
+            panic!("expected historical text")
+        };
+        if reduction == 0 {
+            assert_eq!(retained, &older);
+        } else {
+            assert!(retained.starts_with("[1] user: "));
+            assert!(retained.ends_with("original suffix"));
+            assert!(retained.contains("<truncated omitted_approx_tokens="));
+        }
+        assert_eq!(
+            content,
+            &vec![
+                Budgeted::historical(text(retained)),
+                Budgeted::historical(approval.clone()),
+                Budgeted::historical(restriction.clone()),
+                Budgeted::required(action.clone()),
+            ]
+        );
+    }
+}
+
+#[test]
+fn planned_action_budget_omits_descriptions_without_changing_arguments() {
+    let action = crate::PlannedAction {
+        json: r#"{"tool":"write_record","arguments":{"description":"required payload"}}"#
+            .to_owned(),
+        kind: crate::PlannedActionKind::Command,
+        reason: None,
+        tool_descriptions: Some("optional tool description ".repeat(/*n*/ 100)),
+    };
+    let required = action.render(crate::ActionPresentation::SyncFull);
+    let context = crate::CollectedContext {
+        sections: vec![crate::ContextSection::PlannedAction(action)],
+    }
+    .compose(
+        crate::ContextPresentation::SyncFull {
+            session_id: "review",
+        },
+        crate::RenderedTranscript {
+            items: Vec::new(),
+            omission_note: None,
+            truncations: Vec::new(),
+        },
+    )
+    .unwrap();
+    let mut required_items = required.iter().map(|item| text(item)).collect::<Vec<_>>();
+    required_items.push(text("evidence omitted"));
+    let budget = crate::estimate_input_tokens(&user_message(required_items.clone())) + 100;
+    let selected = context
+        .enforce_budget(
+            RequestBudget {
+                max_input_tokens: budget,
+                existing_context_tokens: 0,
+            },
+            "evidence omitted".to_owned(),
+            HistoryTruncation::Preserve,
+        )
+        .unwrap();
+    // The sync preamble is also required and remains ahead of the action.
+    let messages = selected.into_messages();
+    let ResponseItem::Message { content, .. } = &messages[0] else {
+        panic!("expected user evidence");
+    };
+    assert_eq!(
+        &content[content.len() - required_items.len()..],
+        required_items
+    );
+}
+
+#[test]
+fn budget_reserves_existing_context_and_preserves_required_messages() {
+    let trusted = crate::PreviousReviews::try_from_fragments(vec!["verified review".to_owned()])
+        .unwrap()
+        .into_message();
+    let image = ContentItem::InputImage {
+        image: ImageReference::Inline {
+            image_url: "data:image/png;base64,AAAA".to_owned(),
+        },
+        detail: None,
+    };
+    let make_context = || ComposedContext {
+        sections: vec![
+            SectionOutput {
+                id: "conversation_transcript",
+                delivery: SectionDelivery::UserContent(vec![
+                    Budgeted::required(text("user restriction")),
+                    Budgeted::optional(
+                        text(&"old commentary".repeat(/*n*/ 200)),
+                        BudgetPriority::Commentary,
+                    ),
+                    Budgeted::optional(
+                        text(&"old tool output".repeat(/*n*/ 100)),
+                        BudgetPriority::Tool,
+                    ),
+                    Budgeted::required(text("latest tool evidence")),
+                    Budgeted::optional(image.clone(), BudgetPriority::Image),
+                ]),
+            },
+            SectionOutput {
+                id: "previous_reviews",
+                delivery: SectionDelivery::Message(Box::new(trusted.clone())),
+            },
+            SectionOutput {
+                id: "planned_action",
+                delivery: SectionDelivery::UserContent(vec![Budgeted::required(text(
+                    "exact action",
+                ))]),
+            },
+        ],
+        truncations: Vec::new(),
+    };
+    let notice = SectionOutput {
+        id: "budget_omission",
+        delivery: SectionDelivery::UserContent(vec![Budgeted::required(text("evidence omitted"))]),
+    };
+    let full = make_context();
+    let available = full.estimated_tokens()
+        - content_tokens(&text(&"old commentary".repeat(/*n*/ 200)))
+        - content_tokens(&text(&"old tool output".repeat(/*n*/ 100)))
+        + section_tokens(&notice);
+    let context = full
+        .enforce_budget(
+            RequestBudget {
+                max_input_tokens: available + 2_000,
+                existing_context_tokens: 2_000,
+            },
+            "evidence omitted".to_owned(),
+            HistoryTruncation::Preserve,
+        )
+        .unwrap();
+    assert!(context.estimated_tokens() <= available);
+    assert_eq!(
+        context.into_messages(),
+        vec![
+            user_message(vec![
+                text("user restriction"),
+                text("latest tool evidence"),
+                image.clone()
+            ]),
+            trusted.clone(),
+            user_message(vec![text("exact action"), text("evidence omitted")]),
+        ]
+    );
+    let without_image = make_context()
+        .enforce_budget(
+            RequestBudget {
+                max_input_tokens: available - content_tokens(&image),
+                existing_context_tokens: 0,
+            },
+            "evidence omitted".to_owned(),
+            HistoryTruncation::Preserve,
+        )
+        .unwrap();
+    assert_eq!(
+        without_image.into_messages(),
+        vec![
+            user_message(vec![text("user restriction"), text("latest tool evidence")]),
+            trusted.clone(),
+            user_message(vec![text("exact action"), text("evidence omitted")]),
+        ]
+    );
+}
+
+#[test]
+fn image_accounting_preserves_later_eviction_policy() {
+    let evidence = text(&"optional commentary ".repeat(/*n*/ 100));
+    let file_image = ContentItem::InputImage {
+        image: ImageReference::File {
+            file_id: "file_123".to_owned(),
+        },
+        detail: None,
+    };
+    let mut context = ComposedContext {
+        sections: vec![SectionOutput {
+            id: "evidence",
+            delivery: SectionDelivery::UserContent(vec![
+                Budgeted::optional(
+                    ContentItem::InputImage {
+                        image: ImageReference::Inline {
+                            image_url: "rejected-image".to_owned(),
+                        },
+                        detail: None,
+                    },
+                    BudgetPriority::Image,
+                ),
+                Budgeted::optional(file_image.clone(), BudgetPriority::Image),
+                Budgeted::optional(evidence.clone(), BudgetPriority::Commentary),
+                Budgeted::required(text("user restriction")),
+            ]),
+        }],
+        truncations: Vec::new(),
+    };
+    let without_oversized_image = context
+        .clone()
+        .enforce_budget(
+            RequestBudget {
+                max_input_tokens: content_tokens(&file_image).saturating_add(1_000),
+                existing_context_tokens: 0,
+            },
+            "evidence omitted".to_owned(),
+            HistoryTruncation::Preserve,
+        )
+        .unwrap();
+    assert_eq!(
+        without_oversized_image.into_messages(),
+        vec![user_message(vec![
+            file_image.clone(),
+            text("user restriction"),
+            text("evidence omitted")
+        ])]
+    );
+    context.retain_images(|image, _| matches!(image, ImageReference::File { .. }));
+    let available = context.estimated_tokens();
+    let retained = context
+        .clone()
+        .enforce_budget(
+            RequestBudget {
+                max_input_tokens: available,
+                existing_context_tokens: 0,
+            },
+            "evidence omitted".to_owned(),
+            HistoryTruncation::Preserve,
+        )
+        .unwrap();
+    assert_eq!(
+        retained.into_messages(),
+        vec![user_message(vec![
+            file_image.clone(),
+            evidence,
+            text("user restriction")
+        ])]
+    );
+    let smaller = context
+        .enforce_budget(
+            RequestBudget {
+                max_input_tokens: content_tokens(&file_image).saturating_add(100),
+                existing_context_tokens: 0,
+            },
+            "evidence omitted".to_owned(),
+            HistoryTruncation::Preserve,
+        )
+        .unwrap();
+    assert_eq!(
+        smaller.into_messages(),
+        vec![user_message(vec![
+            file_image,
+            text("user restriction"),
+            text("evidence omitted")
+        ])]
+    );
+
+    let older = ContentItem::InputImage {
+        image: ImageReference::Inline {
+            image_url: "older-image".to_owned(),
+        },
+        detail: None,
+    };
+    let newer = ContentItem::InputImage {
+        image: ImageReference::Inline {
+            image_url: "newer-image".to_owned(),
+        },
+        detail: None,
+    };
+    let image_section = |images: Vec<ContentItem>| SectionOutput {
+        id: "transcript_images",
+        delivery: SectionDelivery::UserContent(
+            images
+                .into_iter()
+                .map(|image| Budgeted::optional(image, BudgetPriority::Image))
+                .collect(),
+        ),
+    };
+    let notice = SectionOutput {
+        id: "budget_omission",
+        delivery: SectionDelivery::UserContent(vec![Budgeted::required(text("evidence omitted"))]),
+    };
+    let available = section_tokens(&image_section(vec![newer.clone()])) + section_tokens(&notice);
+    // Removing the older image frees a separator in one section, or an entire
+    // wrapper in separate sections. Either way, the newer image fits exactly.
+    for sections in [
+        vec![image_section(vec![older.clone(), newer.clone()])],
+        vec![
+            image_section(vec![older]),
+            image_section(vec![newer.clone()]),
+        ],
+    ] {
+        let context = ComposedContext {
+            sections,
+            truncations: Vec::new(),
+        }
+        .enforce_budget(
+            RequestBudget {
+                max_input_tokens: available,
+                existing_context_tokens: 0,
+            },
+            "evidence omitted".to_owned(),
+            HistoryTruncation::Preserve,
+        )
+        .unwrap();
+        assert_eq!(
+            context.into_messages(),
+            vec![user_message(vec![newer.clone(), text("evidence omitted")])]
+        );
+    }
+}

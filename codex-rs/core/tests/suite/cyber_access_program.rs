@@ -189,49 +189,6 @@ async fn cyber_access_program_omits_api_key_and_spoofed_custom_provider() -> Res
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cyber_access_program_survives_mid_turn_remote_compaction() -> Result<()> {
-    core_test_support::skip_if_no_network!(Ok(()));
-    let server = responses::start_mock_server().await;
-    let requests = responses::mount_sse_sequence(
-        &server,
-        vec![
-            responses::sse(vec![
-                // A dummy tool response forces a follow-up without shell approvals.
-                responses::ev_function_call("tool-1", "test_tool", "{}"),
-                responses::ev_completed_with_tokens("resp-1", /*total_tokens*/ 100000000),
-            ]),
-            responses::sse(vec![responses::ev_completed("resp-2")]),
-        ],
-    )
-    .await;
-    let compact =
-        responses::mount_compact_user_history_with_summary_once(&server, "compacted history").await;
-    let test = test_codex()
-        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_config(|config| {
-            let _ = config.features.disable(Feature::RemoteCompactionV2);
-        })
-        .build_with_auto_env(&server)
-        .await?;
-
-    submit(&test, Some(CyberAccessProgram::DaybreakBlue)).await?;
-
-    assert_eq!(
-        compact.single_request().body_json()["access_programs"],
-        json!({"cyber": "daybreak_blue"})
-    );
-    assert_eq!(
-        requests
-            .requests()
-            .iter()
-            .map(|request| request.body_json()["access_programs"].clone())
-            .collect::<Vec<_>>(),
-        vec![json!({"cyber": "daybreak_blue"}); 2]
-    );
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cyber_access_program_survives_mid_turn_remote_compaction_v2() -> Result<()> {
     core_test_support::skip_if_no_network!(Ok(()));
     let server = responses::start_mock_server().await;
@@ -260,10 +217,7 @@ async fn cyber_access_program_survives_mid_turn_remote_compaction_v2() -> Result
     .await;
     let test = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_config(|config| {
-            let _ = config.features.enable(Feature::RemoteCompactionV2);
-            config.model_auto_compact_token_limit = Some(200);
-        })
+        .with_config(|config| config.model_auto_compact_token_limit = Some(200))
         .build_with_auto_env(&server)
         .await?;
 

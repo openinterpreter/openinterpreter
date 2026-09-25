@@ -13,10 +13,11 @@
 //! traversal invariants stay with `ChatComposerHistory`.
 //!
 //! A search session starts idle with an empty footer query, so opening Ctrl+R never previews the
-//! latest history entry by itself. Typing a query restarts traversal from newest to oldest,
+//! latest history entry by itself. Typing or pasting a query restarts traversal from newest to oldest,
 //! repeated Ctrl+R/Up and Ctrl+S/Down move between unique matches, `Enter` accepts the current
 //! preview as an editable draft, and `Esc` or Ctrl+C restores the exact draft that existed before
-//! search started.
+//! search started. Buffered keys are integrated before that snapshot without reclassifying them as
+//! an explicit paste. Only accepting a nonempty preview dismisses any unused Astra sparkle opportunity.
 
 use std::ops::Range;
 
@@ -24,8 +25,6 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
-use ratatui::layout::Constraint;
-use ratatui::layout::Layout;
 use ratatui::layout::Rect;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
@@ -33,7 +32,6 @@ use ratatui::text::Span;
 
 use super::super::chat_composer_history::HistorySearchDirection;
 use super::super::chat_composer_history::HistorySearchResult;
-use super::super::footer::footer_height;
 use super::super::footer::reset_mode_after_activity;
 use super::super::textarea::VimPersistentState;
 use super::ActivePopup;
@@ -61,10 +59,18 @@ pub(super) struct HistorySearchSession {
     original_vim_history: VimHistory,
     /// Active and completed Vim commands suspended during temporary draft replacement.
     original_vim_state: VimPersistentState,
-    /// Footer-owned query text typed while Ctrl+R search is active.
+    /// Footer-owned query text typed or pasted while Ctrl+R search is active.
     query: String,
     /// User-visible search status used to choose footer hints and composer preview behavior.
     status: HistorySearchStatus,
+}
+
+impl HistorySearchSession {
+    /// Renders newlines and tabs as visible markers for the footer and cursor placement.
+    /// Matching continues to use the original query.
+    fn display_query(&self) -> String {
+        self.query.replace('\n', "↵").replace('\t', "⇥")
+    }
 }
 
 /// User-visible phase of the active Ctrl+R search session.
@@ -102,14 +108,14 @@ impl ChatComposer {
 
     /// Opens footer-owned reverse history search without previewing history yet.
     ///
-    /// Entering search mode first flushes pending paste-burst text, then snapshots the full
-    /// composer draft, clears any file/search popup state, and resets history traversal. The first
-    /// visible match is produced only after the footer query becomes non-empty, which keeps Ctrl+R
-    /// from replacing an empty composer with the latest prompt before the user has searched for
-    /// anything.
+    /// Entering search mode first integrates already-classified paste-burst text with
+    /// [`Self::apply_paste`], then snapshots the full composer draft, clears any file/search popup
+    /// state, and resets history traversal. The first visible match is produced only after the
+    /// footer query becomes non-empty, which keeps Ctrl+R from replacing an empty composer with
+    /// the latest prompt before the user has searched for anything.
     pub(super) fn begin_history_search(&mut self) -> (InputResult, bool) {
         if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
-            self.handle_paste(pasted);
+            self.apply_paste(pasted);
         }
         self.draft.paste_burst.clear_window_after_non_char();
 
@@ -198,6 +204,9 @@ impl ChatComposer {
                     .is_some_and(|search| matches!(search.status, HistorySearchStatus::Match))
                 {
                     self.history_search = None;
+                    if !self.is_empty() {
+                        self.dismiss_sparkle();
+                    }
                     self.history.reset_search();
                     self.footer.mode = reset_mode_after_activity(self.footer.mode);
                     self.move_cursor_to_end();
@@ -213,11 +222,9 @@ impl ChatComposer {
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } => {
-                if let Some(search) = self.history_search.as_ref() {
-                    let mut query = search.query.clone();
+                self.update_history_search_query(|query| {
                     query.pop();
-                    self.update_history_search_query(query);
-                }
+                });
                 (InputResult::None, true)
             }
             KeyEvent {
@@ -225,7 +232,7 @@ impl ChatComposer {
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } => {
-                self.update_history_search_query(String::new());
+                self.update_history_search_query(String::clear);
                 (InputResult::None, true)
             }
             KeyEvent {
@@ -233,11 +240,7 @@ impl ChatComposer {
                 modifiers,
                 ..
             } if !has_ctrl_or_alt(modifiers) => {
-                if let Some(search) = self.history_search.as_ref() {
-                    let mut query = search.query.clone();
-                    query.push(ch);
-                    self.update_history_search_query(query);
-                }
+                self.update_history_search_query(|query| query.push(ch));
                 (InputResult::None, true)
             }
             _ => (InputResult::None, true),
@@ -257,7 +260,7 @@ impl ChatComposer {
             if let Some(search) = self.history_search.as_mut() {
                 search.status = HistorySearchStatus::Idle;
             }
-            self.restore_draft(original_draft);
+            self.with_sparkle_history_preview(|composer| composer.restore_draft(original_draft));
             return InputResult::None;
         }
         let result = self.history.search(
@@ -270,19 +273,17 @@ impl ChatComposer {
         InputResult::None
     }
 
-    fn update_history_search_query(&mut self, query: String) {
-        let Some(original_draft) = self
-            .history_search
-            .as_ref()
-            .map(|search| search.original_draft.clone())
-        else {
+    /// Edits the footer query and restarts history traversal from the newest entry.
+    /// An empty query restores the original draft and leaves search open.
+    pub(super) fn update_history_search_query(&mut self, edit: impl FnOnce(&mut String)) {
+        let Some(search) = self.history_search.as_mut() else {
             return;
         };
-        if let Some(search) = self.history_search.as_mut() {
-            search.query = query.clone();
-            search.status = HistorySearchStatus::Searching;
-        }
-        self.restore_draft(original_draft);
+        edit(&mut search.query);
+        search.status = HistorySearchStatus::Searching;
+        let query = search.query.clone();
+        let original_draft = search.original_draft.clone();
+        self.with_sparkle_history_preview(|composer| composer.restore_draft(original_draft));
         if query.is_empty() {
             self.history.reset_search();
             if let Some(search) = self.history_search.as_mut() {
@@ -311,7 +312,7 @@ impl ChatComposer {
         };
         self.history.reset_navigation();
         self.footer.mode = reset_mode_after_activity(self.footer.mode);
-        self.restore_draft(search.original_draft);
+        self.with_sparkle_history_preview(|composer| composer.restore_draft(search.original_draft));
         self.vim_history = search.original_vim_history;
         self.draft
             .textarea
@@ -333,7 +334,7 @@ impl ChatComposer {
                 if let Some(search) = self.history_search.as_mut() {
                     search.status = HistorySearchStatus::Match;
                 }
-                self.apply_history_entry(entry);
+                self.with_sparkle_history_preview(|composer| composer.apply_history_entry(entry));
             }
             HistorySearchResult::Pending => {
                 if let Some(search) = self.history_search.as_mut() {
@@ -358,23 +359,33 @@ impl ChatComposer {
                     };
                 }
                 if let Some(original_draft) = original_draft {
-                    self.restore_draft(original_draft);
+                    self.with_sparkle_history_preview(|composer| {
+                        composer.restore_draft(original_draft)
+                    });
                 }
             }
         }
     }
 
+    fn with_sparkle_history_preview(&mut self, preview: impl FnOnce(&mut Self)) {
+        let previous = self.sparkle.history_preview;
+        self.sparkle.history_preview = true;
+        preview(self);
+        self.sparkle.history_preview = previous;
+    }
+
     /// Builds the footer line shown while reverse history search is active.
     ///
     /// The footer displays the query as the editable field and uses the status to decide whether
-    /// to show searching, match actions, or no-match feedback. The line is intentionally separate
-    /// from cursor placement so rendering can fall back to normal footer layout if a small terminal
-    /// cannot allocate a distinct hint row.
+    /// to show searching, match actions, or no-match feedback. Newlines and tabs use visible markers
+    /// while matching keeps the original query. The line is intentionally separate from cursor
+    /// placement so rendering can fall back to normal footer layout if a small terminal cannot
+    /// allocate a distinct hint row.
     pub(super) fn history_search_footer_line(&self) -> Option<Line<'static>> {
         let search = self.history_search.as_ref()?;
         let mut line = Line::from(vec![
             "reverse-i-search: ".dim(),
-            search.query.clone().cyan(),
+            search.display_query().cyan(),
         ]);
         match search.status {
             HistorySearchStatus::Idle => {}
@@ -393,7 +404,7 @@ impl ChatComposer {
     }
 
     fn history_search_action_key_span(key: KeyCode) -> Span<'static> {
-        Span::from(key_hint::plain(key)).cyan().bold().not_dim()
+        Span::from(key_hint::plain(key))
     }
 
     /// Returns byte ranges that should be highlighted in the current composer preview.
@@ -462,28 +473,8 @@ impl ChatComposer {
     /// The cursor tracks the end of the footer query rather than the textarea preview. If the
     /// footer area is collapsed or too narrow, the x coordinate is clamped inside the hint rect so
     /// terminal backends do not receive an off-screen cursor position.
-    pub(super) fn history_search_cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+    pub(super) fn history_search_cursor_pos(&self, hint_rect: Rect) -> Option<(u16, u16)> {
         self.history_search.as_ref()?;
-        let [_, _, _, popup_rect] = self.layout_areas(area);
-        if popup_rect.is_empty() {
-            return None;
-        }
-
-        let footer_props = self.footer_props();
-        let footer_hint_height = self
-            .custom_footer_height()
-            .unwrap_or_else(|| footer_height(&footer_props));
-        let footer_spacing = Self::footer_spacing(footer_hint_height);
-        let hint_rect = if footer_spacing > 0 && footer_hint_height > 0 {
-            let [_, hint_rect] = Layout::vertical([
-                Constraint::Length(footer_spacing),
-                Constraint::Length(footer_hint_height),
-            ])
-            .areas(popup_rect);
-            hint_rect
-        } else {
-            popup_rect
-        };
         if hint_rect.is_empty() {
             return None;
         }
@@ -502,7 +493,8 @@ impl ChatComposer {
             return None;
         }
         let prompt_width = Line::from("reverse-i-search: ").width() as u16;
-        let query_width = Line::from(search.query.clone()).width() as u16;
+        let query_width =
+            u16::try_from(Line::from(search.display_query()).width()).unwrap_or(u16::MAX);
         let desired_x = area
             .x
             .saturating_add(prompt_width)
@@ -511,6 +503,10 @@ impl ChatComposer {
         Some((desired_x.min(max_x), area.y))
     }
 }
+
+#[cfg(test)]
+#[path = "history_search_paste_tests.rs"]
+mod paste_tests;
 
 #[cfg(test)]
 mod tests {
@@ -881,63 +877,79 @@ mod tests {
 
     #[test]
     fn history_search_footer_action_hints_are_emphasized() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
-        let sender = AppEventSender::new(tx);
-        let mut composer = ChatComposer::new(
-            /*has_input_focus*/ true,
-            sender,
-            /*enhanced_keys_supported*/ true,
-            "Ask Codex to do anything".to_string(),
-            /*disable_paste_burst*/ false,
+        crate::terminal_palette::with_test_default_colors(
+            crate::terminal_probe::DefaultColors {
+                fg: (240, 240, 240),
+                bg: (24, 24, 24),
+            },
+            || {
+                let (tx, _rx) = unbounded_channel::<AppEvent>();
+                let sender = AppEventSender::new(tx);
+                let mut composer = ChatComposer::new(
+                    /*has_input_focus*/ true,
+                    sender,
+                    /*enhanced_keys_supported*/ true,
+                    "Ask Codex to do anything".to_string(),
+                    /*disable_paste_burst*/ false,
+                );
+                composer
+                    .history
+                    .record_local_submission(HistoryEntry::new("cargo test".to_string()));
+
+                let _ = composer
+                    .handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+                let _ = composer
+                    .handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+
+                let line = composer
+                    .history_search_footer_line()
+                    .expect("expected history search footer line");
+                assert_eq!(
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<Vec<_>>(),
+                    vec![
+                        "reverse-i-search: ",
+                        "c",
+                        "  ",
+                        "enter",
+                        " accept",
+                        " · ",
+                        "esc",
+                        " cancel"
+                    ]
+                );
+
+                let query_style = line.spans[1].style;
+                assert_eq!(query_style.fg, Some(ratatui::style::Color::Cyan));
+
+                let enter_style = line.spans[3].style;
+                assert_eq!(
+                    enter_style.fg,
+                    Some(crate::terminal_palette::rgb_color((240, 240, 240)))
+                );
+                assert!(enter_style.add_modifier.contains(Modifier::BOLD));
+                assert!(enter_style.sub_modifier.contains(Modifier::DIM));
+
+                let accept_style = line.spans[4].style;
+                assert!(accept_style.add_modifier.contains(Modifier::DIM));
+
+                let separator_style = line.spans[5].style;
+                assert!(separator_style.add_modifier.contains(Modifier::DIM));
+
+                let esc_style = line.spans[6].style;
+                assert_eq!(
+                    esc_style.fg,
+                    Some(crate::terminal_palette::rgb_color((240, 240, 240)))
+                );
+                assert!(esc_style.add_modifier.contains(Modifier::BOLD));
+                assert!(esc_style.sub_modifier.contains(Modifier::DIM));
+
+                let cancel_style = line.spans[7].style;
+                assert!(cancel_style.add_modifier.contains(Modifier::DIM));
+            },
         );
-        composer
-            .history
-            .record_local_submission(HistoryEntry::new("cargo test".to_string()));
-
-        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
-        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
-
-        let line = composer
-            .history_search_footer_line()
-            .expect("expected history search footer line");
-        assert_eq!(
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<Vec<_>>(),
-            vec![
-                "reverse-i-search: ",
-                "c",
-                "  ",
-                "enter",
-                " accept",
-                " · ",
-                "esc",
-                " cancel"
-            ]
-        );
-
-        let query_style = line.spans[1].style;
-        assert_eq!(query_style.fg, Some(ratatui::style::Color::Cyan));
-
-        let enter_style = line.spans[3].style;
-        assert_eq!(enter_style.fg, Some(ratatui::style::Color::Cyan));
-        assert!(enter_style.add_modifier.contains(Modifier::BOLD));
-        assert!(enter_style.sub_modifier.contains(Modifier::DIM));
-
-        let accept_style = line.spans[4].style;
-        assert!(accept_style.add_modifier.contains(Modifier::DIM));
-
-        let separator_style = line.spans[5].style;
-        assert!(separator_style.add_modifier.contains(Modifier::DIM));
-
-        let esc_style = line.spans[6].style;
-        assert_eq!(esc_style.fg, Some(ratatui::style::Color::Cyan));
-        assert!(esc_style.add_modifier.contains(Modifier::BOLD));
-        assert!(esc_style.sub_modifier.contains(Modifier::DIM));
-
-        let cancel_style = line.spans[7].style;
-        assert!(cancel_style.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]
@@ -964,7 +976,9 @@ mod tests {
         }
 
         let area = Rect::new(0, 0, 60, 8);
-        let [_, _, textarea_rect, _] = composer.layout_areas(area);
+        let textarea_rect = composer
+            .layout_with_options(area, Default::default())
+            .textarea;
         let mut buf = Buffer::empty(area);
         composer.render(area, &mut buf);
         let x = textarea_rect.x;
@@ -983,7 +997,9 @@ mod tests {
         );
 
         let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        let [_, _, accepted_textarea_rect, _] = composer.layout_areas(area);
+        let accepted_textarea_rect = composer
+            .layout_with_options(area, Default::default())
+            .textarea;
         let mut accepted_buf = Buffer::empty(area);
         composer.render(area, &mut accepted_buf);
         for offset in 0..3 {

@@ -116,7 +116,18 @@ impl Default for ToolCatalogCacheEntry {
 
 impl McpToolCatalogCacheContext {
     pub(crate) fn has_tools(&self) -> bool {
-        self.current_tools().is_some_and(|tools| !tools.is_empty())
+        self.current_revision().is_some()
+    }
+
+    /// Identifies the current usable catalog without cloning its tool definitions.
+    /// The entry is fixed for a connection; accepted publications advance its revision.
+    pub(crate) fn current_revision(&self) -> Option<u64> {
+        let state = lock_unpoisoned(&self.entry.state);
+        let snapshot = state.snapshot.as_ref()?;
+        (!state.disabled_by_server
+            && !snapshot.tools.is_empty()
+            && snapshot.published_at.elapsed() <= TOOL_CATALOG_CACHE_TTL)
+            .then_some(state.last_accepted_generation)
     }
 
     pub(crate) fn optional_startup_deadline(

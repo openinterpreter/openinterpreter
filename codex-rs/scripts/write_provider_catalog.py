@@ -19,9 +19,7 @@ OVERRIDES_PATH = (
 )
 DEFAULT_SORT_PRIORITY = 100
 SUPPORTED_WIRE_APIS = {"chat", "messages", "responses"}
-USER_AGENT = (
-    "OpenInterpreter/1.0 (+https://github.com/KillianLucas/open-interpreter-next)"
-)
+USER_AGENT = "OpenInterpreter/1.0 (+https://github.com/openinterpreter/openinterpreter)"
 
 
 def load_models_dev_catalog() -> dict[str, dict]:
@@ -56,6 +54,29 @@ def excluded_provider_ids(overrides: dict[str, object]) -> set[str]:
     if not isinstance(values, list):
         raise SystemExit("exclude_provider_ids must be a list")
     return {value for value in values if isinstance(value, str) and value}
+
+
+def provider_model_allowlist(
+    provider_id: str,
+    overrides: dict[str, object],
+) -> set[str] | None:
+    values = overrides.get("provider_model_allowlists", {})
+    if not isinstance(values, dict):
+        raise SystemExit("provider_model_allowlists must be an object")
+    allowlist = values.get(provider_id)
+    if allowlist is None:
+        return None
+    if not isinstance(allowlist, list) or not all(
+        isinstance(model_id, str) and model_id for model_id in allowlist
+    ):
+        raise SystemExit(
+            f"provider_model_allowlists.{provider_id} must be a list of non-empty strings"
+        )
+    if len(set(allowlist)) != len(allowlist):
+        raise SystemExit(
+            f"provider_model_allowlists.{provider_id} must not contain duplicates"
+        )
+    return set(allowlist)
 
 
 def model_description(metadata: dict) -> str | None:
@@ -115,6 +136,18 @@ def build_provider_entry(
     if not isinstance(base_url, str) or not base_url:
         raise SystemExit(f"missing api/base_url for provider {provider_id}")
 
+    source_models = provider.get("models") or {}
+    if not isinstance(source_models, dict):
+        raise SystemExit(f"models.dev provider {provider_id}.models must be an object")
+    model_allowlist = provider_model_allowlist(provider_id, overrides)
+    if model_allowlist is not None:
+        missing = sorted(model_allowlist - set(source_models))
+        if missing:
+            raise SystemExit(
+                f"provider_model_allowlists.{provider_id} missing from models.dev: "
+                + ", ".join(missing)
+            )
+
     env_key_overrides = overrides.get("env_key_overrides", {})
     if not isinstance(env_key_overrides, dict):
         env_key_overrides = {}
@@ -126,9 +159,9 @@ def build_provider_entry(
     wire_api = wire_api_for_provider(provider_id, provider, overrides)
 
     models: list[dict] = []
-    for priority, (model_id, model) in enumerate(
-        (provider.get("models") or {}).items()
-    ):
+    for priority, (model_id, model) in enumerate(source_models.items()):
+        if model_allowlist is not None and model_id not in model_allowlist:
+            continue
         if not isinstance(model, dict) or not include_model(model):
             continue
         models.append(
@@ -145,6 +178,20 @@ def build_provider_entry(
     merge_live_provider_models(provider_id, models, overrides)
     apply_provider_model_additions(provider_id, models, overrides)
     apply_provider_model_overrides(provider_id, models, overrides)
+    apply_provider_model_exclusions(provider_id, models, overrides)
+    if model_allowlist is not None:
+        models[:] = [model for model in models if model.get("id") in model_allowlist]
+        missing = sorted(
+            model_allowlist
+            - {model["id"] for model in models if isinstance(model.get("id"), str)}
+        )
+        if missing:
+            raise SystemExit(
+                f"provider_model_allowlists.{provider_id} models were filtered out: "
+                + ", ".join(missing)
+            )
+        for priority, model in enumerate(models):
+            model["priority"] = priority
 
     return {
         "id": provider_id,
@@ -361,6 +408,25 @@ def apply_provider_model_additions(
         next_priority = max(next_priority, priority + 1)
 
 
+def apply_provider_model_exclusions(
+    provider_id: str,
+    models: list[dict],
+    overrides: dict[str, object],
+) -> None:
+    exclusions = overrides.get("provider_model_exclusions", {})
+    if not isinstance(exclusions, dict):
+        raise SystemExit("provider_model_exclusions must be an object")
+    excluded = exclusions.get(provider_id, [])
+    if not isinstance(excluded, list) or not all(
+        isinstance(model_id, str) and model_id for model_id in excluded
+    ):
+        raise SystemExit(
+            f"provider_model_exclusions.{provider_id} must be a list of model IDs"
+        )
+    excluded_ids = set(excluded)
+    models[:] = [model for model in models if model.get("id") not in excluded_ids]
+
+
 def additional_provider_entries(overrides: dict[str, object]) -> list[dict]:
     values = overrides.get("additional_provider_entries", [])
     if not isinstance(values, list):
@@ -443,7 +509,34 @@ def parse_args() -> argparse.Namespace:
             "providers"
         ),
     )
+    parser.add_argument(
+        "--refresh-overrides-only",
+        action="store_true",
+        help="apply overrides to selected providers in the committed catalog without network access",
+    )
     return parser.parse_args()
+
+
+def refresh_existing_catalog(selected_provider_ids: set[str]) -> int:
+    overrides = load_overrides()
+    payload = json.loads(OUTPUT_PATH.read_text(encoding="utf-8"))
+    providers = payload["providers"]
+    existing_ids = {provider["id"] for provider in providers}
+    missing = selected_provider_ids - existing_ids
+    if missing:
+        raise SystemExit(
+            "selected providers are missing: " + ", ".join(sorted(missing))
+        )
+    for provider in providers:
+        if provider["id"] not in selected_provider_ids:
+            continue
+        models = provider["models"]
+        apply_provider_model_additions(provider["id"], models, overrides)
+        apply_provider_model_overrides(provider["id"], models, overrides)
+        apply_provider_model_exclusions(provider["id"], models, overrides)
+    OUTPUT_PATH.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    print(f"Refreshed {len(selected_provider_ids)} provider entries in {OUTPUT_PATH}")
+    return 0
 
 
 def write_catalog(selected_provider_ids: set[str] | None = None) -> int:
@@ -513,4 +606,8 @@ def generated_from(overrides: dict[str, object]) -> str | list[str]:
 if __name__ == "__main__":
     args = parse_args()
     selected_provider_ids = set(args.provider_ids) if args.provider_ids else None
+    if args.refresh_overrides_only:
+        if not selected_provider_ids:
+            raise SystemExit("--refresh-overrides-only requires --provider")
+        sys.exit(refresh_existing_catalog(selected_provider_ids))
     sys.exit(write_catalog(selected_provider_ids))

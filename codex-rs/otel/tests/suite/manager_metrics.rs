@@ -1,6 +1,7 @@
 use crate::harness::attributes_to_map;
 use crate::harness::build_metrics_with_defaults;
 use crate::harness::find_metric;
+use crate::harness::histogram_data;
 use crate::harness::latest_metrics;
 use codex_otel::PLUGIN_INSTALL_ELICITATION_SENT_METRIC;
 use codex_otel::PLUGIN_INSTALL_SUGGESTION_METRIC;
@@ -37,9 +38,26 @@ fn manager_attaches_metadata_tags_to_metrics() -> Result<()> {
         /*inc*/ 1,
         &[("source", "tui")],
     );
+    for tokens in [32_000, 256_000] {
+        manager.histogram_with_boundaries(
+            "codex.request_tokens",
+            tokens,
+            &[16_000.0, 128_000.0, 512_000.0],
+            &[("source", "tui")],
+        );
+    }
     manager.shutdown_metrics()?;
 
     let resource_metrics = latest_metrics(&exporter);
+    assert_eq!(
+        histogram_data(&resource_metrics, "codex.request_tokens"),
+        (
+            vec![16_000.0, 128_000.0, 512_000.0],
+            vec![0, 1, 1, 0],
+            288_000.0,
+            2,
+        )
+    );
     let metric =
         find_metric(&resource_metrics, "codex.session_started").expect("counter metric missing");
     let attrs = match metric.data() {

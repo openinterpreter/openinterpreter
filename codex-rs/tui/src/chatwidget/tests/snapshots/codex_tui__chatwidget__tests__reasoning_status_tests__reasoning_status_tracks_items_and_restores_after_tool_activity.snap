@@ -1,0 +1,14 @@
+---
+source: tui/src/chatwidget/tests/reasoning_status_tests.rs
+assertion_line: 84
+expression: headers
+---
+[
+    "Working",
+    "Researching backend freshness",
+    "Researching backend freshness",
+    "Researching backend freshness",
+    "Researching backend freshness",
+    "No summary heading is available.",
+    "Preparing evidence report",
+]

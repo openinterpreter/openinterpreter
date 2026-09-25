@@ -543,7 +543,11 @@ async fn extension_tool_executors_are_model_visible_and_dispatchable() -> anyhow
         internal_chat_message_metadata_passthrough: None,
     };
     session
-        .record_conversation_items(&turn, std::slice::from_ref(&history_item))
+        .record_conversation_items(
+            &turn,
+            turn.model_info(),
+            std::slice::from_ref(&history_item),
+        )
         .await;
     let expected_history_item = session
         .clone_history()

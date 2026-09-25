@@ -1,0 +1,8 @@
+---
+source: tui/src/history_cell/computer_activity_tests.rs
+expression: "render(&cell, 90)"
+---
+• Used computer · 3 actions · 1 failed
+  ├ Inspect page
+  ├ Reload page
+  └ Failed: Inspect refreshed page — Browser state changed

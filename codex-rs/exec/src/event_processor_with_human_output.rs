@@ -13,6 +13,7 @@ use codex_model_provider_info::WireApi;
 use codex_product_info::Product;
 use codex_protocol::num_format::format_with_separators;
 use codex_protocol::protocol::SessionConfiguredEvent;
+use codex_utils_path_uri::PathUri;
 use codex_utils_sandbox_summary::summarize_permission_profile;
 use owo_colors::OwoColorize;
 use owo_colors::Style;
@@ -450,8 +451,8 @@ fn config_summary_entries(
             "sandbox",
             summarize_permission_profile(
                 &permission_profile,
-                &config.cwd,
-                config.effective_workspace_roots().as_slice(),
+                &PathUri::from_abs_path(&config.cwd),
+                &config.effective_workspace_roots(),
             ),
         ),
     ];

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use codex_core::StartIfIdleSubmission;
 use codex_core::TurnInputRequest;
 use codex_core::TurnInputSubmission;
 use codex_core::config::Config;
@@ -9,7 +10,9 @@ use codex_history::RolloutItem;
 use codex_history::RolloutLine;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use core_test_support::responses;
@@ -17,6 +20,7 @@ use core_test_support::skip_if_no_network;
 use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::submit_thread_settings;
+use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
@@ -33,6 +37,106 @@ use tokio::time::timeout;
 const INITIAL_MODEL: &str = "gpt-5.4";
 const COMMITTED_MODEL: &str = "gpt-5.2";
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+fn assert_checkpoints(test: &TestCodex, expected: &[ThreadSettingsSnapshot]) -> Result<()> {
+    let rollout_path = test.codex.rollout_path().expect("rollout path");
+    let rollout: Vec<RolloutLine> = std::fs::read_to_string(rollout_path)?
+        .lines()
+        .map(codex_rollout::parse_rollout_line)
+        .collect::<std::result::Result<_, _>>()?;
+    let snapshots: Vec<_> = rollout
+        .into_iter()
+        .filter_map(|line| match line.item {
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(applied))
+                if applied.thread_id == Some(test.session_configured.thread_id) =>
+            {
+                Some(applied.thread_settings)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(snapshots, expected);
+    Ok(())
+}
+
+#[test_case(ThreadHistoryMode::Legacy; "legacy")]
+#[test_case(ThreadHistoryMode::Paginated; "paginated")]
+#[tokio::test]
+async fn initial_plugin_ids_use_turn_context_without_extra_settings_checkpoints(
+    history_mode: ThreadHistoryMode,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let test = test_codex()
+        .with_history_mode(history_mode)
+        .build_with_auto_env(&server)
+        .await?;
+    let selected = vec!["slack@openai".to_string()];
+    submit_thread_settings(
+        &test.codex,
+        ThreadSettingsOverrides {
+            disabled_plugin_ids: Some(selected.clone()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let response = responses::mount_sse_once(&server, responses::sse_completed("first turn")).await;
+    let submission = test
+        .codex
+        .start_turn_if_idle(TurnInputRequest::user_input(Vec::new()))
+        .await?;
+    let StartIfIdleSubmission::Started { turn_id } = submission else {
+        panic!("expected an accepted first turn, got {submission:?}");
+    };
+    wait_for_event(
+        &test.codex,
+        |event| matches!(event, EventMsg::TurnComplete(completed) if completed.turn_id == turn_id),
+    )
+    .await;
+    test.codex.flush_rollout().await?;
+    assert_checkpoints(&test, &[])?;
+    let rollout_path = test.codex.rollout_path().expect("rollout path");
+    let (items, _, parse_errors) =
+        codex_rollout::RolloutRecorder::load_rollout_items(&rollout_path).await?;
+    assert_eq!(parse_errors, 0);
+    let context = items.iter().find_map(|item| match item {
+        RolloutItem::TurnContext(context)
+            if context.turn_id.as_deref() == Some(turn_id.as_str()) =>
+        {
+            Some(context)
+        }
+        _ => None,
+    });
+    assert_eq!(
+        context
+            .expect("inputless first turn context")
+            .disabled_plugin_ids,
+        Some(selected)
+    );
+    assert_eq!(response.requests().len(), 1);
+
+    submit_thread_settings(
+        &test.codex,
+        ThreadSettingsOverrides {
+            disabled_plugin_ids: Some(vec![]),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let expected = vec![test.codex.thread_settings_snapshot().await];
+    assert!(expected[0].disabled_plugin_ids.is_empty());
+    test.codex.flush_rollout().await?;
+    assert_checkpoints(&test, &expected)?;
+    let response =
+        responses::mount_sse_once(&server, responses::sse_completed("second turn")).await;
+    test.submit_text_turn("second turn").await?;
+    test.codex.flush_rollout().await?;
+    assert_eq!(response.requests().len(), 1);
+    assert_checkpoints(&test, &expected)?;
+    test.codex.shutdown_and_wait().await?;
+    Ok(())
+}
 
 struct PauseAfterCommit {
     gate: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
@@ -94,9 +198,12 @@ async fn settings_notifications_keep_their_commit_across_postcommit_work(
         .with_extensions(Arc::new(extensions.build()))
         .build_with_auto_env(&server)
         .await?;
-    let initial = test.codex.restorable_thread_settings().await;
+    let mut initial = test.codex.restorable_thread_settings().await;
+    // Restore only runtime model settings, without overwriting the committed plugin selection.
+    initial.disabled_plugin_ids = None;
     let thread_settings = ThreadSettingsOverrides {
         model: Some(COMMITTED_MODEL.to_string()),
+        disabled_plugin_ids: Some(vec!["slack@openai".to_string()]),
         ..Default::default()
     };
     let submission = tokio::spawn({
@@ -128,11 +235,13 @@ async fn settings_notifications_keep_their_commit_across_postcommit_work(
     timeout(TIMEOUT, entered_rx).await??;
     let expected = test.codex.thread_settings_snapshot().await;
     assert_eq!(expected.model, COMMITTED_MODEL);
+    assert_eq!(expected.disabled_plugin_ids, vec!["slack@openai"]);
     // Submitted operations are serialized. Runtime restoration is an existing
     // direct writer, so it can overlap the first operation's post-commit work.
     timeout(TIMEOUT, test.codex.restore_thread_settings(initial)).await??;
     let restored = test.codex.thread_settings_snapshot().await;
     assert_eq!(restored.model, INITIAL_MODEL);
+    assert_eq!(restored.disabled_plugin_ids, vec!["slack@openai"]);
     release_tx.send(())?;
     let submission_id = timeout(TIMEOUT, submission).await???;
 
@@ -222,6 +331,7 @@ async fn compaction_checkpoints_settings_changed_during_its_model_request() -> R
         ThreadSettingsOverrides {
             environments: Some(local_selections(updated_cwd_path.clone())),
             model: Some(COMMITTED_MODEL.to_string()),
+            disabled_plugin_ids: Some(vec!["slack@openai".to_string()]),
             ..Default::default()
         },
     )

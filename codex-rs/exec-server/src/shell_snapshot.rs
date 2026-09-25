@@ -10,7 +10,10 @@ use codex_network_proxy::strip_managed_proxy_env;
 use codex_protocol::config_types::ShellEnvironmentPolicyInherit;
 use codex_protocol::shell_environment;
 use codex_shell_command::shell_detect::ShellType;
-use codex_shell_command::shell_snapshot::snapshot_state_and_environment_script;
+use codex_shell_command::shell_snapshot::CapturedSnapshot;
+use codex_shell_command::shell_snapshot::SnapshotCaptureOptions;
+use codex_shell_command::shell_snapshot::SnapshotStartup;
+use codex_shell_command::shell_snapshot::snapshot_capture_script;
 use codex_utils_path_uri::PathUri;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -30,6 +33,8 @@ use crate::telemetry::ExecServerTelemetry;
 
 const MAX_CACHED_SNAPSHOTS: usize = 16;
 const MAX_SNAPSHOT_BYTES: usize = 512 * 1024;
+// Capture also includes quoted export records and an optional pre-startup environment.
+const MAX_SNAPSHOT_CAPTURE_BYTES: usize = 8 * MAX_SNAPSHOT_BYTES;
 const MAX_SNAPSHOT_ENV_VALUE_BYTES: usize = 60 * 1024;
 const MAX_SNAPSHOT_SCOPE_BYTES: usize = 256;
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -255,7 +260,15 @@ async fn capture_snapshot(
     prepared: &PreparedExecRequest,
     shell_type: ShellType,
 ) -> CaptureResult {
-    let script = snapshot_state_and_environment_script(shell_type).ok_or_else(|| {
+    let script = snapshot_capture_script(
+        shell_type,
+        SnapshotCaptureOptions {
+            startup: SnapshotStartup::Interactive,
+            declarations: false,
+            environment: true,
+        },
+    )
+    .ok_or_else(|| {
         (
             "unsupported_shell",
             invalid_params("unsupported shell snapshot script".to_string()),
@@ -299,7 +312,7 @@ async fn capture_snapshot(
     let capture = async {
         let mut output = Vec::new();
         stdout
-            .take((MAX_SNAPSHOT_BYTES + 1) as u64)
+            .take((MAX_SNAPSHOT_CAPTURE_BYTES + 1) as u64)
             .read_to_end(&mut output)
             .await
             .map_err(|err| {
@@ -308,10 +321,12 @@ async fn capture_snapshot(
                     internal_error(format!("cannot read shell snapshot: {err}")),
                 )
             })?;
-        if output.len() > MAX_SNAPSHOT_BYTES {
+        if output.len() > MAX_SNAPSHOT_CAPTURE_BYTES {
             return Err((
                 "too_large",
-                internal_error(format!("shell snapshot exceeds {MAX_SNAPSHOT_BYTES} bytes")),
+                internal_error(format!(
+                    "shell snapshot capture exceeds {MAX_SNAPSHOT_CAPTURE_BYTES} bytes"
+                )),
             ));
         }
         let status = child.wait().await.map_err(|err| {
@@ -337,35 +352,30 @@ async fn capture_snapshot(
             )
         })??;
 
-    parse_snapshot(&output, params.env_policy.as_ref())
+    parse_snapshot(shell_type, &output, params.env_policy.as_ref())
 }
 
-fn parse_snapshot(output: &[u8], env_policy: Option<&ExecEnvPolicy>) -> CaptureResult {
-    let separator = output.iter().position(|byte| *byte == 0).ok_or_else(|| {
+fn parse_snapshot(
+    shell_type: ShellType,
+    output: &[u8],
+    env_policy: Option<&ExecEnvPolicy>,
+) -> CaptureResult {
+    let captured = CapturedSnapshot::parse(shell_type, output).ok_or_else(|| {
         (
-            "missing_environment",
-            internal_error("shell snapshot is missing its environment".to_string()),
+            "invalid_capture",
+            internal_error("invalid shell snapshot capture".to_string()),
         )
     })?;
-    let state = &output[..separator];
-    let marker = b"# Snapshot file";
-    let start = state
-        .windows(marker.len())
-        .position(|window| window == marker)
-        .ok_or_else(|| {
-            (
-                "missing_state",
-                internal_error("shell snapshot is missing its state marker".to_string()),
-            )
-        })?;
-    let state = std::str::from_utf8(&state[start..]).map_err(|err| {
-        (
-            "invalid_utf8",
-            internal_error(format!("shell snapshot state is not UTF-8: {err}")),
-        )
-    })?;
+    let state = captured.render_state();
+    if state.len().saturating_add(captured.environment.len()) > MAX_SNAPSHOT_BYTES {
+        return Err((
+            "too_large",
+            internal_error(format!("shell snapshot exceeds {MAX_SNAPSHOT_BYTES} bytes")),
+        ));
+    }
 
-    let mut environment = output[separator + 1..]
+    let mut environment = captured
+        .environment
         .split(|byte| *byte == 0)
         .filter(|entry| !entry.is_empty())
         .filter_map(|entry| {
@@ -388,10 +398,7 @@ fn parse_snapshot(output: &[u8], env_policy: Option<&ExecEnvPolicy>) -> CaptureR
     environment.remove("OLDPWD");
     environment.retain(|name, _| !shell_environment::is_non_inheritable_env_var(name));
 
-    Ok(ShellSnapshot {
-        state: state.to_string(),
-        environment,
-    })
+    Ok(ShellSnapshot { state, environment })
 }
 
 #[cfg(test)]

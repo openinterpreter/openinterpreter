@@ -1,6 +1,14 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "properties": {
+    "promptHash": {
+      "default": null,
+      "description": "Whitespace-normalized SHA-256 of the session base instructions, matching the uploaded `prompt_hash` tag. Does not include later developer messages. Null when the reported rollout has no prompt metadata.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "threadId": {
       "type": "string"
     }

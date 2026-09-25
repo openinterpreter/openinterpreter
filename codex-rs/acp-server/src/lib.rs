@@ -100,6 +100,7 @@ use codex_app_server_protocol::FileChangeApprovalDecision;
 use codex_app_server_protocol::FileChangeRequestApprovalResponse;
 use codex_app_server_protocol::GetAccountParams;
 use codex_app_server_protocol::GetAccountResponse;
+use codex_app_server_protocol::ImageReference;
 use codex_app_server_protocol::InterpreterHarness;
 use codex_app_server_protocol::InterpreterHarnessListParams;
 use codex_app_server_protocol::InterpreterHarnessListResponse;
@@ -1419,8 +1420,10 @@ fn build_prompt_items(prompt: Vec<ContentBlock>) -> Vec<UserInput> {
                 text_elements: Vec::new(),
             }),
             ContentBlock::Image(image_block) => Some(UserInput::Image {
+                image: ImageReference::Inline {
+                    url: format!("data:{};base64,{}", image_block.mime_type, image_block.data),
+                },
                 detail: None,
-                url: format!("data:{};base64,{}", image_block.mime_type, image_block.data),
             }),
             ContentBlock::ResourceLink(link) => Some(UserInput::Text {
                 text: format!("[{}]({})", link.name, link.uri),

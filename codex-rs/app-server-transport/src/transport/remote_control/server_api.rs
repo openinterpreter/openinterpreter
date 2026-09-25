@@ -21,6 +21,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tracing::warn;
 
+const REMOTE_CONTROL_RETRY_AFTER_JITTER_MAX_MILLIS: u64 = 30_000;
+
 const REMOTE_CONTROL_ENROLL_TIMEOUT: Duration = Duration::from_secs(30);
 const REMOTE_CONTROL_SERVER_TOKEN_REFRESH_BACKOFF_MIN_SECS: u64 = 24;
 const REMOTE_CONTROL_SERVER_TOKEN_REFRESH_BACKOFF_MAX_SECS: u64 = 36;
@@ -28,14 +30,25 @@ const REMOTE_CONTROL_SERVER_TOKEN_REFRESH_BACKOFF_MAX_SECS: u64 = 36;
 pub(super) const REMOTE_CONTROL_INSTALLATION_ID_HEADER: &str = "x-codex-installation-id";
 
 #[derive(Debug)]
-struct RemoteControlServerRequestError {
+pub(super) struct RemoteControlServerRequestError {
     message: String,
     status: Option<StatusCode>,
     retry_at: Option<OffsetDateTime>,
 }
 
 impl RemoteControlServerRequestError {
-    fn io_error(
+    pub(super) fn retry_deferred(retry_at: OffsetDateTime) -> io::Error {
+        io::Error::new(
+            ErrorKind::WouldBlock,
+            Self {
+                message: format!("remote control retry deferred until {retry_at}"),
+                status: None,
+                retry_at: Some(retry_at),
+            },
+        )
+    }
+
+    pub(super) fn io_error(
         message: String,
         status: Option<StatusCode>,
         retry_at: Option<OffsetDateTime>,
@@ -132,9 +145,8 @@ pub(super) async fn refresh_remote_control_server(
         && let Some(next_refresh_at) = enrollment.next_refresh_at
         && next_refresh_at > now
     {
-        return Err(io::Error::new(
-            ErrorKind::WouldBlock,
-            format!("remote control server token refresh deferred until {next_refresh_at}"),
+        return Err(RemoteControlServerRequestError::retry_deferred(
+            next_refresh_at,
         ));
     }
     let refresh_url = enrollment.remote_control_target.refresh_url.clone();
@@ -166,7 +178,13 @@ pub(super) async fn refresh_remote_control_server(
                 == RemoteControlServerTokenRefreshRequirement::Required;
             let (refresh_delay, next_refresh_at) = refresh_deferral(refresh_error.retry_at, now);
             enrollment.next_refresh_at = Some(next_refresh_at);
-            if refresh_is_required {
+            // An explicit server deadline takes precedence over valid-token fallback.
+            // Keep the token, but let callers defer new requests until this deadline.
+            if refresh_is_required
+                || refresh_error
+                    .retry_at
+                    .is_some_and(|retry_at| retry_at > now)
+            {
                 warn!(
                     refresh_url,
                     server_id = %enrollment.server_id,
@@ -174,7 +192,7 @@ pub(super) async fn refresh_remote_control_server(
                     error = %err,
                     ?refresh_delay,
                     %next_refresh_at,
-                    "required remote control server token refresh failed; deferring next attempt"
+                    "remote control server token refresh failed; deferring new requests"
                 );
                 return Err(err);
             }
@@ -244,7 +262,7 @@ where
         })?;
     let headers = response.headers().clone();
     let status = response.status();
-    let retry_at = parse_retry_after(&headers, OffsetDateTime::now_utc());
+    let retry_at = retry_after_with_jitter(&headers, OffsetDateTime::now_utc());
     let body = response.bytes().await.map_err(|err| {
         let timed_out = err.is_timeout();
         RemoteControlServerRequestError::io_error(
@@ -298,6 +316,31 @@ fn remote_control_server_request_error(
     err.get_ref()?.downcast_ref()
 }
 
+pub(super) fn remote_control_retry_at(err: &io::Error) -> Option<OffsetDateTime> {
+    let request_error = remote_control_server_request_error(err)?;
+    if !request_error.is_transient(err.kind()) {
+        return None;
+    }
+    request_error.retry_at
+}
+
+pub(super) fn remote_control_retry_delay(err: &io::Error) -> Option<Duration> {
+    Duration::try_from(remote_control_retry_at(err)? - OffsetDateTime::now_utc()).ok()
+}
+
+pub(super) fn retry_after_with_jitter(
+    headers: &HeaderMap,
+    received_at: OffsetDateTime,
+) -> Option<OffsetDateTime> {
+    let retry_at = parse_retry_after(headers, received_at)?;
+    // Keep the server's deadline as a lower bound, then spread clients across
+    // the next 30 seconds. Sample once per response so retries share a deadline.
+    let jitter = time::Duration::milliseconds(
+        rand::rng().random_range(0..=REMOTE_CONTROL_RETRY_AFTER_JITTER_MAX_MILLIS) as i64,
+    );
+    Some(retry_at.checked_add(jitter).unwrap_or(retry_at))
+}
+
 fn parse_retry_after(headers: &HeaderMap, received_at: OffsetDateTime) -> Option<OffsetDateTime> {
     let retry_after = headers
         .get(axum::http::header::RETRY_AFTER)?
@@ -309,7 +352,7 @@ fn parse_retry_after(headers: &HeaderMap, received_at: OffsetDateTime) -> Option
     } else {
         OffsetDateTime::from(httpdate::parse_http_date(retry_after).ok()?)
     };
-    (retry_at > received_at).then_some(retry_at)
+    (retry_at >= received_at).then_some(retry_at)
 }
 
 fn refresh_deferral(

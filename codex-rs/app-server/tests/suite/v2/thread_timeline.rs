@@ -75,6 +75,7 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() -> 
             history_base: None,
             subagent_history_start_ordinal: None,
             initial_window_id: Uuid::now_v7().to_string(),
+            runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
                 model_provider: "mock_provider".to_string(),
@@ -96,6 +97,7 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() -> 
                 }),
                 RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
                     turn_id: "turn-1".to_string(),
+                    root_turn_id: None,
                     trace_id: None,
                     started_at: Some(10),
                     model_context_window: None,

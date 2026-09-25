@@ -1,0 +1,32 @@
+[package]
+name = "codex-user-verification"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+p256 = { version = "0.13", default-features = false, features = ["arithmetic", "pkcs8", "std"] }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+dirs = { workspace = true }
+objc2 = "0.6.3"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
+objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["std", "LAContext", "LABiometryType"] }
+security-framework = { version = "3.5", features = ["OSX_10_15"] }
+security-framework-sys = "2.15"
+
+[dev-dependencies]
+p256 = { version = "0.13", features = ["ecdsa"] }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+
+[lib]
+doctest = false

@@ -5,7 +5,7 @@ use codex_protocol::openai_models::ModelPreset;
 use std::convert::Infallible;
 
 pub(crate) const LUNA_RESERVE_MODEL: &str = "gpt-reserve";
-pub(crate) const LUNA_MODEL: &str = "gpt-5.6-luna";
+pub(crate) const LUNA_MODEL: &str = "gpt-6-luna";
 
 pub(crate) fn model_display_name(model: &str) -> &str {
     if model.eq_ignore_ascii_case(LUNA_RESERVE_MODEL) {
@@ -36,5 +36,13 @@ impl ModelCatalog {
 
     pub(crate) fn try_list_models(&self) -> Result<Vec<ModelPreset>, Infallible> {
         Ok(self.models.clone())
+    }
+
+    pub(crate) fn display_name<'a>(&'a self, model: &'a str) -> &'a str {
+        self.models
+            .iter()
+            .find(|preset| preset.model == model)
+            .map(|preset| preset.display_name.as_str())
+            .unwrap_or_else(|| model_display_name(model))
     }
 }

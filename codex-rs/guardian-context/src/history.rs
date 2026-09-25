@@ -4,6 +4,8 @@
 //! Hosts append original items, restore bounded checkpoints, and trim rolled-back turns.
 //! Clones share immutable payloads; eviction changes the generation so readers cannot
 //! reuse an offset into a different retained prefix. Prompt selection remains caller-owned.
+//! Non-user overflow drops the oldest half, leaving room for appends without more evictions.
+//! User messages retain as much history as their separate limits allow.
 
 use std::collections::VecDeque;
 use std::io;
@@ -12,6 +14,7 @@ use std::sync::Arc;
 
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::models::executed_tool_call_metadata_bytes;
 
 use crate::SectionHistory;
 
@@ -47,10 +50,13 @@ impl TranscriptHistory {
     }
 
     /// Appends one original item, evicting only older entries of the same kind.
+    /// Non-user overflow removes at least half the existing entries; byte limits may need more.
     /// Oversized user images fall back to bounded text; other oversized items are skipped.
     pub fn record(&mut self, item: &ResponseItem) {
+        let metadata_bytes = executed_tool_call_metadata_bytes(item);
         let mut size = BoundedSize {
             bytes: std::mem::size_of::<ResponseItem>(),
+            max_bytes: MAX_BYTES_PER_KIND.saturating_add(metadata_bytes),
         };
         let measured = serde_json::to_writer(&mut size, item).and_then(|()| {
             // ResponseItem serialization can omit reasoning content that cloning retains.
@@ -108,6 +114,8 @@ impl TranscriptHistory {
             }
             return;
         }
+        // Analytics must not change which evidence fits Guardian's retention budget.
+        size.bytes = size.bytes.saturating_sub(metadata_bytes);
         let is_user = item.is_user_message();
         let (mut count, mut bytes) = self
             .items
@@ -117,9 +125,14 @@ impl TranscriptHistory {
                 (count + 1, bytes + size)
             });
         if count >= MAX_ITEMS_PER_KIND || bytes > MAX_BYTES_PER_KIND {
+            let retained_count = if is_user {
+                MAX_ITEMS_PER_KIND - 1
+            } else {
+                count / 2
+            };
             self.items.retain(|(item, size)| {
                 if item.is_user_message() == is_user
-                    && (count >= MAX_ITEMS_PER_KIND || bytes > MAX_BYTES_PER_KIND)
+                    && (count > retained_count || bytes > MAX_BYTES_PER_KIND)
                 {
                     count -= 1;
                     bytes -= size;
@@ -170,11 +183,12 @@ impl SectionHistory for TranscriptHistory {
 // Count without allocating a serialized copy, and stop before cloning an oversized item.
 struct BoundedSize {
     bytes: usize,
+    max_bytes: usize,
 }
 
 impl Write for BoundedSize {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > MAX_BYTES_PER_KIND.saturating_sub(self.bytes) {
+        if bytes.len() > self.max_bytes.saturating_sub(self.bytes) {
             return Err(io::Error::other(
                 "review history item exceeds storage budget",
             ));

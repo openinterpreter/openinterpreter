@@ -20,6 +20,8 @@ use codex_protocol::mcp::McpResourceOrigin;
 use codex_protocol::mcp::McpResourceOriginCheckpoint;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::ImageDetail;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageEvent;
@@ -39,6 +41,8 @@ use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
+use codex_protocol::protocol::UserMessageImageKind;
+use codex_protocol::user_input::UserInput;
 use codex_rollout::CompactedItem;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutItem;
@@ -223,6 +227,7 @@ fn item_completed(turn_id: &str, item_id: &str) -> RolloutItem {
 fn started(turn_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
         turn_id: turn_id.to_string(),
+        root_turn_id: None,
         trace_id: None,
         started_at: Some(1_735_905_600),
         model_context_window: None,
@@ -317,12 +322,21 @@ async fn list_active_summary_turns(store: &LocalThreadStore, thread_id: ThreadId
 async fn migration_publishes_canonical_projected_history_and_is_idempotent() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
+    let user_event = UserMessageEvent {
+        message: "first question".to_string(),
+        images: Some(vec!["https://example.com/image.png".to_string()]),
+        image_details: vec![Some(ImageDetail::Original)],
+        file_ids: Some(vec!["file_123".to_string()]),
+        file_id_details: vec![Some(ImageDetail::High)],
+        image_order: vec![UserMessageImageKind::File, UserMessageImageKind::Inline],
+        ..Default::default()
+    };
     let path = write_rollout(
         home.path(),
         thread_id,
         SessionSource::Cli,
         vec![
-            user_message("first question"),
+            RolloutItem::EventMsg(EventMsg::UserMessage(user_event)),
             agent_message("first answer"),
         ],
     );
@@ -354,6 +368,32 @@ async fn migration_publishes_canonical_projected_history_and_is_idempotent() {
             .count(),
         2
     );
+    let user_item = lines.iter().find_map(|line| match &line.item {
+        RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+            item: TurnItem::UserMessage(item),
+            ..
+        })) => Some(item),
+        _ => None,
+    });
+    let expected_content = vec![
+        UserInput::Text {
+            text: "first question".to_string(),
+            text_elements: Vec::new(),
+        },
+        UserInput::Image {
+            image: ImageReference::File {
+                file_id: "file_123".to_string(),
+            },
+            detail: Some(ImageDetail::High),
+        },
+        UserInput::Image {
+            image: ImageReference::Inline {
+                image_url: "https://example.com/image.png".to_string(),
+            },
+            detail: Some(ImageDetail::Original),
+        },
+    ];
+    assert_eq!(user_item.map(|item| &item.content), Some(&expected_content));
 
     let turns = list_active_summary_turns(&store, thread_id).await;
     assert_eq!(turns.turns.len(), 1);
@@ -450,6 +490,7 @@ async fn migration_preserves_image_generation_failure_metadata() {
         }),
         saved_path: None,
         imagegen_request_id: None,
+        generation_id: None,
     };
     let image_completion =
         RolloutItem::EventMsg(EventMsg::ImageGenerationEnd(ImageGenerationEndEvent {
@@ -505,6 +546,18 @@ async fn migration_keeps_late_completions_in_their_original_turn() {
             started("current"),
             user_message("current question"),
             exec_completion("old", "call-old"),
+            serde_json::from_value(json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "mcp_tool_call_end",
+                    "call_id": "mcp-old",
+                    "turn_id": "old",
+                    "invocation": {"server": "slack", "tool": "search", "arguments": {}},
+                    "duration": {"secs": 0, "nanos": 0},
+                    "result": {"Ok": {"content": []}}
+                }
+            }))
+            .expect("build late legacy MCP completion"),
             agent_message("current answer"),
             completed("current"),
         ],
@@ -543,7 +596,10 @@ async fn migration_keeps_late_completions_in_their_original_turn() {
         .iter()
         .map(|item| item.turn_id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(item_turn_ids, vec!["old", "current", "old", "current"]);
+    assert_eq!(
+        item_turn_ids,
+        vec!["old", "current", "old", "old", "current"]
+    );
 }
 
 #[tokio::test]
@@ -830,13 +886,36 @@ async fn migration_drops_trailing_context_when_rollback_arrives_before_next_turn
 async fn migration_coalesces_response_first_user_message_rollback_boundary() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
+    let file_id = "file_123".to_string();
+    let response = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![
+            ContentItem::InputText {
+                text: "remove question".to_string(),
+            },
+            ContentItem::InputImage {
+                image: ImageReference::File {
+                    file_id: file_id.clone(),
+                },
+                detail: None,
+            },
+        ],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let event = UserMessageEvent {
+        message: "remove question".to_string(),
+        file_ids: Some(vec![file_id]),
+        ..Default::default()
+    };
     let path = write_rollout(
         home.path(),
         thread_id,
         SessionSource::Cli,
         vec![
-            rollout_response_item(input_response_message("user", "remove question")),
-            user_message("remove question"),
+            rollout_response_item(response),
+            RolloutItem::EventMsg(EventMsg::UserMessage(event)),
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
                 num_turns: 1,
             })),
@@ -1733,6 +1812,7 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
             RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("child-turn".to_string()),
                 root_turn_id: None,
+                disabled_plugin_ids: None,
                 cwd: serde_json::from_value(json!(home.path())).expect("absolute cwd"),
                 workspace_roots: None,
                 current_date: None,
@@ -2289,8 +2369,7 @@ async fn migration_skips_threads_with_an_active_writer() {
     );
     let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
     let _writer = store
-        .writer_lock_coordinator
-        .acquire(thread_id)
+        .acquire_writer_lock(thread_id)
         .expect("acquire live writer lock");
     let original = fs::read(&path).expect("read active rollout");
 
@@ -2358,8 +2437,7 @@ async fn migration_recovers_a_published_rollout_with_missing_projection() {
         .expect("simulate pending migration journal");
 
     let writer = store
-        .writer_lock_coordinator
-        .acquire(thread_id)
+        .acquire_writer_lock(thread_id)
         .expect("acquire live writer lock");
     let busy = store
         .migrate_rollouts(apply_options())

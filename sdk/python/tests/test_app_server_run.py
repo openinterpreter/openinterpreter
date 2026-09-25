@@ -52,6 +52,20 @@ def test_sync_thread_run_uses_mock_responses(
     }
 
 
+def test_checkout_supports_new_options_and_history_selection(tmp_path) -> None:
+    with AppServerHarness(tmp_path) as harness:
+        harness.responses.enqueue_assistant_message("Options supported")
+        with Codex(config=harness.app_server_config()) as codex:
+            thread = codex.thread_start()
+            result = thread.run("hello", turn_service_tier="default", source="automation")
+            resumed = codex.thread_resume(thread.id, include_turns=False)
+            forked = codex.thread_fork(thread.id, include_turns=True)
+        assert result.final_response == "Options supported"
+        assert resumed.id == thread.id
+        assert forked.id != thread.id
+        assert harness.responses.single_request().message_input_texts("user")[-1:] == ["hello"]
+
+
 def test_run_params_and_usage_cross_app_server_boundary(tmp_path) -> None:
     """Thread.run should pass overrides and collect app-server token usage."""
     with AppServerHarness(tmp_path) as harness:

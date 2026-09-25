@@ -282,3 +282,40 @@ fn http_date_retry_after_preserves_absolute_deadline() {
         (Duration::from_secs(90), retry_at)
     );
 }
+
+#[test]
+fn retry_after_jitter_never_shortens_the_server_deadline() {
+    let now =
+        OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("test timestamp should parse");
+    for value in ["120", "Tue, 14 Nov 2023 22:15:20 GMT"] {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::RETRY_AFTER,
+            value.parse().expect("retry hint should be a valid header"),
+        );
+        let deadline = retry_after_with_jitter(&headers, now)
+            .expect("a valid retry hint should produce a deadline");
+        assert!(
+            (now + time::Duration::seconds(120)..=now + time::Duration::seconds(150))
+                .contains(&deadline)
+        );
+        // Reading the response body must not start a new relative wait or resample jitter.
+        let (delay, deferred_until) =
+            refresh_deferral(Some(deadline), now + time::Duration::seconds(30));
+        assert_eq!(deferred_until, deadline);
+        assert!((Duration::from_secs(90)..=Duration::from_secs(120)).contains(&delay));
+    }
+}
+
+#[test]
+fn zero_retry_after_preserves_bounded_jitter() {
+    let now = OffsetDateTime::UNIX_EPOCH;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from_static("0"),
+    );
+    let deadline = retry_after_with_jitter(&headers, now)
+        .expect("a zero-second retry hint should produce a deadline");
+    assert!((now..=now + time::Duration::seconds(30)).contains(&deadline));
+}

@@ -33,6 +33,11 @@ jobs:
       id-token: write # Required for PyPI trusted publishing.
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
       - name: Download Python runtime wheels
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -45,56 +50,14 @@ jobs:
           packages-dir: dist/python-runtime
           skip-existing: true
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.3"
+
       - name: Verify Python runtime wheels are available on PyPI
         env:
-          PYTHON_RUNTIME_VERSION: ${{ inputs.runtime_version }}
+          PYTHON_RUNTIME_VERSION: ${{ needs.prepare-python-runtime.outputs.python_version }}
         run: |
-          set -euo pipefail
-          for attempt in {1..30}; do
-            if python3 - <<'PY'
-          import json
-          import os
-          import urllib.error
-          import urllib.request
-
-          version = os.environ["PYTHON_RUNTIME_VERSION"]
-          tags = {
-              "macosx_10_9_x86_64",
-              "macosx_11_0_arm64",
-              "manylinux_2_17_aarch64",
-              "manylinux_2_17_x86_64",
-              "musllinux_1_1_aarch64",
-              "musllinux_1_1_x86_64",
-              "win_amd64",
-              "win_arm64",
-          }
-          expected = {
-              f"openai_codex_cli_bin-{version}-py3-none-{tag}.whl"
-              for tag in tags
-          }
-
-          try:
-              with urllib.request.urlopen(
-                  f"https://pypi.org/pypi/openai-codex-cli-bin/{version}/json",
-                  timeout=30,
-              ) as response:
-                  payload = json.load(response)
-          except urllib.error.URLError as error:
-              print(f"Could not read runtime {version} from PyPI: {error}.")
-              raise SystemExit(1) from error
-
-          actual = {file["filename"] for file in payload["urls"]}
-          if actual != expected:
-              print(f"Missing runtime wheels: {sorted(expected - actual)}")
-              print(f"Unexpected runtime files: {sorted(actual - expected)}")
-              raise SystemExit(1)
-          PY
-            then
-              exit 0
-            fi
-            echo "Runtime wheels are not available on PyPI yet; retrying (${attempt}/30)."
-            sleep 10
-          done
-
-          echo "Runtime wheels did not become available on PyPI."
-          exit 1
+          uv run --no-project --with packaging==26.2 python .github/scripts/verify_pypi_release.py \
+            openai-codex-cli-bin "$PYTHON_RUNTIME_VERSION"

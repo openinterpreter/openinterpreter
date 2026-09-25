@@ -514,7 +514,8 @@ fn http_status(error: &TransportError) -> Option<http::StatusCode> {
         | TransportError::Timeout
         | TransportError::Connection(_)
         | TransportError::Network(_)
-        | TransportError::Build(_) => None,
+        | TransportError::Build(_)
+        | TransportError::ResponseTooLarge { .. } => None,
     }
 }
 
@@ -565,6 +566,14 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::OnceLock;
     use std::time::Duration;
+
+    #[test]
+    fn response_too_large_has_no_http_status() {
+        assert_eq!(
+            http_status(&TransportError::ResponseTooLarge { max_bytes: 1 }),
+            None
+        );
+    }
 
     #[derive(Debug, Default)]
     struct RecordingTransport {

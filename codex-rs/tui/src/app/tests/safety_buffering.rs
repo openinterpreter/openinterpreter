@@ -2,10 +2,12 @@ use super::*;
 use crate::app::safety_buffering::SafetyBufferedRetry;
 use crate::app::session_lifecycle::ThreadAttachPresentation;
 use crate::chatwidget::UserMessage;
+use crate::chatwidget::tests::helpers::normalize_completion_timestamps;
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_protocol::ModelSafetyBufferingUpdatedNotification;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::models::ManagedFileSystemPermissions;
+use codex_protocol::openai_models::ToolMode;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
@@ -24,8 +26,8 @@ use pretty_assertions::assert_eq;
 use serde_json::Value;
 use tokio::sync::oneshot;
 
-const CURRENT_MODEL: &str = "gpt-5.2";
-const FASTER_MODEL: &str = "gpt-5.4";
+const CURRENT_MODEL: &str = "gpt-5.6-terra";
+const FASTER_MODEL: &str = "gpt-5.6-luna";
 const MODEL_PROVIDER_ID: &str = "safety-retry-test";
 const PREVIOUS_PROMPT: &str = "Establish context";
 const RETRY_PROMPT: &str = "Handle the safety-buffered request";
@@ -273,6 +275,14 @@ stream_max_retries = 0
             crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
         )
         .await?;
+    for cwd in [&app.config.cwd, &other.session.cwd] {
+        crate::legacy_core::config::set_project_trust_level(
+            app.config.codex_home.as_path(),
+            cwd.as_path(),
+            codex_protocol::config_types::TrustLevel::Trusted,
+        )
+        .map_err(std::io::Error::other)?;
+    }
     app.thread_event_channels.insert(
         other_id,
         ThreadEventChannel::new_with_session(
@@ -509,12 +519,25 @@ async fn run_safety_retry(
 
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let codex_home = tempdir()?;
+    // Keep text-only retry fixtures independent of the optional Code Mode host.
+    let mut model_catalog = codex_models_manager::bundled_models_response()?;
+    for model in model_catalog
+        .models
+        .iter_mut()
+        .filter(|model| matches!(model.slug.as_str(), CURRENT_MODEL | FASTER_MODEL))
+    {
+        model.tool_mode = Some(ToolMode::Direct);
+    }
+    let model_catalog_path = codex_home.path().join("models.json");
+    std::fs::write(&model_catalog_path, serde_json::to_vec(&model_catalog)?)?;
+    let model_catalog_path = toml::Value::String(model_catalog_path.display().to_string());
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!(
             r#"
 model = "{CURRENT_MODEL}"
 model_provider = "{MODEL_PROVIDER_ID}"
+model_catalog_json = {model_catalog_path}
 
 [model_providers.{MODEL_PROVIDER_ID}]
 name = "Safety retry test"
@@ -532,6 +555,7 @@ goals = true
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
     app.config.model = Some(CURRENT_MODEL.to_string());
+    app.config.model_catalog = Some(model_catalog);
     app.config.model_provider_id = MODEL_PROVIDER_ID.to_string();
     app.config.model_provider = ModelProviderInfo {
         name: "Safety retry test".to_string(),
@@ -890,13 +914,22 @@ goals = true
         return Ok(());
     }
 
-    drive_until_request_count(&mut app, &mut app_server, &server, expected_request_count).await;
+    let retry_thread_id = app.chat_widget.thread_id().expect("retry thread id");
+    // Capture the completed retry before processing its automatic goal continuation.
+    wait_for_turn_completed(&mut app, &mut app_server, retry_thread_id).await;
     let mut replayed_history = String::new();
     while let Ok(event) = app_event_rx.try_recv() {
         if let AppEvent::InsertHistoryCell(cell) = event {
-            replayed_history.push_str(&lines_to_single_string(
-                &cell.transcript_lines(/*width*/ 80),
-            ));
+            let rendered = lines_to_single_string(&cell.transcript_lines(/*width*/ 80));
+            if cell
+                .as_any()
+                .is::<crate::history_cell::FinalMessageSeparator>()
+            {
+                replayed_history
+                    .push_str(&normalize_completion_timestamps(cell.as_ref(), rendered));
+            } else {
+                replayed_history.push_str(&rendered);
+            }
         }
     }
     assert_eq!(
@@ -921,7 +954,7 @@ goals = true
         insta::assert_snapshot!("safety_retry_committed_steer_history", rendered_retry);
     }
 
-    let retry_thread_id = app.chat_widget.thread_id().expect("retry thread id");
+    drive_until_request_count(&mut app, &mut app_server, &server, expected_request_count).await;
     let source = app_server
         .thread_read(source_thread_id, /*include_turns*/ true)
         .await?;

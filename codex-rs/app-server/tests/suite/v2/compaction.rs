@@ -1,7 +1,7 @@
 //! End-to-end compaction flow tests.
 //!
 //! Phases:
-//! 1) Arrange: mock responses/compact endpoints + config.
+//! 1) Arrange: mock Responses endpoints + config.
 //! 2) Act: start a thread and submit multiple turns to trigger auto-compaction.
 //! 3) Assert: verify item/started + item/completed notifications for context compaction.
 
@@ -30,13 +30,12 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_config::types::AuthCredentialsStoreMode;
-use codex_features::Feature;
-use codex_protocol::models::ContentItem;
-use codex_protocol::models::ResponseItem;
+use codex_utils_absolute_path::test_support::PathExt;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
+use test_case::test_case;
 use tokio::time::timeout;
 
 // macOS and Windows Bazel CI can spend tens of seconds starting app-server
@@ -49,8 +48,16 @@ const AUTO_COMPACT_LIMIT: i64 = 1_000;
 const COMPACT_PROMPT: &str = "Summarize the conversation.";
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
 
+#[derive(Clone, Copy)]
+enum CompactionRoute {
+    Local,
+    Remote,
+}
+
+#[test_case(CompactionRoute::Local; "local")]
+#[test_case(CompactionRoute::Remote; "streamed remote")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn auto_compaction_local_emits_started_and_completed_items() -> Result<()> {
+async fn auto_compaction_emits_started_and_completed_items(route: CompactionRoute) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -62,99 +69,39 @@ async fn auto_compaction_local_emits_started_and_completed_items() -> Result<()>
         responses::ev_assistant_message("m2", "SECOND_REPLY"),
         responses::ev_completed_with_tokens("r2", /*total_tokens*/ 330_000),
     ]);
+    let summary = match route {
+        CompactionRoute::Local => responses::ev_assistant_message("m3", "LOCAL_SUMMARY"),
+        CompactionRoute::Remote => serde_json::json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "compaction",
+                "encrypted_content": "ENCRYPTED_COMPACTION_SUMMARY",
+            },
+        }),
+    };
     let sse3 = responses::sse(vec![
-        responses::ev_assistant_message("m3", "LOCAL_SUMMARY"),
+        summary,
         responses::ev_completed_with_tokens("r3", /*total_tokens*/ 200),
     ]);
     let sse4 = responses::sse(vec![
         responses::ev_assistant_message("m4", "FINAL_REPLY"),
         responses::ev_completed_with_tokens("r4", /*total_tokens*/ 120),
     ]);
-    responses::mount_sse_sequence(&server, vec![sse1, sse2, sse3, sse4]).await;
+    let requests = responses::mount_sse_sequence(&server, vec![sse1, sse2, sse3, sse4]).await;
 
     let codex_home = TempDir::new()?;
-    compaction_config(&server.uri(), AUTO_COMPACT_LIMIT).write(codex_home.path())?;
-
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
-        .await?;
-
-    let thread_id = start_thread(&mut mcp).await?;
-    for message in ["first", "second", "third"] {
-        send_turn_and_wait(&mut mcp, &thread_id, message).await?;
+    let mut config = compaction_config(&server.uri(), /*auto_compact_limit*/ 200_000);
+    if let CompactionRoute::Remote = route {
+        config = config
+            .with_provider_name("OpenAI")
+            .with_provider_config("requires_openai_auth = true");
+        write_chatgpt_auth(
+            codex_home.path(),
+            ChatGptAuthFixture::new("access-chatgpt").plan_type("pro"),
+            AuthCredentialsStoreMode::File,
+        )?;
     }
-
-    let started = wait_for_context_compaction_started(&mut mcp).await?;
-    let completed = wait_for_context_compaction_completed(&mut mcp).await?;
-
-    let ThreadItem::ContextCompaction { id: started_id } = started.item else {
-        unreachable!("started item should be context compaction");
-    };
-    let ThreadItem::ContextCompaction { id: completed_id } = completed.item else {
-        unreachable!("completed item should be context compaction");
-    };
-
-    assert_eq!(started.thread_id, thread_id);
-    assert_eq!(completed.thread_id, thread_id);
-    assert_eq!(started_id, completed_id);
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn auto_compaction_remote_emits_started_and_completed_items() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-    const REMOTE_AUTO_COMPACT_LIMIT: i64 = 200_000;
-
-    let server = responses::start_mock_server().await;
-    let sse1 = responses::sse(vec![
-        responses::ev_assistant_message("m1", "FIRST_REPLY"),
-        responses::ev_completed_with_tokens("r1", /*total_tokens*/ 70_000),
-    ]);
-    let sse2 = responses::sse(vec![
-        responses::ev_assistant_message("m2", "SECOND_REPLY"),
-        responses::ev_completed_with_tokens("r2", /*total_tokens*/ 330_000),
-    ]);
-    let sse3 = responses::sse(vec![
-        responses::ev_assistant_message("m3", "FINAL_REPLY"),
-        responses::ev_completed_with_tokens("r3", /*total_tokens*/ 120),
-    ]);
-    let responses_log = responses::mount_sse_sequence(&server, vec![sse1, sse2, sse3]).await;
-
-    let compacted_history = vec![
-        ResponseItem::Message {
-            id: None,
-            role: "assistant".to_string(),
-            content: vec![ContentItem::OutputText {
-                text: "REMOTE_COMPACT_SUMMARY".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        ResponseItem::Compaction {
-            id: None,
-            encrypted_content: "ENCRYPTED_COMPACTION_SUMMARY".to_string(),
-            internal_chat_message_metadata_passthrough: None,
-        },
-    ];
-    let compact_mock = responses::mount_compact_json_once(
-        &server,
-        serde_json::json!({ "output": compacted_history }),
-    )
-    .await;
-
-    let codex_home = TempDir::new()?;
-    compaction_config(&server.uri(), REMOTE_AUTO_COMPACT_LIMIT)
-        .disable_feature(Feature::RemoteCompactionV2)
-        .with_provider_name("OpenAI")
-        .with_provider_config("requires_openai_auth = true")
-        .write(codex_home.path())?;
-    write_chatgpt_auth(
-        codex_home.path(),
-        ChatGptAuthFixture::new("access-chatgpt").plan_type("pro"),
-        AuthCredentialsStoreMode::File,
-    )?;
+    config.write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -181,64 +128,30 @@ async fn auto_compaction_remote_emits_started_and_completed_items() -> Result<()
     assert_eq!(completed.thread_id, thread_id);
     assert_eq!(started_id, completed_id);
 
-    let compact_requests = compact_mock.requests();
-    assert_eq!(compact_requests.len(), 1);
-    assert_eq!(compact_requests[0].path(), "/v1/responses/compact");
-
-    let response_requests = responses_log.requests();
-    assert_eq!(response_requests.len(), 3);
-    let turn_metadata = response_requests
-        .iter()
-        .map(|request| {
-            request
-                .header("x-codex-turn-metadata")
-                .as_deref()
-                .map(parse_json_header)
-                .expect("turn request should include turn metadata")
-        })
-        .collect::<Vec<_>>();
-    for (request, metadata) in response_requests.iter().zip(&turn_metadata) {
-        assert_eq!(metadata["request_kind"].as_str(), Some("turn"));
-        assert!(
-            metadata["turn_id"]
-                .as_str()
-                .is_some_and(|turn_id| !turn_id.is_empty()),
-            "turn request should carry a non-empty turn id"
-        );
-        assert_eq!(
-            metadata["window_id"].as_str(),
-            request.header("x-codex-window-id").as_deref()
-        );
-        assert!(metadata.get("compaction").is_none());
+    let requests = requests.requests();
+    assert_eq!(requests.len(), 4);
+    let compact_request = &requests[2];
+    assert_eq!(compact_request.path(), "/v1/responses");
+    match route {
+        CompactionRoute::Local => {
+            assert!(
+                compact_request
+                    .inputs_of_type("compaction_trigger")
+                    .is_empty()
+            );
+            assert!(compact_request.body_contains_text(COMPACT_PROMPT));
+        }
+        CompactionRoute::Remote => {
+            assert_eq!(
+                compact_request.inputs_of_type("compaction_trigger").len(),
+                1
+            );
+            assert_eq!(
+                requests[3].inputs_of_type("compaction")[0]["encrypted_content"],
+                "ENCRYPTED_COMPACTION_SUMMARY"
+            );
+        }
     }
-
-    let compact_metadata = compact_requests[0]
-        .header("x-codex-turn-metadata")
-        .as_deref()
-        .map(parse_json_header)
-        .expect("compact request should include turn metadata");
-    assert_eq!(
-        compact_metadata["request_kind"].as_str(),
-        Some("compaction")
-    );
-    assert_eq!(
-        compact_metadata["compaction"],
-        serde_json::json!({
-            "trigger": "auto",
-            "reason": "context_limit",
-            "implementation": "responses_compact",
-            "phase": "pre_turn",
-            "strategy": "memento",
-        })
-    );
-    assert_eq!(
-        compact_metadata["turn_id"], turn_metadata[2]["turn_id"],
-        "pre-turn compaction should carry the current turn id"
-    );
-    assert_eq!(
-        compact_metadata["window_id"].as_str(),
-        compact_requests[0].header("x-codex-window-id").as_deref()
-    );
 
     Ok(())
 }
@@ -269,6 +182,8 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
     let codex_home = TempDir::new()?;
     let initial_cwd = TempDir::new()?;
     let updated_cwd = TempDir::new()?;
+    let extra_root = TempDir::new()?;
+    let updated_roots = vec![updated_cwd.path().abs(), extra_root.path().abs()];
     compaction_config(&server.uri(), /*auto_compact_limit*/ 1_000_000).write(codex_home.path())?;
 
     // Top-level cwd restoration uses host-native paths, not a foreign executor's paths.
@@ -295,6 +210,7 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
         mcp.start_turn_and_wait_for_completion(TurnStartParams {
             thread_id: thread_id.clone(),
             cwd: Some(updated_cwd.path().to_path_buf()),
+            runtime_workspace_roots: Some(updated_roots.clone()),
             input: vec![V2UserInput::Text {
                 text: "seed history".to_string(),
                 text_elements: Vec::new(),
@@ -354,7 +270,8 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
     );
 
     // A completed turn after compaction permits bounded replay. Neither this turn nor
-    // resume resends settings, so restoring the updated cwd depends on the checkpoint.
+    // resume resends settings, so restoring the updated cwd and roots depends on the
+    // checkpoint; startup metadata does not contain the extra root.
     send_turn_and_wait(&mut mcp, &thread_id, "continue").await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.shutdown_gracefully()).await??;
 
@@ -370,9 +287,15 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
             ..Default::default()
         })
         .await?;
-    let ThreadResumeResponse { cwd, .. } =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
-    assert_eq!(cwd.as_path(), updated_cwd.path());
+    let ThreadResumeResponse {
+        cwd,
+        runtime_workspace_roots,
+        ..
+    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
+    assert_eq!(
+        (cwd.as_path(), runtime_workspace_roots),
+        (updated_cwd.path(), updated_roots)
+    );
 
     Ok(())
 }
@@ -509,10 +432,6 @@ async fn wait_for_context_compaction_completed(
             return Ok(completed);
         }
     }
-}
-
-fn parse_json_header(value: &str) -> serde_json::Value {
-    serde_json::from_str(value).expect("turn metadata should be JSON")
 }
 
 fn compaction_config(server_uri: &str, auto_compact_limit: i64) -> MockResponsesConfig {

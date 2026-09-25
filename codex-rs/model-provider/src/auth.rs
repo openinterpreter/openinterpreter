@@ -198,6 +198,17 @@ pub(crate) fn auth_manager_for_provider(
     }
 }
 
+/// Resolves the synchronous portion of provider auth for cache identity.
+pub(crate) fn resolve_provider_auth_sync(
+    auth: Option<&CodexAuth>,
+    provider: &ModelProviderInfo,
+) -> codex_protocol::error::Result<SharedAuthProvider> {
+    if let Some(auth) = bearer_auth_for_provider(provider)? {
+        return Ok(Arc::new(auth));
+    }
+    resolve_provider_auth_without_bearer(auth, provider)
+}
+
 pub(crate) async fn resolve_provider_auth(
     auth: Option<&CodexAuth>,
     provider: &ModelProviderInfo,
@@ -216,6 +227,13 @@ pub(crate) async fn resolve_provider_auth(
         }
     }
 
+    resolve_provider_auth_without_bearer(auth, provider)
+}
+
+fn resolve_provider_auth_without_bearer(
+    auth: Option<&CodexAuth>,
+    provider: &ModelProviderInfo,
+) -> codex_protocol::error::Result<SharedAuthProvider> {
     if !provider.requires_openai_auth && provider.auth.is_none() {
         return Ok(unauthenticated_auth_provider());
     }
@@ -303,6 +321,28 @@ async fn kimi_code_bearer_token(
     };
     match kimi_code::resolve_access_token(codex_home).await {
         Ok(token) => Ok(Some(token)),
+        Err(KimiCodeAuthError::MissingCredentials) => Ok(None),
+        Err(err) => Err(CodexErr::Fatal(format!(
+            "Kimi Code authentication failed: {err}"
+        ))),
+    }
+}
+
+pub(crate) fn provider_credential_fingerprint(
+    provider: &ModelProviderInfo,
+    codex_home: Option<&Path>,
+) -> codex_protocol::error::Result<Option<String>> {
+    if !is_kimi_code_provider(provider)
+        || provider.experimental_bearer_token.is_some()
+        || matches!(provider.api_key(), Ok(Some(_)))
+    {
+        return Ok(None);
+    }
+    let Some(codex_home) = codex_home else {
+        return Ok(None);
+    };
+    match kimi_code::credential_fingerprint(codex_home) {
+        Ok(fingerprint) => Ok(Some(fingerprint)),
         Err(KimiCodeAuthError::MissingCredentials) => Ok(None),
         Err(err) => Err(CodexErr::Fatal(format!(
             "Kimi Code authentication failed: {err}"

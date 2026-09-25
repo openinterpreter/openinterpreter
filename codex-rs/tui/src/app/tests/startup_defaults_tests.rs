@@ -33,8 +33,10 @@ async fn run_startup_for_test(
         Duration::ZERO,
         Some(bootstrap),
         /*startup_hooks_browser*/ None,
+        /*daemon_startup_warning*/ None,
         crate::startup_draft::tests::quiet_startup_test_pump(),
         /*managed_worktree*/ None,
+        /*daemon_cli_executable*/ None,
     )
     .await
 }
@@ -44,7 +46,7 @@ async fn cli_fork_omits_implicit_model_and_effort() -> Result<()> {
     let home = tempdir()?;
     std::fs::write(
         home.path().join("config.toml"),
-        "model = \"gpt-5.2\"\nmodel_reasoning_effort = \"low\"\nfeatures.fast_mode = true\n",
+        "model = \"gpt-5.5\"\nmodel_reasoning_effort = \"low\"\nfeatures.fast_mode = true\n",
     )?;
     let config = ConfigBuilder::default()
         .codex_home(home.path().to_path_buf())
@@ -76,7 +78,7 @@ async fn cli_fork_omits_implicit_model_and_effort() -> Result<()> {
     let client_preset = bootstrap
         .available_models
         .iter_mut()
-        .find(|preset| preset.model == "gpt-5.2")
+        .find(|preset| preset.model == "gpt-5.5")
         .expect("client model in catalog");
     client_preset.upgrade = Some(codex_protocol::openai_models::ModelUpgrade {
         id: "server-model".into(),
@@ -88,7 +90,7 @@ async fn cli_fork_omits_implicit_model_and_effort() -> Result<()> {
     });
     assert!(
         crate::app::startup_prompts::should_show_model_migration_prompt(
-            "gpt-5.2",
+            "gpt-5.5",
             "server-model",
             &Default::default(),
             &bootstrap.available_models,
@@ -178,6 +180,8 @@ async fn fresh_startup_uses_server_defaults_with_explicit_and_managed_precedence
         ("cli_effort", true, "server-model", "low"),
         ("profile_model", false, "profile-model", "high"),
         ("profile_effort", false, "server-model", "low"),
+        ("profile_model", true, "profile-model", "high"),
+        ("profile_effort", true, "server-model", "low"),
         ("managed", true, "managed-model", "medium"),
     ] {
         let client_home = tempdir()?;
@@ -367,7 +371,7 @@ async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Res
             insta::assert_snapshot!(rendered, @r"
             › Ask Codex to do anything
 
-              gpt-6-astra high · <PROJECT>
+              GPT-6-Astra high · <PROJECT>
             ");
         }
         let expected_cwd = if override_cwd {

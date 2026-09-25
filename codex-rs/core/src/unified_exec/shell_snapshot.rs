@@ -27,7 +27,7 @@ use crate::exec_env::inject_session_env;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::shell::ShellType;
-use crate::tools::sandboxing::executor_windows_sandbox_level;
+use crate::tools::sandboxing::executor_windows_sandbox_selection;
 
 impl Session {
     pub(crate) fn prewarm_shell_snapshots(
@@ -92,18 +92,16 @@ impl Session {
                         /*has_managed_network_requirements*/ false,
                     )
                     .then(|| FileSystemSandboxContext {
-                        permissions: environment.permission_profile().clone().into(),
-                        cwd: Some(environment.cwd().clone()),
+                        permissions: environment.permission_profile().clone(),
+                        cwd: environment.cwd().clone(),
                         workspace_roots: environment.workspace_roots().to_vec(),
                         user_home_dir: None,
                         temporary_directories: None,
-                        windows_sandbox_level: executor_windows_sandbox_level(
+                        windows_sandbox_selection: executor_windows_sandbox_selection(
+                            environment.config().windows_sandbox_type,
                             environment.config().windows_sandbox_level,
                             environment.cwd(),
                         ),
-                        windows_sandbox_private_desktop: environment
-                            .config()
-                            .windows_sandbox_private_desktop,
                         windows_sandbox_proxy_settings_mode: Some(
                             session.windows_sandbox_proxy_settings_mode,
                         ),

@@ -1,6 +1,8 @@
 //! Parent model history and bounded host-owned context facts.
-//! Compaction replaces only the model window. Snapshots include retained facts atomically;
+//! Compaction replaces the model window and can activate thread-owned Guardian review.
+//! Snapshots include reviewer policy and retained facts atomically;
 //! checkpoint replay and source-call rollback share their live lifecycle.
+//! Token estimates charge item content rather than transport metadata.
 //! Oversized instructions keep an incomplete excerpt for bounded root review, including
 //! sources recovered from legacy Guardian checkpoints before their raw history is dropped.
 
@@ -32,8 +34,11 @@ use codex_history::CodexHarnessMetadata;
 use codex_history::GuardianHistoryCheckpoint;
 use codex_history::ResponseItemEnvelope;
 use codex_history::RetainedContext;
+use codex_history::RetainedContextEntry;
 use codex_history::RetainedContextEvent;
 use codex_history::RetainedInputSource;
+use codex_prompts::render_model_instructions;
+use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
@@ -41,6 +46,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ImageDetail;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -57,6 +63,7 @@ use codex_utils_output_truncation::approx_bytes_for_tokens;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
 use codex_utils_output_truncation::truncate_function_output_payload;
+use codex_utils_output_truncation::with_serialization_allowance;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -70,15 +77,19 @@ pub(crate) struct ContextManager {
     /// The oldest items are at the beginning of the vector. Snapshots share the vector until a
     /// caller needs to mutate it, avoiding deep copies for read-only history consumers.
     items: Arc<Vec<ResponseItemEnvelope>>,
-    /// Legacy-only history, started at first compaction. Thread-owned mode reads parent context.
+    /// Legacy-only history preserved across compaction and resume. Thread-owned review uses parent context.
     review_history: Option<TranscriptHistory>,
     /// Host facts independent of the model window; snapshots share immutable state.
     retained_context: Arc<RetainedContext>,
-    /// Capture, replay, and snapshot selection share the immutable session mode.
+    /// Capture follows the session flag, including while an older checkpoint uses legacy review.
     guardian_context_mode: GuardianContextMode,
+    /// Reviewer policy travels with the history snapshot, independently of capture.
+    guardian_review_mode: GuardianContextMode,
     retain_inherited_user_messages: bool,
     /// Bumped whenever history is rewritten, such as compaction or rollback.
     history_version: u64,
+    /// Last destructive history replacement; ordinary input and compaction preserve it.
+    pub(crate) reset_version: u64,
     /// Monotonic user-input/reset revision, independent of compaction's history generation.
     user_message_revision: u64,
     token_info: Option<TokenUsageInfo>,
@@ -102,33 +113,30 @@ struct SharedConversationHistory {
     review_history: Option<TranscriptHistory>,
     retained_context: Arc<RetainedContext>,
     guardian_context_mode: GuardianContextMode,
+    guardian_review_mode: GuardianContextMode,
     history_version: u64,
     user_message_revision: u64,
 }
 
 pub(crate) enum HistoryReplacement {
-    Compaction,
+    Compaction {
+        reviewer_compaction_hash: Option<String>,
+    },
     Reset,
 }
 
 impl ConversationHistorySnapshot for SharedConversationHistory {
-    fn latest_compaction_model_hash(&self) -> Option<&str> {
-        self.items
-            .iter()
-            .rev()
-            .find(|envelope| {
-                matches!(
-                    envelope.item,
-                    ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
-                )
-            })
-            .and_then(|envelope| envelope.metadata.as_ref())
-            .and_then(|metadata| metadata.compaction_model_hash.as_deref())
+    fn latest_compaction(&self) -> Option<codex_history::CompactionCheckpoint<'_>> {
+        codex_history::CompactionCheckpoint::latest(&self.items)
     }
 
     fn retained_context(&self) -> Option<&RetainedContext> {
         (self.guardian_context_mode == GuardianContextMode::ThreadOwned)
             .then_some(&self.retained_context)
+    }
+
+    fn uses_parent_context_for_review(&self) -> bool {
+        self.guardian_review_mode == GuardianContextMode::ThreadOwned
     }
 
     fn review_items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
@@ -175,8 +183,10 @@ impl ContextManager {
             review_history: None,
             retained_context: Arc::default(),
             guardian_context_mode: GuardianContextMode::Legacy,
+            guardian_review_mode: GuardianContextMode::Legacy,
             retain_inherited_user_messages: false,
             history_version: 0,
+            reset_version: 0,
             user_message_revision: 0,
             token_info: TokenUsageInfo::new_or_append(
                 &None, &None, /*model_context_window*/ None,
@@ -192,6 +202,7 @@ impl ContextManager {
             review_history: self.review_history.clone(),
             retained_context: Arc::clone(&self.retained_context),
             guardian_context_mode: self.guardian_context_mode,
+            guardian_review_mode: self.guardian_review_mode,
             history_version: self.history_version,
             user_message_revision: self.user_message_revision,
         })
@@ -207,6 +218,7 @@ impl ContextManager {
     ) -> Self {
         Self {
             guardian_context_mode,
+            guardian_review_mode: guardian_context_mode,
             retain_inherited_user_messages: guardian_context_mode
                 == GuardianContextMode::ThreadOwned
                 && !source.is_non_root_agent(),
@@ -227,7 +239,7 @@ impl ContextManager {
     }
 
     pub(crate) fn guardian_history_checkpoint(&self) -> Option<GuardianHistoryCheckpoint> {
-        if self.guardian_context_mode == GuardianContextMode::ThreadOwned {
+        if self.guardian_review_mode == GuardianContextMode::ThreadOwned {
             return None;
         }
         self.review_history
@@ -239,7 +251,52 @@ impl ContextManager {
         &mut self,
         retained_context: Option<&RetainedContext>,
         checkpoint: Option<&GuardianHistoryCheckpoint>,
+        reviewer_compaction_hash: Option<&str>,
     ) {
+        // A previously promoted checkpoint may have discarded the only complete transcript.
+        // Keep requiring parent context in that case; a compatibility failure must not turn
+        // a partial model window into a legacy fallback. Migrating checkpoints keep a backup
+        // and can expose retained facts independently of which transcript review uses.
+        let requires_parent_context = checkpoint.is_none()
+            && retained_context.is_some_and(|context| {
+                !context.verified_answers_complete()
+                    || context.ordered_entries().any(|(_, entry)| match entry {
+                        RetainedContextEntry::VerifiedAnswer(_) => true,
+                        RetainedContextEntry::UserMessage(message) => {
+                            !self.raw_items().any(|item| {
+                                if item.id().map(codex_protocol::ResponseItemId::as_str)
+                                    != message.message_id.as_deref()
+                                    || item.turn_id().unwrap_or_default() != message.turn_id
+                                {
+                                    return false;
+                                }
+                                let ResponseItem::Message { role, content, .. } = item else {
+                                    return false;
+                                };
+                                if role != "user" || is_contextual_user_message_content(content) {
+                                    return false;
+                                }
+                                let text = content
+                                    .iter()
+                                    .filter_map(|content| match content {
+                                        ContentItem::InputText { text }
+                                        | ContentItem::OutputText { text } => Some(text.as_str()),
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                guardian_truncate_text(&text, GUARDIAN_MAX_ROOT_MESSAGE_TOKENS).0
+                                    == message.text
+                            })
+                        }
+                    })
+            });
+        self.guardian_review_mode = if requires_parent_context {
+            self.guardian_context_mode
+        } else {
+            self.guardian_context_mode
+                .for_checkpoint(&self.items, reviewer_compaction_hash)
+        };
         self.restore_retained_context(retained_context);
         if self.guardian_context_mode == GuardianContextMode::ThreadOwned {
             // Older retained checkpoints cleared oversized instructions. Recover their
@@ -260,6 +317,10 @@ impl ContextManager {
                     guardian_truncate_text(&original.message(), GUARDIAN_MAX_ROOT_MESSAGE_TOKENS).0,
                 )
             });
+        }
+        if self.guardian_review_mode == GuardianContextMode::ThreadOwned
+            || (self.guardian_context_mode == GuardianContextMode::Legacy && checkpoint.is_none())
+        {
             self.review_history = None;
             return;
         }
@@ -268,11 +329,17 @@ impl ContextManager {
             .as_ref()
             .map_or(self.history_version, TranscriptHistory::generation)
             .saturating_add(1);
-        self.review_history = checkpoint.map(|checkpoint| {
-            let mut history = TranscriptHistory::new(generation);
+        let mut history = TranscriptHistory::new(generation);
+        if let Some(checkpoint) = checkpoint {
             history.reset(checkpoint.0.iter());
-            history
-        });
+        } else {
+            // Retain the legacy window through replay, including answers captured in its suffix.
+            history.reset(self.raw_items().filter(|item| {
+                !matches!(item, ResponseItem::Message { role, content, .. }
+                    if role == "user" && is_contextual_user_message_content(content))
+            }));
+        }
+        self.review_history = Some(history);
     }
 
     pub(crate) fn token_info(&self) -> Option<TokenUsageInfo> {
@@ -312,6 +379,12 @@ impl ContextManager {
 
     pub(crate) fn set_world_state_baseline(&mut self, snapshot: WorldStateSnapshot) {
         self.world_state_baseline = Some(snapshot);
+    }
+
+    pub(crate) fn world_state_checkpoint(&self) -> Option<WorldStateItem> {
+        self.world_state_baseline
+            .clone()
+            .map(|snapshot| WorldStateItem::full(snapshot.into_object()))
     }
 
     pub(crate) fn set_token_usage_full(&mut self, context_window: i64) {
@@ -366,9 +439,9 @@ impl ContextManager {
             {
                 // The override already includes the tool's serialization allowance.
                 let policy = metadata
-                    .and_then(|metadata| metadata.fallback_token_limit_override)
+                    .and_then(|metadata| metadata.history_truncation_token_limit)
                     .map(TruncationPolicy::Tokens)
-                    .unwrap_or(policy * 1.2);
+                    .unwrap_or_else(|| with_serialization_allowance(policy));
                 truncate_function_output_payload(output, policy, estimate_audio_token_count);
             }
             if let Some(review_history) = &mut self.review_history
@@ -378,6 +451,12 @@ impl ContextManager {
                 review_history.record(&processed.item);
             }
             Arc::make_mut(&mut self.items).push(processed);
+            if self.guardian_context_mode == GuardianContextMode::ThreadOwned
+                && let Some(metadata) = metadata
+                && Arc::make_mut(&mut self.retained_context).record_sender_user_messages(metadata)
+            {
+                self.user_message_revision = self.user_message_revision.saturating_add(1);
+            }
             self.record_user_authorization(
                 item,
                 metadata,
@@ -417,17 +496,14 @@ impl ContextManager {
         &self.items
     }
 
-    /// Returns raw items in the history and consumes the snapshot.
-    pub(crate) fn into_raw_items(self) -> Vec<ResponseItem> {
-        self.into_annotated_items()
-            .into_iter()
-            .map(ResponseItemEnvelope::into_item)
-            .collect()
-    }
-
     /// Returns annotated history items and consumes the snapshot.
     pub(crate) fn into_annotated_items(self) -> Vec<ResponseItemEnvelope> {
-        Arc::unwrap_or_clone(self.items)
+        Arc::unwrap_or_clone(self.into_shared_annotated_items())
+    }
+
+    /// Keeps shared response items while releasing the snapshot's unrelated metadata.
+    pub(crate) fn into_shared_annotated_items(self) -> Arc<Vec<ResponseItemEnvelope>> {
+        self.items
     }
 
     pub(crate) fn history_version(&self) -> u64 {
@@ -438,11 +514,8 @@ impl ContextManager {
     // This is a coarse lower bound, not a tokenizer-accurate count.
     pub(crate) fn estimate_token_count(&self, turn_context: &TurnContext) -> Option<i64> {
         let model_info = &turn_context.model_info();
-        let personality = turn_context
-            .personality()
-            .or(turn_context.config.personality);
         let base_instructions = BaseInstructions {
-            text: model_info.get_model_instructions(personality),
+            text: render_model_instructions(model_info),
             provenance: None,
         };
         self.estimate_token_count_with_base_instructions(&base_instructions)
@@ -494,13 +567,27 @@ impl ContextManager {
         }
         self.items = Arc::new(items);
         self.history_version = self.history_version.saturating_add(1);
+        self.reset_version = self.history_version;
         self.world_state_baseline = None;
     }
 
-    /// Compaction changes the model's history without changing the user's authorization.
-    pub(crate) fn replace_compacted(&mut self, items: Vec<ResponseItemEnvelope>) {
-        if self.guardian_context_mode == GuardianContextMode::Legacy
-            && self.review_history.is_none()
+    /// Returns whether compaction changed Guardian's evidence policy, invalidating older reviews.
+    pub(crate) fn replace_compacted(
+        &mut self,
+        items: Vec<ResponseItemEnvelope>,
+        reviewer_compaction_hash: Option<&str>,
+    ) -> bool {
+        let promoted = self.guardian_review_mode == GuardianContextMode::Legacy
+            && self
+                .guardian_context_mode
+                .for_checkpoint(&items, reviewer_compaction_hash)
+                == GuardianContextMode::ThreadOwned;
+        if promoted {
+            self.guardian_review_mode = GuardianContextMode::ThreadOwned;
+            self.review_history = None;
+            self.user_message_revision = self.user_message_revision.saturating_add(/*rhs*/ 1);
+        }
+        if self.guardian_review_mode == GuardianContextMode::Legacy && self.review_history.is_none()
         {
             let mut retained = TranscriptHistory::new(self.history_version.saturating_add(1));
             for item in self.raw_items().filter(|item| {
@@ -513,7 +600,11 @@ impl ContextManager {
         }
         self.items = Arc::new(items);
         self.history_version = self.history_version.saturating_add(1);
+        if promoted {
+            self.reset_version = self.history_version;
+        }
         self.world_state_baseline = None;
+        promoted
     }
 
     /// Drop the last `num_turns` instruction turns from this history.
@@ -521,7 +612,7 @@ impl ContextManager {
     /// Instruction turns are history messages that should behave like a new prompt boundary:
     /// ordinary user messages and structured assistant inter-agent instructions.
     ///
-    /// This mirrors thread-rollback semantics:
+    /// Used only to replay historical rollback markers when reconstructing a saved rollout:
     /// - `num_turns == 0` is a no-op
     /// - if there are no user turns, this is a no-op
     /// - if `num_turns` exceeds the number of user turns, all user turns are dropped while
@@ -807,8 +898,8 @@ fn estimate_encrypted_function_output_length(encoded_len: usize) -> usize {
 
 /// Returns the same coarse, model-visible token estimate used for full history estimates.
 ///
-/// Ordinary items are JSON-serialized, so callers estimating many items should reuse these
-/// results instead of repeatedly estimating the full history.
+/// Counts content directly, excluding transport IDs, metadata, and outer JSON escaping.
+/// Original-detail file images use the maximum patch count.
 pub(crate) fn estimate_item_token_count(item: &ResponseItem) -> i64 {
     let model_visible_bytes = estimate_response_item_model_visible_bytes(item);
     approx_tokens_from_byte_count_i64(model_visible_bytes)
@@ -838,6 +929,36 @@ static ORIGINAL_IMAGE_ESTIMATE_CACHE: LazyLock<BlockingLruCache<[u8; 20], Option
 
 fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
     match item {
+        ResponseItem::Message { content, .. } => content
+            .iter()
+            .map(|part| match part {
+                ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                    text_bytes(text)
+                }
+                ContentItem::InputImage { image, detail } => {
+                    estimate_image_reference_bytes(image, *detail)
+                }
+                ContentItem::InputAudio { audio_url } => estimate_audio_bytes(audio_url),
+            })
+            .fold(0i64, i64::saturating_add),
+        ResponseItem::AgentMessage {
+            author,
+            recipient,
+            content,
+            ..
+        } => content
+            .iter()
+            .map(|part| match part {
+                AgentMessageInputContent::InputText { text } => text_bytes(text),
+                AgentMessageInputContent::EncryptedContent { encrypted_content } => i64::try_from(
+                    estimate_encrypted_function_output_length(encrypted_content.len()),
+                )
+                .unwrap_or(i64::MAX),
+            })
+            .fold(
+                text_bytes(author).saturating_add(text_bytes(recipient)),
+                i64::saturating_add,
+            ),
         ResponseItem::Reasoning {
             encrypted_content: Some(content),
             ..
@@ -850,46 +971,87 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
             encrypted_content: Some(content),
             ..
         } => i64::try_from(estimate_reasoning_length(content.len())).unwrap_or(i64::MAX),
-        item => {
-            let raw = serialized_json_bytes(item)
-                .map(|len| i64::try_from(len).unwrap_or(i64::MAX))
-                .unwrap_or_default();
-            let (image_payload_bytes, image_replacement_bytes) =
-                image_data_url_estimate_adjustment(item);
-            let (audio_payload_bytes, audio_replacement_bytes) =
-                audio_data_url_estimate_adjustment(item);
-            let (encrypted_payload_bytes, encrypted_replacement_bytes) =
-                encrypted_function_output_estimate_adjustment(item);
-            // Replace raw base64 payload bytes with per-modality estimates.
-            // We intentionally preserve the data URL prefix and JSON
-            // wrapper bytes already included in `raw`.
-            let raw = raw
-                .saturating_sub(image_payload_bytes)
-                .saturating_add(image_replacement_bytes)
-                .saturating_sub(audio_payload_bytes)
-                .saturating_add(audio_replacement_bytes);
-            raw.saturating_sub(encrypted_payload_bytes)
-                .saturating_add(encrypted_replacement_bytes)
+        ResponseItem::FunctionCall {
+            name,
+            namespace,
+            arguments: input,
+            ..
         }
+        | ResponseItem::CustomToolCall {
+            name,
+            namespace,
+            input,
+            ..
+        } => text_bytes(name)
+            .saturating_add(text_bytes(
+                namespace.as_deref().unwrap_or(DEFAULT_FUNCTION_NAMESPACE),
+            ))
+            .saturating_add(text_bytes(input)),
+        ResponseItem::FunctionCallOutput {
+            call_id,
+            name,
+            namespace,
+            output,
+            ..
+        } => estimate_function_output_bytes(&output.body)
+            .saturating_add(text_bytes(call_id.as_deref().unwrap_or_default()))
+            .saturating_add(text_bytes(name.as_deref().unwrap_or_default()))
+            .saturating_add(text_bytes(namespace.as_deref().unwrap_or_default())),
+        ResponseItem::CustomToolCallOutput {
+            call_id,
+            name,
+            output,
+            ..
+        } => estimate_function_output_bytes(&output.body)
+            .saturating_add(text_bytes(call_id))
+            .saturating_add(text_bytes(name.as_deref().unwrap_or_default())),
+        // These payloads are themselves JSON arguments, rather than transport envelopes
+        // around text. Keep their JSON syntax in the estimate.
+        ResponseItem::AdditionalTools { tools, .. } => json_content_bytes(tools),
+        ResponseItem::ToolSearchCall { arguments, .. } => json_content_bytes(arguments),
+        ResponseItem::ToolSearchOutput { tools, .. } => json_content_bytes(tools),
+        ResponseItem::LocalShellCall { action, .. } => json_content_bytes(action),
+        ResponseItem::WebSearchCall { action, .. } => {
+            action.as_ref().map(json_content_bytes).unwrap_or_default()
+        }
+        ResponseItem::ImageGenerationCall {
+            revised_prompt,
+            result,
+            ..
+        } => text_bytes(revised_prompt.as_deref().unwrap_or_default()).saturating_add(
+            if result.is_empty() {
+                0
+            } else {
+                RESIZED_IMAGE_BYTES_ESTIMATE
+            },
+        ),
+        ResponseItem::ContextCompaction {
+            encrypted_content: None,
+            ..
+        } => 0,
+        // Plaintext reasoning is excluded from replay accounting.
+        ResponseItem::Reasoning {
+            encrypted_content: None,
+            ..
+        } => 0,
+        ResponseItem::ConfigurationUpdate { .. }
+        | ResponseItem::CompactionTrigger { .. }
+        | ResponseItem::Other => 0,
     }
 }
 
-/// Returns the base64 payload byte length for inline image data URLs that are
-/// eligible for token-estimation discounting.
-///
-/// We only discount payloads for `data:image/...;base64,...` URLs (case
-/// insensitive markers) and leave everything else at raw serialized size.
+fn text_bytes(text: &str) -> i64 {
+    i64::try_from(text.len()).unwrap_or(i64::MAX)
+}
+
+fn json_content_bytes(value: &(impl serde::Serialize + ?Sized)) -> i64 {
+    serialized_json_bytes(value)
+        .map(|len| i64::try_from(len).unwrap_or(i64::MAX))
+        .unwrap_or_default()
+}
+
+/// Extracts inline image bytes for the original-detail dimension estimate.
 fn parse_base64_image_data_url(url: &str) -> Option<&str> {
-    parse_base64_data_url(url, "image/")
-}
-
-/// Returns the base64 payload for inline audio data URLs that are eligible for
-/// token-estimation discounting.
-fn parse_base64_audio_data_url(url: &str) -> Option<&str> {
-    parse_base64_data_url(url, "audio/")
-}
-
-fn parse_base64_data_url<'a>(url: &'a str, media_type_prefix: &str) -> Option<&'a str> {
     if !url
         .get(.."data:".len())
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
@@ -907,8 +1069,8 @@ fn parse_base64_data_url<'a>(url: &'a str, media_type_prefix: &str) -> Option<&'
     let mime_type = metadata_parts.next().unwrap_or_default();
     let has_base64_marker = metadata_parts.any(|part| part.eq_ignore_ascii_case("base64"));
     if !mime_type
-        .get(..media_type_prefix.len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(media_type_prefix))
+        .get(.."image/".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
     {
         return None;
     }
@@ -954,8 +1116,8 @@ fn estimate_original_image_bytes(image_url: &str) -> Option<i64> {
     })
 }
 
-/// Shared image estimate, excluding the data URL prefix and message framing.
-pub(crate) fn estimate_image_bytes(image_url: &str, detail: Option<ImageDetail>) -> i64 {
+/// Inline image estimate, excluding the data URL prefix and message framing.
+fn estimate_image_bytes(image_url: &str, detail: Option<ImageDetail>) -> i64 {
     match detail {
         Some(ImageDetail::Original) => {
             estimate_original_image_bytes(image_url).unwrap_or(RESIZED_IMAGE_BYTES_ESTIMATE)
@@ -964,130 +1126,53 @@ pub(crate) fn estimate_image_bytes(image_url: &str, detail: Option<ImageDetail>)
     }
 }
 
-/// Scans one response item for discount-eligible inline image data URLs and
-/// returns:
-/// - total base64 payload bytes to subtract from raw serialized size
-/// - total replacement byte estimate for those images
-fn image_data_url_estimate_adjustment(item: &ResponseItem) -> (i64, i64) {
-    let mut payload_bytes = 0i64;
-    let mut replacement_bytes = 0i64;
-
-    let mut accumulate = |image_url: &str, detail: Option<ImageDetail>| {
-        if let Some(payload_len) = parse_base64_image_data_url(image_url).map(str::len) {
-            payload_bytes =
-                payload_bytes.saturating_add(i64::try_from(payload_len).unwrap_or(i64::MAX));
-            replacement_bytes =
-                replacement_bytes.saturating_add(estimate_image_bytes(image_url, detail));
+/// Image estimate for callers that only have the reference. Original-detail file images use the
+/// maximum patch count because their dimensions are not available from the reference.
+pub(crate) fn estimate_image_reference_bytes(
+    image: &ImageReference,
+    detail: Option<ImageDetail>,
+) -> i64 {
+    match image {
+        ImageReference::Inline { image_url } => estimate_image_bytes(image_url, detail),
+        ImageReference::File { .. } if detail == Some(ImageDetail::Original) => {
+            i64::try_from(approx_bytes_for_tokens(ORIGINAL_IMAGE_MAX_PATCHES)).unwrap_or(i64::MAX)
         }
-    };
-
-    match item {
-        ResponseItem::Message { content, .. } => {
-            for content_item in content {
-                if let ContentItem::InputImage { image_url, detail } = content_item {
-                    accumulate(image_url, *detail);
-                }
-            }
-        }
-        ResponseItem::FunctionCallOutput { output, .. }
-        | ResponseItem::CustomToolCallOutput { output, .. } => {
-            if let FunctionCallOutputBody::ContentItems(items) = &output.body {
-                for content_item in items {
-                    if let FunctionCallOutputContentItem::InputImage { image_url, detail } =
-                        content_item
-                    {
-                        accumulate(image_url, *detail);
-                    }
-                }
-            }
-        }
-        _ => {}
+        ImageReference::File { .. } => RESIZED_IMAGE_BYTES_ESTIMATE,
     }
-
-    (payload_bytes, replacement_bytes)
 }
 
-/// Scans one response item for inline base64 audio data URLs and returns:
-/// - total base64 payload bytes to subtract from raw serialized size
-/// - total replacement byte estimate for those audio inputs
-fn audio_data_url_estimate_adjustment(item: &ResponseItem) -> (i64, i64) {
-    let mut payload_bytes = 0i64;
-    let mut replacement_bytes = 0i64;
-
-    let mut accumulate = |audio_url: &str| {
-        if let Some(payload_len) = parse_base64_audio_data_url(audio_url).map(str::len) {
-            payload_bytes =
-                payload_bytes.saturating_add(i64::try_from(payload_len).unwrap_or(i64::MAX));
-            replacement_bytes = replacement_bytes.saturating_add(
-                i64::try_from(approx_bytes_for_tokens(estimate_audio_token_count(
-                    audio_url,
-                )))
-                .unwrap_or(i64::MAX),
-            );
-        }
-    };
-
-    match item {
-        ResponseItem::Message { content, .. } => {
-            for content_item in content {
-                if let ContentItem::InputAudio { audio_url } = content_item {
-                    accumulate(audio_url);
-                }
-            }
-        }
-        ResponseItem::FunctionCallOutput { output, .. }
-        | ResponseItem::CustomToolCallOutput { output, .. } => {
-            if let FunctionCallOutputBody::ContentItems(items) = &output.body {
-                for content_item in items {
-                    if let FunctionCallOutputContentItem::InputAudio { audio_url } = content_item {
-                        accumulate(audio_url);
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-
-    (payload_bytes, replacement_bytes)
+fn estimate_audio_bytes(audio_url: &str) -> i64 {
+    i64::try_from(approx_bytes_for_tokens(estimate_audio_token_count(
+        audio_url,
+    )))
+    .unwrap_or(i64::MAX)
 }
 
-fn encrypted_function_output_estimate_adjustment(item: &ResponseItem) -> (i64, i64) {
-    let mut payload_bytes = 0i64;
-    let mut replacement_bytes = 0i64;
-    let mut accumulate = |encrypted_content: &str| {
-        payload_bytes = payload_bytes
-            .saturating_add(i64::try_from(encrypted_content.len()).unwrap_or(i64::MAX));
-        replacement_bytes = replacement_bytes.saturating_add(
-            i64::try_from(estimate_encrypted_function_output_length(
-                encrypted_content.len(),
-            ))
-            .unwrap_or(i64::MAX),
-        );
-    };
-
-    match item {
-        ResponseItem::FunctionCallOutput { output, .. } => {
-            if let FunctionCallOutputBody::ContentItems(items) = &output.body {
-                for item in items {
-                    if let FunctionCallOutputContentItem::EncryptedContent { encrypted_content } =
-                        item
-                    {
-                        accumulate(encrypted_content);
-                    }
+fn estimate_function_output_bytes(output: &FunctionCallOutputBody) -> i64 {
+    match output {
+        FunctionCallOutputBody::Text(text) => text_bytes(text),
+        FunctionCallOutputBody::ContentItems(items) => items
+            .iter()
+            .map(|part| match part {
+                FunctionCallOutputContentItem::InputText { text } => text_bytes(text),
+                FunctionCallOutputContentItem::InputImage { image, detail } => {
+                    estimate_image_reference_bytes(image, *detail)
                 }
-            }
-        }
-        ResponseItem::AgentMessage { content, .. } => {
-            for item in content {
-                if let AgentMessageInputContent::EncryptedContent { encrypted_content } = item {
-                    accumulate(encrypted_content);
+                FunctionCallOutputContentItem::InputVideo { video_url, .. } => {
+                    text_bytes(video_url)
                 }
-            }
-        }
-        _ => {}
+                FunctionCallOutputContentItem::InputAudio { audio_url } => {
+                    estimate_audio_bytes(audio_url)
+                }
+                FunctionCallOutputContentItem::EncryptedContent { encrypted_content } => {
+                    i64::try_from(estimate_encrypted_function_output_length(
+                        encrypted_content.len(),
+                    ))
+                    .unwrap_or(i64::MAX)
+                }
+            })
+            .fold(0i64, i64::saturating_add),
     }
-
-    (payload_bytes, replacement_bytes)
 }
 
 fn is_model_generated_item(item: &ResponseItem) -> bool {

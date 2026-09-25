@@ -152,7 +152,7 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history(
                 envelope
                     .metadata
                     .as_ref()
-                    .map(|metadata| metadata.client_authored),
+                    .is_some_and(|metadata| metadata.client_authored),
             )),
             _ => None,
         })
@@ -166,10 +166,10 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history(
     assert_eq!(
         persisted_injected_items,
         vec![
-            (injected_item.clone(), None),
-            (injected_developer_item.clone(), Some(true)),
-            (marker_shaped_developer_item.clone(), Some(true)),
-            (named_tool_item, None),
+            (injected_item.clone(), false),
+            (injected_developer_item.clone(), true),
+            (marker_shaped_developer_item.clone(), true),
+            (named_tool_item, false),
         ]
     );
 

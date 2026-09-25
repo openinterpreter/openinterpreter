@@ -2,8 +2,8 @@
 source: tui/src/bottom_pane/chat_composer.rs
 expression: terminal.backend()
 ---
+"› /model  choose provider, model, reasoning effort, and     "
 "                                                            "
 "› /mo                                                       "
 "                                                            "
-"  /model  choose provider, model, reasoning effort, and     "
-"          harness                                           "
+"                                         100% context left  "

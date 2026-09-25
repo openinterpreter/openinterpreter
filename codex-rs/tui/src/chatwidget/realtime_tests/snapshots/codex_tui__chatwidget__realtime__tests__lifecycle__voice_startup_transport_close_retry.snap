@@ -1,0 +1,6 @@
+---
+source: tui/src/chatwidget/realtime_tests/lifecycle.rs
+assertion_line: 2670
+expression: rendered
+---
+• Voice connection closed during startup. Retrying once.

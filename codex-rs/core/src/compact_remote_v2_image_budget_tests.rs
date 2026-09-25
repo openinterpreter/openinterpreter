@@ -1,5 +1,6 @@
 use super::*;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::image_close_tag_text;
 use codex_protocol::models::local_image_open_tag_text_with_path;
@@ -17,8 +18,19 @@ fn message(content: Vec<ContentItem>) -> ResponseItem {
 
 fn image() -> ContentItem {
     ContentItem::InputImage {
-        image_url: "data:image/png;base64,abc".to_string(),
+        image: ImageReference::Inline {
+            image_url: "data:image/png;base64,abc".to_string(),
+        },
         detail: None,
+    }
+}
+
+fn file_image() -> ContentItem {
+    ContentItem::InputImage {
+        image: ImageReference::File {
+            file_id: "file_123".to_string(),
+        },
+        detail: Some(codex_protocol::models::ImageDetail::Original),
     }
 }
 
@@ -42,21 +54,23 @@ fn trim(items: Vec<ResponseItem>, max_tokens: usize) -> Vec<ResponseItem> {
 #[test]
 fn image_only_boundary_is_atomic_and_does_not_backfill_older_messages() {
     let newest = message(vec![text("new")]);
-    let items = vec![
-        message(vec![text("old")]),
-        message(vec![image()]),
-        newest.clone(),
-    ];
-    let image_tokens = images::content_item_token_count(&image());
-    for (max_tokens, expected) in [
-        (
-            image_tokens + 1,
-            vec![message(vec![image()]), newest.clone()],
-        ),
-        (image_tokens, vec![newest.clone()]),
-        (1, vec![newest]),
-    ] {
-        assert_eq!(trim(items.clone(), max_tokens), expected);
+    for image in [image(), file_image()] {
+        let items = vec![
+            message(vec![text("old")]),
+            message(vec![image.clone()]),
+            newest.clone(),
+        ];
+        let image_tokens = images::content_item_token_count(&image);
+        for (max_tokens, expected) in [
+            (
+                image_tokens + 1,
+                vec![message(vec![image.clone()]), newest.clone()],
+            ),
+            (image_tokens, vec![newest.clone()]),
+            (1, vec![newest.clone()]),
+        ] {
+            assert_eq!(trim(items.clone(), max_tokens), expected);
+        }
     }
 }
 

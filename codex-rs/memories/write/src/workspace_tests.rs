@@ -48,10 +48,49 @@ async fn reset_memory_workspace_baseline_removes_generated_diff() {
         .expect("reset baseline");
 
     assert!(!root.join(crate::workspace_diff::FILENAME).exists());
+    assert_eq!(memory_storage_bytes(&root).await.expect("storage size"), 6);
     let diff = memory_workspace_diff(&root)
         .await
         .expect("load workspace diff");
     assert_eq!(diff.changes, Vec::new());
+}
+
+#[tokio::test]
+async fn memory_storage_size_counts_nested_files_but_not_git_or_symlinks() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    for version in [MemoryVersion::V1, MemoryVersion::V2] {
+        let root = home.path().join(version.directory_name());
+        fs::create_dir_all(root.join("rollout_summaries"))?;
+        fs::create_dir_all(root.join("extensions/notes"))?;
+        fs::create_dir_all(root.join(".git/objects"))?;
+        fs::write(
+            root.join(".git/objects/baseline"),
+            "git metadata is not memory",
+        )?;
+        let files = [
+            ("memory_summary.md", "summary"),
+            ("rollout_summaries/thread.md", "rollout"),
+            ("extensions/notes/note.md", "café"),
+        ];
+        for (path, content) in files {
+            fs::write(root.join(path), content)?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink(root.join("memory_summary.md"), root.join("file-link"))?;
+            symlink(&root, root.join("directory-loop"))?;
+            symlink(root.join("missing"), root.join("broken-link"))?;
+        }
+        assert_eq!(
+            memory_storage_bytes(&root).await?,
+            files
+                .iter()
+                .map(|(_, content)| content.len() as u64)
+                .sum::<u64>(),
+        );
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -90,4 +129,32 @@ async fn validate_consolidation_artifacts_rejects_invalid_summary() {
         .expect_err("invalid summary should fail validation");
 
     assert!(err.to_string().contains("does not start with v1"));
+}
+
+#[tokio::test]
+async fn v2_accepts_summary_only_and_checks_its_format_and_size() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let root = home.path();
+    fs::write(
+        root.join("memory_summary.md"),
+        "v1\n\n## User Profile\nProfile\n## User preferences\nPreferences\n## General Tips\nTips\n## What's in Memory\nIndex\n",
+    )?;
+    validate_consolidation_artifacts_for_version(root, MemoryVersion::V2).await?;
+    assert!(validate_consolidation_artifacts(root).await.is_err());
+    fs::write(root.join("memory_summary.md"), "v2\nsummary")?;
+    assert!(
+        validate_consolidation_artifacts_for_version(root, MemoryVersion::V2)
+            .await
+            .is_err()
+    );
+    fs::write(
+        root.join("memory_summary.md"),
+        format!("v1\n{}", "x".repeat(10_000)),
+    )?;
+    assert!(
+        validate_consolidation_artifacts_for_version(root, MemoryVersion::V2)
+            .await
+            .is_err()
+    );
+    Ok(())
 }

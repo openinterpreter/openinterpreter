@@ -7,9 +7,11 @@ use anyhow::Result;
 use chrono::DateTime;
 use chrono::TimeZone;
 use chrono::Utc;
+use codex_core::config::Constrained;
 use codex_login::CodexAuth;
 use codex_models_manager::client_version_to_whole;
 use codex_models_manager::manager::RefreshStrategy;
+use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ReasoningSummary;
@@ -24,15 +26,19 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::openai_models::TruncationPolicyConfig;
 use codex_protocol::openai_models::default_input_modalities;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_response;
+use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
@@ -49,6 +55,106 @@ const REMOTE_MODEL: &str = "codex-test-ttl";
 const VERSIONED_MODEL: &str = "codex-test-versioned";
 const MISSING_VERSION_MODEL: &str = "codex-test-missing-version";
 const DIFFERENT_VERSION_MODEL: &str = "codex-test-different-version";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guardian_reused_reviewer_avoids_stale_catalog_lookup() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    let bundled = codex_models_manager::bundled_models_response()?;
+    let catalog = ModelsResponse {
+        models: bundled
+            .models
+            .into_iter()
+            .filter(|model| ["gpt-5.4", "codex-auto-review"].contains(&model.slug.as_str()))
+            .collect(),
+    };
+    assert_eq!(catalog.models.len(), 2);
+    let initial_models =
+        responses::mount_models_once_with_etag(&server, catalog.clone(), ETAG).await;
+
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_model("gpt-5.4");
+    builder = builder.with_config(|config| {
+        config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+        config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+        config.model_provider.request_max_retries = Some(0);
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    test.thread_manager
+        .get_models_manager()
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
+        .await;
+    assert_eq!(initial_models.requests().len(), 1);
+    rewrite_cache_timestamp(
+        &test.config.codex_home.join(CACHE_FILE),
+        Utc::now() - chrono::Duration::hours(1),
+    )
+    .await?;
+    let repeat_models = responses::mount_models_once_with_etag(&server, catalog, ETAG).await;
+    let deny = r#"{"risk_level":"high","user_authorization":"low","outcome":"deny"}"#;
+    let mut sequence = Vec::new();
+    for index in 1..=2 {
+        let parent = format!("parent-{index}");
+        let guardian = format!("guardian-{index}");
+        sequence.push(sse(vec![
+            ev_response_created(&parent),
+            ev_function_call(
+                &format!("call-{index}"),
+                "exec_command",
+                r#"{"cmd":"true","sandbox_permissions":"require_escalated","justification":"Check an action before running it."}"#,
+            ),
+            ev_completed(&parent),
+        ]));
+        sequence.push(sse(vec![
+            ev_response_created(&guardian),
+            ev_assistant_message(&guardian, deny),
+            ev_completed(&guardian),
+        ]));
+    }
+    sequence.push(sse(vec![
+        ev_response_created("parent-done"),
+        ev_assistant_message("parent-done", "finished"),
+        ev_completed("parent-done"),
+    ]));
+    let response_mock = mount_sse_sequence(&server, sequence).await;
+    test.submit_text_turn("Review both shell requests.").await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(
+        requests.len(),
+        5,
+        "both reviews and the parent turn must finish"
+    );
+    let guardian_requests = requests
+        .iter()
+        .filter(|request| {
+            request.body_json()["client_metadata"]["x-openai-subagent"].as_str() == Some("guardian")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(guardian_requests.len(), 2);
+    for request in &guardian_requests {
+        assert_eq!(
+            request.body_json()["model"].as_str(),
+            Some("codex-auto-review")
+        );
+    }
+    let guardian_thread = guardian_requests[0].body_json()["client_metadata"]["thread_id"]
+        .as_str()
+        .expect("Guardian reviewer thread id")
+        .to_string();
+    assert_eq!(
+        guardian_requests[1].body_json()["client_metadata"]["thread_id"].as_str(),
+        Some(guardian_thread.as_str()),
+        "the second approval must reuse the Guardian reviewer"
+    );
+    assert_eq!(repeat_models.requests().len(), 0);
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn renews_cache_ttl_on_matching_models_etag() -> Result<()> {
@@ -290,9 +396,19 @@ async fn uses_cache_when_version_matches() -> Result<()> {
     .await;
 
     let mut builder = test_codex().with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let identity = codex_model_provider::test_support::models_cache_entry(
+        &codex_model_provider_info::ModelProviderInfo::create_openai_provider(Some(format!(
+            "{}/v1",
+            server.uri()
+        ))),
+        Some(&CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+        Vec::new(),
+    )
+    .identity;
     builder = builder
         .with_pre_build_hook(move |home| {
             let mut cache = serde_json::to_value(ModelsCache {
+                identity,
                 fetched_at: Utc::now(),
                 etag: None,
                 provider_id: Some(PROVIDER_ID.to_string()),
@@ -356,9 +472,19 @@ async fn refreshes_when_cache_version_missing() -> Result<()> {
     .await;
 
     let mut builder = test_codex().with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let identity = codex_model_provider::test_support::models_cache_entry(
+        &codex_model_provider_info::ModelProviderInfo::create_openai_provider(Some(format!(
+            "{}/v1",
+            server.uri()
+        ))),
+        Some(&CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+        Vec::new(),
+    )
+    .identity;
     builder = builder
         .with_pre_build_hook(move |home| {
             let cache = ModelsCache {
+                identity,
                 fetched_at: Utc::now(),
                 etag: None,
                 provider_id: Some(PROVIDER_ID.to_string()),
@@ -407,10 +533,20 @@ async fn refreshes_when_cache_version_differs() -> Result<()> {
     }
 
     let mut builder = test_codex().with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let identity = codex_model_provider::test_support::models_cache_entry(
+        &codex_model_provider_info::ModelProviderInfo::create_openai_provider(Some(format!(
+            "{}/v1",
+            server.uri()
+        ))),
+        Some(&CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+        Vec::new(),
+    )
+    .identity;
     builder = builder
         .with_pre_build_hook(move |home| {
             let client_version = client_version_to_whole();
             let cache = ModelsCache {
+                identity,
                 fetched_at: Utc::now(),
                 etag: None,
                 provider_id: Some(PROVIDER_ID.to_string()),
@@ -586,6 +722,8 @@ fn write_cache_sync(path: &Path, cache: &ModelsCache) -> Result<()> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ModelsCache {
+    #[serde(default)]
+    identity: Option<String>,
     fetched_at: DateTime<Utc>,
     #[serde(default)]
     etag: Option<String>,
@@ -621,6 +759,7 @@ fn test_remote_model(slug: &str, priority: i32) -> ModelInfo {
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),
         default_service_tier: None,
+        available_access_programs: None,
         upgrade: None,
         model_messages: Some(ModelMessages {
             persistent_instructions: None,
@@ -659,6 +798,7 @@ fn test_remote_model(slug: &str, priority: i32) -> ModelInfo {
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
+        supports_reasoning_effort_updates: false,
         guardian: None,
         node_repl_auto_review_required: false,
         node_repl_disabled: false,

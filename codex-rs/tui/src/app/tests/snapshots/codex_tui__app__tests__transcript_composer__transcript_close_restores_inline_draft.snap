@@ -1,0 +1,9 @@
+---
+source: tui/src/app/tests/transcript_composer.rs
+expression: "buffer_text(crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal))"
+---
+
+
+› EDGE-DRAFT-MUST-SURVIVE
+
+  GPT-5.6-Sol default · /tmp/project

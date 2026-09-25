@@ -1,9 +1,8 @@
-use crate::build_consolidation_prompt;
-use crate::memory_root;
 use crate::metrics::MEMORY_PHASE_TWO_E2E_MS;
 use crate::metrics::MEMORY_PHASE_TWO_INPUT;
 use crate::metrics::MEMORY_PHASE_TWO_JOBS;
 use crate::metrics::MEMORY_PHASE_TWO_TOKEN_USAGE;
+use crate::prompts::build_consolidation_prompt_for_version;
 use crate::prune_old_extension_resources;
 use crate::rebuild_raw_memories_file_from_memories;
 use crate::runtime::MemoryStartupContext;
@@ -13,12 +12,13 @@ use crate::workspace::memory_workspace_diff;
 use crate::workspace::prepare_memory_workspace;
 use crate::workspace::remove_memory_symlinks;
 use crate::workspace::reset_memory_workspace_baseline;
-use crate::workspace::validate_consolidation_artifacts;
+use crate::workspace::validate_consolidation_artifacts_for_version;
 use crate::workspace::write_workspace_diff;
 use codex_config::Constrained;
 use codex_core::config::Config;
 use codex_features::Feature;
 use codex_model_provider::ModelProvider;
+use codex_protocol::MemoryVersion;
 use codex_protocol::ThreadId;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AgentStatus;
@@ -26,8 +26,8 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::user_input::UserInput;
+use codex_state::MemoryStore;
 use codex_state::Stage1Output;
-use codex_state::StateRuntime;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -53,16 +53,18 @@ pub async fn run(
 ) {
     let phase_two_e2e_timer = context.start_timer(MEMORY_PHASE_TWO_E2E_MS);
 
-    let Some(db) = context.state_db() else {
+    let Some(db) = context.memory_store().await else {
         // This should not happen.
         return;
     };
-    let root = memory_root(&config.codex_home);
+    let root = config
+        .codex_home
+        .join(config.memories.version.directory_name());
     let max_raw_memories = config.memories.max_raw_memories_for_consolidation;
     let max_unused_days = config.memories.max_unused_days;
 
     // 1. Claim the global Phase 2 lock before touching the memory workspace.
-    let claim = match job::claim(context.as_ref(), db.as_ref()).await {
+    let claim = match job::claim(context.as_ref(), &db).await {
         Ok(claim) => claim,
         Err(e) => {
             context.counter(MEMORY_PHASE_TWO_JOBS, /*inc*/ 1, &[("status", e)]);
@@ -73,13 +75,7 @@ pub async fn run(
     // 2. Ensure the memories root has a git baseline repository.
     if let Err(err) = prepare_memory_workspace(&root).await {
         tracing::error!("failed preparing memory workspace: {err}");
-        job::failed(
-            context.as_ref(),
-            db.as_ref(),
-            &claim,
-            "failed_prepare_workspace",
-        )
-        .await;
+        job::failed(context.as_ref(), &db, &claim, "failed_prepare_workspace").await;
         return;
     }
 
@@ -91,32 +87,19 @@ pub async fn run(
     ) else {
         // If we can't get the config, we can't consolidate.
         tracing::error!("failed to get agent config");
-        job::failed(
-            context.as_ref(),
-            db.as_ref(),
-            &claim,
-            "failed_sandbox_policy",
-        )
-        .await;
+        job::failed(context.as_ref(), &db, &claim, "failed_sandbox_policy").await;
         return;
     };
 
     // 4. Load current DB-backed Phase 2 inputs.
     let raw_memories = match db
-        .memories()
         .get_phase2_input_selection(max_raw_memories, max_unused_days)
         .await
     {
         Ok(raw_memories) => raw_memories,
         Err(err) => {
             tracing::error!("failed to list stage1 outputs from global: {err}");
-            job::failed(
-                context.as_ref(),
-                db.as_ref(),
-                &claim,
-                "failed_load_stage1_outputs",
-            )
-            .await;
+            job::failed(context.as_ref(), &db, &claim, "failed_load_stage1_outputs").await;
             return;
         }
     };
@@ -124,11 +107,11 @@ pub async fn run(
     let new_watermark = get_watermark(claim.watermark, &raw_memories);
 
     // 5. Sync the current inputs into the memory workspace.
-    if let Err(err) = sync_phase2_workspace_inputs(&root, &raw_memories).await {
+    if let Err(err) = sync_phase2_workspace_inputs(&root, &raw_memories, &config).await {
         tracing::error!("failed syncing phase2 workspace inputs: {err}");
         job::failed(
             context.as_ref(),
-            db.as_ref(),
+            &db,
             &claim,
             "failed_sync_workspace_inputs",
         )
@@ -141,46 +124,42 @@ pub async fn run(
         Ok(diff) => diff,
         Err(err) => {
             tracing::error!("failed checking memory workspace changes: {err}");
-            job::failed(
-                context.as_ref(),
-                db.as_ref(),
-                &claim,
-                "failed_workspace_status",
-            )
-            .await;
+            job::failed(context.as_ref(), &db, &claim, "failed_workspace_status").await;
             return;
         }
     };
-    if !workspace_diff.has_changes() && validate_consolidation_artifacts(&root).await.is_ok() {
+    if !workspace_diff.has_changes()
+        && validate_consolidation_artifacts_for_version(&root, config.memories.version)
+            .await
+            .is_ok()
+    {
         tracing::error!("Phase 2 no changes");
         // We check only after sync of the file system.
-        job::succeed(
+        if job::succeed(
             context.as_ref(),
-            db.as_ref(),
+            &db,
             &claim,
             new_watermark,
             &raw_memories,
             "succeeded_no_workspace_changes",
         )
-        .await;
+        .await
+        {
+            drop(phase_two_e2e_timer);
+            context.record_storage_size(&root).await;
+        }
         return;
     }
 
     // 7. Persist the diff for the consolidation agent to inspect.
     if let Err(err) = write_workspace_diff(&root, &workspace_diff).await {
         tracing::error!("failed writing memory workspace diff file: {err}");
-        job::failed(
-            context.as_ref(),
-            db.as_ref(),
-            &claim,
-            "failed_workspace_diff_file",
-        )
-        .await;
+        job::failed(context.as_ref(), &db, &claim, "failed_workspace_diff_file").await;
         return;
     }
 
     // 8. Spawn the consolidation agent.
-    let prompt = agent::get_prompt(&root);
+    let prompt = agent::get_prompt(&root, config.memories.version);
     let agent = match context
         .spawn_consolidation_agent(agent_config, prompt)
         .await
@@ -188,7 +167,7 @@ pub async fn run(
         Ok(agent) => agent,
         Err(err) => {
             tracing::error!("failed to spawn global memory consolidation agent: {err}");
-            job::failed(context.as_ref(), db.as_ref(), &claim, "failed_spawn_agent").await;
+            job::failed(context.as_ref(), &db, &claim, "failed_spawn_agent").await;
             return;
         }
     };
@@ -200,6 +179,7 @@ pub async fn run(
         new_watermark,
         raw_memories.clone(),
         root,
+        config.memories.version,
         agent,
         phase_two_e2e_timer,
     );
@@ -214,10 +194,16 @@ pub async fn run(
 async fn sync_phase2_workspace_inputs(
     root: &Path,
     raw_memories: &[Stage1Output],
+    config: &Config,
 ) -> std::io::Result<()> {
     let raw_memory_count = raw_memories.len();
     sync_rollout_summaries_from_memories(root, raw_memories, raw_memory_count).await?;
-    rebuild_raw_memories_file_from_memories(root, raw_memories, raw_memory_count).await?;
+    match config.memories.version {
+        MemoryVersion::V1 => {
+            rebuild_raw_memories_file_from_memories(root, raw_memories, raw_memory_count).await?
+        }
+        MemoryVersion::V2 => {}
+    }
     prune_old_extension_resources(root).await;
     Ok(())
 }
@@ -227,10 +213,9 @@ mod job {
 
     pub(super) async fn claim(
         context: &MemoryStartupContext,
-        db: &StateRuntime,
+        db: &MemoryStore,
     ) -> Result<Claim, &'static str> {
         let claim = db
-            .memories()
             .try_claim_global_phase2_job(context.thread_id(), crate::stage_two::JOB_LEASE_SECONDS)
             .await
             .map_err(|e| {
@@ -263,23 +248,21 @@ mod job {
 
     pub(super) async fn failed(
         context: &MemoryStartupContext,
-        db: &StateRuntime,
+        db: &MemoryStore,
         claim: &Claim,
         reason: &'static str,
     ) {
         context.counter(MEMORY_PHASE_TWO_JOBS, /*inc*/ 1, &[("status", reason)]);
         if matches!(
-            db.memories()
-                .mark_global_phase2_job_failed(
-                    &claim.token,
-                    reason,
-                    crate::stage_two::JOB_RETRY_DELAY_SECONDS,
-                )
-                .await,
+            db.mark_global_phase2_job_failed(
+                &claim.token,
+                reason,
+                crate::stage_two::JOB_RETRY_DELAY_SECONDS,
+            )
+            .await,
             Ok(false)
         ) {
             let _ = db
-                .memories()
                 .mark_global_phase2_job_failed_if_unowned(
                     &claim.token,
                     reason,
@@ -291,15 +274,14 @@ mod job {
 
     pub(super) async fn succeed(
         context: &MemoryStartupContext,
-        db: &StateRuntime,
+        db: &MemoryStore,
         claim: &Claim,
         completion_watermark: i64,
         selected_outputs: &[codex_state::Stage1Output],
         reason: &'static str,
     ) -> bool {
         context.counter(MEMORY_PHASE_TWO_JOBS, /*inc*/ 1, &[("status", reason)]);
-        db.memories()
-            .mark_global_phase2_job_succeeded(&claim.token, completion_watermark, selected_outputs)
+        db.mark_global_phase2_job_succeeded(&claim.token, completion_watermark, selected_outputs)
             .await
             .unwrap_or(false)
     }
@@ -314,7 +296,9 @@ mod agent {
         parent_permission_profile: PermissionProfile,
         provider: &dyn ModelProvider,
     ) -> Option<Config> {
-        let root = memory_root(&config.codex_home);
+        let root = config
+            .codex_home
+            .join(config.memories.version.directory_name());
         let mut agent_config = config.clone();
 
         agent_config.cwd = root.clone();
@@ -369,8 +353,8 @@ mod agent {
         Some(agent_config)
     }
 
-    pub(super) fn get_prompt(root: &Path) -> Vec<UserInput> {
-        let prompt = build_consolidation_prompt(root);
+    pub(super) fn get_prompt(root: &Path, version: MemoryVersion) -> Vec<UserInput> {
+        let prompt = build_consolidation_prompt_for_version(root, version);
         vec![UserInput::Text {
             text: prompt,
             text_elements: vec![],
@@ -385,15 +369,14 @@ mod agent {
         new_watermark: i64,
         selected_outputs: Vec<codex_state::Stage1Output>,
         memory_root: codex_utils_absolute_path::AbsolutePathBuf,
+        version: MemoryVersion,
         agent: SpawnedConsolidationAgent,
         phase_two_e2e_timer: Option<codex_otel::Timer>,
     ) {
-        let Some(db) = context.state_db() else {
-            return;
-        };
-
         tokio::spawn(async move {
-            let _phase_two_e2e_timer = phase_two_e2e_timer;
+            let Some(db) = context.memory_store().await else {
+                return;
+            };
             let SpawnedConsolidationAgent { thread_id, thread } = agent;
 
             // Loop the agent until we have the final status.
@@ -421,7 +404,7 @@ mod agent {
             }
 
             let artifacts_valid = if agent_completed {
-                match validate_consolidation_artifacts(&memory_root).await {
+                match validate_consolidation_artifacts_for_version(&memory_root, version).await {
                     Ok(()) => true,
                     Err(err) => {
                         tracing::error!("memory consolidation artifacts are invalid: {err}");
@@ -437,7 +420,6 @@ mod agent {
             if agent_completed && artifacts_valid {
                 // Do not reset the workspace baseline if we lost the lock.
                 let still_owns_lock = match db
-                    .memories()
                     .heartbeat_global_phase2_job(
                         &claim.token,
                         crate::stage_two::JOB_LEASE_SECONDS,
@@ -478,6 +460,9 @@ mod agent {
                         tracing::error!(
                             "failed marking global memory consolidation job succeeded after resetting workspace baseline"
                         );
+                    } else {
+                        drop(phase_two_e2e_timer);
+                        context.record_storage_size(&memory_root).await;
                     }
                 }
             } else if !agent_completed {
@@ -490,7 +475,7 @@ mod agent {
     }
 
     async fn loop_agent(
-        db: Arc<StateRuntime>,
+        db: MemoryStore,
         token: String,
         thread_id: ThreadId,
         thread: &codex_core::CodexThread,
@@ -526,7 +511,6 @@ mod agent {
                 }
                 _ = heartbeat_interval.tick() => {
                     match db
-                        .memories()
                         .heartbeat_global_phase2_job(
                             &token,
                             crate::stage_two::JOB_LEASE_SECONDS,

@@ -60,6 +60,7 @@ fn tools_are_not_contributed_when_disabled() {
     let extension = MemoriesExtension::default();
     let thread_store = ExtensionData::new("thread");
     thread_store.insert(MemoriesExtensionConfig {
+        version: codex_protocol::MemoryVersion::V1,
         enabled: false,
         dedicated_tools: true,
         codex_home: test_path_buf("/tmp/codex-home").abs(),
@@ -77,6 +78,7 @@ fn tools_are_not_contributed_when_dedicated_tools_disabled() {
     let extension = MemoriesExtension::default();
     let thread_store = ExtensionData::new("thread");
     thread_store.insert(MemoriesExtensionConfig {
+        version: codex_protocol::MemoryVersion::V1,
         enabled: true,
         dedicated_tools: false,
         codex_home: test_path_buf("/tmp/codex-home").abs(),
@@ -94,6 +96,7 @@ fn tools_are_contributed_when_enabled_with_dedicated_tools() {
     let extension = MemoriesExtension::default();
     let thread_store = ExtensionData::new("thread");
     thread_store.insert(MemoriesExtensionConfig {
+        version: codex_protocol::MemoryVersion::V1,
         enabled: true,
         dedicated_tools: true,
         codex_home: test_path_buf("/tmp/codex-home").abs(),
@@ -123,6 +126,7 @@ fn install_registers_dedicated_tool_contributor() {
     let registry = builder.build();
     let thread_store = ExtensionData::new("thread");
     thread_store.insert(MemoriesExtensionConfig {
+        version: codex_protocol::MemoryVersion::V1,
         enabled: true,
         dedicated_tools: true,
         codex_home: test_path_buf("/tmp/codex-home").abs(),
@@ -183,6 +187,7 @@ async fn prompt_contribution_uses_memory_summary_when_enabled() {
     let extension = MemoriesExtension::default();
     let thread_store = ExtensionData::new("thread");
     thread_store.insert(MemoriesExtensionConfig {
+        version: codex_protocol::MemoryVersion::V1,
         enabled: true,
         dedicated_tools: false,
         codex_home: tempdir.path().abs(),

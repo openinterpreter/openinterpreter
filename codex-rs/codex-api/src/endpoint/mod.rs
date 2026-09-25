@@ -1,5 +1,4 @@
 pub(crate) mod anthropic_messages;
-pub(crate) mod compact;
 pub(crate) mod images;
 pub(crate) mod memories;
 pub(crate) mod models;
@@ -11,7 +10,6 @@ pub(crate) mod search;
 mod session;
 
 pub use anthropic_messages::AnthropicMessagesClient;
-pub use compact::CompactClient;
 pub use images::ImagesClient;
 pub use memories::MemoriesClient;
 pub use models::ModelsClient;
@@ -29,7 +27,6 @@ pub use realtime_websocket::RealtimeWebsocketEvents;
 pub use realtime_websocket::RealtimeWebsocketWriter;
 pub use realtime_websocket::session_update_session_json;
 pub use responses::ResponsesClient;
-pub use responses::ResponsesEndpoint;
 pub use responses::ResponsesOptions;
 pub use responses_websocket::ResponsesWebsocketClient;
 pub use responses_websocket::ResponsesWebsocketClose;

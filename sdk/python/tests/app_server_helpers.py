@@ -162,8 +162,6 @@ def assistant_message_with_phase(
 
 def request_kind(request_path: str) -> str:
     """Classify captured mock-server request paths for compact assertions."""
-    if request_path.endswith("/responses/compact"):
-        return "compact"
     if request_path.endswith("/responses"):
         return "responses"
     return request_path

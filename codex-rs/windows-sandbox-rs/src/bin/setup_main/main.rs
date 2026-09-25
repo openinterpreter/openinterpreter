@@ -1,11 +1,8 @@
 #![recursion_limit = "256"]
 
 #[cfg(target_os = "windows")]
-mod win;
-
-#[cfg(target_os = "windows")]
 fn main() -> anyhow::Result<()> {
-    win::main()
+    codex_windows_sandbox::setup_helper_main()
 }
 
 #[cfg(not(target_os = "windows"))]

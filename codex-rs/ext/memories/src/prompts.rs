@@ -1,4 +1,5 @@
 use crate::MEMORY_TOOL_DEVELOPER_INSTRUCTIONS_SUMMARY_TOKEN_LIMIT;
+use codex_protocol::MemoryVersion;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::truncate_text;
@@ -10,6 +11,13 @@ static MEMORY_TOOL_DEVELOPER_INSTRUCTIONS_TEMPLATE: LazyLock<Template> = LazyLoc
     parse_embedded_template(
         include_str!("../templates/memories/read_path.md"),
         "memories/read_path.md",
+    )
+});
+
+static MEMORY_V2_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
+    parse_embedded_template(
+        include_str!("../templates/memories/read_path_v2.md"),
+        "memories/read_path_v2.md",
     )
 });
 
@@ -26,8 +34,9 @@ fn parse_embedded_template(source: &'static str, template_name: &str) -> Templat
 /// [MEMORY_TOOL_DEVELOPER_INSTRUCTIONS_SUMMARY_TOKEN_LIMIT].
 pub(crate) async fn build_memory_tool_developer_instructions(
     codex_home: &AbsolutePathBuf,
+    version: MemoryVersion,
 ) -> Option<String> {
-    let base_path = codex_home.join("memories");
+    let base_path = codex_home.join(version.directory_name());
     let memory_summary_path = base_path.join("memory_summary.md");
     let memory_summary = fs::read_to_string(&memory_summary_path)
         .await
@@ -42,7 +51,11 @@ pub(crate) async fn build_memory_tool_developer_instructions(
         return None;
     }
     let base_path = base_path.display().to_string();
-    MEMORY_TOOL_DEVELOPER_INSTRUCTIONS_TEMPLATE
+    let template = match version {
+        MemoryVersion::V1 => &MEMORY_TOOL_DEVELOPER_INSTRUCTIONS_TEMPLATE,
+        MemoryVersion::V2 => &MEMORY_V2_TEMPLATE,
+    };
+    template
         .render([
             ("base_path", base_path.as_str()),
             ("memory_summary", memory_summary.as_str()),

@@ -7,6 +7,7 @@ use crate::mcp_policy::EnvironmentMcpPolicy;
 use crate::models::PermissionProfile;
 use crate::models::PermissionProfileSnapshot;
 use crate::protocol::AskForApproval;
+use crate::sandbox::SandboxType;
 use codex_execpolicy::RequirementsExecPolicy;
 use codex_network_proxy::EnvironmentNetworkPolicy;
 use codex_utils_path_uri::PathUri;
@@ -64,10 +65,10 @@ pub struct EnvironmentConfig {
     pub permission_profile: PermissionProfileSnapshot,
     /// Controls which environment variables shell commands may inherit.
     pub shell_environment_policy: ShellEnvironmentPolicy,
-    /// Windows sandbox implementation for this environment attachment.
+    /// Legacy Windows restricted-token setup level for this environment attachment.
     pub windows_sandbox_level: WindowsSandboxLevel,
-    /// Whether Windows sandbox processes use a private desktop.
-    pub windows_sandbox_private_desktop: bool,
+    /// Concrete Windows sandbox backend selected for this environment attachment.
+    pub windows_sandbox_type: SandboxType,
     /// Whether Linux sandbox processes use the legacy Landlock backend.
     pub use_legacy_landlock: bool,
     /// Additional managed command restrictions for this environment attachment.
@@ -89,10 +90,7 @@ impl std::fmt::Debug for EnvironmentConfig {
             .field("permission_profile", &self.permission_profile)
             .field("shell_environment_policy", &"<redacted>")
             .field("windows_sandbox_level", &self.windows_sandbox_level)
-            .field(
-                "windows_sandbox_private_desktop",
-                &self.windows_sandbox_private_desktop,
-            )
+            .field("windows_sandbox_type", &self.windows_sandbox_type)
             .field("use_legacy_landlock", &self.use_legacy_landlock)
             .field("exec_policy", &self.exec_policy)
             .field("mcp_policy", &self.mcp_policy)

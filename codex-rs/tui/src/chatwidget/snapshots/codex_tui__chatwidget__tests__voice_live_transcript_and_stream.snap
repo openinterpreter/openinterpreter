@@ -1,0 +1,17 @@
+---
+source: tui/src/chatwidget/tests/status_and_layout.rs
+expression: rendered
+---
+"                                                            "
+"• Agent answer arriving                                     "
+"                                                            "
+"                                                            "
+"› pick a number                                             "
+"                                                            "
+"                                                            "
+"                                                            "
+" voice ● listening              ctrl+x mute     /voice stop "
+"                                                            "
+"› Ask Codex to do anything                                  "
+"                                                            "
+"  GPT-5.6-Sol default · /tmp/project                        "

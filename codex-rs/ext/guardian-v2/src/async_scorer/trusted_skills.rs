@@ -5,70 +5,11 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use codex_core::config::Config;
-use codex_extension_api::ContentItemKind;
-use codex_extension_api::ContextualUserFragment;
-use codex_protocol::protocol::TruncationPolicy;
 use dirs::home_dir;
-use serde_json::json;
 
 const MAX_TRUSTED_SKILLS: usize = 16;
 const MAX_TRUSTED_SKILL_PATH_BYTES: usize = 512;
 const MAX_TRUSTED_SKILL_PATHS_BYTES: usize = 2_048;
-const MAX_TRUSTED_SKILL_TOKENS: usize = 768;
-const TRUSTED_SKILLS_PREFIX: &str = "Codex-verified invoked user-owned skill paths:\n";
-
-/// Host-verified user-owned skill paths for the current Guardian classification.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct GuardianTrustedSkillsFragment {
-    pub(crate) paths: Vec<String>,
-}
-
-impl ContextualUserFragment for GuardianTrustedSkillsFragment {
-    fn content_kind(&self) -> ContentItemKind {
-        ContentItemKind("guardian.trusted_skills".to_owned())
-    }
-
-    fn role(&self) -> &'static str {
-        "developer"
-    }
-
-    fn requires_separate_message(&self) -> bool {
-        true
-    }
-
-    fn markers(&self) -> (&'static str, &'static str) {
-        Self::type_markers()
-    }
-
-    fn type_markers() -> (&'static str, &'static str) {
-        ("", "")
-    }
-
-    fn body(&self) -> String {
-        let mut paths = String::from("[");
-        let max_path_bytes = TruncationPolicy::Tokens(MAX_TRUSTED_SKILL_TOKENS)
-            .byte_budget()
-            .saturating_sub(TRUSTED_SKILLS_PREFIX.len());
-        for path in &self.paths {
-            let separator = if paths.ends_with('[') { "" } else { "," };
-            let encoded_path = json!(path).to_string();
-            if paths
-                .len()
-                .saturating_add(separator.len())
-                .saturating_add(encoded_path.len())
-                .saturating_add(1)
-                > max_path_bytes
-            {
-                continue;
-            }
-            paths.push_str(separator);
-            paths.push_str(&encoded_path);
-        }
-        paths.push(']');
-        format!("{TRUSTED_SKILLS_PREFIX}{paths}")
-    }
-}
-
 /// Host-owned roots from which invoked skill paths can be verified.
 pub(crate) struct TrustedSkillRoots {
     roots: Vec<PathBuf>,

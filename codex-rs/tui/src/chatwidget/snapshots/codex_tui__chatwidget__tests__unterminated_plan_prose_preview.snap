@@ -1,0 +1,10 @@
+---
+source: tui/src/chatwidget/tests/status_and_layout.rs
+expression: lines_to_single_string(&cell.display_lines(26))
+---
+• Proposed Plan
+ 
+   
+  100 200 300 400 500
+  600 700 800 900 1000
+  1100 1200

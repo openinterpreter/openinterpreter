@@ -1,7 +1,7 @@
 //! Reviews terminal input against retained launch permissions and current policy.
 //! Permission snapshots stay host-owned; neither an earlier approval nor a policy
 //! change alters the sandbox of an already-running process. Native launches keep
-//! their configured Windows sandbox level; executor launches use executor defaults.
+//! their configured Windows sandbox selection; executor launches use executor defaults.
 
 use super::ProcessEntry;
 use super::UnifiedExecContext;
@@ -11,8 +11,8 @@ use crate::session::turn_context::TurnContext;
 use crate::session::turn_context::TurnEnvironment;
 use crate::tools::sandboxing::ApprovalAction;
 use crate::tools::sandboxing::ToolError;
+use crate::windows_sandbox::windows_sandbox_level_for_legacy_checks;
 use codex_features::Feature;
-use codex_file_system::ExecPermissionProfile;
 use codex_file_system::FileSystemSandboxContext;
 use codex_network_proxy::EnvironmentNetworkPolicy;
 use codex_protocol::models::AdditionalPermissionProfile;
@@ -53,10 +53,16 @@ impl TerminalPolicy {
         additional_permissions: Option<AdditionalPermissionProfile>,
     ) -> Self {
         let mut sandbox = environment.sandbox_context(additional_permissions);
-        if matches!(sandbox_source, TerminalSandboxSource::Native) {
+        if matches!(sandbox_source, TerminalSandboxSource::Native)
+            && windows_sandbox_level_for_legacy_checks(
+                environment.config().windows_sandbox_type,
+                environment.config().windows_sandbox_level,
+            ) == codex_protocol::config_types::WindowsSandboxLevel::Disabled
+        {
             // The filesystem helper applies executor defaults, but native process
             // launches honor Disabled. Preserve it so later enablement is detected.
-            sandbox.windows_sandbox_level = environment.config().windows_sandbox_level;
+            sandbox.windows_sandbox_selection =
+                codex_protocol::config_types::WindowsSandboxLevel::Disabled.into();
         }
         Self {
             sandbox,
@@ -69,7 +75,7 @@ impl TerminalPolicy {
     fn file_system_context(&self) -> FileSystemSandboxContext {
         let mut context = self.sandbox.clone();
         // Network changes require review, not rejection for denied-read drift.
-        if let ExecPermissionProfile::Managed { network, .. } = &mut context.permissions {
+        if let PermissionProfile::Managed { network, .. } = &mut context.permissions {
             *network = NetworkSandboxPolicy::Restricted;
         }
         context
@@ -109,13 +115,6 @@ impl TerminalPermissions {
         baseline: &PermissionProfile,
     ) -> Result<SandboxPermissions, &'static str> {
         let bypassed = self.launch_permissions.requires_escalated_permissions();
-        if current.environment_network.is_some()
-            && (bypassed || self.policy.environment_network != current.environment_network)
-        {
-            return Err(
-                "this terminal cannot enforce the current environment-owned network restrictions; start a new terminal",
-            );
-        }
         // Approval cannot retrofit denied reads onto a running process. Unless
         // its sandbox still matches, start a new terminal under the current policy.
         if baseline
@@ -131,7 +130,7 @@ impl TerminalPermissions {
         Ok(if bypassed || &self.policy != current {
             SandboxPermissions::RequireEscalated
         } else if self.policy.sandbox.permissions
-            == effective_permission_profile(baseline, /*additional_permissions*/ None).into()
+            == effective_permission_profile(baseline, /*additional_permissions*/ None)
         {
             SandboxPermissions::UseDefault
         } else {
@@ -145,7 +144,7 @@ impl TerminalPermissions {
     ) -> Result<String, serde_json::Error> {
         let authority = if self.launch_permissions.requires_escalated_permissions() {
             "This terminal was launched outside the sandbox, bypassing any managed network proxy."
-        } else if self.policy.sandbox.permissions == ExecPermissionProfile::Disabled {
+        } else if self.policy.sandbox.permissions == PermissionProfile::Disabled {
             "This terminal runs without a filesystem sandbox."
         } else {
             match sandbox_permissions {
@@ -160,7 +159,7 @@ impl TerminalPermissions {
         };
         let mut reason = format!("Send input to an existing terminal. {authority}");
         if self.internal_permissions.is_some() {
-            reason.push_str(" It also has an internal plugin metrics write grant.");
+            reason.push_str(" It also has an internal filesystem grant.");
         }
         reason.push_str(" The cwd is its launch directory; the terminal's current directory and state may have changed.");
         if let Some(grants) = &self.additional_permissions {

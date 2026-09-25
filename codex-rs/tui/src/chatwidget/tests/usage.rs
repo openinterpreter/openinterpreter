@@ -13,6 +13,15 @@ use uuid::Uuid;
 
 const TEST_OVERLAY_VIEW_ID: &str = "usage-test-overlay";
 
+#[tokio::test]
+async fn usage_menu_opens_analytics() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    set_chatgpt_auth(&mut chat);
+    chat.dispatch_command(SlashCommand::Usage);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenAnalytics { view: None }));
+}
+
 fn reset_credits(available_count: i64) -> RateLimitResetCreditsSummary {
     RateLimitResetCreditsSummary {
         available_count,
@@ -119,8 +128,12 @@ async fn usage_command_opens_menu_when_reset_is_available_snapshot() {
         "usage_command_menu",
         render_bottom_popup(&chat, /*width*/ 80)
     );
+    assert_chatwidget_snapshot!(
+        "usage_command_menu_narrow",
+        render_bottom_popup(&chat, /*width*/ 40)
+    );
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenTokenActivity));
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenAnalytics { view: None }));
 }
 
 #[tokio::test]
@@ -146,9 +159,8 @@ async fn usage_command_disables_reset_after_cached_zero_snapshot() {
             origin: RateLimitRefreshOrigin::UsageMenu { request_id: 1 }
         })
     );
-    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenTokenActivity));
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenAnalytics { view: None }));
 }
 
 #[tokio::test]
@@ -204,10 +216,9 @@ async fn usage_menu_refresh_failure_preserves_disabled_known_zero() {
         Err("backend unavailable".to_string()),
     );
 
-    assert!(render_bottom_popup(&chat, /*width*/ 80).contains("No usage limit resets available."));
-    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert!(render_bottom_popup(&chat, /*width*/ 80).contains("None available."));
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenTokenActivity));
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenAnalytics { view: None }));
 }
 
 #[tokio::test]
@@ -700,10 +711,9 @@ async fn no_credit_outcome_disables_reset_entry_in_usage_menu() {
             origin: RateLimitRefreshOrigin::UsageMenu { request_id: 2 }
         })
     );
-    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenTokenActivity));
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenAnalytics { view: None }));
 
     chat.available_rate_limit_reset_credits = Some(2);
     let consume_request_id = chat.show_rate_limit_reset_consuming_popup();
@@ -810,8 +820,8 @@ async fn failed_post_consume_refresh_does_not_keep_stale_reset_count() {
     chat.dispatch_command(SlashCommand::Usage);
 
     let rendered = render_bottom_popup(&chat, /*width*/ 80);
-    assert!(rendered.contains("Check reset availability."));
-    assert!(!rendered.contains("You have 2 usage limit resets available."));
+    assert!(rendered.contains("Check availability."));
+    assert!(!rendered.contains("2 available."));
 }
 
 #[tokio::test]

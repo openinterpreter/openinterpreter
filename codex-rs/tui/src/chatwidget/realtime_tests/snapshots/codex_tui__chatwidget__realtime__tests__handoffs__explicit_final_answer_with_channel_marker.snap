@@ -1,0 +1,6 @@
+---
+source: tui/src/chatwidget/realtime_tests/handoffs.rs
+assertion_line: 918
+expression: rendered
+---
+• [COMMENTARY] is a label in the documentation.

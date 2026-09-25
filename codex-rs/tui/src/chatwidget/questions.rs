@@ -11,7 +11,19 @@ impl ChatWidget {
         message_id: &str,
         questions: &[AsyncUserInputQuestion],
     ) {
+        let previous_count = self.bottom_pane.question_editor().unanswered_count();
         self.bottom_pane.push_async_questions(message_id, questions);
+        let added_count = self.bottom_pane.question_editor().unanswered_count() - previous_count;
+        if added_count > 0 {
+            let title = match questions {
+                [question] if !question.title.trim().is_empty() => {
+                    truncate_text(question.title.trim(), /*max_graphemes*/ 30)
+                }
+                _ if added_count == 1 => "Question requested".to_string(),
+                _ => format!("{added_count} questions requested"),
+            };
+            self.notify(Notification::AsyncQuestion { title });
+        }
         self.refresh_pending_input_preview();
     }
 
@@ -117,13 +129,18 @@ impl ChatWidget {
                         && !self.turn_lifecycle.agent_turn_running
                     || self.only_user_shell_commands_running()
                 {
-                    self.queue_user_message(UserMessage::from(text));
-                    true
+                    self.queue_user_message_with_options_and_source(
+                        UserMessage::from(text),
+                        QueuedInputAction::Plain,
+                        Vec::new(),
+                        UserMessageSource::QuestionAnswer,
+                    )
                 } else {
                     self.submit_user_message_with_history_and_shell_escape_policy(
                         UserMessage::from(text),
                         UserMessageHistoryRecord::UserMessageText,
                         ShellEscapePolicy::Disallow,
+                        UserMessageSource::QuestionAnswer,
                     )
                     .0
                 };

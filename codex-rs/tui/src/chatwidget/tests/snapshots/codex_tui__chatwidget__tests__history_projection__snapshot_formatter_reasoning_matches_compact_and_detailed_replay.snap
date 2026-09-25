@@ -1,0 +1,16 @@
+---
+source: tui/src/chatwidget/tests/history_projection.rs
+assertion_line: 176
+expression: "snapshots.join(\"\\n\")"
+---
+Hidden
+compact: []
+detailed:
+• Read src/main.rs (src/main.rs:3).
+
+Visible
+compact: []
+detailed:
+• Read src/main.rs (src/main.rs:3).
+  
+  Raw detail.

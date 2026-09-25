@@ -9,7 +9,7 @@ The footer shows the active selection.
 ## Shell Overrides
 
 ```bash
-interpreter -m gpt-5.1-codex "review this module"
+interpreter -m gpt-6-sol "review this module"
 interpreter --oss "use my local open source provider"
 ```
 
@@ -17,7 +17,7 @@ interpreter --oss "use my local open source provider"
 
 ```toml
 model_provider = "openai"
-model = "gpt-5.1-codex"
+model = "gpt-6-sol"
 model_reasoning_effort = "medium"
 model_reasoning_summary = "auto"
 model_verbosity = "medium"
@@ -33,29 +33,30 @@ active provider currently offers.
 
 | Provider | Setup | Text model IDs | Wire API |
 | --- | --- | --- | --- |
-| Inherited upstream presets | Use only where the active provider exposes them | `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Provider default |
+| OpenAI presets (upstream and Open Interpreter additions) | Use only where the active provider exposes them | `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Provider default |
 | Google AI Studio | Provider `google` and `GEMINI_API_KEY` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite` | `chat` |
 | DeepSeek | Provider `deepseek` and `DEEPSEEK_API_KEY` | `deepseek-flash`, `deepseek-v4-pro` | `chat` |
-| Anthropic | Provider `anthropic` and `ANTHROPIC_API_KEY` | `claude-fable-5-1`, `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` | Provider default |
+| Anthropic | Provider `anthropic` and `ANTHROPIC_API_KEY` | `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` | Provider default |
 | Z.AI | Provider `zai` and `ZAI_API_KEY` | Use the exact IDs returned by the service's live model endpoint | `chat` |
 | Z.AI Coding Plan | Provider `zai-coding-plan` and `ZAI_API_KEY` | `glm-5.3`, `glm-5.3-flash`, `glm-5.2`, `glm-5.1` | `chat` |
 | Z.AI ZCode | Provider `zai-zcode` and `ZAI_API_KEY` | `glm-5.1`, `glm-5-turbo`, `glm-4.7`, `glm-4.5-air` | `messages` |
 
-The first row contains OpenAI-style choices inherited from the upstream
-`models-manager/models.json`; it is upstream preset metadata, not a guarantee
-that every provider accepts those IDs. Google's current official [Gemini model
+The OpenAI-style presets are based on upstream `models-manager/models.json`;
+Open Interpreter added `gpt-6-sol` and `gpt-6-luna` to its copy. Preset metadata
+does not guarantee that every provider accepts those IDs. Google's current official [Gemini model
 list](https://ai.google.dev/gemini-api/docs/models) includes the listed stable
 Gemini 3 Flash text IDs and identifies `gemini-3.8-flash` as its most intelligent
 Flash model. Its [OpenAI compatibility guide](https://ai.google.dev/gemini-api/docs/openai)
 documents the compatible endpoint. DeepSeek's official [model list](https://api-docs.deepseek.com/api/list-models/)
 and [pricing documentation](https://api-docs.deepseek.com/quick_start/pricing/)
-identify `deepseek-flash` and `deepseek-v4-pro` as current public IDs while
-documenting legacy aliases; use the exact IDs returned by the selected service
+identify `deepseek-flash` and `deepseek-v4-pro` as current public IDs;
+`deepseek-v4-flash` is only a legacy alias routed to the current Flash model.
+Use the exact IDs returned by the selected service
 rather than guessing an alias. For Z.AI Coding Plan, the [GLM-5.3 guide](https://docs.z.ai/guides/llm/glm-5.3)
 documents the current `glm-5.3` family. ZCode's [GLM-5.1 guide](https://docs.z.ai/guides/llm/glm-5.1)
 and [GLM-5-Turbo guide](https://docs.z.ai/guides/llm/glm-5-turbo) use its
 listed IDs; use the exact IDs returned for the selected service.
-Anthropic's [model lifecycle page](https://platform.claude.com/docs/en/about-claude/model-deprecations) lists the shown Anthropic IDs as active.
+Anthropic's [current model overview](https://platform.claude.com/docs/en/models/overview) lists the shown Anthropic IDs.
 
 ## Where Model Metadata Comes From
 

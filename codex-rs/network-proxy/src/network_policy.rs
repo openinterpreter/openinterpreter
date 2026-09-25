@@ -674,11 +674,21 @@ mod tests {
             ..NetworkProxyConfig::default()
         };
         let config = network;
-        let state = build_config_state(config, NetworkProxyConstraints::default()).unwrap();
+        let state = build_config_state(
+            config,
+            NetworkProxyConstraints::default(),
+            crate::Platform::native(),
+        )
+        .unwrap();
         let reloader = Arc::new(StaticReloader {
             state: state.clone(),
         });
-        NetworkProxyState::with_reloader_and_audit_metadata(state, reloader, metadata)
+        NetworkProxyState::with_reloader_and_audit_metadata(
+            state,
+            reloader,
+            metadata,
+            crate::LocalBindingPolicy::DefaultFalse,
+        )
     }
 
     fn is_rfc3339_utc_millis(timestamp: &str) -> bool {
@@ -1073,7 +1083,7 @@ mod tests {
         let state = network_proxy_state_for_policy({
             let mut network = NetworkProxyConfig::default();
             network.set_allowed_domains(vec!["example.com".to_string()]);
-            network.allow_local_binding = false;
+            network.allow_local_binding = Some(false);
             network
         });
         let request = NetworkPolicyRequest::new(NetworkPolicyRequestArgs {

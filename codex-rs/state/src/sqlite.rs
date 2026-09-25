@@ -80,6 +80,12 @@ const MEMORIES_DB: RuntimeDbSpec = RuntimeDbSpec {
     migrate_phase: "migrate_memories",
 };
 
+const MEMORIES_V2_DB: RuntimeDbSpec = RuntimeDbSpec {
+    label: "memories v2 DB",
+    filename: "memories_v2_1.sqlite",
+    ..MEMORIES_DB
+};
+
 const QUEUE_DB: RuntimeDbSpec = RuntimeDbSpec {
     label: "queue DB",
     filename: QUEUE_DB_FILENAME,
@@ -96,11 +102,12 @@ const THREAD_HISTORY_DB: RuntimeDbSpec = RuntimeDbSpec {
     migrate_phase: "migrate_thread_history",
 };
 
-const RUNTIME_DBS: [RuntimeDbSpec; 6] = [
+const RUNTIME_DBS: [RuntimeDbSpec; 7] = [
     STATE_DB,
     LOGS_DB,
     GOALS_DB,
     MEMORIES_DB,
+    MEMORIES_V2_DB,
     QUEUE_DB,
     THREAD_HISTORY_DB,
 ];
@@ -148,6 +155,19 @@ impl SqliteConfig {
     /// Return the path to the memories database.
     pub fn memories_db_path(&self) -> PathBuf {
         MEMORIES_DB.path(self.home())
+    }
+
+    pub(crate) fn memories_v2_db_path(&self) -> PathBuf {
+        MEMORIES_V2_DB.path(self.home())
+    }
+
+    pub(crate) async fn open_memories_v2_db(&self) -> anyhow::Result<SqlitePool> {
+        self.open_runtime_db(
+            MEMORIES_V2_DB,
+            &crate::migrations::runtime_memories_migrator(),
+            /*telemetry_override*/ None,
+        )
+        .await
     }
 
     /// Return the path to the durable user-message queue database.

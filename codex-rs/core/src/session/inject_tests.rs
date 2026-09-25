@@ -26,7 +26,11 @@ async fn harness_authored_configuration_updates_preserve_metadata_and_resume() {
         }),
     };
     session
-        .record_annotated_conversation_items(&turn_context, vec![expected.clone()])
+        .record_annotated_conversation_items(
+            &turn_context,
+            turn_context.model_info(),
+            vec![expected.clone()],
+        )
         .await;
 
     let recorded = session.clone_history().await.into_annotated_items();

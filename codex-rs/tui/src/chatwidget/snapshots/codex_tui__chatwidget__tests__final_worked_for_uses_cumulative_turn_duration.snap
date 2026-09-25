@@ -1,12 +1,10 @@
 ---
 source: tui/src/chatwidget/tests/exec_flow.rs
-expression: combined
+expression: normalize_completion_timestamps(& (combined))
 ---
 • Ran echo preparing
   └ preparing
 
-────────────────────────────────────────────────────────────────────────────────
-
 • Final response.
 
-─ Worked for 2m 05s ────────────────────────────────────────────────────────────
+  Worked for [duration] · [completion time]

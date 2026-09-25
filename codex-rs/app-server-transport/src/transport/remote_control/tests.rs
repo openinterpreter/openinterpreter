@@ -68,6 +68,8 @@ use tokio_util::sync::CancellationToken;
 
 mod clients_tests;
 mod pairing_tests;
+#[path = "tests/retry_tests.rs"]
+mod retry_tests;
 
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
 const TEST_REMOTE_CONTROL_URL: &str = "http://127.0.0.1:1/backend-api/wham/remote/control";
@@ -137,6 +139,55 @@ async fn remote_control_state_runtime(codex_home: &TempDir) -> Arc<StateRuntime>
 }
 
 #[tokio::test]
+async fn committed_disable_prevents_later_enrollment_from_restoring_preference() {
+    let home = TempDir::new().expect("temp dir");
+    let state_db = remote_control_state_runtime(&home).await;
+    let session = remote_control_handle_with_current_enrollment(
+        TEST_REMOTE_CONTROL_URL,
+        remote_control_auth_manager(),
+    );
+    let enrollment = session.current_enrollment.snapshot().expect("enrollment");
+    session
+        .desired_state_tx
+        .send_replace(RemoteControlDesiredState::Enabled {
+            persistence_preference: Some(true),
+        });
+    session
+        .set_preference(
+            &state_db,
+            &enrollment.remote_control_target,
+            &enrollment.account_id,
+            /*client_name*/ None,
+            /*enabled*/ false,
+            Some(&enrollment),
+        )
+        .await
+        .expect("disable commits");
+    // This is the window before the disable RPC resumes and publishes its status.
+    let error = persistence::save_enrollment(
+        &session.auth_manager,
+        &session.persistence,
+        &state_db,
+        &enrollment,
+        /*client_name*/ None,
+        &session.desired_state_tx,
+    )
+    .await
+    .expect_err("enrollment cannot re-enable a committed disable");
+    assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+    let saved = state_db
+        .get_remote_control_enrollment(
+            &enrollment.remote_control_target.websocket_url,
+            &enrollment.account_id,
+            /*app_server_client_name*/ None,
+        )
+        .await
+        .expect("read preference")
+        .expect("saved enrollment");
+    assert_eq!(saved.remote_control_enabled, Some(false));
+}
+
+#[tokio::test]
 async fn plain_start_resolves_persisted_remote_control_preference() {
     let cases = [
         ("enabled", Some(Some(true))),
@@ -182,7 +233,7 @@ async fn plain_start_resolves_persisted_remote_control_preference() {
             server_name: test_server_name(),
         },
         Some(state_db),
-        remote_control_auth_manager(),
+        auth::RemoteControlAuth::capture(remote_control_auth_manager()).0,
         RemoteControlChannels {
             transport_event_tx,
             status_publisher: RemoteControlStatusPublisher::new(status_tx),
@@ -190,7 +241,7 @@ async fn plain_start_resolves_persisted_remote_control_preference() {
                 /*enrollment*/ None,
             )),
             pairing_persistence_key: watch::channel(None).0,
-            desired_state_persistence_lock: Arc::new(Semaphore::new(1)),
+            persistence: RemoteControlPersistence::default(),
         },
         CancellationToken::new(),
         desired_state_tx.clone(),
@@ -249,8 +300,8 @@ async fn explicit_disabled_start_ignores_persisted_enable() {
     .expect("remote control should start disabled");
 
     assert_eq!(
-        *remote_handle.desired_state_tx.borrow(),
-        RemoteControlDesiredState::Disabled
+        remote_handle.status().status,
+        RemoteControlConnectionStatus::Disabled
     );
     assert_eq!(
         state_db
@@ -381,7 +432,7 @@ fn test_server_name() -> String {
 pub(super) fn remote_control_handle_with_current_enrollment(
     remote_control_url: &str,
     auth_manager: Arc<AuthManager>,
-) -> RemoteControlHandle {
+) -> RemoteControlSession {
     let (desired_state_tx, _desired_state_rx) =
         watch::channel(RemoteControlDesiredState::Enabled {
             persistence_preference: None,
@@ -409,19 +460,19 @@ pub(super) fn remote_control_handle_with_current_enrollment(
             next_refresh_at: None,
         },
     )));
-    RemoteControlHandle {
+    RemoteControlSession {
         policy: RemoteControlPolicy::Allowed,
         shutdown_token: CancellationToken::new(),
         desired_state_tx: Arc::new(desired_state_tx),
         desired_state_rpc_lock: Arc::new(Semaphore::new(1)),
-        desired_state_persistence_lock: Arc::new(Semaphore::new(1)),
+        persistence: RemoteControlPersistence::default(),
         status_tx: Arc::new(status_tx),
         state_db: None,
         remote_control_url: remote_control_url.to_string(),
         current_enrollment,
         pairing_persistence_key: watch::channel(None).0,
         pairing_persistence_key_required: false,
-        auth_manager,
+        auth_manager: auth::RemoteControlAuth::capture(auth_manager).0,
     }
 }
 
@@ -2289,15 +2340,18 @@ async fn persisted_enable_does_not_follow_auth_to_an_account_without_a_preferenc
     )
     .expect("account B auth should save");
     auth_manager.reload().await;
-    websocket
-        .close(None)
+    let closed = timeout(Duration::from_secs(1), websocket.next())
         .await
-        .expect("backend websocket should close");
+        .expect("account switch should close the backend websocket");
+    assert!(matches!(
+        closed,
+        None | Some(Err(_)) | Some(Ok(tungstenite::Message::Close(_)))
+    ));
 
-    let mut desired_state_rx = remote_handle.desired_state_tx.subscribe();
+    let mut desired_state_rx = remote_handle.status_receiver();
     timeout(
         Duration::from_secs(1),
-        desired_state_rx.wait_for(|state| *state == RemoteControlDesiredState::Disabled),
+        desired_state_rx.wait_for(|state| state.status == RemoteControlConnectionStatus::Disabled),
     )
     .await
     .expect("account B missing preference should disable remote control")
@@ -2673,6 +2727,8 @@ async fn remote_control_http_mode_preserves_stale_enrollment_when_reenrollment_f
     .await;
 
     let current_enrollment = remote_handle
+        .inner
+        .session()
         .current_enrollment
         .lock()
         .await

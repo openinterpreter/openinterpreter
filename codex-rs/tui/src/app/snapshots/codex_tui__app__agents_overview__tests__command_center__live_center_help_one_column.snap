@@ -1,0 +1,36 @@
+---
+source: tui/src/app/agent_center_tests.rs
+expression: "screen(&view, width, height)"
+---
+  Agent command center  Group: Projec…
+   All 3   Needs you 1   Working 0   ›
+  ────────────────────────────────────
+  Task shortcuts
+
+  Navigate
+  ↑       Up
+  ↓       Down
+  enter   Open
+  pgup    Page up
+  pgdn    Page down
+  ctrl+c  Quit
+
+  Tasks
+  n          New
+  w          New worktree
+  o          Resume
+  r          Rename
+  x          Stop
+  a          Archive
+  h          Hide
+  backspace  Delete
+
+  View
+  tab/shift+tab  Filter
+  f              Search
+  g              Group
+
+
+
+
+  esc back

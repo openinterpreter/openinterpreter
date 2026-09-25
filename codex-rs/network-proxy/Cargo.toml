@@ -9,6 +9,10 @@ name = "codex_network_proxy"
 path = "src/lib.rs"
 doctest = false
 
+[[bin]]
+name = "codex-network-proxy"
+path = "src/main.rs"
+
 [lints]
 workspace = true
 
@@ -19,16 +23,24 @@ clap = { workspace = true, features = ["derive"] }
 chrono = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-home-dir = { workspace = true }
+codex-utils-path-uri = { workspace = true }
 codex-utils-rustls-provider = { workspace = true }
 globset = { workspace = true }
 opentelemetry = { workspace = true }
 rand = { workspace = true }
+rand_regex = { workspace = true }
+regex = { workspace = true }
+regex-automata = { workspace = true }
+regex-syntax = { workspace = true }
+schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_ignored = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 url = { workspace = true }
 rama-core = { version = "=0.3.0-alpha.4" }
 rama-http = { version = "=0.3.0-alpha.4" }
@@ -48,6 +60,7 @@ tempfile = { workspace = true }
 rama-unix = { version = "=0.3.0-alpha.4" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+rama-dns = { version = "=0.3.0-alpha.4" }
 security-framework = "3"
 
 [target.'cfg(windows)'.dependencies]

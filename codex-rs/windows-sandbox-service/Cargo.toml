@@ -22,15 +22,19 @@ codex-cloud-config = { workspace = true }
 codex-config = { workspace = true }
 codex-core = { workspace = true }
 codex-windows-sandbox = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 toml = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.58"
 features = [
     "ApplicationModel",
+    "Foundation_Collections",
+    "Management_Deployment",
     "Win32_System_WinRT",
 ]
 
@@ -47,12 +51,14 @@ features = [
     "Win32_System_Environment",
     "Win32_System_EventLog",
     "Win32_System_IO",
+    "Win32_System_JobObjects",
     "Win32_System_Memory",
     "Win32_System_Pipes",
     "Win32_System_Registry",
     "Win32_System_RemoteDesktop",
     "Win32_System_Services",
     "Win32_System_SystemServices",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_Shell",
 ]

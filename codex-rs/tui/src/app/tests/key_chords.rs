@@ -8,7 +8,10 @@ use super::start_config_write_test_app_server;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
 use crate::chatwidget::tests::helpers::render_bottom_popup;
+use crate::chatwidget::tests::helpers::set_active_cell;
 use crate::keymap::KeymapContext;
+#[cfg(unix)]
+use crate::pager_overlay::TranscriptHistoryState;
 use crate::test_support::test_path_display;
 use crate::tui::Tui;
 use codex_app_server_protocol::ToolRequestUserInputOption;
@@ -93,19 +96,24 @@ async fn vim_buffer_jumps_route_default_chords_in_normal_and_operator_contexts()
 }
 
 #[tokio::test]
-async fn completed_global_chord_reuses_the_existing_action_handler() -> Result<()> {
+async fn global_chord_keeps_hints_and_completes_before_deadline() -> Result<()> {
     let (mut app, mut tui, mut app_server) = chord_app().await?;
 
     press(&mut app, &mut tui, &mut app_server, ctrl('x')).await?;
     assert!(app.key_chord_matcher.is_pending());
     assert!(app.overlay.is_none());
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_millis(/*millis*/ 500)).await;
+    app.handle_tui_event(&mut tui, &mut app_server, TuiEvent::Draw)
+        .await?;
+    assert!(app.key_chord_matcher.is_pending());
     insta::assert_snapshot!(
         render_bottom_popup(&app.chat_widget, /*width*/ 80)
             .replace(&test_path_display("/tmp/project"), "/tmp/project"),
         @r"
         › Ask Codex to do anything
 
-           ctrl + x … waiting for next key    esc cancel
+          ctrl+x then · ctrl+t open transcript · ctrl+u interrupt turn · esc cancel
         "
     );
 
@@ -119,7 +127,7 @@ async fn completed_global_chord_reuses_the_existing_action_handler() -> Result<(
 async fn completed_global_chords_toggle_output_and_request_external_editor() -> Result<()> {
     let (mut app, mut tui, mut app_server) = chord_app().await?;
     let config = toml::from_str(
-        "[global]\ntoggle_raw_output = [\"ctrl-x r\"]\nopen_external_editor = [\"ctrl-x e\"]",
+        "[global]\ntoggle_raw_output = [\"ctrl-x r\", \"pageup\"]\nopen_external_editor = [\"ctrl-x e\"]",
     )?;
     app.keymap = RuntimeKeymap::from_config(&config).expect("valid global chords");
     app.chat_widget.apply_keymap_update(config, &app.keymap);
@@ -128,6 +136,30 @@ async fn completed_global_chords_toggle_output_and_request_external_editor() -> 
         press(&mut app, &mut tui, &mut app_server, key).await?;
     }
     assert!(app.chat_widget.raw_output_mode());
+    tui.set_owned_screen(/*owned*/ true)?;
+    press(&mut app, &mut tui, &mut app_server, KeyCode::PageUp.into()).await?;
+    assert!(!app.chat_widget.raw_output_mode());
+    let config = toml::from_str(
+        "[composer]\nsubmit = 'pageup'\n[editor]\nmove_line_start = 'pagedown'\n[global]\nopen_external_editor = 'ctrl-x e'",
+    )?;
+    app.keymap = RuntimeKeymap::from_config(&config).expect("valid composer and editor bindings");
+    app.chat_widget.apply_keymap_update(config, &app.keymap);
+    app.chat_widget.apply_external_edit("draft".to_string());
+    assert!(!app.handle_owned_transcript_event(
+        &mut tui,
+        &mut app_server,
+        &TuiEvent::Key(KeyCode::PageUp.into()),
+    )?);
+    press(
+        &mut app,
+        &mut tui,
+        &mut app_server,
+        KeyCode::PageDown.into(),
+    )
+    .await?;
+    app.chat_widget.insert_str("X");
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "Xdraft");
+    tui.set_owned_screen(/*owned*/ false)?;
 
     for key in [ctrl('x'), KeyCode::Char('e').into()] {
         press(&mut app, &mut tui, &mut app_server, key).await?;
@@ -260,6 +292,65 @@ async fn legacy_terminal_preserves_active_global_alt_shortcuts() -> Result<()> {
         app.chat_widget
             .should_handle_vim_insert_escape(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
     );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn owned_transcript_alt_jumps_preserve_legacy_vim_insert_and_draft() -> Result<()> {
+    let (mut app, mut tui, mut app_server) = chord_app().await?;
+    app.enhanced_keys_supported = false;
+    tui.set_owned_screen(/*owned*/ true)?;
+    app.transcript_cells = vec![std::sync::Arc::new(
+        crate::history_cell::PlainHistoryCell::new(vec!["Earlier transcript".into()]),
+    )];
+    app.chat_widget.toggle_vim_mode_and_notify();
+    app.chat_widget.insert_str("draft");
+    press(
+        &mut app,
+        &mut tui,
+        &mut app_server,
+        KeyCode::Char('i').into(),
+    )
+    .await?;
+
+    let area = ratatui::layout::Rect::new(
+        /*x*/ 0, /*y*/ 0, /*width*/ 80, /*height*/ 4,
+    );
+    let mut buffer = ratatui::buffer::Buffer::empty(area);
+    app.transcript_view
+        .render(area, &mut buffer, &app.transcript_cells);
+
+    for modifiers in [KeyModifiers::ALT, KeyModifiers::ALT | KeyModifiers::SHIFT] {
+        app.transcript_view.history = TranscriptHistoryState::Partial;
+        for (character, following, history) in [
+            ('<', false, TranscriptHistoryState::LoadingBeginning),
+            ('>', true, TranscriptHistoryState::LoadingOlder),
+        ] {
+            press(
+                &mut app,
+                &mut tui,
+                &mut app_server,
+                KeyEvent::new(KeyCode::Char(character), modifiers),
+            )
+            .await?;
+            assert_eq!(
+                (
+                    app.transcript_view.is_following(),
+                    app.transcript_view.history,
+                    app.chat_widget.composer_text_with_pending(),
+                    app.chat_widget
+                        .should_handle_vim_insert_escape(KeyEvent::new(
+                            KeyCode::Esc,
+                            KeyModifiers::NONE,
+                        )),
+                ),
+                (following, history, "draft".to_string(), true)
+            );
+        }
+    }
+    tui.set_owned_screen(/*owned*/ false)?;
+    app_server.shutdown().await?;
     Ok(())
 }
 
@@ -586,10 +677,14 @@ async fn physical_chords_route_list_and_mixed_request_input_modals() -> Result<(
 #[tokio::test]
 async fn dashboard_chord_hint_survives_refresh_and_clears_on_cancel() -> Result<()> {
     let mut app = make_test_app().await;
-    app.keymap = RuntimeKeymap::from_config(&toml::from_str(
-        "[editor]\ninsert_newline = [\"ctrl-x n\"]",
-    )?)
-    .unwrap();
+    app.agents_overview
+        .view_state
+        .lock()
+        .unwrap()
+        .server_version_notice = Some("Older server".into());
+    app.keymap =
+        RuntimeKeymap::from_config(&toml::from_str("[agents]\nnew_task = [\"ctrl-x n\"]")?)
+            .unwrap();
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
     app.chat_widget.show_bottom_pane_view(Box::new(view));
@@ -598,12 +693,173 @@ async fn dashboard_chord_hint_survives_refresh_and_clears_on_cancel() -> Result<
     let _ = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
     insta::assert_snapshot!(
         render_bottom_popup(&app.chat_widget, /*width*/ 80).lines().last().unwrap(),
-        @"   ctrl + x … waiting for next key    esc cancel"
+        @"  ctrl+x then  n new task  esc cancel"
     );
     assert_eq!(
         app.route_key_chord_event(&mut tui, KeyCode::Esc.into()),
         None
     );
     assert_eq!(render_bottom_popup(&app.chat_widget, /*width*/ 80), before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn command_center_chords_do_not_capture_search_text() -> Result<()> {
+    let mut app = make_test_app().await;
+    app.keymap = RuntimeKeymap::from_config(&toml::from_str(
+        "[agents]\nnew_task = 'n n'\n[ list ]\naccept = 'ctrl-x enter'",
+    )?)
+    .unwrap();
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    app.chat_widget.handle_key_event(KeyCode::Char('f').into());
+    for key in "new".chars() {
+        let event = KeyCode::Char(key).into();
+        assert_eq!(app.route_key_chord_event(&mut tui, event), Some(event));
+        app.chat_widget.handle_key_event(event);
+    }
+    assert!(render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("Search › new"));
+    assert_eq!(app.route_key_chord_event(&mut tui, ctrl('x')), None);
+    assert!(app.key_chord_matcher.is_pending());
+    app.route_key_chord_event(&mut tui, KeyCode::Esc.into());
+    app.chat_widget.handle_key_event(KeyCode::Esc.into());
+    assert_eq!(
+        app.route_key_chord_event(&mut tui, KeyCode::Char('n').into()),
+        None
+    );
+    assert!(app.key_chord_matcher.is_pending());
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_fixed_keys_take_precedence_over_pager_chord_prefixes() -> Result<()> {
+    let (mut app, mut tui, mut app_server) = chord_app().await?;
+    app.keymap = RuntimeKeymap::from_config(&serde_json::from_value(serde_json::json!({
+        "global": {"copy": ["ctrl-x ctrl-u"]},
+        "pager": {
+            "scroll_up": ["ctrl-space x", "ctrl-home x", "ctrl-end x"],
+            "close_transcript": ["ctrl-x ctrl-u"]
+        }
+    }))?)
+    .expect("valid pager chords");
+    app.chat_widget.insert_str("draft");
+    for owned in [true, false] {
+        tui.set_owned_screen(owned)?;
+        app.open_transcript_overlay(&mut tui);
+        for code in [KeyCode::Home, KeyCode::End, KeyCode::Char(' ')] {
+            let key = KeyEvent::new(code, KeyModifiers::CONTROL);
+            assert_eq!(app.route_key_chord_event(&mut tui, key), Some(key));
+            assert!(!app.key_chord_matcher.is_pending());
+        }
+        press(&mut app, &mut tui, &mut app_server, ctrl('x')).await?;
+        press(&mut app, &mut tui, &mut app_server, ctrl('u')).await?;
+        assert!(app.overlay.is_none());
+        assert!(!app.transcript_view.is_detailed());
+        assert_eq!(app.chat_widget.composer_text_with_pending(), "draft");
+    }
+    app.transcript_cells = vec![std::sync::Arc::new(
+        crate::history_cell::PlainHistoryCell::new(
+            (0..50).map(|_| "transcript row".into()).collect(),
+        ),
+    )];
+    tui.set_owned_screen(/*owned*/ true)?;
+    let home = KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL);
+    for (binding, keys) in [
+        ("ctrl-home", vec![home]),
+        ("ctrl-home ctrl-u", vec![home, ctrl('u')]),
+        ("ctrl-x ctrl-home", vec![ctrl('x'), home]),
+    ] {
+        app.keymap = RuntimeKeymap::from_config(&toml::from_str(&format!(
+            "[pager]\nclose_transcript = '{binding}'\n[global]\nopen_external_editor = '{binding}'"
+        ))?)
+        .expect("valid close binding");
+        app.open_transcript_overlay(&mut tui);
+        app.render_owned_transcript(
+            &mut tui,
+            ratatui::layout::Size::new(/*width*/ 80, /*height*/ 12),
+        )?;
+        app.transcript_view
+            .scroll(&app.transcript_cells, /*rows*/ -10);
+        assert!(app.transcript_view.can_return_to_latest());
+        for key in &keys {
+            press(&mut app, &mut tui, &mut app_server, *key).await?;
+        }
+        assert!(!app.transcript_view.is_detailed());
+        assert_eq!(app.chat_widget.composer_text_with_pending(), "draft");
+        for key in keys {
+            press(&mut app, &mut tui, &mut app_server, key).await?;
+        }
+        assert_eq!(
+            app.chat_widget.external_editor_state(),
+            crate::chatwidget::ExternalEditorState::Requested
+        );
+        app.reset_external_editor_state(&mut tui);
+    }
+    tui.set_owned_screen(/*owned*/ false)?;
+    app_server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn selection_after_live_commit_uses_the_refreshed_frame() -> Result<()> {
+    let (mut app, mut tui, mut app_server) = chord_app().await?;
+    let area = ratatui::layout::Rect::new(
+        /*x*/ 0, /*y*/ 0, /*width*/ 40, /*height*/ 12,
+    );
+    let mut overlay =
+        crate::pager_overlay::TranscriptOverlay::new(Vec::new(), app.keymap.pager.clone());
+    overlay.sync_live_tail(
+        /*width*/ 40,
+        /*key*/ None,
+        |_| Some(vec!["committed output".into()]),
+    );
+    overlay.render(area, &mut ratatui::buffer::Buffer::empty(area));
+    overlay.insert_cell(std::sync::Arc::new(
+        crate::history_cell::PlainHistoryCell::new(vec!["committed output".into()]),
+    ));
+    app.overlay = Some(crate::pager_overlay::Overlay::Transcript(overlay));
+    // The active cell has completed, but no Draw has reached the overlay yet.
+    app.handle_tui_event(
+        &mut tui,
+        &mut app_server,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)),
+    )
+    .await?;
+    let Some(crate::pager_overlay::Overlay::Transcript(overlay)) = &mut app.overlay else {
+        panic!("overlay closed")
+    };
+    assert!(overlay.has_active_interaction());
+    let mut buffer = ratatui::buffer::Buffer::empty(area);
+    overlay.render(area, &mut buffer);
+    let text = buffer
+        .content()
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect::<String>();
+    assert_eq!(text.matches("committed output").count(), 1);
+    app.handle_tui_event(
+        &mut tui,
+        &mut app_server,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    )
+    .await?;
+    set_active_cell(
+        &mut app.chat_widget,
+        Box::new(crate::history_cell::StreamingAgentTailCell::new(
+            vec!["live continuation wraps at the resized width".into()],
+            /*is_first_line*/ false,
+        )),
+    );
+    app.handle_tui_event(
+        &mut tui,
+        &mut app_server,
+        TuiEvent::Resize(ratatui::layout::Size::new(
+            /*width*/ 20, /*height*/ 12,
+        )),
+    )
+    .await?;
+    app.close_transcript_overlay(&mut tui);
+    app_server.shutdown().await?;
     Ok(())
 }

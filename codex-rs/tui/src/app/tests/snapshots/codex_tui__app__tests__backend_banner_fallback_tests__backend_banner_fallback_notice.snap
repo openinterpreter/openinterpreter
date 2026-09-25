@@ -1,6 +1,5 @@
 ---
 source: tui/src/app/tests/backend_banner_fallback_tests.rs
-assertion_line: 124
 expression: "notices[0]"
 ---
-• Automatically switched to gpt-5.2 medium due to usage limits.
+• Automatically switched to gpt-5.6-terra medium due to usage limits.

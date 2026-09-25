@@ -1,0 +1,7 @@
+---
+source: tui/src/chatwidget/tests/computer_activity_tests.rs
+expression: "lines_to_single_string(&cells[0])"
+---
+• Used computer · 2 actions · 1 failed
+  ├ Failed: Inspect page 1 — interrupted
+  └ Inspect page 2

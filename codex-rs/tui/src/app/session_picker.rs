@@ -151,7 +151,7 @@ impl App {
                     dismiss_on_select: true,
                     ..Default::default()
                 }],
-                ..Default::default()
+                ..SelectionViewParams::picker()
             });
         }
         self.chat_widget.add_error_message(message);

@@ -2,6 +2,7 @@ mod config;
 mod discovery;
 mod signing;
 
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use aws_credential_types::provider::ProvideCredentials;
@@ -41,6 +42,55 @@ impl std::fmt::Debug for AwsAccessKeys {
                 &self.session_token.as_ref().map(|_| "<redacted>"),
             )
             .finish()
+    }
+}
+
+/// Supplies AWS access keys on demand without exposing AWS SDK credential types to callers.
+///
+/// Implementations should return current credentials for every call so request signing can
+/// observe credential refreshes. Errors must not contain credentials or command output.
+pub trait AwsCredentialsProvider: std::fmt::Debug + Send + Sync {
+    fn credentials(
+        &self,
+    ) -> impl std::future::Future<Output = std::io::Result<AwsAccessKeys>> + Send;
+}
+
+#[derive(Debug)]
+struct AwsCredentialsProviderAdapter<P>(Arc<P>);
+
+#[derive(Debug, Error)]
+#[error("{0}")]
+struct ProvidedCredentialsError(std::io::Error);
+
+impl<P: AwsCredentialsProvider> ProvideCredentials for AwsCredentialsProviderAdapter<P> {
+    fn provide_credentials<'a>(
+        &'a self,
+    ) -> aws_credential_types::provider::future::ProvideCredentials<'a>
+    where
+        Self: 'a,
+    {
+        aws_credential_types::provider::future::ProvideCredentials::new(async move {
+            let access_keys = self.0.credentials().await.map_err(|error| {
+                let error = ProvidedCredentialsError(error);
+                match error.0.kind() {
+                    std::io::ErrorKind::InvalidData
+                    | std::io::ErrorKind::InvalidInput
+                    | std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::PermissionDenied => {
+                        aws_credential_types::provider::error::CredentialsError::invalid_configuration(error)
+                    }
+                    _ => aws_credential_types::provider::error::CredentialsError::provider_error(error),
+                }
+            })?;
+
+            Ok(aws_credential_types::Credentials::new(
+                access_keys.access_key_id,
+                access_keys.secret_access_key,
+                access_keys.session_token,
+                /*expires_after*/ None,
+                "codex-bedrock-credential-export",
+            ))
+        })
     }
 }
 
@@ -135,6 +185,16 @@ impl AwsAuthContext {
         Ok(context)
     }
 
+    pub async fn load_with_credentials_provider(
+        config: AwsAuthConfig,
+        provider: Arc<impl AwsCredentialsProvider + 'static>,
+    ) -> Result<Self, AwsAuthError> {
+        let mut context = Self::load(config).await?;
+        context.credentials_provider =
+            SharedCredentialsProvider::new(AwsCredentialsProviderAdapter(provider));
+        Ok(context)
+    }
+
     pub async fn load_profile(config: AwsAuthConfig) -> Result<Self, AwsAuthError> {
         let profile = config
             .profile
@@ -171,6 +231,16 @@ impl AwsAuthContext {
 }
 
 impl AwsAuthError {
+    /// Returns the caller-supplied credential error without exposing SDK error sources.
+    pub fn credentials_provider_error(&self) -> Option<&std::io::Error> {
+        let Self::Credentials(error) = self else {
+            return None;
+        };
+        std::error::Error::source(error)?
+            .downcast_ref::<ProvidedCredentialsError>()
+            .map(|error| &error.0)
+    }
+
     /// Returns whether retrying the outbound request can reasonably recover from this auth error.
     pub fn is_retryable(&self) -> bool {
         match self {
@@ -261,6 +331,68 @@ mod tests {
                 .is_some_and(|value| value.starts_with("AWS4-HMAC-SHA256 "))
         );
         assert!(signing::header_value(&signed.headers, "x-amz-date").is_some());
+    }
+
+    #[tokio::test]
+    async fn credentials_provider_adapter_converts_keys_and_provider_failures() {
+        #[derive(Debug)]
+        struct TestCredentialsProvider(Result<AwsAccessKeys, std::io::ErrorKind>);
+
+        impl AwsCredentialsProvider for TestCredentialsProvider {
+            async fn credentials(&self) -> std::io::Result<AwsAccessKeys> {
+                self.0
+                    .clone()
+                    .map_err(|kind| std::io::Error::new(kind, "credential export failed"))
+            }
+        }
+
+        let credentials =
+            AwsCredentialsProviderAdapter(Arc::new(TestCredentialsProvider(Ok(AwsAccessKeys {
+                access_key_id: "access-key-id".to_string(),
+                secret_access_key: "secret-access-key".to_string(),
+                session_token: Some("session-token".to_string()),
+            }))))
+            .provide_credentials()
+            .await
+            .expect("exported credentials should be available");
+
+        assert_eq!(
+            credentials,
+            Credentials::new(
+                "access-key-id",
+                "secret-access-key",
+                Some("session-token".to_string()),
+                /*expires_after*/ None,
+                "codex-bedrock-credential-export",
+            )
+        );
+
+        for (kind, retryable) in [
+            (std::io::ErrorKind::Other, true),
+            (std::io::ErrorKind::TimedOut, true),
+            (std::io::ErrorKind::InvalidData, false),
+            (std::io::ErrorKind::InvalidInput, false),
+            (std::io::ErrorKind::NotFound, false),
+            (std::io::ErrorKind::PermissionDenied, false),
+        ] {
+            let error = AwsCredentialsProviderAdapter(Arc::new(TestCredentialsProvider(Err(kind))))
+                .provide_credentials()
+                .await
+                .expect_err("credential export failure should be propagated");
+            let error = AwsAuthError::Credentials(error);
+            assert_eq!(
+                (
+                    error.is_retryable(),
+                    error
+                        .credentials_provider_error()
+                        .map(|error| (error.kind(), error.to_string())),
+                ),
+                (
+                    retryable,
+                    Some((kind, "credential export failed".to_string()))
+                ),
+            );
+        }
     }
 
     #[test]

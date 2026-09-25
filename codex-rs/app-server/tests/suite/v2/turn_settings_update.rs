@@ -557,8 +557,8 @@ fn mock_config(codex_home: &Path, server_uri: &str) -> Result<MockResponsesConfi
     let model = bundled_models_response()?
         .models
         .into_iter()
-        .find(|model| model.slug == "gpt-5.4")
-        .context("bundled catalog should include gpt-5.4")?;
+        .find(|model| model.slug == "gpt-5.5")
+        .context("bundled catalog should include gpt-5.5")?;
     let models = [MODEL_A, MODEL_B]
         .into_iter()
         .map(|slug| {

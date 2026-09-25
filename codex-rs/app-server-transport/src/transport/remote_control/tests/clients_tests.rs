@@ -13,7 +13,7 @@ use pretty_assertions::assert_eq;
 fn client_management_handle(
     remote_control_url: String,
     auth_manager: Arc<AuthManager>,
-) -> RemoteControlHandle {
+) -> RemoteControlSession {
     let desired_state_tx = watch::channel(RemoteControlDesiredState::Disabled).0;
     let (status_tx, _status_rx) = watch::channel(RemoteControlStatusChangedNotification {
         status: RemoteControlConnectionStatus::Disabled,
@@ -21,19 +21,19 @@ fn client_management_handle(
         installation_id: TEST_INSTALLATION_ID.to_string(),
         environment_id: None,
     });
-    RemoteControlHandle {
+    RemoteControlSession {
         policy: RemoteControlPolicy::Allowed,
         shutdown_token: CancellationToken::new(),
         desired_state_tx: Arc::new(desired_state_tx),
         desired_state_rpc_lock: Arc::new(Semaphore::new(1)),
-        desired_state_persistence_lock: Arc::new(Semaphore::new(1)),
+        persistence: RemoteControlPersistence::default(),
         status_tx: Arc::new(status_tx),
         state_db: None,
         remote_control_url,
         current_enrollment: Arc::new(RemoteControlEnrollmentState::new(/*enrollment*/ None)),
         pairing_persistence_key: watch::channel(None).0,
         pairing_persistence_key_required: false,
-        auth_manager,
+        auth_manager: auth::RemoteControlAuth::capture(auth_manager).0,
     }
 }
 
@@ -225,7 +225,7 @@ async fn list_remote_control_clients_recovers_auth_after_unauthorized() {
 
     let response = list_remote_control_clients(
         &remote_control_url,
-        &auth_manager,
+        &auth::RemoteControlAuth::capture(auth_manager.clone()).0,
         RemoteControlClientsListParams {
             environment_id: "env-123".to_string(),
             ..Default::default()
@@ -323,7 +323,7 @@ async fn list_remote_control_clients_retries_unauthorized_only_once() {
 
     let err = list_remote_control_clients(
         &remote_control_url,
-        &auth_manager,
+        &auth::RemoteControlAuth::capture(auth_manager.clone()).0,
         RemoteControlClientsListParams {
             environment_id: "env-123".to_string(),
             ..Default::default()
@@ -363,7 +363,7 @@ async fn revoke_remote_control_client_does_not_retry_forbidden() {
 
     let err = revoke_remote_control_client(
         &remote_control_url,
-        &remote_control_auth_manager(),
+        &auth::RemoteControlAuth::capture(remote_control_auth_manager()).0,
         RemoteControlClientsRevokeParams {
             environment_id: "env-123".to_string(),
             client_id: "client-123".to_string(),
@@ -395,7 +395,7 @@ async fn list_remote_control_clients_preserves_decode_error_context() {
 
     let err = list_remote_control_clients(
         &remote_control_url,
-        &remote_control_auth_manager(),
+        &auth::RemoteControlAuth::capture(remote_control_auth_manager()).0,
         RemoteControlClientsListParams {
             environment_id: "env-123".to_string(),
             ..Default::default()

@@ -35,6 +35,10 @@ pub(super) fn apply_to_config(
     apply_exact!(sqlite_home);
     apply_exact!(log_dir);
     apply_exact!(model_catalog_json);
+    apply_exact!(model_provider);
+    if let Some(providers) = &requirements.model_providers {
+        config.model_providers.extend(providers.value.clone());
+    }
     apply_exact!(check_for_update_on_startup);
     apply_exact!(allow_login_shell);
     if requirements
@@ -66,17 +70,6 @@ pub(super) fn apply_to_config(
                 startup_warnings.push(warning);
             }
         }
-    }
-    if let Some(requirement) = requirements.windows_sandbox_private_desktop.as_ref() {
-        apply_exact_requirement(
-            "windows.sandbox_private_desktop",
-            &mut config
-                .windows
-                .get_or_insert_default()
-                .sandbox_private_desktop,
-            Some(requirement),
-            startup_warnings,
-        );
     }
 }
 

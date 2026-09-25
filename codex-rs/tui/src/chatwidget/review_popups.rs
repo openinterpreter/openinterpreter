@@ -1,8 +1,17 @@
-//! Review preset selection and custom review prompt surfaces.
+//! Review presets, searchable Git choices, and instructions in the shared picker.
+//!
+//! Child cancellation restores the preset menu; accepting a target dismisses both.
 
 use super::*;
+use crate::bottom_pane::PickerSurface;
+use codex_git_utils::CommitLogEntry;
 
 impl ChatWidget {
+    pub(crate) fn on_review_started(&mut self) {
+        self.bottom_pane.dismiss_composer_sparkle();
+        self.bottom_pane.clear_pending_questions();
+    }
+
     pub(crate) fn open_review_popup(&mut self) {
         let mut items: Vec<SelectionItem> = Vec::new();
 
@@ -54,9 +63,8 @@ impl ChatWidget {
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
             title: Some("Select a review preset".into()),
-            footer_hint: Some(standard_popup_hint_line()),
             items,
-            ..Default::default()
+            ..SelectionViewParams::picker()
         });
     }
 
@@ -70,7 +78,7 @@ impl ChatWidget {
         for option in branches {
             let branch = option.clone();
             items.push(SelectionItem {
-                name: format!("{current_branch} -> {branch}"),
+                name: branch.clone(),
                 actions: vec![Box::new(move |tx3: &AppEventSender| {
                     tx3.review(ReviewTarget::BaseBranch {
                         branch: branch.clone(),
@@ -83,8 +91,9 @@ impl ChatWidget {
         }
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
+            picker_surface: PickerSurface::Panel,
             title: Some("Select a base branch".to_string()),
-            footer_hint: Some(standard_popup_hint_line()),
+            subtitle: Some(format!("Current branch: {current_branch}")),
             items,
             is_searchable: true,
             search_placeholder: Some("Type to search branches".to_string()),
@@ -94,7 +103,10 @@ impl ChatWidget {
 
     pub(crate) async fn show_review_commit_picker(&mut self, cwd: &Path) {
         let commits = recent_commits(cwd, /*limit*/ 100).await;
+        self.show_review_commits(commits);
+    }
 
+    pub(super) fn show_review_commits(&mut self, commits: Vec<CommitLogEntry>) {
         let mut items: Vec<SelectionItem> = Vec::with_capacity(commits.len());
         for entry in commits {
             let subject = entry.subject.clone();
@@ -116,8 +128,8 @@ impl ChatWidget {
         }
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: Some("Select a commit to review".to_string()),
-            footer_hint: Some(standard_popup_hint_line()),
+            picker_surface: PickerSurface::Panel,
+            title: Some("Select a commit to review".into()),
             items,
             is_searchable: true,
             search_placeholder: Some("Type to search commits".to_string()),
@@ -144,39 +156,4 @@ impl ChatWidget {
         );
         self.bottom_pane.show_text_prompt(view);
     }
-}
-
-#[cfg(test)]
-pub(crate) fn show_review_commit_picker_with_entries(
-    chat: &mut ChatWidget,
-    entries: Vec<CommitLogEntry>,
-) {
-    let mut items: Vec<SelectionItem> = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let subject = entry.subject.clone();
-        let sha = entry.sha.clone();
-        let search_val = format!("{subject} {sha}");
-
-        items.push(SelectionItem {
-            name: subject.clone(),
-            actions: vec![Box::new(move |tx3: &AppEventSender| {
-                tx3.review(ReviewTarget::Commit {
-                    sha: sha.clone(),
-                    title: Some(subject.clone()),
-                });
-            })],
-            dismiss_on_select: true,
-            search_value: Some(search_val),
-            ..Default::default()
-        });
-    }
-
-    chat.bottom_pane.show_selection_view(SelectionViewParams {
-        title: Some("Select a commit to review".to_string()),
-        footer_hint: Some(standard_popup_hint_line()),
-        items,
-        is_searchable: true,
-        search_placeholder: Some("Type to search commits".to_string()),
-        ..Default::default()
-    });
 }

@@ -108,6 +108,7 @@ impl FeedbackRequestProcessor {
             None
         };
         apply_feedback_turn_metadata(&mut upload_tags, turn_metadata);
+        let prompt_hash = upload_tags.get("prompt_hash").cloned();
 
         if let Some(chatgpt_user_id) = auth
             .as_ref()
@@ -206,7 +207,7 @@ impl FeedbackRequestProcessor {
                     .await
                     && seen_attachment_paths.insert(rollout_path.clone())
                 {
-                    thread.rollout_filename = rollout_path
+                    thread.rollout_filename = codex_rollout::plain_rollout_path(&rollout_path)
                         .file_name()
                         .map(|name| name.to_string_lossy().into_owned());
                     attachment_paths.push(FeedbackAttachmentPath {
@@ -314,7 +315,10 @@ impl FeedbackRequestProcessor {
 
         upload_result
             .map_err(|err| internal_error(format!("failed to upload feedback: {err:#}")))?;
-        Ok(FeedbackUploadResponse { thread_id })
+        Ok(FeedbackUploadResponse {
+            thread_id,
+            prompt_hash,
+        })
     }
 
     async fn resolve_rollout_path(
@@ -723,6 +727,7 @@ mod tests {
                 item: RolloutItem::TurnContext(TurnContextItem {
                     turn_id: Some((*turn_id).to_string()),
                     root_turn_id: None,
+                    disabled_plugin_ids: None,
                     cwd: AbsolutePathBuf::from_absolute_path(tempdir.path())
                         .expect("absolute feedback rollout directory"),
                     workspace_roots: None,

@@ -1,5 +1,8 @@
 //! Model-history and persisted-rollout domain types.
 
+mod compaction_checkpoint;
+pub use compaction_checkpoint::CompactionCheckpoint;
+
 use std::borrow::Borrow;
 use std::ops::Deref;
 use std::ops::DerefMut;
@@ -50,10 +53,19 @@ pub struct CodexHarnessMetadata {
     #[serde(default)]
     pub client_authored: bool,
 
-    /// Overrides history's fallback truncation budget, including on resume.
-    /// Measured in tokens, with any tool-specific allowance already included.
+    /// The originating history budget, including any tool-specific allowance.
+    /// Measured in tokens and reused when replaying persisted history.
+    #[serde(
+        default,
+        rename = "fallback_token_limit_override",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub history_truncation_token_limit: Option<usize>,
+
+    /// Bounded assistant text confirmed by a successful messaging tool result.
+    /// Captured after input hooks; untrusted context, never user authorization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fallback_token_limit_override: Option<usize>,
+    pub delivered_assistant_message: Option<String>,
 
     /// Whether a response configuration update was created by the Codex harness itself.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -70,6 +82,10 @@ pub struct CodexHarnessMetadata {
     /// Copied parent context stays model-visible but must not become child-local authorization.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub inherited_user_message: bool,
+
+    /// Sender context captured by the host when this task message was accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_user_messages: Option<Box<SenderUserMessages>>,
 }
 
 impl ResponseItemEnvelope {
@@ -168,6 +184,9 @@ impl JsonSchema for RolloutItem {
 mod guardian_history;
 mod reconciled_retained_context;
 mod retained_context;
+mod sender_user_messages;
+
+pub use sender_user_messages::SenderUserMessages;
 
 pub use reconciled_retained_context::ReconciledRetainedContext;
 pub use retained_context::RetainedContext;
@@ -447,6 +466,34 @@ fn session_cwd_from_items(items: &[RolloutItem]) -> Option<PathBuf> {
         RolloutItem::SessionMeta(meta_line) => Some(meta_line.meta.cwd.clone()),
         _ => None,
     })
+}
+
+/// Returns a thread's latest plugin selection, with a turn-context fallback.
+///
+/// Forked history may contain ancestor snapshots, and compaction may append a
+/// frozen turn context after an update. Neither can replace thread-owned settings.
+/// Without an owned snapshot, only the latest turn context supplies the initial
+/// selection; a missing field must not resurrect a selection from an older turn.
+pub fn latest_disabled_plugin_ids(items: &[RolloutItem], thread_id: ThreadId) -> Option<&[String]> {
+    if let Some(ids) = items.iter().rev().find_map(|item| {
+        if let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = item
+            && event.thread_id == Some(thread_id)
+        {
+            Some(event.thread_settings.disabled_plugin_ids.as_slice())
+        } else {
+            None
+        }
+    }) {
+        return Some(ids);
+    }
+    items
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            RolloutItem::TurnContext(context) => Some(context),
+            _ => None,
+        })
+        .and_then(|context| context.disabled_plugin_ids.as_deref())
 }
 
 fn multi_agent_version_from_items(

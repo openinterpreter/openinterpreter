@@ -99,7 +99,8 @@ async fn spawn_runner_transport_task(
     tokio::task::spawn_blocking(move || -> Result<_> {
         let desktop_policy = request
             .spawn_request
-            .use_private_desktop
+            .private_desktop_name
+            .is_none()
             .then(|| {
                 DesktopPolicy::elevated(
                     crate::setup::SandboxSetupRequest {
@@ -164,7 +165,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
     deny_write_paths_override: &[AbsolutePathBuf],
     tty: bool,
     stdin_open: bool,
-    use_private_desktop: bool,
+    private_desktop_name: Option<String>,
 ) -> Result<SpawnedProcess> {
     let deny_read_paths_override = deny_read_paths_override
         .iter()
@@ -214,8 +215,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
             timeout_ms,
             tty,
             stdin_open,
-            use_private_desktop,
-            private_desktop_name: None,
+            private_desktop_name,
         },
         read_roots_override: read_roots_override.map(<[PathBuf]>::to_vec),
         read_roots_include_platform_defaults,

@@ -10,15 +10,24 @@ use rama_http::header::AUTHORIZATION;
 use std::collections::HashMap;
 
 const OPENAI_API_KEY_ENV_VARS: &[&str] = &["OPENAI_API_KEY"];
+const OPENAI_API_KEY_PREFIXES: &[&str] = &["sk-proj-", "sk-svcacct-", "sk-admin-", "sk-"];
 const OPENAI_BASE_URL_ENV_VAR: &str = "OPENAI_BASE_URL";
 const OPENAI_API_KEY_MIN_LEN: usize = 51;
 const OPENAI_API_HOST: &str = "api.openai.com";
 
 pub(super) static PROVIDER: CredentialProvider = CredentialProvider {
     context_env_vars: &[OPENAI_BASE_URL_ENV_VAR],
+    credential_prefixes: OPENAI_API_KEY_PREFIXES,
+    ignored_credential_prefixes: &["sk-ant-", "sk-or-"],
+    credential_watermark: Some("T3BlbkFJ"),
+    minimum_credential_len: OPENAI_API_KEY_MIN_LEN,
     sources: &[CredentialSource {
         env_vars: OPENAI_API_KEY_ENV_VARS,
         binding_env_vars: &[OPENAI_BASE_URL_ENV_VAR],
+        invalidates_host_binding: |env| {
+            env_value(env, OPENAI_BASE_URL_ENV_VAR)
+                .is_some_and(|value| trusted_credential_broker_host(value).is_none())
+        },
         host_binding,
     }],
     reset_on_configuration_change: true,
@@ -78,10 +87,9 @@ fn host_binding(
 }
 
 fn openai_api_key_prefix(value: &str) -> &str {
-    let Some(suffix) = value.strip_prefix("sk-") else {
-        return "sk-";
-    };
-    suffix
-        .find('-')
-        .map_or("sk-", |separator| &value[..separator + 4])
+    OPENAI_API_KEY_PREFIXES
+        .iter()
+        .copied()
+        .find(|prefix| value.starts_with(prefix))
+        .unwrap_or("sk-")
 }

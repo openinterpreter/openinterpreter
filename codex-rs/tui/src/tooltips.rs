@@ -1,8 +1,20 @@
+use crate::keymap::RuntimeKeymap;
+use crate::keymap::keymap_action_id;
+use crate::terminal_hyperlinks::HyperlinkLine;
+use codex_config::types::TuiKeymap;
 use codex_features::FEATURES;
+use codex_features::Feature;
+use codex_features::FeatureSpec;
 use codex_product_info::Product;
 use codex_protocol::account::PlanType;
 use lazy_static::lazy_static;
 use rand::Rng;
+use rand::seq::IteratorRandom;
+use std::path::Path;
+
+#[cfg(test)]
+#[path = "tooltips/keybinding_tests.rs"]
+mod keybinding_tests;
 
 const ANNOUNCEMENT_TIP_URL: &str =
     "https://raw.githubusercontent.com/openai/codex/main/announcement_tip.toml";
@@ -37,23 +49,46 @@ lazy_static! {
     static ref ALL_TOOLTIPS: Vec<&'static str> = {
         let mut tips = Vec::new();
         tips.extend(TOOLTIPS.iter().copied());
-        tips.extend(experimental_tooltips());
+        tips.extend(experimental_tooltips(
+            FEATURES,
+            codex_realtime_webrtc::RealtimeWebrtcSession::is_supported,
+        ));
         tips
     };
 }
 
-fn experimental_tooltips() -> Vec<&'static str> {
-    FEATURES
+fn experimental_tooltips(
+    features: &[FeatureSpec],
+    voice_supported: impl Fn() -> bool,
+) -> Vec<&'static str> {
+    features
         .iter()
+        .filter(|spec| spec.id != Feature::RealtimeConversation || voice_supported())
         .filter_map(|spec| spec.stage.experimental_announcement())
         .collect()
 }
 
 /// Pick a random tooltip to show to the user when starting Codex.
-pub(crate) fn get_tooltip(plan: Option<PlanType>, fast_mode_enabled: bool) -> Option<String> {
+pub(crate) fn get_tooltip(
+    plan: Option<PlanType>,
+    fast_mode_enabled: bool,
+    keymap: &TuiKeymap,
+) -> Option<String> {
     let mut rng = rand::rng();
     let product = Product::current();
+    preferred_tooltip(&mut rng, plan, fast_mode_enabled, product).or_else(|| {
+        pick_tooltip(&mut rng, keymap).map(|tooltip| tooltip_for_product(&tooltip, product))
+    })
+}
 
+/// Apply the shared announcement and promotion policy before falling back to local tips.
+/// The announcement lookup only reads the prewarmed cache.
+pub(crate) fn preferred_tooltip<R: Rng + ?Sized>(
+    rng: &mut R,
+    plan: Option<PlanType>,
+    fast_mode_enabled: bool,
+    product: Product,
+) -> Option<String> {
     if product == Product::Codex
         && let Some(announcement) = announcement::fetch_announcement_tip(plan)
     {
@@ -61,7 +96,7 @@ pub(crate) fn get_tooltip(plan: Option<PlanType>, fast_mode_enabled: bool) -> Op
     }
 
     // Leave small chance for a random tooltip to be shown.
-    if product == Product::Codex && rng.random_ratio(8, 10) {
+    if product == Product::Codex && rng.random_ratio(/*numerator*/ 8, /*denominator*/ 10) {
         match plan {
             Some(plan_type)
                 if matches!(
@@ -70,7 +105,7 @@ pub(crate) fn get_tooltip(plan: Option<PlanType>, fast_mode_enabled: bool) -> Op
                 ) || plan_type.is_team_like()
                     || plan_type.is_business_like() =>
             {
-                if let Some(tooltip) = pick_paid_tooltip(&mut rng, fast_mode_enabled) {
+                if let Some(tooltip) = pick_paid_tooltip(rng, fast_mode_enabled) {
                     return Some(tooltip.to_string());
                 }
             }
@@ -88,7 +123,7 @@ pub(crate) fn get_tooltip(plan: Option<PlanType>, fast_mode_enabled: bool) -> Op
         }
     }
 
-    pick_tooltip(&mut rng).map(|tooltip| tooltip_for_product(tooltip, product))
+    None
 }
 
 fn tooltip_for_product(tooltip: &str, product: Product) -> String {
@@ -151,14 +186,51 @@ fn pick_paid_tooltip<R: Rng + ?Sized>(
     }
 }
 
-fn pick_tooltip<R: Rng + ?Sized>(rng: &mut R) -> Option<&'static str> {
-    if ALL_TOOLTIPS.is_empty() {
-        None
-    } else {
-        ALL_TOOLTIPS
-            .get(rng.random_range(0..ALL_TOOLTIPS.len()))
-            .copied()
+fn pick_tooltip<R: Rng + ?Sized>(rng: &mut R, keymap: &TuiKeymap) -> Option<String> {
+    // Resolve current settings for each new tip; never replace an invalid or unbound keymap
+    // with defaults, or cache shortcut text across /keymap edits.
+    let keymap = RuntimeKeymap::from_config(keymap).ok();
+    resolved_tooltips(keymap.as_ref()).choose(rng)
+}
+
+/// Render shared tip styling and links, retaining visible URLs when the terminal needs them.
+pub(crate) fn render_tooltip_lines(tip: &str, width: usize, cwd: &Path) -> Vec<HyperlinkLine> {
+    crate::markdown_render::render_streaming_markdown_lines_with_width_and_cwd(
+        &format!("**Tip:** {tip}"),
+        Some(width),
+        Some(cwd),
+        &crate::markdown_render::hide_web_link_destination,
+        crate::markdown_render::ListSpacing::AfterMultiline,
+    )
+    .lines
+}
+
+/// Resolve the local tip pool in catalog order using the supplied runtime keymap.
+/// Tips with invalid or unbound shortcuts are omitted; without a keymap, only key-free tips remain.
+pub(crate) fn resolved_tooltips(
+    keymap: Option<&RuntimeKeymap>,
+) -> impl Iterator<Item = String> + '_ {
+    ALL_TOOLTIPS
+        .iter()
+        .filter_map(move |tip| render_tooltip(tip, keymap))
+}
+
+/// Substitute `{key:context.action}` with the current primary shortcut in a Markdown code span.
+/// Skip the tip if a placeholder is invalid or its action has no binding.
+fn render_tooltip(mut template: &str, keymap: Option<&RuntimeKeymap>) -> Option<String> {
+    let mut rendered = String::new();
+    while let Some((prefix, rest)) = template.split_once("{key:") {
+        let (action, suffix) = rest.split_once('}')?;
+        let (context, action) = action.split_once('.')?;
+        let action = keymap_action_id(context, action)?;
+        let hint = keymap?.primary_hint(action.context, action.action)?;
+        rendered.push_str(prefix);
+        // A key or two-key chord can contain literal backticks; use a padded code span.
+        rendered.push_str(&format!("`` {} ``", hint.display_label()));
+        template = suffix;
     }
+    rendered.push_str(template);
+    Some(rendered)
 }
 
 pub(crate) mod announcement {
@@ -175,7 +247,7 @@ pub(crate) mod announcement {
     use std::sync::OnceLock;
     use std::time::Duration;
 
-    static ANNOUNCEMENT_TIP: OnceLock<Option<String>> = OnceLock::new();
+    static ANNOUNCEMENT_TIP: OnceLock<Option<AnnouncementTips>> = OnceLock::new();
     const CURRENT_OS: TargetOs = TargetOs::current();
 
     /// Prewarm the cache of the announcement tip.
@@ -184,7 +256,9 @@ pub(crate) mod announcement {
             return;
         }
         tokio::spawn(async move {
-            let announcement_tip = fetch_announcement_tip_text(http_client_factory).await;
+            let announcement_tip = fetch_announcement_tip_text(http_client_factory)
+                .await
+                .and_then(|raw| AnnouncementTips::parse(&raw));
             let _ = ANNOUNCEMENT_TIP.set(announcement_tip);
         });
     }
@@ -193,9 +267,8 @@ pub(crate) mod announcement {
     pub(crate) fn fetch_announcement_tip(plan: Option<PlanType>) -> Option<String> {
         ANNOUNCEMENT_TIP
             .get()
-            .cloned()
-            .flatten()
-            .and_then(|raw| parse_announcement_tip_toml(&raw, plan))
+            .and_then(Option::as_ref)
+            .and_then(|tips| tips.select(plan))
     }
 
     #[derive(Debug, Deserialize)]
@@ -259,39 +332,44 @@ pub(crate) mod announcement {
         response.error_for_status().ok()?.text().await.ok()
     }
 
-    pub(crate) fn parse_announcement_tip_toml(
-        text: &str,
-        plan: Option<PlanType>,
-    ) -> Option<String> {
-        let announcements = toml::from_str::<AnnouncementTipDocument>(text)
-            .map(|doc| doc.announcements)
-            .or_else(|_| toml::from_str::<Vec<AnnouncementTipRaw>>(text))
-            .ok()?;
+    /// Parsed once during prewarming; eligibility stays current across redraws and account changes.
+    pub(super) struct AnnouncementTips(Vec<AnnouncementTip>);
 
-        let mut latest_match = None;
-        let today = Utc::now().date_naive();
-        for raw in announcements {
-            let Some(tip) = AnnouncementTip::from_raw(raw) else {
-                continue;
-            };
-            let plan_matches = tip
-                .target_plan_types
-                .as_ref()
-                .is_none_or(|target_plans| plan.is_some_and(|plan| target_plans.contains(&plan)));
-            let os_matches = tip
-                .target_oses
-                .as_ref()
-                .is_none_or(|target_oses| target_oses.contains(&CURRENT_OS));
-            if tip.version_matches(CODEX_CLI_VERSION)
-                && tip.date_matches(today)
-                && tip.target_app == "cli"
-                && plan_matches
-                && os_matches
-            {
-                latest_match = Some(tip.content);
-            }
+    impl AnnouncementTips {
+        pub(super) fn parse(text: &str) -> Option<Self> {
+            let announcements = toml::from_str::<AnnouncementTipDocument>(text)
+                .map(|doc| doc.announcements)
+                .or_else(|_| toml::from_str::<Vec<AnnouncementTipRaw>>(text))
+                .ok()?;
+            Some(Self(
+                announcements
+                    .into_iter()
+                    .filter_map(AnnouncementTip::from_raw)
+                    .collect(),
+            ))
         }
-        latest_match
+
+        pub(super) fn select(&self, plan: Option<PlanType>) -> Option<String> {
+            let today = Utc::now().date_naive();
+            self.0
+                .iter()
+                .rev()
+                .find(|tip| {
+                    let plan_matches = tip.target_plan_types.as_ref().is_none_or(|target_plans| {
+                        plan.is_some_and(|plan| target_plans.contains(&plan))
+                    });
+                    let os_matches = tip
+                        .target_oses
+                        .as_ref()
+                        .is_none_or(|target_oses| target_oses.contains(&CURRENT_OS));
+                    tip.version_matches(CODEX_CLI_VERSION)
+                        && tip.date_matches(today)
+                        && tip.target_app == "cli"
+                        && plan_matches
+                        && os_matches
+                })
+                .map(|tip| tip.content.clone())
+        }
     }
 
     impl AnnouncementTip {
@@ -364,26 +442,63 @@ pub(crate) mod announcement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tooltips::announcement::parse_announcement_tip_toml;
+    use crate::tooltips::announcement::AnnouncementTips;
     use pretty_assertions::assert_eq;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
     #[test]
+    fn experimental_voice_tooltip_requires_runtime_support() {
+        let mut features = FEATURES.to_vec();
+        features
+            .iter_mut()
+            .find(|spec| spec.id == Feature::RealtimeConversation)
+            .unwrap()
+            .stage = codex_features::Stage::Experimental {
+            name: "Voice conversations",
+            menu_description: "Talk with Codex using /voice.",
+            announcement: "NEW: Voice conversations can now be enabled from /experimental. Restart Codex after enabling, then use /voice.",
+        };
+        let unavailable = experimental_tooltips(&features, || false);
+        let available = experimental_tooltips(&features, || true);
+        let voice_tip = features
+            .iter()
+            .find(|spec| spec.id == Feature::RealtimeConversation)
+            .and_then(|spec| spec.stage.experimental_announcement())
+            .expect("voice has an experimental announcement");
+        assert_eq!(
+            unavailable,
+            available
+                .iter()
+                .copied()
+                .filter(|tip| *tip != voice_tip)
+                .collect::<Vec<_>>()
+        );
+        insta::assert_snapshot!(
+            "experimental_voice_tooltip",
+            available
+                .into_iter()
+                .filter(|tip| *tip == voice_tip)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    #[test]
     fn random_tooltip_returns_some_tip_when_available() {
         let mut rng = StdRng::seed_from_u64(42);
-        assert!(pick_tooltip(&mut rng).is_some());
+        assert!(pick_tooltip(&mut rng, &TuiKeymap::default()).is_some());
     }
 
     #[test]
     fn random_tooltip_is_reproducible_with_seed() {
         let expected = {
             let mut rng = StdRng::seed_from_u64(7);
-            pick_tooltip(&mut rng)
+            pick_tooltip(&mut rng, &TuiKeymap::default())
         };
 
         let mut rng = StdRng::seed_from_u64(7);
-        assert_eq!(expected, pick_tooltip(&mut rng));
+        assert_eq!(expected, pick_tooltip(&mut rng, &TuiKeymap::default()));
     }
 
     #[test]
@@ -494,7 +609,7 @@ to_date = "2000-01-01"
 
         assert_eq!(
             Some("latest match".to_string()),
-            parse_announcement_tip_toml(toml, /*plan*/ None)
+            AnnouncementTips::parse(toml).and_then(|tips| tips.select(/*plan*/ None))
         );
 
         let toml = r#"
@@ -514,7 +629,7 @@ to_date = "2000-01-01"
 
         assert_eq!(
             Some("latest match".to_string()),
-            parse_announcement_tip_toml(toml, /*plan*/ None)
+            AnnouncementTips::parse(toml).and_then(|tips| tips.select(/*plan*/ None))
         );
     }
 
@@ -535,7 +650,10 @@ content = "should not match either "
 target_app = "vsce"
         "#;
 
-        assert_eq!(None, parse_announcement_tip_toml(toml, /*plan*/ None));
+        assert_eq!(
+            None,
+            AnnouncementTips::parse(toml).and_then(|tips| tips.select(/*plan*/ None))
+        );
     }
 
     #[test]
@@ -546,7 +664,10 @@ content = 123
 from_date = "2000-01-01"
         "#;
 
-        assert_eq!(None, parse_announcement_tip_toml(toml, /*plan*/ None));
+        assert_eq!(
+            None,
+            AnnouncementTips::parse(toml).and_then(|tips| tips.select(/*plan*/ None))
+        );
     }
 
     #[test]
@@ -573,7 +694,7 @@ content = "This is a test announcement"
 
         assert_eq!(
             Some("This is a test announcement".to_string()),
-            parse_announcement_tip_toml(toml, /*plan*/ None)
+            AnnouncementTips::parse(toml).and_then(|tips| tips.select(/*plan*/ None))
         );
     }
 
@@ -592,22 +713,20 @@ content = "free announcement"
 target_plan_types = ["free"]
         "#;
 
+        let tips = AnnouncementTips::parse(toml).unwrap();
         assert_eq!(
             Some("pro announcement".to_string()),
-            parse_announcement_tip_toml(toml, Some(PlanType::Pro))
+            tips.select(Some(PlanType::Pro))
         );
         assert_eq!(
             Some("free announcement".to_string()),
-            parse_announcement_tip_toml(toml, Some(PlanType::Free))
+            tips.select(Some(PlanType::Free))
         );
         assert_eq!(
             Some("all plans".to_string()),
-            parse_announcement_tip_toml(toml, Some(PlanType::Plus))
+            tips.select(Some(PlanType::Plus))
         );
-        assert_eq!(
-            Some("all plans".to_string()),
-            parse_announcement_tip_toml(toml, /*plan*/ None)
-        );
+        assert_eq!(Some("all plans".to_string()), tips.select(/*plan*/ None));
     }
 
     #[test]
@@ -623,7 +742,7 @@ target_plan_types = ["prp"]
 
         assert_eq!(
             Some("all plans".to_string()),
-            parse_announcement_tip_toml(toml, Some(PlanType::Unknown))
+            AnnouncementTips::parse(toml).and_then(|tips| tips.select(Some(PlanType::Unknown)))
         );
     }
 
@@ -652,7 +771,7 @@ target_oses = ["windows"]
         };
         assert_eq!(
             Some(expected.to_string()),
-            parse_announcement_tip_toml(toml, /*plan*/ None)
+            AnnouncementTips::parse(toml).and_then(|tips| tips.select(/*plan*/ None))
         );
     }
 
@@ -669,7 +788,7 @@ target_oses = ["amiga"]
 
         assert_eq!(
             Some("all operating systems".to_string()),
-            parse_announcement_tip_toml(toml, /*plan*/ None)
+            AnnouncementTips::parse(toml).and_then(|tips| tips.select(/*plan*/ None))
         );
     }
 }

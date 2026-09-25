@@ -7,6 +7,7 @@ use crate::memory_citation::MemoryCitation;
 use crate::models::ContentItem;
 use crate::models::FunctionCallOutputBody;
 use crate::models::ImageDetail;
+use crate::models::ImageReference;
 use crate::models::MessagePhase;
 use crate::models::ResponseItem;
 use crate::models::WebSearchAction;
@@ -232,8 +233,19 @@ pub fn is_safe_plugin_relative_path(path: &str) -> bool {
         })
 }
 
+/// Immutable model labels carried within command lifecycle events for analytics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelInvocationContext {
+    pub model_slug: String,
+    pub reasoning_effort: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq)]
 pub struct CommandExecutionItem {
+    #[serde(skip)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub model_context: Option<ModelInvocationContext>,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -413,6 +425,25 @@ pub struct FileChangeItem {
     pub stderr: Option<String>,
 }
 
+/// UI resource and display preference for model invocations, captured from the tool descriptor.
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct McpAppUi {
+    pub resource_uri: String,
+    pub preferred_model_display_mode: McpAppDisplayMode,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum McpAppDisplayMode {
+    Inline,
+    Fullscreen,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]
@@ -424,9 +455,13 @@ pub struct McpToolCallItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub connector_id: Option<String>,
+    /// Legacy compatibility field; prefer `mcp_app_ui.resource_uri` when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub mcp_app_resource_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mcp_app_ui: Option<McpAppUi>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub link_id: Option<String>,
@@ -543,7 +578,10 @@ impl UserMessageItem {
         self.content
             .iter()
             .filter_map(|c| match c {
-                UserInput::Image { image_url, .. } => Some(image_url.clone()),
+                UserInput::Image {
+                    image: ImageReference::Inline { image_url },
+                    ..
+                } => Some(image_url.clone()),
                 _ => None,
             })
             .collect()
@@ -554,7 +592,10 @@ impl UserMessageItem {
             self.content
                 .iter()
                 .filter_map(|c| match c {
-                    UserInput::Image { detail, .. } => Some(*detail),
+                    UserInput::Image {
+                        image: ImageReference::Inline { .. },
+                        detail,
+                    } => Some(*detail),
                     _ => None,
                 })
                 .collect(),
@@ -604,7 +645,7 @@ impl UserMessageItem {
     }
 }
 
-fn trim_trailing_default_image_details(
+pub(crate) fn trim_trailing_default_image_details(
     mut details: Vec<Option<ImageDetail>>,
 ) -> Vec<Option<ImageDetail>> {
     while matches!(details.last(), Some(None)) {

@@ -262,7 +262,10 @@ fn apply_capability_denies_for_world_writable_for_permissions(
     let cap_path = cap_sid_file(codex_home);
     let caps = load_or_create_cap_sids(codex_home)?;
     std::fs::write(&cap_path, serde_json::to_string(&caps)?)?;
-    if !permissions.is_enforceable_by_windows_sandbox() {
+    if permissions
+        .validate_elevated_filesystem_policy(cwd)
+        .is_err()
+    {
         return Ok(());
     }
     let (active_sids, workspace_roots): (Vec<LocalSid>, Vec<PathBuf>) =

@@ -11,6 +11,7 @@ use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ImageDetail;
+use codex_protocol::models::ImageReference as CoreImageReference;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::plan_tool::PlanItemArg as CorePlanItemArg;
 use codex_protocol::plan_tool::StepStatus as CorePlanStepStatus;
@@ -139,6 +140,16 @@ impl From<CyberAccessProgram> for CoreCyberAccessProgram {
     }
 }
 
+impl From<CoreCyberAccessProgram> for CyberAccessProgram {
+    fn from(value: CoreCyberAccessProgram) -> Self {
+        match value {
+            CoreCyberAccessProgram::Standard => Self::Standard,
+            CoreCyberAccessProgram::DaybreakBlue => Self::DaybreakBlue,
+            CoreCyberAccessProgram::DaybreakRed => Self::DaybreakRed,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -155,6 +166,10 @@ pub struct TurnToolOutput {
 #[ts(export_to = "v2/")]
 pub struct TurnStartParams {
     pub thread_id: String,
+    /// Replace this thread's disabled plugin IDs.
+    /// Omitted/null preserves the list; [] clears it.
+    #[ts(optional = nullable)]
+    pub disabled_plugin_ids: Option<Vec<String>>,
     #[ts(optional = nullable)]
     pub client_user_message_id: Option<String>,
     pub input: Vec<UserInput>,
@@ -233,7 +248,8 @@ pub struct TurnStartParams {
     /// Override the reasoning summary for this turn and subsequent turns.
     #[ts(optional = nullable)]
     pub summary: Option<ReasoningSummary>,
-    /// Override the personality for this turn and subsequent turns.
+    /// @deprecated `friendly` and `pragmatic` no longer select a style.
+    /// Changing this does not rewrite the thread's existing instructions.
     #[ts(optional = nullable)]
     pub personality: Option<Personality>,
     /// Optional JSON Schema used to constrain the final assistant message for
@@ -388,6 +404,21 @@ impl From<TextElement> for CoreTextElement {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(untagged)]
+#[ts(untagged)]
+#[ts(export_to = "v2/")]
+pub enum ImageReference {
+    Inline {
+        url: String,
+    },
+    File {
+        #[serde(rename = "fileId")]
+        #[ts(rename = "fileId")]
+        file_id: String,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "camelCase")]
 #[ts(tag = "type")]
 #[ts(export_to = "v2/")]
@@ -399,10 +430,11 @@ pub enum UserInput {
         text_elements: Vec<TextElement>,
     },
     Image {
+        #[serde(flatten)]
+        image: ImageReference,
         #[serde(default)]
         #[ts(optional)]
         detail: Option<ImageDetail>,
-        url: String,
     },
     LocalImage {
         #[serde(default)]
@@ -436,8 +468,11 @@ impl UserInput {
                 text,
                 text_elements: text_elements.into_iter().map(Into::into).collect(),
             },
-            UserInput::Image { url, detail } => CoreUserInput::Image {
-                image_url: url,
+            UserInput::Image { image, detail } => CoreUserInput::Image {
+                image: match image {
+                    ImageReference::Inline { url } => CoreImageReference::Inline { image_url: url },
+                    ImageReference::File { file_id } => CoreImageReference::File { file_id },
+                },
                 detail,
             },
             UserInput::LocalImage { path, detail } => CoreUserInput::LocalImage { path, detail },
@@ -459,8 +494,13 @@ impl From<CoreUserInput> for UserInput {
                 text,
                 text_elements: text_elements.into_iter().map(Into::into).collect(),
             },
-            CoreUserInput::Image { image_url, detail } => UserInput::Image {
-                url: image_url,
+            CoreUserInput::Image { image, detail } => UserInput::Image {
+                image: match image {
+                    CoreImageReference::Inline { image_url } => {
+                        ImageReference::Inline { url: image_url }
+                    }
+                    CoreImageReference::File { file_id } => ImageReference::File { file_id },
+                },
                 detail,
             },
             CoreUserInput::LocalImage { path, detail } => UserInput::LocalImage { path, detail },

@@ -136,6 +136,11 @@ pub struct AccountsCheckResponse {
 #[derive(Clone, Debug, Deserialize)]
 pub struct AccountEntry {
     pub id: String,
+    /// Current subscription reported by the accounts endpoint, independent of token claims.
+    #[serde(default)]
+    pub plan_type: Option<codex_protocol::account::PlanType>,
+    pub workspace_backend_origin: Option<String>,
+    pub account_routing_override: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
@@ -176,6 +181,8 @@ struct ChatGptAccountEntry {
 struct ChatGptAccountInfo {
     account_id: Option<String>,
     #[serde(default)]
+    plan_type: Option<codex_protocol::account::PlanType>,
+    #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     profile_picture_url: Option<String>,
@@ -198,6 +205,9 @@ impl<'de> Deserialize<'de> for AccountsCheckResponse {
                     let account = accounts.remove(account_id)?.account;
                     Some(AccountEntry {
                         id: account.account_id?,
+                        plan_type: account.plan_type,
+                        workspace_backend_origin: None,
+                        account_routing_override: None,
                         name: account.name,
                         profile_picture_url: account.profile_picture_url,
                         structure: account.structure,

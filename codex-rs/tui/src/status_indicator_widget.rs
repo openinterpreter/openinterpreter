@@ -28,7 +28,6 @@ use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
 use crate::motion::MotionMode;
 use crate::motion::ReducedMotionIndicator;
 use crate::motion::activity_indicator;
-use crate::motion::shimmer_text;
 use crate::render::renderable::Renderable;
 use crate::text_formatting::capitalize_first;
 use crate::tui::FrameRequester;
@@ -38,6 +37,10 @@ use crate::wrapping::word_wrap_lines;
 
 mod timer;
 pub(crate) use timer::StatusTimer;
+
+#[path = "summary_shimmer.rs"]
+mod summary_shimmer;
+use summary_shimmer::summary_shimmer;
 
 pub(crate) const STATUS_DETAILS_DEFAULT_MAX_LINES: usize = 3;
 const DETAILS_PREFIX: &str = "  └ ";
@@ -52,6 +55,7 @@ pub(crate) enum StatusDetailsCapitalization {
 pub(crate) struct StatusIndicatorWidget {
     /// Animated header text (defaults to "Working").
     header: String,
+    header_started_at: Instant,
     details: Option<String>,
     details_max_lines: usize,
     /// Optional suffix rendered after the elapsed/interrupt segment.
@@ -64,6 +68,7 @@ pub(crate) struct StatusIndicatorWidget {
     app_event_tx: AppEventSender,
     frame_requester: FrameRequester,
     animations_enabled: bool,
+    effects: codex_config::types::TuiEffects,
 }
 
 // Format elapsed seconds into a compact human-friendly form used by the status line.
@@ -88,9 +93,11 @@ impl StatusIndicatorWidget {
         app_event_tx: AppEventSender,
         frame_requester: FrameRequester,
         animations_enabled: bool,
+        effects: codex_config::types::TuiEffects,
     ) -> Self {
         Self {
             header: String::from("Working"),
+            header_started_at: Instant::now(),
             details: None,
             details_max_lines: STATUS_DETAILS_DEFAULT_MAX_LINES,
             inline_message: None,
@@ -100,6 +107,7 @@ impl StatusIndicatorWidget {
             app_event_tx,
             frame_requester,
             animations_enabled,
+            effects,
         }
     }
 
@@ -109,7 +117,10 @@ impl StatusIndicatorWidget {
 
     /// Update the animated header label (left of the brackets).
     pub(crate) fn update_header(&mut self, header: String) {
-        self.header = header;
+        if self.header != header {
+            self.header = header;
+            self.header_started_at = Instant::now();
+        }
     }
 
     /// Update the details text shown below the header.
@@ -216,29 +227,34 @@ impl StatusIndicator<'_> {
             |started_at| now.saturating_duration_since(started_at),
         );
         let pretty_elapsed = fmt_elapsed_compact(elapsed_duration.as_secs());
-        let motion_mode = MotionMode::from_animations_enabled(row.animations_enabled);
+        let progress =
+            MotionMode::from_animations_enabled(row.animations_enabled && row.effects.progress);
+        let shimmer =
+            MotionMode::from_animations_enabled(row.animations_enabled && row.effects.shimmer);
 
         let mut spans = Vec::with_capacity(5);
         if let Some(indicator) = activity_indicator(
             Some(self.timer.last_resume_at),
-            motion_mode,
+            progress,
             ReducedMotionIndicator::Hidden,
         ) {
             spans.push(indicator);
             spans.push(" ".into());
         }
-        spans.extend(shimmer_text(&row.header, motion_mode));
+        spans.extend(summary_shimmer(
+            &row.header,
+            now.saturating_duration_since(row.header_started_at),
+            shimmer,
+        ));
         if !spans.is_empty() {
             spans.push(" ".into());
         }
         if row.show_interrupt_hint
             && let Some(interrupt_binding) = row.interrupt_binding
         {
-            spans.extend(vec![
-                format!("({pretty_elapsed} • ").dim(),
-                interrupt_binding.into(),
-                " to interrupt)".dim(),
-            ]);
+            spans.push(format!("({pretty_elapsed} • ").dim());
+            spans.extend(interrupt_binding.spans());
+            spans.push(" to interrupt)".dim());
         } else {
             spans.push(format!("({pretty_elapsed})").dim());
         }
@@ -284,7 +300,9 @@ impl Renderable for StatusIndicator<'_> {
             return;
         }
         if self.row.animations_enabled || self.timer.display_started_at.is_some() {
-            let interval_ms = if self.row.animations_enabled {
+            let interval_ms = if self.row.animations_enabled
+                && (self.row.effects.progress || self.row.effects.shimmer)
+            {
                 32
             } else {
                 1_000
@@ -309,6 +327,23 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
+    fn changed_summary_restarts_shimmer_but_repeated_summary_keeps_phase() {
+        let (tx, _rx) = unbounded_channel();
+        let mut row = StatusIndicatorWidget::new(
+            AppEventSender::new(tx),
+            FrameRequester::test_dummy(),
+            /*animations_enabled*/ true,
+            Default::default(),
+        );
+        let previous = Instant::now() - Duration::from_secs(/*secs*/ 1);
+        row.header_started_at = previous;
+        row.update_header("Working".to_owned());
+        assert_eq!(row.header_started_at, previous);
+        row.update_header("Mapping the app structure".to_owned());
+        assert!(row.header_started_at > previous);
+    }
+
+    #[test]
     fn fmt_elapsed_compact_formats_seconds_minutes_hours() {
         assert_eq!(fmt_elapsed_compact(/*elapsed_secs*/ 0), "0s");
         assert_eq!(fmt_elapsed_compact(/*elapsed_secs*/ 1), "1s");
@@ -331,6 +366,7 @@ mod tests {
             tx,
             crate::tui::FrameRequester::test_dummy(),
             /*animations_enabled*/ true,
+            Default::default(),
         );
 
         // Render into a fixed-size test terminal and snapshot the backend.
@@ -350,6 +386,7 @@ mod tests {
             tx,
             crate::tui::FrameRequester::test_dummy(),
             /*animations_enabled*/ true,
+            Default::default(),
         );
 
         // Render into a fixed-size test terminal and snapshot the backend.
@@ -368,6 +405,7 @@ mod tests {
             tx,
             crate::tui::FrameRequester::test_dummy(),
             /*animations_enabled*/ false,
+            Default::default(),
         );
         w.update_details(
             Some("A man a plan a canal panama".to_string()),
@@ -397,6 +435,7 @@ mod tests {
             tx,
             crate::tui::FrameRequester::test_dummy(),
             /*animations_enabled*/ false,
+            Default::default(),
         );
         let mut timer = StatusTimer::default();
         timer.pause_at(timer.last_resume_at);
@@ -421,6 +460,7 @@ mod tests {
             tx,
             crate::tui::FrameRequester::test_dummy(),
             /*animations_enabled*/ false,
+            Default::default(),
         );
         w.set_interrupt_binding(Some(key_hint::plain(KeyCode::F(12)).into()));
         let mut timer = StatusTimer::default();
@@ -440,6 +480,7 @@ mod tests {
             AppEventSender::new(tx),
             crate::tui::FrameRequester::test_dummy(),
             /*animations_enabled*/ false,
+            Default::default(),
         );
         let mut timer = StatusTimer::default();
         timer.pause_at(timer.last_resume_at);
@@ -487,6 +528,7 @@ mod tests {
             tx,
             crate::tui::FrameRequester::test_dummy(),
             /*animations_enabled*/ true,
+            Default::default(),
         );
         w.update_details(
             Some("abcd abcd abcd abcd".to_string()),
@@ -511,6 +553,7 @@ mod tests {
             tx,
             crate::tui::FrameRequester::test_dummy(),
             /*animations_enabled*/ true,
+            Default::default(),
         );
         w.update_details(
             Some("cargo test -p codex-core and then cargo test -p codex-tui".to_string()),
@@ -534,3 +577,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "status_indicator_widget/effects_tests.rs"]
+mod effects_tests;

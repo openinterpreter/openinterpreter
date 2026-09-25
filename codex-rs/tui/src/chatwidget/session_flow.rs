@@ -1,14 +1,61 @@
 //! Session configuration and thread-header orchestration for `ChatWidget`.
+//! Confirmed model-picker changes can offer the flourish only on their original task; the app
+//! checks the previous model when it applies the final selection.
 
 use super::*;
+use crate::style::accent_color;
 
 impl ChatWidget {
+    /// Offer the flourish only for a successful primary thread/start without initial work.
+    pub(crate) fn mark_fresh_task_for_sparkle(
+        &mut self,
+        started: &crate::app_server_session::AppServerStartedThread,
+    ) {
+        if started.turns.is_empty()
+            && started.session.forked_from_id.is_none()
+            && !started.blocks_direct_input
+            && self.initial_user_message.is_none()
+            && !self.is_user_turn_pending_or_running()
+        {
+            self.bottom_pane
+                .mark_fresh_task_for_sparkle(&started.session.model, &self.local_settings.tui);
+        } else {
+            self.bottom_pane.dismiss_composer_sparkle();
+        }
+    }
+
+    pub(crate) fn set_sparkle_terminal_focus(&mut self, focused: bool) {
+        self.bottom_pane.set_sparkle_terminal_focus(focused);
+    }
+
+    pub(crate) fn prepare_composer_sparkle_key(&self, key: KeyEvent) {
+        self.bottom_pane.prepare_composer_sparkle_key(key);
+    }
+
+    pub(crate) fn sparkle_thread_for_picker_action(&self, model: &str) -> Option<ThreadId> {
+        self.thread_id()
+            .filter(|_| BottomPane::is_sparkle_model(model))
+    }
+
+    pub(crate) fn on_sparkle_model_selected_from_picker(&mut self, model: &str) {
+        if self.current_model() == model {
+            self.bottom_pane
+                .select_sparkle_model(model, &self.local_settings.tui);
+        }
+    }
+
     fn on_session_configured_with_display_and_fork_parent_title(
         &mut self,
         session: ThreadSessionState,
         display: SessionConfiguredDisplay,
         fork_parent_title: Option<String>,
     ) {
+        self.windows_sandbox_host =
+            if !self.windows_sandbox_local_server && self.remote_connection.is_some() {
+                crate::app::WindowsSandboxHost::Remote
+            } else {
+                session.windows_sandbox_host
+            };
         self.invalidate_permission_discovery();
         self.permission_profiles_menu_opened = false;
         self.transcript.reset_copy_history();
@@ -24,6 +71,21 @@ impl ChatWidget {
         let connector_scope_changed = previous_thread_id != Some(session.thread_id)
             || self.config.cwd.as_path() != session.cwd.as_path();
         self.thread_id = Some(session.thread_id);
+        #[cfg(target_os = "windows")]
+        if self.windows_sandbox_local_server
+            && matches!(self.codex_op_target, CodexOpTarget::AppEvent)
+        {
+            self.windows_sandbox_config = Default::default();
+            self.set_windows_sandbox_mode(/*mode*/ None);
+            self.app_event_tx.send(AppEvent::RefreshWindowsSandbox {
+                thread_id: session.thread_id,
+            });
+        }
+        self.realtime_conversation_available_for_thread =
+            self.config.features.enabled(Feature::RealtimeConversation)
+                && codex_realtime_webrtc::RealtimeWebrtcSession::is_supported();
+        self.bottom_pane
+            .set_voice_command_enabled(self.realtime_conversation_available_for_thread);
         self.bottom_pane
             .set_queue_submissions(/*queue_submissions*/ false);
         if previous_thread_id != self.thread_id {
@@ -132,16 +194,12 @@ impl ChatWidget {
                 });
         }
         self.sync_service_tier_commands();
-        self.sync_personality_command_enabled();
         self.sync_worktrees_enabled();
         self.sync_plugins_command_enabled();
         self.sync_goal_command_enabled();
         self.refresh_plugin_mentions();
         let model_for_header = self.current_model().to_string();
-        if matches!(
-            display,
-            SessionConfiguredDisplay::Normal | SessionConfiguredDisplay::PromptEdit
-        ) {
+        if display == SessionConfiguredDisplay::Normal {
             let startup_tooltip_override = self.startup_tooltip_override.take();
             let show_fast_status = self
                 .should_show_fast_status(&model_for_header, self.effective_service_tier.as_deref());
@@ -149,6 +207,7 @@ impl ChatWidget {
                 &self.config,
                 &self.local_settings,
                 &model_for_header,
+                self.model_catalog.display_name(&session.model),
                 &session,
                 self.show_welcome_banner,
                 startup_tooltip_override,
@@ -204,16 +263,6 @@ impl ChatWidget {
         );
     }
 
-    pub(crate) fn handle_prompt_edit_thread_session(&mut self, session: ThreadSessionState) {
-        self.instruction_source_paths = session.instruction_source_paths.clone();
-        let fork_parent_title = session.fork_parent_title.clone();
-        self.on_session_configured_with_display_and_fork_parent_title(
-            session,
-            SessionConfiguredDisplay::PromptEdit,
-            fork_parent_title,
-        );
-    }
-
     pub(crate) fn handle_side_thread_session(&mut self, session: ThreadSessionState) {
         self.instruction_source_paths = session.instruction_source_paths.clone();
         let fork_parent_title = session.fork_parent_title.clone();
@@ -236,9 +285,9 @@ impl ChatWidget {
             vec![
                 "• ".dim(),
                 "Thread forked from ".into(),
-                name.cyan(),
+                name.fg(accent_color()),
                 " (".into(),
-                forked_from_id_text.cyan(),
+                forked_from_id_text.fg(accent_color()),
                 ")".into(),
             ]
             .into()
@@ -246,7 +295,7 @@ impl ChatWidget {
             vec![
                 "• ".dim(),
                 "Thread forked from ".into(),
-                forked_from_id_text.cyan(),
+                forked_from_id_text.fg(accent_color()),
             ]
             .into()
         };
@@ -255,10 +304,63 @@ impl ChatWidget {
         )));
     }
 
+    /// Clear history-derived state while preserving this thread's settings and goal.
+    pub(crate) fn reset_after_prompt_revert(
+        &mut self,
+        rollout_path: Option<PathBuf>,
+        retained_turns: &[Turn],
+    ) {
+        self.current_rollout_path = rollout_path;
+        self.input_queue.clear();
+        self.reset_realtime_conversation();
+        // Finish any output not yet drained from the old runtime without live completion actions.
+        self.on_task_complete(
+            /*last_agent_message*/ None, /*completion*/ None, /*from_replay*/ true,
+        );
+        self.turn_lifecycle.reset_thread();
+        self.review = Default::default();
+        self.transcript.take_active_cell();
+        self.transcript.reset_copy_history();
+        self.transcript.reset_turn_flags();
+        for turn in retained_turns {
+            let mut replaying_delegation = false;
+            for item in &turn.items {
+                if matches!(item, ThreadItem::UserMessage { content, .. }
+                    if realtime::realtime_delegation_input(content).is_some())
+                {
+                    replaying_delegation = true;
+                }
+                if replaying_delegation && realtime::is_private_realtime_agent_item(item) {
+                    continue;
+                }
+                let (markdown, source) = match item {
+                    ThreadItem::AgentMessage { text, .. } => (
+                        parse_assistant_markdown(text, self.config.cwd.as_path()).visible_markdown,
+                        text,
+                    ),
+                    ThreadItem::Plan { text, .. } => (text.clone(), text),
+                    _ => continue,
+                };
+                if !markdown.trim().is_empty() {
+                    self.transcript
+                        .record_agent_markdown(markdown, source.clone());
+                }
+            }
+        }
+        self.transcript.last_plan_progress = None;
+        self.last_rendered_user_message_display = None;
+        self.last_rendered_user_message_client_id = None;
+        self.clear_pending_rate_limit_reset_hint();
+        self.set_token_info(/*info*/ None);
+        self.bottom_pane.clear_pending_questions();
+        self.bottom_pane.set_task_running(/*running*/ false);
+        self.refresh_status_surfaces();
+    }
+
     pub(crate) fn emit_prompt_edit_thread_event(&mut self) {
         let line: Line<'static> = vec![
             "• ".dim(),
-            "You’re continuing from this point in a new conversation".into(),
+            "Conversation reverted to this point. File changes are unchanged.".into(),
         ]
         .into();
         self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(

@@ -34,7 +34,7 @@ pub(super) async fn revert(
     let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
     store.ensure_live_recorder_absent(thread_id).await?;
-    let _writer_lock = store.writer_lock_coordinator.acquire(thread_id)?;
+    let writer_lock = store.acquire_writer_lock(thread_id)?;
 
     // Resolution may return a compressed sibling. Keep SQLite's exact stored path for the CAS.
     let expected_sqlite_path = state_db
@@ -115,6 +115,7 @@ pub(super) async fn revert(
         rollout_id,
         history_base,
         forked_from_ordinal_exclusive,
+        writer_lock,
     )
     .await?;
     let replacement_path = recorder.rollout_path().to_path_buf();
@@ -146,6 +147,7 @@ async fn create_replacement_recorder(
     rollout_id: ThreadId,
     history_base: Option<codex_protocol::protocol::HistoryPosition>,
     forked_from_ordinal_exclusive: Option<u64>,
+    writer_lock: super::WriterLockGuard,
 ) -> ThreadStoreResult<RolloutRecorder> {
     let config = RolloutConfig {
         codex_home: store.config.codex_home.clone(),
@@ -170,6 +172,7 @@ async fn create_replacement_recorder(
     .with_session_id(source_meta.session_id)
     .with_rollout_id(rollout_id)
     .with_selected_capability_roots(source_meta.selected_capability_roots)
+    .with_runtime_workspace_roots(source_meta.runtime_workspace_roots)
     .with_multi_agent_version(source_meta.multi_agent_version)
     .with_history_mode(ThreadHistoryMode::Paginated)
     .with_history_base(history_base)
@@ -178,7 +181,7 @@ async fn create_replacement_recorder(
     if let Some(context_window) = source_meta.context_window {
         params = params.with_initial_window_id(context_window.window_id);
     }
-    RolloutRecorder::new(&config, params)
+    RolloutRecorder::new_with_writer_lock(&config, params, writer_lock)
         .await
         .map_err(|err| ThreadStoreError::Internal {
             message: format!("failed to create reverted rollout: {err}"),

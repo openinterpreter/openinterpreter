@@ -57,6 +57,7 @@ use codex_app_server_protocol::TurnStartedNotification;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnSteerResponse;
 use codex_app_server_protocol::UserInput as V2UserInput;
+use codex_login::default_client::RESIDENCY_HEADER_NAME;
 use codex_protocol::protocol::CodexResponseHandoffMode;
 use codex_protocol::protocol::ConversationTextRole;
 use codex_protocol::protocol::RealtimeConversationVersion;
@@ -84,6 +85,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tempfile::TempDir;
 use test_case::test_case;
+use test_case::test_matrix;
 use tokio::time::timeout;
 use uuid::Uuid;
 use wiremock::Match;
@@ -106,6 +108,9 @@ const V2_HANDOFF_COMPLETE_ACKNOWLEDGEMENT: &str =
     "Background agent finished. Use the preceding [BACKEND] messages as the result.";
 const RESPONSE_ITEM_PREFIX: &str =
     "Use the following context to inform future responses, but do not speak it to the user.";
+
+#[path = "realtime_transcript_tests.rs"]
+mod transcript_tests;
 
 #[derive(Debug, Clone, Copy)]
 enum StartupContextConfig<'a> {
@@ -1895,6 +1900,156 @@ async fn realtime_mode_uses_client_instructions_on_entry_and_exit() -> Result<()
     Ok(())
 }
 
+const PROVIDER_RESIDENCY_ENV_VAR: &str = "CODEX_TEST_REALTIME_RESIDENCY_HEADER";
+
+#[derive(Clone, Copy, Debug)]
+enum RealtimeTransport {
+    Websocket,
+    Webrtc,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ResidencyPolicy {
+    Required,
+    Unmanaged,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ProviderHeaders {
+    Static,
+    StaticAndEnvironment,
+}
+
+#[test_matrix(
+    [RealtimeTransport::Websocket, RealtimeTransport::Webrtc],
+    [ResidencyPolicy::Required, ResidencyPolicy::Unmanaged],
+    [ProviderHeaders::Static, ProviderHeaders::StaticAndEnvironment]
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn realtime_respects_managed_residency(
+    transport: RealtimeTransport,
+    residency: ResidencyPolicy,
+    provider_headers: ProviderHeaders,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let responses_server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+    let call_capture = RealtimeCallRequestCapture::new();
+    Mock::given(method("POST"))
+        .and(path("/v1/realtime/calls"))
+        .and(call_capture.clone())
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Location", "/v1/realtime/calls/rtc_residency")
+                .set_body_string("v=answer\r\n"),
+        )
+        .mount(&responses_server)
+        .await;
+    let realtime_server = start_websocket_server_with_headers(vec![
+        open_realtime_sideband_connection(vec![vec![session_updated("sess_residency")]]),
+    ])
+    .await;
+    let responses_uri = responses_server.uri();
+    let realtime_uri = realtime_server.uri();
+    let codex_home = TempDir::new()?;
+    let mut config = MockResponsesConfig::new(&responses_uri)
+        .with_root_config(&format!(
+            "experimental_realtime_ws_base_url = \"{realtime_uri}\"\n\
+             experimental_realtime_webrtc_call_base_url = \"{responses_uri}/v1\"\n\
+             experimental_realtime_ws_startup_context = \"startup context\""
+        ))
+        .with_extra_config("[realtime]\nversion = \"v1\"\ntype = \"conversational\"")
+        .with_extra_config(
+            "[model_providers.mock_provider.http_headers]\n\
+             \"X-OpenAI-Internal-Codex-Residency\" = \"eu-static\"\n\
+             \"x-provider-header\" = \"preserved\"",
+        );
+    let configured_residency = match provider_headers {
+        ProviderHeaders::Static => "eu-static",
+        ProviderHeaders::StaticAndEnvironment => {
+            config = config.with_extra_config(&format!(
+                "[model_providers.mock_provider.env_http_headers]\n\
+                 \"x-openai-internal-codex-residency\" = \"{PROVIDER_RESIDENCY_ENV_VAR}\""
+            ));
+            "eu-environment"
+        }
+    };
+    config.write(codex_home.path())?;
+    let expected_residency = match residency {
+        ResidencyPolicy::Required => {
+            std::fs::write(
+                codex_home.path().join("requirements.toml"),
+                "enforce_residency = \"us\"\n",
+            )?;
+            "us"
+        }
+        ResidencyPolicy::Unmanaged => configured_residency,
+    };
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .with_env_overrides(&[(PROVIDER_RESIDENCY_ENV_VAR, Some("eu-environment"))])
+        .build()
+        .await?;
+    mcp.initialize().await?;
+    login_with_api_key(&mut mcp, "sk-test-key").await?;
+    let thread_request = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams::default())
+        .await?;
+    let thread: ThreadStartResponse =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(thread_request)).await??;
+    let mut harness = RealtimeE2eHarness {
+        mcp,
+        _codex_home: codex_home,
+        main_loop_responses_server: responses_server,
+        realtime_server,
+        call_capture,
+        thread_id: thread.thread.id,
+    };
+
+    match transport {
+        RealtimeTransport::Websocket => {
+            harness.start_websocket_realtime().await?;
+        }
+        RealtimeTransport::Webrtc => {
+            harness.start_webrtc_realtime("v=offer\r\n").await?;
+            let request = harness.call_capture.single_request();
+            assert_eq!(
+                request
+                    .headers
+                    .get_all(RESIDENCY_HEADER_NAME)
+                    .iter()
+                    .map(|value| value.to_str().expect("residency header should be text"))
+                    .collect::<Vec<_>>(),
+                vec![expected_residency]
+            );
+            assert_eq!(
+                request
+                    .headers
+                    .get("x-provider-header")
+                    .expect("unrelated provider header should be preserved"),
+                "preserved"
+            );
+        }
+    }
+    // The WebRTC started event precedes the asynchronous sideband connection.
+    harness.sideband_outbound_request(/*request_index*/ 0).await;
+    let handshake = harness.realtime_server.single_handshake();
+    assert_eq!(
+        (
+            handshake.header(RESIDENCY_HEADER_NAME),
+            handshake.header("x-provider-header"),
+        ),
+        (
+            Some(expected_residency.to_string()),
+            Some("preserved".to_string()),
+        )
+    );
+
+    harness.shutdown().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn realtime_webrtc_start_emits_sdp_notification() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -3358,7 +3513,7 @@ async fn websocket_v2_background_agent_returns_function_output() -> Result<()> {
                 }),
                 json!({
                     "type": "conversation.item.input_audio_transcription.completed",
-                    "transcript": "The secret word is strawberry"
+                    "transcript": "The secret word is blueberry"
                 }),
                 json!({
                     "type": "conversation.item.created",
@@ -3373,7 +3528,7 @@ async fn websocket_v2_background_agent_returns_function_output() -> Result<()> {
                 }),
                 json!({
                     "type": "response.output_audio_transcript.delta",
-                    "delta": "Got it-strawberry. What's next on the menu?"
+                    "delta": "Got it-blueberry. What's next on the menu?"
                 }),
                 v2_background_agent_tool_call("call_v2", "run ls"),
             ],
@@ -3404,7 +3559,7 @@ async fn websocket_v2_background_agent_returns_function_output() -> Result<()> {
     assert!(
         response_request_contains_text(
             &requests[0],
-            "<realtime_delegation>\n  <input>run ls</input>\n  <transcript_delta>user: Hi how are you\nassistant: Doing well, what can I help you with?\nuser: The secret word is strawberry\nassistant: Got it-strawberry. What's next on the menu?\nuser: run ls</transcript_delta>\n</realtime_delegation>",
+            "<realtime_delegation>\n  <input>run ls</input>\n  <transcript_delta>user: Hi how are you\nassistant: Doing well, what can I help you with?\nuser: The secret word is blueberry\nassistant: Got it-blueberry. What's next on the menu?\nuser: run ls</transcript_delta>\n</realtime_delegation>",
         ),
         "delegated Responses request should contain realtime delegation envelope: {}",
         requests[0]

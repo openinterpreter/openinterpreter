@@ -1,5 +1,6 @@
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ImageDetail;
+use codex_protocol::models::ImageReference;
 use codex_utils_image::data_url_from_bytes;
 use image::DynamicImage;
 use image::GenericImageView;
@@ -150,7 +151,7 @@ pub(super) async fn handle(
                 text: format!("<image path=\"{absolute_path}\">"),
             },
             FunctionCallOutputContentItem::InputImage {
-                image_url,
+                image: ImageReference::Inline { image_url },
                 detail: Some(ImageDetail::Original),
             },
             FunctionCallOutputContentItem::InputText {

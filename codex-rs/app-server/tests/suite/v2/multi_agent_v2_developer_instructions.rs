@@ -198,7 +198,7 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     config
         .with_extra_config(&feature_config)
         .write(codex_home.path())?;
-    write_models_cache(codex_home.path())?;
+    write_models_cache(codex_home.path()).await?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build_initialized()
@@ -379,7 +379,7 @@ async fn compacted_full_history_fork_replaces_parent_developer_instructions() ->
             "[features.multi_agent_v2]\nenabled = true\nsubagent_developer_instructions = {CHILD_INSTRUCTIONS:?}"
         ))
         .write(codex_home.path())?;
-    write_models_cache(codex_home.path())?;
+    write_models_cache(codex_home.path()).await?;
 
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -641,7 +641,7 @@ async fn cold_resume_preserves_effective_developer_instructions_for_worker(
         ))
         .with_extra_config(&feature_config)
         .write(codex_home.path())?;
-    write_models_cache(codex_home.path())?;
+    write_models_cache(codex_home.path()).await?;
 
     let (thread_id, child_resume_params, baseline) = {
         let mut app_server = TestAppServer::builder()
@@ -863,7 +863,7 @@ features.shell_tool = false
     assert!(loaded.data.contains(&thread_id));
     assert!(!loaded.data.contains(&child_thread_id));
 
-    let mut expected = baseline;
+    let expected = baseline;
     if history_mode == ThreadHistoryMode::Paginated {
         let state_db = StateRuntime::init(
             codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
@@ -881,11 +881,11 @@ features.shell_tool = false
         else {
             anyhow::bail!("expected worker thread-spawn source");
         };
-        // Stale display metadata must not choose which parent controls the resume.
+        // Stale display metadata must not choose which parent controls the resume;
+        // the resume checkpoint restores the canonical source.
         *parent_thread_id = ThreadId::new();
         metadata.source = serde_json::to_string(&source)?;
         state_db.upsert_thread(&metadata).await?;
-        expected.thread.source = source.into();
     }
 
     let is_child_usage = |notification: &JSONRPCNotification| {

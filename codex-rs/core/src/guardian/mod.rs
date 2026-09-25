@@ -3,21 +3,31 @@
 //! review requirements. Each approval retains its issuing context and cancellation.
 
 mod approval_request;
-mod assessment;
 mod coverage;
 mod decision;
 mod feedback;
-mod metrics;
+mod input_budget;
 mod prompt;
+pub(crate) use input_budget::PendingReviewContext;
+pub(crate) use input_budget::check_pending as check_pending_guardian_input;
+pub(crate) use input_budget::finalize as finalize_guardian_input;
+mod request_budget;
+pub(crate) use request_budget::ExhaustedReviewBudget;
+pub(crate) use request_budget::check_prompt as check_guardian_prompt_budget;
+pub(crate) use request_budget::observe as observe_guardian_request;
 mod review;
 mod review_session;
 mod reviewer_config;
+pub(crate) use reviewer_config::resolve_review_model;
 mod runtime;
+#[cfg(test)]
+pub(crate) mod test_host;
 
+use codex_protocol::items::ModelInvocationContext;
 use std::sync::Arc;
-use std::time::Duration;
 
 use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -37,39 +47,30 @@ pub(crate) use approval_request::GuardianNetworkAccessTrigger;
 pub(crate) use approval_request::guardian_approval_request_to_json;
 pub(crate) use decision::decide_approval;
 pub(crate) use decision::spawn_approval_decision;
-pub(crate) use prompt::BUNDLED_GUARDIAN_POLICY;
-pub(crate) use prompt::BUNDLED_GUARDIAN_POLICY_TEMPLATE;
 pub(crate) use prompt::guardian_truncate_text;
 pub(crate) use review::GuardianReviewOptions;
-pub(crate) use review::guardian_timeout_message;
 pub(crate) use review::is_basic_session_source;
 pub(crate) use review::new_guardian_review_id;
-#[cfg(test)]
-pub(crate) use review::record_guardian_denial_for_test;
 pub(crate) use review::routes_approval_policy_to_guardian;
-pub(crate) use review::routes_approval_to_guardian;
+pub use review_session::GuardianReviewSession;
 pub(crate) use review_session::GuardianReviewSessionManager;
+pub use review_session::GuardianReviewState;
+pub use review_session::PreparedGuardianContext;
+pub use review_session::prepare_review_prewarm;
+
 pub(crate) use review_session::prompt_cache_key_override_for_review_session;
 pub(crate) use runtime::ReviewAction;
 
-pub(crate) const GUARDIAN_REVIEW_TIMEOUT: Duration = Duration::from_secs(90);
+pub(crate) use codex_guardian_reviewer::REVIEW_TIMEOUT as GUARDIAN_REVIEW_TIMEOUT;
 pub(crate) const GUARDIAN_REVIEWER_NAME: &str = "guardian";
-pub(crate) const MAX_CONSECUTIVE_CYBER_GUARDIAN_DENIALS_PER_TURN: u32 = 1;
-pub(crate) const MAX_CONSECUTIVE_GUARDIAN_DENIALS_PER_TURN: u32 = 3;
-pub(crate) const MAX_RECENT_CYBER_AUTO_REVIEW_DENIALS_PER_TURN: u32 = 1;
-pub(crate) const MAX_RECENT_AUTO_REVIEW_DENIALS_PER_TURN: u32 = 10;
-pub(crate) const AUTO_REVIEW_DENIAL_WINDOW_SIZE: usize = 50;
 pub(crate) const AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX: &str =
     codex_guardian_context::MANUAL_APPROVAL_DEVELOPER_PREFIX;
-const GUARDIAN_MAX_MESSAGE_TRANSCRIPT_TOKENS: usize = 20_000;
-const GUARDIAN_MAX_TOOL_TRANSCRIPT_TOKENS: usize = 10_000;
-const GUARDIAN_MAX_MESSAGE_ENTRY_TOKENS: usize = 5_000;
-const GUARDIAN_MAX_TOOL_ENTRY_TOKENS: usize = 1_000;
+const GUARDIAN_MAX_TOOL_ENTRY_TOKENS: usize = codex_guardian_context::ContextProfile::synchronous()
+    .transcript
+    .entry_limits
+    .tool_tokens;
 pub(crate) const GUARDIAN_MAX_ROOT_MESSAGE_TOKENS: usize = 900;
 pub(crate) const GUARDIAN_MAX_NODE_REPL_TOOL_RESULT_TOKENS: usize = 6_000;
-pub(crate) const GUARDIAN_MAX_ACTION_BYTES: usize = 50_000 * 4;
-const GUARDIAN_MAX_ACTION_STRING_TOKENS: usize = 16_000;
-const GUARDIAN_RECENT_ENTRY_LIMIT: usize = 40;
 
 /// Captures review inputs from the issuing step without retaining its MCP bindings or tool router.
 /// Background network approvals and Unix interception use the active task's resolved settings.
@@ -78,35 +79,46 @@ const GUARDIAN_RECENT_ENTRY_LIMIT: usize = 40;
 /// MCP elicitation reviews continue to use turn-only inputs.
 #[derive(Clone)]
 pub(crate) struct GuardianReviewContext {
-    /// The response currently handled in this execution context.
+    /// The latest response ID received in this turn when review was requested.
     pub(crate) parent_response_id: Option<String>,
     turn: Arc<TurnContext>,
     environments: TurnEnvironmentSnapshot,
     // Model and reasoning inputs are carried for the follow-up Guardian and V2 migrations.
-    #[expect(dead_code)]
     pub(crate) model_info: Arc<ModelInfo>,
-    #[expect(dead_code)]
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
-    #[expect(dead_code)]
     pub(crate) reasoning_summary: ReasoningSummary,
+    pub(crate) personality: Option<Personality>,
     pub(crate) approval_policy: AskForApproval,
     pub(crate) approvals_reviewer: ApprovalsReviewer,
 }
 
 impl GuardianReviewContext {
+    pub(crate) fn model_context(&self) -> ModelInvocationContext {
+        ModelInvocationContext {
+            model_slug: self.model_info.slug.clone(),
+            reasoning_effort: self
+                .reasoning_effort
+                .as_ref()
+                .or(self.model_info.default_reasoning_level.as_ref())
+                .map(ToString::to_string),
+        }
+    }
+
     pub(crate) fn from_resolved_settings(
         turn: Arc<TurnContext>,
         settings: &ResolvedStepSettings,
+        environments: &TurnEnvironmentSnapshot,
     ) -> Self {
         Self {
             parent_response_id: turn
                 .extension_data
                 .get::<codex_api::ResponseId>()
                 .map(|id| id.0.clone()),
-            environments: turn.environments.clone(),
+            environments: environments.clone(),
             model_info: Arc::clone(&settings.model_info),
             reasoning_effort: settings.reasoning_effort().cloned(),
             reasoning_summary: settings.reasoning_summary,
+            personality: settings.personality(),
             approval_policy: settings.approval_policy(),
             approvals_reviewer: settings.approvals_reviewer(),
             turn,
@@ -135,6 +147,7 @@ impl From<&Arc<StepContext>> for GuardianReviewContext {
             model_info: Arc::clone(&step.settings.model_info),
             reasoning_effort: step.settings.reasoning_effort().cloned(),
             reasoning_summary: step.settings.reasoning_summary,
+            personality: step.settings.personality(),
             approval_policy: step.settings.approval_policy(),
             approvals_reviewer: step.settings.approvals_reviewer(),
         }
@@ -148,10 +161,11 @@ impl From<Arc<TurnContext>> for GuardianReviewContext {
                 .extension_data
                 .get::<codex_api::ResponseId>()
                 .map(|id| id.0.clone()),
-            environments: turn.environments.clone(),
+            environments: turn.initial_environments.clone(),
             model_info: Arc::clone(turn.model_info()),
             reasoning_effort: turn.reasoning_effort().cloned(),
             reasoning_summary: turn.reasoning_summary(),
+            personality: turn.personality(),
             approval_policy: turn.approval_policy(),
             approvals_reviewer: turn.config.approvals_reviewer,
             turn,
@@ -165,95 +179,16 @@ impl From<&Arc<TurnContext>> for GuardianReviewContext {
     }
 }
 
-pub use assessment::GuardianAssessment;
-pub use assessment::guardian_output_schema;
-pub use assessment::parse_guardian_assessment;
-pub use reviewer_config::build_guardian_review_session_config;
-
-#[derive(Debug, Default)]
-pub(crate) struct GuardianRejectionCircuitBreaker {
-    turns: std::collections::HashMap<String, GuardianRejectionCircuitBreakerTurn>,
-}
-
-#[derive(Debug, Default)]
-struct GuardianRejectionCircuitBreakerTurn {
-    consecutive_denials: u32,
-    recent_denials: std::collections::VecDeque<bool>,
-    interrupt_triggered: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum GuardianRejectionCircuitBreakerPolicy {
-    Standard,
-    CyberModel,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum GuardianRejectionCircuitBreakerAction {
-    Continue,
-    InterruptTurn {
-        consecutive_denials: u32,
-        recent_denials: u32,
-    },
-}
-
-impl GuardianRejectionCircuitBreaker {
-    pub(crate) fn clear_turn(&mut self, turn_id: &str) {
-        self.turns.remove(turn_id);
-    }
-
-    pub(crate) fn record_denial(
-        &mut self,
-        turn_id: &str,
-        policy: GuardianRejectionCircuitBreakerPolicy,
-    ) -> GuardianRejectionCircuitBreakerAction {
-        let turn = self.turns.entry(turn_id.to_string()).or_default();
-        turn.consecutive_denials = turn.consecutive_denials.saturating_add(1);
-        Self::record_recent_review(turn, /*denied*/ true);
-        let recent_denials = turn.recent_denials.iter().filter(|denied| **denied).count() as u32;
-        let (max_consecutive_denials, max_recent_denials) = match policy {
-            GuardianRejectionCircuitBreakerPolicy::Standard => (
-                MAX_CONSECUTIVE_GUARDIAN_DENIALS_PER_TURN,
-                MAX_RECENT_AUTO_REVIEW_DENIALS_PER_TURN,
-            ),
-            GuardianRejectionCircuitBreakerPolicy::CyberModel => (
-                MAX_CONSECUTIVE_CYBER_GUARDIAN_DENIALS_PER_TURN,
-                MAX_RECENT_CYBER_AUTO_REVIEW_DENIALS_PER_TURN,
-            ),
-        };
-        if !turn.interrupt_triggered
-            && (turn.consecutive_denials >= max_consecutive_denials
-                || recent_denials >= max_recent_denials)
-        {
-            turn.interrupt_triggered = true;
-            GuardianRejectionCircuitBreakerAction::InterruptTurn {
-                consecutive_denials: turn.consecutive_denials,
-                recent_denials,
-            }
-        } else {
-            GuardianRejectionCircuitBreakerAction::Continue
-        }
-    }
-
-    pub(crate) fn record_non_denial(&mut self, turn_id: &str) {
-        let turn = self.turns.entry(turn_id.to_string()).or_default();
-        turn.consecutive_denials = 0;
-        Self::record_recent_review(turn, /*denied*/ false);
-    }
-
-    fn record_recent_review(turn: &mut GuardianRejectionCircuitBreakerTurn, denied: bool) {
-        turn.recent_denials.push_back(denied);
-        if turn.recent_denials.len() > AUTO_REVIEW_DENIAL_WINDOW_SIZE {
-            turn.recent_denials.pop_front();
-        }
-    }
-}
+#[cfg(test)]
+use codex_guardian_reviewer::guardian_output_schema;
 
 pub(crate) use approval_request::format_guardian_action_pretty;
 #[cfg(test)]
 use approval_request::guardian_assessment_action;
 #[cfg(test)]
 use approval_request::guardian_request_turn_id;
+#[cfg(test)]
+use codex_guardian_reviewer::GuardianReviewOutcome;
 #[cfg(test)]
 use prompt::GuardianPromptMode;
 #[cfg(test)]
@@ -264,8 +199,6 @@ use prompt::build_guardian_prompt_items;
 use prompt::build_guardian_prompt_items_with_parent_turn;
 #[cfg(test)]
 use prompt::render_guardian_transcript_entries;
-#[cfg(test)]
-use review::GuardianReviewOutcome;
 #[cfg(test)]
 use review::run_guardian_review_session_with_retry as run_guardian_review_session_for_test;
 #[cfg(test)]

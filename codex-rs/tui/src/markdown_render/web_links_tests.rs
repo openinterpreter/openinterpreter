@@ -1,6 +1,7 @@
 use super::WebLinkDisplay;
 use crate::markdown_render::render_markdown_lines_with_width_cwd_and_hidden_link_destinations;
 use crate::markdown_render::render_streaming_markdown_lines_with_width_and_cwd;
+use crate::style::accent_color;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_hyperlinks::TerminalHyperlink;
 use crate::terminal_hyperlinks::visible_lines;
@@ -9,10 +10,61 @@ use codex_terminal_detection::TerminalInfo;
 use codex_terminal_detection::TerminalName;
 use insta::assert_debug_snapshot;
 use pretty_assertions::assert_eq;
+use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Text;
 use std::collections::BTreeSet;
+
+#[test]
+fn bare_urls_are_styled_without_coloring_surrounding_prose() {
+    let text = Text::from(visible_lines(render(
+        "界 (https://example.com/a); https://example.com/b! **https://example.com/c**",
+        /*width*/ 100,
+        WebLinkDisplay::LabelOnly,
+    )));
+    assert_eq!(
+        text,
+        Text::from(Line::from(vec![
+            "界 (".into(),
+            "https://example.com/a".fg(accent_color()).underlined(),
+            "); ".into(),
+            "https://example.com/b".fg(accent_color()).underlined(),
+            "! ".into(),
+            "https://example.com/c"
+                .bold()
+                .fg(accent_color())
+                .underlined(),
+        ])),
+    );
+    assert_debug_snapshot!(text);
+}
+
+#[test]
+fn bare_url_styling_preserves_tabs_and_unicode() {
+    let line = super::style_bare_web_urls(
+        "界\t(https://example.com).".bold(),
+        Style::new().fg(accent_color()).underlined(),
+    );
+    assert_eq!(
+        line.line,
+        Line::from(vec![
+            "界\t(".bold(),
+            "https://example.com".bold().fg(accent_color()).underlined(),
+            ").".bold(),
+        ]),
+    );
+}
+
+#[test]
+fn bare_urls_keep_link_style_when_wrapped_in_tables() {
+    let text = Text::from(visible_lines(render(
+        "| Resource |\n| --- |\n| https://example.com/docs |",
+        /*width*/ 20,
+        WebLinkDisplay::LabelOnly,
+    )));
+    assert_debug_snapshot!(text);
+}
 
 fn terminal(name: TerminalName) -> TerminalInfo {
     TerminalInfo {
@@ -49,29 +101,36 @@ fn supporting_terminals_render_only_the_styled_label_and_keep_its_target() {
     ] {
         let display = WebLinkDisplay::for_terminal(&terminal(name), /*term*/ None);
         for (markdown, label) in [
-            ("[label](https://example.com)", "label".cyan().underlined()),
+            (
+                "[label](https://example.com)",
+                "label".fg(accent_color()).underlined(),
+            ),
             (
                 "[`label`](https://example.com)",
-                "label".cyan().underlined(),
+                "label".fg(accent_color()).underlined(),
             ),
             (
                 "[**label**](https://example.com)",
-                "label".cyan().bold().underlined(),
+                "label".fg(accent_color()).bold().underlined(),
             ),
             (
                 "[*label*](https://example.com)",
-                "label".cyan().italic().underlined(),
+                "label".fg(accent_color()).italic().underlined(),
             ),
-            ("[<b>](https://example.com)", "<b>".cyan().underlined()),
+            (
+                "[<b>](https://example.com)",
+                "<b>".fg(accent_color()).underlined(),
+            ),
             (
                 "[https://example.com](https://example.com)",
-                "https://example.com".cyan().underlined(),
+                "https://example.com".fg(accent_color()).underlined(),
             ),
         ] {
             let label_width = label.width();
             assert_eq!(
                 render(markdown, /*width*/ 80, display),
                 vec![HyperlinkLine {
+                    source: None,
                     line: Line::from(label),
                     hyperlinks: vec![TerminalHyperlink::web(
                         0..label_width,
@@ -179,6 +238,7 @@ fn streaming_and_full_render_agree_with_label_only_links() {
                 Some(width),
                 /*cwd*/ None,
                 &|destination| display.hide_destination(destination),
+                crate::markdown_render::ListSpacing::AfterMultiline,
             );
             assert_eq!(streamed.lines, render(prefix, width, display));
         }

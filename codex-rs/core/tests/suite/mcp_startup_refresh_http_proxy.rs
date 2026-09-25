@@ -366,7 +366,7 @@ async fn skill_mcp_dependency_oauth_uses_configured_http_client() -> Result<()> 
         permission_profile: PermissionProfileSnapshot::legacy(PermissionProfile::Disabled),
         shell_environment_policy: Default::default(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&fixture.config),
-        windows_sandbox_private_desktop: fixture.config.permissions.windows_sandbox_private_desktop,
+        windows_sandbox_type: fixture.config.permissions.windows_sandbox_type,
         use_legacy_landlock: fixture.config.features.use_legacy_landlock(),
         exec_policy: None,
         mcp_policy: Some(EnvironmentMcpPolicy {
@@ -419,6 +419,7 @@ async fn skill_mcp_dependency_oauth_uses_configured_http_client() -> Result<()> 
             client_id: None,
             callback_url: None,
             callback_port: Some(skill_callback_port),
+            ..Default::default()
         })
     );
     assert!(!servers.contains_key(DENIED_SERVER_NAME));

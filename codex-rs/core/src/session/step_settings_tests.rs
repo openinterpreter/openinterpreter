@@ -10,13 +10,13 @@ use codex_config::Sourced;
 use codex_features::Feature;
 use codex_models_manager::manager::StaticModelsManager;
 use codex_models_manager::model_info::model_info_from_slug;
+use codex_prompts::render_model_instructions;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
 use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::AutoReviewMessages;
 use codex_protocol::openai_models::GuardianV2ModelConfig;
-use codex_protocol::openai_models::ModelInstructionsVariables;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::TruncationPolicyConfig;
 use codex_protocol::permissions::FileSystemAccessMode;
@@ -407,7 +407,7 @@ fn collaboration_replacement_wins_and_effort_clear_remains_sparse() {
 async fn model_resolution_preserves_startup_overrides_and_instruction_provenance(
     provenance: BaseInstructionsProvenance,
 ) {
-    let configured_instructions = "explicit {{ personality }}";
+    let configured_instructions = "explicit instructions";
     let auto_review = AutoReviewMessages {
         policy: Some("catalog review policy".to_string()),
         policy_template: Some("catalog review template".to_string()),
@@ -430,12 +430,8 @@ async fn model_resolution_preserves_startup_overrides_and_instruction_provenance
         .as_mut()
         .expect("test model should have instruction metadata");
     messages.instructions_template =
-        Some("Catalog B.\n# Personality\n{{ personality }}\n# Rules\nKeep the rules.".to_string());
-    messages.instructions_variables = Some(ModelInstructionsVariables {
-        personality_default: Some("default".to_string()),
-        personality_friendly: Some("friendly".to_string()),
-        personality_pragmatic: Some("pragmatic".to_string()),
-    });
+        Some("Catalog B.\n# Personality\nfixed\n# Rules\nKeep the rules.".to_string());
+    messages.instructions_variables = None;
     messages.auto_review = Some(auto_review);
     messages.guardian_v2 = Some(guardian_v2);
     let catalog = ModelsResponse {
@@ -456,28 +452,14 @@ async fn model_resolution_preserves_startup_overrides_and_instruction_provenance
     // Capture the same filtered explicit overrides that session startup owns.
     let overrides = ModelInfoOverrides::from(config.to_models_manager_config());
 
-    for (personality, personality_enabled, catalog_instructions) in [
+    for (personality, catalog_instructions) in [
         (
             Personality::Friendly,
-            true,
-            "Catalog B.\n# Personality\nfriendly\n# Rules\nKeep the rules.",
+            "Catalog B.\n# Personality\nfixed\n# Rules\nKeep the rules.",
         ),
-        (
-            Personality::None,
-            true,
-            "Catalog B.\n# Rules\nKeep the rules.",
-        ),
-        (
-            Personality::Friendly,
-            false,
-            "Catalog B.\n# Personality\ndefault\n# Rules\nKeep the rules.",
-        ),
+        (Personality::None, "Catalog B.\n# Rules\nKeep the rules."),
     ] {
         config.personality = Some(personality);
-        config
-            .features
-            .set_enabled(Feature::Personality, personality_enabled)
-            .expect("test config should allow personality changes");
         let mut settings = configured_settings();
         settings.collaboration_mode = settings.collaboration_mode.with_updates(
             Some("model-b".to_string()),
@@ -490,15 +472,11 @@ async fn model_resolution_preserves_startup_overrides_and_instruction_provenance
             .get_model_info("model-b", &config.to_models_manager_config())
             .await;
         let resolved = settings
-            .resolve_model_info(
-                &models_manager,
-                &overrides,
-                config.features.enabled(Feature::Personality),
-            )
+            .resolve_model_info(&models_manager, &overrides)
             .await;
         assert_eq!(resolved, legacy);
         assert_eq!(
-            resolved.get_model_instructions(settings.personality),
+            render_model_instructions(&resolved),
             if explicit_instructions {
                 configured_instructions
             } else {

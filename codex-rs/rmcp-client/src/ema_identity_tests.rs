@@ -91,6 +91,83 @@ async fn discovery() -> (MockServer, String) {
     (server, issuer)
 }
 
+#[tokio::test]
+async fn enterprise_discovery_shares_idp_checks_but_keeps_login_endpoint_policy() -> Result<()> {
+    for case in [
+        "valid",
+        "missing-discovery",
+        "issuer",
+        "missing-issuer",
+        "token-endpoint",
+        "public-client",
+        "authorization-endpoint",
+    ] {
+        let server = MockServer::start().await;
+        let issuer = format!("{}/idp", server.uri());
+        // Login need not advertise ID-JAG exchange capabilities.
+        let mut metadata = json!({
+            "issuer": issuer, "authorization_endpoint": format!("{issuer}/authorize"),
+            "token_endpoint": format!("{issuer}/token"),
+            "token_endpoint_auth_methods_supported": ["none"],
+            "grant_types_supported": ["authorization_code"],
+        });
+        match case {
+            "issuer" => metadata["issuer"] = json!("https://other.example"),
+            "missing-issuer" => {
+                metadata.as_object_mut().expect("metadata").remove("issuer");
+            }
+            "token-endpoint" => metadata["token_endpoint"] = json!("http://unsafe.example/token"),
+            "public-client" => {
+                metadata["token_endpoint_auth_methods_supported"] = json!(["client_secret_basic"])
+            }
+            "authorization-endpoint" => {
+                metadata["authorization_endpoint"] = json!("http://unsafe.example/authorize")
+            }
+            "valid" | "missing-discovery" => {}
+            _ => unreachable!(),
+        }
+        if case != "missing-discovery" {
+            Mock::given(method("GET"))
+                .and(path("/.well-known/oauth-authorization-server/idp"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(metadata))
+                .mount(&server)
+                .await;
+        }
+        let client = Arc::new(OAuthHttpClientAdapter::new_with_redirect_mode(
+            Arc::new(RouteAwareHttpClient::new(HttpClientFactory::new(
+                OutboundProxyPolicy::ReqwestDefault,
+            ))),
+            build_default_headers(/*http_headers*/ None, /*env_http_headers*/ None)?,
+            &issuer,
+            /*has_configured_headers*/ false,
+            StreamableHttpRedirectMode::Legacy,
+        )?);
+        let shared = resolve_ema_idp_authorization_manager(&issuer, client.clone()).await;
+        let login = crate::enterprise_oauth_login::resolve_enterprise_authorization_manager(
+            &issuer, client,
+        )
+        .await;
+        assert_eq!(
+            (shared.is_ok(), login.is_ok()),
+            (
+                matches!(case, "valid" | "authorization-endpoint"),
+                case == "valid"
+            ),
+            "{case}",
+        );
+        if case == "missing-discovery" {
+            assert_eq!(
+                shared
+                    .err()
+                    .expect("reject synthesized metadata")
+                    .to_string(),
+                "enterprise IdP must publish authorization metadata",
+            );
+        }
+    }
+    Ok(())
+}
+
 const REREAD_TEST_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 5);
 const REREAD_PANIC_SENTINEL: &str = "credential-panic-payload-sentinel";
 
@@ -175,10 +252,9 @@ async fn refresh_subject_reread_is_cancellable_and_releases_guard_on_failure() -
             entered: Arc::new(Mutex::new(Some(entered_tx))),
             release: Arc::new(Mutex::new(release_rx)),
         };
-        let mut identity = Box::pin(resolve_ema_idp_identity_in(
-            request(&issuer, &snapshot),
-            &keyring,
-        ));
+        let request = request(&issuer, &snapshot);
+        crate::oauth::test_support::warm_http_client(request.http_client.as_ref()).await?;
+        let mut identity = Box::pin(resolve_ema_idp_identity_in(request, &keyring));
         tokio::select! {
             result = &mut identity => {
                 result?;

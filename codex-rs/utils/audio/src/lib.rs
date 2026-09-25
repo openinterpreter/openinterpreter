@@ -246,6 +246,11 @@ fn prepare_audio(audio_url: &mut String) -> Result<(), AudioPreparationError> {
             .map_err(|_| AudioPreparationError::InvalidDataUrl {
                 reason: "invalid base64 payload",
             })?;
+    if bytes.is_empty() {
+        return Err(AudioPreparationError::InvalidDataUrl {
+            reason: "audio payload is empty",
+        });
+    }
     if bytes.len() > MAX_PROMPT_AUDIO_INPUT_BYTES {
         return Err(AudioPreparationError::AudioTooLarge { size: bytes.len() });
     }

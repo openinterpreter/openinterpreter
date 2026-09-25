@@ -61,3 +61,72 @@ fn normalizes_legacy_form_capability_into_extensions() {
         )]))
     );
 }
+
+#[test]
+fn user_verification_is_projected_only_to_the_host_owned_plugin_service() {
+    use crate::catalog::McpServerRegistration;
+    use crate::catalog::ResolvedMcpCatalog;
+    use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
+    use crate::mcp::codex_apps_mcp_server_config;
+    use codex_rmcp_client::McpProtocolMode;
+
+    let config = codex_apps_mcp_server_config(
+        "https://example.com",
+        /*apps_mcp_product_sku*/ None,
+        /*originator*/ None,
+    );
+    let extensions = ClientMcpExtensions::new([(
+        OPENAI_ELICITATION_EXTENSION_ID.to_string(),
+        json!({"form": {}, "userVerification": {}}),
+    )]);
+    for (name, registration, settings) in [
+        (
+            CODEX_APPS_MCP_SERVER_NAME,
+            McpServerRegistration::from_hosted_apps(
+                "host",
+                /*contribution_order*/ 0,
+                config.clone(),
+            ),
+            json!({"form": {}, "userVerification": {}}),
+        ),
+        (
+            CODEX_APPS_MCP_SERVER_NAME,
+            McpServerRegistration::from_hosted_apps(
+                "host",
+                /*contribution_order*/ 0,
+                config.clone(),
+            )
+            .with_protocol_mode(McpProtocolMode::V20260728),
+            json!({"form": {}, "userVerification": {}}),
+        ),
+        (
+            CODEX_APPS_MCP_SERVER_NAME,
+            McpServerRegistration::from_extension(
+                CODEX_APPS_MCP_SERVER_NAME.into(),
+                "ordinary",
+                /*contribution_order*/ 0,
+                config.clone(),
+            )
+            .with_protocol_mode(McpProtocolMode::V20260728),
+            json!({"form": {}}),
+        ),
+        (
+            CODEX_APPS_MCP_SERVER_NAME,
+            McpServerRegistration::from_config(CODEX_APPS_MCP_SERVER_NAME.into(), config.clone()),
+            json!({"form": {}}),
+        ),
+        (
+            "attached",
+            McpServerRegistration::from_config("attached".into(), config),
+            json!({"form": {}}),
+        ),
+    ] {
+        let mut catalog = ResolvedMcpCatalog::builder();
+        catalog.register(registration);
+        let catalog = catalog.build();
+        assert_eq!(
+            server_mcp_extensions(&extensions, name, catalog.server(name)),
+            ClientMcpExtensions::new([(OPENAI_ELICITATION_EXTENSION_ID.to_string(), settings)]),
+        );
+    }
+}
