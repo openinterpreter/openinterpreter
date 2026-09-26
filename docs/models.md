@@ -182,10 +182,12 @@ server:
 OLLAMA_CONTEXT_LENGTH=32768 ollama serve
 ```
 
-If the server truncates the beginning of the request, a model may answer from
-guesses, print a tool call as ordinary text, or ask you to run a command instead
-of invoking a tool. These are model/server compatibility symptoms, not evidence
-that the requested filesystem action happened.
+If the context window is too small for the full request, the model may answer
+from a truncated prompt — raising it (above) fixes that. Separately, some models
+emit a tool call as ordinary text (or ask you to run a command) even when the
+whole request fits: that is a model or template limitation, not truncation, so a
+larger context window will not fix it. Either way, text that looks like a tool
+call is not evidence the action ran.
 
 The `qwen-code` harness uses the Chat Completions transport. For Qwen models on
 Ollama, select that transport explicitly so the inferred Qwen harness can use
