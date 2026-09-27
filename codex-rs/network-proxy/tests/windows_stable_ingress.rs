@@ -297,12 +297,16 @@ async fn build_proxy(
         socks_url: format!("socks5://{socks_addr}"),
         enable_socks5,
         enable_socks5_udp: false,
-        allow_local_binding: true,
+        allow_local_binding: Some(true),
         mode: NetworkMode::Full,
         ..NetworkProxyConfig::default()
     };
     config.set_allowed_domains(vec![allowed_domain.to_string()]);
-    let config_state = build_config_state(config, Default::default())?;
+    let config_state = build_config_state(
+        config,
+        Default::default(),
+        codex_network_proxy::Platform::native(),
+    )?;
     let reloader = Arc::new(StaticReloader(config_state.clone()));
     let state = Arc::new(NetworkProxyState::with_reloader(config_state, reloader));
     let mut builder = NetworkProxy::builder().state(state);
@@ -448,9 +452,7 @@ fn run_restricted_child_blocking(
             /*logs_base_dir*/ None,
             /*stdio*/ None,
             /*console_mode*/ ConsoleMode::Inherit,
-            LaunchDesktop::prepare(
-                /*use_private_desktop*/ false, /*logs_base_dir*/ None,
-            )?,
+            LaunchDesktop::prepare(/*logs_base_dir*/ None)?,
         )?
     };
     let process = unsafe {

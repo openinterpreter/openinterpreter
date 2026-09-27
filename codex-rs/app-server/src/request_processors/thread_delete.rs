@@ -41,7 +41,7 @@ impl ThreadRequestProcessor {
         self.validate_root_thread_delete(thread_id, thread_ids.len() > 1)
             .await?;
         for thread_id_to_delete in thread_ids.iter().copied() {
-            self.prepare_thread_for_delete(thread_id_to_delete).await;
+            self.prepare_thread_for_delete(thread_id_to_delete).await?;
         }
 
         let mut delete_order: Vec<_> = thread_ids.iter().skip(1).rev().copied().collect();
@@ -53,17 +53,6 @@ impl ThreadRequestProcessor {
             })
             .await
             .map_err(thread_store_delete_error)?;
-
-        if let Some(state_db) = self.state_db.as_ref() {
-            state_db
-                .delete_threads_strict(thread_ids.as_slice())
-                .await
-                .map_err(|err| {
-                    internal_error(format!(
-                        "failed to delete app-server state for {thread_id}: {err}"
-                    ))
-                })?;
-        }
 
         deleted_thread_ids.extend(
             delete_order
@@ -136,11 +125,15 @@ impl ThreadRequestProcessor {
         }
     }
 
-    async fn prepare_thread_for_delete(&self, thread_id: ThreadId) {
-        self.prepare_thread_for_removal(thread_id, "delete").await;
+    async fn prepare_thread_for_delete(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<(), JSONRPCErrorError> {
+        self.prepare_thread_for_removal(thread_id, "delete").await?;
         if let Some(log_db) = self.log_db.as_ref() {
             log_db.flush().await;
         }
+        Ok(())
     }
 }
 

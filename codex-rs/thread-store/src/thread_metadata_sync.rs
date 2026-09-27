@@ -460,6 +460,7 @@ mod tests {
             history_base: None,
             subagent_history_start_ordinal: None,
             initial_window_id: uuid::Uuid::now_v7().to_string(),
+            runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: None,
                 model_provider: "test-provider".to_string(),
@@ -630,6 +631,7 @@ mod tests {
             .observe_appended_items(&[RolloutItem::EventMsg(EventMsg::TurnStarted(
                 TurnStartedEvent {
                     turn_id: "turn-1".to_string(),
+                    root_turn_id: None,
                     trace_id: None,
                     started_at: None,
                     model_context_window: None,
@@ -655,6 +657,7 @@ mod tests {
             ThreadSettingsAppliedEvent {
                 thread_id: None,
                 thread_settings: ThreadSettingsSnapshot {
+                    disabled_plugin_ids: Vec::new(),
                     model: "gpt-5.2-codex".to_string(),
                     model_provider_id: "updated-provider".to_string(),
                     service_tier: None,
@@ -663,6 +666,7 @@ mod tests {
                     permission_profile: permission_profile.clone(),
                     active_permission_profile: None,
                     cwd: cwd.clone().try_into().expect("absolute settings cwd"),
+                    runtime_workspace_roots: None,
                     reasoning_effort: Some(ReasoningEffort::Ultra),
                     reasoning_summary: Some(ReasoningSummary::Auto),
                     personality: None,

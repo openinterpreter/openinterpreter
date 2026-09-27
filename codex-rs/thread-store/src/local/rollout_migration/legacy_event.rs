@@ -26,8 +26,10 @@ use codex_protocol::items::SubAgentActivityItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::items::WebSearchItem;
+use codex_protocol::models::ImageReference;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::UserMessageEvent;
+use codex_protocol::protocol::UserMessageImageKind;
 use codex_protocol::user_input::UserInput;
 
 use crate::ThreadStoreResult;
@@ -37,17 +39,68 @@ pub(super) fn user_message_item(
     next_item_id: &mut impl FnMut() -> ThreadStoreResult<String>,
 ) -> ThreadStoreResult<TurnItem> {
     let mut content = Vec::new();
+    let has_image_order = event.has_complete_image_order();
     if !event.message.trim().is_empty() {
         content.push(UserInput::Text {
             text: event.message,
             text_elements: event.text_elements,
         });
     }
-    if let Some(images) = event.images {
+    if has_image_order {
+        let mut inline_index = 0;
+        let mut file_index = 0;
+        for image_kind in event.image_order {
+            let (image, detail) = match image_kind {
+                UserMessageImageKind::Inline => {
+                    let Some(image_url) = event
+                        .images
+                        .as_deref()
+                        .and_then(|images| images.get(inline_index))
+                    else {
+                        continue;
+                    };
+                    let detail = event.image_details.get(inline_index).copied().flatten();
+                    inline_index += 1;
+                    (
+                        ImageReference::Inline {
+                            image_url: image_url.clone(),
+                        },
+                        detail,
+                    )
+                }
+                UserMessageImageKind::File => {
+                    let Some(file_id) = event
+                        .file_ids
+                        .as_deref()
+                        .and_then(|file_ids| file_ids.get(file_index))
+                    else {
+                        continue;
+                    };
+                    let detail = event.file_id_details.get(file_index).copied().flatten();
+                    file_index += 1;
+                    (
+                        ImageReference::File {
+                            file_id: file_id.clone(),
+                        },
+                        detail,
+                    )
+                }
+            };
+            content.push(UserInput::Image { image, detail });
+        }
+    } else if let Some(images) = event.images {
         for (index, image_url) in images.into_iter().enumerate() {
             content.push(UserInput::Image {
-                image_url,
+                image: ImageReference::Inline { image_url },
                 detail: event.image_details.get(index).copied().flatten(),
+            });
+        }
+    }
+    if !has_image_order && let Some(file_ids) = event.file_ids {
+        for (index, file_id) in file_ids.into_iter().enumerate() {
+            content.push(UserInput::Image {
+                image: ImageReference::File { file_id },
+                detail: event.file_id_details.get(index).copied().flatten(),
             });
         }
     }
@@ -132,6 +185,7 @@ pub(super) fn completed_item(
                         .unwrap_or(serde_json::Value::Null),
                     connector_id: event.connector_id.clone(),
                     mcp_app_resource_uri: event.mcp_app_resource_uri.clone(),
+                    mcp_app_ui: event.mcp_app_ui.clone(),
                     link_id: event.link_id.clone(),
                     app_name: event.app_name.clone(),
                     action_name: event.action_name.clone(),
@@ -146,7 +200,7 @@ pub(super) fn completed_item(
                     error,
                     duration: Some(event.duration),
                 }),
-                None,
+                (!event.turn_id.is_empty()).then(|| event.turn_id.clone()),
             ))
         }
         EventMsg::WebSearchEnd(event) => Some((
@@ -168,6 +222,7 @@ pub(super) fn completed_item(
                 failure: event.failure.clone(),
                 saved_path: event.saved_path.clone(),
                 imagegen_request_id: None,
+                generation_id: None,
             })),
             None,
         )),
@@ -212,6 +267,7 @@ pub(super) fn completed_item(
         )),
         EventMsg::ExecCommandEnd(event) => Some((
             TurnItem::CommandExecution(CommandExecutionItem {
+                model_context: None,
                 id: event.call_id.clone(),
                 plugin_id: event.plugin_id.clone(),
                 script_path: event.script_path.clone(),

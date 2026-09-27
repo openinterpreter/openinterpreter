@@ -5,6 +5,7 @@ use crate::history_cell::plain_lines;
 use crate::history_cell::with_border_with_inner_width;
 use crate::legacy_core::config::Config;
 use crate::line_truncation::line_width;
+use crate::style::accent_color;
 use crate::token_usage::TokenUsage;
 use crate::token_usage::TokenUsageInfo;
 use crate::version::CODEX_CLI_VERSION;
@@ -23,7 +24,7 @@ use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use codex_utils_sandbox_summary::summarize_permission_profile;
 use ratatui::prelude::*;
 use ratatui::style::Stylize;
@@ -300,6 +301,7 @@ impl StatusHistoryCell {
         let approval_policy = AskForApproval::from(config.permissions.approval_policy.value());
         let permission_profile = config.permissions.effective_permission_profile();
         let workspace_roots = config.effective_workspace_roots();
+        let cwd = PathUri::from_abs_path(&config.cwd);
         let model_provider = model_provider_id
             .filter(|id| !id.trim().is_empty())
             .map(str::to_string);
@@ -312,11 +314,7 @@ impl StatusHistoryCell {
             ),
             (
                 "sandbox",
-                summarize_permission_profile(
-                    &permission_profile,
-                    &config.cwd,
-                    workspace_roots.as_slice(),
-                ),
+                summarize_permission_profile(&permission_profile, &cwd, &workspace_roots),
             ),
         ];
         if let Some(provider_id) = &model_provider {
@@ -343,9 +341,8 @@ impl StatusHistoryCell {
             .map(|(_, v)| v.clone())
             .unwrap_or_else(|| "<unknown>".to_string());
         let active_permission_profile = config.permissions.active_permission_profile();
-        let sandbox =
-            status_permission_summary(&permission_profile, &config.cwd, workspace_roots.as_slice());
-        let workspace_root_suffix = workspace_root_suffix(workspace_roots.as_slice(), &config.cwd);
+        let sandbox = status_permission_summary(&permission_profile, &cwd, &workspace_roots);
+        let workspace_root_suffix = workspace_root_suffix(&workspace_roots, &cwd);
         let approval = status_approval_label(approval_policy, config.approvals_reviewer, &approval);
         let permissions = status_permissions_label(
             active_permission_profile.as_ref(),
@@ -611,8 +608,8 @@ impl StatusHistoryCell {
 
 fn status_permission_summary(
     permission_profile: &PermissionProfile,
-    cwd: &AbsolutePathBuf,
-    workspace_roots: &[AbsolutePathBuf],
+    cwd: &PathUri,
+    workspace_roots: &[PathUri],
 ) -> String {
     let summary = summarize_permission_profile(permission_profile, cwd, workspace_roots);
     if let Some(details) = summary.strip_prefix("read-only") {
@@ -633,14 +630,11 @@ fn status_permission_summary(
     summary
 }
 
-fn workspace_root_suffix(
-    workspace_roots: &[AbsolutePathBuf],
-    cwd: &AbsolutePathBuf,
-) -> Option<String> {
+fn workspace_root_suffix(workspace_roots: &[PathUri], cwd: &PathUri) -> Option<String> {
     let extra_roots = workspace_roots
         .iter()
-        .filter(|root| *root != cwd)
-        .map(|root| root.to_string_lossy().to_string())
+        .filter(|root| root.to_string() != cwd.to_string())
+        .map(PathUri::inferred_native_path_string)
         .collect::<Vec<_>>();
     if extra_roots.is_empty() {
         None
@@ -815,12 +809,12 @@ impl StatusHistoryCell {
         let value_width = formatter.value_width(available_inner_width);
 
         let note_first_line = Line::from(vec![
-            Span::from("Visit ").cyan(),
-            CHATGPT_USAGE_URL.cyan().underlined(),
-            Span::from(" for up-to-date").cyan(),
+            Span::from("Visit ").fg(accent_color()),
+            CHATGPT_USAGE_URL.fg(accent_color()).underlined(),
+            Span::from(" for up-to-date").fg(accent_color()),
         ]);
         let note_second_line = Line::from(vec![
-            Span::from("information on rate limits and credits").cyan(),
+            Span::from("information on rate limits and credits").fg(accent_color()),
         ]);
         let note_lines = adaptive_wrap_lines(
             [note_first_line, note_second_line],
@@ -834,18 +828,20 @@ impl StatusHistoryCell {
             lines.push(Line::from(Vec::<Span<'static>>::new()));
         }
         if let Some(remote_connection) = self.remote_connection.as_ref() {
-            let wrapped_remote = word_wrap_lines(
-                [Line::from(vec![
+            let value = if remote_connection.is_local_daemon {
+                Line::from("Local background server")
+            } else {
+                Line::from(vec![
                     Span::from(remote_connection.address.clone()),
                     Span::from(" (").dim(),
                     Span::from(remote_connection.version.clone()).dim(),
                     Span::from(")").dim(),
-                ])],
-                RtOptions::new(value_width.max(1)),
-            );
+                ])
+            };
+            let wrapped_remote = word_wrap_lines([value], RtOptions::new(value_width.max(1)));
             let mut wrapped_remote = wrapped_remote.into_iter();
             if let Some(first) = wrapped_remote.next() {
-                lines.push(formatter.line("Remote", first.spans));
+                lines.push(formatter.line("Server", first.spans));
                 lines.extend(wrapped_remote.map(|line| formatter.continuation(line.spans)));
             }
             lines.push(Line::from(Vec::<Span<'static>>::new()));

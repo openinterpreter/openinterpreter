@@ -17,7 +17,7 @@ Requirements:
 - An existing Codex account session, or one of the login flows below
 
 The SDK installs its matching `openai-codex-cli-bin` runtime dependency
-automatically. SDK release versions track the corresponding Codex CLI release.
+automatically. Stable SDK releases track the corresponding stable Codex CLI release.
 
 ## 2. Authenticate When Needed
 
@@ -69,6 +69,11 @@ with Codex() as codex:
 
 Use `Thread.turn(...)` when you need a `TurnHandle` for streaming, steering,
 or interrupting an active turn.
+
+For **untrusted content** from another agent, tool, or application, pass an
+[`ExternalMessage`](api-reference.md#externalmessage). It retains tool-level
+authority and does not establish user authorization or approval. Plain strings
+and `TextInput` represent user input.
 
 ## 4. Choose Sandbox Access
 

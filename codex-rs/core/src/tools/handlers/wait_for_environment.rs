@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
 
+use crate::environment_selection::TurnEnvironmentState;
 use crate::function_tool::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
@@ -128,6 +129,22 @@ impl ToolExecutor<ToolInvocation> for WaitForEnvironmentHandler {
                 .turn_environments()
                 .any(|environment| environment.selection.environment_id == environment_id);
             if !already_ready {
+                if let Some(error) =
+                    step_context
+                        .environments
+                        .environments
+                        .iter()
+                        .find_map(|state| match state {
+                            TurnEnvironmentState::Failed { selection, error }
+                                if selection.environment_id == environment_id =>
+                            {
+                                Some(error)
+                            }
+                            _ => None,
+                        })
+                {
+                    return Err(environment_failure(&environment_id, error));
+                }
                 let Some(environment) = step_context
                     .environments
                     .starting()
@@ -139,11 +156,10 @@ impl ToolExecutor<ToolInvocation> for WaitForEnvironmentHandler {
                     )));
                 };
 
-                environment.wait_until_ready().await.map_err(|_| {
-                    FunctionCallError::RespondToModel(format!(
-                        "Environment `{environment_id}` failed to start and is unavailable. Continue without it."
-                    ))
-                })?;
+                environment
+                    .wait_until_ready()
+                    .await
+                    .map_err(|error| environment_failure(&environment_id, &error.to_string()))?;
             }
 
             Ok(boxed_tool_output(JsonToolOutput::new(json!({
@@ -155,3 +171,12 @@ impl ToolExecutor<ToolInvocation> for WaitForEnvironmentHandler {
 }
 
 impl CoreToolRuntime for WaitForEnvironmentHandler {}
+
+// Keep failure output small while preserving a UTF-8 boundary.
+fn environment_failure(environment_id: &str, error: &str) -> FunctionCallError {
+    const MAX_ERROR_BYTES: usize = 256;
+    let reason = &error[..error.floor_char_boundary(MAX_ERROR_BYTES)];
+    FunctionCallError::RespondToModel(format!(
+        "Environment `{environment_id}` failed to start: {reason}"
+    ))
+}

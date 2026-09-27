@@ -3,12 +3,16 @@ use crate::metrics::MEMORY_PHASE_ONE_E2E_MS;
 use crate::metrics::MEMORY_PHASE_ONE_JOBS;
 use crate::metrics::MEMORY_PHASE_ONE_OUTPUT;
 use crate::metrics::MEMORY_PHASE_ONE_TOKEN_USAGE;
+use crate::phase1_output::StageOneOutput;
+use crate::phase1_output::output_schema;
+use crate::rollout_input::sanitize_response_item_for_memories;
 use crate::runtime::MemoryStartupContext;
 use crate::runtime::StageOneRequestContext;
 use codex_config::types::MemoriesConfig;
 use codex_core::Prompt;
 use codex_core::RolloutRecorder;
 use codex_core::config::Config;
+use codex_protocol::MemoryVersion;
 use codex_protocol::ResponseItemId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::models::BaseInstructions;
@@ -17,12 +21,8 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
 use codex_rollout::INTERACTIVE_SESSION_SOURCES;
 use codex_rollout::RolloutItem;
-use codex_rollout::should_persist_response_item_for_memories;
 use codex_secrets::redact_secrets;
 use futures::StreamExt;
-use serde::Deserialize;
-use serde_json::Value;
-use serde_json::json;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::info;
@@ -46,21 +46,6 @@ struct Stats {
     succeeded_no_output: usize,
     failed: usize,
     total_token_usage: Option<TokenUsage>,
-}
-
-/// Phase 1 model output payload.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StageOneOutput {
-    /// Detailed markdown raw memory for a single rollout.
-    #[serde(rename = "raw_memory")]
-    pub(crate) raw_memory: String,
-    /// Compact summary line used for routing and indexing.
-    #[serde(rename = "rollout_summary")]
-    pub(crate) rollout_summary: String,
-    /// Optional slug used to derive rollout summary artifact filenames.
-    #[serde(default, rename = "rollout_slug")]
-    pub(crate) rollout_slug: Option<String>,
 }
 
 /// Runs memory phase 1 in strict step order:
@@ -110,10 +95,9 @@ pub async fn run(context: Arc<MemoryStartupContext>, config: Arc<Config>) {
 
 /// Prune old un-used "dead" raw memories.
 pub async fn prune(context: &MemoryStartupContext, config: &Config) {
-    if let Some(db) = context.state_db() {
+    if let Some(db) = context.memory_store().await {
         let max_unused_days = config.memories.max_unused_days;
         match db
-            .memories()
             .prune_stage1_outputs_for_retention(max_unused_days, crate::stage_one::PRUNE_BATCH_SIZE)
             .await
         {
@@ -133,25 +117,11 @@ pub async fn prune(context: &MemoryStartupContext, config: &Config) {
     }
 }
 
-/// JSON schema used to constrain phase-1 model output.
-pub fn output_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "rollout_summary": { "type": "string" },
-            "rollout_slug": { "type": ["string", "null"] },
-            "raw_memory": { "type": "string" }
-        },
-        "required": ["rollout_summary", "rollout_slug", "raw_memory"],
-        "additionalProperties": false
-    })
-}
-
 async fn claim_startup_jobs(
     context: &MemoryStartupContext,
     memories_config: &MemoriesConfig,
 ) -> Option<Vec<codex_state::Stage1JobClaim>> {
-    let Some(state_db) = context.state_db() else {
+    let Some(state_db) = context.memory_store().await else {
         // This should not happen.
         warn!("state db unavailable while claiming phase-1 startup jobs; skipping");
         return None;
@@ -163,7 +133,6 @@ async fn claim_startup_jobs(
         .collect::<Vec<_>>();
 
     match state_db
-        .memories()
         .claim_stage1_jobs_for_startup(
             context.thread_id(),
             codex_state::Stage1StartupClaimParams {
@@ -237,6 +206,7 @@ mod job {
             config,
             &claimed_thread.rollout_path,
             &claimed_thread.cwd,
+            claimed_thread.git_branch.as_deref(),
             stage_one_context,
         )
         .await
@@ -257,7 +227,12 @@ mod job {
             }
         };
 
-        if stage_one_output.raw_memory.is_empty() || stage_one_output.rollout_summary.is_empty() {
+        if stage_one_output
+            .raw_memory
+            .as_ref()
+            .is_some_and(String::is_empty)
+            || stage_one_output.rollout_summary.is_empty()
+        {
             return JobResult {
                 outcome: result::no_output(context, claimed_thread.id, &claim.ownership_token)
                     .await,
@@ -271,7 +246,7 @@ mod job {
                 claimed_thread.id,
                 &claim.ownership_token,
                 claimed_thread.updated_at.timestamp(),
-                &stage_one_output.raw_memory,
+                stage_one_output.raw_memory.as_deref().unwrap_or_default(),
                 &stage_one_output.rollout_summary,
                 stage_one_output.rollout_slug.as_deref(),
             )
@@ -286,41 +261,60 @@ mod job {
         config: &Config,
         rollout_path: &Path,
         rollout_cwd: &Path,
+        rollout_git_branch: Option<&str>,
         stage_one_context: &StageOneRequestContext,
     ) -> anyhow::Result<(StageOneOutput, Option<TokenUsage>)> {
         let (rollout_items, _, _) = RolloutRecorder::load_rollout_items(rollout_path).await?;
-        let rollout_contents = serialize_filtered_rollout_response_items(&rollout_items)?;
+        let rollout_contents = match config.memories.version {
+            MemoryVersion::V1 => serialize_filtered_rollout_response_items(&rollout_items)?,
+            MemoryVersion::V2 => crate::rollout_input::serialize_tiered_input(
+                &rollout_items,
+                crate::prompts::rollout_token_limit(&stage_one_context.model_info),
+            )?,
+        };
+
+        let input_text = match config.memories.version {
+            MemoryVersion::V1 => build_stage_one_input_message(
+                &stage_one_context.model_info,
+                rollout_path,
+                rollout_cwd,
+                &rollout_contents,
+            )?,
+            MemoryVersion::V2 => crate::prompts::build_stage_one_input_v2(
+                rollout_path,
+                rollout_cwd,
+                rollout_git_branch,
+                &rollout_contents,
+            )?,
+        };
 
         let mut prompt = Prompt::default();
-        prompt.input = vec![ResponseItem::Message {
-            id: Some(ResponseItemId::new("msg")),
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: build_stage_one_input_message(
-                    &stage_one_context.model_info,
-                    rollout_path,
-                    rollout_cwd,
-                    &rollout_contents,
-                )?,
+        prompt.input = match config.memories.version {
+            MemoryVersion::V1 => vec![ResponseItem::Message {
+                id: Some(ResponseItemId::new("msg")),
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText { text: input_text }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        }];
+            MemoryVersion::V2 => crate::rollout_input::extraction_messages(&input_text),
+        };
         prompt.base_instructions = BaseInstructions {
-            text: crate::stage_one::PROMPT.to_string(),
+            text: match config.memories.version {
+                MemoryVersion::V1 => crate::stage_one::PROMPT,
+                MemoryVersion::V2 => include_str!("../templates/memories/stage_one_system_v2.md"),
+            }
+            .to_string(),
             provenance: None,
         };
-        prompt.output_schema = Some(output_schema());
+        prompt.output_schema = Some(output_schema(config.memories.version));
         prompt.output_schema_strict = true;
 
         let (result, token_usage) = context
             .stream_stage_one_prompt(config, &prompt, stage_one_context)
             .await?;
 
-        let mut output: StageOneOutput = serde_json::from_str(&result)?;
-        output.raw_memory = redact_secrets(output.raw_memory);
-        output.rollout_summary = redact_secrets(output.rollout_summary);
-        output.rollout_slug = output.rollout_slug.map(redact_secrets);
+        let output = StageOneOutput::parse(&result, config.memories.version)?;
 
         Ok((output, token_usage))
     }
@@ -335,9 +329,8 @@ mod job {
             reason: &str,
         ) {
             tracing::warn!("Phase 1 job failed for thread {thread_id}: {reason}");
-            if let Some(state_db) = context.state_db() {
+            if let Some(state_db) = context.memory_store().await {
                 let _ = state_db
-                    .memories()
                     .mark_stage1_job_failed(
                         thread_id,
                         ownership_token,
@@ -353,12 +346,11 @@ mod job {
             thread_id: codex_protocol::ThreadId,
             ownership_token: &str,
         ) -> JobOutcome {
-            let Some(state_db) = context.state_db() else {
+            let Some(state_db) = context.memory_store().await else {
                 return JobOutcome::Failed;
             };
 
             if state_db
-                .memories()
                 .mark_stage1_job_succeeded_no_output(thread_id, ownership_token)
                 .await
                 .unwrap_or(false)
@@ -378,12 +370,11 @@ mod job {
             rollout_summary: &str,
             rollout_slug: Option<&str>,
         ) -> JobOutcome {
-            let Some(state_db) = context.state_db() else {
+            let Some(state_db) = context.memory_store().await else {
                 return JobOutcome::Failed;
             };
 
             if state_db
-                .memories()
                 .mark_stage1_job_succeeded(
                     thread_id,
                     ownership_token,
@@ -431,108 +422,14 @@ mod job {
         Ok(redact_secrets(serialized))
     }
 
-    fn sanitize_response_item_for_memories(item: &ResponseItem) -> Option<ResponseItem> {
-        let ResponseItem::Message {
-            id,
-            role,
-            content,
-            phase,
-            internal_chat_message_metadata_passthrough: metadata,
-        } = item
-        else {
-            return should_persist_response_item_for_memories(item).then(|| item.clone());
-        };
-
-        if role == "developer" {
-            return None;
-        }
-
-        if role != "user" {
-            return Some(item.clone());
-        }
-
-        let content = content
-            .iter()
-            .filter(|content_item| !is_memory_excluded_contextual_user_fragment(content_item))
-            .cloned()
-            .collect::<Vec<_>>();
-        if content.is_empty() {
-            return None;
-        }
-
-        Some(ResponseItem::Message {
-            id: id.clone(),
-            role: role.clone(),
-            content,
-            phase: phase.clone(),
-            internal_chat_message_metadata_passthrough: metadata.clone(),
-        })
-    }
-
-    fn is_memory_excluded_contextual_user_fragment(content_item: &ContentItem) -> bool {
-        let ContentItem::InputText { text } = content_item else {
-            return false;
-        };
-
-        matches_marked_fragment(text, "# AGENTS.md instructions", "</INSTRUCTIONS>")
-            || matches_marked_fragment(text, "<skill>", "</skill>")
-    }
-
-    fn matches_marked_fragment(text: &str, start_marker: &str, end_marker: &str) -> bool {
-        let trimmed = text.trim_start();
-        let starts_with_marker = trimmed
-            .get(..start_marker.len())
-            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(start_marker));
-        let trimmed = trimmed.trim_end();
-        let ends_with_marker = trimmed
-            .get(trimmed.len().saturating_sub(end_marker.len())..)
-            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(end_marker));
-        starts_with_marker && ends_with_marker
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
-
-        #[test]
-        fn classifies_memory_excluded_fragments() {
-            let cases = [
-                (
-                    "# AGENTS.md instructions for /tmp\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>",
-                    true,
-                ),
-                (
-                    "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>",
-                    true,
-                ),
-                (
-                    "<skill>\n<name>demo</name>\n<path>skills/demo/SKILL.md</path>\nbody\n</skill>",
-                    true,
-                ),
-                (
-                    "<environment_context>\n<cwd>/tmp</cwd>\n</environment_context>",
-                    false,
-                ),
-                (
-                    "<subagent_notification>{\"agent_id\":\"a\",\"status\":\"completed\"}</subagent_notification>",
-                    false,
-                ),
-            ];
-
-            for (text, expected) in cases {
-                assert_eq!(
-                    is_memory_excluded_contextual_user_fragment(&ContentItem::InputText {
-                        text: text.to_string(),
-                    }),
-                    expected,
-                    "{text}",
-                );
-            }
-        }
+        use serde_json::Value;
 
         #[test]
         fn output_schema_requires_rollout_slug_and_keeps_it_nullable() {
-            let schema = output_schema();
+            let schema = output_schema(MemoryVersion::V1);
             let properties = schema
                 .get("properties")
                 .and_then(Value::as_object)

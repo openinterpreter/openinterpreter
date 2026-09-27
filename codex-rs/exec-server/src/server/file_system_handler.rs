@@ -3,7 +3,6 @@ use std::io;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use codex_exec_server_protocol::JSONRPCErrorError;
-use codex_protocol::config_types::WindowsSandboxLevel;
 
 use crate::CapabilityRootsDiscoverParams;
 use crate::CapabilityRootsDiscoverResponse;
@@ -80,9 +79,11 @@ impl FileSystemHandler {
             .first()
             .and_then(|root| root.sandbox.as_ref())
             .filter(|sandbox| {
-                sandbox.should_run_in_sandbox()
-                    && (!cfg!(target_os = "windows")
-                        || sandbox.windows_sandbox_level != WindowsSandboxLevel::Disabled)
+                sandbox
+                    .validate_file_system_paths_for_current_host()
+                    .is_ok()
+                    && sandbox.should_read_from_sandbox()
+                    && (!cfg!(target_os = "windows") || sandbox.windows_sandbox_is_requested())
                     && params
                         .roots
                         .iter()

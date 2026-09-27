@@ -332,6 +332,7 @@ fn write_rollout_with_user_message(
                     parent_thread_id: None,
                     timestamp: "2026-06-01T14:26:25Z".to_string(),
                     cwd: home.to_path_buf(),
+                    runtime_workspace_roots: None,
                     originator: "test".to_string(),
                     cli_version: "test".to_string(),
                     source: SessionSource::Cli,

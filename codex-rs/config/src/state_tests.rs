@@ -79,6 +79,44 @@ fn origins_attribute_multi_agent_v2_enabled_to_overriding_boolean_layer() {
 }
 
 #[test]
+fn origins_omit_displaced_credential_providers() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    for scope in ["", "profiles.work."] {
+        let user = ConfigLayerEntry::new(
+            ConfigLayerSource::User {
+                file: test_user_config_path(&temp_dir, "config.toml"),
+                profile: None,
+            },
+            toml::from_str(&format!(
+                "[{scope}features.network_proxy.credentials.user_provider]\nenv = ['VENDOR_TOKEN']\n",
+            ))
+            .expect("user config"),
+        );
+        let session = ConfigLayerEntry::new(
+            ConfigLayerSource::SessionFlags,
+            toml::from_str(&format!(
+                "[{scope}features.network_proxy.credentials.session_provider]\nenv = ['VENDOR_TOKEN']\n",
+            ))
+            .expect("session config"),
+        );
+        let metadata = session.metadata();
+        let stack = ConfigLayerStack::new(
+            vec![user, session],
+            ConfigRequirements::default(),
+            ConfigRequirementsToml::default(),
+        )
+        .expect("valid layers");
+        assert_eq!(
+            stack.origins(),
+            HashMap::from([(
+                format!("{scope}features.network_proxy.credentials.session_provider.env.0"),
+                metadata
+            )])
+        );
+    }
+}
+
+#[test]
 fn enabled_layers_validate_shell_environment_policy() {
     let layer = ConfigLayerEntry::new(
         ConfigLayerSource::SessionFlags,

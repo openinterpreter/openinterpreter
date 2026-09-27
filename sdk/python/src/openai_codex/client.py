@@ -14,7 +14,9 @@ from typing import Callable, Iterator, TypeVar
 from pydantic import BaseModel
 
 from ._goal import _GoalOperationState
-from ._message_router import MessageRouter
+from ._initialize_metadata import _split_user_agent
+from ._message_router import MessageRouter, _TurnSubscription
+from ._runtime_requirements import CheckoutCapabilities, require_runtime_version
 from ._version import __version__ as SDK_VERSION
 from .errors import CodexError, InvalidRequestError, TransportClosedError
 from .generated.notification_registry import NOTIFICATION_MODELS
@@ -227,6 +229,8 @@ class CodexClient:
         self._stderr_lines: deque[str] = deque(maxlen=400)
         self._stderr_thread: threading.Thread | None = None
         self._reader_thread: threading.Thread | None = None
+        self._runtime_version: str | None = None
+        self._checkout_capabilities: CheckoutCapabilities | None = None
 
     def __enter__(self) -> "CodexClient":
         self.start()
@@ -256,6 +260,11 @@ class CodexClient:
             env.update(self.config.env)
         _prepend_path_dirs(env, path_dirs)
 
+        if self.config.launch_args_override is None:
+            self._checkout_capabilities = CheckoutCapabilities(
+                command=tuple(args[:-2]), cwd=self.config.cwd, env=env.copy()
+            )
+
         self._proc = subprocess.Popen(
             args,
             stdin=subprocess.PIPE,
@@ -272,6 +281,8 @@ class CodexClient:
         self._start_reader_thread()
 
     def close(self) -> None:
+        self._runtime_version = None
+        self._checkout_capabilities = None
         if self._proc is None:
             return
         proc = self._proc
@@ -291,6 +302,7 @@ class CodexClient:
             self._reader_thread.join(timeout=0.5)
 
     def initialize(self) -> InitializeResponse:
+        self._runtime_version = None
         result = self.request(
             "initialize",
             {
@@ -305,6 +317,10 @@ class CodexClient:
             },
             response_model=InitializeResponse,
         )
+        version = result.serverInfo.version if result.serverInfo is not None else None
+        if not version or not version.strip():
+            _, version = _split_user_agent(result.userAgent or "")
+        self._runtime_version = version.split()[0] if version and version.strip() else None
         self.notify("initialized", None)
         return result
 
@@ -315,6 +331,35 @@ class CodexClient:
         *,
         response_model: type[ModelT],
     ) -> ModelT:
+        runtime_fields = {
+            "turn/start": ("toolOutput", "turnTrigger", "serviceTierForTurn"),
+            "thread/resume": ("excludeTurns",),
+            "thread/fork": ("excludeTurns",),
+        }
+        supplied_fields = [
+            field
+            for field in runtime_fields.get(method, ())
+            if (params or {}).get(field) is not None
+        ]
+        if supplied_fields:
+            try:
+                if self._runtime_version == "0.0.0":
+                    if self._checkout_capabilities is None:
+                        raise ValueError(
+                            "Cannot verify an unversioned CLI with a custom launch command"
+                        )
+                    supported = self._checkout_capabilities.fields[method]
+                    if missing := set(supplied_fields) - supported:
+                        raise ValueError(
+                            f"The checkout does not support {', '.join(sorted(missing))}"
+                        )
+                else:
+                    require_runtime_version(self._runtime_version)
+            except ValueError as exc:
+                raise CodexError(
+                    f"{method} with {', '.join(supplied_fields)}: {exc}. "
+                    "Configure CodexConfig.codex_bin with a supported CLI."
+                ) from exc
         result = self._request_raw(method, params)
         if not isinstance(result, dict):
             raise CodexError(f"{method} response must be a JSON object")
@@ -361,6 +406,9 @@ class CodexClient:
     def next_login_notification(self, login_id: str) -> Notification:
         """Return the next routed notification for the requested login id."""
         return self._router.next_login_notification(login_id)
+
+    def _subscribe_turn_notifications(self, turn_id: str) -> _TurnSubscription:
+        return self._router.subscribe_turn(turn_id)
 
     def register_turn_notifications(self, turn_id: str) -> None:
         """Start routing notifications for one turn into its dedicated queue."""
@@ -606,6 +654,15 @@ class CodexClient:
         params: V2TurnStartParams | JsonObject | None = None,
     ) -> TurnStartResponse:
         """Start a turn and register its notification queue as early as possible."""
+        return self._start_turn(thread_id, input_items, params, for_handle=False)[0]
+
+    def _start_turn(
+        self,
+        thread_id: str,
+        input_items: list[JsonObject] | JsonObject | str,
+        params: V2TurnStartParams | JsonObject | None,
+        for_handle: bool,
+    ) -> tuple[TurnStartResponse, _TurnSubscription | None]:
         with self._thread_start_lock(thread_id):
             if self._router.has_goal(thread_id):
                 raise InvalidRequestError(
@@ -617,9 +674,12 @@ class CodexClient:
                 "threadId": thread_id,
                 "input": self._normalize_input_items(input_items),
             }
-            started = self.request("turn/start", payload, response_model=TurnStartResponse)
-            self.register_turn_notifications(started.turn.id)
-            return started
+            with self._router.pending_turn(thread_id) as cursors:
+                started = self.request("turn/start", payload, response_model=TurnStartResponse)
+                subscription = self._router.prepare_turn(
+                    started.turn.id, thread_id, cursors, for_handle=for_handle
+                )
+                return started, subscription
 
     @contextmanager
     def _thread_start_lock(self, thread_id: str) -> Iterator[None]:

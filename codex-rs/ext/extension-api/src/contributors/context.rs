@@ -15,6 +15,6 @@ pub struct TurnContextContributionInput<'a> {
     pub thread_store: &'a ExtensionData,
     /// Store scoped to this turn.
     pub turn_store: &'a ExtensionData,
-    /// Effective model context window for this turn, when known.
+    /// Usable context window of the captured model for this context build, when known.
     pub model_context_window: Option<i64>,
 }

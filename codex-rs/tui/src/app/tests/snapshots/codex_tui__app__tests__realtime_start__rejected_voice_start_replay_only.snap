@@ -1,0 +1,6 @@
+---
+source: tui/src/app/tests/realtime_start.rs
+assertion_line: 57
+expression: rendered
+---
+■ This conversation is read-only or unavailable; no operation was sent.

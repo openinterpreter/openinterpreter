@@ -1,0 +1,214 @@
+# Verified side packages, published by rust-release.yml when enabled.
+# The legacy CLI, npm, installer and DMG packages are unchanged.
+# Required secrets in the codesigning environment:
+# - CODEX_CLI_PROVISIONING_PROFILE_BASE64: profile approved for public distribution.
+# - CODEX_CLI_PROVISIONING_PROFILE_SHA256: reviewed lowercase SHA-256 of that profile.
+# - CODEX_CLI_PROVISIONING_TEAM_ID: expected ten-character Apple Team ID.
+# - AKV_CODESIGN_CERTIFICATE_SHA256: required signing certificate pin.
+# Set repository variable CODEX_PROVISIONED_MACOS_CANDIDATE to true to enable
+# candidates on normal tag releases; unset it or set it to false to disable them.
+name: Provisioned macOS CLI candidate
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CODEX_REPO_ROOT: ${{ github.workspace }}
+
+jobs:
+  sign:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/rust-v') && vars.CODEX_PROVISIONED_MACOS_CANDIDATE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment:
+      name: codesigning
+      deployment: false
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    env:
+      TARGET: ${{ matrix.target }}
+      PROVISIONED_MACOS: "true"
+      PROFILE_SHA256: ${{ secrets.CODEX_CLI_PROVISIONING_PROFILE_SHA256 }}
+      CERTIFICATE_SHA256: ${{ secrets.AKV_CODESIGN_CERTIFICATE_SHA256 }}
+      TEAM_ID: ${{ secrets.CODEX_CLI_PROVISIONING_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Validate the independently approved public-distribution profile
+        env:
+          PROFILE_BASE64: ${{ secrets.CODEX_CLI_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+          profile = Path(os.environ["RUNNER_TEMP"]) / "codex-cli.provisionprofile"
+          profile.write_bytes(base64.b64decode("".join(os.environ["PROFILE_BASE64"].split()), validate=True))
+          PY
+          python3 .github/scripts/macos-signing/provisioned_macos_cli_package.py validate-profile \
+            --profile "$RUNNER_TEMP/codex-cli.provisionprofile" --profile-sha256 "$PROFILE_SHA256" \
+            --certificate-sha256 "$CERTIFICATE_SHA256" --team-id "$TEAM_ID"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.target }}
+          path: standard
+      - name: Extract the verified package from this tag-release run
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import tarfile
+          from pathlib import Path
+          with tarfile.open(f"standard/codex-package-{os.environ['TARGET']}.tar.gz") as archive:
+              archive.extractall("package", filter="data")
+          metadata = json.loads(Path("package/codex-package.json").read_text())
+          if metadata["target"] != os.environ["TARGET"]:
+              raise ValueError("Package target does not match this release job")
+          PY
+      - name: Set up the existing AKV signer
+        uses: ./.github/actions/setup-akv-pkcs11-codesigning
+        with:
+          rcodesign-blob-uri: ${{ secrets.AKV_CODESIGN_RCODESIGN_BLOB_URI }}
+          rcodesign-sha256: ${{ secrets.AKV_CODESIGN_RCODESIGN_SHA256 }}
+          akv-pkcs11-library-blob-uri: ${{ secrets.AKV_CODESIGN_PKCS11_LIBRARY_BLOB_URI }}
+          akv-pkcs11-library-sha256: ${{ secrets.AKV_CODESIGN_PKCS11_LIBRARY_SHA256 }}
+          azure-client-id: ${{ secrets.AKV_CODESIGN_AZURE_CLIENT_ID }}
+          azure-tenant-id: ${{ secrets.AKV_CODESIGN_TENANT }}
+          azure-subscription-id: ${{ secrets.AKV_CODESIGN_SUBSCRIPTION }}
+          key-vault-name: ${{ secrets.AKV_CODESIGN_KEY_VAULT_NAME }}
+          key-name: ${{ secrets.AKV_CODESIGN_KEY_NAME }}
+          key-version: ${{ secrets.AKV_CODESIGN_KEY_VERSION || '' }}
+          certificate-sha256: ${{ secrets.AKV_CODESIGN_CERTIFICATE_SHA256 }}
+      - name: Sign and notarize the provisioned bundle
+        env:
+          APPLE_NOTARIZATION_AKV_KEY_NAME: ${{ secrets.AKV_NOTARIZATION_KEY_NAME }}
+          APPLE_NOTARIZATION_AKV_KEY_VERSION: ${{ secrets.AKV_NOTARIZATION_KEY_VERSION }}
+        run: |
+          python3 .github/scripts/macos-signing/sign_macos_cli_package.py sign package \
+            --profile "$RUNNER_TEMP/codex-cli.provisionprofile" --profile-sha256 "$PROFILE_SHA256" \
+            --certificate-sha256 "$CERTIFICATE_SHA256" --team-id "$TEAM_ID"
+          mkdir signed
+          tar -czf "signed/codex-provisioned-package-$TARGET.tar.gz" -C package \
+            bin codex-resources codex-path codex-package.json CodexCLI.app
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: provisioned-macos-signed-candidate-${{ matrix.target }}
+          path: signed/*.tar.gz
+          if-no-files-found: error
+      - name: Retain signing reports
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: provisioned-macos-signing-reports-${{ matrix.target }}
+          path: signing-verification/
+          if-no-files-found: warn
+
+  verify:
+    needs: sign
+    runs-on: macos-15-xlarge
+    timeout-minutes: 30
+    environment:
+      name: codesigning
+      deployment: false
+    # Read independent profile/certificate expectations without a signing token.
+    permissions:
+      contents: read
+      id-token: none
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    env:
+      TARGET: ${{ matrix.target }}
+      PROVISIONED_MACOS: "true"
+      PROFILE_SHA256: ${{ secrets.CODEX_CLI_PROVISIONING_PROFILE_SHA256 }}
+      CERTIFICATE_SHA256: ${{ secrets.AKV_CODESIGN_CERTIFICATE_SHA256 }}
+      TEAM_ID: ${{ secrets.CODEX_CLI_PROVISIONING_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: provisioned-macos-signed-candidate-${{ matrix.target }}
+          path: signed
+      - name: Extract candidate and load independent verification profile
+        env:
+          PROFILE_BASE64: ${{ secrets.CODEX_CLI_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import os
+          import tarfile
+          from pathlib import Path
+          profile = Path(os.environ["RUNNER_TEMP"]) / "codex-cli.provisionprofile"
+          profile.write_bytes(base64.b64decode("".join(os.environ["PROFILE_BASE64"].split()), validate=True))
+          with tarfile.open(f"signed/codex-provisioned-package-{os.environ['TARGET']}.tar.gz") as archive:
+              archive.extractall("package", filter="data")
+          PY
+      - name: Verify signatures, profile, architecture, stapling and Gatekeeper
+        run: |
+          profile_args=(--profile "$RUNNER_TEMP/codex-cli.provisionprofile"
+            --profile-sha256 "$PROFILE_SHA256" --certificate-sha256 "$CERTIFICATE_SHA256"
+            --team-id "$TEAM_ID")
+          python3 .github/scripts/macos-signing/sign_macos_cli_package.py verify package "${profile_args[@]}"
+          xcrun stapler staple package/CodexCLI.app
+          xcrun stapler validate package/CodexCLI.app
+          spctl --assess --type execute --verbose=4 package/CodexCLI.app
+          python3 .github/scripts/macos-signing/sign_macos_cli_package.py verify package "${profile_args[@]}"
+          mkdir verified
+          tar -czf "verified/codex-provisioned-package-$TARGET.tar.gz" -C package \
+            bin codex-resources codex-path codex-package.json CodexCLI.app
+          (cd verified && shasum -a 256 "codex-provisioned-package-$TARGET.tar.gz" > SHA256SUMS)
+      - uses: ./.github/actions/setup-ci
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.3"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.target }}-app-server
+          path: app-server
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.target }}-symbols
+          path: symbols
+      - name: Test the exact verified package, including sandboxed code mode
+        working-directory: scripts/codex_package/smoke_tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}/sdk/python/src:${{ github.workspace }}/sdk/python/tests
+        run: |
+          # This repackaging does not change debug code. The normal release's
+          # primary symbols omit app-server symbols, so skip symbol-only tests.
+          uv run --frozen pytest -v --compression gzip --package-target "$TARGET" \
+            --cli-archive "$CODEX_REPO_ROOT/verified/codex-provisioned-package-$TARGET.tar.gz" \
+            --app-server-archive "$CODEX_REPO_ROOT/app-server/codex-app-server-package-$TARGET.tar.gz" \
+            --symbols-archive "$CODEX_REPO_ROOT/symbols/codex-symbols-$TARGET.tar.gz" \
+            test_codex_package.py -k 'not debug_symbols'
+      - name: Retain verified candidate only after package tests pass
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: provisioned-macos-verified-candidate-${{ matrix.target }}
+          path: verified/*
+          if-no-files-found: error
+      - name: Retain verification reports
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: provisioned-macos-verification-reports-${{ matrix.target }}
+          path: signing-verification/
+          if-no-files-found: warn

@@ -103,6 +103,74 @@ async fn installed_apps_force_refresh_only_refreshes_tools_snapshot() -> Result<
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installed_apps_threadless_refresh_updates_existing_thread_tools() -> Result<()> {
+    let fixture = InstalledAppsFixture::start().await?;
+    fixture.set_tools(vec![connector_tool("alpha", "Alpha")?]);
+    let responses_server = responses::start_mock_server().await;
+    let codex_home = configured_codex_home(fixture.base_url())?;
+    MockResponsesConfig::new(&responses_server.uri())
+        .with_root_config(&format!(
+            "chatgpt_base_url = {:?}\nmcp_oauth_credentials_store = \"file\"",
+            fixture.base_url(),
+        ))
+        .enable_feature(Feature::Apps)
+        .disable_feature(Feature::CodeMode)
+        .disable_feature(Feature::CodeModeOnly)
+        .disable_feature(Feature::ToolSearch)
+        .write(codex_home.path())?;
+    let mut app_server = start_app_server(codex_home.path()).await?;
+    let ThreadStartResponse { thread, .. } = app_server
+        .start_thread(ThreadStartParams::default())
+        .await?;
+
+    for (index, (connector_id, connector_name)) in [("alpha", "Alpha"), ("beta", "Beta")]
+        .into_iter()
+        .enumerate()
+    {
+        if index > 0 {
+            fixture.set_tools(vec![connector_tool(connector_id, connector_name)?]);
+            send_installed_request(&mut app_server, /*force_refresh*/ true).await?;
+        }
+        let response_id = format!("response-{connector_id}");
+        let response = responses::mount_sse_once(
+            &responses_server,
+            responses::sse(vec![
+                responses::ev_response_created(&response_id),
+                responses::ev_assistant_message("message", "done"),
+                responses::ev_completed(&response_id),
+            ]),
+        )
+        .await;
+        app_server
+            .start_turn_and_wait_for_completion(TurnStartParams {
+                thread_id: thread.id.clone(),
+                input: vec![UserInput::Text {
+                    text: "Show the available apps".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            })
+            .await?;
+
+        let body = response.single_request().body_json();
+        for candidate in ["alpha", "beta"] {
+            assert_eq!(
+                responses::namespace_child_tool(
+                    &body,
+                    &format!("mcp__codex_apps__{candidate}"),
+                    &format!("connector_{candidate}"),
+                )
+                .is_some(),
+                candidate == connector_id,
+                "the existing thread should expose the refreshed Apps catalog: {body}",
+            );
+        }
+        assert_eq!(fixture.list_tools_calls(), index + 1);
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn installed_apps_global_disable_retains_tool_derived_identities() -> Result<()> {
     let fixture = InstalledAppsFixture::start().await?;

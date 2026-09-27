@@ -61,9 +61,9 @@ pub fn create_update_goal_tool() -> ToolSpec {
     let properties = BTreeMap::from([(
         "status".to_string(),
         JsonSchema::string_enum(
-            vec![json!("complete"), json!("blocked")],
+            vec![json!("complete"), json!("blocked"), json!("paused")],
             Some(
-                "Required. Set to `complete` only when the objective is achieved and no required work remains. Set to `blocked` only after the same blocking condition has recurred for at least three consecutive goal turns and the agent is at an impasse. After a previously blocked goal is resumed, the resumed run starts a fresh blocked audit."
+                "Required. `paused` requires an explicit user request. Set to `complete` only when the objective is achieved and no required work remains. Set to `blocked` only after the same blocking condition has recurred for at least three consecutive goal turns and the agent is at an impasse. After a previously blocked goal is resumed, the resumed run starts a fresh blocked audit."
                     .to_string(),
             ),
         ),
@@ -72,14 +72,14 @@ pub fn create_update_goal_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: UPDATE_GOAL_TOOL_NAME.to_string(),
         description: r#"Update the existing goal.
-Use this tool only to mark the goal achieved or genuinely blocked.
+Set status to `paused` only at the user's explicit request to pause this goal, never on your own initiative. Ask if unclear; a later resume revokes that request. Report the returned status and stop goal work. Budget limits take precedence over pausing.
 Set status to `complete` only when the objective has actually been achieved and no required work remains.
 Set status to `blocked` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change.
 If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, set status to `blocked` again.
 Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; set status to `blocked`.
 Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.
 Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.
-You cannot use this tool to pause, resume, budget-limit, or usage-limit a goal; those status changes are controlled by the user or system.
+You cannot use this tool to resume, budget-limit, or usage-limit a goal; those status changes are controlled by the user or system.
 When marking a budgeted goal achieved with status `complete`, report the final token usage from the tool result to the user."#
             .to_string(),
         strict: false,

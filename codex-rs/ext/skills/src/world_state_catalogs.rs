@@ -6,7 +6,6 @@ use codex_extension_api::ExtensionWarning;
 use codex_extension_api::SelectedPluginSnapshot;
 use codex_extension_api::WorldStateContributionInput;
 use codex_extension_api::WorldStateSectionContribution;
-use codex_protocol::openai_models::ModelInfo;
 
 use crate::HostSkillsSnapshot;
 use crate::SkillsExtensionConfig;
@@ -102,13 +101,8 @@ impl<'a> CatalogContext<'a> {
     ) -> Option<Self> {
         let thread_state = input.thread_store.get::<SkillsThreadState>()?;
         let config = thread_state.config();
-        let model_info = input.thread_store.get::<ModelInfo>();
-        let include_usage = model_info
-            .as_deref()
-            .is_some_and(|model_info| model_info.include_skills_usage_instructions);
-        let context_window = model_info
-            .as_deref()
-            .and_then(ModelInfo::resolved_context_window);
+        let include_usage = input.model_info.include_skills_usage_instructions;
+        let context_window = input.model_info.resolved_context_window();
         let metadata_budget = skill_metadata_budget(context_window, config.max_context_tokens);
         let emitted_warnings = input
             .turn_store

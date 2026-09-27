@@ -67,6 +67,7 @@ Use Python's standard `help(openai_codex)`, `help(Codex)`, or
 
 - [Getting started](https://github.com/openai/codex/blob/main/sdk/python/docs/getting-started.md)
 - [API reference](https://github.com/openai/codex/blob/main/sdk/python/docs/api-reference.md)
+- [Untrusted external messages](https://github.com/openai/codex/blob/main/sdk/python/docs/api-reference.md#externalmessage)
 - [FAQ](https://github.com/openai/codex/blob/main/sdk/python/docs/faq.md)
 - [Examples](https://github.com/openai/codex/blob/main/sdk/python/examples/README.md)
 

@@ -1,222 +1,15 @@
 //! Windows sandbox prompts and warning surfaces for `ChatWidget`.
 
 use super::*;
+#[cfg(any(target_os = "windows", test))]
+use crate::render::renderable::ColumnRenderable;
 
 impl ChatWidget {
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn windows_sandbox_mode_allowed(&self, mode: WindowsSandboxModeToml) -> bool {
-        self.config
-            .config_layer_stack
-            .requirements()
-            .windows_sandbox_mode
-            .can_set(&Some(mode))
-            .is_ok()
-    }
-
-    #[cfg(any(target_os = "windows", test))]
     pub(super) fn elevated_windows_sandbox_setup_required(&self) -> bool {
-        crate::windows_sandbox::level_from_config(&self.config) == WindowsSandboxLevel::Elevated
-            && self
-                .config
-                .config_layer_stack
-                .requirements()
-                .windows_sandbox_mode
-                .source
-                .is_some()
-            && !crate::windows_sandbox::sandbox_setup_is_complete(self.config.codex_home.as_path())
-    }
-
-    #[cfg(target_os = "windows")]
-    pub(crate) fn world_writable_warning_details(&self) -> Option<(Vec<String>, usize, bool)> {
-        if self
-            .local_settings
-            .notices
-            .hide_world_writable_warning
-            .unwrap_or(false)
-        {
-            return None;
-        }
-        let cwd = self.config.cwd.clone();
-        let workspace_roots = self.config.effective_workspace_roots();
-        let env_map: std::collections::HashMap<String, String> = std::env::vars().collect();
-        let permission_profile = self.config.permissions.effective_permission_profile();
-        let Ok(permissions) =
-            codex_windows_sandbox::ResolvedWindowsSandboxPermissions::try_from_permission_profile_for_workspace_roots(
-                &permission_profile,
-                workspace_roots.as_slice(),
-            )
-        else {
-            return None;
-        };
-        let result = codex_windows_sandbox::apply_world_writable_scan_and_denies_for_permissions(
-            self.config.codex_home.as_path(),
-            cwd.as_path(),
-            &env_map,
-            &permissions,
-            Some(self.config.codex_home.as_path()),
-        );
-        crate::windows_sandbox::record_world_writable_scan_result(&self.session_telemetry, &result);
-        match result {
-            Ok(_) => None,
-            Err(_) => Some((Vec::new(), 0, true)),
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    #[allow(dead_code)]
-    pub(crate) fn world_writable_warning_details(&self) -> Option<(Vec<String>, usize, bool)> {
-        None
-    }
-
-    #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn open_world_writable_warning_confirmation(
-        &mut self,
-        preset: Option<ApprovalPreset>,
-        profile_selection: Option<PermissionProfileSelection>,
-        sample_paths: Vec<String>,
-        extra_count: usize,
-        failed_scan: bool,
-    ) {
-        let (approval, permission_profile, active_permission_profile) = match &preset {
-            Some(p) => (
-                Some(AskForApproval::from(p.approval)),
-                Some(p.permission_profile.clone()),
-                Some(p.active_permission_profile.clone()),
-            ),
-            None => (None, None, None),
-        };
-        let mut header_children: Vec<Box<dyn Renderable>> = Vec::new();
-        let describe_profile = |profile: &PermissionProfile| {
-            if matches!(profile, PermissionProfile::Disabled) {
-                "Full Access mode"
-            } else if profile
-                .file_system_sandbox_policy()
-                .can_write_local_path_with_cwd(self.config.cwd.as_path(), self.config.cwd.as_path())
-            {
-                "Agent mode"
-            } else {
-                "Read-Only mode"
-            }
-        };
-        let mode_label = preset
-            .as_ref()
-            .map(|p| describe_profile(&p.permission_profile))
-            .unwrap_or_else(|| {
-                describe_profile(&self.config.permissions.effective_permission_profile())
-            });
-        let info_line = if failed_scan {
-            Line::from(vec![
-                "We couldn't complete the world-writable scan, so protections cannot be verified. "
-                    .into(),
-                format!("The Windows sandbox cannot guarantee protection in {mode_label}.").red(),
-            ])
-        } else {
-            Line::from(vec![
-                "The Windows sandbox cannot protect writes to folders that are writable by Everyone.".into(),
-                " Consider removing write access for Everyone from the following folders:".into(),
-            ])
-        };
-        header_children.push(Box::new(
-            Paragraph::new(vec![info_line]).wrap(Wrap { trim: false }),
-        ));
-
-        if !sample_paths.is_empty() {
-            // Show up to three examples and optionally an "and X more" line.
-            let mut lines: Vec<Line> = Vec::new();
-            lines.push(Line::from(""));
-            for p in &sample_paths {
-                lines.push(Line::from(format!("  - {p}")));
-            }
-            if extra_count > 0 {
-                lines.push(Line::from(format!("and {extra_count} more")));
-            }
-            header_children.push(Box::new(Paragraph::new(lines).wrap(Wrap { trim: false })));
-        }
-        let header = ColumnRenderable::with(header_children);
-
-        // Build actions ensuring acknowledgement happens before applying the
-        // new permission profile, so downstream policy-change hooks don't
-        // re-trigger the warning.
-        let mut accept_actions: Vec<SelectionAction> = Vec::new();
-        // Suppress the immediate re-scan only when a preset will be applied via
-        // /permissions, to avoid duplicate warnings from the ensuing policy change.
-        if preset.is_some() {
-            accept_actions.push(Box::new(|tx| {
-                tx.send(AppEvent::SkipNextWorldWritableScan);
-            }));
-        }
-        if let Some(selection) = profile_selection.clone() {
-            accept_actions.extend(Self::permission_profile_selection_actions(selection));
-        } else if let (Some(approval), Some(permission_profile), Some(active_permission_profile)) = (
-            approval,
-            permission_profile.clone(),
-            active_permission_profile.clone(),
-        ) {
-            accept_actions.extend(Self::approval_preset_actions(
-                approval,
-                permission_profile,
-                active_permission_profile,
-                mode_label.to_string(),
-                ApprovalsReviewer::User,
-            ));
-        }
-
-        let mut accept_and_remember_actions: Vec<SelectionAction> = Vec::new();
-        accept_and_remember_actions.push(Box::new(|tx| {
-            tx.send(AppEvent::UpdateWorldWritableWarningAcknowledged(true));
-            tx.send(AppEvent::PersistWorldWritableWarningAcknowledged);
-        }));
-        if let Some(selection) = profile_selection {
-            accept_and_remember_actions
-                .extend(Self::permission_profile_selection_actions(selection));
-        } else if let (Some(approval), Some(permission_profile), Some(active_permission_profile)) =
-            (approval, permission_profile, active_permission_profile)
-        {
-            accept_and_remember_actions.extend(Self::approval_preset_actions(
-                approval,
-                permission_profile,
-                active_permission_profile,
-                mode_label.to_string(),
-                ApprovalsReviewer::User,
-            ));
-        }
-
-        let items = vec![
-            SelectionItem {
-                name: "Continue".to_string(),
-                description: Some(format!("Apply {mode_label} for this session")),
-                actions: accept_actions,
-                dismiss_on_select: true,
-                require_explicit_confirmation: true,
-                ..Default::default()
-            },
-            SelectionItem {
-                name: "Continue and don't warn again".to_string(),
-                description: Some(format!("Enable {mode_label} and remember this choice")),
-                actions: accept_and_remember_actions,
-                dismiss_on_select: true,
-                require_explicit_confirmation: true,
-                ..Default::default()
-            },
-        ];
-
-        self.bottom_pane.show_selection_view(SelectionViewParams {
-            footer_hint: Some(standard_popup_hint_line()),
-            items,
-            header: Box::new(header),
-            ..Default::default()
-        });
-    }
-
-    #[cfg(all(not(target_os = "windows"), not(test)))]
-    pub(crate) fn open_world_writable_warning_confirmation(
-        &mut self,
-        _preset: Option<ApprovalPreset>,
-        _profile_selection: Option<PermissionProfileSelection>,
-        _sample_paths: Vec<String>,
-        _extra_count: usize,
-        _failed_scan: bool,
-    ) {
+        self.windows_sandbox_config.requires_elevated()
+            && (self.windows_sandbox_host != crate::app::WindowsSandboxHost::Local
+                || !self.windows_sandbox_elevated_setup_complete)
     }
 
     #[cfg(any(target_os = "windows", test))]
@@ -233,8 +26,9 @@ impl ChatWidget {
             &[],
         );
 
-        let allow_unelevated =
-            self.windows_sandbox_mode_allowed(WindowsSandboxModeToml::Unelevated);
+        let allow_unelevated = self
+            .windows_sandbox_config
+            .allows(WindowsSandboxSetupMode::Unelevated);
         let setup_choice_is_required =
             !allow_unelevated || self.elevated_windows_sandbox_setup_required();
         let product = codex_product_info::Product::current();
@@ -262,7 +56,7 @@ impl ChatWidget {
         let quit_otel = self.session_telemetry.clone();
         let retry_preset = preset.clone();
         let retry_profile_selection = profile_selection.clone();
-        let mut items = vec![SelectionItem {
+        let elevated_item = SelectionItem {
             name: "Set up default sandbox (requires Administrator permissions)".to_string(),
             description: None,
             actions: vec![Box::new(move |tx| {
@@ -278,7 +72,15 @@ impl ChatWidget {
             })],
             dismiss_on_select: true,
             ..Default::default()
-        }];
+        };
+        let mut items = if self
+            .windows_sandbox_config
+            .allows(WindowsSandboxSetupMode::Elevated)
+        {
+            vec![elevated_item]
+        } else {
+            Vec::new()
+        };
         if allow_unelevated {
             items.push(SelectionItem {
                 name: "Use non-admin sandbox (higher risk if prompt injected)".to_string(),
@@ -327,7 +129,7 @@ impl ChatWidget {
                     });
                 }) as _
             }),
-            ..Default::default()
+            ..SelectionViewParams::picker()
         });
     }
 
@@ -347,8 +149,9 @@ impl ChatWidget {
     ) {
         use ratatui_macros::line;
 
-        let allow_unelevated =
-            self.windows_sandbox_mode_allowed(WindowsSandboxModeToml::Unelevated);
+        let allow_unelevated = self
+            .windows_sandbox_config
+            .allows(WindowsSandboxSetupMode::Unelevated);
         let setup_choice_is_required =
             !allow_unelevated || self.elevated_windows_sandbox_setup_required();
         let product = codex_product_info::Product::current();
@@ -380,7 +183,7 @@ impl ChatWidget {
         let elevated_profile_selection = profile_selection.clone();
         let legacy_profile_selection = profile_selection;
         let quit_otel = self.session_telemetry.clone();
-        let mut items = vec![SelectionItem {
+        let elevated_item = SelectionItem {
             name: "Try setting up admin sandbox again".to_string(),
             description: None,
             actions: vec![Box::new({
@@ -400,7 +203,15 @@ impl ChatWidget {
             })],
             dismiss_on_select: true,
             ..Default::default()
-        }];
+        };
+        let mut items = if self
+            .windows_sandbox_config
+            .allows(WindowsSandboxSetupMode::Elevated)
+        {
+            vec![elevated_item]
+        } else {
+            Vec::new()
+        };
         if allow_unelevated {
             items.push(SelectionItem {
                 name: format!("Use {product_name} with non-admin sandbox"),
@@ -453,7 +264,7 @@ impl ChatWidget {
                     });
                 }) as _
             }),
-            ..Default::default()
+            ..SelectionViewParams::picker()
         });
     }
 
@@ -467,8 +278,7 @@ impl ChatWidget {
 
     #[cfg(target_os = "windows")]
     pub(crate) fn maybe_prompt_windows_sandbox_enable(&mut self, show_now: bool) {
-        let windows_sandbox_level = crate::windows_sandbox::level_from_config(&self.config);
-        let setup_is_required = windows_sandbox_level == WindowsSandboxLevel::Disabled
+        let setup_is_required = !self.windows_sandbox_config.is_enabled()
             || self.elevated_windows_sandbox_setup_required();
         if show_now
             && setup_is_required
@@ -480,7 +290,7 @@ impl ChatWidget {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(all(not(target_os = "windows"), test))]
     pub(crate) fn maybe_prompt_windows_sandbox_enable(&mut self, _show_now: bool) {}
 
     #[cfg(any(target_os = "windows", test))]

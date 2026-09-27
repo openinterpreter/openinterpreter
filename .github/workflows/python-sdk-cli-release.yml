@@ -1,0 +1,156 @@
+name: python-sdk-cli-release
+
+on:
+  workflow_run:
+    workflows: [rust-release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      cli_run_id:
+        description: "Stable rust-release run to publish or retry."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-sdk-cli-release-${{ github.event.workflow_run.id || inputs.cli_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-cli-release:
+    if: github.repository == 'openai/codex'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      publish: ${{ steps.release.outputs.publish }}
+      version: ${{ steps.release.outputs.version }}
+      source_sha: ${{ steps.release.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Resolve the completed CLI release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLI_RUN_ID: ${{ github.event.workflow_run.id || inputs.cli_run_id }}
+        run: |
+          python3 .github/scripts/resolve_python_cli_release.py "$CLI_RUN_ID" \
+            --repository "$GITHUB_REPOSITORY" \
+            --event-path "$GITHUB_EVENT_PATH" \
+            --github-output "$GITHUB_OUTPUT"
+
+  prepare-python-runtime:
+    name: prepare-python-runtime
+    needs: resolve-cli-release
+    if: needs.resolve-cli-release.outputs.publish == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/python-runtime-build.yml
+    with:
+      runtime_version: ${{ needs.resolve-cli-release.outputs.version }}
+      source_ref: ${{ needs.resolve-cli-release.outputs.source_sha }}
+
+  build-python-sdk:
+    name: build-python-sdk
+    needs: resolve-cli-release
+    if: needs.resolve-cli-release.outputs.publish == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/python-sdk-build.yml
+    with:
+      sdk_version: ${{ needs.resolve-cli-release.outputs.version }}
+      runtime_version: ${{ needs.resolve-cli-release.outputs.version }}
+      source_ref: ${{ needs.resolve-cli-release.outputs.source_sha }}
+
+  # Publish from the top-level workflow: PyPI does not support reusable
+  # workflows as Trusted Publishers. The runtime must be available before
+  # publishing the SDK that depends on it.
+  publish-python-runtime:
+    if: github.repository == 'openai/codex'
+    name: publish-python-runtime
+    needs:
+      - prepare-python-runtime
+      - build-python-sdk
+      - resolve-cli-release
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write # Required for PyPI trusted publishing.
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.resolve-cli-release.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Download Python runtime wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-runtime-wheels
+          path: dist/python-runtime
+
+      - name: Publish Python runtime wheels to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/python-runtime
+          skip-existing: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.3"
+
+      - name: Verify Python runtime wheels are available on PyPI
+        env:
+          PYTHON_RUNTIME_VERSION: ${{ needs.resolve-cli-release.outputs.version }}
+        run: |
+          uv run --no-project --with packaging==26.2 python .github/scripts/verify_pypi_release.py \
+            openai-codex-cli-bin "$PYTHON_RUNTIME_VERSION"
+
+  publish-python-sdk:
+    name: publish-python-sdk
+    needs:
+      - build-python-sdk
+      - publish-python-runtime
+      - resolve-cli-release
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write # Required for PyPI trusted publishing.
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.resolve-cli-release.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Download Python SDK package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-sdk-package
+          path: dist/python-sdk
+
+      - name: Publish Python SDK to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/python-sdk
+          skip-existing: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.3"
+
+      - name: Verify Python SDK is available on PyPI
+        env:
+          SDK_VERSION: ${{ needs.resolve-cli-release.outputs.version }}
+        run: uv run --no-project --with packaging==26.2 python .github/scripts/verify_pypi_release.py openai-codex "$SDK_VERSION"

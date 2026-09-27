@@ -120,6 +120,16 @@ use crate::protocol::SignalParams;
 use crate::protocol::SignalResponse;
 use crate::protocol::TerminateParams;
 use crate::protocol::TerminateResponse;
+use crate::protocol::WireFsCanonicalizeParams;
+use crate::protocol::WireFsCopyParams;
+use crate::protocol::WireFsCreateDirectoryParams;
+use crate::protocol::WireFsGetMetadataParams;
+use crate::protocol::WireFsOpenParams;
+use crate::protocol::WireFsReadDirectoryParams;
+use crate::protocol::WireFsReadFileParams;
+use crate::protocol::WireFsRemoveParams;
+use crate::protocol::WireFsWalkParams;
+use crate::protocol::WireFsWriteFileParams;
 use crate::protocol::WriteParams;
 use crate::protocol::WriteResponse;
 use crate::rpc::RpcCallError;
@@ -281,6 +291,8 @@ struct Inner {
 
 struct ConnectionState {
     status: ConnectionStatus,
+    // Publish registration renewal together with the recovered transport.
+    executor_registration_id: Option<String>,
     active_process_starts: usize,
     environment_connection_state_tx: watch::Sender<EnvironmentConnectionState>,
 }
@@ -337,6 +349,7 @@ pub struct ExecServerClient {
 /// `timeout_for_error` keeps diagnostics tied to the caller's configured
 /// budget after readiness has consumed part of that budget.
 pub(crate) struct NoiseInitializeContext {
+    pub(crate) executor_registration_id: String,
     pub(crate) span: tracing::Span,
     pub(crate) timeout_for_error: Duration,
 }
@@ -588,6 +601,11 @@ impl LazyRemoteExecServerClient {
             .filter(|client| !client.is_disconnected())
     }
 
+    pub(crate) fn cached_executor_registration_id(&self) -> Option<String> {
+        self.cached_client()
+            .and_then(|client| client.executor_registration_id())
+    }
+
     fn cached_client(&self) -> Option<ExecServerClient> {
         self.current_client
             .lock()
@@ -683,6 +701,15 @@ pub enum ExecServerError {
 }
 
 impl ExecServerClient {
+    fn executor_registration_id(&self) -> Option<String> {
+        self.inner
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .executor_registration_id
+            .clone()
+    }
+
     fn attach_environment_connection_state(
         &self,
         state_tx: watch::Sender<EnvironmentConnectionState>,
@@ -900,11 +927,13 @@ impl ExecServerClient {
         &self,
         params: FsReadFileParams,
     ) -> Result<FsReadFileResponse, ExecServerError> {
-        self.call(FS_READ_FILE_METHOD, &params).await
+        self.call(FS_READ_FILE_METHOD, &WireFsReadFileParams::from(params))
+            .await
     }
 
     pub async fn fs_open(&self, params: FsOpenParams) -> Result<FsOpenResponse, ExecServerError> {
-        self.call(FS_OPEN_METHOD, &params).await
+        self.call(FS_OPEN_METHOD, &WireFsOpenParams::from(params))
+            .await
     }
 
     pub async fn fs_read_block(
@@ -925,50 +954,70 @@ impl ExecServerClient {
         &self,
         params: FsWriteFileParams,
     ) -> Result<FsWriteFileResponse, ExecServerError> {
-        self.call(FS_WRITE_FILE_METHOD, &params).await
+        self.call(FS_WRITE_FILE_METHOD, &WireFsWriteFileParams::from(params))
+            .await
     }
 
     pub async fn fs_create_directory(
         &self,
         params: FsCreateDirectoryParams,
     ) -> Result<FsCreateDirectoryResponse, ExecServerError> {
-        self.call(FS_CREATE_DIRECTORY_METHOD, &params).await
+        self.call(
+            FS_CREATE_DIRECTORY_METHOD,
+            &WireFsCreateDirectoryParams::from(params),
+        )
+        .await
     }
 
     pub async fn fs_get_metadata(
         &self,
         params: FsGetMetadataParams,
     ) -> Result<FsGetMetadataResponse, ExecServerError> {
-        self.call(FS_GET_METADATA_METHOD, &params).await
+        self.call(
+            FS_GET_METADATA_METHOD,
+            &WireFsGetMetadataParams::from(params),
+        )
+        .await
     }
 
     pub async fn fs_canonicalize(
         &self,
         params: FsCanonicalizeParams,
     ) -> Result<FsCanonicalizeResponse, ExecServerError> {
-        self.call(FS_CANONICALIZE_METHOD, &params).await
+        self.call(
+            FS_CANONICALIZE_METHOD,
+            &WireFsCanonicalizeParams::from(params),
+        )
+        .await
     }
 
     pub async fn fs_read_directory(
         &self,
         params: FsReadDirectoryParams,
     ) -> Result<FsReadDirectoryResponse, ExecServerError> {
-        self.call(FS_READ_DIRECTORY_METHOD, &params).await
+        self.call(
+            FS_READ_DIRECTORY_METHOD,
+            &WireFsReadDirectoryParams::from(params),
+        )
+        .await
     }
 
     pub async fn fs_walk(&self, params: FsWalkParams) -> Result<FsWalkResponse, ExecServerError> {
-        self.call(FS_WALK_METHOD, &params).await
+        self.call(FS_WALK_METHOD, &WireFsWalkParams::from(params))
+            .await
     }
 
     pub async fn fs_remove(
         &self,
         params: FsRemoveParams,
     ) -> Result<FsRemoveResponse, ExecServerError> {
-        self.call(FS_REMOVE_METHOD, &params).await
+        self.call(FS_REMOVE_METHOD, &WireFsRemoveParams::from(params))
+            .await
     }
 
     pub async fn fs_copy(&self, params: FsCopyParams) -> Result<FsCopyResponse, ExecServerError> {
-        self.call(FS_COPY_METHOD, &params).await
+        self.call(FS_COPY_METHOD, &WireFsCopyParams::from(params))
+            .await
     }
 
     pub(crate) async fn start_process(
@@ -1184,6 +1233,9 @@ impl ExecServerClient {
         let inner = Arc::new(Inner {
             connection: StdMutex::new(ConnectionState {
                 status: ConnectionStatus::Connected(Arc::clone(&rpc_client)),
+                executor_registration_id: noise_context
+                    .as_ref()
+                    .map(|context| context.executor_registration_id.clone()),
                 active_process_starts: 0,
                 environment_connection_state_tx: watch::channel(
                     EnvironmentConnectionState::Connected,

@@ -39,18 +39,6 @@
           "priority": 1
         },
         {
-          "id": "claude-3-5-haiku-20241022",
-          "display_name": "Claude Haiku 3.5",
-          "description": "claude-haiku \u2022 Tool calling \u2022 Image input \u2022 PDF input",
-          "reasoning": false,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 200000,
-          "priority": 2
-        },
-        {
           "id": "claude-opus-4-0",
           "display_name": "Claude Opus 4 (latest)",
           "description": "claude-opus \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input",
@@ -61,30 +49,6 @@
           ],
           "context_window": 200000,
           "priority": 3
-        },
-        {
-          "id": "claude-3-opus-20240229",
-          "display_name": "Claude Opus 3",
-          "description": "claude-opus \u2022 Tool calling \u2022 Image input \u2022 PDF input",
-          "reasoning": false,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 200000,
-          "priority": 4
-        },
-        {
-          "id": "claude-opus-4-1-20250805",
-          "display_name": "Claude Opus 4.1",
-          "description": "claude-opus \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input",
-          "reasoning": true,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 200000,
-          "priority": 5
         },
         {
           "id": "claude-sonnet-4-5",
@@ -123,18 +87,6 @@
           "priority": 8
         },
         {
-          "id": "claude-3-5-sonnet-20241022",
-          "display_name": "Claude Sonnet 3.5 v2",
-          "description": "claude-sonnet \u2022 Tool calling \u2022 Image input \u2022 PDF input",
-          "reasoning": false,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 200000,
-          "priority": 9
-        },
-        {
           "id": "claude-opus-4-8",
           "display_name": "Claude Opus 4.8",
           "description": "claude-opus \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input",
@@ -147,42 +99,6 @@
           "priority": 10
         },
         {
-          "id": "claude-opus-4-20250514",
-          "display_name": "Claude Opus 4",
-          "description": "claude-opus \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input",
-          "reasoning": true,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 200000,
-          "priority": 11
-        },
-        {
-          "id": "claude-3-5-sonnet-20240620",
-          "display_name": "Claude Sonnet 3.5",
-          "description": "claude-sonnet \u2022 Tool calling \u2022 Image input \u2022 PDF input",
-          "reasoning": false,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 200000,
-          "priority": 12
-        },
-        {
-          "id": "claude-sonnet-4-20250514",
-          "display_name": "Claude Sonnet 4",
-          "description": "claude-sonnet \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input",
-          "reasoning": true,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 200000,
-          "priority": 13
-        },
-        {
           "id": "claude-opus-4-1",
           "display_name": "Claude Opus 4.1 (latest)",
           "description": "claude-opus \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input",
@@ -193,18 +109,6 @@
           ],
           "context_window": 200000,
           "priority": 14
-        },
-        {
-          "id": "claude-3-haiku-20240307",
-          "display_name": "Claude Haiku 3",
-          "description": "claude-haiku \u2022 Tool calling \u2022 Image input \u2022 PDF input",
-          "reasoning": false,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 200000,
-          "priority": 15
         },
         {
           "id": "claude-fable-5",
@@ -229,18 +133,6 @@
           ],
           "context_window": 200000,
           "priority": 17
-        },
-        {
-          "id": "claude-3-7-sonnet-20250219",
-          "display_name": "Claude Sonnet 3.7",
-          "description": "claude-sonnet \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input",
-          "reasoning": true,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 200000,
-          "priority": 18
         },
         {
           "id": "claude-haiku-4-5",
@@ -279,18 +171,6 @@
           "priority": 21
         },
         {
-          "id": "claude-3-sonnet-20240229",
-          "display_name": "Claude Sonnet 3",
-          "description": "claude-sonnet \u2022 Tool calling \u2022 Image input \u2022 PDF input",
-          "reasoning": false,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 200000,
-          "priority": 22
-        },
-        {
           "id": "claude-sonnet-4-6",
           "display_name": "Claude Sonnet 4.6",
           "description": "claude-sonnet \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input",
@@ -313,6 +193,42 @@
           ],
           "context_window": 200000,
           "priority": 24
+        },
+        {
+          "id": "claude-fable-5-1",
+          "display_name": "Claude Fable 5.1",
+          "description": null,
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": null,
+          "priority": -3
+        },
+        {
+          "id": "claude-opus-5-5",
+          "display_name": "Claude Opus 5.5",
+          "description": null,
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": null,
+          "priority": -2
+        },
+        {
+          "id": "claude-sonnet-5",
+          "display_name": "Claude Sonnet 5",
+          "description": null,
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": null,
+          "priority": -1
         }
       ]
     },
@@ -433,18 +349,6 @@
           "priority": 12
         },
         {
-          "id": "gemini-3.1-flash-lite-preview",
-          "display_name": "Gemini 3.1 Flash Lite Preview",
-          "description": "gemini-flash-lite \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
-          "reasoning": true,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 1048576,
-          "priority": 14
-        },
-        {
           "id": "gemini-3-flash-preview",
           "display_name": "Gemini 3 Flash Preview",
           "description": "gemini-flash \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
@@ -503,18 +407,6 @@
           ],
           "context_window": 262144,
           "priority": 21
-        },
-        {
-          "id": "gemini-2.0-flash",
-          "display_name": "Gemini 2.0 Flash",
-          "description": "gemini-flash \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
-          "reasoning": false,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 1048576,
-          "priority": 24
         },
         {
           "id": "gemini-3.6-flash",
@@ -589,18 +481,6 @@
           "priority": 35
         },
         {
-          "id": "gemini-3-pro-preview",
-          "display_name": "Gemini 3 Pro Preview",
-          "description": "gemini-pro \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
-          "reasoning": true,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 1048576,
-          "priority": 36
-        },
-        {
           "id": "gemini-2.5-flash-lite",
           "display_name": "Gemini 2.5 Flash-Lite",
           "description": "gemini-flash-lite \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
@@ -611,18 +491,6 @@
           ],
           "context_window": 1048576,
           "priority": 37
-        },
-        {
-          "id": "gemini-2.0-flash-lite",
-          "display_name": "Gemini 2.0 Flash-Lite",
-          "description": "gemini-flash-lite \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
-          "reasoning": false,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 1048576,
-          "priority": 39
         },
         {
           "id": "gemini-3.1-flash-live-preview",
@@ -3623,40 +3491,6 @@
       "sort_priority": 21,
       "models": [
         {
-          "id": "llama-3.3-70b-versatile",
-          "display_name": "Llama 3.3 70B",
-          "description": "llama \u2022 Tool calling",
-          "reasoning": false,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 131072,
-          "priority": 0
-        },
-        {
-          "id": "llama-3.1-8b-instant",
-          "display_name": "Llama 3.1 8B",
-          "description": "llama \u2022 Tool calling",
-          "reasoning": false,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 131072,
-          "priority": 1
-        },
-        {
-          "id": "meta-llama/llama-4-scout-17b-16e-instruct",
-          "display_name": "Llama 4 Scout 17B 16E",
-          "description": "llama \u2022 Tool calling \u2022 Image input",
-          "reasoning": false,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 131072,
-          "priority": 2
-        },
-        {
           "id": "openai/gpt-oss-safeguard-20b",
           "display_name": "Safety GPT OSS 20B",
           "description": "gpt-oss \u2022 Reasoning \u2022 Tool calling",
@@ -3688,17 +3522,6 @@
           ],
           "context_window": 131072,
           "priority": 5
-        },
-        {
-          "id": "qwen/qwen3-32b",
-          "display_name": "Qwen3-32B",
-          "description": "qwen \u2022 Reasoning \u2022 Tool calling",
-          "reasoning": true,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 131072,
-          "priority": 6
         }
       ]
     },
@@ -7505,17 +7328,6 @@
           "priority": 0
         },
         {
-          "id": "deepseek-v4-flash",
-          "display_name": "DeepSeek V4 Flash",
-          "description": "deepseek-flash \u2022 Reasoning \u2022 Tool calling",
-          "reasoning": true,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 1000000,
-          "priority": 1
-        },
-        {
           "id": "deepseek-v4-pro",
           "display_name": "DeepSeek V4 Pro",
           "description": "deepseek-thinking \u2022 Reasoning \u2022 Tool calling",
@@ -7525,28 +7337,6 @@
           ],
           "context_window": 1000000,
           "priority": 2
-        },
-        {
-          "id": "deepseek-reasoner",
-          "display_name": "DeepSeek Reasoner",
-          "description": "deepseek-thinking \u2022 Reasoning \u2022 Tool calling",
-          "reasoning": true,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 1000000,
-          "priority": 3
-        },
-        {
-          "id": "deepseek-chat",
-          "display_name": "DeepSeek Chat",
-          "description": "deepseek \u2022 Tool calling",
-          "reasoning": false,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 1000000,
-          "priority": 4
         }
       ]
     },
@@ -10429,6 +10219,42 @@
           ],
           "context_window": 1000000,
           "priority": 50
+        },
+        {
+          "id": "qwen3.8-max",
+          "display_name": "Qwen3.8 Max",
+          "description": null,
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": null,
+          "priority": -3
+        },
+        {
+          "id": "qwen3.8-flash",
+          "display_name": "Qwen3.8 Flash",
+          "description": null,
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": null,
+          "priority": -2
+        },
+        {
+          "id": "qwen3.7-flash",
+          "display_name": "Qwen3.7 Flash",
+          "description": null,
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": null,
+          "priority": -1
         }
       ]
     },
@@ -26755,6 +26581,30 @@
           ],
           "context_window": 262144,
           "priority": 5
+        },
+        {
+          "id": "k3-256k",
+          "display_name": "Kimi K3 (256K)",
+          "description": null,
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 262144,
+          "priority": 0,
+          "thinking_toggle": true
+        },
+        {
+          "id": "kimi-for-coding",
+          "display_name": "Kimi For Coding",
+          "description": null,
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": null,
+          "priority": 1
         }
       ]
     },
@@ -32652,6 +32502,52 @@
           ],
           "context_window": 202736,
           "priority": 12
+        }
+      ]
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "env_key": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1",
+      "wire_api": "chat",
+      "sort_priority": 100,
+      "models": [
+        {
+          "id": "gpt-6-astra",
+          "display_name": "GPT-6 Astra",
+          "description": "gpt-astra \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1050000,
+          "priority": 0
+        },
+        {
+          "id": "gpt-6-luna",
+          "display_name": "GPT-6 Luna",
+          "description": "gpt-luna \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1050000,
+          "priority": 1
+        },
+        {
+          "id": "gpt-6-sol",
+          "display_name": "GPT-6 Sol",
+          "description": "gpt-sol \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1050000,
+          "priority": 2
         }
       ]
     },

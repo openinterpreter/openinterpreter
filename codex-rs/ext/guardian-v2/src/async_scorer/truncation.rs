@@ -7,11 +7,7 @@ pub(crate) const CLASSIFICATION_TRUNCATION_METRIC: &str =
 pub(crate) const CLASSIFICATION_TRUNCATION_BYTES_METRIC: &str =
     "codex.guardian_v2.classification.truncation.bytes";
 
-pub(crate) struct TruncationObservation {
-    pub(crate) component: &'static str,
-    pub(crate) original_bytes: usize,
-    pub(crate) retained_bytes: usize,
-}
+pub(crate) use codex_guardian_context::TruncationObservation;
 
 /// Aggregates actual context reductions once per component and classifier request.
 #[derive(Default)]

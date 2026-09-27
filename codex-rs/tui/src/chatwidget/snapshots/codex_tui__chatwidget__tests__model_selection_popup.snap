@@ -1,5 +1,6 @@
 ---
 source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3309
 expression: popup
 ---
   Select Provider
@@ -7,4 +8,4 @@ expression: popup
 
 ›    Loading providers...
 
-  Press enter to confirm or esc to go back
+  enter select · esc back

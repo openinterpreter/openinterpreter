@@ -63,7 +63,7 @@ async fn thread_revert_preserves_model_selected_multi_agent_version(restart: boo
     let config = load_default_config_for_test(&codex_home).await;
     let mut model = codex_core::test_support::construct_model_info_offline("mock-model", &config);
     model.multi_agent_version = Some(MultiAgentVersion::V2);
-    write_models_cache_with_models(codex_home.path(), vec![model])?;
+    write_models_cache_with_models(codex_home.path(), vec![model]).await?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build()
@@ -155,8 +155,13 @@ async fn thread_revert_preserves_fork_cutoff_after_cold_resume() -> Result<()> {
     let updated_workspace = TempDir::new()?;
     let saved_cwd = AbsolutePathBuf::from_absolute_path(updated_workspace.path().canonicalize()?)?
         .into_path_buf();
+    let extra_workspace = TempDir::new()?;
+    let saved_roots = vec![
+        AbsolutePathBuf::from_absolute_path(&saved_cwd)?,
+        AbsolutePathBuf::from_absolute_path(extra_workspace.path().canonicalize()?)?,
+    ];
     MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
-    // This fixture checks host-native cwd restoration across fork and revert.
+    // This fixture checks host-native cwd and workspace restoration across fork and revert.
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_auto_env()
@@ -221,11 +226,15 @@ async fn thread_revert_preserves_fork_cutoff_after_cold_resume() -> Result<()> {
             })
             .expect("inherited turn start ordinal");
     let mut child_turns = Vec::new();
-    for text in ["child first", "child second"] {
+    for (text, runtime_workspace_roots) in [
+        ("child first", None),
+        ("child second", Some(saved_roots.clone())),
+    ] {
         let completed = mcp
             .start_turn_and_wait_for_completion(TurnStartParams {
                 thread_id: child.id.clone(),
                 cwd: Some(saved_cwd.clone()),
+                runtime_workspace_roots,
                 input: vec![UserInput::Text {
                     text: text.to_string(),
                     text_elements: Vec::new(),
@@ -272,7 +281,11 @@ async fn thread_revert_preserves_fork_cutoff_after_cold_resume() -> Result<()> {
             .build()
             .await?;
         initialize_experimental(&mut mcp).await?;
-        let ThreadResumeResponse { cwd, .. } = mcp
+        let ThreadResumeResponse {
+            cwd,
+            runtime_workspace_roots,
+            ..
+        } = mcp
             .request(|request_id| ClientRequest::ThreadResume {
                 request_id,
                 params: ThreadResumeParams {
@@ -281,12 +294,10 @@ async fn thread_revert_preserves_fork_cutoff_after_cold_resume() -> Result<()> {
                 },
             })
             .await?;
-        if expected_cutoff == fork_cutoff {
-            assert_eq!(cwd.as_path(), saved_cwd);
-        } else {
-            // Only parent-owned snapshots remain after reverting into inherited history.
-            assert_eq!(cwd.as_path(), child_meta.cwd);
-        }
+        assert_eq!(
+            (cwd.as_path(), runtime_workspace_roots),
+            (saved_cwd.as_path(), saved_roots.clone())
+        );
         mcp.start_turn_and_wait_for_completion(TurnStartParams {
             thread_id: child.id.clone(),
             input: vec![UserInput::Text {

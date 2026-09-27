@@ -4,7 +4,10 @@ use super::protocol::RemoteControlPairingStatusResponse as BackendRemoteControlP
 use super::protocol::RemoteControlTarget;
 use super::protocol::StartRemoteControlPairingRequest;
 use super::protocol::StartRemoteControlPairingResponse;
+use super::server_api::RemoteControlServerRequestError;
+use super::server_api::retry_after_with_jitter;
 use axum::http::HeaderMap;
+use axum::http::StatusCode;
 use codex_app_server_protocol::RemoteControlPairingStartResponse;
 use codex_app_server_protocol::RemoteControlPairingStatusResponse;
 use codex_login::default_client::create_client_without_request_logging;
@@ -74,11 +77,17 @@ impl RemoteControlEnrollment {
             })?;
         let headers = response.headers().clone();
         let status = response.status();
+        let retry_at = retry_after_with_jitter(&headers, OffsetDateTime::now_utc());
         let body = response.bytes().await.map_err(|err| {
-            io::Error::other(format!(
-                "failed to read remote control pairing response from `{}`: {err}",
-                self.remote_control_target.pair_url
-            ))
+            pairing_response_error(
+                format!(
+                    "failed to read remote control pairing response from `{}`: {err}",
+                    self.remote_control_target.pair_url
+                ),
+                status,
+                retry_at,
+                ErrorKind::Other,
+            )
         })?;
         let body_preview = preview_remote_control_response_body(&body);
         if !status.is_success() {
@@ -87,13 +96,15 @@ impl RemoteControlEnrollment {
                 404 => ErrorKind::NotFound,
                 _ => ErrorKind::Other,
             };
-            return Err(io::Error::new(
-                error_kind,
+            return Err(pairing_response_error(
                 format!(
                     "remote control pairing failed at `{}`: HTTP {status}, {}, body: {body_preview}",
                     self.remote_control_target.pair_url,
                     format_headers(&headers)
                 ),
+                status,
+                retry_at,
+                error_kind,
             ));
         }
 
@@ -169,11 +180,17 @@ impl RemoteControlEnrollment {
             })?;
         let headers = response.headers().clone();
         let status = response.status();
+        let retry_at = retry_after_with_jitter(&headers, OffsetDateTime::now_utc());
         let body = response.bytes().await.map_err(|err| {
-            io::Error::other(format!(
-                "failed to read remote control pairing status response from `{}`: {err}",
-                self.remote_control_target.pair_status_url
-            ))
+            pairing_response_error(
+                format!(
+                    "failed to read remote control pairing status response from `{}`: {err}",
+                    self.remote_control_target.pair_status_url
+                ),
+                status,
+                retry_at,
+                ErrorKind::Other,
+            )
         })?;
         let body_preview = preview_remote_control_response_body(&body);
         if !status.is_success() {
@@ -182,13 +199,15 @@ impl RemoteControlEnrollment {
                 404 | 410 => ErrorKind::InvalidInput,
                 _ => ErrorKind::Other,
             };
-            return Err(io::Error::new(
-                error_kind,
+            return Err(pairing_response_error(
                 format!(
                     "remote control pairing status failed at `{}`: HTTP {status}, {}, body: {body_preview}",
                     self.remote_control_target.pair_status_url,
                     format_headers(&headers)
                 ),
+                status,
+                retry_at,
+                error_kind,
             ));
         }
 
@@ -239,6 +258,27 @@ impl RemoteControlEnrollment {
     pub(super) fn clear_server_token(&mut self) {
         self.remote_control_token = None;
         self.expires_at = None;
+    }
+}
+
+fn pairing_response_error(
+    message: String,
+    status: StatusCode,
+    retry_at: Option<OffsetDateTime>,
+    fallback_kind: ErrorKind,
+) -> io::Error {
+    if matches!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+    ) {
+        RemoteControlServerRequestError::io_error(
+            message,
+            Some(status),
+            retry_at,
+            /*timed_out*/ false,
+        )
+    } else {
+        io::Error::new(fallback_kind, message)
     }
 }
 

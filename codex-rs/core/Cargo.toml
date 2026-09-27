@@ -49,6 +49,7 @@ codex-shell-command = { workspace = true }
 codex-execpolicy = { workspace = true }
 codex-git-utils = { workspace = true }
 codex-guardian-context = { workspace = true }
+codex-guardian-reviewer = { workspace = true }
 codex-history = { workspace = true }
 codex-hooks = { workspace = true }
 codex-http-client = { workspace = true }
@@ -67,6 +68,7 @@ codex-sandboxing = { workspace = true }
 codex-skills = { workspace = true }
 codex-skills-extension = { workspace = true }
 codex-state = { workspace = true }
+codex-agent-message-board-extension = { workspace = true }
 codex-terminal-detection = { workspace = true }
 codex-thread-store = { workspace = true }
 codex-tools = { workspace = true }

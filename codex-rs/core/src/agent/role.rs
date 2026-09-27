@@ -94,7 +94,6 @@ async fn apply_role_to_config_inner(
                 && let Some(
                     feature @ (Feature::ShellTool
                     | Feature::Apps
-                    | Feature::Personality
                     | Feature::Plugins
                     | Feature::MemoryTool
                     | Feature::RequestPermissionsTool),
@@ -222,10 +221,9 @@ mod role_overrides {
         {
             next_config.include_skill_instructions = false;
         }
-        let personality_changed = config.personality != next_config.personality
-            || config.features.enabled(Feature::Personality)
-                != next_config.features.enabled(Feature::Personality);
-        if personality_changed
+        let strips_baked_personality =
+            |config: &Config| config.personality == Some(Personality::None);
+        if strips_baked_personality(config) != strips_baked_personality(&next_config)
             && matches!(
                 config.base_instructions_provenance,
                 Some(BaseInstructionsProvenance::Model { .. })

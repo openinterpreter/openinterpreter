@@ -3,57 +3,67 @@
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+use codex_windows_sandbox::DirectoryOpenDisposition;
+use codex_windows_sandbox::SetupRuntime;
+use codex_windows_sandbox::create_directory_guard;
 use codex_windows_sandbox::string_from_sid_bytes;
+use std::ffi::OsString;
 use std::ffi::c_void;
 use std::mem::size_of;
-use std::path::Path;
+use std::os::windows::ffi::OsStringExt;
+use std::os::windows::io::BorrowedHandle;
+use std::os::windows::io::IntoRawHandle;
 use std::path::PathBuf;
-use std::ptr;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Security as security;
+use windows_sys::Win32::Storage::FileSystem as filesystem;
 use windows_sys::Win32::System::Pipes as pipes;
 use windows_sys::Win32::System::Threading as threading;
 
 use super::home::OwnedHandle;
 use super::home::prepare_codex_home;
-use super::request::ProvisioningRequest;
+use super::request::ServiceRequest;
 
-pub(super) struct ClientIdentity {
-    pub(super) account: String,
-    pub(super) codex_home: PathBuf,
-    pub(super) user_sid: String,
-    pub(super) session_id: u32,
-    pub(super) token: OwnedHandle,
-    pub(super) desktop_installation: Option<crate::installation_record::DesktopInstallation>,
-    // Retained by both the service and helper throughout provisioning.
-    pub(super) directory_handles: Vec<OwnedHandle>,
+pub(crate) struct ClientIdentity {
+    pub(crate) account: String,
+    pub(crate) codex_home: PathBuf,
+    pub(crate) user_sid: String,
+    pub(crate) session_id: u32,
+    // The requested route, authenticated against the held client's installed image.
+    pub(crate) runtime: SetupRuntime,
+    pub(crate) token: OwnedHandle,
+    pub(crate) desktop_installation: Option<crate::installation_record::DesktopInstallation>,
+    // Pins and guards remain live through registration and the provisioning helper.
+    pub(crate) directory_handles: Vec<OwnedHandle>,
 }
 
 pub(super) fn authenticate_client(
     pipe: HANDLE,
     authorized_process: &crate::package_identity::AuthorizedClientProcess,
     sandbox_sid: &[u8],
-    request: &ProvisioningRequest,
+    request: &ServiceRequest,
 ) -> Result<(ClientIdentity, Result<()>)> {
     std::thread::scope(|scope| {
         scope
             .spawn(|| {
-                if unsafe { pipes::ImpersonateNamedPipeClient(pipe) } == 0 {
-                    return Err(std::io::Error::last_os_error())
-                        .context("impersonate provisioning client");
-                }
-
                 let identity = authenticate_impersonated_client(
+                    pipe,
                     authorized_process,
                     sandbox_sid,
-                    &request.codex_home,
+                    request,
                 )?;
-                let policy_result = crate::machine_policy::validate_provisioning_settings(
-                    &identity.codex_home,
-                    &request.settings,
-                    &request.listeners,
-                    identity.token.0,
-                );
+                let policy_result = match request {
+                    // Registration does not provision resources or change sandbox policy.
+                    ServiceRequest::RegisterInstallation { .. } => Ok(()),
+                    ServiceRequest::ProvisionSandbox(request) => {
+                        crate::machine_policy::validate_provisioning_settings(
+                            &identity.codex_home,
+                            &request.settings,
+                            &request.listeners,
+                            identity.token.0,
+                        )
+                    }
+                };
                 Ok((identity, policy_result))
             })
             .join()
@@ -62,10 +72,22 @@ pub(super) fn authenticate_client(
 }
 
 fn authenticate_impersonated_client(
+    pipe: HANDLE,
     authorized_process: &crate::package_identity::AuthorizedClientProcess,
     sandbox_sid: &[u8],
-    requested_home: &Path,
+    request: &ServiceRequest,
 ) -> Result<ClientIdentity> {
+    // Pin the group generation through identity capture.
+    // Release this lock before the provisioning worker checks machine policy.
+    let _setup_lock = codex_windows_sandbox::acquire_sandbox_setup_lock(/*timeout_ms*/ 5_000)?;
+    anyhow::ensure!(
+        codex_windows_sandbox::resolve_sid(codex_windows_sandbox::SANDBOX_USERS_GROUP)
+            .is_ok_and(|current| current == sandbox_sid),
+        codex_windows_sandbox::SANDBOX_GROUP_CHANGED
+    );
+    if unsafe { pipes::ImpersonateNamedPipeClient(pipe) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("impersonate provisioning client");
+    }
     let mut raw_token = 0;
     if unsafe {
         threading::OpenThreadToken(
@@ -114,45 +136,71 @@ fn authenticate_impersonated_client(
         bail!("sandbox accounts cannot request provisioning");
     }
 
-    let mut length = 0;
-    unsafe {
-        security::GetTokenInformation(
-            token.0,
-            security::TokenUser,
-            ptr::null_mut(),
-            0,
-            &mut length,
-        )
+    let user = unsafe { codex_windows_sandbox::get_user_sid_bytes(token.0) }
+        .context("read provisioning client identity")?;
+    let user_sid = string_from_sid_bytes(&user).map_err(anyhow::Error::msg)?;
+    let account = unsafe { codex_windows_sandbox::account_name_from_sid(user.as_ptr() as _) }
+        .context("resolve provisioning client account")?;
+    let runtime = crate::package_identity::authorize_setup_runtime(authorized_process, request)?;
+    let requested_home = match request {
+        ServiceRequest::RegisterInstallation { codex_home } => codex_home,
+        ServiceRequest::ProvisionSandbox(request) => &request.codex_home,
     };
-    if length < size_of::<security::TOKEN_USER>() as u32 {
-        return Err(std::io::Error::last_os_error()).context("size provisioning client identity");
-    }
-    let mut user = vec![0_u8; length as usize];
-    if unsafe {
-        security::GetTokenInformation(
-            token.0,
-            security::TokenUser,
-            user.as_mut_ptr().cast(),
-            length,
-            &mut length,
-        )
-    } == 0
-    {
-        return Err(std::io::Error::last_os_error()).context("read provisioning client identity");
-    }
-    let sid = unsafe { ptr::read_unaligned(user.as_ptr().cast::<security::TOKEN_USER>()) }
-        .User
-        .Sid;
-    let sid_length = unsafe { security::GetLengthSid(sid) };
-    if sid_length == 0 {
-        return Err(std::io::Error::last_os_error()).context("size provisioning client SID");
-    }
-    let user_sid = string_from_sid_bytes(unsafe {
-        std::slice::from_raw_parts(sid.cast::<u8>(), sid_length as usize)
-    })
-    .map_err(anyhow::Error::msg)?;
-    let account = account_name(sid)?;
-    let (codex_home, handles) = prepare_codex_home(requested_home)?;
+    let (codex_home, handles) = match request {
+        ServiceRequest::ProvisionSandbox(request) => prepare_codex_home(
+            requested_home,
+            runtime,
+            if request.refresh_only {
+                DirectoryOpenDisposition::OpenExisting
+            } else {
+                DirectoryOpenDisposition::OpenOrCreate
+            },
+        )?,
+        ServiceRequest::RegisterInstallation { .. } => {
+            // Registration must not create the sandbox directories or change their ACLs.
+            codex_windows_sandbox::validate_local_directory_path(requested_home)?;
+            let mut handles = Vec::new();
+            super::home::pin_existing_ancestors(requested_home, &mut handles)?;
+            // Uninstall removes sandbox files as SYSTEM; read access cannot grant that authority.
+            let home = super::home::pin_directory(
+                requested_home,
+                filesystem::FILE_ADD_FILE
+                    | filesystem::FILE_ADD_SUBDIRECTORY
+                    | filesystem::WRITE_DAC,
+                DirectoryOpenDisposition::OpenExisting,
+            )?;
+            // Bind the guard to the authorized directory before resolving its pathname.
+            let guard = create_directory_guard(unsafe { BorrowedHandle::borrow_raw(home.0 as _) })?;
+            drop(super::home::pin_directory(
+                requested_home,
+                filesystem::FILE_READ_ATTRIBUTES,
+                DirectoryOpenDisposition::OpenExisting,
+            )?);
+            // Preserve the authorized directory's literal name (including trailing dots).
+            let mut buffer = vec![0_u16; 260];
+            let path = loop {
+                let length = unsafe {
+                    filesystem::GetFinalPathNameByHandleW(
+                        home.0,
+                        buffer.as_mut_ptr(),
+                        buffer.len() as u32,
+                        filesystem::FILE_NAME_NORMALIZED | filesystem::VOLUME_NAME_DOS,
+                    )
+                };
+                if length == 0 {
+                    return Err(std::io::Error::last_os_error())
+                        .context("resolve authorized desktop home");
+                }
+                if (length as usize) < buffer.len() {
+                    break PathBuf::from(OsString::from_wide(&buffer[..length as usize]));
+                }
+                buffer.resize(length as usize, /*value*/ 0);
+            };
+            handles.push(home);
+            handles.push(OwnedHandle(guard.into_raw_handle() as HANDLE));
+            (path, handles)
+        }
+    };
     let desktop_installation =
         crate::installation_record::read_desktop_installation(&codex_home, token.0)
             .inspect_err(|_| {
@@ -167,36 +215,9 @@ fn authenticate_impersonated_client(
         codex_home,
         user_sid,
         session_id: session,
+        runtime,
         token,
         desktop_installation,
         directory_handles: handles,
     })
-}
-
-fn account_name(sid: *mut c_void) -> Result<String> {
-    let mut name = [0_u16; 256];
-    let mut domain = [0_u16; 256];
-    let mut name_length = name.len() as u32;
-    let mut domain_length = domain.len() as u32;
-    let mut account_type: security::SID_NAME_USE = 0;
-    if unsafe {
-        security::LookupAccountSidW(
-            std::ptr::null(),
-            sid,
-            name.as_mut_ptr(),
-            &mut name_length,
-            domain.as_mut_ptr(),
-            &mut domain_length,
-            &mut account_type,
-        )
-    } == 0
-    {
-        return Err(std::io::Error::last_os_error()).context("resolve provisioning client name");
-    }
-    if account_type != security::SidTypeUser || domain_length == 0 {
-        bail!("provisioning client is not a named Windows user");
-    }
-    let name = String::from_utf16(&name[..name_length as usize])?;
-    let domain = String::from_utf16(&domain[..domain_length as usize])?;
-    Ok(format!("{domain}\\{name}"))
 }

@@ -53,7 +53,9 @@ where
                     "unknown network proxy attribution token",
                 )
             })?,
-            None => self.state.as_ref().clone(),
+            None => self
+                .state
+                .for_environment_id(self.environment_id.as_deref()),
         };
         if let Some(expected_environment_id) = self.environment_id.as_deref()
             && state

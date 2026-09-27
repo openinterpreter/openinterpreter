@@ -908,6 +908,19 @@ impl Environment {
         }
     }
 
+    /// Registration on the installed Noise session, without connecting or refreshing it.
+    ///
+    /// Returns `None` before a session is installed and for non-Noise environments.
+    /// A registry lookup does not change this value until the new connection is
+    /// installed. Recovery may renew the registration while preserving the session.
+    /// Callers that authorize asynchronously must check the snapshot again before
+    /// admitting work.
+    pub fn cached_executor_registration_id(&self) -> Option<String> {
+        self.remote_client
+            .as_ref()
+            .and_then(LazyRemoteExecServerClient::cached_executor_registration_id)
+    }
+
     /// Refresh the connection to the executor currently registered for this environment.
     ///
     /// # Caller contract
@@ -920,11 +933,11 @@ impl Environment {
     /// # Session behavior
     ///
     /// A fresh registry lookup determines whether the current session can be reused.
-    /// A changed executor key, or a failed or missing session, causes a fresh connection
+    /// A changed registration or executor key, or a failed or missing session, causes a fresh connection
     /// without resuming the old session. Retirement cancels old recovery, fails its
     /// outstanding work and process handles, and never replays commands. The environment
     /// object and filesystem handle remain usable through the new connection.
-    /// A matching executor key preserves a session that has not failed, including one
+    /// A matching registration and executor key preserve a session that has not failed, including one
     /// that is recovering; the live readiness check rejects a recovering connection.
     ///
     /// # Completion and errors
@@ -989,7 +1002,7 @@ impl Environment {
                     if params.roots.iter().any(|root| {
                         root.sandbox
                             .as_ref()
-                            .is_some_and(crate::FileSystemSandboxContext::should_run_in_sandbox)
+                            .is_some_and(crate::FileSystemSandboxContext::should_read_from_sandbox)
                     }) && !client
                         .environment_info()
                         .await?
@@ -1121,6 +1134,11 @@ impl Environment {
 
     pub fn get_filesystem(&self) -> Arc<dyn ExecutorFileSystem> {
         Arc::clone(&self.filesystem)
+    }
+
+    /// Borrows the shared filesystem identity without extending the environment's lifetime.
+    pub fn filesystem_ref(&self) -> &Arc<dyn ExecutorFileSystem> {
+        &self.filesystem
     }
 
     /// Returns a filesystem view that fails instead of starting or waiting for a connection.
@@ -1838,7 +1856,7 @@ mod tests {
         let source = sandbox_cwd
             .to_abs_path()
             .expect_err("sandbox cwd should not be native to this host");
-        let sandbox = crate::FileSystemSandboxContext::from_permission_profile_with_cwd(
+        let sandbox = crate::FileSystemSandboxContext::from_permission_profile(
             codex_protocol::models::PermissionProfile::workspace_write(),
             sandbox_cwd.clone(),
         );
@@ -1890,6 +1908,8 @@ mod tests {
                 &codex_protocol::permissions::FileSystemSandboxPolicy::restricted(Vec::new()),
                 codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
             ),
+            PathUri::from_host_native_path(std::env::current_dir().expect("read current dir"))
+                .expect("cwd URI"),
         );
 
         let err = environment

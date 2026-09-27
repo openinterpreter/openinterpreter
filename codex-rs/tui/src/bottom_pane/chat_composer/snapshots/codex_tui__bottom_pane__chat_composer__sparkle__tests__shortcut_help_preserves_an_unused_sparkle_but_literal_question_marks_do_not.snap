@@ -1,0 +1,45 @@
+---
+source: tui/src/bottom_pane/chat_composer/sparkle_tests.rs
+assertion_line: 365
+expression: "snapshots.join(\"\\n\\n\")"
+---
+shortcut help:
+  Keyboard shortcuts
+
+  Compose                       Session
+  /        Commands             tab     Send message
+  @        Mention files        ⌥+,     Less reasoning
+  !        Shell command        ⌥+.     More reasoning
+  ctrl+j   New line             ctrl+c  Quit
+  ctrl+v   Paste image
+  ctrl+g   External editor      Transcript (open first)
+  ctrl+r   Search history       ctrl+t                 Open transcript
+  esc esc  Edit last message    f3                     Find text
+                                pgup / pgdn            Scroll
+                                ctrl+space             Start selection
+                                ctrl+home / ctrl+end   Top / latest
+                                shift+⌥+, / shift+⌥+.  Top / latest
+
+  /keymap customize
+
+› Ask Codex to do anything
+
+  ? / esc close
+
+after /model selects Astra:
+                            ⠈     ⢀     ⠁                 ⠂
+›⠁Ask Codex to do anything         ⠈      ⠁
+       ⢀            ⠠     ⠄         ⠠          ⢀    ⠠     ⡀
+  ? for shortcuts                                            100% context left
+
+literal pasted question mark:
+
+› ?
+
+                                                             100% context left
+
+after clearing and selecting Astra:
+
+› Ask Codex to do anything
+
+  ? for shortcuts                                            100% context left

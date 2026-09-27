@@ -30,8 +30,10 @@ chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["derive"] }
 codex-ansi-escape = { workspace = true }
 codex-app-server-client = { workspace = true }
+codex-app-server-daemon = { workspace = true }
 codex-app-server-protocol = { workspace = true }
 codex-arg0 = { workspace = true }
+codex-backend-client = { workspace = true }
 codex-install-context = { workspace = true }
 codex-cloud-config = { workspace = true }
 codex-config = { workspace = true }
@@ -46,6 +48,7 @@ codex-file-search = { workspace = true }
 codex-git-utils = { workspace = true }
 codex-http-client = { workspace = true }
 codex-login = { workspace = true }
+codex-mermaid = { workspace = true }
 codex-message-history = { workspace = true }
 codex-model-provider = { workspace = true }
 codex-model-provider-info = { workspace = true }
@@ -54,6 +57,8 @@ codex-models-manager = { workspace = true }
 codex-otel = { workspace = true }
 codex-plugin = { workspace = true }
 codex-protocol = { workspace = true }
+codex-realtime-webrtc = { workspace = true }
+futures = { workspace = true }
 codex-rollout = { workspace = true }
 codex-sandboxing = { workspace = true }
 codex-shell-command = { workspace = true }
@@ -95,6 +100,7 @@ ratatui = { workspace = true, features = [
 ratatui-macros = { workspace = true }
 regex-lite = { workspace = true }
 rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
+semver = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
 sha2 = { workspace = true }
@@ -116,6 +122,7 @@ tokio = { workspace = true, features = [
 ] }
 tokio-stream = { workspace = true, features = ["sync"] }
 toml = { workspace = true }
+toml_edit = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
@@ -134,16 +141,28 @@ tokio-util = { workspace = true, features = ["time"] }
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAccessibility", "NSWorkspace"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSDateFormatter", "NSFormatter", "NSLocale", "NSString"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Keep the same executor features as the credential store, which also uses zbus.
+zbus = "4.4.0"
+
 [target.'cfg(windows)'.dependencies]
 which = { workspace = true }
 windows-sys = { version = "0.52", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_RemoteDesktop",
     "Win32_System_IO",
     "Win32_System_Pipes",
     "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 winsplit = "0.1"
 

@@ -21,6 +21,7 @@ http = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 codex-utils-absolute-path = { workspace = true }

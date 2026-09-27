@@ -1,7 +1,13 @@
+//! Archived-session recovery with shared picker rows and scoped terminal ownership.
+
+use crate::bottom_pane::picker_option_list;
+use crate::bottom_pane::render_menu_surface;
 use crate::key_hint;
-use crate::render::renderable::ColumnRenderable;
+use crate::render::Insets;
+use crate::render::renderable::FlexRenderable;
 use crate::render::renderable::Renderable;
-use crate::selection_list::selection_option_row;
+use crate::render::renderable::RenderableExt as _;
+use crate::render::renderable::RenderableItem;
 use crate::session_start::SessionStartAction;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
@@ -26,6 +32,7 @@ use tokio_stream::StreamExt;
 pub(crate) enum UnarchiveChoice {
     Unarchive,
     Cancel,
+    Quit,
 }
 
 pub(crate) async fn run_unarchive_prompt(
@@ -44,7 +51,7 @@ pub(crate) async fn run_unarchive_prompt(
     guard.draw(&screen)?;
     loop {
         let Some(event) = events.next().await else {
-            return Ok(UnarchiveChoice::Cancel);
+            return Ok(UnarchiveChoice::Quit);
         };
         guard.tui.screen_size_for_event(&event)?;
         match event {
@@ -58,7 +65,7 @@ pub(crate) async fn run_unarchive_prompt(
             | TuiEvent::Resize(_)
             | TuiEvent::Resume
             | TuiEvent::FocusGained => {}
-            TuiEvent::FocusLost => continue,
+            TuiEvent::Mouse(_) | TuiEvent::FocusLost => continue,
         }
         guard.draw(&screen)?;
     }
@@ -140,13 +147,13 @@ impl UnarchivePrompt {
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d'))
         {
-            return Some(UnarchiveChoice::Cancel);
+            return Some(UnarchiveChoice::Quit);
         }
         match key.code {
             KeyCode::Up | KeyCode::Down | KeyCode::Char('k' | 'j') => {
                 self.highlighted = match self.highlighted {
                     UnarchiveChoice::Unarchive => UnarchiveChoice::Cancel,
-                    UnarchiveChoice::Cancel => UnarchiveChoice::Unarchive,
+                    UnarchiveChoice::Cancel | UnarchiveChoice::Quit => UnarchiveChoice::Unarchive,
                 };
                 None
             }
@@ -157,37 +164,47 @@ impl UnarchivePrompt {
         }
     }
 
-    fn content(&self) -> ColumnRenderable<'static> {
-        let mut column = ColumnRenderable::new();
-        column.push("");
+    fn content(&self) -> FlexRenderable<'static> {
+        let mut column = FlexRenderable::new();
+        column.push(/*flex*/ 1, RenderableItem::Borrowed(&""));
         column.push(
-            Paragraph::new("This conversation is archived".bold()).wrap(Wrap { trim: false }),
+            /*flex*/ 0,
+            Paragraph::new("This conversation is archived".bold())
+                .wrap(Wrap { trim: false })
+                .inset(Insets::vh(/*v*/ 0, /*h*/ 2)),
         );
         column.push(
-            Paragraph::new(Line::from(self.thread_id.to_string()).dim()).wrap(Wrap { trim: false }),
+            /*flex*/ 0,
+            Paragraph::new(Line::from(self.thread_id.to_string()).dim())
+                .wrap(Wrap { trim: false })
+                .inset(Insets::vh(/*v*/ 0, /*h*/ 2)),
         );
-        column.push("");
-        column.push(selection_option_row(
-            /*index*/ 0,
-            format!("Unarchive and {}", self.action.verb()),
-            self.highlighted == UnarchiveChoice::Unarchive,
-        ));
-        column.push(selection_option_row(
-            /*index*/ 1,
-            "Cancel".to_string(),
-            self.highlighted == UnarchiveChoice::Cancel,
-        ));
-        column.push("");
+        let selected_index = match self.highlighted {
+            UnarchiveChoice::Unarchive => 0,
+            UnarchiveChoice::Cancel | UnarchiveChoice::Quit => 1,
+        };
         column.push(
+            /*flex*/ 1,
+            picker_option_list(
+                vec![
+                    format!("Unarchive and {}", self.action.verb()),
+                    "Cancel".to_string(),
+                ],
+                selected_index,
+            ),
+        );
+        column.push(
+            /*flex*/ 0,
             Paragraph::new(Line::from(vec![
-                "Press ".dim(),
                 key_hint::plain(KeyCode::Enter).into(),
-                " to continue or ".dim(),
+                " continue · ".dim(),
                 key_hint::plain(KeyCode::Esc).into(),
-                " to cancel".dim(),
+                " cancel".dim(),
             ]))
-            .wrap(Wrap { trim: false }),
+            .wrap(Wrap { trim: false })
+            .inset(Insets::vh(/*v*/ 0, /*h*/ 2)),
         );
+        column.push(/*flex*/ 1, RenderableItem::Borrowed(&""));
         column
     }
 }
@@ -195,7 +212,13 @@ impl UnarchivePrompt {
 impl WidgetRef for &UnarchivePrompt {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
         Clear.render(area, buf);
-        self.content().render(area, buf);
+        let content = self.content();
+        let panel = Rect {
+            height: content.desired_height(area.width).min(area.height),
+            ..area
+        };
+        render_menu_surface(panel, buf);
+        content.render(panel, buf);
     }
 }
 

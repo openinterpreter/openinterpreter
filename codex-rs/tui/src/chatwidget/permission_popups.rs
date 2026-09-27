@@ -1,10 +1,11 @@
 //! Permission and approval popup flows for `ChatWidget`.
 //!
-//! This module owns the generic permission pickers and confirmation surfaces;
+//! This module presents permission choices and confirmations in the shared picker;
 //! Windows-specific sandbox prompting lives beside it in
 //! `windows_sandbox_prompts`.
 
 use super::*;
+use crate::style::accent_color;
 use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
 
 impl ChatWidget {
@@ -41,15 +42,20 @@ impl ChatWidget {
         let presets: Vec<ApprovalPreset> = builtin_approval_presets();
 
         #[cfg(target_os = "windows")]
-        let windows_sandbox_level = crate::windows_sandbox::level_from_config(&self.config);
+        let windows_sandbox_level = self.windows_sandbox_config.level();
         #[cfg(target_os = "windows")]
         let windows_degraded_sandbox_enabled =
-            matches!(windows_sandbox_level, WindowsSandboxLevel::RestrictedToken);
+            matches!(windows_sandbox_level, WindowsSandboxLevel::RestrictedToken)
+                && self.windows_sandbox_local_server
+                && self.windows_sandbox_host == crate::app::WindowsSandboxHost::Local;
         #[cfg(not(target_os = "windows"))]
         let windows_degraded_sandbox_enabled = false;
 
-        let show_elevate_sandbox_hint =
-            windows_degraded_sandbox_enabled && presets.iter().any(|preset| preset.id == "auto");
+        let show_elevate_sandbox_hint = windows_degraded_sandbox_enabled
+            && self
+                .windows_sandbox_config
+                .allows(WindowsSandboxSetupMode::Elevated)
+            && presets.iter().any(|preset| preset.id == "auto");
 
         let guardian_disabled_reason = |enabled: bool| {
             let mut next_features = self.config.features.get().clone();
@@ -160,19 +166,17 @@ impl ChatWidget {
         let footer_note = show_elevate_sandbox_hint.then(|| {
             vec![
                 "The non-admin sandbox protects your files and prevents network access under most circumstances. However, it carries greater risk if prompt injected. To upgrade to the default sandbox, run ".dim(),
-                "/setup-default-sandbox".cyan(),
+                "/setup-default-sandbox".fg(accent_color()),
                 ".".dim(),
             ]
             .into()
         });
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: Some("Update Model Permissions".to_string()),
             footer_note,
-            footer_hint: Some(standard_popup_hint_line()),
             items,
-            header: Box::new(()),
-            ..Default::default()
+            title: Some("Update Model Permissions".into()),
+            ..SelectionViewParams::picker()
         });
     }
 
@@ -225,13 +229,18 @@ impl ChatWidget {
         );
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: Some("Auto-review Denials".to_string()),
-            subtitle: Some("Select a denied action to approve.".to_string()),
-            footer_hint: Some(standard_popup_hint_line()),
+            header: Box::new(
+                Paragraph::new(vec![
+                    Line::from("Auto-review Denials".bold()),
+                    Line::from("Select a denied action to approve.".dim()),
+                ])
+                .wrap(Wrap { trim: false }),
+            ),
             items,
             is_searchable: true,
-            col_width_mode: ColumnWidthMode::AutoAllRows,
-            ..Default::default()
+            // Denial rationales remain visible before authorizing a retry.
+            description_layout: crate::bottom_pane::SelectionDescriptionLayout::Columns,
+            ..SelectionViewParams::picker()
         });
         self.request_redraw();
     }
@@ -269,7 +278,6 @@ impl ChatWidget {
                 Some(approvals_reviewer),
                 Some(permission_profile.clone()),
                 Some(active_permission_profile.clone()),
-                /*windows_sandbox_level*/ None,
                 /*model*/ None,
                 /*effort*/ None,
                 /*summary*/ None,
@@ -307,6 +315,14 @@ impl ChatWidget {
         profile_selection: Option<PermissionProfileSelection>,
         return_to_permissions: bool,
     ) -> Vec<SelectionAction> {
+        let profile_selection = profile_selection.or_else(|| {
+            self.thread_id.map(|_| PermissionProfileSelection {
+                profile_id: preset.active_permission_profile.id.clone(),
+                approval_policy: Some(AskForApproval::from(preset.approval)),
+                approvals_reviewer: Some(approvals_reviewer),
+                display_label: label.clone(),
+            })
+        });
         let apply_actions = || {
             profile_selection.clone().map_or_else(
                 || {
@@ -323,6 +339,21 @@ impl ChatWidget {
         };
         let requires_confirmation =
             approvals_reviewer == ApprovalsReviewer::User && preset.id == "full-access";
+        #[cfg(target_os = "windows")]
+        if preset.id == "auto"
+            && matches!(
+                self.windows_sandbox_host,
+                crate::app::WindowsSandboxHost::Mixed | crate::app::WindowsSandboxHost::Unknown
+            )
+        {
+            let preset = preset.clone();
+            return vec![Box::new(move |tx| {
+                tx.send(AppEvent::OpenWindowsSandboxEnablePrompt {
+                    preset: preset.clone(),
+                    profile_selection: profile_selection.clone(),
+                });
+            })];
+        }
         if requires_confirmation {
             let preset = preset.clone();
             return vec![Box::new(move |tx| {
@@ -336,39 +367,17 @@ impl ChatWidget {
         if approvals_reviewer == ApprovalsReviewer::User && preset.id == "auto" {
             #[cfg(target_os = "windows")]
             {
-                if crate::windows_sandbox::level_from_config(&self.config)
-                    == WindowsSandboxLevel::Disabled
-                {
+                if self.windows_sandbox_host == crate::app::WindowsSandboxHost::Remote {
+                    // The remote server owns the permission choice. Its executor
+                    // cannot be set up from this TUI's Windows account.
+                    return apply_actions();
+                }
+                if !self.windows_sandbox_config.is_enabled() {
                     let preset = preset.clone();
-                    if crate::windows_sandbox::sandbox_setup_is_complete(
-                        self.config.codex_home.as_path(),
-                    ) {
-                        return vec![Box::new(move |tx| {
-                            tx.send(AppEvent::EnableWindowsSandboxForAgentMode {
-                                preset: preset.clone(),
-                                mode: WindowsSandboxEnableMode::Elevated,
-                                profile_selection: profile_selection.clone(),
-                            });
-                        })];
-                    }
                     return vec![Box::new(move |tx| {
                         tx.send(AppEvent::OpenWindowsSandboxEnablePrompt {
                             preset: preset.clone(),
                             profile_selection: profile_selection.clone(),
-                        });
-                    })];
-                }
-                if let Some((sample_paths, extra_count, failed_scan)) =
-                    self.world_writable_warning_details()
-                {
-                    let preset = preset.clone();
-                    return vec![Box::new(move |tx| {
-                        tx.send(AppEvent::OpenWorldWritableWarningConfirmation {
-                            preset: Some(preset.clone()),
-                            profile_selection: profile_selection.clone(),
-                            sample_paths: sample_paths.clone(),
-                            extra_count,
-                            failed_scan,
                         });
                     })];
                 }
@@ -505,10 +514,9 @@ impl ChatWidget {
         ];
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
-            footer_hint: Some(standard_popup_hint_line()),
             items,
             header: Box::new(header),
-            ..Default::default()
+            ..SelectionViewParams::picker()
         });
     }
 }

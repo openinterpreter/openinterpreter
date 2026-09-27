@@ -25,16 +25,28 @@ jobs:
       - name: Verify Bazel clippy flags match Cargo workspace lints
         run: python3 .github/scripts/verify_bazel_clippy_lints.py
 
-      - name: Test packaging scripts
-        run: |
-          python3 -m unittest discover -s scripts/codex_package -p 'test_*.py'
-          python3 -m unittest discover -s scripts/install -p 'test_*.py'
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.3"
+
+      - name: Test downstream Python release resolution
+        run: python3 -m unittest discover -s .github/scripts -p 'test_resolve_python_cli_release.py'
+
+      - name: Test PyPI release verification
+        run: uv run --no-project --with packaging==26.2 python -m unittest discover -s .github/scripts -p 'test_verify_pypi_release.py'
+
+      - name: Test Codex package builder
+        run: python3 -m unittest discover -s scripts/codex_package -p 'test_*.py'
+
+      - name: Test Open Interpreter packaging scripts
+        run: python3 -m unittest discover -s scripts/install -p 'test_*.py'
 
       - name: Test standalone installer
         run: python3 -m unittest discover -s scripts/install -p 'test_*.py'
 
-      - name: Test macOS notarization
-        run: python3 -m unittest discover -s .github/scripts/macos-signing -p 'test_notarize_with_akv.py'
+      - name: Test macOS signing and notarization
+        run: python3 -m unittest discover -s .github/scripts/macos-signing -p 'test_*.py'
 
       - name: Setup pnpm
         uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
@@ -54,10 +66,6 @@ jobs:
       - name: Check root README ToC
         run: python3 scripts/readme_toc.py README.md
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          version: "0.11.3"
       - name: Check formatting (run `just fmt` to fix)
         run: just fmt-check
 

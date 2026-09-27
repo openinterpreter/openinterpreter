@@ -43,6 +43,7 @@ struct ClientState {
 }
 
 pub(crate) struct ClientTracker {
+    pub(super) auth: Option<crate::ConnectionAuth>,
     clients: HashMap<(ClientId, StreamId), ClientState>,
     legacy_stream_ids: HashMap<ClientId, StreamId>,
     join_set: JoinSet<(ClientId, StreamId)>,
@@ -58,6 +59,7 @@ impl ClientTracker {
         shutdown_token: &CancellationToken,
     ) -> Self {
         Self {
+            auth: None,
             clients: HashMap::new(),
             legacy_stream_ids: HashMap::new(),
             join_set: JoinSet::new(),
@@ -168,6 +170,7 @@ impl ClientTracker {
                 self.send_transport_event(TransportEvent::ConnectionOpened {
                     connection_id,
                     origin: ConnectionOrigin::RemoteControl,
+                    auth: self.auth.clone(),
                     writer: writer_tx,
                     disconnect_sender: Some(disconnect_token.clone()),
                 })

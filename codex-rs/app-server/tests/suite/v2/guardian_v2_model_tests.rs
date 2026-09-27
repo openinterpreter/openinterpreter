@@ -77,7 +77,7 @@ async fn computer_use_scoring_follows_model_review_requirement(
     let mut reviewed_model =
         codex_core::test_support::construct_model_info_offline(REVIEWED_MODEL, &config);
     reviewed_model.node_repl_auto_review_required = true;
-    write_models_cache_with_models(codex_home.path(), vec![ordinary_model, reviewed_model])?;
+    write_models_cache_with_models(codex_home.path(), vec![ordinary_model, reviewed_model]).await?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(TIMEOUT)

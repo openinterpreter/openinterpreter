@@ -3,6 +3,8 @@ use reqwest::header::HeaderName;
 use reqwest::header::HeaderValue;
 use serde::Deserialize;
 use serde::Serialize;
+use sha2::Digest;
+use sha2::Sha256;
 use std::fs;
 use std::io;
 use std::io::Write;
@@ -183,6 +185,27 @@ pub async fn resolve_access_token(codex_home: &Path) -> Result<String, KimiCodeA
         save_token(codex_home, token.clone())?;
     }
     Ok(token.access_token)
+}
+
+/// Returns a non-secret fingerprint of the saved Kimi Code credentials.
+///
+/// Loading through `load_token` preserves the credential file's symlink and permission checks.
+pub fn credential_fingerprint(codex_home: &Path) -> Result<String, KimiCodeAuthError> {
+    let token = load_token(codex_home)?;
+    let mut digest = Sha256::new();
+    digest.update(b"kimi-code-credentials-v1");
+    for value in [
+        token.access_token.as_bytes(),
+        token.refresh_token.as_bytes(),
+        token.scope.as_bytes(),
+        token.token_type.as_bytes(),
+    ] {
+        digest.update((value.len() as u64).to_le_bytes());
+        digest.update(value);
+    }
+    digest.update(token.expires_at.to_le_bytes());
+    digest.update(token.expires_in.to_le_bytes());
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 pub async fn ensure_access_token(
@@ -537,6 +560,58 @@ mod tests {
         save_token(temp_dir.path(), token.clone()).expect("save token");
         let loaded = load_token(temp_dir.path()).expect("load token");
         assert_eq!(loaded, token);
+    }
+
+    #[test]
+    fn credential_fingerprint_rejects_missing_saved_credentials() {
+        let temp_dir = tempdir().expect("tempdir");
+        let error = credential_fingerprint(temp_dir.path()).expect_err("missing credentials");
+
+        assert!(matches!(error, KimiCodeAuthError::MissingCredentials));
+    }
+
+    #[test]
+    fn credential_fingerprint_tracks_saved_credentials_without_exposing_them() {
+        let temp_dir = tempdir().expect("tempdir");
+        save_token(temp_dir.path(), test_token()).expect("save token");
+        let first = credential_fingerprint(temp_dir.path()).expect("fingerprint credentials");
+
+        let changed = KimiCodeToken {
+            access_token: "other-access".to_string(),
+            ..test_token()
+        };
+        save_token(temp_dir.path(), changed).expect("save changed token");
+        let second = credential_fingerprint(temp_dir.path()).expect("fingerprint credentials");
+
+        assert_ne!(first, second);
+        assert!(!first.contains("access"));
+        assert!(!second.contains("other-access"));
+    }
+
+    #[test]
+    fn credential_fingerprint_changes_after_saved_token_refresh_without_exposing_tokens() {
+        let temp_dir = tempdir().expect("tempdir");
+        let initial = test_token();
+        save_token(temp_dir.path(), initial.clone()).expect("save token");
+        let before_refresh =
+            credential_fingerprint(temp_dir.path()).expect("fingerprint credentials");
+
+        let refreshed = KimiCodeToken {
+            access_token: "refreshed-access".to_string(),
+            refresh_token: "refreshed-refresh".to_string(),
+            expires_at: initial.expires_at + 1,
+            expires_in: initial.expires_in + 1,
+            ..initial
+        };
+        save_token(temp_dir.path(), refreshed).expect("save refreshed token");
+        let after_refresh =
+            credential_fingerprint(temp_dir.path()).expect("fingerprint credentials");
+
+        assert_ne!(before_refresh, after_refresh);
+        for secret in ["access", "refresh", "refreshed-access", "refreshed-refresh"] {
+            assert!(!before_refresh.contains(secret));
+            assert!(!after_refresh.contains(secret));
+        }
     }
 
     #[cfg(unix)]

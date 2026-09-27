@@ -2,13 +2,15 @@ use anyhow::Context;
 use anyhow::Result;
 use codex_exec_server::CopyOptions;
 use codex_exec_server::CreateDirectoryOptions;
+use codex_exec_server::EnvironmentAccess;
+use codex_exec_server::EnvironmentAccessExt;
 #[cfg(unix)]
 use codex_exec_server::ExecServerRuntimePaths;
-#[cfg(unix)]
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::FILE_READ_CHUNK_SIZE;
 use codex_exec_server::FileMetadata;
-#[cfg(unix)]
+use codex_exec_server::FileSystemEnvironmentAccessor;
+use codex_exec_server::FileSystemSandboxContext;
 use codex_exec_server::LocalFileSystem;
 use codex_exec_server::ReadDirectoryEntry;
 use codex_exec_server::RemoveOptions;
@@ -23,12 +25,19 @@ use codex_file_system::MAX_WALK_ENTRIES;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::FileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::FileSystemAccessMode;
+use codex_protocol::permissions::FileSystemPath;
+use codex_protocol::permissions::FileSystemSandboxEntry;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::FileSystemSpecialPath;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy;
 use codex_sandboxing::policy_transforms::effective_network_sandbox_policy;
 use codex_utils_path_uri::PathUri;
 use futures::TryStreamExt;
 use pretty_assertions::assert_eq;
 use std::path::Path;
+use std::sync::Arc;
 use tempfile::TempDir;
 use test_case::test_case;
 
@@ -48,8 +57,7 @@ fn sandbox_context_from_profile_preserves_workspace_write_read_only_subpaths() -
     std::fs::create_dir_all(&git_dir)?;
 
     let sandbox = workspace_write_sandbox(writable_dir.clone());
-    let permissions: PermissionProfile = sandbox.permissions.try_into()?;
-    let policy = permissions.file_system_sandbox_policy();
+    let policy = sandbox.permissions.file_system_sandbox_policy();
     let cwd = absolute_path(writable_dir.clone());
     let writable_roots = policy.get_writable_roots_with_cwd(cwd.as_path());
     let writable_dir = absolute_path(std::fs::canonicalize(writable_dir)?);
@@ -320,16 +328,22 @@ async fn file_system_read_file_text_returns_string(
     let tmp = TempDir::new()?;
     let file_path = tmp.path().join("note.txt");
     std::fs::write(&file_path, "hello from trait")?;
+    let file_path = PathUri::from_host_native_path(file_path)?;
 
     let contents = file_system
-        .read_file_text(
-            &PathUri::from_host_native_path(&file_path)?,
-            Default::default(),
-            /*sandbox*/ None,
-        )
+        .read_file_text(&file_path, Default::default(), /*sandbox*/ None)
         .await
         .with_context(|| format!("mode={implementation}"))?;
     assert_eq!(contents, "hello from trait");
+
+    let accessor = FileSystemEnvironmentAccessor::unrestricted(&file_system);
+    let access: &dyn EnvironmentAccess = &accessor;
+    assert_eq!(
+        access
+            .read_file_text(&file_path, Default::default())
+            .await?,
+        contents
+    );
 
     Ok(())
 }
@@ -904,6 +918,221 @@ async fn file_system_sandboxed_metadata_and_read_allow_readable_root(
     Ok(())
 }
 
+/// Full-disk read permission allows all read APIs without a helper; mutations still require one.
+#[tokio::test]
+async fn file_system_full_disk_read_skips_sandbox_only_for_reads() -> Result<()> {
+    let file_system = LocalFileSystem::unsandboxed();
+    let tmp = TempDir::new()?;
+    let file = tmp.path().join("note.txt");
+    std::fs::write(&file, b"note")?;
+    let file_uri = PathUri::from_host_native_path(&file)?;
+    let root_uri = PathUri::from_host_native_path(tmp.path())?;
+    let destination = PathUri::from_host_native_path(tmp.path().join("destination"))?;
+    let sandbox = FileSystemSandboxContext::from_permission_profile(
+        PermissionProfile::read_only(),
+        root_uri.clone(),
+    );
+
+    assert_eq!(
+        file_system.canonicalize(&file_uri, Some(&sandbox)).await?,
+        PathUri::from_host_native_path(std::fs::canonicalize(&file)?)?
+    );
+    assert_eq!(
+        file_system
+            .read_file(&file_uri, Default::default(), Some(&sandbox))
+            .await?,
+        b"note"
+    );
+    assert_eq!(
+        file_system
+            .read_file_stream(&file_uri, Some(&sandbox))
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?
+            .concat(),
+        b"note"
+    );
+    let metadata = file_system
+        .get_metadata(&file_uri, Default::default(), Some(&sandbox))
+        .await?;
+    assert_eq!(
+        metadata,
+        FileMetadata {
+            is_directory: false,
+            is_file: true,
+            is_symlink: false,
+            size: 4,
+            created_at_ms: metadata.created_at_ms,
+            modified_at_ms: metadata.modified_at_ms,
+        }
+    );
+    assert_eq!(
+        file_system
+            .read_directory(&root_uri, Some(&sandbox))
+            .await?,
+        vec![ReadDirectoryEntry {
+            file_name: "note.txt".to_string(),
+            is_directory: false,
+            is_file: true,
+        }]
+    );
+    assert_eq!(
+        file_system
+            .walk(
+                &root_uri,
+                WalkOptions {
+                    max_depth: 1,
+                    max_directories: 2,
+                    max_entries: 2,
+                    follow_directory_symlinks: false,
+                    prune_hidden_directories: false,
+                },
+                Some(&sandbox),
+            )
+            .await?,
+        WalkOutcome {
+            entries: vec![WalkEntry {
+                path: file_uri.clone(),
+                kind: WalkEntryKind::File,
+            }],
+            errors: Vec::new(),
+            truncated: false,
+        }
+    );
+
+    let mutations = [
+        file_system
+            .write_file(
+                &file_uri,
+                b"changed".to_vec(),
+                Default::default(),
+                Some(&sandbox),
+            )
+            .await,
+        file_system
+            .create_directory(
+                &destination,
+                CreateDirectoryOptions {
+                    recursive: false,
+                    follow_symlinks: true,
+                },
+                Some(&sandbox),
+            )
+            .await,
+        file_system
+            .remove(
+                &file_uri,
+                RemoveOptions {
+                    recursive: false,
+                    force: false,
+                    follow_symlinks: true,
+                },
+                Some(&sandbox),
+            )
+            .await,
+        file_system
+            .copy(
+                &file_uri,
+                &destination,
+                CopyOptions { recursive: false },
+                Some(&sandbox),
+            )
+            .await,
+    ];
+    for mutation in mutations {
+        let error = mutation.expect_err("restricted writes must require the sandbox");
+        assert_eq!(
+            error.to_string(),
+            "sandboxed filesystem operations require configured runtime paths"
+        );
+    }
+    assert_eq!(std::fs::read(&file)?, b"note");
+    assert!(!tmp.path().join("destination").exists());
+    Ok(())
+}
+
+/// A stream already opened under one environment remains usable after its accessor is dropped;
+/// cache keys still distinguish a new filesystem or changed captured permissions.
+#[test_case(FileSystemImplementation::Local ; "local")]
+#[test_case(FileSystemImplementation::Remote ; "remote")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn environment_accessor_stream_outlives_permissions_snapshot(
+    implementation: FileSystemImplementation,
+) -> Result<()> {
+    let context = create_file_system_context(implementation).await?;
+    let tmp = TempDir::new()?;
+    let file = tmp.path().join("note.txt");
+    std::fs::write(&file, b"opened in the previous turn")?;
+    let cwd = PathUri::from_host_native_path(tmp.path())?;
+    let file = PathUri::from_host_native_path(file)?;
+    let sandbox = FileSystemSandboxContext::from_permission_profile(
+        PermissionProfile::read_only(),
+        cwd.clone(),
+    );
+
+    let (stream, key) = {
+        let access = FileSystemEnvironmentAccessor::new(&context.file_system, sandbox.clone());
+        (access.read_file_stream(&file).await?, access.cache_key())
+    };
+    let same = FileSystemEnvironmentAccessor::new(&context.file_system, sandbox.clone());
+    assert_eq!(key, same.cache_key());
+    let changed = FileSystemEnvironmentAccessor::new(
+        &context.file_system,
+        FileSystemSandboxContext::from_permission_profile(PermissionProfile::Disabled, cwd),
+    );
+    assert_ne!(key, changed.cache_key());
+    let other_file_system: Arc<dyn ExecutorFileSystem> = Arc::new(LocalFileSystem::unsandboxed());
+    let replacement = FileSystemEnvironmentAccessor::new(&other_file_system, sandbox);
+    assert_ne!(key, replacement.cache_key());
+    assert_eq!(
+        stream.try_collect::<Vec<_>>().await?.concat(),
+        b"opened in the previous turn"
+    );
+    Ok(())
+}
+
+/// A read deny keeps both ordinary and streaming reads from falling back to direct access.
+#[tokio::test]
+async fn file_system_restricted_reads_require_sandbox() -> Result<()> {
+    let file_system = LocalFileSystem::unsandboxed();
+    let tmp = TempDir::new()?;
+    let file = tmp.path().join("note.txt");
+    std::fs::write(&file, b"note")?;
+    let file_uri = PathUri::from_host_native_path(&file)?;
+    let sandbox = FileSystemSandboxContext::from_permission_profile(
+        PermissionProfile::from_runtime_permissions(
+            &FileSystemSandboxPolicy::restricted(vec![
+                FileSystemSandboxEntry::new(
+                    FileSystemPath::Special {
+                        value: FileSystemSpecialPath::Root,
+                    },
+                    FileSystemAccessMode::Read,
+                ),
+                FileSystemSandboxEntry::new(absolute_path(file).into(), FileSystemAccessMode::Deny),
+            ]),
+            NetworkSandboxPolicy::Restricted,
+        ),
+        PathUri::from_host_native_path(tmp.path())?,
+    );
+
+    let read = file_system
+        .read_file(&file_uri, Default::default(), Some(&sandbox))
+        .await
+        .map(|_| ());
+    let stream = file_system
+        .read_file_stream(&file_uri, Some(&sandbox))
+        .await
+        .map(|_| ());
+    for result in [read, stream] {
+        let error = result.expect_err("restricted reads must require the sandbox");
+        assert_eq!(
+            error.to_string(),
+            "sandboxed filesystem operations require configured runtime paths"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sandboxed_file_operations_cannot_read_helper_siblings() -> Result<()> {
@@ -1080,21 +1309,20 @@ async fn file_system_sandboxed_write_allows_additional_write_root(
             Some(vec![absolute_path(writable_dir)]),
         )),
     };
-    let native_permissions: PermissionProfile = sandbox.permissions.clone().try_into()?;
+    let permissions = &sandbox.permissions;
     let file_system_policy = effective_file_system_sandbox_policy(
-        &native_permissions.file_system_sandbox_policy(),
+        &permissions.file_system_sandbox_policy(),
         Some(&additional_permissions),
     );
     let network_policy = effective_network_sandbox_policy(
-        native_permissions.network_sandbox_policy(),
+        permissions.network_sandbox_policy(),
         Some(&additional_permissions),
     );
     sandbox.permissions = PermissionProfile::from_runtime_permissions_with_enforcement(
-        native_permissions.enforcement(),
+        permissions.enforcement(),
         &file_system_policy,
         network_policy,
-    )
-    .into();
+    );
 
     file_system
         .write_file(

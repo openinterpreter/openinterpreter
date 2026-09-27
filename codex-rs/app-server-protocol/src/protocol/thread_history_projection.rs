@@ -9,7 +9,7 @@ use codex_rollout::RolloutLine;
 
 use crate::protocol::thread_history::ThreadHistoryChangeSet;
 use crate::protocol::thread_history::ThreadHistoryItemChange;
-use crate::protocol::thread_history::ThreadHistoryTurnChange;
+use crate::protocol::thread_history::ThreadHistoryTurnMetadata;
 use crate::protocol::v2::ThreadItem;
 use crate::protocol::v2::TurnError;
 use crate::protocol::v2::TurnStatus;
@@ -21,8 +21,9 @@ use crate::protocol::v2::TurnStatus;
 pub fn project_rollout_line(line: &RolloutLine) -> ThreadHistoryChangeSet {
     match &line.item {
         RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => ThreadHistoryChangeSet {
-            changed_turns: vec![ThreadHistoryTurnChange {
+            changed_turns: vec![ThreadHistoryTurnMetadata {
                 turn_id: event.turn_id.clone(),
+                root_turn_id: event.root_turn_id.clone(),
                 status: TurnStatus::InProgress,
                 error: None,
                 started_at: event.started_at,
@@ -32,8 +33,9 @@ pub fn project_rollout_line(line: &RolloutLine) -> ThreadHistoryChangeSet {
             ..Default::default()
         },
         RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => ThreadHistoryChangeSet {
-            changed_turns: vec![ThreadHistoryTurnChange {
+            changed_turns: vec![ThreadHistoryTurnMetadata {
                 turn_id: event.turn_id.clone(),
+                root_turn_id: None,
                 status: if event.error.is_some() {
                     TurnStatus::Failed
                 } else {
@@ -56,8 +58,9 @@ pub fn project_rollout_line(line: &RolloutLine) -> ThreadHistoryChangeSet {
                 return ThreadHistoryChangeSet::default();
             };
             ThreadHistoryChangeSet {
-                changed_turns: vec![ThreadHistoryTurnChange {
+                changed_turns: vec![ThreadHistoryTurnMetadata {
                     turn_id: turn_id.clone(),
+                    root_turn_id: None,
                     status: TurnStatus::Interrupted,
                     error: None,
                     started_at: event.started_at,

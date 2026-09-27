@@ -36,7 +36,7 @@ DEEPSEEK_API_KEY="..." interpreter exec \
 
 `/model` 选择器由维护的提供程序目录和提供程序当前的模型数据生成。请将其作为您已安装版本中可用模型的唯一可信来源。
 
-DeepSeek 当前的 API 模型 ID 为 `deepseek-v4-pro` 和 `deepseek-v4-flash`。在需要更高容量时使用 Pro，在成本或并发更重要时使用 Flash。DeepSeek 已宣布，旧的 `deepseek-chat` 和 `deepseek-reasoner` ID 将于 2026 年 7 月 24 日停用，因此新配置应使用 V4 ID。请查看 DeepSeek 的[API 更新](https://api-docs.deepseek.com/updates/)以获取当前可用性，并在提交工作负载前查阅其[定价页面](https://api-docs.deepseek.com/quick_start/pricing)。
+DeepSeek 当前的 API 模型 ID 为 `deepseek-flash` 和 `deepseek-v4-pro`。在需要更高容量时使用 Pro，在成本或并发更重要时使用 Flash。旧的 `deepseek-v4-flash` 仅作为兼容别名指向现行 Flash 模型；`deepseek-chat` 和 `deepseek-reasoner` 原定于 2026 年 7 月 24 日停用，新配置不应使用这些旧 ID。请查看 DeepSeek 的[API 更新](https://api-docs.deepseek.com/updates/)以获取当前可用性，并在提交工作负载前查阅其[定价页面](https://api-docs.deepseek.com/quick_start/pricing)。
 
 ## 装置行为
 

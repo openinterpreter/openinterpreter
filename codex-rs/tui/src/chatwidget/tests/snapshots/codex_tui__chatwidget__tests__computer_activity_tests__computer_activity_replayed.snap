@@ -1,0 +1,8 @@
+---
+source: tui/src/chatwidget/tests/computer_activity_tests.rs
+expression: "lines_to_single_string(&outputs[0].0)"
+---
+• Used computer · 4 actions
+  ├ Inspect page 3
+  ├ Inspect page 4
+  └ 2 more · ctrl+t

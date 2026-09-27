@@ -9,7 +9,20 @@ use crate::chatwidget::tests::make_chatwidget_manual_with_sender;
 use codex_models_manager::test_support::construct_model_info_offline_for_tests;
 use codex_models_manager::test_support::get_model_offline_for_tests;
 
-pub(super) async fn make_test_app() -> App {
+pub(super) fn select_catalog_tip(app: &mut App, width: u16, expected: &str) {
+    for seed in 0..1024 {
+        app.composer_tips = super::composer_hints::ComposerTips::new(seed);
+        if app
+            .composer_hint(width)
+            .is_some_and(|tip| tip.line.to_string().starts_with(expected))
+        {
+            return;
+        }
+    }
+    panic!("catalog tip was never selected: {expected}");
+}
+
+pub(crate) async fn make_test_app() -> App {
     let (chat_widget, app_event_tx, _rx, _op_rx) = make_chatwidget_manual_with_sender().await;
     let config = chat_widget.config_ref().clone();
     let file_search = FileSearchManager::new(config.cwd.to_path_buf(), app_event_tx.clone());
@@ -37,14 +50,19 @@ pub(super) async fn make_test_app() -> App {
         pending_server_profiles: HashMap::new(),
         file_search,
         transcript_cells: Vec::new(),
+        composer_tips: super::composer_hints::ComposerTips::new(/*seed*/ 0),
+        native_history: Default::default(),
+        transcript_view: Default::default(),
         last_rendered_history_tail: None,
         last_thread_usage_status_cell: None,
         pending_thread_usage_history_refresh: false,
         overlay: None,
+        retained_analytics: None,
         deferred_history_lines: Vec::new(),
         has_emitted_history_lines: false,
         transcript_reflow: TranscriptReflowState::default(),
         initial_history_replay_buffer: None,
+        pending_thread_switch_resets: 0,
         scrollback_has_older_history: false,
         enhanced_keys_supported: false,
         keymap: crate::keymap::RuntimeKeymap::defaults(),
@@ -60,12 +78,16 @@ pub(super) async fn make_test_app() -> App {
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         app_server_target: crate::AppServerTarget::Embedded,
         reconnect: Default::default(),
+        daemon_cli_executable: None,
         pending_update_action: None,
         pending_shutdown_exit_thread_id: None,
         windows_sandbox: WindowsSandboxState::default(),
         thread_event_channels: HashMap::new(),
+        pending_realtime_speech_replay: HashMap::new(),
+        pending_realtime_transcript_replay: HashMap::new(),
+        realtime_replay_order: VecDeque::new(),
         temporary_structured_requests: HashMap::new(),
-        pending_thread_titles: HashSet::new(),
+        pending_thread_titles: HashMap::new(),
         thread_event_listener_tasks: HashMap::new(),
         agent_navigation: AgentNavigationState::default(),
         agents_overview: Default::default(),
@@ -81,6 +103,7 @@ pub(super) async fn make_test_app() -> App {
         dynamic_tool_status_updates: tokio::sync::broadcast::channel(/*capacity*/ 64).0,
         dynamic_tool_tasks: HashMap::new(),
         pending_startup_thread_start: false,
+        pending_server_version_notice: None,
         pending_open_resume_picker: false,
         pending_working_directory_change: None,
         pending_start_managed_worktree: None,

@@ -2,7 +2,9 @@
 
 use anyhow::Result;
 use codex_core::TurnInputRequest;
+use codex_core::config::Config;
 use codex_core::config::Constrained;
+use codex_extension_api::ExtensionRegistryBuilder;
 use codex_features::Feature;
 use codex_protocol::approvals::ExecApprovalKind;
 use codex_protocol::models::AdditionalPermissionProfile;
@@ -26,6 +28,7 @@ use core_test_support::responses::sse;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_sandbox;
 use core_test_support::skip_if_target_windows;
+use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::TestCodexHarness;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
@@ -33,6 +36,8 @@ use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 fn tool_response(id: &str, tool: &str, args: Value) -> String {
     sse(vec![
@@ -41,8 +46,8 @@ fn tool_response(id: &str, tool: &str, args: Value) -> String {
     ])
 }
 
-async fn harness() -> Result<TestCodexHarness> {
-    TestCodexHarness::with_auto_env_builder(test_codex().with_config(|config| {
+async fn harness(builder: TestCodexBuilder) -> Result<TestCodexHarness> {
+    TestCodexHarness::with_auto_env_builder(builder.with_config(|config| {
         for feature in [
             Feature::WriteStdinApproval,
             Feature::ExecPermissionApprovals,
@@ -67,7 +72,7 @@ async fn stdin_reviews_retained_grants_after_turn_permissions_expire() -> Result
     skip_if_target_windows!(Ok(()), "uses a POSIX interactive shell");
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
-    let harness = harness().await?;
+    let harness = harness(test_codex()).await?;
     let test = harness.test();
     harness.create_dir_all("allowed").await?;
     let directory = test
@@ -193,7 +198,27 @@ async fn strict_stdin_review_reaches_guardian_with_sandbox_prompts_disabled() ->
     skip_if_target_windows!(Ok(()), "uses a POSIX interactive shell");
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
-    let harness = harness().await?;
+    #[derive(Default)]
+    struct ReviewedCalls(Mutex<Vec<String>>);
+
+    impl codex_extension_api::ApprovalReviewContributor for ReviewedCalls {
+        fn decide<'a>(
+            &'a self,
+            input: &'a codex_extension_api::ApprovalDecisionInput<'_>,
+        ) -> codex_extension_api::ExtensionFuture<'a, Option<codex_extension_api::ApprovalDecision>>
+        {
+            self.0
+                .lock()
+                .unwrap()
+                .push(input.tool_call_id.expect("reviewed call id").to_owned());
+            Box::pin(async { None })
+        }
+    }
+
+    let calls = Arc::new(ReviewedCalls::default());
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    extensions.approval_review_contributor(calls.clone());
+    let harness = harness(test_codex().with_extensions(Arc::new(extensions.build()))).await?;
     let test = harness.test();
     let opened = mount_sse_sequence(
         harness.server(),
@@ -269,6 +294,10 @@ async fn strict_stdin_review_reaches_guardian_with_sandbox_prompts_disabled() ->
     })
     .await;
     let requests = writes.requests();
+    assert_eq!(
+        *calls.0.lock().unwrap(),
+        vec!["strict", "denied", "allowed"]
+    );
     assert_eq!(
         requests
             .iter()

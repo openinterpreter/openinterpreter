@@ -205,6 +205,29 @@ impl SessionTelemetry {
         }
     }
 
+    /// Records a histogram with explicit buckets and the usual session attribution.
+    /// All callers of the same metric name must use the same boundaries.
+    pub fn histogram_with_boundaries(
+        &self,
+        name: &str,
+        value: i64,
+        boundaries: &[f64],
+        tags: &[(&str, &str)],
+    ) {
+        let res: MetricsResult<()> = (|| {
+            let Some(metrics) = &self.metrics else {
+                return Ok(());
+            };
+
+            let tags = self.tags_with_metadata(tags)?;
+            metrics.histogram_with_boundaries(name, value, boundaries, &tags)
+        })();
+
+        if let Err(e) = res {
+            tracing::warn!("metrics histogram [{name}] failed: {e}");
+        }
+    }
+
     pub fn record_duration(&self, name: &str, duration: Duration, tags: &[(&str, &str)]) {
         let res: MetricsResult<()> = (|| {
             let Some(metrics) = &self.metrics else {

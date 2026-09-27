@@ -2,12 +2,12 @@
 source: tui/src/app/agents_overview_tests.rs
 expression: "render_bottom_popup(&app.chat_widget,\n96).replace(&format!(\"{project}  1\"),\n&normalized_group).replace(&project, \"/tmp/project\")"
 ---
-  Agent command center
-  0 need input   1 working   0 ready
+  Agent command center  Group: Project  g
+   All 1   Needs you 0   Working 1   Ready 0   Inactive 0                 tab/shift+tab filter
   ────────────────────────────────────────────────────────────────────────────────────────────
-  /tmp/project  1                                     │ Task details
-  › ● Check startup performance  Working              │
-                                                      │ Check startup performance
+      Tasks                                           │ Task details
+  /tmp/project  1                                     │
+  › ● Check startup performance                       │ Check startup performance
                                                       │ ● Working
                                                       │
                                                       │ Latest activity
@@ -15,14 +15,14 @@ expression: "render_bottom_popup(&app.chat_widget,\n96).replace(&format!(\"{proj
                                                       │
                                                       │ Project
                                                       │ /tmp/project
+                                                      │ Model: Unknown
                                                       │
                                                       │ Prompt
                                                       │ No prompt available.
                                                       │
                                                       │
                                                       │
-  New task
-
-› Keep this draft
-
-   enter create task    ctrl+j newline    esc tasks
+                                                      │
+                                                      │
+                                                      │
+  ? help  esc back  ↑/↓ move  enter open  n new

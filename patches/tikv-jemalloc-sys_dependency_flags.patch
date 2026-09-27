@@ -1,0 +1,38 @@
+diff --git a/jemalloc/Makefile.in b/jemalloc/Makefile.in
+--- a/jemalloc/Makefile.in
++++ b/jemalloc/Makefile.in
+@@ -508,7 +508,7 @@
+ 	@mkdir -p $(@D)
+ 	$(CC) $(CFLAGS) -c $(CPPFLAGS) $(CTARGET) $<
+ ifdef CC_MM
+-	@$(CC) -MM $(CPPFLAGS) -MT $@ -o $(@:%.$(O)=%.d) $<
++	@$(CC) $(CFLAGS) -MM $(CPPFLAGS) -MT $@ -o $(@:%.$(O)=%.d) $<
+ endif
+ 
+ $(C_SYMS): %.sym:
+@@ -532,7 +532,7 @@
+ 	@mkdir -p $(@D)
+ 	$(CXX) $(CXXFLAGS) -c $(CPPFLAGS) $(CTARGET) $<
+ ifdef CC_MM
+-	@$(CXX) -MM $(CPPFLAGS) -MT $@ -o $(@:%.$(O)=%.d) $<
++	@$(CXX) $(CXXFLAGS) -MM $(CPPFLAGS) -MT $@ -o $(@:%.$(O)=%.d) $<
+ endif
+ 
+ ifneq ($(SOREV),$(SO))
+@@ -589,14 +589,14 @@
+ 	@mkdir -p $(@D)
+ 	$(CC) $(CFLAGS) -c $(CPPFLAGS) -DJEMALLOC_STRESS_TEST -I$(srcroot)test/include -I$(objroot)test/include $(CTARGET) $<
+ ifdef CC_MM
+-	@$(CC) -MM $(CPPFLAGS) -DJEMALLOC_STRESS_TEST -I$(srcroot)test/include -I$(objroot)test/include -MT $@ -o $(@:%.$(O)=%.d) $<
++	@$(CC) $(CFLAGS) -MM $(CPPFLAGS) -DJEMALLOC_STRESS_TEST -I$(srcroot)test/include -I$(objroot)test/include -MT $@ -o $(@:%.$(O)=%.d) $<
+ endif
+ 
+ $(objroot)test/stress/pa/%.$(O): $(srcroot)test/stress/pa/%.cpp
+ 	@mkdir -p $(@D)
+ 	$(CXX) $(CXXFLAGS) -c $(CPPFLAGS) -I$(srcroot)test/include -I$(objroot)test/include $(CTARGET) $<
+ ifdef CC_MM
+-	@$(CXX) -MM $(CPPFLAGS) -I$(srcroot)test/include -I$(objroot)test/include -MT $@ -o $(@:%.$(O)=%.d) $<
++	@$(CXX) $(CXXFLAGS) -MM $(CPPFLAGS) -I$(srcroot)test/include -I$(objroot)test/include -MT $@ -o $(@:%.$(O)=%.d) $<
+ endif
+ 
+ build_lib_shared: $(DSOS)

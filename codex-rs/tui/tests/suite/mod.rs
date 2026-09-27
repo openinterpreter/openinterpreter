@@ -1,9 +1,15 @@
 // Aggregates all former standalone integration tests as modules.
 #[cfg(unix)]
+mod daemon_compatibility;
+#[cfg(unix)]
+mod directory_trust;
+#[cfg(unix)]
 mod focus_palette;
 #[cfg(unix)]
 mod reconnect;
 mod resize_reflow;
+#[cfg(unix)]
+mod screen_reader;
 mod status_indicator;
 mod vt100_history;
 mod vt100_live_commit;

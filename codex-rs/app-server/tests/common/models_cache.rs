@@ -1,7 +1,4 @@
-use chrono::DateTime;
-use chrono::Utc;
 use codex_core::test_support::all_model_presets;
-use codex_models_manager::client_version_to_whole;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::ModelInfo;
@@ -11,7 +8,6 @@ use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ReasoningControl;
 use codex_protocol::openai_models::TruncationPolicyConfig;
 use codex_protocol::openai_models::default_input_modalities;
-use serde_json::json;
 use std::path::Path;
 
 /// Convert a ModelPreset to ModelInfo for cache storage.
@@ -34,6 +30,7 @@ fn preset_to_info(preset: &ModelPreset, priority: i32) -> ModelInfo {
         additional_speed_tiers: preset.additional_speed_tiers.clone(),
         service_tiers: preset.service_tiers.clone(),
         default_service_tier: preset.default_service_tier.clone(),
+        available_access_programs: preset.available_access_programs.clone(),
         upgrade: preset.upgrade.as_ref().map(Into::into),
         model_messages: Some(ModelMessages {
             persistent_instructions: None,
@@ -73,6 +70,7 @@ fn preset_to_info(preset: &ModelPreset, priority: i32) -> ModelInfo {
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
+        supports_reasoning_effort_updates: false,
         guardian: None,
         node_repl_auto_review_required: false,
         node_repl_disabled: false,
@@ -88,7 +86,7 @@ fn preset_to_info(preset: &ModelPreset, priority: i32) -> ModelInfo {
 /// This prevents ModelsManager from making network requests to refresh models.
 /// The cache will be treated as fresh (within TTL) and used instead of fetching from the network.
 /// Uses bundled-catalog-derived presets, converted to ModelInfo format.
-pub fn write_models_cache(codex_home: &Path) -> std::io::Result<()> {
+pub async fn write_models_cache(codex_home: &Path) -> std::io::Result<()> {
     // Get a stable bundled-catalog-derived preset list and filter for picker-visible entries.
     let presets: Vec<&ModelPreset> = all_model_presets()
         .iter()
@@ -106,24 +104,33 @@ pub fn write_models_cache(codex_home: &Path) -> std::io::Result<()> {
         })
         .collect();
 
-    write_models_cache_with_models(codex_home, models)
+    write_models_cache_with_models(codex_home, models).await
 }
 
 /// Write a models_cache.json file with specific models.
 /// Useful when tests need specific models to be available.
-pub fn write_models_cache_with_models(
+pub async fn write_models_cache_with_models(
     codex_home: &Path,
     models: Vec<ModelInfo>,
 ) -> std::io::Result<()> {
+    let config = codex_core::config::ConfigBuilder::default()
+        .loader_overrides(codex_config::LoaderOverrides::without_managed_config_for_tests())
+        .codex_home(codex_home.to_path_buf())
+        .build()
+        .await?;
+    let auth = codex_login::CodexAuth::from_auth_storage(
+        codex_home,
+        config.cli_auth_credentials_store_mode,
+        Some(&config.chatgpt_base_url),
+        config.auth_keyring_backend_kind(),
+        &codex_login::test_support::transport_default_auth_route_config(),
+    )
+    .await?;
+    let cache = codex_model_provider::test_support::models_cache_entry(
+        &config.model_provider,
+        auth.as_ref(),
+        models,
+    );
     let cache_path = codex_home.join("models_cache.json");
-    // DateTime<Utc> serializes to RFC3339 format by default with serde
-    let fetched_at: DateTime<Utc> = Utc::now();
-    let client_version = client_version_to_whole();
-    let cache = json!({
-        "fetched_at": fetched_at,
-        "etag": null,
-        "client_version": client_version,
-        "models": models
-    });
     std::fs::write(cache_path, serde_json::to_string_pretty(&cache)?)
 }

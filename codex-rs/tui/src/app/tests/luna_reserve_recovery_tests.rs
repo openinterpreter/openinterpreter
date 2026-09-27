@@ -29,7 +29,7 @@ pub(super) fn configure_reserve_catalog(app: &mut App) {
     let mut models = app.model_catalog.try_list_models().unwrap();
     let mut reserve = models
         .iter()
-        .find(|model| model.model == "gpt-5.4")
+        .find(|model| model.model == "gpt-5.5")
         .unwrap()
         .clone();
     reserve.model = "gpt-reserve".into();
@@ -37,7 +37,7 @@ pub(super) fn configure_reserve_catalog(app: &mut App) {
     models.push(reserve);
     let original = models
         .iter_mut()
-        .find(|model| model.model == "gpt-5.4")
+        .find(|model| model.model == "gpt-5.5")
         .unwrap();
     let mut high = original.supported_reasoning_efforts[0].clone();
     high.effort = ReasoningEffortConfig::High;
@@ -54,7 +54,7 @@ pub(super) fn configure_reserve_catalog(app: &mut App) {
     app.replace_chat_widget(ChatWidget::new_with_app_event(init));
     app.chat_widget
         .handle_thread_session(app.primary_session_configured.clone().unwrap());
-    app.chat_widget.set_model("gpt-5.4");
+    app.chat_widget.set_model("gpt-5.5");
 }
 
 #[tokio::test]
@@ -87,7 +87,7 @@ async fn luna_reserve_recovery_survives_task_reconstruction() -> Result<()> {
     recovered.rate_limit_upsell = None;
     app.chat_widget.update_backend_banner(&recovered);
     app.apply_backend_banner_fallback(&mut server).await;
-    assert_eq!(app.chat_widget.current_model(), "gpt-5.4");
+    assert_eq!(app.chat_widget.current_model(), "gpt-5.5");
     assert_eq!(
         app.chat_widget.current_reasoning_effort(),
         Some(ReasoningEffortConfig::High)
@@ -236,8 +236,8 @@ async fn luna_reserve_recovery_restores_task_and_pending_turn_after_fresh_backen
         // A rounded percentage is not an authorization decision; backend allowed=true wins.
         for (request_id, hard_stop_generation, expected) in [
             (2, generation.wrapping_sub(1), "gpt-reserve"),
-            (3, generation, "gpt-5.4"),
-            (4, generation, "gpt-5.4"),
+            (3, generation, "gpt-5.5"),
+            (4, generation, "gpt-5.5"),
         ] {
             app.handle_event(
                 &mut tui,
@@ -260,7 +260,7 @@ async fn luna_reserve_recovery_restores_task_and_pending_turn_after_fresh_backen
         app.chat_widget
             .apply_reserve_fallback_to_pending_turn(&mut pending);
         assert_matches!(pending, AppCommand::UserTurn { model, effort, collaboration_mode, .. }
-        if model == "gpt-5.4" && effort == original_mode.reasoning_effort()
+        if model == "gpt-5.5" && effort == original_mode.reasoning_effort()
             && collaboration_mode == Some(original_mode.clone()));
         let sent = requests.lock().unwrap().clone();
         assert_eq!(sent.len(), 2);
@@ -270,7 +270,7 @@ async fn luna_reserve_recovery_restores_task_and_pending_turn_after_fresh_backen
             restored,
             ThreadSettingsUpdateParams {
                 thread_id: app.active_thread_id.unwrap().to_string(),
-                model: Some("gpt-5.4".into()),
+                model: Some("gpt-5.5".into()),
                 effort: Some(ReasoningEffortConfig::High),
                 collaboration_mode: Some(original_mode),
                 service_tier: None,
@@ -341,7 +341,7 @@ async fn luna_reserve_recovery_requires_permission_and_no_remaining_blocker() ->
     app.chat_widget.clear_backend_banner();
     app.chat_widget.update_backend_banner(&recovered);
     app.apply_backend_banner_fallback(&mut server).await;
-    assert_eq!(app.chat_widget.current_model(), "gpt-5.4");
+    assert_eq!(app.chat_widget.current_model(), "gpt-5.5");
     assert_eq!(requests.lock().unwrap().len(), 1);
     server.shutdown().await?;
     proxy.await??;
@@ -365,8 +365,8 @@ async fn luna_reserve_recovery_does_not_override_manual_choice_or_account_change
             recovered.account_id = Some("workspace-b".into());
             "gpt-reserve"
         } else {
-            app.chat_widget.set_model("gpt-5.2");
-            "gpt-5.2"
+            app.chat_widget.set_model("gpt-5.6-terra");
+            "gpt-5.6-terra"
         };
         app.chat_widget.update_backend_banner(&recovered);
         app.apply_backend_banner_fallback(&mut server).await;

@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use codex_exec_server::EnvironmentManager;
+use codex_exec_server::FileSystemEnvironmentAccessor;
 use codex_exec_server::FileSystemSandboxContext;
 use codex_extension_api::SelectedPluginSnapshot;
 use codex_protocol::capabilities::CapabilityRootLocation;
@@ -34,6 +37,7 @@ use crate::provider::SkillSearchRequest;
 pub struct ExecutorSkillProvider {
     environment_manager: Arc<EnvironmentManager>,
     restriction_product: Option<Product>,
+    disabled_skill_paths: HashMap<String, HashSet<PathUri>>,
 }
 
 impl ExecutorSkillProvider {
@@ -44,7 +48,19 @@ impl ExecutorSkillProvider {
         Self {
             environment_manager,
             restriction_product,
+            disabled_skill_paths: HashMap::new(),
         }
+    }
+
+    /// Applies caller-owned disablement to executor catalogs. Paths identify SKILL.md
+    /// documents in their executor's filesystem; other executors are unaffected.
+    /// By default, all discovered skills remain enabled.
+    pub fn with_disabled_skill_paths(
+        mut self,
+        disabled_skill_paths: HashMap<String, HashSet<PathUri>>,
+    ) -> Self {
+        self.disabled_skill_paths = disabled_skill_paths;
+        self
     }
 }
 
@@ -98,8 +114,10 @@ impl SkillProvider for ExecutorSkillProvider {
                     ));
                     continue;
                 };
+                // TODO(anp): Take this accessor from the selected turn root when discovery receives
+                // turn permissions; until then, preserve direct access through its existing filesystem.
                 let outcome = load_environment_skills_from_root(
-                    file_system.as_ref(),
+                    &FileSystemEnvironmentAccessor::unrestricted(&file_system),
                     path,
                     self.restriction_product,
                 )
@@ -113,6 +131,7 @@ impl SkillProvider for ExecutorSkillProvider {
                         path,
                         environment_id,
                         /*instructions*/ None,
+                        &self.disabled_skill_paths,
                     ));
                 }
             }
@@ -223,6 +242,7 @@ impl ExecutorSkillProvider {
                     path,
                     environment_id,
                     Some(skill.instructions),
+                    &self.disabled_skill_paths,
                 ));
             }
         }
@@ -237,6 +257,7 @@ fn catalog_entry_from_skill(
     selected_root_path: &PathUri,
     environment_id: &str,
     instructions: Option<String>,
+    disabled_skill_paths: &HashMap<String, HashSet<PathUri>>,
 ) -> SkillCatalogEntry {
     let handle_prefix = format!("skill://{selected_root_id}/");
     let alias_root = format!(
@@ -269,7 +290,7 @@ fn catalog_entry_from_skill(
             skill.path_to_skills_md.clone(),
         ),
     };
-    let entry = SkillCatalogEntry::new(
+    let mut entry = SkillCatalogEntry::new(
         SkillPackageId(package),
         authority,
         skill.name.clone(),
@@ -280,6 +301,13 @@ fn catalog_entry_from_skill(
     .with_display_path(main_resource)
     .with_alias_root(alias_root)
     .with_dependencies(skill.dependencies.clone());
+
+    if disabled_skill_paths
+        .get(environment_id)
+        .is_some_and(|paths| paths.contains(&skill.path_to_skills_md))
+    {
+        entry = entry.disabled();
+    }
 
     if skill.allows_implicit_invocation() {
         entry
@@ -308,12 +336,9 @@ async fn read_bounded_text(
             "failed to read executor skill resource {resource}: {err}"
         ))
     };
-    if sandbox.is_some_and(FileSystemSandboxContext::should_run_in_sandbox)
+    if sandbox.is_some_and(FileSystemSandboxContext::should_read_from_sandbox)
         && path.infer_path_convention() == Some(PathConvention::Windows)
-        && sandbox.is_some_and(|context| {
-            context.windows_sandbox_level
-                == codex_protocol::config_types::WindowsSandboxLevel::Disabled
-        })
+        && sandbox.is_some_and(|context| !context.windows_sandbox_is_requested())
     {
         return Err(SkillProviderError::new(
             "executor skill resource requires an unavailable filesystem sandbox",

@@ -6,10 +6,12 @@ use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::RolloutRecorderParams;
+use codex_utils_absolute_path::AbsolutePathBuf;
 
 pub(super) async fn create_thread(
     store: &LocalThreadStore,
     params: CreateThreadParams,
+    writer_lock: super::WriterLockGuard,
 ) -> ThreadStoreResult<RolloutRecorder> {
     let cwd = params
         .metadata
@@ -25,7 +27,7 @@ pub(super) async fn create_thread(
         model_provider_id: params.metadata.model_provider.clone(),
         generate_memories: matches!(params.metadata.memory_mode, ThreadMemoryMode::Enabled),
     };
-    RolloutRecorder::new(
+    RolloutRecorder::new_with_writer_lock(
         &config,
         RolloutRecorderParams::new(
             params.thread_id,
@@ -39,6 +41,12 @@ pub(super) async fn create_thread(
         )
         .with_session_id(params.session_id)
         .with_selected_capability_roots(params.selected_capability_roots)
+        .with_runtime_workspace_roots(params.runtime_workspace_roots.map(|roots| {
+            roots
+                .into_iter()
+                .map(AbsolutePathBuf::into_path_buf)
+                .collect()
+        }))
         .with_multi_agent_version(params.multi_agent_version)
         .with_history_mode(params.history_mode)
         .with_history_base(params.history_base)
@@ -50,6 +58,7 @@ pub(super) async fn create_thread(
         )
         .with_subagent_history_start_ordinal(params.subagent_history_start_ordinal)
         .with_initial_window_id(params.initial_window_id),
+        writer_lock,
     )
     .await
     .map_err(|err| ThreadStoreError::Internal {

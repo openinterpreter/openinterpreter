@@ -213,8 +213,7 @@ async fn recovers_pending_migrations_after_retrying_busy_rollouts() {
     let store = indexed_store(home.path()).await;
     let state_db = store.state_db().await.expect("state db");
     let writer_guard = store
-        .writer_lock_coordinator
-        .acquire(busy_thread_id)
+        .acquire_writer_lock(busy_thread_id)
         .expect("hold cross-process writer lock");
 
     store
@@ -419,8 +418,7 @@ async fn retries_busy_rollouts_after_archive_and_compression_move() {
     let store = indexed_store(home.path()).await;
     let state_db = store.state_db().await.expect("state db");
     let writer_guard = store
-        .writer_lock_coordinator
-        .acquire(thread_id)
+        .acquire_writer_lock(thread_id)
         .expect("hold cross-process writer lock");
 
     store
@@ -514,8 +512,7 @@ async fn treats_writer_owned_empty_rollouts_as_busy() {
         .await
         .expect("seed thread metadata");
     let writer_guard = store
-        .writer_lock_coordinator
-        .acquire(thread_id)
+        .acquire_writer_lock(thread_id)
         .expect("hold cross-process writer lock");
 
     store

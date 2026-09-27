@@ -30,7 +30,6 @@ pub(crate) use codex_app_server_transport::acquire_app_server_startup_lock;
 pub use codex_app_server_transport::app_server_control_socket_path;
 pub(crate) use codex_app_server_transport::app_server_startup_lock_path;
 pub use codex_app_server_transport::auth;
-pub(crate) use codex_app_server_transport::prepare_control_socket_path;
 pub(crate) use codex_app_server_transport::start_control_socket_acceptor;
 pub(crate) use codex_app_server_transport::start_remote_control;
 pub(crate) use codex_app_server_transport::start_stdio_connection;
@@ -48,16 +47,21 @@ pub(crate) struct ConnectionState {
 impl ConnectionState {
     pub(crate) fn new(
         origin: ConnectionOrigin,
+        auth: Option<codex_app_server_transport::ConnectionAuth>,
         outbound_initialized: Arc<AtomicBool>,
         outbound_experimental_api_enabled: Arc<AtomicBool>,
         outbound_opted_out_notification_methods: Arc<RwLock<HashSet<String>>>,
     ) -> Self {
+        let mut session = ConnectionSessionState::new(origin);
+        let mut rpc_gate = crate::connection_rpc_gate::ConnectionRpcGate::new();
+        rpc_gate.auth = auth;
+        session.rpc_gate = Arc::new(rpc_gate);
         Self {
             origin,
             outbound_initialized,
             outbound_experimental_api_enabled,
             outbound_opted_out_notification_methods,
-            session: Arc::new(ConnectionSessionState::new()),
+            session: Arc::new(session),
         }
     }
 }

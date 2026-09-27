@@ -1,0 +1,7 @@
+---
+source: tui/src/history_cell/computer_activity_tests.rs
+expression: "render(&cell, 80)"
+---
+• Used computer · 2 actions
+  ├ Inspect page
+  └ Reload page

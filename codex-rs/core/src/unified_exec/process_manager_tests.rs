@@ -47,6 +47,16 @@ async fn deterministic_process_ids_are_not_reused_after_release() {
     assert_eq!((first, second), (1000, 1001));
 }
 
+#[tokio::test]
+async fn deterministic_process_ids_are_not_reused_after_removal() {
+    let manager = UnifiedExecProcessManager::default();
+    let first = manager.allocate_process_id().await;
+    let _removed = manager.process_store.lock().await.remove(first);
+    let second = manager.allocate_process_id().await;
+
+    assert_eq!((first, second), (1000, 1001));
+}
+
 #[test]
 fn env_overlay_for_exec_server_keeps_runtime_changes_only() {
     let local_policy_env = HashMap::from([
@@ -168,6 +178,7 @@ fn exec_server_params_use_path_uri_and_env_policy_overlay_contract() {
     let managed_network = ManagedNetworkSandboxContext {
         loopback_ports: vec![43123],
         allow_local_binding: false,
+        ..Default::default()
     };
     let mut request = ExecRequest {
         command: vec!["bash".to_string(), "-lc".to_string(), "true".to_string()],
@@ -217,7 +228,6 @@ fn exec_server_params_use_path_uri_and_env_policy_overlay_contract() {
         windows_sandbox_policy_cwd: cwd.clone().into(),
         windows_sandbox_workspace_roots: vec![cwd],
         windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel::Disabled,
-        windows_sandbox_private_desktop: false,
         permission_profile: permission_profile.clone(),
         windows_sandbox_filesystem_overrides: None,
         arg0: None,
@@ -270,7 +280,10 @@ fn exec_server_params_use_path_uri_and_env_policy_overlay_contract() {
     request.exec_server_shell_snapshot = None;
 
     request.exec_server_sandbox = Some(
-        codex_exec_server::FileSystemSandboxContext::from_permission_profile(permission_profile),
+        codex_exec_server::FileSystemSandboxContext::from_permission_profile(
+            permission_profile,
+            request.cwd.clone(),
+        ),
     );
     let first = params_for_request(&request);
     let second = params_for_request(&request);
@@ -450,7 +463,7 @@ async fn failed_initial_end_for_unstored_process_uses_fallback_output() {
         #[allow(deprecated)]
         sandbox_cwd: turn.cwd.clone().into(),
         turn_environment: turn
-            .environments
+            .initial_environments
             .primary()
             .cloned()
             .expect("primary environment"),
@@ -618,7 +631,9 @@ async fn pruning_does_not_evict_live_process_while_exited_process_is_finalizing(
                 tty: false,
                 environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
                 permissions: super::super::TerminalPermissions::for_launch(
-                    turn.environments.primary().expect("turn environment"),
+                    turn.initial_environments
+                        .primary()
+                        .expect("turn environment"),
                     &turn,
                     super::super::TerminalSandboxSource::Native,
                     crate::sandboxing::SandboxPermissions::UseDefault,

@@ -110,6 +110,31 @@ pub(super) fn emit_system_bwrap_warning(app_event_tx: &AppEventSender, config: &
     )));
 }
 
+pub(super) fn model_upgrade_for_migration(
+    model: &str,
+    available_models: &[ModelPreset],
+) -> Option<ModelUpgrade> {
+    if let Some(preset) = available_models.iter().find(|preset| preset.model == model) {
+        return preset.upgrade.clone();
+    }
+
+    // Saved selections can outlive their catalog entries. Keep only their migration metadata.
+    let (target_model, current_name, target_name) = match model {
+        "gpt-5.4-mini" => ("gpt-6-luna", "GPT-5.4 Mini", "GPT-6 Luna"),
+        _ => return None,
+    };
+    Some(ModelUpgrade {
+        id: target_model.to_string(),
+        migration_config_key: model.to_string(),
+        model_link: None,
+        upgrade_copy: None,
+        migration_markdown: Some(format!(
+            "{current_name} is no longer available\n\nCodex now uses {target_name} in place of {current_name}. Switch to {target_name} to continue.\n"
+        )),
+        retirement_at: None,
+    })
+}
+
 pub(super) fn should_show_model_migration_prompt(
     current_model: &str,
     target_model: &str,
@@ -133,9 +158,8 @@ pub(super) fn should_show_model_migration_prompt(
         return false;
     }
 
-    if available_models
-        .iter()
-        .any(|preset| preset.model == current_model && preset.upgrade.is_some())
+    if model_upgrade_for_migration(current_model, available_models)
+        .is_some_and(|upgrade| upgrade.id == target_model)
     {
         return true;
     }
@@ -274,10 +298,7 @@ pub(super) async fn handle_model_migration_prompt_if_needed(
     app_event_tx: &AppEventSender,
     available_models: &[ModelPreset],
 ) -> std::io::Result<Option<AppExitInfo>> {
-    let upgrade = available_models
-        .iter()
-        .find(|preset| preset.model == model)
-        .and_then(|preset| preset.upgrade.as_ref());
+    let upgrade = model_upgrade_for_migration(model, available_models);
 
     if let Some(ModelUpgrade {
         id: target_model,
@@ -286,7 +307,7 @@ pub(super) async fn handle_model_migration_prompt_if_needed(
         upgrade_copy,
         migration_markdown,
         ..
-    }) = upgrade
+    }) = upgrade.as_ref()
     {
         if migration_prompt_hidden(local_settings, migration_config_key.as_str()) {
             return Ok(None);
@@ -435,7 +456,7 @@ mod tests {
         let mut rendered = Vec::new();
         while let Ok(AppEvent::InsertHistoryCell(cell)) = rx.try_recv() {
             rendered.extend(
-                cell.display_lines(/*width*/ 120)
+                cell.transcript_lines(/*width*/ 120)
                     .iter()
                     .map(render_line_text),
             );

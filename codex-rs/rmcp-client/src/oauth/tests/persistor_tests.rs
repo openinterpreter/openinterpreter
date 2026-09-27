@@ -49,6 +49,7 @@ use crate::oauth::OAuthRuntime;
 use crate::oauth::ResolvedOAuthCredentialStore;
 use crate::oauth::StoredOAuthTokens;
 use crate::oauth::WrappedOAuthTokenResponse;
+use crate::oauth::compute_expires_at_millis;
 use crate::oauth::compute_store_key;
 use crate::oauth::delete_oauth_tokens;
 use crate::oauth::load_oauth_tokens_from_file;
@@ -533,8 +534,14 @@ async fn issuerless_newer_credentials_are_not_adopted_before_refresh() -> Result
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn transient_refresh_failure_does_not_require_reauthorization() -> Result<()> {
-    let (_env, server, initial) = test_context().await?;
+async fn proactive_refresh_failure_with_unexpired_token_does_not_require_reauthorization()
+-> Result<()> {
+    let (_env, server, mut initial) = test_context().await?;
+    initial
+        .token_response
+        .0
+        .set_expires_in(Some(&Duration::from_secs(/*secs*/ 30)));
+    initial.expires_at = compute_expires_at_millis(&initial.token_response.0);
     Mock::given(method("POST"))
         .and(path("/oauth/token"))
         .and(body_string_contains("grant_type=refresh_token"))
@@ -639,6 +646,139 @@ async fn assert_caller_cancellation(mode: crate::McpOAuthRefreshMode) -> Result<
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn failed_refresh_adopts_login_completed_during_request() -> Result<()> {
+    for expires_in in [Some(Duration::from_secs(/*secs*/ 3600)), None] {
+        let (_env, server, initial) = test_context().await?;
+        let mut replacement = initial.clone();
+        replacement.client_id = "new-login-client".to_string();
+        replacement
+            .token_response
+            .0
+            .set_access_token(AccessToken::new("new-login-access-token".to_string()));
+        replacement
+            .token_response
+            .0
+            .set_expires_in(expires_in.as_ref());
+        replacement.expires_at = compute_expires_at_millis(&replacement.token_response.0);
+        save_oauth_tokens_to_file(&initial)?;
+        let persistor = persistor_for(&initial).await?;
+        let provider_replacement = replacement.clone();
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .and(body_string_contains("grant_type=refresh_token"))
+            .respond_with(move |_request: &wiremock::Request| {
+                // A browser login writes independently of the refresh transaction lock.
+                save_oauth_tokens_to_file(&provider_replacement).expect("complete new login");
+                ResponseTemplate::new(200).set_body_string("not an OAuth token response")
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        persistor.refresh_if_needed().await?;
+        let live = persistor.stored_credentials().await.expect("adopted login");
+        let mut expected_live = replacement.clone();
+        expected_live.token_response.0.set_expires_in(None);
+        assert_eq!(live, expected_live);
+        persistor.persist_if_needed().await?;
+        let stored = load_oauth_tokens_from_file(&initial.server_name, &initial.url)?
+            .expect("new login must remain stored");
+        assert_tokens_match_without_expiry(&stored, &replacement);
+        server.verify().await;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_refresh_does_not_adopt_unbound_replacement_credentials() -> Result<()> {
+    for issuer in [None, Some("https://different-issuer.example.test")] {
+        let (_env, server, initial) = test_context().await?;
+        let mut replacement = initial.clone();
+        replacement.issuer = issuer.map(str::to_string);
+        replacement.expires_at = Some(u64::MAX);
+        replacement
+            .token_response
+            .0
+            .set_access_token(AccessToken::new("replacement-access-token".to_string()));
+        save_oauth_tokens_to_file(&initial)?;
+        let persistor = persistor_for(&initial).await?;
+        let provider_replacement = replacement.clone();
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .and(body_string_contains("grant_type=refresh_token"))
+            .respond_with(move |_request: &wiremock::Request| {
+                save_oauth_tokens_to_file(&provider_replacement).expect("complete new login");
+                ResponseTemplate::new(200).set_body_string("invalid JSON")
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = persistor
+            .refresh_if_needed()
+            .await
+            .expect_err("an unbound replacement must not enter the authorization manager");
+        assert!(is_authentication_required_error(&error));
+        let live = persistor
+            .stored_credentials()
+            .await
+            .expect("original credentials");
+        let mut expected_live = initial.clone();
+        expected_live.token_response.0.set_expires_in(None);
+        assert_eq!(live, expected_live);
+        let stored = load_oauth_tokens_from_file(&initial.server_name, &initial.url)?
+            .expect("the replacement must not be deleted or overwritten");
+        assert_tokens_match_without_expiry(&stored, &replacement);
+        server.verify().await;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn expired_refresh_failure_preserves_credentials_for_a_later_retry() -> Result<()> {
+    let (_env, server, initial) = test_context().await?;
+    save_oauth_tokens_to_file(&initial)?;
+    let persistor = persistor_for(&initial).await?;
+    let failure = Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("invalid JSON"))
+        .expect(1)
+        .mount_as_scoped(&server)
+        .await;
+
+    let error = persistor
+        .refresh_if_needed()
+        .await
+        .expect_err("refresh failed");
+    assert!(is_authentication_required_error(&error));
+    let stored = load_oauth_tokens_from_file(&initial.server_name, &initial.url)?
+        .expect("failed refresh must preserve stored credentials");
+    assert_tokens_match_without_expiry(&stored, &initial);
+    drop(failure);
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .and(body_string_contains("refresh_token=refresh-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "retry-access-token",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    persistor.refresh_if_needed().await?;
+    let stored = load_oauth_tokens_from_file(&initial.server_name, &initial.url)?
+        .expect("successful retry must persist new credentials");
+    assert_eq!(
+        stored.token_response.0.access_token().secret(),
+        "retry-access-token"
+    );
+    server.verify().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn provider_timeout_releases_lock_and_preserves_durable_credentials() -> Result<()> {
     let (_env, server, initial) = test_context().await?;
     mount_delayed_refresh(&server, "late-access-token").await;
@@ -653,6 +793,7 @@ async fn provider_timeout_releases_lock_and_preserves_durable_credentials() -> R
         .await
         .expect_err("provider request should reach its explicit timeout");
     assert!(error.to_string().contains("timed out after 50ms"));
+    assert!(is_authentication_required_error(&error));
 
     let _lock = tokio::time::timeout(
         Duration::from_millis(/*millis*/ 100),

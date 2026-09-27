@@ -9,6 +9,7 @@ use app_test_support::TestAppServer;
 use app_test_support::write_chatgpt_auth;
 use codex_app_server_protocol::ImageGenerationFailure;
 use codex_app_server_protocol::ImageGenerationItem;
+use codex_app_server_protocol::ImageReference as V2ImageReference;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadReadParams;
@@ -62,7 +63,23 @@ const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 async fn standalone_image_generation_returns_saved_path_hint_to_model() -> Result<()> {
     let call_id = "image-run-1";
     let server = responses::start_mock_server().await;
-    mount_image_response(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/codex/images/generations"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("x-codex-imagegen-request-id", "req-imagegen-123")
+                .set_body_json(json!({
+                    "created": 1,
+                    "background": "opaque",
+                    "data": [
+                        {"b64_json": RESULT, "generation_id": "gen-image-123"},
+                        {"b64_json": "ignored", "generation_id": "gen-other"},
+                    ],
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
 
     let response_mock = responses::mount_sse_sequence(
         &server,
@@ -191,6 +208,10 @@ async fn standalone_image_generation_returns_saved_path_hint_to_model() -> Resul
     assert_eq!(
         event["event_params"]["imagegen_request_id"],
         json!("req-imagegen-123")
+    );
+    assert_eq!(
+        event["event_params"]["generation_id"],
+        json!("gen-image-123")
     );
 
     Ok(())
@@ -430,6 +451,7 @@ async fn standalone_image_generation_failure_emits_terminal_item() -> Result<()>
             failure: None,
             saved_path: None,
             imagegen_request_id: None,
+            generation_id: None,
         })
     );
 
@@ -636,7 +658,9 @@ async fn transparent_image_edit_preserves_metadata_and_recent_pathless_image() -
                     text_elements: Vec::new(),
                 },
                 V2UserInput::Image {
-                    url: image_url.to_string(),
+                    image: V2ImageReference::Inline {
+                        url: image_url.to_string(),
+                    },
                     detail: None,
                 },
             ],
@@ -700,7 +724,7 @@ async fn standalone_image_generation_is_exposed_in_code_mode_only() -> Result<()
 async fn standalone_image_generation_is_callable_from_code_mode_only() -> Result<()> {
     let call_id = "code-mode-image-run-1";
     let server = responses::start_mock_server().await;
-    mount_image_response(&server).await;
+    mount_image_response_with_background(&server, "opaque").await;
 
     let response_mock = responses::mount_sse_sequence(
         &server,
@@ -924,10 +948,6 @@ async fn wait_for_image_generation_completed(
             return Ok(completed);
         }
     }
-}
-
-async fn mount_image_response(server: &MockServer) {
-    mount_image_response_with_background(server, "opaque").await;
 }
 
 async fn mount_image_response_with_background(server: &MockServer, background: &str) {

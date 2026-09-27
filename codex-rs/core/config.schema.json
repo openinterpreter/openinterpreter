@@ -155,6 +155,13 @@
           ],
           "description": "Per-account approval settings keyed by link ID."
         },
+        "omit_tools_from": {
+          "description": "Model-facing surfaces from which this connector's tools must be omitted, in addition to any server-level omissions. `None` leaves lower-priority configuration unchanged; an empty list clears connector-level omissions.",
+          "items": {
+            "$ref": "#/definitions/ToolExposureSurface"
+          },
+          "type": "array"
+        },
         "open_world_enabled": {
           "description": "Whether tools with `open_world_hint = true` are allowed for this app.",
           "type": "boolean"
@@ -383,6 +390,10 @@
     },
     "AutoReviewToml": {
       "properties": {
+        "experimental_policy_template": {
+          "description": "Experimental full Guardian prompt template containing the tenant policy placeholder.",
+          "type": "string"
+        },
         "policy": {
           "description": "Additional policy instructions inserted into the guardian prompt.",
           "type": "string"
@@ -409,6 +420,35 @@
         "timeout_ms": {
           "default": 300000,
           "description": "Maximum time to wait for the refresh command to complete.",
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "AwsCredentialExportConfig": {
+      "additionalProperties": false,
+      "description": "Command used to export AWS signing credentials for a model provider.",
+      "properties": {
+        "args": {
+          "default": [],
+          "description": "Arguments passed to the credential export command.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "description": "Executable to invoke directly, without a shell.",
+          "type": "string"
+        },
+        "timeout_ms": {
+          "default": 30000,
+          "description": "Maximum time to wait for the credential export command to complete.",
           "format": "uint64",
           "minimum": 1.0,
           "type": "integer"
@@ -490,6 +530,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "experimental_show_cell_overhead": {
+          "description": "Show handler duration, code-mode host duration, and harness overhead in each code-mode cell response. Experimental: this option and the response format may change or be removed.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -602,6 +646,15 @@
           "default": null,
           "description": "Optional feature toggles scoped to this profile.",
           "properties": {
+            "agent_message_board": {
+              "type": "boolean"
+            },
+            "analytics_plan_history": {
+              "type": "boolean"
+            },
+            "api_key_model_discovery": {
+              "type": "boolean"
+            },
             "apply_patch_freeform": {
               "type": "boolean"
             },
@@ -672,6 +725,9 @@
             "code_mode_prewarm": {
               "type": "boolean"
             },
+            "codex_apps_mcp_2026_07_28": {
+              "type": "boolean"
+            },
             "codex_git_commit": {
               "type": "boolean"
             },
@@ -706,6 +762,9 @@
               "$ref": "#/definitions/FeatureToml_for_CurrentTimeReminderConfigToml"
             },
             "cwd_relative_turn_diffs": {
+              "type": "boolean"
+            },
+            "daemon_auto_start": {
               "type": "boolean"
             },
             "default_mode_request_user_input": {
@@ -852,6 +911,9 @@
             "non_prefixed_mcp_tool_names": {
               "$ref": "#/definitions/FeatureToml_for_NonPrefixedMcpToolNamesConfigToml"
             },
+            "nonfatal_clock_read_errors": {
+              "type": "boolean"
+            },
             "omit_app_server_notification_media": {
               "type": "boolean"
             },
@@ -936,6 +998,9 @@
             "send_async_message": {
               "type": "boolean"
             },
+            "send_message_to_user_async": {
+              "type": "boolean"
+            },
             "shell_snapshot": {
               "type": "boolean"
             },
@@ -973,6 +1038,9 @@
               "type": "boolean"
             },
             "step_model_switching": {
+              "type": "boolean"
+            },
+            "system_proxy_fallback": {
               "type": "boolean"
             },
             "telepathy": {
@@ -1036,6 +1104,9 @@
               "type": "boolean"
             },
             "use_linux_sandbox_bwrap": {
+              "type": "boolean"
+            },
+            "use_xaa": {
               "type": "boolean"
             },
             "view_image": {
@@ -1116,7 +1187,12 @@
           "type": "string"
         },
         "personality": {
-          "$ref": "#/definitions/Personality"
+          "allOf": [
+            {
+              "$ref": "#/definitions/Personality"
+            }
+          ],
+          "description": "Deprecated: `friendly` and `pragmatic` no longer select a style."
         },
         "plan_mode_reasoning_effort": {
           "$ref": "#/definitions/ReasoningEffort"
@@ -1160,6 +1236,62 @@
         "experimental_mode": {
           "description": "Enables experimental context management.",
           "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "CredentialAuthMethod": {
+      "description": "Authentication formats supported by declarative credential providers.",
+      "enum": [
+        "bearer",
+        "token",
+        "basic",
+        "header"
+      ],
+      "type": "string"
+    },
+    "CredentialProviderConfig": {
+      "additionalProperties": false,
+      "description": "Declarative description of an environment-backed credential family.",
+      "properties": {
+        "auth": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/CredentialAuthMethod"
+          },
+          "type": "array"
+        },
+        "env": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "header": {
+          "type": "string"
+        },
+        "patterns": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "url_prefix_from_env": {
+          "description": "Environment variable containing an additional URL prefix or hostname.",
+          "type": "string"
+        },
+        "url_prefixes": {
+          "default": [],
+          "description": "URL prefixes authorized for injection. Bare loopback hosts imply HTTP; other bare hosts imply HTTPS.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "type": "object"
@@ -1441,6 +1573,91 @@
       ],
       "type": "string"
     },
+    "GatewayOAuthConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "authorization_url": {
+          "type": "string"
+        },
+        "client_id": {
+          "type": "string"
+        },
+        "delivery": {
+          "$ref": "#/definitions/GatewayOAuthDelivery"
+        },
+        "redirect_port": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "resource": {
+          "type": "string"
+        },
+        "scopes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "token_url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "authorization_url",
+        "client_id",
+        "delivery",
+        "token_url"
+      ],
+      "type": "object"
+    },
+    "GatewayOAuthDelivery": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "header"
+              ],
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "scheme": {
+              "default": "Bearer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "cookie"
+              ],
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "GhostSnapshotToml": {
       "additionalProperties": false,
       "properties": {
@@ -1516,7 +1733,7 @@
           "type": "boolean"
         },
         "free_guardian": {
-          "description": "Route Guardian review and classification through the unmetered Codex endpoints.",
+          "description": "Legacy setting retained for config compatibility; the backend now controls Guardian billing.",
           "type": "boolean"
         },
         "max_action_tokens": {
@@ -1982,8 +2199,25 @@
       },
       "type": "object"
     },
+    "McpEnterpriseManagedAuthConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "idp": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/McpServerIdpOAuthConfig"
+            }
+          ],
+          "description": "Shared enterprise authorization, independent of Codex account credentials."
+        }
+      },
+      "required": [
+        "idp"
+      ],
+      "type": "object"
+    },
     "McpServerAuth": {
-      "description": "Authentication flow Codex attempts after resolving an HTTP MCP server's configured bearer token and authorization headers, which always take precedence. ChatGPT authentication falls back to stored OAuth credentials when its session provider is unavailable; both modes ultimately fall back to an unauthenticated connection.",
+      "description": "Authentication flow for an HTTP MCP server. Explicit credentials take precedence for OAuth and ChatGPT; EMA rejects alternate credentials and fallback.",
       "oneOf": [
         {
           "description": "Use stored MCP OAuth credentials when available. Starting an OAuth login is a separate operation.",
@@ -1996,6 +2230,13 @@
           "description": "Use the current ChatGPT session for servers on the trusted first-party ChatGPT origin. If no ChatGPT session provider is available, startup can still fall back to stored OAuth credentials.",
           "enum": [
             "chatgpt"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Exchange an enterprise IdP refresh token for resource-specific authorization. Alternate credentials and ordinary OAuth fallback are not permitted.",
+          "enum": [
+            "ema_auth"
           ],
           "type": "string"
         }
@@ -2023,10 +2264,32 @@
         }
       ]
     },
+    "McpServerIdpOAuthConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "client_id": {
+          "description": "Public OAuth client registered with that enterprise IdP.",
+          "type": "string"
+        },
+        "issuer": {
+          "description": "Issuer used for enterprise OAuth discovery and identity validation.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "client_id",
+        "issuer"
+      ],
+      "type": "object"
+    },
     "McpServerOAuthConfig": {
       "additionalProperties": false,
-      "description": "OAuth client settings used when Codex launches an MCP OAuth flow.",
+      "description": "Client settings for MCP OAuth login or enterprise token exchange.",
       "properties": {
+        "authorization_server_issuer": {
+          "description": "Expected resource authorization server issuer for EMA token exchange.",
+          "type": "string"
+        },
         "callback_port": {
           "description": "Fixed callback port that takes precedence over Codex's global OAuth callback port.",
           "format": "uint16",
@@ -2081,6 +2344,10 @@
           "description": "When `true`, external context sources mark the thread `memory_mode` as `\"polluted\"`.",
           "type": "boolean"
         },
+        "dual_write": {
+          "description": "Generate both versions while the selected version supplies context.",
+          "type": "boolean"
+        },
         "extract_model": {
           "description": "Model used for thread summarisation.",
           "type": "string"
@@ -2128,9 +2395,24 @@
         "use_memories": {
           "description": "When `false`, skip injecting memory usage instructions into developer prompts.",
           "type": "boolean"
+        },
+        "version": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MemoryVersion"
+            }
+          ],
+          "description": "Selects the memory pipeline; v1 remains the default."
         }
       },
       "type": "object"
+    },
+    "MemoryVersion": {
+      "enum": [
+        "v1",
+        "v2"
+      ],
+      "type": "string"
     },
     "ModelAvailabilityNuxConfig": {
       "additionalProperties": {
@@ -2196,6 +2478,14 @@
           ],
           "description": "Optional command used to reauthenticate after a refreshable AWS auth failure."
         },
+        "credential_export": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AwsCredentialExportConfig"
+            }
+          ],
+          "description": "Optional command whose exported credentials replace the AWS SDK credential chain."
+        },
         "profile": {
           "description": "AWS profile name to use. When unset, the AWS SDK default chain decides.",
           "type": "string"
@@ -2250,12 +2540,24 @@
           "description": "Value to use with `Authorization: Bearer <token>` header. Use of this config is discouraged in favor of `env_key` for security reasons, but this may be necessary when using this programmatically.",
           "type": "string"
         },
+        "gateway_oauth": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/GatewayOAuthConfig"
+            }
+          ],
+          "description": "Secondary OAuth credentials required by the provider's gateway."
+        },
         "http_headers": {
           "additionalProperties": {
             "type": "string"
           },
           "description": "Additional HTTP headers to include in requests to this provider where the (key, value) pairs are the header name and value.",
           "type": "object"
+        },
+        "model_catalog_url": {
+          "description": "Optional full URL for a Codex-native model catalog. When unset, OpenAI discovery uses the Codex backend unless `base_url` overrides the inference endpoint.",
+          "type": "string"
         },
         "name": {
           "default": "",
@@ -2525,6 +2827,7 @@
       "additionalProperties": false,
       "properties": {
         "allow_local_binding": {
+          "description": "Permits local servers and direct host-loopback connections and skips the proxy's additional private-network destination checks. Proxy domain rules still apply. Defaults to true for MXC, which cannot enforce false; otherwise defaults to false.",
           "type": "boolean"
         },
         "allow_upstream_proxy": {
@@ -2532,6 +2835,12 @@
         },
         "credential_broker": {
           "type": "boolean"
+        },
+        "credentials": {
+          "additionalProperties": {
+            "$ref": "#/definitions/CredentialProviderConfig"
+          },
+          "type": "object"
         },
         "dangerously_allow_all_unix_sockets": {
           "type": "boolean"
@@ -2597,6 +2906,7 @@
       "additionalProperties": false,
       "properties": {
         "allow_local_binding": {
+          "description": "Permits local servers and direct host-loopback connections and skips the proxy's additional private-network destination checks. Proxy domain rules still apply. Defaults to true for MXC, which cannot enforce false; otherwise defaults to false.",
           "type": "boolean"
         },
         "allow_upstream_proxy": {
@@ -3017,6 +3327,7 @@
       "type": "object"
     },
     "Personality": {
+      "description": "Deprecated: `friendly` and `pragmatic` no longer select a style.",
       "enum": [
         "none",
         "friendly",
@@ -3043,7 +3354,7 @@
     },
     "PluginMcpServerConfig": {
       "additionalProperties": false,
-      "description": "Policy settings for a plugin-provided MCP server.\n\nThis intentionally excludes transport settings: plugin manifests own how the MCP server is launched, while user config owns enablement and tool policy.",
+      "description": "Policy settings for a plugin-provided MCP server.\n\nThis intentionally excludes transport settings: plugin manifests own how the MCP server is launched, while host config owns enablement, auth, and tool policy.",
       "properties": {
         "default_tools_approval_mode": {
           "allOf": [
@@ -3059,6 +3370,14 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "ema_auth": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/PluginMcpServerEmaAuthConfig"
+            }
+          ],
+          "description": "Host-configured EMA registration; the plugin still owns its endpoint."
         },
         "enabled": {
           "default": true,
@@ -3080,6 +3399,39 @@
           "type": "object"
         }
       },
+      "type": "object"
+    },
+    "PluginMcpServerEmaAuthConfig": {
+      "additionalProperties": false,
+      "description": "Resource registration applied through an existing per-plugin policy overlay. The enterprise IdP is selected separately by trusted host configuration.",
+      "properties": {
+        "authorization_server_issuer": {
+          "type": "string"
+        },
+        "client_id": {
+          "type": "string"
+        },
+        "resource": {
+          "type": "string"
+        },
+        "scopes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "url": {
+          "description": "Exact plugin endpoint approved by the host; never overrides the declaration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "authorization_server_issuer",
+        "client_id",
+        "resource",
+        "url"
+      ],
       "type": "object"
     },
     "ProfileTui": {
@@ -3861,6 +4213,27 @@
           "description": "When true, disables burst-paste detection for typed input entirely. All characters are inserted as they are received, and no buffering or placeholder replacement will occur for fast keypress bursts. Overrides the legacy top-level `disable_paste_burst` setting. Defaults to `false`.",
           "type": "boolean"
         },
+        "effects": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TuiEffects"
+            }
+          ],
+          "default": {
+            "effort": true,
+            "progress": true,
+            "shimmer": true,
+            "starfield": true,
+            "title": true,
+            "welcome": true
+          },
+          "description": "Individual visual effects. Each also requires animations to be enabled."
+        },
+        "fullscreen_transcript": {
+          "default": false,
+          "description": "Own the fullscreen transcript, including scrolling, selection, and search. Defaults to `false`; alternate-screen restrictions take precedence.",
+          "type": "boolean"
+        },
         "keymap": {
           "allOf": [
             {
@@ -3869,7 +4242,11 @@
           ],
           "default": {
             "agents": {
+              "archive": null,
+              "delete": null,
+              "hide": null,
               "new_task": null,
+              "new_worktree": null,
               "rename": null,
               "resume": null,
               "search": null,
@@ -3895,6 +4272,7 @@
               "previous_permission_mode": null,
               "prompt_stack_back": null,
               "skip_question": null,
+              "toggle_voice": null,
               "toggle_voice_mute": null
             },
             "composer": {
@@ -3926,6 +4304,8 @@
             "global": {
               "clear_terminal": null,
               "copy": null,
+              "find_transcript": null,
+              "focus_activity": null,
               "open_agents": null,
               "open_external_editor": null,
               "open_transcript": null,
@@ -3952,6 +4332,7 @@
             "pager": {
               "close": null,
               "close_transcript": null,
+              "find": null,
               "half_page_down": null,
               "half_page_up": null,
               "jump_bottom": null,
@@ -4101,6 +4482,19 @@
           "description": "Start the TUI in raw scrollback mode for copy-friendly transcript output. Defaults to `false`.",
           "type": "boolean"
         },
+        "rendering": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TuiRendering"
+            }
+          ],
+          "default": {
+            "math": true,
+            "mermaid": true,
+            "tables": true
+          },
+          "description": "Rich content rendering. Independent of animations and visual effects."
+        },
         "resume_cwd": {
           "allOf": [
             {
@@ -4110,6 +4504,10 @@
           "default": null,
           "description": "Working directory to use when resuming or forking a session. When unset, prompt if the current and session directories differ."
         },
+        "screen_reader_detection_done": {
+          "description": "Records the one-time screen-reader detection attempt. Either value skips detection.",
+          "type": "boolean"
+        },
         "session_picker_view": {
           "allOf": [
             {
@@ -4118,6 +4516,11 @@
           ],
           "default": null,
           "description": "Preferred layout for resume/fork session picker results."
+        },
+        "show_server_version_notice": {
+          "default": true,
+          "description": "Show informational notices about connected app server version differences. Defaults to `true`; this does not control compatibility errors or version status.",
+          "type": "boolean"
         },
         "show_tooltips": {
           "default": true,
@@ -4161,11 +4564,6 @@
           "default": false,
           "description": "Start the composer in Vim mode (`Normal`) by default. Defaults to `false`.",
           "type": "boolean"
-        },
-        "whimsy": {
-          "default": true,
-          "description": "Enable decorative effects such as Astra composer stars. Also requires animations. Defaults to `true`.",
-          "type": "boolean"
         }
       },
       "type": "object"
@@ -4174,13 +4572,45 @@
       "additionalProperties": false,
       "description": "Shortcuts specific to the shared agents overview.",
       "properties": {
+        "archive": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Archive the selected task and its child agents after confirmation."
+        },
+        "delete": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Permanently delete the selected task and its child agents after confirmation."
+        },
+        "hide": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Hide the selected task until explicitly resumed or the TUI restarts."
+        },
         "new_task": {
           "allOf": [
             {
               "$ref": "#/definitions/KeybindingsSpec"
             }
           ],
-          "description": "Start composing a new agent task."
+          "description": "Open a new session in the selected checkout."
+        },
+        "new_worktree": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Open a new session in a worktree from the project default branch."
         },
         "rename": {
           "allOf": [
@@ -4363,6 +4793,14 @@
             }
           ],
           "description": "Skip the focused question."
+        },
+        "toggle_voice": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Start or stop a voice conversation."
         },
         "toggle_voice_mute": {
           "allOf": [
@@ -4565,6 +5003,43 @@
       },
       "type": "object"
     },
+    "TuiEffects": {
+      "additionalProperties": false,
+      "description": "Optional visual effects. Disabling an effect preserves its underlying activity.",
+      "properties": {
+        "effort": {
+          "default": true,
+          "description": "Animate reasoning-effort changes in the composer and footer.",
+          "type": "boolean"
+        },
+        "progress": {
+          "default": true,
+          "description": "Animate activity bullets and loading spinners.",
+          "type": "boolean"
+        },
+        "shimmer": {
+          "default": true,
+          "description": "Shimmer status and loading text.",
+          "type": "boolean"
+        },
+        "starfield": {
+          "default": true,
+          "description": "Animate the composer starfield.",
+          "type": "boolean"
+        },
+        "title": {
+          "default": true,
+          "description": "Blink the terminal-title indicator when user action is required.",
+          "type": "boolean"
+        },
+        "welcome": {
+          "default": true,
+          "description": "Animate the welcome artwork.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "TuiGlobalKeymap": {
       "additionalProperties": false,
       "description": "Global keybindings. These are used when a context does not define an override.",
@@ -4584,6 +5059,22 @@
             }
           ],
           "description": "Copy the last agent response to the clipboard."
+        },
+        "find_transcript": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Find text in the full transcript."
+        },
+        "focus_activity": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Focus activity groups in the owned transcript to inspect their details."
         },
         "open_agents": {
           "allOf": [
@@ -4679,7 +5170,11 @@
             }
           ],
           "default": {
+            "archive": null,
+            "delete": null,
+            "hide": null,
             "new_task": null,
+            "new_worktree": null,
             "rename": null,
             "resume": null,
             "search": null,
@@ -4719,6 +5214,7 @@
             "previous_permission_mode": null,
             "prompt_stack_back": null,
             "skip_question": null,
+            "toggle_voice": null,
             "toggle_voice_mute": null
           }
         },
@@ -4771,6 +5267,8 @@
           "default": {
             "clear_terminal": null,
             "copy": null,
+            "find_transcript": null,
+            "focus_activity": null,
             "open_agents": null,
             "open_external_editor": null,
             "open_transcript": null,
@@ -4811,6 +5309,7 @@
           "default": {
             "close": null,
             "close_transcript": null,
+            "find": null,
             "half_page_down": null,
             "half_page_up": null,
             "jump_bottom": null,
@@ -5036,6 +5535,14 @@
           ],
           "description": "Close the transcript overlay via its dedicated toggle key."
         },
+        "find": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Find text in a transcript pager."
+        },
         "half_page_down": {
           "allOf": [
             {
@@ -5120,6 +5627,28 @@
           "type": "string"
         }
       ]
+    },
+    "TuiRendering": {
+      "additionalProperties": false,
+      "description": "Optional rich renderers. Disabled renderers preserve the original source.",
+      "properties": {
+        "math": {
+          "default": true,
+          "description": "Render math expressions using Unicode notation.",
+          "type": "boolean"
+        },
+        "mermaid": {
+          "default": true,
+          "description": "Render Mermaid code blocks as diagrams.",
+          "type": "boolean"
+        },
+        "tables": {
+          "default": true,
+          "description": "Render pipe tables, including tables inside Markdown fences.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
     },
     "TuiVimNormalKeymap": {
       "additionalProperties": false,
@@ -5796,7 +6325,8 @@
     "WindowsSandboxModeToml": {
       "enum": [
         "elevated",
-        "unelevated"
+        "unelevated",
+        "mxc"
       ],
       "type": "string"
     },
@@ -5805,10 +6335,6 @@
       "properties": {
         "sandbox": {
           "$ref": "#/definitions/WindowsSandboxModeToml"
-        },
-        "sandbox_private_desktop": {
-          "description": "Defaults to `true`. Set to `false` to launch the final sandboxed child process on `Winsta0\\\\Default` instead of a private desktop.",
-          "type": "boolean"
         }
       },
       "type": "object"
@@ -6011,6 +6537,15 @@
       "default": null,
       "description": "Centralized feature flags (new). Prefer this over individual toggles.",
       "properties": {
+        "agent_message_board": {
+          "type": "boolean"
+        },
+        "analytics_plan_history": {
+          "type": "boolean"
+        },
+        "api_key_model_discovery": {
+          "type": "boolean"
+        },
         "apply_patch_freeform": {
           "type": "boolean"
         },
@@ -6081,6 +6616,9 @@
         "code_mode_prewarm": {
           "type": "boolean"
         },
+        "codex_apps_mcp_2026_07_28": {
+          "type": "boolean"
+        },
         "codex_git_commit": {
           "type": "boolean"
         },
@@ -6115,6 +6653,9 @@
           "$ref": "#/definitions/FeatureToml_for_CurrentTimeReminderConfigToml"
         },
         "cwd_relative_turn_diffs": {
+          "type": "boolean"
+        },
+        "daemon_auto_start": {
           "type": "boolean"
         },
         "default_mode_request_user_input": {
@@ -6261,6 +6802,9 @@
         "non_prefixed_mcp_tool_names": {
           "$ref": "#/definitions/FeatureToml_for_NonPrefixedMcpToolNamesConfigToml"
         },
+        "nonfatal_clock_read_errors": {
+          "type": "boolean"
+        },
         "omit_app_server_notification_media": {
           "type": "boolean"
         },
@@ -6345,6 +6889,9 @@
         "send_async_message": {
           "type": "boolean"
         },
+        "send_message_to_user_async": {
+          "type": "boolean"
+        },
         "shell_snapshot": {
           "type": "boolean"
         },
@@ -6382,6 +6929,9 @@
           "type": "boolean"
         },
         "step_model_switching": {
+          "type": "boolean"
+        },
+        "system_proxy_fallback": {
           "type": "boolean"
         },
         "telepathy": {
@@ -6445,6 +6995,9 @@
           "type": "boolean"
         },
         "use_linux_sandbox_bwrap": {
+          "type": "boolean"
+        },
+        "use_xaa": {
           "type": "boolean"
         },
         "view_image": {
@@ -6597,6 +7150,15 @@
       "description": "User-level marketplace entries keyed by marketplace name.",
       "type": "object"
     },
+    "mcp_enterprise_managed_auth": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/McpEnterpriseManagedAuthConfig"
+        }
+      ],
+      "default": null,
+      "description": "Trusted enterprise IdP shared by EMA-enabled MCP servers and plugins."
+    },
     "mcp_oauth_callback_port": {
       "description": "Optional fixed port for the local HTTP callback server used during MCP OAuth login. When unset, Codex will bind to an ephemeral port chosen by the OS.",
       "format": "uint16",
@@ -6675,6 +7237,13 @@
         }
       ],
       "description": "Optional path to a file containing model instructions that will override the built-in instructions for the selected model. Users are STRONGLY DISCOURAGED from using this field, as deviating from the instructions sanctioned by Codex will likely degrade model performance."
+    },
+    "model_post_turn_compact_threshold_percent": {
+      "description": "Percentage of the usable context window that triggers compaction after a final response. Existing auto-compaction limits still apply. Omitted or zero disables turn-end compaction; valid values are 0–100.",
+      "format": "uint8",
+      "maximum": 100.0,
+      "minimum": 0.0,
+      "type": "integer"
     },
     "model_provider": {
       "description": "Provider to use from the model_providers map.",
@@ -6761,7 +7330,7 @@
           "$ref": "#/definitions/Personality"
         }
       ],
-      "description": "Optionally specify a personality for the model"
+      "description": "Deprecated: `friendly` and `pragmatic` no longer select a style."
     },
     "plan_mode_reasoning_effort": {
       "$ref": "#/definitions/ReasoningEffort"

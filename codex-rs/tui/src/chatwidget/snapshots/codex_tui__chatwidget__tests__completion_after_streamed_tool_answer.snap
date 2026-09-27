@@ -1,0 +1,10 @@
+---
+source: tui/src/chatwidget/tests/completion_styling_tests.rs
+expression: normalize_completion_timestamps(& (text))
+---
+• Ran echo ready
+  └ ready
+
+• The change is ready.
+
+  Worked for [duration] · [completion time]

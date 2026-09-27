@@ -12,7 +12,9 @@ import re
 from runtime import PLUGINS, digest, required_library_paths
 
 
-def runtime_files(root: Path, target: str) -> dict[str, str]:
+def runtime_files(
+    root: Path, target: str, *, public_release: bool = False
+) -> dict[str, str]:
     manifest_path = root / "runtime.json"
     if manifest_path.is_symlink() or not manifest_path.is_file():
         raise ValueError("runtime manifest must be a regular file")
@@ -23,7 +25,8 @@ def runtime_files(root: Path, target: str) -> dict[str, str]:
     manifest = json.loads(data)
     if (
         manifest.get("schemaVersion") != 1
-        or manifest.get("developmentOnly") is not True
+        or manifest.get("developmentOnly") is not (not public_release)
+        or (public_release and manifest.get("distribution") != "publicRelease")
         or manifest.get("target") != target
         or manifest.get("sourceManifestSha256")
         != digest(Path(__file__).with_name("sources.json"))

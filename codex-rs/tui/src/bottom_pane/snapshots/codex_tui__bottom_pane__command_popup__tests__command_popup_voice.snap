@@ -1,0 +1,15 @@
+---
+source: tui/src/bottom_pane/command_popup.rs
+expression: "format!(\"{buf:?}\")"
+---
+Buffer {
+    area: Rect { x: 0, y: 0, width: 72, height: 1 },
+    content: [
+        "› /voice  start or stop voice; use /voice settings to choose a voice    ",
+    ],
+    styles: [
+        x: 0, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD | REVERSED,
+        x: 10, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: REVERSED,
+        x: 68, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD | REVERSED,
+    ]
+}

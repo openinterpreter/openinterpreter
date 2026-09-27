@@ -1,0 +1,6 @@
+---
+source: tui/src/app/tests/user_verification_routes.rs
+assertion_line: 194
+expression: "app.render_transcript_lines_for_reflow(80).lines.iter().map(rendered_line_text).collect::<Vec<_>>().join(\"\\n\")"
+---
+• The foreground answer continues.

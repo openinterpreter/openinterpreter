@@ -1,10 +1,17 @@
-//! PID reservations serialize detached launches; creation times protect stale-record cleanup.
+//! PID reservations serialize detached launches; process identities protect stale-record cleanup.
 
+#[path = "pid_identity.rs"]
+mod identity;
+
+#[cfg(any(unix, windows))]
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::io::SeekFrom;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::managed_install::ExecutableIdentity;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
@@ -19,15 +26,17 @@ use tokio::io::AsyncSeekExt;
 use tokio::process::Command;
 use tokio::time::sleep;
 
+use crate::settings::DEFAULT_SHUTDOWN_GRACE_SECONDS;
+
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const STOP_GRACE_PERIOD: Duration = Duration::from_secs(60);
-const STOP_TIMEOUT: Duration = Duration::from_secs(70);
+const STOP_FORCE_TIMEOUT: Duration = Duration::from_secs(10);
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const STDERR_LOG_TAIL_BYTES: u64 = 4096;
 
 #[derive(Debug)]
 #[cfg_attr(not(any(unix, windows)), allow(dead_code))]
 pub(crate) struct PidBackend {
+    pub(super) feature_overrides: BTreeMap<String, bool>,
     codex_bin: PathBuf,
     pid_file: PathBuf,
     lock_file: PathBuf,
@@ -38,7 +47,13 @@ pub(crate) struct PidBackend {
 #[serde(rename_all = "camelCase")]
 struct PidRecord {
     pid: u32,
+    // Keep the legacy timestamp for older CLI/updater versions reading this record.
     process_start_time: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "linuxProcessIdentity")]
+    process_identity: Option<identity::ProcessIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    executable_identity: Option<ExecutableIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,17 +82,27 @@ enum PidFileState {
     Running(PidRecord),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[cfg_attr(not(any(unix, windows)), allow(dead_code))]
 enum PidCommandKind {
     AppServer { remote_control_enabled: bool },
-    UpdateLoop,
+    UpdateLoop { restore_release: Option<String> },
 }
 
 impl PidBackend {
+    pub(crate) async fn running_executable_identity(&self) -> Result<Option<ExecutableIdentity>> {
+        match self.read_pid_file_state().await? {
+            PidFileState::Running(record) if self.record_is_active(&record).await? => {
+                Ok(record.executable_identity)
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub(crate) fn new(codex_bin: PathBuf, pid_file: PathBuf, remote_control_enabled: bool) -> Self {
         let lock_file = pid_file.with_extension("pid.lock");
         Self {
+            feature_overrides: BTreeMap::new(),
             codex_bin,
             pid_file,
             lock_file,
@@ -87,13 +112,18 @@ impl PidBackend {
         }
     }
 
-    pub(crate) fn new_update_loop(codex_bin: PathBuf, pid_file: PathBuf) -> Self {
+    pub(crate) fn new_update_loop(
+        codex_bin: PathBuf,
+        pid_file: PathBuf,
+        restore_release: Option<String>,
+    ) -> Self {
         let lock_file = pid_file.with_extension("pid.lock");
         Self {
+            feature_overrides: BTreeMap::new(),
             codex_bin,
             pid_file,
             lock_file,
-            command_kind: PidCommandKind::UpdateLoop,
+            command_kind: PidCommandKind::UpdateLoop { restore_release },
         }
     }
 
@@ -126,6 +156,10 @@ impl PidBackend {
     }
 
     pub(crate) async fn stop(&self) -> Result<()> {
+        self.stop_with_grace(DEFAULT_SHUTDOWN_GRACE_SECONDS).await
+    }
+
+    pub(crate) async fn stop_with_grace(&self, grace_seconds: u32) -> Result<()> {
         loop {
             let Some(record) = self.wait_for_pid_start().await? else {
                 return Ok(());
@@ -139,7 +173,8 @@ impl PidBackend {
 
             let pid = record.pid;
             let started_at = tokio::time::Instant::now();
-            let deadline = started_at + STOP_TIMEOUT;
+            let force_after = Duration::from_secs(grace_seconds.into());
+            let deadline = started_at + force_after + STOP_FORCE_TIMEOUT;
             #[cfg(unix)]
             self.terminate_process(pid)?;
             #[cfg(windows)]
@@ -165,7 +200,7 @@ impl PidBackend {
                             tracing::warn!(%pid, %err, "managed app-server shutdown request failed; waiting for force deadline");
                         }
                     }
-                    PidCommandKind::UpdateLoop => {
+                    PidCommandKind::UpdateLoop { .. } => {
                         fs::write(self.pid_file.with_extension("shutdown"), pid.to_string())
                             .await
                             .context("failed to request updater shutdown")?;
@@ -181,7 +216,10 @@ impl PidBackend {
                         PidFileState::Starting | PidFileState::Running(_) => break,
                     }
                 }
-                if !forced && started_at.elapsed() >= STOP_GRACE_PERIOD {
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                if !forced && started_at.elapsed() >= force_after {
                     #[cfg(unix)]
                     self.force_terminate_process(pid)?;
                     #[cfg(windows)]
@@ -323,16 +361,37 @@ impl PidBackend {
     }
 
     #[cfg(any(unix, windows))]
-    fn command_args(&self) -> Vec<&'static str> {
-        match self.command_kind {
+    fn command_args(&self) -> Vec<Cow<'_, str>> {
+        let mut args = match &self.command_kind {
             PidCommandKind::AppServer {
                 remote_control_enabled: true,
-            } => vec!["app-server", "--remote-control", "--listen", "unix://"],
+            } => vec![
+                "app-server".into(),
+                "--remote-control".into(),
+                "--listen".into(),
+                "unix://".into(),
+            ],
             PidCommandKind::AppServer {
                 remote_control_enabled: false,
-            } => vec!["app-server", "--listen", "unix://"],
-            PidCommandKind::UpdateLoop => vec!["app-server", "daemon", "pid-update-loop"],
+            } => vec!["app-server".into(), "--listen".into(), "unix://".into()],
+            PidCommandKind::UpdateLoop { restore_release } => {
+                let mut args = vec![
+                    "app-server".into(),
+                    "daemon".into(),
+                    "pid-update-loop".into(),
+                ];
+                if let Some(release) = restore_release {
+                    args.extend(["--restore-release".into(), release.as_str().into()]);
+                }
+                args
+            }
+        };
+        if matches!(self.command_kind, PidCommandKind::AppServer { .. }) {
+            for (name, enabled) in &self.feature_overrides {
+                args.extend(["-c".into(), format!("features.{name}={enabled}").into()]);
+            }
         }
+        args
     }
 
     #[cfg(any(unix, windows))]
@@ -344,14 +403,17 @@ impl PidBackend {
             PidCommandKind::AppServer {
                 remote_control_enabled: true,
             }
-            | PidCommandKind::UpdateLoop => None,
+            | PidCommandKind::UpdateLoop { .. } => None,
         }
     }
 
     fn terminate_process(&self, pid: u32) -> Result<()> {
         match self.command_kind {
             PidCommandKind::AppServer { .. } => terminate_process(pid),
-            PidCommandKind::UpdateLoop => terminate_process(pid),
+            #[cfg(unix)]
+            PidCommandKind::UpdateLoop { .. } => terminate_process_group(pid),
+            #[cfg(not(unix))]
+            PidCommandKind::UpdateLoop { .. } => terminate_process(pid),
         }
     }
 
@@ -359,7 +421,7 @@ impl PidBackend {
     fn force_terminate_process(&self, pid: u32) -> Result<()> {
         match self.command_kind {
             PidCommandKind::AppServer { .. } => force_terminate_process(pid),
-            PidCommandKind::UpdateLoop => force_terminate_process_group(pid),
+            PidCommandKind::UpdateLoop { .. } => force_terminate_process_group(pid),
         }
     }
 
@@ -458,6 +520,21 @@ fn force_terminate_process(pid: u32) -> Result<()> {
 }
 
 #[cfg(unix)]
+fn terminate_process_group(pid: u32) -> Result<()> {
+    let raw_pid = libc::pid_t::try_from(pid)
+        .with_context(|| format!("pid-managed updater pid {pid} is out of range"))?;
+    let result = unsafe { libc::kill(-raw_pid, libc::SIGTERM) };
+    if result == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(err).with_context(|| format!("failed to terminate pid-managed updater group {pid}"))
+}
+
+#[cfg(unix)]
 fn force_terminate_process_group(pid: u32) -> Result<()> {
     let raw_pid = libc::pid_t::try_from(pid)
         .with_context(|| format!("pid-managed updater pid {pid} is out of range"))?;
@@ -493,20 +570,37 @@ async fn process_matches_record(record: &PidRecord) -> Result<bool> {
         return Ok(false);
     }
 
-    match read_process_details(record.pid).await {
-        Ok((state, start_time)) => {
+    let details = async {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(expected) = &record.process_identity {
+            return expected.matches_process(record.pid).await;
+        }
+        let (state, start_time) = read_process_details(record.pid).await?;
+        let matches = start_time == record.process_start_time;
+        let is_zombie = state.starts_with('Z');
+        if !matches && !is_zombie {
+            bail!(
+                "cannot verify pid-managed process {}: legacy start time changed; PID record retained. \
+                 Retry with the locale and timezone used to start the daemon. If the system clock \
+                 changed, stop the original process before restarting the daemon",
+                record.pid
+            );
+        }
+        Ok((is_zombie, matches))
+    }
+    .await;
+    match details {
+        Ok((is_zombie, matches)) => {
             // An unreaped zombie still passes kill(pid, 0) and retains its start
             // time, but it can no longer run the app-server or updater.
-            if state.starts_with('Z') {
-                if start_time == record.process_start_time
-                    && let Ok(raw_pid) = libc::pid_t::try_from(record.pid)
-                {
+            if is_zombie {
+                if matches && let Ok(raw_pid) = libc::pid_t::try_from(record.pid) {
                     // Re-exec can lose the Child handle without changing parenthood.
                     unsafe { libc::waitpid(raw_pid, std::ptr::null_mut(), libc::WNOHANG) };
                 }
                 return Ok(false);
             }
-            Ok(start_time == record.process_start_time)
+            Ok(matches)
         }
         Err(_err) if !process_exists(record.pid) => Ok(false),
         Err(err) => Err(err),
@@ -668,21 +762,7 @@ async fn read_process_start_time(pid: u32) -> Result<String> {
 
 #[cfg(windows)]
 async fn process_matches_record(record: &PidRecord) -> Result<bool> {
-    let process = match super::windows::Process::open(record.pid) {
-        Ok(process) => process,
-        // A managed daemon is queryable by its launching user. A stale PID may
-        // have been reused by a protected process; never try to terminate it.
-        Err(err)
-            if err.downcast_ref::<std::io::Error>().is_some_and(|err| {
-                err.raw_os_error()
-                    == Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32)
-            }) =>
-        {
-            return Ok(false);
-        }
-        Err(err) => return Err(err),
-    };
-    let Some(process) = process else {
+    let Some(process) = super::windows::Process::open(record.pid)? else {
         return Ok(false);
     };
     Ok(process.is_running()? && process.start_time()? == record.process_start_time)

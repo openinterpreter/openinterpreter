@@ -297,6 +297,11 @@ pub(super) fn v8_value_to_json(
     scope: &mut v8::PinScope<'_, '_>,
     value: v8::Local<'_, v8::Value>,
 ) -> Result<Option<JsonValue>, String> {
+    // V8 stringifies undefined as the non-JSON text "undefined".
+    if value.is_undefined() {
+        return Ok(None);
+    }
+
     let tc = std::pin::pin!(v8::TryCatch::new(scope));
     let mut tc = tc.init();
     let Some(stringified) = v8::json::stringify(&tc, value) else {

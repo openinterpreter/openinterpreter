@@ -113,7 +113,7 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{}/metrics", protocol = "json" 
             .chatgpt_user_id("user-a"),
         AuthCredentialsStoreMode::File,
     )?;
-    write_models_cache(home.path())?;
+    write_models_cache(home.path()).await?;
     let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
     let config = Arc::new(
         ConfigBuilder::default()

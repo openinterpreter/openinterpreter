@@ -1,0 +1,6 @@
+---
+source: tui/src/chatwidget/realtime_tests/lifecycle.rs
+assertion_line: 1372
+expression: "cell.display_lines(80).into_iter().map(|line|\nline.to_string()).collect::<Vec<_>>().join(\"\\n\")"
+---
+• Voice conversation started. Use /voice mute to mute or /voice to stop.

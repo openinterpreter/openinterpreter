@@ -38,11 +38,17 @@ impl ElicitationReviewer for RecordingReviewer {
         assert_eq!(request.server_name, "independent-mcp");
         self.calls.fetch_add(/*val*/ 1, Relaxed);
         let active_elicitations = self.active_elicitations.clone();
+        let active_during_review = usize::from(
+            request
+                .elicitation
+                .meta()
+                .is_some_and(|meta| meta.get(STRICT_AUTO_REVIEW_KEY) == Some(&Value::Bool(true))),
+        );
         let response = self.response.clone();
         async move {
-            assert_eq!(active_elicitations.load(Relaxed), 1);
+            assert_eq!(active_elicitations.load(Relaxed), active_during_review);
             tokio::task::yield_now().await;
-            assert_eq!(active_elicitations.load(Relaxed), 1);
+            assert_eq!(active_elicitations.load(Relaxed), active_during_review);
             response.map_err(anyhow::Error::msg)
         }
         .boxed()
@@ -111,6 +117,145 @@ async fn send_elicitation(sender: &SendElicitation, marker: Option<Value>) -> El
     sender(RequestId::Number(7), elicitation)
         .await
         .expect("elicitation must receive a terminal response")
+}
+
+fn form_elicitations(meta: Option<Value>, properties: Value) -> [Elicitation; 3] {
+    let schema = json!({"type": "object", "properties": properties});
+    [
+        Elicitation::Mcp(ElicitRequestParams::FormElicitationParams {
+            meta: meta
+                .as_ref()
+                .map(|meta| RequestMetaObject::from(meta.as_object().unwrap().clone())),
+            message: "Review this request".into(),
+            requested_schema: serde_json::from_value(schema.clone()).unwrap(),
+        }),
+        Elicitation::OpenAiForm {
+            meta: meta.clone(),
+            message: "Review this request".into(),
+            requested_schema: schema.clone(),
+        },
+        Elicitation::OpenAiElicitationForm {
+            meta,
+            message: "Review this request".into(),
+            requested_schema: schema,
+        },
+    ]
+}
+
+#[tokio::test]
+async fn permission_elicitation_preserves_automatic_review_decisions() {
+    for (strict_auto_review, approval_policy, expected_reviews) in [
+        (false, AskForApproval::OnRequest, 1),
+        (true, AskForApproval::OnRequest, 1),
+        (true, AskForApproval::Never, 1),
+        (false, AskForApproval::Never, 0),
+    ] {
+        for response in [
+            approved_response(),
+            ElicitationResponse {
+                action: ElicitationAction::Decline,
+                content: None,
+                meta: Some(json!({"approvals_reviewer": "auto_review", "message": "Denied"})),
+            },
+        ] {
+            let reviewer = RecordingReviewer::new(Ok(Some(response.clone())));
+            let (manager, events, sender) = elicitation_fixture(
+                approval_policy,
+                PermissionProfile::Disabled,
+                Some(reviewer.clone()),
+            );
+            let [request, _, _] = form_elicitations(
+                Some(json!({
+                    "codex_request_type": "approval_request",
+                    "codex_approval_kind": "mcp_tool_call",
+                    "codex_strict_auto_review": strict_auto_review,
+                    "tool_name": "access_browser_origin",
+                    "tool_params": {"origin": "https://example.com"},
+                })),
+                json!({}),
+            );
+            let expected = if expected_reviews == 0 {
+                ElicitationResponse {
+                    meta: None,
+                    ..approved_response()
+                }
+            } else {
+                response
+            };
+            assert_eq!(
+                sender(RequestId::Number(7), request).await.unwrap(),
+                expected
+            );
+            assert_eq!(reviewer.calls.load(Relaxed), expected_reviews);
+            assert_eq!(reviewer.active_elicitations.load(Relaxed), 0);
+            assert!(events.is_empty());
+            assert!(manager.router.requests.lock().unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn elicitation_without_an_automatic_decision_prompts() {
+    for reviewer in [None, Some(RecordingReviewer::new(Ok(None)))] {
+        let (manager, events, sender) = elicitation_fixture(
+            AskForApproval::OnRequest,
+            PermissionProfile::read_only(),
+            reviewer.clone(),
+        );
+        let mut requests = Vec::from(form_elicitations(/*meta*/ None, json!({})));
+        requests.extend(form_elicitations(
+            Some(json!({"codex_requires_user_input": true})),
+            json!({"answer": {"type": "string"}}),
+        ));
+        requests.push(Elicitation::Mcp(
+            ElicitRequestParams::UrlElicitationParams {
+                meta: None,
+                message: "Sign in to continue".into(),
+                url: "https://example.com/auth".into(),
+                elicitation_id: "test-auth".into(),
+            },
+        ));
+        let expected_reviews = requests.len() + 1;
+        for elicitation in requests {
+            let pending = tokio::spawn(sender(RequestId::Number(7), elicitation));
+            let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+                .await
+                .expect("elicitation should prompt")
+                .expect("event channel should remain open");
+            let EventMsg::ElicitationRequest(request) = event.msg else {
+                panic!("expected MCP elicitation");
+            };
+            assert!(!pending.is_finished());
+            let ProtocolRequestId::String(request_id) = request.id else {
+                panic!("expected Codex-owned string request ID");
+            };
+            let response = ElicitationResponse {
+                action: ElicitationAction::Accept,
+                content: Some(json!({"answer": "continue"})),
+                meta: None,
+            };
+            manager
+                .router
+                .resolve(
+                    request.server_name,
+                    RequestId::String(request_id.into()),
+                    response.clone(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(pending.await.unwrap().unwrap(), response);
+        }
+        assert_eq!(
+            send_elicitation(&sender, Some(json!(true))).await,
+            strict_auto_review_decline()
+        );
+        if let Some(reviewer) = reviewer {
+            assert_eq!(reviewer.calls.load(Relaxed), expected_reviews);
+            assert_eq!(reviewer.active_elicitations.load(Relaxed), 0);
+        }
+        assert!(events.is_empty());
+        assert!(manager.router.requests.lock().unwrap().is_empty());
+    }
 }
 
 async fn assert_declined(marker: Value, response: Option<ReviewerResponse>) {
@@ -459,6 +604,7 @@ async fn user_verification_requires_the_app_even_when_policy_would_approve_or_de
         let pending = tokio::spawn(sender(
             RequestId::Number(7),
             Elicitation::UserVerification {
+                meta: Some(json!({"example/display": {"label": "Operation"}})),
                 title: "Approve purchase".into(),
                 description: "Pay $200".into(),
                 challenge: "AQID".into(),
@@ -471,6 +617,7 @@ async fn user_verification_requires_the_app_even_when_policy_would_approve_or_de
         assert_eq!(
             request.request,
             ElicitationRequest::UserVerification {
+                meta: Some(json!({"example/display": {"label": "Operation"}})),
                 title: "Approve purchase".into(),
                 description: "Pay $200".into(),
                 challenge: "AQID".into(),
@@ -520,6 +667,7 @@ async fn user_verification_cancels_when_no_app_can_receive_the_request() {
         sender(
             RequestId::Number(7),
             Elicitation::UserVerification {
+                meta: None,
                 title: "Approve".into(),
                 description: String::new(),
                 challenge: "AQID".into(),
@@ -549,6 +697,7 @@ async fn user_verification_cancels_for_an_event_receiver_without_host_activation
         sender(
             RequestId::Number(7),
             Elicitation::UserVerification {
+                meta: None,
                 title: "Approve".into(),
                 description: String::new(),
                 challenge: "AQID".into(),
@@ -574,16 +723,81 @@ async fn user_verification_cancels_for_an_event_receiver_without_host_activation
 async fn user_verification_drops_pending_response_when_the_request_is_cancelled() {
     let (manager, events, sender) =
         verification_fixture(AskForApproval::OnRequest, /*reviewer*/ None);
+    let active_elicitations = Arc::new(AtomicUsize::new(0));
+    let registrations = active_elicitations.clone();
+    manager
+        .authority
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .lifecycle = Some(ElicitationLifecycle::new(move || {
+        registrations.fetch_add(/*val*/ 1, Relaxed);
+        LifecycleRegistration(registrations.clone())
+    }));
     let pending = tokio::spawn(sender(
         RequestId::Number(7),
         Elicitation::UserVerification {
+            meta: None,
             title: "Approve".into(),
             description: String::new(),
             challenge: "AQID".into(),
         },
     ));
     events.recv().await.unwrap();
+    assert_eq!(active_elicitations.load(Relaxed), 1);
     pending.abort();
     assert!(pending.await.unwrap_err().is_cancelled());
     assert!(manager.router.requests.lock().unwrap().is_empty());
+    assert_eq!(active_elicitations.load(Relaxed), 0);
+}
+
+#[tokio::test]
+async fn user_verification_rejects_attached_servers_even_if_they_use_the_plugin_service_name() {
+    for name in ["attached", crate::CODEX_APPS_MCP_SERVER_NAME] {
+        let (manager, _, _) =
+            verification_fixture(AskForApproval::OnRequest, /*reviewer*/ None);
+        {
+            let mut authority = manager.authority.lock().unwrap();
+            let config = Arc::make_mut(&mut authority.as_mut().unwrap().config);
+            let mut catalog = crate::catalog::ResolvedMcpCatalog::builder();
+            catalog.register(crate::catalog::McpServerRegistration::from_config(
+                name.into(),
+                crate::mcp::codex_apps_mcp_server_config(
+                    "https://example.com",
+                    /*apps_mcp_product_sku*/ None,
+                    /*originator*/ None,
+                ),
+            ));
+            config.mcp_server_catalog = catalog.build();
+        }
+        let (tx, events) = async_channel::bounded(1);
+        let sender = manager.make_sender(
+            name.into(),
+            Some(tx),
+            &ClientMcpExtensions::new([(
+                OPENAI_ELICITATION_EXTENSION_ID.to_string(),
+                json!({"userVerification": {}}),
+            )]),
+        );
+        assert_eq!(
+            sender(
+                RequestId::Number(7),
+                Elicitation::UserVerification {
+                    meta: None,
+                    title: "Approve".into(),
+                    description: String::new(),
+                    challenge: "AQID".into()
+                }
+            )
+            .await
+            .unwrap(),
+            ElicitationResponse {
+                action: ElicitationAction::Cancel,
+                content: None,
+                meta: None
+            },
+        );
+        assert!(events.try_recv().is_err());
+    }
 }

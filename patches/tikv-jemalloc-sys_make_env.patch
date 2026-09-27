@@ -1,0 +1,13 @@
+diff --git a/build.rs b/build.rs
+--- a/build.rs
++++ b/build.rs
+@@ -331,7 +331,8 @@
+     run_and_log(&mut cmd, &build_dir.join("config.log"));
+ 
+     // Make:
+-    let make = make_cmd(&host);
++    let make = read_and_watch_env("MAKE").unwrap_or_else(|_| make_cmd(&host).to_owned());
++    let make = make.as_str();
+     run(&mut make_command(make, &build_dir, &num_jobs));
+ 
+     // Skip watching this environment variables to avoid rebuild in CI.

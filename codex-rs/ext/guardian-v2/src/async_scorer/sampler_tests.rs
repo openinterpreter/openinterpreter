@@ -1,5 +1,8 @@
 use anyhow::Result;
+use codex_context_fragments::RenderedFragment;
+use codex_extension_api::ContextualUserFragment;
 use codex_extension_api::ExtensionMetrics;
+use codex_guardian_context::PreviousReviews;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
 use codex_login::AgentIdentityAuthPolicy;
@@ -10,8 +13,10 @@ use codex_login::ExternalAuthFuture;
 use codex_login::ExternalAuthRefreshContext;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_prompts::GuardianClassifierInstructions;
 use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::SessionSource;
@@ -108,6 +113,7 @@ fn assert_connection_metadata(
                 "turn_id": turn_id,
                 "parent_turn_id": parent_turn_id,
                 "thread_source": "guardian_classifier",
+                "turn_trigger": "guardian_classifier",
             },
         });
         if let Some(root_turn_id) = root_turn_id {
@@ -202,9 +208,10 @@ pub(super) fn sampler_config(base_url: String) -> LunaSamplerConfig {
         session_id: "session-1".to_owned(),
         thread_id: "thread-1".to_owned(),
         originator: Some("guardian-v2-test".to_owned()),
-        free_guardian: false,
+
         service_tier: None,
         luna_compaction_hash: None,
+        max_input_tokens: codex_guardian_context::DEFAULT_MAX_INPUT_TOKENS,
         metrics: None,
     }
 }
@@ -215,15 +222,42 @@ async fn connect_sampler(config: LunaSamplerConfig) -> Result<LunaSampler> {
     Ok(sampler)
 }
 
+fn classifier_instructions() -> RenderedFragment {
+    GuardianClassifierInstructions::new(
+        "Classify using {{ tenant_policy_config }}.",
+        "the tenant policy",
+        "Return high for high risk or low for low risk.",
+        /*max_tokens*/ None,
+    )
+    .render_fragment()
+}
+
+fn assert_classifier_instructions(request: &serde_json::Value) {
+    let mut instructions = request["input"][1].clone();
+    instructions.as_object_mut().unwrap().remove("id");
+    assert_eq!(
+        instructions,
+        json!({
+            "type": "message",
+            "role": "developer",
+            "content": [{
+                "type": "input_text",
+                "text": "Classify using the tenant policy.\n\nReturn high for high risk or low for low risk.",
+            }],
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["guardian.classifier_instructions"],
+            },
+        })
+    );
+}
+
 pub(super) fn sample_request(parent_turn_id: &str) -> LunaSamplingRequest {
     LunaSamplingRequest {
         parent_response_id: None,
-        instructions: "Return high for high risk or low for low risk.".to_owned(),
-        trusted_review_evidence: Vec::new(),
-        trusted_tool_context: None,
-        trusted_skill_paths: Vec::new(),
-        input: vec!["The user requested a README summary.".to_owned()],
-        images: Vec::new(),
+        instructions: classifier_instructions(),
+        input: vec![responses::user_message_item(
+            "The user requested a README summary.",
+        )],
         parent_compaction: None,
         parent_compaction_hash: None,
         reasoning_effort: ReasoningEffort::None,
@@ -238,6 +272,16 @@ type RecordedMetric = (String, i64, Vec<(String, String)>);
 struct RecordingMetrics(Mutex<Vec<RecordedMetric>>);
 
 impl ExtensionMetrics for RecordingMetrics {
+    fn histogram_with_boundaries(
+        &self,
+        name: &str,
+        value: i64,
+        _boundaries: &[f64],
+        tags: &[(&str, &str)],
+    ) {
+        self.histogram(name, value, tags);
+    }
+
     fn counter(&self, _name: &str, _inc: i64, _tags: &[(&str, &str)]) {}
 
     fn histogram(&self, name: &str, value: i64, tags: &[(&str, &str)]) {
@@ -275,14 +319,29 @@ async fn sampler_records_token_usage_after_returning_an_early_classification() -
 
     assert_eq!(sampler.sample(sample_request("turn-1")).await?, "low");
     tokio::time::timeout(Duration::from_secs(2), async {
-        while metrics.0.lock().unwrap().len() < 7 {
+        while metrics
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|metric| metric.0 == CLASSIFICATION_TOKEN_USAGE_METRIC)
+            .count()
+            < 7
+        {
             tokio::task::yield_now().await;
         }
     })
     .await?;
 
     assert_eq!(
-        *metrics.0.lock().unwrap(),
+        metrics
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|metric| metric.0 == CLASSIFICATION_TOKEN_USAGE_METRIC)
+            .cloned()
+            .collect::<Vec<_>>(),
         [
             ("total", 37),
             ("input", 37),
@@ -299,6 +358,27 @@ async fn sampler_records_token_usage_after_returning_an_early_classification() -
         ))
     );
 
+    let request = server
+        .wait_for_request(
+            /*connection_index*/ INITIAL_WEBSOCKET_CONNECTIONS - 1,
+            /*request_index*/ 0,
+        )
+        .await
+        .body_json();
+    let input: Vec<ResponseItem> = serde_json::from_value(request["input"].clone())?;
+    let estimated = input
+        .iter()
+        .map(codex_guardian_context::estimate_input_tokens)
+        .sum::<usize>();
+    assert!(metrics.0.lock().unwrap().contains(&(
+        codex_guardian_context::REQUEST_TOKENS_METRIC.to_owned(),
+        i64::try_from(estimated)?,
+        vec![
+            ("target".to_owned(), "async".to_owned()),
+            ("component".to_owned(), "total".to_owned()),
+        ],
+    )));
+
     Ok(())
 }
 
@@ -314,36 +394,26 @@ impl ExternalAuth for RefreshableAuth {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn classifier_uses_free_endpoint_only_with_codex_backend_auth() -> Result<()> {
+async fn classifier_sends_guardian_header_only_with_codex_backend_auth() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    for (auth, base_path, free_guardian, expected_path, expected_service_tier) in [
+    for (auth, base_path, expected_header, expected_service_tier) in [
         (
             CodexAuth::create_dummy_chatgpt_auth_for_testing(),
             "/backend-api/codex",
-            false,
-            "/backend-api/codex/responses",
-            Some("priority"),
-        ),
-        (
-            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
-            "/backend-api/codex",
-            true,
-            "/backend-api/codex/guardian-classifier",
+            Some("classifier"),
             None,
         ),
         (
             CodexAuth::create_dummy_chatgpt_auth_for_testing(),
             "/v1",
-            true,
-            "/v1/responses",
+            None,
             Some("priority"),
         ),
         (
             CodexAuth::from_api_key("test-api-key"),
             "/v1",
-            true,
-            "/v1/responses",
+            None,
             Some("priority"),
         ),
     ] {
@@ -363,13 +433,16 @@ async fn classifier_uses_free_endpoint_only_with_codex_backend_auth() -> Result<
             ModelProviderInfo::create_openai_provider(Some(base_url)),
             Some(AuthManager::from_auth_for_testing(auth)),
         );
-        config.free_guardian = free_guardian;
         config.service_tier = Some("priority".to_owned());
         let sampler = connect_sampler(config).await?;
 
         assert_eq!(sampler.sample(sample_request("turn-1")).await?, "low");
         for handshake in server.handshakes() {
-            assert_eq!(handshake.uri(), expected_path);
+            assert_eq!(handshake.uri(), format!("{base_path}/responses"));
+            assert_eq!(
+                handshake.header("x-codex-guardian").as_deref(),
+                expected_header
+            );
             assert_eq!(handshake.header("x-codex-routing-hint"), None);
         }
         let request = server
@@ -440,9 +513,10 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
         session_id: "session-1".to_owned(),
         thread_id: "thread-1".to_owned(),
         originator: Some("guardian-v2-test".to_owned()),
-        free_guardian: false,
+
         service_tier: None,
         luna_compaction_hash: None,
+        max_input_tokens: codex_guardian_context::DEFAULT_MAX_INPUT_TOKENS,
         metrics: None,
     })
     .await?;
@@ -476,15 +550,21 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
     let first = sampler
         .sample(LunaSamplingRequest {
             parent_response_id: None,
-            instructions: "Return high for high risk or low for low risk.".to_owned(),
-            trusted_review_evidence: Vec::new(),
-            trusted_tool_context: None,
-            trusted_skill_paths: Vec::new(),
-            input: vec![
-                "The user requested a README summary.".to_owned(),
-                "The assistant inspected README.md.".to_owned(),
-            ],
-            images: Vec::new(),
+            instructions: classifier_instructions(),
+            input: vec![ResponseItem::Message {
+                id: None,
+                role: "user".to_owned(),
+                content: vec![
+                    ContentItem::InputText {
+                        text: "The user requested a README summary.".to_owned(),
+                    },
+                    ContentItem::InputText {
+                        text: "The assistant inspected README.md.".to_owned(),
+                    },
+                ],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }],
             parent_compaction: None,
             parent_compaction_hash: None,
             reasoning_effort: ReasoningEffort::None,
@@ -511,12 +591,10 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
     let second = sampler
         .sample(LunaSamplingRequest {
             parent_response_id: None,
-            instructions: "Return high for high risk or low for low risk.".to_owned(),
-            trusted_review_evidence: Vec::new(),
-            trusted_tool_context: None,
-            trusted_skill_paths: Vec::new(),
-            input: vec!["The user requested a source review.".to_owned()],
-            images: Vec::new(),
+            instructions: classifier_instructions(),
+            input: vec![responses::user_message_item(
+                "The user requested a source review.",
+            )],
             parent_compaction: None,
             parent_compaction_hash: None,
             reasoning_effort: ReasoningEffort::Medium,
@@ -559,6 +637,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
         assert_eq!(request["type"], "response.create");
         assert_eq!(request["model"], "gpt-5.6-luna");
         assert_eq!(request["input"][0]["tools"], json!([]));
+        assert_classifier_instructions(&request);
         assert_eq!(request["tool_choice"], "none");
         assert!(request.get("text").is_none());
         assert_eq!(request["prompt_cache_key"], "guardian-v2:thread-1");
@@ -603,7 +682,10 @@ async fn sampler_reuses_parent_compaction_only_for_matching_model_hashes() -> Re
         let mut request = sample_request("turn-1");
         request.parent_compaction = Some(parent_compaction.clone());
         request.parent_compaction_hash = parent_hash.map(str::to_owned);
-        request.trusted_review_evidence = vec!["trusted review".to_owned()];
+        request.input.insert(
+            /*index*/ 0,
+            PreviousReviews::try_from_fragments(vec!["trusted review".to_owned()])?.into_message(),
+        );
 
         let result = sampler.sample(request).await;
         if !should_reuse {
@@ -676,9 +758,10 @@ async fn sampler_returns_classification_token_before_terminal_response_events() 
         session_id: "session-1".to_owned(),
         thread_id: "thread-1".to_owned(),
         originator: None,
-        free_guardian: false,
+
         service_tier: None,
         luna_compaction_hash: None,
+        max_input_tokens: codex_guardian_context::DEFAULT_MAX_INPUT_TOKENS,
         metrics: None,
     })
     .await?;
@@ -687,12 +770,10 @@ async fn sampler_returns_classification_token_before_terminal_response_events() 
         Duration::from_secs(2),
         sampler.sample(LunaSamplingRequest {
             parent_response_id: None,
-            instructions: "Return high for high risk or low for low risk.".to_owned(),
-            trusted_review_evidence: Vec::new(),
-            trusted_tool_context: None,
-            trusted_skill_paths: Vec::new(),
-            input: vec!["The user requested a README summary.".to_owned()],
-            images: Vec::new(),
+            instructions: classifier_instructions(),
+            input: vec![responses::user_message_item(
+                "The user requested a README summary.",
+            )],
             parent_compaction: None,
             parent_compaction_hash: None,
             reasoning_effort: ReasoningEffort::None,
@@ -892,8 +973,16 @@ async fn sampler_retries_expired_websockets_on_another_warm_connection() -> Resu
     .await?;
 
     let mut request = sample_request("turn-1");
-    request.trusted_review_evidence = vec!["trusted review".to_owned()];
-    request.trusted_skill_paths = vec!["/skills/review/SKILL.md".to_owned()];
+    request.input.insert(
+        /*index*/ 0,
+        PreviousReviews::try_from_fragments(vec!["trusted review".to_owned()])?.into_message(),
+    );
+    request.input.insert(
+        /*index*/ 1,
+        ContextualUserFragment::into(codex_guardian_context::TrustedSkills {
+            paths: vec!["/skills/review/SKILL.md".to_owned()],
+        }),
+    );
     request.root_turn_id = Some("root-turn".to_owned());
     let output = sampler.sample(request).await?;
 
@@ -973,6 +1062,7 @@ async fn sampler_uses_http_with_a_fresh_identity_when_warm_connections_expire() 
     ]);
     assert_eq!(thread_ids.len(), 3);
     responses::assert_parent_turn(&request.body_json(), Some("turn-2"))?;
+    assert_classifier_instructions(&request.body_json());
     assert_eq!(second.single_connection().len(), 1);
     Ok(())
 }
@@ -1080,7 +1170,7 @@ async fn sampler_limits_transient_recovery_attempts() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn parent_response_id_survives_classifier_transport_retry() -> Result<()> {
     skip_if_no_network!(Ok(()));
-    for free_guardian in [false, true] {
+    for uses_codex_backend in [false, true] {
         let healthy = responses::start_websocket_server(vec![vec![vec![
             ev_assistant_message("resp-review", "low"),
             ev_completed("resp-review"),
@@ -1092,8 +1182,7 @@ async fn parent_response_id_survives_classifier_transport_retry() -> Result<()> 
         })]]]).await;
         let base_url = proxy_websocket_servers(&[&healthy, &expired]).await?;
         let mut config = sampler_config(base_url.clone());
-        if free_guardian {
-            config.free_guardian = true;
+        if uses_codex_backend {
             config.provider = create_model_provider(
                 ModelProviderInfo::create_openai_provider(Some(format!(
                     "{}/backend-api/codex",
@@ -1118,7 +1207,7 @@ async fn parent_response_id_survives_classifier_transport_retry() -> Result<()> 
                     body["client_metadata"].get("parent_response_id").cloned(),
                     body["client_metadata"].get("guardian_credits_requested"),
                 ),
-                (free_guardian.then(|| json!(parent_response_id)), None)
+                (uses_codex_backend.then(|| json!(parent_response_id)), None)
             );
             assert!(!body["input"].to_string().contains(parent_response_id));
         }

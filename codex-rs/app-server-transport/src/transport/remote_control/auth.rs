@@ -1,3 +1,6 @@
+//! Credentials and recovery bound to one remote-control login lifetime.
+//! A request can refresh credentials, but cannot adopt a replacement authentication owner.
+
 use axum::http::HeaderMap;
 use axum::http::HeaderValue;
 use codex_api::SharedAuthProvider;
@@ -9,6 +12,46 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::info;
 use tracing::warn;
+
+#[derive(Clone)]
+pub(super) struct RemoteControlAuth {
+    manager: Arc<AuthManager>,
+    pub(super) owner: crate::ConnectionAuth,
+}
+
+pub(super) struct RemoteControlRecovery {
+    auth: RemoteControlAuth,
+    recovery: UnauthorizedRecovery,
+}
+
+impl RemoteControlAuth {
+    pub(super) fn capture(manager: Arc<AuthManager>) -> (Self, bool) {
+        loop {
+            let owner = crate::ConnectionAuth::capture(&manager);
+            let authenticated = manager
+                .auth_cached()
+                .is_some_and(|auth| auth.uses_codex_backend() && auth.get_account_id().is_some());
+            if owner.is_current() {
+                return (Self { manager, owner }, authenticated);
+            }
+        }
+    }
+
+    pub(super) fn ensure_current(&self) -> io::Result<()> {
+        self.owner.ensure_current()
+    }
+
+    pub(super) fn unauthorized_recovery(&self) -> RemoteControlRecovery {
+        RemoteControlRecovery {
+            auth: self.clone(),
+            recovery: self.manager.unauthorized_recovery(),
+        }
+    }
+
+    pub(super) fn auth_change_receiver(&self) -> watch::Receiver<u64> {
+        self.manager.auth_change_receiver()
+    }
+}
 
 pub(super) const REMOTE_CONTROL_ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
 
@@ -35,6 +78,15 @@ impl RemoteControlConnectionAuth {
 }
 
 pub(super) async fn load_remote_control_auth(
+    auth: &RemoteControlAuth,
+) -> io::Result<RemoteControlConnectionAuth> {
+    auth.ensure_current()?;
+    let credentials = load_auth_manager(&auth.manager).await?;
+    auth.ensure_current()?;
+    Ok(credentials)
+}
+
+async fn load_auth_manager(
     auth_manager: &Arc<AuthManager>,
 ) -> io::Result<RemoteControlConnectionAuth> {
     let mut reloaded = false;
@@ -80,9 +132,13 @@ pub(super) async fn load_remote_control_auth(
 }
 
 pub(super) async fn recover_remote_control_auth(
-    auth_recovery: &mut UnauthorizedRecovery,
+    recovery: &mut RemoteControlRecovery,
     auth_change_rx: &mut watch::Receiver<u64>,
 ) -> bool {
+    if recovery.auth.ensure_current().is_err() {
+        return false;
+    }
+    let auth_recovery = &mut recovery.recovery;
     if !auth_recovery.has_next() {
         return false;
     }
@@ -92,6 +148,9 @@ pub(super) async fn recover_remote_control_auth(
     let auth_change_revision_before_recovery = *auth_change_rx.borrow();
     match auth_recovery.next().await {
         Ok(step_result) => {
+            if recovery.auth.ensure_current().is_err() {
+                return false;
+            }
             if step_result.auth_state_changed() == Some(true) {
                 mark_recovery_auth_change_seen(
                     auth_change_rx,

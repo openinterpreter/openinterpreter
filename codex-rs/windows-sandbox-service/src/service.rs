@@ -1,8 +1,7 @@
-//! Windows service lifecycle and event-log integration for sandbox provisioning.
+//! Owns Windows SCM registration, service state, and sandbox provisioning event logs.
 
 use std::ffi::c_void;
 use std::io;
-use std::mem::size_of;
 use std::ptr;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -20,7 +19,6 @@ use windows_sys::Win32::System::EventLog::EVENTLOG_ERROR_TYPE;
 use windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE;
 use windows_sys::Win32::System::EventLog::RegisterEventSourceW;
 use windows_sys::Win32::System::EventLog::ReportEventW;
-use windows_sys::Win32::System::RemoteDesktop::WTSSESSION_NOTIFICATION;
 use windows_sys::Win32::System::Services::RegisterServiceCtrlHandlerExW;
 use windows_sys::Win32::System::Services::SERVICE_ACCEPT_SESSIONCHANGE;
 use windows_sys::Win32::System::Services::SERVICE_ACCEPT_SHUTDOWN;
@@ -40,7 +38,10 @@ use windows_sys::Win32::System::Services::SERVICE_WIN32_OWN_PROCESS;
 use windows_sys::Win32::System::Services::SetServiceStatus;
 use windows_sys::Win32::System::Services::StartServiceCtrlDispatcherW;
 
-pub(crate) const SERVICE_NAME: &str = "CodexSandboxService";
+mod runtime_lifecycle;
+
+pub(crate) use runtime_lifecycle::retry_cleanup;
+
 const EVENT_SERVICE_STARTED: u32 = 1000;
 const EVENT_SERVICE_STOP_REQUESTED: u32 = 1001;
 const EVENT_SERVICE_STOPPED: u32 = 1002;
@@ -50,33 +51,37 @@ pub(crate) const EVENT_PROVISIONING_FAILED: u32 = 2001;
 pub(crate) const EVENT_REQUEST_REJECTED: u32 = 2002;
 pub(crate) const EVENT_CLEANUP_STARTED: u32 = 3002;
 pub(crate) const EVENT_CLEANUP_FINISHED: u32 = 3003;
+pub(crate) const EVENT_CLEANUP_DETAIL: u32 = 3004;
 const MAX_EVENT_MESSAGE_UNITS: usize = 1024;
 
 static SERVICE_STATE: OnceLock<ServiceState> = OnceLock::new();
 
 struct ServiceState {
+    service_name: String,
+    pipe_name: String,
     shutdown: Arc<AtomicBool>,
     uninstalling: Arc<AtomicBool>,
     status_handle: OnceLock<SERVICE_STATUS_HANDLE>,
     current_status: AtomicU32,
-    changed_session: AtomicU32,
     stop_requested: AtomicBool,
 }
 
 pub(crate) fn run() -> Result<()> {
+    let service_name = codex_windows_sandbox::windows_sandbox_service_name()?;
     let state = ServiceState {
+        service_name: service_name.clone(),
+        pipe_name: codex_windows_sandbox::windows_sandbox_service_pipe_name()?,
         shutdown: Arc::new(AtomicBool::new(false)),
         uninstalling: Arc::new(AtomicBool::new(false)),
         status_handle: OnceLock::new(),
         current_status: AtomicU32::new(SERVICE_START_PENDING),
-        changed_session: AtomicU32::new(u32::MAX),
         stop_requested: AtomicBool::new(false),
     };
     SERVICE_STATE
         .set(state)
         .map_err(|_| anyhow::anyhow!("the service dispatcher was already initialized"))?;
 
-    let mut service_name = SERVICE_NAME
+    let mut service_name = service_name
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
@@ -106,10 +111,14 @@ pub(crate) fn run_foreground() -> Result<()> {
     crate::ipc::run(
         Arc::new(AtomicBool::new(false)),
         || {
-            eprintln!("{SERVICE_NAME} listening on {}", crate::ipc::PIPE_NAME);
+            eprintln!(
+                "{} listening on {}",
+                codex_windows_sandbox::windows_sandbox_service_name()?,
+                codex_windows_sandbox::windows_sandbox_service_pipe_name()?
+            );
             Ok(())
         },
-        |_, _| Ok(()),
+        runtime_lifecycle::foreground_owner,
         || Ok(()),
     )
 }
@@ -124,7 +133,7 @@ unsafe extern "system" fn service_main(_argument_count: u32, _arguments: *mut *m
             EVENT_SERVICE_FAILED,
             &format!("The Codex sandbox service encountered a fatal error: {error:#}"),
         );
-        eprintln!("{SERVICE_NAME} failed: {error:#}");
+        eprintln!("{} failed: {error:#}", state.service_name);
         if state.status_handle.get().is_some() {
             let _ = state.report_status(SERVICE_STOPPED, ERROR_SERVICE_SPECIFIC_ERROR);
         }
@@ -132,7 +141,8 @@ unsafe extern "system" fn service_main(_argument_count: u32, _arguments: *mut *m
 }
 
 fn service_main_inner(state: &ServiceState) -> Result<()> {
-    let service_name = SERVICE_NAME
+    let service_name = state
+        .service_name
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
@@ -156,53 +166,7 @@ fn service_main_inner(state: &ServiceState) -> Result<()> {
     state.report_status(SERVICE_START_PENDING, NO_ERROR)?;
     let package_lifecycle =
         crate::package_lifecycle::PackageLifecycle::new(Arc::clone(&state.uninstalling))?;
-    crate::ipc::run(
-        Arc::clone(&state.shutdown),
-        || {
-            state.report_status(SERVICE_RUNNING, NO_ERROR)?;
-            if let Some(record) = crate::installation_record::load()?
-                && let Err(error) = package_lifecycle.restore_logged_in_owner(record.session_id)
-            {
-                log_error(
-                    EVENT_SERVICE_FAILED,
-                    &format!("unable to restore package uninstall listener: {error:#}"),
-                );
-            }
-            log_information(
-                EVENT_SERVICE_STARTED,
-                "The Codex sandbox service is running.",
-            );
-            Ok(())
-        },
-        |installation, user_token| {
-            if let Err(error) = package_lifecycle.watch_authenticated_user(installation, user_token)
-            {
-                log_error(
-                    EVENT_SERVICE_FAILED,
-                    &format!("unable to observe package uninstall: {error:#}"),
-                );
-            }
-            Ok(())
-        },
-        || {
-            let session = state.changed_session.swap(u32::MAX, Ordering::AcqRel);
-            if session == u32::MAX {
-                return Ok(());
-            }
-            if let Err(error) = package_lifecycle.restore_authenticated_user(session) {
-                log_error(
-                    EVENT_SERVICE_FAILED,
-                    &format!("unable to restore package uninstall listener: {error:#}"),
-                );
-            }
-            Ok(())
-        },
-    )
-    .context("run the sandbox provisioning broker")?;
-
-    if state.stop_requested.load(Ordering::Acquire) && state.uninstalling.load(Ordering::Acquire) {
-        package_lifecycle.clean_up()?;
-    }
+    runtime_lifecycle::run(state, &package_lifecycle)?;
     log_information(
         EVENT_SERVICE_STOPPED,
         "The Codex sandbox service has stopped.",
@@ -213,7 +177,7 @@ fn service_main_inner(state: &ServiceState) -> Result<()> {
 unsafe extern "system" fn service_control_handler(
     control: u32,
     _event_type: u32,
-    event_data: *mut c_void,
+    _event_data: *mut c_void,
     _context: *mut c_void,
 ) -> u32 {
     let Some(state) = SERVICE_STATE.get() else {
@@ -233,11 +197,7 @@ unsafe extern "system" fn service_control_handler(
                     EVENT_SERVICE_STOP_REQUESTED,
                     "The Codex sandbox service was asked to stop.",
                 );
-                std::thread::spawn(move || {
-                    crate::ipc::wake(crate::ipc::PIPE_NAME, || {
-                        state.current_status.load(Ordering::Acquire) == SERVICE_STOPPED
-                    });
-                });
+                wake_listener();
             }
             NO_ERROR
         }
@@ -253,22 +213,20 @@ unsafe extern "system" fn service_control_handler(
             NO_ERROR
         }
         SERVICE_CONTROL_SESSIONCHANGE => {
-            if !event_data.is_null() {
-                let event = unsafe { &*event_data.cast::<WTSSESSION_NOTIFICATION>() };
-                if event.cbSize as usize >= size_of::<WTSSESSION_NOTIFICATION>() {
-                    state
-                        .changed_session
-                        .store(event.dwSessionId, Ordering::Release);
-                    std::thread::spawn(move || {
-                        crate::ipc::wake(crate::ipc::PIPE_NAME, || {
-                            state.current_status.load(Ordering::Acquire) == SERVICE_STOPPED
-                        });
-                    });
-                }
-            }
+            wake_listener();
             NO_ERROR
         }
         _ => ERROR_CALL_NOT_IMPLEMENTED,
+    }
+}
+
+pub(crate) fn wake_listener() {
+    if let Some(state) = SERVICE_STATE.get() {
+        std::thread::spawn(move || {
+            crate::ipc::wake(&state.pipe_name, || {
+                state.current_status.load(Ordering::Acquire) == SERVICE_STOPPED
+            });
+        });
     }
 }
 
@@ -276,21 +234,14 @@ pub(crate) fn log_information(event_id: u32, message: &str) {
     log_event(EVENTLOG_INFORMATION_TYPE, event_id, message);
 }
 
-pub(crate) fn record_provisioned_user(
-    installation: &crate::installation_record::InstallationRecord,
-) -> Result<()> {
-    if SERVICE_STATE.get().is_some() {
-        crate::installation_record::save(installation)?;
-    }
-    Ok(())
-}
-
 pub(crate) fn log_error(event_id: u32, message: &str) {
     log_event(EVENTLOG_ERROR_TYPE, event_id, message);
 }
 
 fn log_event(event_type: u16, event_id: u32, message: &str) {
-    let source = SERVICE_NAME
+    let source = SERVICE_STATE
+        .get()
+        .map_or("CodexSandboxService", |state| state.service_name.as_str())
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();

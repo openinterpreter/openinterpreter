@@ -159,7 +159,7 @@ bazel-lock-check:
 
 [windows]
 bazel-lock-check:
-    bazel mod deps --lockfile_mode=error; if ($LASTEXITCODE -ne 0) { Write-Error "MODULE.bazel.lock is out of date. Run 'just bazel-lock-update' and commit the updated lockfile."; exit 1 }
+    bazel mod deps --lockfile_mode=error; if ($LASTEXITCODE -ne 0) { Write-Error "Unable to verify MODULE.bazel.lock; see the Bazel error above. If Bazel reports an out-of-date lockfile, run 'just bazel-lock-update' and commit the updated lockfile."; exit 1 }
 
 bazel-test:
     bazel test --test_tag_filters=-argument-comment-lint //... --keep_going
@@ -181,16 +181,9 @@ build-for-release:
 write-config-schema:
     cargo run -p codex-config-schema --bin codex-write-config-schema
 
-# Regenerate vendored app-server protocol schema artifacts.
-[unix]
-write-app-server-schema:
-    CODEX_APP_SERVER_SCHEMA_ROOT={{ justfile_directory() }}/codex-rs/app-server-protocol/schema CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL=0 cargo test -p codex-app-server-protocol write_schema_fixtures_from_env -- --ignored
-    CODEX_APP_SERVER_SCHEMA_ROOT={{ justfile_directory() }}/codex-rs/app-server-protocol/schema CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL=1 cargo test -p codex-app-server-protocol write_schema_fixtures_from_env -- --ignored
-
-[windows]
-write-app-server-schema:
-    $env:CODEX_APP_SERVER_SCHEMA_ROOT = "{{ justfile_directory() }}/codex-rs/app-server-protocol/schema"; $env:CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL = "0"; cargo test -p codex-app-server-protocol write_schema_fixtures_from_env -- --ignored
-    $env:CODEX_APP_SERVER_SCHEMA_ROOT = "{{ justfile_directory() }}/codex-rs/app-server-protocol/schema"; $env:CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL = "1"; cargo test -p codex-app-server-protocol write_schema_fixtures_from_env -- --ignored
+# Regenerate app-server protocol schemas and the Python SDK derived from them.
+write-app-server-schema *args:
+    {{ python }} app-server-protocol/scripts/write_schema_fixtures.py {args}
 
 [no-cd]
 write-hooks-schema:

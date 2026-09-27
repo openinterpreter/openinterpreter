@@ -40,11 +40,12 @@ The `/model` picker is generated from maintained provider catalogs and the
 provider's current model data. Use it as the source of truth for models
 available in your installed version.
 
-DeepSeek's current API model IDs are `deepseek-v4-pro` and
-`deepseek-v4-flash`. Use Pro for the higher-capacity option and Flash when cost
-or concurrency matters more. DeepSeek has announced that the legacy
-`deepseek-chat` and `deepseek-reasoner` IDs will be discontinued on July 24,
-2026, so new configurations should use the V4 IDs.
+DeepSeek's current API model IDs are `deepseek-flash` and
+`deepseek-v4-pro`. Use Pro for the higher-capacity option and Flash when cost
+or concurrency matters more. The retired V4 Flash model's
+`deepseek-v4-flash` name remains a legacy alias routed to the current Flash
+model. The older `deepseek-chat` and `deepseek-reasoner` IDs were scheduled for
+discontinuation on July 24, 2026; do not use them in new configurations.
 See DeepSeek's [API updates](https://api-docs.deepseek.com/updates/) for current
 availability and its [pricing page](https://api-docs.deepseek.com/quick_start/pricing)
 before committing to a workload.

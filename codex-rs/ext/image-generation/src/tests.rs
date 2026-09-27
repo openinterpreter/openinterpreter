@@ -12,6 +12,7 @@ use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_tools::ResponsesApiNamespaceTool;
@@ -165,6 +166,87 @@ async fn recent_image_fallback_selects_newest_images_in_chronological_order() {
     );
 }
 
+/// A file-backed image in the requested window must not cause an older inline image to be edited.
+#[tokio::test]
+async fn recent_image_fallback_rejects_file_backed_image_in_requested_window() {
+    let error = request_for_call_args(
+        &ImagegenArgs {
+            prompt: "change the lighting".to_string(),
+            referenced_image_paths: None,
+            num_last_images_to_include: Some(1),
+        },
+        &[ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![
+                input_image("older-inline-image"),
+                ContentItem::InputImage {
+                    image: ImageReference::File {
+                        file_id: "newer-file-backed-image".to_string(),
+                    },
+                    detail: None,
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        &[],
+    )
+    .await
+    .expect_err("a selected file-backed image should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "requested the last 1 conversation images, but that window includes a file-backed image \
+         that cannot be used for editing"
+    );
+}
+
+/// Tool-output file references must count toward the window instead of exposing an older image.
+#[tokio::test]
+async fn recent_image_fallback_rejects_file_backed_tool_output_in_requested_window() {
+    let error = request_for_call_args(
+        &ImagegenArgs {
+            prompt: "change the lighting".to_string(),
+            referenced_image_paths: None,
+            num_last_images_to_include: Some(1),
+        },
+        &[
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: Some("older-inline-output".to_string()),
+                name: None,
+                namespace: None,
+                output: image_output("older-inline-image"),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::CustomToolCallOutput {
+                id: None,
+                call_id: "newer-file-backed-output".to_string(),
+                name: Some("view_image".to_string()),
+                output: FunctionCallOutputPayload::from_content_items(vec![
+                    FunctionCallOutputContentItem::InputImage {
+                        image: ImageReference::File {
+                            file_id: "newer-file-backed-image".to_string(),
+                        },
+                        detail: None,
+                    },
+                ]),
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ],
+        &[],
+    )
+    .await
+    .expect_err("a selected file-backed tool output should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "requested the last 1 conversation images, but that window includes a file-backed image \
+         that cannot be used for editing"
+    );
+}
+
 #[tokio::test]
 async fn conflicting_image_selectors_return_tool_error() {
     let error = request_for_call_args(
@@ -266,7 +348,9 @@ fn generated_output_returns_image_input_and_output_hint() {
         content_items,
         vec![
             FunctionCallOutputContentItem::InputImage {
-                image_url: format!("data:image/png;base64,{RESULT}"),
+                image: ImageReference::Inline {
+                    image_url: format!("data:image/png;base64,{RESULT}")
+                },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             },
             FunctionCallOutputContentItem::InputText { text: output_hint },
@@ -311,7 +395,9 @@ fn generated_output_omits_oversized_output_hint() {
     assert_eq!(
         content_items,
         vec![FunctionCallOutputContentItem::InputImage {
-            image_url: format!("data:image/png;base64,{RESULT}"),
+            image: ImageReference::Inline {
+                image_url: format!("data:image/png;base64,{RESULT}")
+            },
             detail: Some(DEFAULT_IMAGE_DETAIL),
         }]
     );
@@ -319,14 +405,18 @@ fn generated_output_omits_oversized_output_hint() {
 
 fn input_image(image: &str) -> ContentItem {
     ContentItem::InputImage {
-        image_url: format!("data:image/png;base64,{image}"),
+        image: ImageReference::Inline {
+            image_url: format!("data:image/png;base64,{image}"),
+        },
         detail: None,
     }
 }
 
 fn image_output(image: &str) -> FunctionCallOutputPayload {
     FunctionCallOutputPayload::from_content_items(vec![FunctionCallOutputContentItem::InputImage {
-        image_url: format!("data:image/png;base64,{image}"),
+        image: ImageReference::Inline {
+            image_url: format!("data:image/png;base64,{image}"),
+        },
         detail: None,
     }])
 }

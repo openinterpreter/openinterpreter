@@ -1,13 +1,14 @@
 use super::backend_banner_fallback_tests::fallback_response;
 use super::*;
 use crate::chatwidget::UserMessage;
+use crate::chatwidget::tests::helpers::set_fast_mode_test_catalog_for_models;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
 async fn backend_banner_fallback_applies_before_initial_and_queued_startup_prompts() -> Result<()> {
     let (mut app, mut events, _ops) = make_test_app_with_channels().await;
     let mut config = app.config.clone();
-    config.model = Some("gpt-5.4".into());
+    config.model = Some("gpt-5.5".into());
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let init = app.chatwidget_init_for_forked_or_resumed_thread(
         &mut tui,
@@ -16,10 +17,10 @@ async fn backend_banner_fallback_applies_before_initial_and_queued_startup_promp
     );
     app.replace_chat_widget(ChatWidget::new_with_app_event(init));
     set_chatgpt_auth(&mut app.chat_widget);
-    set_fast_mode_test_catalog(&mut app.chat_widget);
+    set_fast_mode_test_catalog_for_models(&mut app.chat_widget, "gpt-5.5", "gpt-5.6-terra");
     app.model_catalog = app.chat_widget.model_catalog();
     app.pending_startup_thread_start = true;
-    app.chat_widget.set_model("gpt-5.4");
+    app.chat_widget.set_model("gpt-5.5");
     app.chat_widget
         .set_queue_submissions_until_session_configured(/*queue*/ true);
     app.chat_widget
@@ -68,7 +69,7 @@ async fn backend_banner_fallback_applies_before_initial_and_queued_startup_promp
     assert_eq!(
         submissions,
         vec![(
-            "gpt-5.2".into(),
+            "gpt-5.6-terra".into(),
             vec![UserInput::Text {
                 text: "initial prompt".into(),
                 text_elements: Vec::new(),

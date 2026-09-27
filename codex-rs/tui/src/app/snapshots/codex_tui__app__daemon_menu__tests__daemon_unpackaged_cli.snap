@@ -1,0 +1,12 @@
+---
+source: tui/src/app/daemon_menu_tests.rs
+expression: "render_bottom_popup(&app.chat_widget, 80)"
+---
+  Daemon
+  Not connected to the local background server.
+
+
+› 1. Install latest public stable
+     Use this CLI build (disabled)  This CLI has no local package to copy.
+
+  enter select · esc back

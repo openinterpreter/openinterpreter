@@ -144,6 +144,11 @@ pub(crate) trait BottomPaneView: Renderable {
         Some(request)
     }
 
+    /// Return true when this view already presents the matching app-server request.
+    fn matches_app_server_request(&self, _request: &ResolvedAppServerRequest) -> bool {
+        false
+    }
+
     /// Dismiss a request that was resolved by another client.
     ///
     /// Returns `true` when the view changed state.

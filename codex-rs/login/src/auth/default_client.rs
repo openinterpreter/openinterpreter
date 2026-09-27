@@ -41,9 +41,10 @@ use crate::outbound_proxy::AuthRouteConfig;
 pub static USER_AGENT_SUFFIX: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
 pub const DEFAULT_ORIGINATOR: &str = "codex_cli_rs";
 pub const CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR: &str = "CODEX_INTERNAL_ORIGINATOR_OVERRIDE";
-pub const RESIDENCY_HEADER_NAME: &str = "x-openai-internal-codex-residency";
-
-pub use codex_config::ResidencyRequirement;
+pub use codex_model_provider_info::RESIDENCY_HEADER_NAME;
+pub use codex_model_provider_info::ResidencyRequirement;
+pub use codex_model_provider_info::read_managed_residency_requirement as read_default_client_residency_requirement;
+pub use codex_model_provider_info::set_managed_residency_requirement as set_default_client_residency_requirement;
 
 #[derive(Debug, Clone)]
 pub struct Originator {
@@ -51,8 +52,6 @@ pub struct Originator {
     pub header_value: HeaderValue,
 }
 static ORIGINATOR: LazyLock<RwLock<Option<Originator>>> = LazyLock::new(|| RwLock::new(None));
-static REQUIREMENTS_RESIDENCY: LazyLock<RwLock<Option<ResidencyRequirement>>> =
-    LazyLock::new(|| RwLock::new(None));
 static ROUTE_AWARE_CLIENT_BUILD_PERMIT: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(1);
 
@@ -96,19 +95,6 @@ pub fn set_default_originator(value: String) -> Result<(), SetOriginatorError> {
     }
     *guard = Some(originator);
     Ok(())
-}
-
-pub fn set_default_client_residency_requirement(enforce_residency: Option<ResidencyRequirement>) {
-    let Ok(mut guard) = REQUIREMENTS_RESIDENCY.write() else {
-        tracing::warn!("Failed to acquire requirements residency lock");
-        return;
-    };
-    *guard = enforce_residency;
-}
-
-/// Returns the current process-wide residency requirement.
-pub fn read_default_client_residency_requirement() -> Option<ResidencyRequirement> {
-    REQUIREMENTS_RESIDENCY.read().ok().and_then(|guard| *guard)
 }
 
 pub fn originator() -> Originator {
@@ -164,8 +150,11 @@ pub fn is_first_party_chat_originator(originator_value: &str) -> bool {
 }
 
 pub fn get_codex_user_agent() -> String {
+    // OS discovery can spawn subprocesses on Linux. Reuse it across requests,
+    // while continuing to read the mutable originator and suffix below.
+    static OS_INFO: LazyLock<os_info::Info> = LazyLock::new(os_info::get);
     let build_version = codex_product_info::Product::current().codex_compatibility_version();
-    let os_info = os_info::get();
+    let os_info = &*OS_INFO;
     let originator = originator();
     let prefix = format!(
         "{}/{build_version} ({} {}; {}) {}",
@@ -266,24 +255,32 @@ pub fn create_client_for_route(
     http_client_factory: &HttpClientFactory,
     request_url: &str,
     route_class: ClientRouteClass,
+    redirect_policy: ClientRedirectPolicy,
 ) -> Result<HttpClient, BuildRouteAwareHttpClientError> {
+    let builder = match redirect_policy {
+        ClientRedirectPolicy::Default => default_http_client_builder(),
+        ClientRedirectPolicy::Reject => default_http_client_builder().without_redirects(),
+    };
     if matches!(
         http_client_factory.outbound_proxy_policy(),
         OutboundProxyPolicy::ReqwestDefault
     ) {
-        return Ok(create_client());
+        return Ok(build_default_client(builder));
     }
     if is_sandboxed() {
         // Preserve the sandbox's existing no-proxy policy; sandboxed command egress is routed
         // separately through network-proxy.
-        return Ok(create_client());
+        return Ok(build_default_client(builder));
     }
 
-    default_http_client_builder().build_respecting_outbound_proxy_policy(
-        http_client_factory,
-        request_url,
-        route_class,
-    )
+    builder.build_respecting_outbound_proxy_policy(http_client_factory, request_url, route_class)
+}
+
+/// Redirect handling for the shared HTTP client builders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClientRedirectPolicy {
+    Default,
+    Reject,
 }
 
 /// Builds the default Codex HTTP client for a concrete outbound route without blocking the
@@ -292,6 +289,7 @@ pub async fn create_client_for_route_async(
     http_client_factory: HttpClientFactory,
     request_url: String,
     route_class: ClientRouteClass,
+    redirect_policy: ClientRedirectPolicy,
 ) -> std::io::Result<HttpClient> {
     let permit = ROUTE_AWARE_CLIENT_BUILD_PERMIT
         .acquire()
@@ -299,8 +297,13 @@ pub async fn create_client_for_route_async(
         .map_err(std::io::Error::other)?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        create_client_for_route(&http_client_factory, &request_url, route_class)
-            .map_err(std::io::Error::from)
+        create_client_for_route(
+            &http_client_factory,
+            &request_url,
+            route_class,
+            redirect_policy,
+        )
+        .map_err(std::io::Error::from)
     })
     .await
     .map_err(std::io::Error::other)?
@@ -342,6 +345,7 @@ pub(crate) fn create_default_auth_client(
         auth_route_config.http_client_factory(),
         endpoint,
         ClientRouteClass::Auth,
+        ClientRedirectPolicy::Default,
     )
 }
 
@@ -351,10 +355,7 @@ pub fn default_headers() -> HeaderMap {
     if let Ok(user_agent) = HeaderValue::from_str(&get_codex_user_agent()) {
         headers.insert(USER_AGENT, user_agent);
     }
-    if let Ok(guard) = REQUIREMENTS_RESIDENCY.read()
-        && let Some(requirement) = guard.as_ref()
-        && !headers.contains_key(RESIDENCY_HEADER_NAME)
-    {
+    if let Some(requirement) = read_default_client_residency_requirement() {
         let value = match requirement {
             ResidencyRequirement::Us => HeaderValue::from_static("us"),
         };

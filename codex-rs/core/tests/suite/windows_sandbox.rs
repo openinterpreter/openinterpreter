@@ -3,6 +3,9 @@ use codex_core::exec::ExecCapturePolicy;
 use codex_core::exec::ExecParams;
 use codex_core::exec::process_exec_tool_call;
 use codex_core::sandboxing::SandboxPermissions;
+use codex_core::windows_sandbox::WindowsSandboxSetupMode;
+use codex_core::windows_sandbox::WindowsSandboxSetupRequest;
+use codex_core::windows_sandbox::run_windows_sandbox_setup;
 use codex_core::windows_sandbox::sandbox_setup_is_complete;
 use codex_features::Feature;
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -229,13 +232,12 @@ fn windows_sandbox_cli_preserves_managed_deny_reads_across_launches() -> anyhow:
              \n\
              [permissions.managed-deny-test.filesystem]\n\
              \":minimal\" = \"read\"\n\
-             \"{}\" = \"read\"\n\
+             \":root\" = \"read\"\n\
              \"{}\" = \"write\"\n\
              \"{}\" = \"deny\"\n\
              \n\
              [permissions.managed-deny-test.network]\n\
              enabled = false\n",
-            escape_toml_path(&fixture_root),
             escape_toml_path(&work),
             escape_toml_path(&denied),
         ),
@@ -259,6 +261,43 @@ fn windows_sandbox_cli_preserves_managed_deny_reads_across_launches() -> anyhow:
         assert_managed_deny_probe(&output, launch)?;
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+#[serial(codex_home)]
+async fn windows_elevated_setup_rejects_default_root_deny() -> anyhow::Result<()> {
+    let codex_home = codex_home_for_windows_sandbox_test("windows-elevated-root-deny-codex-home")?;
+    let workspace = TempDir::new()?;
+    let cwd = dunce::canonicalize(workspace.path())?.abs();
+    let file_system_sandbox_policy =
+        FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        }]);
+    let permission_profile = PermissionProfile::from_runtime_permissions(
+        &file_system_sandbox_policy,
+        NetworkSandboxPolicy::Restricted,
+    );
+
+    let err = run_windows_sandbox_setup(WindowsSandboxSetupRequest {
+        mode: WindowsSandboxSetupMode::Elevated,
+        permission_profile,
+        workspace_roots: vec![cwd.clone()],
+        command_cwd: cwd.to_path_buf(),
+        env_map: HashMap::new(),
+        codex_home: codex_home.path().to_path_buf(),
+    })
+    .await
+    .expect_err("elevated setup should reject default root deny");
+
+    assert_eq!(
+        err.to_string(),
+        "elevated Windows sandbox requires effective `:root` read access"
+    );
     Ok(())
 }
 
@@ -328,7 +367,6 @@ async fn windows_restricted_token_rejects_exact_and_glob_deny_read_policy() -> a
             network_environment_id: None,
             sandbox_permissions: SandboxPermissions::UseDefault,
             windows_sandbox_level: WindowsSandboxLevel::RestrictedToken,
-            windows_sandbox_private_desktop: false,
             justification: None,
             arg0: None,
         },
@@ -336,6 +374,7 @@ async fn windows_restricted_token_rejects_exact_and_glob_deny_read_policy() -> a
         &cwd,
         std::slice::from_ref(&cwd),
         &None,
+        /*codex_self_exe*/ &None,
         /*use_legacy_landlock*/ false,
         /*stdout_stream*/ None,
     )
@@ -377,7 +416,6 @@ async fn windows_elevated_does_not_create_missing_workspace_metadata() -> anyhow
             network_environment_id: None,
             sandbox_permissions: SandboxPermissions::UseDefault,
             windows_sandbox_level: WindowsSandboxLevel::Elevated,
-            windows_sandbox_private_desktop: false,
             justification: None,
             arg0: None,
         },
@@ -385,6 +423,7 @@ async fn windows_elevated_does_not_create_missing_workspace_metadata() -> anyhow
         &cwd,
         std::slice::from_ref(&cwd),
         &None,
+        /*codex_self_exe*/ &None,
         /*use_legacy_landlock*/ false,
         /*stdout_stream*/ None,
     )
@@ -399,6 +438,78 @@ async fn windows_elevated_does_not_create_missing_workspace_metadata() -> anyhow
             path.display()
         );
     }
+
+    let firewall_output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            r#"
+$ErrorActionPreference = 'Stop'
+$sid = (Get-LocalUser -Name 'CodexSandboxOffline').SID.Value
+$rules = foreach ($name in @('codex_sandbox_offline_block_inbound', 'codex_sandbox_offline_block_outbound')) {
+    $rule = @(Get-NetFirewallRule -PolicyStore ActiveStore -DisplayName $name)
+    if ($rule.Count -ne 1) { throw "Expected exactly one effective rule for $name" }
+    $address = $rule | Get-NetFirewallAddressFilter
+    $security = $rule | Get-NetFirewallSecurityFilter
+    $port = $rule | Get-NetFirewallPortFilter
+    [pscustomobject]@{
+        name = $name
+        direction = [string]$rule[0].Direction
+        action = [string]$rule[0].Action
+        enabled = [string]$rule[0].Enabled
+        profile = [string]$rule[0].Profile
+        protocol = [string]$port.Protocol
+        localAddresses = @($address.LocalAddress)
+        remoteAddresses = @($address.RemoteAddress | Sort-Object)
+        localPorts = @($port.LocalPort)
+        remotePorts = @($port.RemotePort)
+        localUser = [string]$security.LocalUser
+    }
+}
+[pscustomobject]@{ offlineSid = $sid; rules = @($rules) } | ConvertTo-Json -Depth 4 -Compress
+"#,
+        ])
+        .output()
+        .context("read offline sandbox firewall rules")?;
+    assert!(
+        firewall_output.status.success(),
+        "read offline sandbox firewall rules: {}",
+        String::from_utf8_lossy(&firewall_output.stderr)
+    );
+    let firewall_rules: serde_json::Value = serde_json::from_slice(&firewall_output.stdout)
+        .context("parse offline sandbox firewall rules")?;
+    let offline_sid = firewall_rules["offlineSid"]
+        .as_str()
+        .context("offline sandbox firewall rules should include their user SID")?;
+    let local_user = format!("O:LSD:(A;;CC;;;{offline_sid})");
+    let expected_rules: Vec<_> = [
+        ("codex_sandbox_offline_block_inbound", "Inbound"),
+        ("codex_sandbox_offline_block_outbound", "Outbound"),
+    ]
+    .into_iter()
+    .map(|(name, direction)| {
+        serde_json::json!({
+            "name": name,
+            "direction": direction,
+            "action": "Block",
+            "enabled": "True",
+            "profile": "Any",
+            "protocol": "Any",
+            "localAddresses": ["Any"],
+            "remoteAddresses": [
+                "::",
+                "::2-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+                "0.0.0.0-126.255.255.255",
+                "128.0.0.0-255.255.255.255",
+            ],
+            "localPorts": ["Any"],
+            "remotePorts": ["Any"],
+            "localUser": local_user,
+        })
+    })
+    .collect();
+    assert_eq!(firewall_rules["rules"], serde_json::json!(expected_rules));
     Ok(())
 }
 
@@ -484,7 +595,6 @@ async fn windows_elevated_enforces_deny_read_and_protects_setup_marker() -> anyh
             network_environment_id: None,
             sandbox_permissions: SandboxPermissions::UseDefault,
             windows_sandbox_level: WindowsSandboxLevel::Elevated,
-            windows_sandbox_private_desktop: false,
             justification: None,
             arg0: None,
         },
@@ -492,6 +602,7 @@ async fn windows_elevated_enforces_deny_read_and_protects_setup_marker() -> anyh
         &cwd,
         std::slice::from_ref(&cwd),
         &None,
+        /*codex_self_exe*/ &None,
         /*use_legacy_landlock*/ false,
         /*stdout_stream*/ None,
     )

@@ -218,6 +218,7 @@ impl ChatWidget {
         self.set_status_line(status_line_from_segments(
             segments,
             self.local_settings.tui.status_line_use_colors,
+            self.thread_id,
         ));
         let hyperlink_url = selections
             .status_line_items
@@ -327,7 +328,12 @@ impl ChatWidget {
         now: Instant,
     ) -> Option<String> {
         if self.terminal_title_shows_action_required_with_selections(selections) {
-            return Some(self.action_required_terminal_title_text(selections, now));
+            let title = self.action_required_terminal_title_text(selections, now);
+            return Some(if self.realtime_microphone_is_listening() {
+                format!("● {title}")
+            } else {
+                title
+            });
         }
 
         let mut previous = None;
@@ -362,7 +368,7 @@ impl ChatWidget {
     }
 
     fn action_required_terminal_title_prefix_at(&self, now: Instant) -> &'static str {
-        if !self.local_settings.tui.animations {
+        if !(self.local_settings.tui.animations && self.local_settings.tui.effects.title) {
             return TERMINAL_TITLE_ACTION_REQUIRED_PREFIX;
         }
 
@@ -390,6 +396,7 @@ impl ChatWidget {
         selections: &StatusSurfaceSelections,
     ) -> Option<Duration> {
         if self.local_settings.tui.animations
+            && self.local_settings.tui.effects.progress
             && self.status_state.thread_title_generation_pending
             && (selections.status_line_items.iter().any(|item| {
                 matches!(
@@ -410,6 +417,7 @@ impl ChatWidget {
             return Some(TERMINAL_TITLE_SPINNER_INTERVAL);
         }
         if self.local_settings.tui.animations
+            && self.local_settings.tui.effects.title
             && self.terminal_title_shows_action_required_with_selections(selections)
         {
             return Some(TERMINAL_TITLE_ACTION_REQUIRED_INTERVAL);
@@ -1001,15 +1009,18 @@ impl ChatWidget {
     }
 
     pub(super) fn terminal_title_spinner_text_at(&self, now: Instant) -> Option<String> {
-        if !self.local_settings.tui.animations {
-            return None;
+        let spinner = (self.local_settings.tui.animations
+            && self.local_settings.tui.effects.progress
+            && self.terminal_title_has_active_progress())
+        .then(|| self.terminal_title_spinner_frame_at(now));
+        if self.realtime_microphone_is_listening() {
+            return Some(match spinner {
+                Some(frame) => format!("● {frame}"),
+                None => "●".to_string(),
+            });
         }
 
-        if !self.terminal_title_has_active_progress() {
-            return None;
-        }
-
-        Some(self.terminal_title_spinner_frame_at(now).to_string())
+        spinner.map(str::to_string)
     }
 
     pub(super) fn terminal_title_spinner_frame_at(&self, now: Instant) -> &'static str {
@@ -1041,12 +1052,15 @@ impl ChatWidget {
 
     pub(super) fn should_animate_terminal_title_spinner(&self) -> bool {
         self.local_settings.tui.animations
+            && self.local_settings.tui.effects.progress
             && self.terminal_title_uses_activity()
             && self.terminal_title_has_active_progress()
     }
 
     pub(super) fn should_animate_terminal_title_action_required(&self) -> bool {
-        self.local_settings.tui.animations && self.terminal_title_shows_action_required()
+        self.local_settings.tui.animations
+            && self.local_settings.tui.effects.title
+            && self.terminal_title_shows_action_required()
     }
 
     fn should_animate_terminal_title_spinner_with_selections(
@@ -1054,6 +1068,7 @@ impl ChatWidget {
         selections: &StatusSurfaceSelections,
     ) -> bool {
         self.local_settings.tui.animations
+            && self.local_settings.tui.effects.progress
             && selections
                 .terminal_title_items
                 .contains(&TerminalTitleItem::Spinner)
@@ -1192,9 +1207,11 @@ fn permissions_display(config: &Config) -> String {
     }
 
     let permission_profile = config.permissions.effective_permission_profile();
-    let workspace_roots = config.effective_workspace_roots();
-    let summary =
-        summarize_permission_profile(&permission_profile, &config.cwd, workspace_roots.as_slice());
+    let summary = summarize_permission_profile(
+        &permission_profile,
+        &PathUri::from_abs_path(&config.cwd),
+        &config.effective_workspace_roots(),
+    );
     if let Some(details) = summary.strip_prefix("read-only")
         && !details.contains("(network access enabled)")
     {

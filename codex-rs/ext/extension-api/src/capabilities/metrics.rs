@@ -8,4 +8,14 @@ pub trait ExtensionMetrics: Send + Sync {
 
     /// Records one histogram sample with optional extension-provided tags.
     fn histogram(&self, name: &str, value: i64, tags: &[(&str, &str)]);
+
+    /// Records a histogram with explicit buckets, preserving host attribution.
+    /// All callers of the same metric name must use the same boundaries.
+    fn histogram_with_boundaries(
+        &self,
+        name: &str,
+        value: i64,
+        boundaries: &[f64],
+        tags: &[(&str, &str)],
+    );
 }

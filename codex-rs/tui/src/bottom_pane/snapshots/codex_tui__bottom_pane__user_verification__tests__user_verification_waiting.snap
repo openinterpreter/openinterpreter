@@ -1,0 +1,11 @@
+---
+source: tui/src/bottom_pane/user_verification_tests.rs
+expression: "render_view_lines(&view, 80)"
+---
+Waiting for verification…
+
+Server: deployments
+
+Approve deploying the reviewed release?
+
+Press esc to cancel this request

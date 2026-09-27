@@ -2,6 +2,7 @@
 //! Native implementation and registration transport are independent of these contracts.
 
 use crate::JsonSchema;
+use crate::RequestId;
 use crate::TS;
 use serde::Deserialize;
 use serde::Serialize;
@@ -108,11 +109,19 @@ pub struct UserVerificationStatusResponse {
 #[ts(export_to = "v2/")]
 pub struct UserVerificationEnrollParams {}
 
+/// Public metadata for a created or reused local credential. The caller completes
+/// backend registration; this response does not establish server enrollment.
+/// Older app-servers omit the metadata fields; callers must check both before registration.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct UserVerificationEnrollResponse {
     pub credential_id: String,
+    // TODO: Make both metadata fields required after the experimental/alpha rollout
+    // guarantees them on the oldest supported app-server version.
+    pub algorithm: Option<String>,
+    /// Unpadded base64url of the SubjectPublicKeyInfo DER encoding.
+    pub public_key: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -144,6 +153,22 @@ pub struct UserVerificationVerifyParams {
 pub struct UserVerificationVerifyResponse {
     pub proof: UserVerificationProof,
 }
+
+/// Cancels a native verification RPC issued on this connection, not an elicitation.
+/// Use a fresh request ID for each operation and a distinct ID for this cancellation RPC.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub struct UserVerificationCancelParams {
+    pub request_id: RequestId,
+}
+
+/// Acknowledges the cancellation signal; native work may still be finishing.
+/// Unknown or finished requests are a no-op, and completed effects are not rolled back.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct UserVerificationCancelResponse {}
 
 #[cfg(test)]
 #[path = "user_verification_tests.rs"]

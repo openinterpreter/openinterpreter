@@ -96,6 +96,10 @@ pub struct TuiGlobalKeymap {
     pub open_agents: Option<KeybindingsSpec>,
     /// Open the transcript overlay.
     pub open_transcript: Option<KeybindingsSpec>,
+    /// Find text in the full transcript.
+    pub find_transcript: Option<KeybindingsSpec>,
+    /// Focus activity groups in the owned transcript to inspect their details.
+    pub focus_activity: Option<KeybindingsSpec>,
     /// Open the external editor for the current draft.
     pub open_external_editor: Option<KeybindingsSpec>,
     /// Copy the last agent response to the clipboard.
@@ -123,6 +127,8 @@ pub struct TuiGlobalKeymap {
 #[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct TuiChatKeymap {
+    /// Start or stop a voice conversation.
+    pub toggle_voice: Option<KeybindingsSpec>,
     /// Toggle the microphone in an active voice conversation.
     pub toggle_voice_mute: Option<KeybindingsSpec>,
     /// Interrupt the active turn.
@@ -399,6 +405,8 @@ pub struct TuiPagerKeymap {
     pub close: Option<KeybindingsSpec>,
     /// Close the transcript overlay via its dedicated toggle key.
     pub close_transcript: Option<KeybindingsSpec>,
+    /// Find text in a transcript pager.
+    pub find: Option<KeybindingsSpec>,
 }
 
 /// List selection context keybindings for popup-style selectable lists.
@@ -437,12 +445,20 @@ pub struct TuiAgentsKeymap {
     pub resume: Option<KeybindingsSpec>,
     /// Search the available agent tasks.
     pub search: Option<KeybindingsSpec>,
-    /// Start composing a new agent task.
+    /// Open a new session in the selected checkout.
     pub new_task: Option<KeybindingsSpec>,
+    /// Open a new session in a worktree from the project default branch.
+    pub new_worktree: Option<KeybindingsSpec>,
     /// Rename the selected task.
     pub rename: Option<KeybindingsSpec>,
     /// Stop the selected running task.
     pub stop: Option<KeybindingsSpec>,
+    /// Archive the selected task and its child agents after confirmation.
+    pub archive: Option<KeybindingsSpec>,
+    /// Permanently delete the selected task and its child agents after confirmation.
+    pub delete: Option<KeybindingsSpec>,
+    /// Hide the selected task until explicitly resumed or the TUI restarts.
+    pub hide: Option<KeybindingsSpec>,
     /// Toggle grouping tasks by status or project.
     pub toggle_grouping: Option<KeybindingsSpec>,
 }
@@ -757,6 +773,48 @@ mod tests {
         "#;
         let keymap: TuiKeymap = toml::from_str(toml_input).expect("valid config");
         assert!(keymap.global.open_transcript.is_some());
+    }
+
+    #[test]
+    fn transcript_find_accepts_custom_chords_and_can_be_disabled() {
+        for (bindings, expected) in [
+            (
+                "'ctrl-x f'",
+                KeybindingsSpec::One(KeybindingSpec("ctrl-x f".to_owned())),
+            ),
+            ("[]", KeybindingsSpec::Many(Vec::new())),
+        ] {
+            for (context, action) in [("pager", "find"), ("global", "find_transcript")] {
+                let keymap: TuiKeymap =
+                    toml::from_str(&format!("[{context}]\n{action} = {bindings}\n"))
+                        .expect("Find binding");
+                let mut expected_keymap = TuiKeymap::default();
+                if context == "pager" {
+                    expected_keymap.pager.find = Some(expected.clone());
+                } else {
+                    expected_keymap.global.find_transcript = Some(expected.clone());
+                }
+                assert_eq!(keymap, expected_keymap);
+            }
+        }
+    }
+
+    #[test]
+    fn activity_focus_accepts_custom_chords_and_can_be_disabled() {
+        for (bindings, expected) in [
+            (
+                "'ctrl-x t'",
+                KeybindingsSpec::One(KeybindingSpec("ctrl-x t".to_owned())),
+            ),
+            ("[]", KeybindingsSpec::Many(Vec::new())),
+        ] {
+            let keymap: TuiKeymap =
+                toml::from_str(&format!("[global]\nfocus_activity = {bindings}\n"))
+                    .expect("activity focus binding");
+            let mut expected_keymap = TuiKeymap::default();
+            expected_keymap.global.focus_activity = Some(expected);
+            assert_eq!(keymap, expected_keymap);
+        }
     }
 
     #[test]

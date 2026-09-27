@@ -27,4 +27,9 @@ pub struct FeedbackUploadParams {
 #[ts(export_to = "v2/")]
 pub struct FeedbackUploadResponse {
     pub thread_id: String,
+    /// Whitespace-normalized SHA-256 of the session base instructions, matching the
+    /// uploaded `prompt_hash` tag. Does not include later developer messages.
+    /// Null when the reported rollout has no prompt metadata.
+    #[serde(default)]
+    pub prompt_hash: Option<String>,
 }

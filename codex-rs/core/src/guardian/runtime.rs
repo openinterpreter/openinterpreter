@@ -1,16 +1,14 @@
-//! Binds the existing synchronous reviewer to one approval action.
+//! Captures one approval action for the extension-owned synchronous reviewer.
 
-use codex_extension_api::ExtensionFuture;
-use codex_extension_api::SynchronousApprovalReviewer;
 use codex_protocol::protocol::ReviewDecision;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use super::ApprovalRequestReasons;
 use super::GuardianApprovalRequest;
 use super::GuardianReviewContext;
 use super::GuardianReviewOptions;
 use super::approval_request::guardian_approval_request_to_json;
-use super::review::run_synchronous_review;
 use crate::session::session::Session;
 
 /// Carries the original action even when the legacy synchronous renderer cannot handle its paths.
@@ -60,15 +58,24 @@ impl ReviewAction {
             tracing::error!(%error, "failed to build automatic approval action");
             ReviewDecision::denied("automatic approval review could not prepare the action")
         })?;
-        if let GuardianApprovalRequest::WriteStdin { environment_id, .. } = request
+        let environment_id =
+            if let GuardianApprovalRequest::WriteStdin { environment_id, .. } = request {
+                Some(environment_id.as_str())
+            } else {
+                request.background_environment_id()
+            };
+        if let Some(environment_id) = environment_id
             && !context
                 .environments()
                 .turn_environments()
-                .any(|environment| environment.selection.environment_id == *environment_id)
+                .any(|environment| environment.selection.environment_id == environment_id)
         {
-            return Err(ReviewDecision::denied(
-                "automatic approval review cannot access the terminal's environment; select it before retrying",
-            ));
+            let message = if matches!(request, GuardianApprovalRequest::WriteStdin { .. }) {
+                "automatic approval review cannot access the terminal's environment; select it before retrying"
+            } else {
+                "automatic approval review cannot access the request's environment"
+            };
+            return Err(ReviewDecision::denied(message));
         }
         Ok(request)
     }
@@ -77,18 +84,9 @@ impl ReviewAction {
 #[derive(Clone)]
 pub(super) struct ReviewRuntime {
     pub(super) session: Arc<Session>,
+    pub(super) history_reset: CancellationToken,
     pub(super) context: GuardianReviewContext,
-    pub(super) review_id: String,
     pub(super) request: ReviewAction,
     pub(super) reasons: ApprovalRequestReasons,
     pub(super) options: GuardianReviewOptions,
-}
-
-impl SynchronousApprovalReviewer for ReviewRuntime {
-    fn review(
-        &self,
-        reason: codex_protocol::approvals::GuardianReviewReason,
-    ) -> ExtensionFuture<'_, ReviewDecision> {
-        Box::pin(run_synchronous_review(self.clone(), reason))
-    }
 }

@@ -1,0 +1,6 @@
+---
+source: tui/src/app/tests/realtime_start.rs
+assertion_line: 59
+expression: rendered
+---
+■ No active thread is available.

@@ -13,6 +13,7 @@ use codex_protocol::mcp::CallToolResult;
 use codex_protocol::models::function_call_output_content_items_to_text;
 use codex_protocol::protocol::TruncationPolicy;
 use codex_utils_output_truncation::truncate_text;
+use codex_utils_output_truncation::with_serialization_allowance;
 use rmcp::model::ListResourceTemplatesResult;
 use rmcp::model::ListResourcesResult;
 use rmcp::model::PaginatedRequestParams;
@@ -26,6 +27,7 @@ use serde_json::Value;
 
 use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
+use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolOutput;
@@ -220,6 +222,7 @@ async fn emit_tool_call_begin(
         arguments: arguments.unwrap_or(Value::Null),
         connector_id: None,
         mcp_app_resource_uri: None,
+        mcp_app_ui: None,
         link_id: None,
         app_name: None,
         action_name: None,
@@ -264,6 +267,7 @@ async fn emit_tool_call_end(
         arguments: arguments.unwrap_or(Value::Null),
         connector_id: None,
         mcp_app_resource_uri: None,
+        mcp_app_ui: None,
         link_id: None,
         app_name: None,
         action_name: None,
@@ -279,7 +283,7 @@ async fn emit_tool_call_end(
 
 async fn run_resource_operation<T>(
     session: &Arc<Session>,
-    turn: &TurnContext,
+    step_context: &StepContext,
     call_id: &str,
     invocation: McpInvocation,
     operation: impl Future<Output = Result<T, FunctionCallError>>,
@@ -287,10 +291,14 @@ async fn run_resource_operation<T>(
 where
     T: Serialize,
 {
+    let turn = &step_context.turn;
     emit_tool_call_begin(session, turn, call_id, invocation.clone()).await;
     let start = Instant::now();
     let result = operation.await.and_then(|payload| {
-        serialize_function_output(payload, turn.model_info().truncation_policy.into())
+        serialize_function_output(
+            payload,
+            step_context.settings.model_info.truncation_policy.into(),
+        )
     });
 
     match result {
@@ -357,7 +365,7 @@ where
     })?;
     // Match regular MCP tool outputs by bounding the copy persisted to the
     // rollout and injected into model context.
-    let content = truncate_text(&content, truncation_policy * 1.2);
+    let content = truncate_text(&content, with_serialization_allowance(truncation_policy));
 
     Ok(FunctionToolOutput::from_text(content, Some(true)))
 }

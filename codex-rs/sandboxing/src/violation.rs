@@ -50,6 +50,7 @@ pub enum SandboxViolationBackend {
     ManagedNetworkProxy,
     Seatbelt,
     WindowsSandbox,
+    WindowsMxc,
 }
 
 impl SandboxViolationBackend {
@@ -59,6 +60,7 @@ impl SandboxViolationBackend {
             Self::ManagedNetworkProxy => "managed_network_proxy",
             Self::Seatbelt => "seatbelt",
             Self::WindowsSandbox => "windows_sandbox",
+            Self::WindowsMxc => "windows_mxc",
         }
     }
 }
@@ -143,6 +145,7 @@ fn classify_filesystem_sandbox_violation(
         SandboxType::MacosSeatbelt => SandboxViolationBackend::Seatbelt,
         SandboxType::LinuxSeccomp => SandboxViolationBackend::LinuxSandbox,
         SandboxType::WindowsRestrictedToken => SandboxViolationBackend::WindowsSandbox,
+        SandboxType::WindowsMxc => SandboxViolationBackend::WindowsMxc,
     };
 
     if let Some((reason, output)) = filesystem_reason_from_output(exec_output) {

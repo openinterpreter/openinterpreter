@@ -4,6 +4,7 @@
 use super::*;
 use crate::app_server_session::turn_permissions_overrides;
 use crate::chatwidget::MisalignmentReview;
+use crate::chatwidget::MisalignmentTurnSource;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
@@ -161,6 +162,10 @@ impl App {
             Ok(response) => {
                 let store = &self.ensure_thread_channel(review.thread_id).store;
                 store.lock().await.active_turn_id = Some(response.turn.id.clone());
+                self.chat_widget.clear_misalignment_for_new_turn(
+                    &response.turn.id,
+                    MisalignmentTurnSource::AcknowledgedContinuation,
+                );
                 self.chat_widget.handle_server_notification(
                     ServerNotification::TurnStarted(
                         codex_app_server_protocol::TurnStartedNotification {

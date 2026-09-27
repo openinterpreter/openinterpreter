@@ -3,6 +3,8 @@
 use super::*;
 use crate::app::reconnect::ReconnectPresentation;
 use crate::app::reconnect::reconnect;
+use codex_config::types::KeybindingSpec;
+use codex_config::types::KeybindingsSpec;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -11,16 +13,22 @@ use super::disconnect::serve_reconnect_requests;
 
 #[tokio::test]
 async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> Result<()> {
-    for (recovered_queue, edit_offline, resume_error_code) in [
-        (true, false, -32603),
-        (false, false, -32603),
-        (true, true, -32603),
-        (true, false, -32600),
-        (false, false, -32600),
-        (true, true, -32600),
+    for (recovered_queue, edit_offline, resume_error_code, deferred_notice, notice_enabled) in [
+        (true, false, -32603, false, false),
+        (true, false, -32603, false, true),
+        (false, false, -32603, false, false),
+        (true, true, -32603, false, false),
+        (true, false, -32600, false, false),
+        (false, false, -32600, false, false),
+        (true, true, -32600, false, false),
+        (true, false, -32603, true, true),
     ] {
         let pending_profile = !recovered_queue && resume_error_code == -32600;
         let (mut app, mut events, mut ops) = make_test_app_with_channels().await;
+        app.local_settings.tui.show_server_version_notice = notice_enabled;
+        // Reconstructed widgets should use the same hint on every test terminal.
+        app.local_settings.tui.keymap.chat.edit_queued_message =
+            Some(KeybindingsSpec::One(KeybindingSpec("alt-up".into())));
         let id = ThreadId::new();
         let cwd = app.config.cwd.clone();
         app.config.model = Some("gpt-test".into());
@@ -48,11 +56,20 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
         app.chat_widget.set_collaboration_mask(
             crate::collaboration_modes::plan_mask(app.model_catalog.as_ref()).unwrap(),
         );
-        let expected_mode = app.chat_widget.effective_collaboration_mode().with_updates(
+        let cached_mode = app.chat_widget.effective_collaboration_mode().with_updates(
             Some("gpt-test".into()),
             Some(None),
             /*developer_instructions*/ None,
         );
+        // A newer server can report a mode changed by another client while disconnected.
+        let server_mode = (!recovered_queue).then(|| CollaborationMode {
+            mode: ModeKind::Default,
+            settings: Settings {
+                developer_instructions: Some("Updated by another client".into()),
+                ..cached_mode.settings.clone()
+            },
+        });
+        let expected_mode = server_mode.clone().unwrap_or(cached_mode);
         let expected_submitted_mode = expected_mode.clone();
         assert!(!app.model_catalog.collaboration_modes.is_empty());
         if edit_offline {
@@ -75,6 +92,22 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let endpoint = crate::resolve_remote_addr(&format!("ws://{}", listener.local_addr()?))?;
         app.app_server_target = AppServerTarget::Remote { endpoint };
+        if notice_enabled {
+            let (notice, key) = crate::status::remote_connection::pending_server_version_notice(
+                &app.local_settings.tui,
+                &app.app_server_target,
+                /*server_home*/ None,
+                "2.1.0",
+                Some("2.0.0"),
+                /*last_shown*/ None,
+            )
+            .expect("older server should have a pending notice");
+            app.reconnect.seen_version_notice = Some(key);
+            if deferred_notice {
+                app.pending_server_version_notice = Some(notice);
+                app.update_server_version_overview_notice("2.1.0", Some("2.0.0"));
+            }
+        }
         let thread = json!({
             "id": id, "sessionId": id, "preview": "only once", "ephemeral": false,
             "modelProvider": "test-provider", "createdAt": 1, "updatedAt": 2,
@@ -99,8 +132,12 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
                         let params = request.params.as_ref().unwrap();
                         assert_eq!(params["threadId"], id.to_string());
                         assert!(params["model"].is_null());
-                        Some(json!({"result": {"thread": thread, "model": "gpt-test", "modelProvider": "test-provider", "cwd": cwd,
-                            "approvalPolicy": "never", "approvalsReviewer": "user", "sandbox": {"type": "dangerFullAccess"}, "reasoningEffort": null}}))
+                        let mut result = json!({"thread": thread, "model": "gpt-test", "modelProvider": "test-provider", "cwd": cwd,
+                            "approvalPolicy": "never", "approvalsReviewer": "user", "sandbox": {"type": "dangerFullAccess"}, "reasoningEffort": null});
+                        if let Some(mode) = &server_mode {
+                            result["collaborationMode"] = json!(mode);
+                        }
+                        Some(json!({"result": result}))
                     }
                     "thread/read" => Some(json!({"result": {"thread": thread}})),
                     "thread/list" | "thread/loaded/list" => Some(json!({"result": {"data": [], "nextCursor": null}})),
@@ -178,8 +215,28 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
                 },
             );
         }
-        app.begin_reconnect();
         if edit_offline {
+            let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+            app.chat_widget.show_bottom_pane_view(Box::new(view));
+        }
+        app.begin_reconnect();
+        if deferred_notice {
+            assert_eq!(
+                app.agents_overview
+                    .view_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .server_version_notice,
+                None
+            );
+        }
+        if edit_offline {
+            for key in [KeyCode::Esc, KeyCode::Enter] {
+                app.handle_tui_event(&mut tui, &mut session, TuiEvent::Key(key.into()))
+                    .await?;
+            }
+            assert!(!app.chat_widget.has_active_view());
+            assert_eq!(app.chat_widget.composer_text_with_pending(), "kept draft");
             app.handle_tui_event(
                 &mut tui,
                 &mut session,
@@ -202,13 +259,19 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
                 &mut app.rate_limit_hard_stop_generation,
             )
             .unwrap();
-        let before_disconnect = Instant::now() - Duration::from_secs(/*secs*/ 300);
+        let before_disconnect = Instant::now();
         app.recap.note_focus_lost(before_disconnect);
         for _ in 0..3 {
             app.recap
                 .note_turn_finished(&TurnStatus::Completed, before_disconnect);
         }
         app.schedule_recap_check(id, Instant::now());
+        app.pending_managed_worktree_creation = true;
+        app.agents_overview
+            .view_state
+            .lock()
+            .unwrap()
+            .creating_worktree = true;
         let old_sender = app.app_event_tx.clone();
         let connected = reconnect(
             app.app_server_target.clone(),
@@ -225,9 +288,28 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
             paused.contains("TUI is reconnecting; tool was not sent"),
             "{paused}"
         );
-        app.finish_reconnect(&mut tui, &mut session, &mut events, connected)
+        app.finish_reconnect(&mut tui, &mut session, &mut events, connected, "2.1.0")
             .await?;
+        if edit_offline {
+            assert!(!app.chat_widget.has_active_view());
+            assert!(
+                app.agents_overview
+                    .view_state
+                    .lock()
+                    .unwrap()
+                    .connection_notice
+                    .is_none()
+            );
+        }
         assert!(app.pending_server_profiles.is_empty());
+        assert!(!app.pending_managed_worktree_creation);
+        assert!(
+            !app.agents_overview
+                .view_state
+                .lock()
+                .unwrap()
+                .creating_worktree
+        );
         assert!(!app.reconnect.offline);
         assert!(!app.thread_unavailable(id));
         assert_eq!(app.last_subagent_backfill_attempt, None);
@@ -244,6 +326,10 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
             !app.agent_navigation
                 .finish_picker_refresh(id, stale_picker_refresh)
         );
+        // Let the rebound timer become due without depending on machine uptime.
+        tokio::time::pause();
+        tokio::time::advance(recap::RECAP_DELAY).await;
+        tokio::time::resume();
         let mut deferred = Vec::new();
         tokio::time::timeout(Duration::from_secs(/*secs*/ 5), async {
             loop {
@@ -290,6 +376,23 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
             }
         );
         let history = drain_history(&mut app, &mut tui, &mut session, &mut events).await?;
+        let notices = history
+            .lines()
+            .filter(|line| {
+                line.contains("Reconnected.") || line.contains("background Codex service")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if deferred_notice {
+            assert_snapshot!(notices, @r###"
+• Reconnected. No input was resent. Review uncertain submissions before retrying; recovered queues remain paused.
+⚠ A background Codex service is running v2.0.0, older than your Codex CLI
+"###);
+        } else {
+            insta::allow_duplicates! {
+                assert_snapshot!(notices, @"• Reconnected. No input was resent. Review uncertain submissions before retrying; recovered queues remain paused.");
+            }
+        }
         assert_eq!(history.matches("only once").count(), 1);
         if recovered_queue {
             assert!(app.chat_widget.has_queued_follow_up_messages());
@@ -439,8 +542,14 @@ async fn reconnect_reconciles_offscreen_pending_profile_before_restoring_permiss
         ReconnectPresentation::Conversation,
     )
     .await?;
-    app.finish_reconnect(&mut tui, &mut session, &mut events, connected)
-        .await?;
+    app.finish_reconnect(
+        &mut tui,
+        &mut session,
+        &mut events,
+        connected,
+        CODEX_CLI_VERSION,
+    )
+    .await?;
     assert!(app.pending_server_profiles.contains_key(&primary));
 
     app.select_agent_thread(&mut tui, &mut session, primary)
@@ -574,8 +683,14 @@ async fn reconnect_allows_slow_hydration_but_bounds_a_stalled_server() -> Result
             app.begin_reconnect();
             let mut session = crate::start_embedded_app_server_for_picker(&app.config).await?;
             let mut tui = crate::tui::test_support::make_test_tui()?;
-            app.finish_reconnect(&mut tui, &mut session, &mut events, result?)
-                .await?;
+            app.finish_reconnect(
+                &mut tui,
+                &mut session,
+                &mut events,
+                result?,
+                CODEX_CLI_VERSION,
+            )
+            .await?;
             assert!(app.thread_unavailable(id));
             app.handle_tui_event(
                 &mut tui,
@@ -643,7 +758,7 @@ pub(super) async fn drain_history(
     Ok(lines_to_single_string(
         &app.transcript_cells
             .iter()
-            .flat_map(|cell| cell.display_lines(/*width*/ 80))
+            .flat_map(|cell| cell.transcript_lines(/*width*/ 80))
             .collect::<Vec<_>>(),
     ))
 }

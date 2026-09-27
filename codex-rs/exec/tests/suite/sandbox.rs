@@ -4,6 +4,7 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::test_support::PathBufExt;
+use codex_utils_path_uri::PathUri;
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
@@ -44,14 +45,15 @@ pub(super) async fn spawn_command_under_sandbox(
             network_environment_id: None,
             sandbox_permissions: SandboxPermissions::UseDefault,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
-            windows_sandbox_private_desktop: false,
             justification: None,
             arg0: None,
         },
         permission_profile,
         sandbox_cwd,
-        std::slice::from_ref(sandbox_cwd),
+        &[PathUri::from_abs_path(sandbox_cwd)],
         &codex_linux_sandbox_exe,
+        /*codex_self_exe*/ &None,
+        codex_protocol::sandbox::SandboxType::None,
         /*use_legacy_landlock*/ false,
     )
     .map_err(|err| io::Error::other(err.to_string()))?;

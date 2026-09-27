@@ -34,6 +34,7 @@ fn environment(id: &str, cwd: PathUri, shell: impl Into<String>) -> (String, Env
         EnvironmentState {
             cwd,
             status: EnvironmentStatus::Available,
+            error: None,
             shell: Some(shell.into()),
             is_primary: false,
         },
@@ -393,5 +394,33 @@ fn shell_version_diff_clears_previously_visible_version() {
             .expect("removed shell version")
             .render(),
         "<environment_context>\n  <shell_version status=\"unavailable\" />\n</environment_context>"
+    );
+}
+
+#[test]
+fn current_date_diff_clears_once_and_recovers() {
+    let available = EnvironmentsState {
+        current_date: Some("2026-06-17".to_string()),
+        ..Default::default()
+    };
+    let unavailable = EnvironmentsState::default();
+    assert_eq!(
+        unavailable
+            .render_diff(PreviousSectionState::Known(&available.snapshot()))
+            .expect("removed current date")
+            .render(),
+        "<environment_context>\n  <current_date status=\"unavailable\" />\n</environment_context>"
+    );
+    assert!(
+        unavailable
+            .render_diff(PreviousSectionState::Known(&unavailable.snapshot()))
+            .is_none()
+    );
+    assert_eq!(
+        available
+            .render_diff(PreviousSectionState::Known(&unavailable.snapshot()))
+            .expect("restored current date")
+            .render(),
+        "<environment_context>\n  <current_date>2026-06-17</current_date>\n</environment_context>"
     );
 }

@@ -1,4 +1,4 @@
-//! Reads rollout byte positions independently of their plain or compressed representation.
+//! Reads rollout bytes and positions independently of their plain or compressed representation.
 //!
 //! Offsets always address the original JSONL bytes. Readers retain an open file, or an anonymous
 //! decoded snapshot, so a concurrent compression cannot invalidate an in-progress scan.
@@ -37,6 +37,30 @@ impl RolloutReader {
         }
         unreachable!("the final open attempt returns its error")
     }
+}
+
+/// Reads at most `max_bytes` decoded rollout bytes without materializing the durable file.
+///
+/// Returns `None` for nonregular files. This retains an open representation while reading, so
+/// compression or materialization cannot invalidate the read after resolution.
+pub fn read_rollout_prefix(path: &Path, max_bytes: usize) -> io::Result<Option<Vec<u8>>> {
+    if std::fs::metadata(path).is_ok_and(|metadata| !metadata.is_file()) {
+        return Ok(None);
+    }
+    let source = RolloutReader::open(path)?;
+    let file = match &source {
+        RolloutReader::Plain(file) | RolloutReader::Compressed(file) => file,
+    };
+    if !file.metadata()?.is_file() {
+        return Ok(None);
+    }
+    let reader: Box<dyn Read> = match source {
+        RolloutReader::Plain(file) => Box::new(file),
+        RolloutReader::Compressed(file) => Box::new(zstd::stream::read::Decoder::new(file)?),
+    };
+    let mut bytes = Vec::new();
+    reader.take(max_bytes as u64).read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
 }
 
 /// Opens the original JSONL bytes for blocking offset reads without changing the rollout on disk.

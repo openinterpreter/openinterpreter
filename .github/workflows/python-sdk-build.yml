@@ -1,0 +1,65 @@
+name: python-sdk-build
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        description: "Source revision to build; defaults to the calling workflow revision."
+        required: false
+        type: string
+      sdk_version:
+        description: "Python SDK version to build."
+        required: true
+        type: string
+      runtime_version:
+        description: "Exact Python CLI runtime dependency for this SDK release."
+        required: true
+        type: string
+
+jobs:
+  build-python-sdk:
+    if: github.repository == 'openai/codex'
+    name: build-python-sdk
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Build Python SDK package
+        shell: bash
+        env:
+          SDK_VERSION: ${{ inputs.sdk_version }}
+          RUNTIME_VERSION: ${{ inputs.runtime_version }}
+        run: |
+          set -euo pipefail
+          python3 -m venv "${RUNNER_TEMP}/python-sdk-build-venv"
+          build_python="${RUNNER_TEMP}/python-sdk-build-venv/bin/python"
+          "$build_python" -m pip install build twine packaging==26.2
+          "$build_python" sdk/python/scripts/update_sdk_artifacts.py \
+            stage-sdk "${RUNNER_TEMP}/openai-codex" \
+            --sdk-version "$SDK_VERSION" \
+            --codex-version "$RUNTIME_VERSION"
+          "$build_python" -m build \
+            --wheel \
+            --sdist \
+            --outdir dist/python-sdk \
+            "${RUNNER_TEMP}/openai-codex"
+          "$build_python" -m twine check --strict dist/python-sdk/*
+
+      - name: Upload Python SDK package
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: python-sdk-package
+          path: dist/python-sdk/*
+          if-no-files-found: error

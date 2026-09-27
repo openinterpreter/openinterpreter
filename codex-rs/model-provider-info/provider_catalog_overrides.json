@@ -7,7 +7,8 @@
     "@ai-sdk/groq"
   ],
   "include_provider_ids": [
-    "google"
+    "google",
+    "openai"
   ],
   "exclude_provider_ids": [
     "cloudflare-workers-ai",
@@ -15,6 +16,7 @@
     "privatemode-ai"
   ],
   "api_base_url_overrides": {
+    "openai": "https://api.openai.com/v1",
     "google": "https://generativelanguage.googleapis.com/v1beta/openai",
     "groq": "https://api.groq.com/openai/v1",
     "anthropic": "https://api.anthropic.com"
@@ -23,6 +25,44 @@
         "google": "GEMINI_API_KEY",
         "zai": "ZAI_API_KEY",
         "zai-coding-plan": "ZAI_API_KEY"
+    },
+    "provider_model_allowlists": {
+        "openai": [
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna"
+        ]
+    },
+    "provider_model_exclusions": {
+        "google": [
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+            "gemini-3-pro-preview",
+            "gemini-3.1-flash-lite-preview"
+        ],
+        "groq": [
+            "llama-3.1-8b-instant",
+            "llama-3.3-70b-versatile",
+            "qwen/qwen3-32b",
+            "meta-llama/llama-4-scout-17b-16e-instruct"
+        ],
+        "anthropic": [
+            "claude-opus-4-1-20250805",
+            "claude-opus-4-20250514",
+            "claude-sonnet-4-20250514",
+            "claude-3-7-sonnet-20250219",
+            "claude-3-5-haiku-20241022",
+            "claude-3-haiku-20240307",
+            "claude-3-5-sonnet-20240620",
+            "claude-3-5-sonnet-20241022",
+            "claude-3-opus-20240229",
+            "claude-3-sonnet-20240229"
+        ],
+        "deepseek": [
+            "deepseek-v4-flash",
+            "deepseek-chat",
+            "deepseek-reasoner"
+        ]
     },
     "provider_model_additions": {
         "google": [
@@ -48,6 +88,69 @@
                     "image"
                 ],
                 "context_window": 1048576,
+                "priority": -1
+            }
+        ],
+        "anthropic": [
+            {
+                "id": "claude-fable-5-1",
+                "display_name": "Claude Fable 5.1",
+                "reasoning": true,
+                "input_modalities": ["text", "image"],
+                "priority": -3
+            },
+            {
+                "id": "claude-opus-5-5",
+                "display_name": "Claude Opus 5.5",
+                "reasoning": true,
+                "input_modalities": ["text", "image"],
+                "priority": -2
+            },
+            {
+                "id": "claude-sonnet-5",
+                "display_name": "Claude Sonnet 5",
+                "reasoning": true,
+                "input_modalities": ["text", "image"],
+                "priority": -1
+            }
+        ],
+        "kimi-for-coding": [
+            {
+                "id": "k3-256k",
+                "display_name": "Kimi K3 (256K)",
+                "reasoning": true,
+                "input_modalities": ["text", "image"],
+                "context_window": 262144,
+                "priority": 0
+            },
+            {
+                "id": "kimi-for-coding",
+                "display_name": "Kimi For Coding",
+                "reasoning": true,
+                "input_modalities": ["text"],
+                "priority": 1
+            }
+        ],
+        "alibaba": [
+            {
+                "id": "qwen3.8-max",
+                "display_name": "Qwen3.8 Max",
+                "reasoning": true,
+                "input_modalities": ["text", "image"],
+                "priority": -3
+            },
+            {
+                "id": "qwen3.8-flash",
+                "display_name": "Qwen3.8 Flash",
+                "reasoning": true,
+                "input_modalities": ["text", "image"],
+                "priority": -2
+            },
+            {
+                "id": "qwen3.7-flash",
+                "display_name": "Qwen3.7 Flash",
+                "reasoning": true,
+                "input_modalities": ["text", "image"],
                 "priority": -1
             }
         ]
@@ -152,6 +255,9 @@
       "k3": {
         "thinking_toggle": true,
         "priority": -1
+      },
+      "k3-256k": {
+        "thinking_toggle": true
       }
     },
     "moonshotai-cn": {

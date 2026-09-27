@@ -1,4 +1,4 @@
-use crate::context_manager::estimate_image_bytes;
+use crate::context_manager::estimate_image_reference_bytes;
 use codex_context_fragments::AnnotatedContent;
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
@@ -17,8 +17,8 @@ pub(super) fn content_item_token_count(item: &ContentItem) -> usize {
         ContentItem::InputText { text } | ContentItem::OutputText { text } => {
             approx_token_count(text)
         }
-        ContentItem::InputImage { image_url, detail } => usize::try_from(
-            approx_tokens_from_byte_count_i64(estimate_image_bytes(image_url, *detail)),
+        ContentItem::InputImage { image, detail } => usize::try_from(
+            approx_tokens_from_byte_count_i64(estimate_image_reference_bytes(image, *detail)),
         )
         .unwrap_or(usize::MAX),
         ContentItem::InputAudio { .. } => 0,

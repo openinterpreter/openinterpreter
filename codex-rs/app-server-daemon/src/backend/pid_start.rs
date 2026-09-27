@@ -7,6 +7,7 @@ use super::PidCommandKind;
 use super::PidFileState;
 use super::PidRecord;
 use super::read_process_start_time;
+use crate::managed_install::executable_identity;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
@@ -67,14 +68,17 @@ impl PidBackend {
                 }
             }
         }
-        // Pin the Windows image path across installer junction retargeting.
-        #[cfg(windows)]
+        // Pin the selected release across installer symlink/junction retargeting.
         let codex_bin = fs::canonicalize(&self.codex_bin)
             .await
             .unwrap_or_else(|_| self.codex_bin.clone());
-        #[cfg(not(windows))]
-        let codex_bin = &self.codex_bin;
-        let mut command = Command::new(codex_bin);
+        let launched_identity =
+            if matches!(self.command_kind, super::PidCommandKind::AppServer { .. }) {
+                executable_identity(&codex_bin).await.ok()
+            } else {
+                None
+            };
+        let mut command = Command::new(&codex_bin);
         let stderr_log = match self.open_stderr_log().await {
             Ok(stderr_log) => stderr_log,
             Err(err) => {
@@ -85,10 +89,46 @@ impl PidBackend {
             }
         };
         command
-            .args(self.command_args())
+            // Handoff suppression belongs to the foreground CLI, not its long-lived children.
+            .env_remove(crate::telemetry::HANDOFF_ENV)
+            .args(self.command_args().iter().map(std::borrow::Cow::as_ref))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr_log.into_std().await));
+        // Older or pinned managed binaries may predate this optional startup flag.
+        let managed_app_server =
+            matches!(self.command_kind, super::PidCommandKind::AppServer { .. });
+        if managed_app_server
+            && matches!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    Command::new(&codex_bin)
+                        .args(["app-server", "--managed-daemon", "--help"])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .kill_on_drop(true)
+                        .status(),
+                ).await,
+                Ok(Ok(status)) if status.success()
+            )
+        {
+            command.arg("--managed-daemon");
+        } else if managed_app_server {
+            let codex_home = self
+                .pid_file
+                .parent()
+                .and_then(std::path::Path::parent)
+                .context("daemon pid path has no Codex home")?;
+            let recovery_file = codex_app_server_transport::daemon_recovery_file_path(codex_home);
+            match fs::remove_file(&recovery_file).await {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    tracing::warn!(path = %recovery_file.display(), %err, "failed to clear daemon recovery state before legacy launch");
+                }
+            }
+        }
         if let Some((key, value)) = self.command_env() {
             command.env(key, value);
         }
@@ -167,7 +207,7 @@ impl PidBackend {
             // Never retry inside the parent's Job Object: that would report a
             // successful launch that dies when the terminal/SSH session closes.
             command.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
-            if matches!(self.command_kind, PidCommandKind::UpdateLoop) {
+            if matches!(self.command_kind, PidCommandKind::UpdateLoop { .. }) {
                 match fs::remove_file(self.pid_file.with_extension("ready")).await {
                     Ok(()) => {}
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -178,7 +218,7 @@ impl PidBackend {
                 PidCommandKind::AppServer { .. } => {
                     command.env(codex_app_server_transport::DAEMON_SHUTDOWN_SOCKET_ENV, "1");
                 }
-                PidCommandKind::UpdateLoop => {
+                PidCommandKind::UpdateLoop { .. } => {
                     let shutdown_file = self.pid_file.with_extension("shutdown");
                     match fs::remove_file(&shutdown_file).await {
                         Ok(()) => {}
@@ -222,14 +262,24 @@ impl PidBackend {
             super::super::windows::Process::open(pid)?
                 .context("daemon exited during launch")?
                 .ensure_detached()?;
-            read_process_start_time(pid).await
+            let process_start_time = read_process_start_time(pid).await?;
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            let process_identity = super::identity::read_process_details(pid)
+                .await
+                .ok()
+                .map(|(_, identity)| identity);
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            let process_identity = None;
+            anyhow::Ok(PidRecord {
+                pid,
+                process_start_time,
+                process_identity,
+                executable_identity: launched_identity,
+            })
         }
         .await
         {
-            Ok(process_start_time) => PidRecord {
-                pid,
-                process_start_time,
-            },
+            Ok(record) => record,
             Err(err) => {
                 let _ = self.terminate_process(pid);
                 let mut context =
@@ -263,7 +313,7 @@ impl PidBackend {
             });
         }
         #[cfg(windows)]
-        if matches!(self.command_kind, PidCommandKind::UpdateLoop) {
+        if matches!(self.command_kind, PidCommandKind::UpdateLoop { .. }) {
             self.finish_updater_start(&record, replacement.as_ref())
                 .await?;
         }

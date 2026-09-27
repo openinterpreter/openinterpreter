@@ -1,11 +1,12 @@
 ---
 source: tui/src/chatwidget/tests/status_and_layout.rs
+assertion_line: 4833
 expression: normalized_backend_snapshot(terminal.backend())
 ---
 "                                                                                "
-"• Checking files (0s • esc to interrupt) · 1 background terminal running · /ps …"
+"• Checking files and preparing a response (0s • esc to interrupt) · 1 backgroun…"
 "                                                                                "
 "                                                                                "
 "› Ask Codex to do anything                                                      "
 "                                                                                "
-"  gpt-5.6-sol default · /tmp/project                                            "
+"  GPT-5.6-Sol default · /tmp/project                                            "

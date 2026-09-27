@@ -1,0 +1,12 @@
+---
+source: tui/src/chatwidget/realtime_tests/caption_replay.rs
+assertion_line: 1586
+expression: rendered
+---
+
+› Typed question
+
+• Checking the typed request
+• Typed reasoning summary
+
+› spoken correction

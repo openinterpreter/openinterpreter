@@ -77,7 +77,7 @@ impl ReadMcpResourceHandler {
             arguments: arguments.clone(),
         };
 
-        run_resource_operation(&session, turn.as_ref(), &call_id, invocation, async {
+        run_resource_operation(&session, &step_context, &call_id, invocation, async {
             ensure_model_can_access_mcp_server(turn.as_ref(), &server)?;
             let result = mcp
                 .read_resource(&server, ReadResourceRequestParams::new(uri.clone()))

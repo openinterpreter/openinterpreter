@@ -1,12 +1,14 @@
 use super::App;
+use super::GeneratedRecap;
 use super::RECAP_DELAY;
-use super::RECAP_HISTORY_MAX_TURNS;
 use super::RECAP_MAX_CHARS;
+use super::RECAP_NEXT_MAX_CHARS;
 use super::RECAP_PROMPT_MAX_BYTES;
 use super::RECAP_RETRY_DELAY;
 use super::RecapProgress;
 use super::RecapRequest;
 use super::RecapState;
+use super::history::RECAP_HISTORY_MAX_TURNS;
 use super::parse_recap;
 use super::recap_history;
 use super::recap_prompt;
@@ -21,10 +23,18 @@ use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::ThreadRecapHistoryCell;
 use crate::history_cell::ThreadRecapLoadingCell;
 use crate::history_cell::UserHistoryCell;
+use crate::line_truncation::line_width;
+use crate::style::accent_color;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnStatus;
 use codex_protocol::ThreadId;
 use pretty_assertions::assert_eq;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::Modifier;
+use ratatui::style::Stylize;
+use ratatui::widgets::Paragraph;
+use ratatui::widgets::Widget;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,6 +58,7 @@ fn turn(status: TurnStatus) -> Turn {
 fn user_history_cell(message: &str) -> Arc<dyn HistoryCell> {
     Arc::new(UserHistoryCell {
         message: message.to_string(),
+        spoken: false,
         text_elements: Vec::new(),
         local_image_paths: Vec::new(),
         remote_image_urls: Vec::new(),
@@ -109,6 +120,7 @@ fn recap_history_ignores_activity_previous_recaps_and_empty_messages() {
         recap_history(&cells),
         "User: Implement recap\n\nAssistant: Done"
     );
+    assert_eq!(recap_history(&cells[..2]), "");
 }
 
 #[test]
@@ -132,28 +144,153 @@ fn recap_history_caps_utf8_bytes_without_splitting_characters() {
     let history = recap_history(&cells);
 
     assert!(recap_prompt(&history).len() <= RECAP_PROMPT_MAX_BYTES);
-    assert!(history.starts_with("User: 最新の進捗🦀"));
+    assert!(history.starts_with("Pending user request: 最新の進捗🦀"));
+}
+
+#[test]
+fn recap_history_keeps_eight_exchanges_and_the_pending_correction_once() {
+    let mut cells = Vec::new();
+    for index in 0..10 {
+        cells.push(user_history_cell(&format!("request-{index}")));
+        cells.push(assistant_history_cell(&format!("result-{index}")));
+    }
+    cells.push(user_history_cell("Keep this queued; do not implement it."));
+    let expected = (2..10)
+        .map(|index| format!("User: request-{index}\n\nAssistant: result-{index}"))
+        .chain(["Pending user request: Keep this queued; do not implement it.".to_string()])
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    assert_eq!(recap_history(&cells), expected);
+}
+
+#[test]
+fn recap_history_preserves_steering_and_intermediate_progress() {
+    let cells = vec![
+        assistant_history_cell("Orphaned older answer"),
+        user_history_cell("Fix the parser"),
+        user_history_cell("Keep the API unchanged"),
+        assistant_history_cell("The parser fix is implemented"),
+        assistant_history_cell("All twelve tests pass"),
+        user_history_cell("Fix the parser"),
+    ];
+    assert_eq!(
+        recap_history(&cells),
+        "User: Fix the parser\n\nKeep the API unchanged\n\nAssistant: The parser fix is implemented\n\nAll twelve tests pass\n\nPending user request: Fix the parser"
+    );
+    assert_eq!(
+        recap_history(&[assistant_history_cell("Orphaned answer")]),
+        ""
+    );
+}
+
+#[test]
+fn recap_history_drops_old_whole_exchanges_before_clipping_newest() {
+    let cells = vec![
+        user_history_cell("Old request"),
+        assistant_history_cell(&"old ".repeat(RECAP_PROMPT_MAX_BYTES)),
+        user_history_cell("Current request"),
+        assistant_history_cell("Implemented; what should happen on empty input?"),
+    ];
+    assert_eq!(
+        recap_history(&cells),
+        "[Earlier exchanges omitted]\n\nUser: Current request\n\nAssistant: Implemented; what should happen on empty input?"
+    );
+}
+
+#[test]
+fn recap_history_excerpts_both_ends_and_keeps_the_latest_correction() {
+    let large = "最新🦀".repeat(RECAP_PROMPT_MAX_BYTES);
+    let cells = vec![
+        user_history_cell(&format!("Request start {large} request end")),
+        assistant_history_cell(&format!("Answer start {large} what should empty input do?")),
+        user_history_cell(&format!("Correction start {large} keep it queued")),
+    ];
+    let history = recap_history(&cells);
+    assert!(recap_prompt(&history).len() <= RECAP_PROMPT_MAX_BYTES);
+    for expected in [
+        "User: Request start",
+        "request end",
+        "Assistant: Answer start",
+        "what should empty input do?",
+        "Pending user request: Correction start",
+        "keep it queued",
+    ] {
+        assert!(history.contains(expected), "missing {expected}");
+    }
+    assert_eq!(history.matches("[... excerpted ...]").count(), 3);
+}
+
+#[test]
+fn oversized_request_uses_space_left_by_short_reply_and_correction() {
+    let cells = vec![
+        user_history_cell(&format!(
+            "Request start {} request end",
+            "🦀".repeat(RECAP_PROMPT_MAX_BYTES)
+        )),
+        assistant_history_cell("Implemented; twelve tests pass."),
+        user_history_cell("Keep further work queued."),
+    ];
+    let prompt = recap_prompt(&recap_history(&cells));
+    assert!(prompt.len() <= RECAP_PROMPT_MAX_BYTES);
+    assert!(RECAP_PROMPT_MAX_BYTES - prompt.len() < 8);
+    for expected in [
+        "User: Request start",
+        "request end",
+        "Assistant: Implemented; twelve tests pass.",
+        "Pending user request: Keep further work queued.",
+    ] {
+        assert!(prompt.contains(expected), "missing {expected}");
+    }
 }
 
 #[test]
 fn generated_recap_is_normalized_and_bounded() {
-    let expected = "🚀".repeat(RECAP_MAX_CHARS);
+    let summary = "🚀".repeat(RECAP_MAX_CHARS);
+    let action = "🚀".repeat(RECAP_NEXT_MAX_CHARS);
     let cases = [
         (
-            serde_json::json!({ "recap": "  Fixed the parser.  \n" }).to_string(),
-            Some("Fixed the parser.".to_string()),
+            serde_json::json!({"summary": "  Fixed the parser.  ", "next_action": "  Run integration tests.  "}),
+            Some(GeneratedRecap {
+                summary: "Fixed the parser.".to_string(),
+                next_action: Some("Run integration tests.".to_string()),
+            }),
         ),
         (
-            serde_json::json!({ "recap": format!("{expected}discarded") }).to_string(),
-            Some(expected),
+            serde_json::json!({"summary": "Done", "next_action": "  "}),
+            Some(GeneratedRecap {
+                summary: "Done".to_string(),
+                next_action: None,
+            }),
         ),
-        ("not json".to_string(), None),
-        (r#"{"recap":"  \t  "}"#.to_string(), None),
+        (
+            serde_json::json!({"summary": summary, "next_action": action}),
+            Some(GeneratedRecap {
+                summary: summary.clone(),
+                next_action: Some(action.clone()),
+            }),
+        ),
+        (
+            serde_json::json!({"summary": format!("{summary}x"), "next_action": null}),
+            None,
+        ),
+        (
+            serde_json::json!({"summary": "Done", "next_action": format!("{action}x")}),
+            None,
+        ),
+        (
+            serde_json::json!({"summary": " ", "next_action": null}),
+            None,
+        ),
+        (serde_json::json!({"summary": "Missing action field"}), None),
+        (
+            serde_json::json!({"summary": "Done", "next_action": null, "unexpected": true}),
+            None,
+        ),
     ];
-
     for (response, expected) in cases {
-        assert_eq!(parse_recap(&response), expected, "response: {response}");
+        assert_eq!(parse_recap(&response.to_string()), expected);
     }
+    assert_eq!(parse_recap("not json"), None);
 }
 
 #[test]
@@ -315,7 +452,7 @@ fn regaining_focus_preserves_only_manual_in_flight_request() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn scheduled_check_fires_at_recap_deadline() {
+async fn scheduled_check_fires_after_thirty_minutes() {
     let thread_id = ThreadId::new();
     let now = Instant::now();
     let mut app = make_test_app().await;
@@ -329,7 +466,7 @@ async fn scheduled_check_fires_at_recap_deadline() {
     app.schedule_recap_check(thread_id, now);
     tokio::task::yield_now().await;
 
-    tokio::time::advance(RECAP_DELAY - Duration::from_secs(/*secs*/ 1)).await;
+    tokio::time::advance(Duration::from_secs(/*secs*/ 30 * 60 - 1)).await;
     tokio::task::yield_now().await;
     assert!(matches!(event_rx.try_recv(), Err(TryRecvError::Empty)));
 
@@ -517,20 +654,28 @@ fn restored_history_never_reduces_observed_completed_turns() {
 }
 
 #[test]
-fn recap_history_cell_uses_labeled_checkpoint_layout() {
+fn recap_history_cell_uses_hanging_indent_and_right_padding() {
     let cell =
         ThreadRecapHistoryCell::new("Automatic recaps stay compact on wide terminals.".to_string());
-    let rendered = cell
-        .display_lines(/*width*/ 64)
+    let lines = cell.display_lines(/*width*/ 56);
+    assert!(lines.iter().all(|line| {
+        line.style
+            .add_modifier
+            .contains(Modifier::ITALIC | Modifier::DIM)
+    }));
+    assert_eq!(
+        &lines[0].spans[..3],
+        &["  ".into(), "↳ ".dim(), "Recap: ".bold()],
+    );
+    let rendered = lines
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
 
     insta::assert_snapshot!(rendered, @r"
-    ─ Conversation recap ───────────────────────────────────────────
-
-      Automatic recaps stay compact on wide terminals.
+      ↳ Recap: Automatic recaps stay compact on wide
+               terminals.
     ");
 }
 
@@ -547,11 +692,117 @@ fn recap_history_cell_wraps_in_narrow_terminals() {
         .join("\n");
 
     insta::assert_snapshot!(rendered, @r"
-    ─ Conversation recap ───────────
-
-      Keep conversation recaps
-      readable in narrow terminals.
+      ↳ Recap: Keep conversation
+               recaps readable in
+               narrow terminals.
     ");
+}
+
+#[test]
+fn recap_history_cell_preserves_unicode_and_url_tokens() {
+    let cell = ThreadRecapHistoryCell::new(
+        "Résumé ready. See https://example.com/review/42 日本語 details.".to_string(),
+    );
+    let rendered = cell
+        .display_lines(/*width*/ 48)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    insta::assert_snapshot!(rendered, @r"
+      ↳ Recap: Résumé ready. See
+               https://example.com/review/42
+               日本語 details.
+    ");
+}
+
+#[test]
+fn recap_history_cell_wraps_long_urls_in_narrow_terminals() {
+    let cell = ThreadRecapHistoryCell::new(
+        "The café review is paused with the draft ready at https://example.com/review/42. 日本語"
+            .to_string(),
+    );
+    let lines = cell.display_lines(/*width*/ 32);
+    assert!(lines.iter().all(|line| line_width(line) <= 30));
+    assert!(
+        lines
+            .iter()
+            .skip(/*n*/ 1)
+            .all(|line| line.to_string().starts_with("           "))
+    );
+    assert!(lines.iter().all(|line| {
+        line.style
+            .add_modifier
+            .contains(Modifier::ITALIC | Modifier::DIM)
+    }));
+    let rendered = lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    insta::assert_snapshot!(rendered, @"
+    ↳ Recap: The café review is
+             paused with the
+             draft ready at
+             https://example.com
+             /review/42. 日本語
+    ");
+}
+
+#[test]
+fn recap_history_cell_splits_only_urls_wider_than_the_text_column() {
+    for (url, expected) in [
+        (
+            "https://example.com",
+            vec!["  ↳ Recap: https://example.com"],
+        ),
+        (
+            "https://example.com/",
+            vec!["  ↳ Recap: https://example.com", "           /"],
+        ),
+        (
+            "https://a.co/ｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞ",
+            vec!["  ↳ Recap: https://a.co/ｶﾞｶﾞｶﾞ", "           ｶﾞｶﾞｶﾞ"],
+        ),
+    ] {
+        let cell = ThreadRecapHistoryCell::new(url.to_string());
+        let lines = cell.display_lines(/*width*/ 32);
+        assert!(lines.iter().all(|line| line_width(line) <= 30));
+        assert_eq!(
+            lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            expected
+        );
+        let displayed_url = lines
+            .iter()
+            .map(|line| line.to_string().chars().skip(/*n*/ 11).collect::<String>())
+            .collect::<String>();
+        assert_eq!(displayed_url, url);
+    }
+}
+
+#[test]
+fn recap_history_cell_uses_available_space_below_indent_width() {
+    let cell = ThreadRecapHistoryCell::new(
+        "Resume this task.\nhttps://example.com/review/42.".to_string(),
+    );
+    let rendered = cell
+        .display_lines(/*width*/ 12)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    insta::assert_snapshot!(rendered, @r"
+    ↳ Recap:
+    Resume
+    this task.
+    https://ex
+    ample.com/
+    review/42.
+    ");
+    assert_eq!(cell.display_lines(/*width*/ 0), Vec::new());
 }
 
 #[test]
@@ -571,16 +822,73 @@ fn recap_history_cell_preserves_heading_in_raw_history() {
 }
 
 #[test]
-fn recap_history_cell_preserves_explicit_line_breaks() {
-    let cell = ThreadRecapHistoryCell::new(
-        "Finished the parser.\nNext: run the focused tests.".to_string(),
+fn recap_history_cell_wraps_next_action_urls_in_narrow_terminals() {
+    let cell = ThreadRecapHistoryCell::new("The café draft is ready.".to_string())
+        .with_next_action(Some("Review https://example.com/review/42.".to_string()));
+    let lines = cell.display_lines(/*width*/ 32);
+    assert!(lines.iter().all(|line| line_width(line) <= 30));
+    assert_eq!(
+        lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .find(|span| span.content == "Next: "),
+        Some(&"Next: ".bold().fg(accent_color()).italic()),
     );
-    let displayed = cell
-        .display_lines(/*width*/ 48)
+    let rendered = lines
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
+
+    insta::assert_snapshot!(rendered, @r"
+      ↳ Recap: The café draft is
+               ready.
+               Next: Review
+               https://example.com
+               /review/42.
+    ");
+}
+
+#[test]
+fn recap_history_cell_preserves_line_breaks_and_optional_next() {
+    let cell = ThreadRecapHistoryCell::new("Finished the parser.\nTwelve tests pass.".to_string())
+        .with_next_action(Some(
+            "Run focused tests and check the empty-input case.".to_string(),
+        ));
+    let hyperlink_lines = cell.display_hyperlink_lines(/*width*/ 48);
+    for line in &hyperlink_lines {
+        let source = line.source.as_ref().expect("recap source");
+        assert!(
+            source
+                .styled_range(source.range.clone())
+                .spans
+                .iter()
+                .all(|span| {
+                    span.style
+                        .add_modifier
+                        .contains(ratatui::style::Modifier::DIM)
+                })
+        );
+    }
+    let lines = hyperlink_lines
+        .into_iter()
+        .map(|line| line.line)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .find(|span| span.content == "Next: "),
+        Some(&"Next: ".bold().fg(accent_color()).italic()),
+    );
+    let area = Rect::new(
+        /*x*/ 0,
+        /*y*/ 0,
+        /*width*/ 48,
+        lines.len() as u16,
+    );
+    let mut buffer = Buffer::empty(area);
+    Paragraph::new(lines).render(area, &mut buffer);
     let raw = cell
         .raw_lines()
         .iter()
@@ -588,16 +896,12 @@ fn recap_history_cell_preserves_explicit_line_breaks() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    insta::assert_snapshot!(displayed, @r"
-    ─ Conversation recap ───────────────────────────
-
-      Finished the parser.
-      Next: run the focused tests.
-    ");
+    insta::assert_snapshot!("recap_dimmed", format!("{buffer:?}"));
     insta::assert_snapshot!(raw, @r"
     Conversation recap
     Finished the parser.
-    Next: run the focused tests.
+    Twelve tests pass.
+    Next: Run focused tests and check the empty-input case.
     ");
 }
 
@@ -635,7 +939,7 @@ async fn generated_recap_is_returned_for_synchronous_insertion() {
         .handle_generated_recap(
             request,
             temporary_thread_id,
-            Ok(serde_json::json!({ "recap": "  Continue with focused tests.  " }).to_string()),
+            Ok(serde_json::json!({ "summary": "  Continue with focused tests.  ", "next_action": null }).to_string()),
         )
         .expect("fresh recap");
 
@@ -654,7 +958,7 @@ async fn auto_recap_opt_out_discards_results_without_retrying() {
     let thread_id = ThreadId::new();
     let mut app = app_with_visible_thread(thread_id).await;
     for result in [
-        Ok(serde_json::json!({ "recap": "obsolete" }).to_string()),
+        Ok(serde_json::json!({ "summary": "obsolete", "next_action": null }).to_string()),
         Err("temporary failure".to_string()),
     ] {
         let (request, temporary_thread_id) = track_in_flight_recap(&mut app, thread_id);
@@ -682,7 +986,7 @@ async fn obsolete_recap_result_does_not_clear_the_current_request() {
             ..request
         },
         temporary_thread_id,
-        Ok(serde_json::json!({ "recap": "obsolete" }).to_string()),
+        Ok(serde_json::json!({ "summary": "obsolete", "next_action": null }).to_string()),
     );
 
     assert!(cell.is_none());
@@ -701,7 +1005,10 @@ async fn newer_terminal_turn_invalidates_generated_recap() {
     let cell = app.handle_generated_recap(
         request,
         temporary_thread_id,
-        Ok(serde_json::json!({ "recap": "missing the failure" }).to_string()),
+        Ok(
+            serde_json::json!({ "summary": "missing the failure", "next_action": null })
+                .to_string(),
+        ),
     );
 
     assert!(cell.is_none());

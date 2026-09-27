@@ -70,9 +70,16 @@ use codex_core::config::ConfigBuilder;
 use codex_exec_server::EnvironmentManager;
 use codex_features::Feature;
 use codex_feedback::CodexFeedback;
+use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+use codex_rollout::RolloutItem;
+use codex_rollout::RolloutRecorder;
+use codex_rollout::append_rollout_item_to_path;
 use codex_state::PINNED_THREAD_SECTION_ID;
 use codex_state::PINNED_THREAD_SECTION_NAME;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -109,6 +116,9 @@ use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+
+#[path = "mcp_resource/plugin_metadata_refresh.rs"]
+mod plugin_metadata_refresh;
 
 pub(super) const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const TEST_RESOURCE_URI: &str = "test://codex/resource";
@@ -1255,6 +1265,104 @@ async fn resume_revalidates_persisted_thread_after_config_load(
             );
         }
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_reloads_config_when_saved_workspace_roots_change() -> Result<()> {
+    let responses_server = create_mock_responses_server_repeating_assistant("Ready").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&responses_server.uri()).write(codex_home.path())?;
+    let filename_timestamp = "2025-01-05T12-00-00";
+    let thread_id = create_fake_rollout(
+        codex_home.path(),
+        filename_timestamp,
+        "2025-01-05T12:00:00Z",
+        "Saved user message",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let path = rollout_path(codex_home.path(), filename_timestamp, &thread_id);
+    let resume_cwd = TempDir::new()?;
+    let saved_workspace = TempDir::new()?;
+    let cwd = AbsolutePathBuf::from_absolute_path(resume_cwd.path())?;
+    let saved_root = AbsolutePathBuf::from_absolute_path(saved_workspace.path())?;
+    let settings: ThreadSettingsAppliedEvent = serde_json::from_value(json!({
+        "thread_id": thread_id,
+        "thread_settings": {
+            "model": "gpt-5.4",
+            "model_provider_id": "mock_provider",
+            "cwd": cwd,
+            "runtime_workspace_roots": [saved_root],
+            "approval_policy": "never",
+            "approvals_reviewer": "user",
+            "permission_profile": PermissionProfile::read_only(),
+            "collaboration_mode": { "mode": "default", "settings": { "model": "gpt-5.4" } },
+        },
+    }))?;
+    append_rollout_item_to_path(
+        &path,
+        &RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(settings.clone())),
+    )
+    .await?;
+
+    let blocked_resume = Arc::new(BlockedResumeConfig {
+        cwd: cwd.clone(),
+        matching_loads: AtomicUsize::new(0),
+        entered: Notify::new(),
+        release: Notify::new(),
+    });
+    let client =
+        start_resource_in_process_client(codex_home.path(), blocked_resume.clone()).await?;
+    let sender = client.sender();
+    let mut resume = pin!(sender.request(ClientRequest::ThreadResume {
+        request_id: RequestId::Integer(1),
+        params: ThreadResumeParams {
+            thread_id: thread_id.clone(),
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            ..Default::default()
+        },
+    }));
+    assert!(poll!(&mut resume).is_pending());
+    let update_result = async {
+        timeout(DEFAULT_READ_TIMEOUT, blocked_resume.entered.notified())
+            .await
+            .context("resume did not enter config loading")?;
+        let mut cleared = settings;
+        cleared.thread_settings.runtime_workspace_roots = Some(Vec::new());
+        append_rollout_item_to_path(
+            &path,
+            &RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(cleared)),
+        )
+        .await?;
+        anyhow::Ok(())
+    }
+    .await;
+    blocked_resume.release.notify_one();
+    update_result?;
+    let resumed: ThreadResumeResponse = serde_json::from_value(
+        timeout(DEFAULT_READ_TIMEOUT, &mut resume)
+            .await??
+            .expect("resume updated thread"),
+    )?;
+    let (items, _, _) = RolloutRecorder::load_rollout_items(&path).await?;
+    client.shutdown().await?;
+
+    assert_eq!(resumed.runtime_workspace_roots, Vec::new());
+    assert!(
+        blocked_resume.matching_loads.load(Ordering::Relaxed) >= 2,
+        "roots-only updates must reload config"
+    );
+    let expected_thread_id = ThreadId::from_string(&thread_id)?;
+    let latest_roots = items.into_iter().rev().find_map(|item| match item {
+        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
+            if event.thread_id == Some(expected_thread_id) =>
+        {
+            Some(event.thread_settings.runtime_workspace_roots)
+        }
+        _ => None,
+    });
+    assert_eq!(latest_roots, Some(Some(Vec::new())));
     Ok(())
 }
 

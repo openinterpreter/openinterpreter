@@ -21,6 +21,7 @@ use crate::audio_track::EncodedAudio;
 type Result<T> = std::result::Result<T, &'static str>;
 const BLOCK: usize = 480;
 pub(super) const MAX_PROCESSING_DELAY: Duration = Duration::from_millis(/*millis*/ 500);
+pub(super) const PROCESSING_LATE: &str = "voice processing fell behind";
 
 struct Converter {
     resampler: rubato::Async<f32>,
@@ -150,6 +151,15 @@ impl Processor {
         Ok(())
     }
 
+    pub(super) fn set_render_rate(&mut self, rate: u32) -> Result<()> {
+        // Capture keeps its own rate and history across speaker-only changes.
+        if self.render.rate != rate {
+            self.render = Converter::new(rate)?;
+        }
+        self.reset_render();
+        Ok(())
+    }
+
     pub(super) fn reset_render(&mut self) {
         // Speaker changes discard old references without resetting capture or APM state.
         self.render.resampler.reset();
@@ -220,11 +230,11 @@ impl Processor {
         while let Some((at, input)) = self.capture.next() {
             let capture_age = now().saturating_duration_since(at);
             if capture_age > MAX_PROCESSING_DELAY {
-                return Err("voice processing fell behind");
+                return Err(PROCESSING_LATE);
             }
             let delay = (capture_age.as_millis() as i64 + self.render_delay).max(0);
             if delay > MAX_PROCESSING_DELAY.as_millis() as i64 {
-                return Err("voice processing fell behind");
+                return Err(PROCESSING_LATE);
             }
             self.apm
                 .set_stream_delay_ms(delay as i32)

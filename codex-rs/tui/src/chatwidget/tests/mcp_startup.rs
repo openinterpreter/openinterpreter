@@ -164,16 +164,16 @@ async fn mcp_startup_updates_preserve_streaming_status_suppression() {
 }
 
 #[tokio::test]
-async fn mcp_startup_summary_distinguishes_initial_resume_from_task_switch() {
+async fn mcp_startup_warning_identity_survives_resume_and_task_switch() {
     use AppServerTurnStatus::Completed;
     use AppServerTurnStatus::InProgress;
     use ReplayKind::ResumeInitialMessages;
     use ReplayKind::ThreadSnapshot;
 
-    for (replay_kind, status, compact) in [
-        (ResumeInitialMessages, Completed, true),
-        (ResumeInitialMessages, InProgress, false),
-        (ThreadSnapshot, Completed, false),
+    for (replay_kind, status) in [
+        (ResumeInitialMessages, Completed),
+        (ResumeInitialMessages, InProgress),
+        (ThreadSnapshot, Completed),
     ] {
         let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
         chat.replay_thread_turns(
@@ -194,7 +194,7 @@ async fn mcp_startup_summary_distinguishes_initial_resume_from_task_switch() {
                 compact_cells.push(cell.as_any().is::<history_cell::StartupWarningsCell>());
             }
         }
-        assert_eq!(compact_cells, vec![compact; 2]);
+        assert_eq!(compact_cells, vec![true; 2]);
     }
 }
 
@@ -214,6 +214,109 @@ async fn mcp_startup_complete_does_not_clear_running_task() {
     assert!(chat.bottom_pane.is_task_running());
     assert!(chat.bottom_pane.status_indicator_visible());
     assert_eq!(chat.status_state.current_status.header, "Working");
+}
+
+#[tokio::test]
+async fn review_opens_during_mcp_startup() {
+    for dismiss_completion in [false, true] {
+        let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+        chat.show_welcome_banner = false;
+        chat.set_mcp_startup_expected_servers(["slow".to_string()]);
+        notify_mcp_status(&mut chat, "slow", McpServerStartupState::Starting);
+        chat.bottom_pane
+            .set_composer_text("/review".to_string(), Vec::new(), Vec::new());
+        chat.bottom_pane
+            .set_remote_image_urls(vec!["https://example.com/image.png".to_string()]);
+        if dismiss_completion {
+            chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        }
+
+        chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(drain_insert_history(&mut rx).is_empty());
+        assert_eq!(chat.bottom_pane.composer_text(), "");
+        assert!(chat.bottom_pane.remote_image_urls().is_empty());
+        assert_chatwidget_snapshot!(
+            "review_during_mcp_startup",
+            render_bottom_popup(&chat, /*width*/ 80)
+        );
+    }
+}
+
+#[tokio::test]
+async fn inline_review_submits_during_mcp_startup() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_mcp_startup_expected_servers(["slow".to_string()]);
+    notify_mcp_status(&mut chat, "slow", McpServerStartupState::Starting);
+    chat.bottom_pane.set_composer_text(
+        "/review check regressions".to_string(),
+        Vec::new(),
+        Vec::new(),
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(
+        op_rx.try_recv().expect("review command"),
+        Op::Review {
+            target: ReviewTarget::Custom {
+                instructions: "check regressions".to_string(),
+            }
+        }
+    );
+    assert!(drain_insert_history(&mut rx).is_empty());
+    assert_eq!(chat.bottom_pane.composer_text(), "");
+}
+
+#[tokio::test]
+async fn review_during_mcp_startup_preserves_draft_when_foreground_work_is_pending() {
+    for activity in ["turn", "review", "pending", "queued", "images"] {
+        for draft in ["/review", "/review check regressions"] {
+            let (mut chat, mut rx, mut op_rx) =
+                make_chatwidget_manual(/*model_override*/ None).await;
+            chat.set_mcp_startup_expected_servers(["slow".to_string()]);
+            notify_mcp_status(&mut chat, "slow", McpServerStartupState::Starting);
+            match activity {
+                "turn" => handle_turn_started(&mut chat, "turn-1"),
+                "review" => chat.review.is_review_mode = true,
+                "pending" => chat.input_queue.user_turn_pending_start = true,
+                "images" => chat.prepare_image_submission(
+                    "image prompt".into(),
+                    UserMessageHistoryRecord::UserMessageText,
+                    UserMessageSource::Prompt,
+                ),
+                "queued" => chat
+                    .input_queue
+                    .queued_user_messages
+                    .push_back(UserMessage::from("queued prompt".to_string()).into()),
+                _ => unreachable!(),
+            }
+            chat.bottom_pane
+                .set_composer_text(draft.to_string(), Vec::new(), Vec::new());
+            chat.bottom_pane
+                .set_remote_image_urls(vec!["https://example.com/image.png".to_string()]);
+
+            chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+            assert_eq!(chat.bottom_pane.composer_text(), draft);
+            assert_eq!(
+                chat.bottom_pane.remote_image_urls(),
+                vec!["https://example.com/image.png".to_string()]
+            );
+            let errors = drain_insert_history(&mut rx)
+                .iter()
+                .map(|cell| lines_to_single_string(cell))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                errors,
+                vec!["■ '/review' is disabled while a task is in progress.\n".to_string()]
+            );
+            assert!(
+                !std::iter::from_fn(|| op_rx.try_recv().ok())
+                    .any(|op| matches!(op, Op::Review { .. } | Op::UserTurn { .. }))
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -245,6 +348,7 @@ async fn pending_mcp_startup_does_not_block_queued_follow_up() {
 #[tokio::test]
 async fn pending_mcp_startup_dispatches_queued_slash_commands() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.empty_state_animation.borrow_mut().start_fresh();
     chat.set_mcp_startup_expected_servers(["slow".to_string()]);
     notify_mcp_status(&mut chat, "slow", McpServerStartupState::Starting);
     chat.thread_id = Some(ThreadId::new());
@@ -255,6 +359,20 @@ async fn pending_mcp_startup_dispatches_queued_slash_commands() {
 
     assert_matches!(rx.try_recv(), Ok(AppEvent::OpenResumePicker));
     assert_no_submit_op(&mut op_rx);
+    let area = Rect::new(
+        /*x*/ 0, /*y*/ 0, /*width*/ 48, /*height*/ 17,
+    );
+    let mut buffer = ratatui::buffer::Buffer::empty(area);
+    assert!(
+        chat.empty_state_animation
+            .borrow_mut()
+            .render_in(
+                area,
+                &mut buffer,
+                crate::empty_state_animation::Presentation::Animated,
+            )
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -288,7 +406,10 @@ async fn pending_mcp_startup_does_not_drain_follow_up_before_review_starts() {
             .set_composer_text(message.to_string(), Vec::new(), Vec::new());
         chat.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     }
+    chat.bottom_pane
+        .set_composer_text("new draft".to_string(), Vec::new(), Vec::new());
     handle_turn_completed(&mut chat, "turn-1", /*duration_ms*/ None);
+    assert_eq!(chat.bottom_pane.composer_text(), "new draft");
 
     chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -504,7 +625,7 @@ async fn mcp_startup_failure_restores_running_status_header() {
         "MCP client for `alpha` failed to start: handshake failed",
     );
     notify_mcp_status(&mut chat, "beta", McpServerStartupState::Ready);
-    let warnings = super::helpers::drain_insert_history(&mut rx);
+    let warnings = drain_insert_history(&mut rx);
     insta::assert_snapshot!(
         "runtime_mcp_warning",
         warnings
@@ -535,6 +656,7 @@ async fn mcp_startup_complete_preserves_review_status() {
 
     chat.on_guardian_assessment(GuardianAssessmentEvent {
         review_reason: None,
+        model_context: None,
         id: "guardian-1".to_string(),
         target_item_id: Some("guardian-target-1".to_string()),
         plugin_id: None,

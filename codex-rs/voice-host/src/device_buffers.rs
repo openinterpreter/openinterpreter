@@ -98,12 +98,11 @@ pub(super) struct Buffers {
     pub(super) speaker_failure_gate: Mutex<()>,
     pub(super) serviced: AtomicBool,
     pub(super) failed: AtomicBool,
+    pub(super) capture_dropped: AtomicBool,
+    pub(super) render_dropped: AtomicBool,
     pub(super) microphone_peak: AtomicU16,
     pub(super) speaker_peak: AtomicU16,
     pub(super) queued: AtomicU32,
-    pub(super) last_dac_ns: AtomicU64,
-    pub(super) clock: Instant,
-    pub(super) callback_sequence: AtomicU64,
 }
 
 impl Buffers {
@@ -136,12 +135,11 @@ impl Buffers {
             speaker_failure_gate: Mutex::new(()),
             serviced: AtomicBool::new(false),
             failed: AtomicBool::new(false),
+            capture_dropped: AtomicBool::new(false),
+            render_dropped: AtomicBool::new(false),
             microphone_peak: AtomicU16::new(/*v*/ 0),
             speaker_peak: AtomicU16::new(/*v*/ 0),
             queued: AtomicU32::new(/*v*/ 0),
-            last_dac_ns: AtomicU64::new(/*v*/ 0),
-            clock: Instant::now(),
-            callback_sequence: AtomicU64::new(/*v*/ 0),
         }
     }
 

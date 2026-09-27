@@ -1,4 +1,5 @@
 //! Shared history-cell building blocks reused across transcript concerns.
+//! Wrapped prefixes remain display-only while annotated rows retain their logical source.
 
 use super::*;
 
@@ -80,13 +81,24 @@ impl PrefixedWrappedHistoryCell {
 
 impl HistoryCell for PrefixedWrappedHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        visible_lines(self.display_hyperlink_lines(width))
+    }
+
+    fn display_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
         if width == 0 {
             return Vec::new();
         }
-        let opts = RtOptions::new(width.max(1) as usize)
+        let opts = RtOptions::new(usize::from(width))
             .initial_indent(self.initial_prefix.clone())
             .subsequent_indent(self.subsequent_prefix.clone());
-        adaptive_wrap_lines(&self.text, opts)
+        crate::terminal_hyperlinks::adaptive_wrap_hyperlink_lines(
+            &plain_hyperlink_lines(self.text.lines.clone()),
+            opts,
+        )
+    }
+
+    fn transcript_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        self.display_hyperlink_lines(width)
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
@@ -105,6 +117,48 @@ impl CompositeHistoryCell {
 }
 
 impl HistoryCell for CompositeHistoryCell {
+    fn warning_entries(&self) -> Vec<WarningEntry> {
+        self.parts
+            .iter()
+            .flat_map(|part| part.warning_entries())
+            .collect()
+    }
+
+    fn live_raw_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        for part in &self.parts {
+            let part = part.live_raw_lines();
+            if !part.is_empty() {
+                if !lines.is_empty() {
+                    lines.push(Line::default());
+                }
+                lines.extend(part);
+            }
+        }
+        lines
+    }
+
+    fn warning_keys(&self) -> Vec<WarningKey<'_>> {
+        self.parts
+            .iter()
+            .flat_map(|part| part.warning_keys())
+            .collect()
+    }
+
+    fn compact_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        let mut out = Vec::new();
+        for part in &self.parts {
+            let lines = part.compact_hyperlink_lines(width);
+            if !lines.is_empty() {
+                if !out.is_empty() {
+                    out.push(HyperlinkLine::from(""));
+                }
+                out.extend(lines);
+            }
+        }
+        out
+    }
+
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut out: Vec<Line<'static>> = Vec::new();
         let mut first = true;
@@ -173,3 +227,7 @@ impl HistoryCell for CompositeHistoryCell {
         false
     }
 }
+
+#[cfg(test)]
+#[path = "base_tests.rs"]
+mod tests;

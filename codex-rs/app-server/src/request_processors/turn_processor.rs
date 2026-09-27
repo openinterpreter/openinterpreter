@@ -3,11 +3,13 @@ use super::*;
 use codex_agent_extension::AgentInvocation;
 use codex_agent_extension::AgentRun;
 use codex_agent_extension::AgentRunner;
+use codex_app_server_protocol::ImageReference as V2ImageReference;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ImageReference as CoreImageReference;
 use codex_protocol::protocol::AdditionalContextEntry as CoreAdditionalContextEntry;
 use codex_protocol::protocol::AdditionalContextKind as CoreAdditionalContextKind;
 use codex_protocol::protocol::TurnSettingsUpdate;
@@ -23,7 +25,10 @@ pub(super) fn validate_user_input_image_urls(
     if input.iter().any(|item| {
         matches!(
             item,
-            V2UserInput::Image { url, .. } if is_remote_image_url(url)
+            V2UserInput::Image {
+                image: V2ImageReference::Inline { url },
+                ..
+            } if is_remote_image_url(url)
         )
     }) {
         return Err(invalid_request(REMOTE_IMAGE_URL_ERROR));
@@ -36,7 +41,7 @@ fn validate_response_item_image_urls(items: &[ResponseItem]) -> Result<(), JSONR
         ResponseItem::Message { content, .. } => content.iter().any(|item| {
             matches!(
                 item,
-                ContentItem::InputImage { image_url, .. } if is_remote_image_url(image_url)
+                ContentItem::InputImage { image: CoreImageReference::Inline { image_url }, .. } if is_remote_image_url(image_url)
             )
         }),
         ResponseItem::FunctionCallOutput { output, .. }
@@ -45,7 +50,7 @@ fn validate_response_item_image_urls(items: &[ResponseItem]) -> Result<(), JSONR
                 content.iter().any(|item| {
                     matches!(
                         item,
-                        FunctionCallOutputContentItem::InputImage { image_url, .. }
+                        FunctionCallOutputContentItem::InputImage { image: CoreImageReference::Inline { image_url }, .. }
                             if is_remote_image_url(image_url)
                     )
                 })
@@ -79,13 +84,11 @@ pub(crate) struct TurnRequestProcessor {
     thread_manager: Arc<ThreadManager>,
     outgoing: Arc<OutgoingMessageSender>,
     analytics_events_client: AnalyticsEventsClient,
-    arg0_paths: Arg0DispatchPaths,
     config: Arc<Config>,
     config_manager: ConfigManager,
     pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
     thread_state_manager: ThreadStateManager,
     thread_watch_manager: ThreadWatchManager,
-    thread_list_state_permit: Arc<Semaphore>,
     skills_watcher: Arc<SkillsWatcher>,
     turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
 }
@@ -113,9 +116,17 @@ fn map_additional_context(
         .collect()
 }
 
+#[derive(Default)]
+struct ThreadEnvironmentOverride {
+    environments: Option<TurnEnvironmentSelections>,
+    // Only default-environment updates replace the task's separately persisted root selection.
+    runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
+}
+
 struct ThreadSettingsBuildParams {
     method: &'static str,
-    environments: Option<TurnEnvironmentSelections>,
+    disabled_plugin_ids: Option<Vec<String>>,
+    environment_override: ThreadEnvironmentOverride,
     approval_policy: Option<codex_app_server_protocol::AskForApproval>,
     approvals_reviewer: Option<codex_app_server_protocol::ApprovalsReviewer>,
     sandbox_policy: Option<codex_app_server_protocol::SandboxPolicy>,
@@ -135,13 +146,11 @@ impl TurnRequestProcessor {
         thread_manager: Arc<ThreadManager>,
         outgoing: Arc<OutgoingMessageSender>,
         analytics_events_client: AnalyticsEventsClient,
-        arg0_paths: Arg0DispatchPaths,
         config: Arc<Config>,
         config_manager: ConfigManager,
         pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
         thread_state_manager: ThreadStateManager,
         thread_watch_manager: ThreadWatchManager,
-        thread_list_state_permit: Arc<Semaphore>,
         skills_watcher: Arc<SkillsWatcher>,
         turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
     ) -> Self {
@@ -152,13 +161,11 @@ impl TurnRequestProcessor {
             thread_manager,
             outgoing,
             analytics_events_client,
-            arg0_paths,
             config,
             config_manager,
             pending_thread_unloads,
             thread_state_manager,
             thread_watch_manager,
-            thread_list_state_permit,
             skills_watcher,
             turn_cost_worker,
         }
@@ -526,6 +533,10 @@ impl TurnRequestProcessor {
                 })?;
         self.ensure_direct_input_allowed(&request_id, thread.as_ref())
             .await?;
+        self.config_manager
+            .check_thread_model_provider(thread.config().await.as_ref())
+            .await
+            .map_err(|error| config_load_error(&error))?;
         if let Some(tool_output) = &params.tool_output {
             if !params.input.is_empty() {
                 return Err(invalid_request(
@@ -607,7 +618,7 @@ impl TurnRequestProcessor {
             }
         };
         let cwd = resolve_request_cwd(params.cwd)?;
-        let environments = self
+        let environment_override = self
             .build_environment_override(
                 thread.as_ref(),
                 cwd,
@@ -620,7 +631,8 @@ impl TurnRequestProcessor {
                 thread.as_ref(),
                 ThreadSettingsBuildParams {
                     method: "turn/start",
-                    environments,
+                    disabled_plugin_ids: params.disabled_plugin_ids,
+                    environment_override,
                     approval_policy: params.approval_policy,
                     approvals_reviewer: params.approvals_reviewer,
                     sandbox_policy: params.sandbox_policy,
@@ -660,7 +672,11 @@ impl TurnRequestProcessor {
             TurnInputSubmission::Started { turn_id } => (turn_id, true),
             TurnInputSubmission::Steered { turn_id } => (turn_id, false),
             TurnInputSubmission::NotSubmitted { reason } => {
-                let error = internal_error(format!("failed to submit turn input: {reason:?}"));
+                let error = if reason == NotSubmittedReason::ServerDraining {
+                    crate::error_code::server_draining_error()
+                } else {
+                    internal_error(format!("failed to submit turn input: {reason:?}"))
+                };
                 self.track_error_response(&request_id, &error, /*error_type*/ None);
                 return Err(error);
             }
@@ -704,9 +720,9 @@ impl TurnRequestProcessor {
         cwd: Option<AbsolutePathBuf>,
         workspace_roots: Option<Vec<AbsolutePathBuf>>,
         environment_selections: Option<Vec<TurnEnvironmentSelection>>,
-    ) -> Option<TurnEnvironmentSelections> {
+    ) -> ThreadEnvironmentOverride {
         if cwd.is_none() && workspace_roots.is_none() && environment_selections.is_none() {
-            return None;
+            return ThreadEnvironmentOverride::default();
         }
 
         // Explicit environment selections own their roots and pass through unchanged. Top-level
@@ -723,42 +739,37 @@ impl TurnRequestProcessor {
                     None => thread.config_snapshot().await.cwd().clone(),
                 },
             };
-            return Some(TurnEnvironmentSelections::new(
-                legacy_fallback_cwd,
-                environment_selections,
-            ));
+            return ThreadEnvironmentOverride {
+                environments: Some(TurnEnvironmentSelections::new(
+                    legacy_fallback_cwd,
+                    environment_selections,
+                )),
+                ..Default::default()
+            };
         }
 
-        let snapshot = thread.config_snapshot().await;
-        let current_cwd = snapshot.cwd().clone();
+        // Default-environment updates retain the task's fallback roots, not its active roots.
+        let snapshot = thread.thread_settings_snapshot().await;
+        let current_cwd = snapshot.cwd;
         let legacy_fallback_cwd = cwd.unwrap_or_else(|| current_cwd.clone());
         let workspace_roots = match workspace_roots {
             Some(workspace_roots) => workspace_roots,
-            None => {
-                // Match the pre-environment partial-update behavior: a cwd-only update retargets
-                // the old cwd root while preserving any additional roots. Deduplicate because the
-                // new cwd may already be present as an additional root.
-                let mut retargeted_workspace_roots = Vec::new();
-                for root in snapshot.workspace_roots {
-                    let root = if root == current_cwd {
-                        legacy_fallback_cwd.clone()
-                    } else {
-                        root
-                    };
-                    if !retargeted_workspace_roots.contains(&root) {
-                        retargeted_workspace_roots.push(root);
-                    }
-                }
-                retargeted_workspace_roots
-            }
+            None => path_utils::replace_path_and_deduplicate(
+                snapshot.runtime_workspace_roots.unwrap_or_default(),
+                current_cwd.as_path(),
+                legacy_fallback_cwd.clone(),
+            ),
         };
         let environment_selections = self
             .thread_manager
             .default_environment_selections(&legacy_fallback_cwd, &workspace_roots);
-        Some(TurnEnvironmentSelections::new(
-            legacy_fallback_cwd,
-            environment_selections,
-        ))
+        ThreadEnvironmentOverride {
+            environments: Some(TurnEnvironmentSelections::new(
+                legacy_fallback_cwd,
+                environment_selections,
+            )),
+            runtime_workspace_roots: Some(workspace_roots),
+        }
     }
 
     async fn build_thread_settings_overrides(
@@ -768,7 +779,12 @@ impl TurnRequestProcessor {
     ) -> Result<codex_protocol::protocol::ThreadSettingsOverrides, JSONRPCErrorError> {
         let ThreadSettingsBuildParams {
             method,
-            environments,
+            disabled_plugin_ids,
+            environment_override:
+                ThreadEnvironmentOverride {
+                    environments,
+                    runtime_workspace_roots,
+                },
             approval_policy,
             approvals_reviewer,
             sandbox_policy,
@@ -800,6 +816,7 @@ impl TurnRequestProcessor {
         };
 
         let has_any_overrides = has_environment_override
+            || disabled_plugin_ids.is_some()
             || approval_policy.is_some()
             || approvals_reviewer.is_some()
             || sandbox_policy.is_some()
@@ -823,24 +840,16 @@ impl TurnRequestProcessor {
                         "{method} permission selection missing thread snapshot"
                     )));
                 };
-                let overrides = ConfigOverrides {
-                    cwd: environments
-                        .as_ref()
-                        .map(|environments| environments.legacy_fallback_cwd.to_path_buf()),
-                    default_permissions: Some(permissions),
-                    codex_linux_sandbox_exe: self.arg0_paths.codex_linux_sandbox_exe.clone(),
-                    main_execve_wrapper_exe: self.arg0_paths.main_execve_wrapper_exe.clone(),
-                    ..Default::default()
-                };
+                let thread_config = thread.config().await;
+                let cwd = environments.as_ref().map_or_else(
+                    || snapshot.cwd().clone(),
+                    |environments| environments.legacy_fallback_cwd.clone(),
+                );
                 let config = self
                     .config_manager
-                    .load_for_cwd(
-                        /*request_overrides*/ None,
-                        overrides,
-                        Some(snapshot.cwd().to_path_buf()),
-                    )
+                    .load_permission_config_for_thread(&thread_config, cwd, permissions)
                     .await
-                    .map_err(|err| config_load_error(&err))?;
+                    .map_err(|error| config_load_error(&error))?;
                 // Startup config is allowed to fall back when requirements
                 // disallow a configured profile. An explicit settings update
                 // is different: reject it before accepting the request.
@@ -864,7 +873,9 @@ impl TurnRequestProcessor {
         if has_any_overrides {
             thread
                 .preview_thread_settings_overrides(CodexThreadSettingsOverrides {
+                    disabled_plugin_ids: disabled_plugin_ids.clone(),
                     environments: environments.clone(),
+                    runtime_workspace_roots: runtime_workspace_roots.clone(),
                     approval_policy,
                     approvals_reviewer,
                     sandbox_policy: sandbox_policy.clone(),
@@ -886,7 +897,9 @@ impl TurnRequestProcessor {
         }
 
         Ok(codex_protocol::protocol::ThreadSettingsOverrides {
+            disabled_plugin_ids,
             environments,
+            runtime_workspace_roots,
             profile_workspace_roots,
             approval_policy,
             approvals_reviewer,
@@ -912,7 +925,7 @@ impl TurnRequestProcessor {
         self.ensure_direct_input_allowed(request_id, thread.as_ref())
             .await?;
         let cwd = resolve_request_cwd(params.cwd)?;
-        let environments = self
+        let environment_override = self
             .build_environment_override(
                 thread.as_ref(),
                 cwd,
@@ -925,7 +938,8 @@ impl TurnRequestProcessor {
                 thread.as_ref(),
                 ThreadSettingsBuildParams {
                     method: "thread/settings/update",
-                    environments,
+                    disabled_plugin_ids: params.disabled_plugin_ids,
+                    environment_override,
                     approval_policy: params.approval_policy,
                     approvals_reviewer: params.approvals_reviewer,
                     sandbox_policy: params.sandbox_policy,
@@ -1016,6 +1030,10 @@ impl TurnRequestProcessor {
             })?;
         self.ensure_direct_input_allowed(request_id, thread.as_ref())
             .await?;
+        self.config_manager
+            .check_thread_model_provider(thread.config().await.as_ref())
+            .await
+            .map_err(|error| config_load_error(&error))?;
 
         if params.expected_turn_id.is_empty() {
             return Err(invalid_request("expectedTurnId must not be empty"));
@@ -1059,6 +1077,9 @@ impl TurnRequestProcessor {
             SteerSubmission::Steered { turn_id } => turn_id,
             SteerSubmission::NotSubmitted { reason } => {
                 let (message, data, error_type) = match reason {
+                    NotSubmittedReason::ServerDraining => {
+                        return Err(crate::error_code::server_draining_error());
+                    }
                     NotSubmittedReason::NoActiveTurn | NotSubmittedReason::NotIdle => (
                         "no active turn to steer".to_string(),
                         None,
@@ -1118,7 +1139,9 @@ impl TurnRequestProcessor {
                         None,
                         None,
                     ),
-                    NotSubmittedReason::PendingTriggerTurn | NotSubmittedReason::PlanMode => (
+                    NotSubmittedReason::PendingTriggerTurn
+                    | NotSubmittedReason::PlanMode
+                    | NotSubmittedReason::Superseded => (
                         "no active turn to steer".to_string(),
                         None,
                         Some(AnalyticsJsonRpcError::TurnSteer(
@@ -1438,7 +1461,7 @@ impl TurnRequestProcessor {
                 "paginated threads do not support detached review",
             ));
         }
-        let mut config = self.config.as_ref().clone();
+        let mut config = parent_thread.config().await.as_ref().clone();
         if let Some(review_model) = &config.review_model {
             config.model = Some(review_model.clone());
         }
@@ -1450,7 +1473,7 @@ impl TurnRequestProcessor {
         } = self
             .agent_runner
             .start(
-                parent_thread.session_configured().thread_id,
+                parent_thread.startup_metadata().thread_id,
                 AgentInvocation {
                     config,
                     prompt: prompt.to_string(),
@@ -1481,7 +1504,7 @@ impl TurnRequestProcessor {
         if let Some(mut thread) = stored_thread {
             let config_snapshot = review_thread.config_snapshot().await;
             apply_live_thread_settings(&mut thread, &config_snapshot);
-            thread.session_id = review_thread.session_configured().session_id.to_string();
+            thread.session_id = review_thread.startup_metadata().session_id.to_string();
             self.thread_watch_manager
                 .upsert_thread_silently(&thread.id)
                 .await;
@@ -1531,6 +1554,10 @@ impl TurnRequestProcessor {
         let (_, parent_thread) = self.load_thread(&thread_id).await?;
         self.ensure_direct_input_allowed(request_id, parent_thread.as_ref())
             .await?;
+        self.config_manager
+            .check_thread_model_provider(parent_thread.config().await.as_ref())
+            .await
+            .map_err(|error| config_load_error(&error))?;
         let (review_request, display_text, target_prompt) =
             Self::review_request_from_target(target)?;
         match delivery.unwrap_or(ApiReviewDelivery::Inline).to_core() {
@@ -1580,11 +1607,10 @@ impl TurnRequestProcessor {
             let is_running = matches!(thread.agent_status().await, AgentStatus::Running);
             {
                 let mut thread_state = thread_state.lock().await;
-                if let Some(active_turn) = thread_state.active_turn_snapshot() {
-                    if active_turn.id != turn_id {
+                if let Some(active_turn_id) = thread_state.active_turn_id() {
+                    if active_turn_id != turn_id {
                         return Err(invalid_request(format!(
-                            "expected active turn id {turn_id} but found {}",
-                            active_turn.id
+                            "expected active turn id {turn_id} but found {active_turn_id}"
                         )));
                     }
                 } else if thread_state.last_terminal_turn_id.as_deref() == Some(turn_id.as_str())
@@ -1635,8 +1661,6 @@ impl TurnRequestProcessor {
             outgoing: Arc::clone(&self.outgoing),
             pending_thread_unloads: Arc::clone(&self.pending_thread_unloads),
             thread_watch_manager: self.thread_watch_manager.clone(),
-            thread_list_state_permit: self.thread_list_state_permit.clone(),
-            fallback_model_provider: self.config.model_provider_id.clone(),
             codex_home: self.config.codex_home.to_path_buf(),
             thread_unload_delay: self.config.thread_unload_delay,
             skills_watcher: Arc::clone(&self.skills_watcher),

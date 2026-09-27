@@ -596,6 +596,7 @@ fn workspace_share_context_preserves_publish_capability() {
 
 fn directory_plugin(id: &str, name: &str) -> RemotePluginDirectoryItem {
     RemotePluginDirectoryItem {
+        canonical_app_id: None,
         id: id.to_string(),
         name: name.to_string(),
         scope: RemotePluginScope::Global,
@@ -639,6 +640,7 @@ fn directory_plugin(id: &str, name: &str) -> RemotePluginDirectoryItem {
                 screenshot_urls: Vec::new(),
             },
             skills: Vec::new(),
+            onboarding_skill_name: None,
             mcp_servers: Vec::new(),
             scheduled_tasks: None,
         },

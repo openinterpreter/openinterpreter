@@ -44,7 +44,6 @@ where
         network_environment_id: None,
         sandbox_permissions: SandboxPermissions::UseDefault,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
-        windows_sandbox_private_desktop: false,
         justification: None,
         arg0: None,
     };
@@ -55,6 +54,7 @@ where
         &cwd,
         std::slice::from_ref(&cwd),
         &None,
+        /*codex_self_exe*/ &None,
         /*use_legacy_landlock*/ false,
         /*stdout_stream*/ None,
     )

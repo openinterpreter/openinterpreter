@@ -1,8 +1,119 @@
+#[path = "agent_center_tests.rs"]
+mod command_center;
+
+use super::super::agents_overview_view::AgentsOverviewGrouping;
 use super::*;
+use crate::chatwidget::tests::helpers::normalize_agent_center_snapshot;
+
+#[tokio::test]
+async fn overview_worktree_creation_busy_state() {
+    let mut app = make_test_app().await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    app.app_event_tx = AppEventSender::new(tx);
+    app.agents_overview
+        .view_state
+        .lock()
+        .unwrap()
+        .creating_worktree = true;
+    {
+        let mut state = app.agents_overview.view_state.lock().unwrap();
+        state.server_version_notice = Some("Older server".into());
+    }
+    let mut view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+    for key in ['n', 'w', 'o', 'r', 'x', 'h', 'a'] {
+        view.handle_key_event(KeyCode::Char(key).into());
+    }
+    assert!(rx.try_recv().is_err());
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    insta::assert_snapshot!(normalize_agent_center_snapshot(render_bottom_popup(
+        &app.chat_widget,
+        /*width*/ 80,
+    )));
+}
+
+#[tokio::test]
+async fn overview_thread_colors_match_footer_and_respect_color_suppression() {
+    let mut app = make_test_app().await;
+    let id = ThreadId::from_u128(/*value*/ 42);
+    let mut snapshot = Vec::new();
+    for enabled in [true, false] {
+        app.local_settings.tui.status_line_use_colors = enabled;
+        let mut thread = overview_thread(
+            id,
+            /*parent_thread_id*/ None,
+            "Original prompt",
+            ThreadStatus::Idle,
+        );
+        thread.name = Some("Named task".into());
+        let mut selected = thread.clone();
+        selected.id = ThreadId::from_u128(/*value*/ 43).to_string();
+        selected.name = Some("Selected task".into());
+        let view = app.agents_overview_view(
+            vec![thread, selected],
+            Some(ThreadId::from_u128(/*value*/ 43)),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| view.render(frame.area(), frame.buffer_mut()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for row in buffer.content.chunks(100) {
+            let text: String = row.iter().map(ratatui::buffer::Cell::symbol).collect();
+            if let Some(x) = text.find("Named task") {
+                let x = text[..x].chars().count();
+                snapshot.push(format!(
+                    "{} | title style: {:?}",
+                    normalize_agent_center_snapshot(&text),
+                    row[x].style()
+                ));
+            }
+        }
+    }
+    insta::assert_snapshot!(snapshot.join("\n"));
+}
+
+#[tokio::test]
+async fn older_server_notice_is_visible_in_agents_overview() {
+    let mut app = make_test_app().await;
+    app.update_server_version_overview_notice("0.153.0", Some("0.152.1"));
+    let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 80);
+    insta::assert_snapshot!(rendered.lines().last().unwrap());
+}
+
+#[tokio::test]
+async fn server_version_overview_notice_updates_and_clears() {
+    let mut app = make_test_app().await;
+    app.update_server_version_overview_notice("0.153.0", Some("0.152.1"));
+    app.update_server_version_overview_notice("0.153.0", Some("0.151.0"));
+    let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 80);
+    insta::assert_snapshot!(rendered.lines().last().unwrap(), @"  Service v0.151.0 < Codex CLI v0.153.0");
+
+    app.update_server_version_overview_notice("0.153.0", /*server_version*/ None);
+    let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 80);
+    assert!(!rendered.contains("Service v"));
+}
+
+#[tokio::test]
+async fn older_server_notice_truncates_in_narrow_overview() {
+    let mut app = make_test_app().await;
+    app.update_server_version_overview_notice("0.153.0", Some("0.152.1"));
+    let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    insta::assert_snapshot!(
+        "older_server_narrow_overview",
+        render_bottom_popup(&app.chat_widget, /*width*/ 12)
+    );
+}
+
 use crate::app::test_support::make_test_app;
 use crate::app_event::AgentsOverviewThreadRefresh;
 use crate::bottom_pane::BottomPaneView;
-use crate::bottom_pane::CancellationEvent;
 use crate::chatwidget::tests::helpers::render_bottom_popup;
 use crate::render::renderable::Renderable;
 use crate::test_support::PathBufExt;
@@ -11,6 +122,7 @@ use crate::test_support::test_path_display;
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_protocol::CurrentTimeReadParams;
 use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
+use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::ThreadActiveFlag;
@@ -31,7 +143,6 @@ use codex_config::types::KeybindingsSpec;
 use codex_config::types::TuiKeymap;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::SubAgentSource;
-use crossterm::cursor::SetCursorStyle;
 use pretty_assertions::assert_eq;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -40,184 +151,85 @@ use ratatui::layout::Rect;
 static OVERVIEW_TIMESTAMP: std::sync::LazyLock<i64> =
     std::sync::LazyLock::new(|| chrono::Utc::now().timestamp() - 120);
 
-fn overview_draft(app: &App) -> (String, usize) {
-    let state = app.agents_overview.view_state.lock().unwrap();
-    let composer = state.composer.as_ref().unwrap();
-    (composer.current_text_with_pending(), composer.cursor())
+#[tokio::test]
+async fn overview_right_opens_current_or_highlighted_task() {
+    let mut app = make_test_app().await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    app.app_event_tx = AppEventSender::new(tx);
+    let current = ThreadId::new();
+    let other = ThreadId::new();
+    app.primary_thread_id = Some(current);
+    let threads = vec![
+        overview_thread(
+            current,
+            /*parent_thread_id*/ None,
+            "Current",
+            ThreadStatus::Idle,
+        ),
+        overview_thread(
+            other,
+            /*parent_thread_id*/ None,
+            "Other",
+            ThreadStatus::Idle,
+        ),
+    ];
+
+    let view = app.agents_overview_view(threads.clone(), /*selected_thread_id*/ None);
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    app.chat_widget.handle_key_event(KeyCode::Right.into());
+    assert!(
+        matches!(rx.try_recv(), Ok(AppEvent::SelectAgentsOverviewThread { thread_id }) if thread_id == current)
+    );
+    assert!(!app.chat_widget.no_modal_or_popup_active());
+
+    let mut view = app.agents_overview_view(threads, /*selected_thread_id*/ None);
+    view.handle_key_event(KeyCode::Down.into());
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    app.chat_widget.handle_key_event(KeyCode::Right.into());
+    assert!(
+        matches!(rx.try_recv(), Ok(AppEvent::SelectAgentsOverviewThread { thread_id }) if thread_id == other)
+    );
+    assert!(!app.chat_widget.no_modal_or_popup_active());
 }
 
 #[tokio::test]
-async fn overview_composer_preserves_editing_and_routes_focus() {
+async fn overview_right_preserves_editors_and_offline_state() {
     let mut app = make_test_app().await;
     app.config.disable_paste_burst = true;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     app.app_event_tx = AppEventSender::new(tx);
     let thread_id = ThreadId::new();
-    let threads = vec![overview_thread(
-        thread_id,
-        /*parent_thread_id*/ None,
-        "Existing task",
-        ThreadStatus::Idle,
-    )];
-    let mut view = app.agents_overview_view(threads.clone(), Some(thread_id));
-    view.handle_paste("    /first @file $skill\nthird \t".into());
-    view.handle_key_event(KeyCode::Home.into());
-    view.handle_paste("!second\n".into());
-    let expected = overview_draft(&app);
-    assert_eq!(
-        expected,
-        ("    /first @file $skill\n!second\nthird \t".into(), 32)
+    let mut view = app.agents_overview_view(
+        vec![overview_thread(
+            thread_id,
+            /*parent_thread_id*/ None,
+            "Task",
+            ThreadStatus::Idle,
+        )],
+        Some(thread_id),
     );
-    view = app.agents_overview_view(threads.clone(), Some(thread_id));
-    assert_eq!(overview_draft(&app), expected);
-    view.handle_key_event(KeyCode::Esc.into());
-    view.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
-    assert_eq!(view.on_ctrl_c(), CancellationEvent::Handled);
-    view.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
-    view.handle_paste(" renamed".into());
-    view.handle_key_event(KeyCode::Enter.into());
+    view.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+    view.handle_key_event(KeyCode::Right.into());
     assert!(
-        matches!(rx.try_recv(), Ok(AppEvent::RenameAgentsOverviewThread { name, .. }) if name == "Existing task renamed")
+        app.agents_overview
+            .view_state
+            .lock()
+            .unwrap()
+            .rename_target
+            .is_some()
     );
-    view = app.agents_overview_view(threads, Some(thread_id));
-    view.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
-    view.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
     view.handle_key_event(KeyCode::Esc.into());
-    view.handle_key_event(KeyCode::Tab.into());
-    assert!(
-        matches!(rx.try_recv(), Ok(AppEvent::DispatchAgentsOverviewTask { prompt, .. }) if prompt == expected.0)
-    );
-    view.handle_key_event(KeyCode::Up.into());
-    assert_eq!(overview_draft(&app).0, expected.0);
-    assert_eq!(view.on_ctrl_c(), CancellationEvent::Handled);
-    view.handle_paste(" \t\n".into());
-    view.handle_key_event(KeyCode::Enter.into());
-    assert!(rx.try_recv().is_err());
-    assert_eq!(view.on_ctrl_c(), CancellationEvent::Handled);
-    let mut server = crate::start_embedded_app_server_for_picker(&app.config)
-        .await
-        .unwrap();
-    app.cli_kv_overrides = vec![("model".into(), toml::Value::Integer(1))];
-    app.dispatch_agents_overview_task(&mut server, "retry me".into(), Some(app.config.cwd.clone()))
-        .await;
-    view.handle_paste(" later".into());
-    app.submit_agents_overview_prompt(&server, thread_id, "older failure".into())
-        .await;
-    assert_eq!(overview_draft(&app).0, "retry me later");
-    server.shutdown().await.unwrap();
-    while rx.try_recv().is_ok() {}
-    view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
-    view.handle_paste(format!(
-        "x{}",
-        " ".repeat(codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS)
-    ));
-    view.handle_key_event(KeyCode::Enter.into());
-    assert!(matches!(rx.try_recv(), Ok(AppEvent::InsertHistoryCell(_))));
-    assert!(view.next_frame_delay().is_some());
-    app.chat_widget.show_bottom_pane_view(Box::new(view));
-    insta::assert_snapshot!(render_bottom_popup(&app.chat_widget, /*width*/ 80).lines().last().unwrap(), @"  Message too long; limit 1048576 characters");
-}
-
-#[tokio::test]
-async fn overview_composer_preserves_pastes_and_editor_bindings() {
-    let mut app = make_test_app().await;
-    app.config.disable_paste_burst = true;
-    app.chat_widget.toggle_vim_mode_and_notify();
-    let mut keymap = TuiKeymap::default();
-    keymap.composer.submit = Some(KeybindingsSpec::One(KeybindingSpec("f8".to_string())));
-    keymap.editor.insert_newline = Some(KeybindingsSpec::One(KeybindingSpec("f7".to_string())));
-    app.keymap = RuntimeKeymap::from_config(&keymap).unwrap();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    app.app_event_tx = AppEventSender::new(tx);
-    let mut view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
-    let pasted = "long paste ".repeat(/*n*/ 200);
-    view.handle_paste(pasted.clone());
-    view.handle_key_event(KeyCode::F(7).into());
-    view.handle_paste("last line".into());
-    view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
-    let area = Rect::new(
-        /*x*/ 0, /*y*/ 0, /*width*/ 60, /*height*/ 24,
-    );
-    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
-    terminal
-        .draw(|frame| view.render(frame.area(), frame.buffer_mut()))
-        .unwrap();
-    insta::assert_snapshot!(terminal.backend().to_string().lines().last().unwrap(), @r#""   f8 create task    f7 newline    esc esc tasks            ""#);
-    assert_eq!(view.cursor_style(area), SetCursorStyle::SteadyBar);
-    view.handle_key_event(KeyCode::Home.into());
-    view.handle_key_event(KeyCode::Esc.into());
-    assert_eq!(view.cursor_style(area), SetCursorStyle::DefaultUserShape);
-    view.handle_key_event(KeyCode::Char('d').into());
-    view.handle_key_event(KeyCode::Esc.into());
-    assert!(view.cursor_pos(area).is_some());
-    view.handle_key_event(KeyCode::Esc.into());
-    assert_eq!(view.cursor_pos(area), None);
-    view.handle_key_event(KeyCode::Char('x').into());
-    assert_eq!(view.cursor_pos(area), None);
-    view.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
-    assert_eq!(view.cursor_style(area), SetCursorStyle::SteadyBar);
-    view.handle_key_event(KeyCode::Esc.into());
-    view.handle_key_event(KeyCode::Esc.into());
-    view.handle_paste("abc".into());
-    view.handle_key_event(KeyCode::Char('x').into());
-    view.handle_key_event(KeyCode::F(8).into());
-    assert!(
-        matches!(rx.try_recv(), Ok(AppEvent::DispatchAgentsOverviewTask { prompt, .. }) if prompt == format!("{pasted}\nabcxlast line"))
-    );
-}
-
-#[tokio::test]
-async fn overview_composer_flushes_pending_typing_after_refresh() {
-    for disable_paste_burst in [false, true] {
-        let mut app = make_test_app().await;
-        app.config.disable_paste_burst = false;
-        let mut view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
-        view.handle_key_event(KeyCode::Char('x').into());
-        app.config.disable_paste_burst = disable_paste_burst;
-        if !disable_paste_burst {
-            app.chat_widget.toggle_vim_mode_and_notify();
-        }
-        view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
-        assert_eq!(overview_draft(&app).0, "x");
-        view.handle_key_event(KeyCode::Esc.into());
-        if !disable_paste_burst {
-            view.handle_key_event(KeyCode::Esc.into());
-        }
-        assert_eq!(view.on_ctrl_c(), CancellationEvent::Handled);
-        view.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
-        view.handle_key_event(KeyCode::Up.into());
-        assert_eq!(overview_draft(&app).0, "x");
-    }
-}
-
-#[tokio::test]
-async fn offline_overview_preserves_unbracketed_paste_newlines() {
-    let mut app = make_test_app().await;
-    app.config.disable_paste_burst = false;
-    let mut view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
     app.agents_overview
         .view_state
         .lock()
         .unwrap()
-        .connection_notice = Some("Reconnecting");
-    for ch in "a\nbc\nd".chars() {
-        view.handle_key_event(
-            if ch == '\n' {
-                KeyCode::Enter
-            } else {
-                KeyCode::Char(ch)
-            }
-            .into(),
-        );
-    }
-    view.handle_key_event(KeyCode::Tab.into());
-    assert_eq!(view.on_ctrl_c(), CancellationEvent::Handled);
-    view.handle_key_event(KeyCode::Up.into());
-    view.handle_key_event(KeyCode::Enter.into());
-    assert_eq!(overview_draft(&app).0, "a\nbc\nd");
-    view.handle_key_event(KeyCode::Esc.into());
-    app.chat_widget.show_bottom_pane_view(Box::new(view));
-    insta::assert_snapshot!(render_bottom_popup(&app.chat_widget, /*width*/ 80).lines().last().unwrap(), @"  ctrl+c clear input, then quit · actions paused until the list is refreshed");
+        .connection_notice = Some("Offline");
+    view.handle_key_event(KeyCode::Right.into());
+    view.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    view.on_ctrl_c();
+    view.handle_key_event(KeyCode::Right.into());
+    assert!(!view.is_complete());
+    assert!(rx.try_recv().is_err());
 }
 
 fn overview_thread(
@@ -273,7 +285,8 @@ fn overview_thread(
 #[tokio::test]
 async fn shared_overview_keeps_rows_and_replays_changes_over_stale_reads() -> Result<()> {
     let mut app = make_test_app().await;
-    let app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
+    let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
     let [retained, archived, deleted, created] = std::array::from_fn(|_| ThreadId::new());
     let [
         mut retained_thread,
@@ -293,9 +306,6 @@ async fn shared_overview_keeps_rows_and_replays_changes_over_stale_reads() -> Re
     app.agents_overview.request_id = Some(request_id);
     // The seed is still in flight and the command center has never been opened.
     for notification in [
-        ServerNotification::ThreadStarted(ThreadStartedNotification {
-            thread: created_thread.clone(),
-        }),
         ServerNotification::ThreadNameUpdated(ThreadNameUpdatedNotification {
             thread_id: retained.to_string(),
             thread_name: Some("New name".to_string()),
@@ -316,6 +326,35 @@ async fn shared_overview_keeps_rows_and_replays_changes_over_stale_reads() -> Re
         )
         .await;
     }
+    // Tool responses can arrive without thread/started or after newer updates/removals.
+    for thread in [
+        retained_thread.clone(),
+        created_thread.clone(),
+        archived_thread.clone(),
+        deleted_thread.clone(),
+    ] {
+        let (registered, registration) = tokio::sync::oneshot::channel();
+        Box::pin(app.handle_event(
+            &mut tui,
+            &mut app_server,
+            AppEvent::DynamicToolThreadStarted {
+                thread,
+                task_tools_available: false,
+                registered,
+            },
+        ))
+        .await?;
+        registration.await?;
+    }
+    assert_eq!(
+        app.agents_overview.threads,
+        HashMap::from([
+            (retained, Some(retained_thread.clone())),
+            (created, Some(created_thread.clone())),
+        ])
+    );
+    // A successful read supersedes registration; queued notifications supersede the read.
+    retained_thread.preview = "Fresh preview from the read".to_string();
     app.apply_agents_overview_thread_refresh(
         &app_server,
         request_id,
@@ -408,8 +447,9 @@ async fn shared_overview_keeps_rows_and_replays_changes_over_stale_reads() -> Re
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Result<()> {
     let mut app = make_test_app().await;
+    trust_fixture_folders(&mut app);
     let mut ids = Vec::new();
-    for day in 1..=22 {
+    for day in 1..=12 {
         let source = match day {
             3 => codex_protocol::protocol::SessionSource::Custom("atlas".to_string()),
             4 => codex_protocol::protocol::SessionSource::Custom("chatgpt".to_string()),
@@ -436,13 +476,13 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
     }
     let message_path = app_test_support::rollout_path(
         &app.config.codex_home,
-        "2025-01-21T12-00-00",
-        &ids[20].to_string(),
+        "2025-01-11T12-00-00",
+        &ids[10].to_string(),
     );
     let mut history = std::fs::read_to_string(&message_path)?;
     history.push_str(
         &serde_json::json!({
-            "timestamp": "2025-01-21T12:00:01Z",
+            "timestamp": "2025-01-11T12:00:01Z",
             "type": "event_msg",
             "payload": { "type": "agent_message", "message": "Found the regression in the parser." }
         })
@@ -452,7 +492,7 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
     std::fs::write(message_path, history)?;
     let config = app.config.clone();
     let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&config)).await?;
-    for thread_id in [ids[0], ids[21]] {
+    for thread_id in [ids[0], ids[11]] {
         app_server
             .resume_thread(
                 &app.local_settings,
@@ -465,8 +505,8 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
     // A newer rollout missing from the index must not trigger a startup filesystem scan.
     app_test_support::create_fake_rollout_with_source(
         &app.config.codex_home,
-        "2025-01-23T12-00-00",
-        "2025-01-23T12:00:00Z",
+        "2025-01-13T12-00-00",
+        "2025-01-13T12:00:00Z",
         "Unindexed task",
         Some(&app.config.model_provider_id),
         /*git_info*/ None,
@@ -474,6 +514,7 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
     )
     .expect("materialize unindexed session");
     app.app_server_target = AppServerTarget::LocalDaemon {
+        allow_embedded_fallback: true,
         endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
             socket_path: test_path_buf("/tmp/unused.sock").abs(),
         },
@@ -489,9 +530,9 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
     assert_eq!(retained, expected);
     assert_eq!(
         app.agents_overview.last_messages,
-        HashMap::from([(ids[20], "Found the regression in the parser.".to_string())])
+        HashMap::from([(ids[10], "Found the regression in the parser.".to_string())])
     );
-    let thread = app.agents_overview.threads[&ids[20]].as_ref().unwrap();
+    let thread = app.agents_overview.threads[&ids[10]].as_ref().unwrap();
     assert_eq!(thread.status, ThreadStatus::NotLoaded);
 
     let created = app_server.start_thread(&config).await?.session.thread_id;
@@ -505,10 +546,9 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
         .copied()
         .collect();
     assert_eq!(visible, expected);
-    app.chat_widget
-        .handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    app.chat_widget
-        .handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    app.agents_overview.view_state.lock().unwrap().completion =
+        Some(crate::bottom_pane::ViewCompletion::Accepted);
+    app.chat_widget.pre_draw_tick();
     finish_overview_refresh(&mut app, &app_server, &mut event_rx).await;
     let retained: HashSet<_> = app.agents_overview.threads.keys().copied().collect();
     assert_eq!(retained, expected);
@@ -554,6 +594,12 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
         app.config.codex_home.join("config.toml"),
         "[tui]\nresume_cwd = \"session\"\n",
     )?;
+    crate::legacy_core::config::set_project_trust_level(
+        app.config.codex_home.as_path(),
+        &test_path_buf("/"),
+        codex_protocol::config_types::TrustLevel::Trusted,
+    )
+    .map_err(std::io::Error::other)?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
     Box::pin(app.select_agents_overview_thread(&mut tui, &mut app_server, ids[2])).await?;
     assert_eq!(app.primary_thread_id, Some(ids[2]));
@@ -569,6 +615,14 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
     finish_overview_refresh(&mut restarted, &app_server, &mut event_rx).await;
     let retained: HashSet<_> = restarted.agents_overview.threads.keys().copied().collect();
     assert_eq!(retained, recent_ids);
+    restarted.open_agents_overview(&app_server);
+    let rendered = render_bottom_popup(&restarted.chat_widget, /*width*/ 80)
+        .replace(&test_path_display("/"), "/");
+    let age = regex_lite::Regex::new(r" +[0-9]+d ago").unwrap();
+    insta::assert_snapshot!(
+        "agents_overview_recent_sessions",
+        age.replace_all(&rendered, " [age]")
+    );
     app_server.shutdown().await?;
     Ok(())
 }
@@ -595,6 +649,15 @@ async fn finish_overview_refresh(
 
 #[tokio::test]
 async fn hidden_system_thread_does_not_refresh_shared_overview() {
+    check_hidden_thread_does_not_refresh_shared_overview("system").await;
+}
+
+#[tokio::test]
+async fn hidden_title_thread_does_not_refresh_shared_overview() {
+    check_hidden_thread_does_not_refresh_shared_overview("thread_title").await;
+}
+
+async fn check_hidden_thread_does_not_refresh_shared_overview(source: &str) {
     let mut app = make_test_app().await;
     let app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
         .await
@@ -621,7 +684,7 @@ async fn hidden_system_thread_does_not_refresh_shared_overview() {
         ThreadStatus::Idle,
     );
     thread.ephemeral = true;
-    thread.thread_source = Some(ThreadSource::Feature("system".to_string()));
+    thread.thread_source = Some(ThreadSource::Feature(source.to_string()));
 
     app.handle_app_server_event(
         &app_server,
@@ -652,7 +715,7 @@ async fn hidden_system_thread_does_not_refresh_shared_overview() {
         "Persisted system thread",
         ThreadStatus::Idle,
     );
-    thread.thread_source = Some(ThreadSource::Feature("system".to_string()));
+    thread.thread_source = Some(ThreadSource::Feature(source.to_string()));
 
     app.handle_app_server_event(
         &app_server,
@@ -791,6 +854,94 @@ fn reasoning_delta(thread_id: ThreadId, item_id: &str, delta: &str) -> ServerNot
 }
 
 #[tokio::test]
+async fn agents_overview_details_render_markdown() {
+    let mut app = make_test_app().await;
+    let thread_id = ThreadId::new();
+    let mut thread = overview_thread(
+        thread_id,
+        /*parent_thread_id*/ None,
+        "Review parser",
+        ThreadStatus::Idle,
+    );
+    thread.preview = "Review **parser** and `token` handling.".into();
+    app.agents_overview
+        .threads
+        .insert(thread_id, Some(thread.clone()));
+    let message = "## Findings\n\n- Fixed **parsing** and `tokens` with a long explanation that wraps.\n- Kept *compatibility*.\n\n```rust\nlet token = 1;\n```";
+    app.agents_overview.last_messages.insert(
+        thread_id,
+        super::super::agents_overview_details::preview_markdown(message),
+    );
+    let view = app.agents_overview_view(vec![thread.clone()], Some(thread_id));
+    let mut terminal = Terminal::new(TestBackend::new(/*width*/ 96, /*height*/ 40)).unwrap();
+    terminal
+        .draw(|frame| view.render(frame.area(), frame.buffer_mut()))
+        .unwrap();
+    let cached = terminal.backend().to_string();
+    insta::assert_snapshot!(
+        "agents_overview_markdown",
+        normalize_agent_center_snapshot(&cached)
+    );
+
+    app.agents_overview.last_messages.clear();
+    app.track_agents_overview_activity(
+        thread_id,
+        &ServerNotification::ItemCompleted(codex_app_server_protocol::ItemCompletedNotification {
+            thread_id: thread.id.clone(),
+            turn_id: "turn".into(),
+            completed_at_ms: 0,
+            item: ThreadItem::AgentMessage {
+                id: "answer".into(),
+                text: message.into(),
+                phase: None,
+                memory_citation: None,
+                delivery: None,
+                questions: None,
+            },
+        }),
+    );
+    let view = app.agents_overview_view(vec![thread.clone()], Some(thread_id));
+    terminal
+        .draw(|frame| view.render(frame.area(), frame.buffer_mut()))
+        .unwrap();
+    assert_eq!(terminal.backend().to_string(), cached);
+
+    thread.preview = format!("```\n{}\n```", "long prompt ".repeat(25));
+    app.agents_overview.activity.clear();
+    app.agents_overview.last_messages.insert(
+        thread_id,
+        "```\nlet explanation = \"A long code line should wrap inside the task details panel.\";\n```".into(),
+    );
+    let view = app.agents_overview_view(vec![thread.clone()], Some(thread_id));
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+
+    insta::assert_snapshot!(
+        "agents_overview_markdown_long_lines",
+        normalize_agent_center_snapshot(render_bottom_popup(&app.chat_widget, /*width*/ 96))
+    );
+
+    app.agents_overview.last_messages.insert(
+        thread_id,
+        "```md\n| Check | Result |\n| --- | --- |\n| Parser | Fixed |\n```".into(),
+    );
+    let view = app.agents_overview_view(vec![thread], Some(thread_id));
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    insta::assert_snapshot!(
+        "agents_overview_markdown_table",
+        normalize_agent_center_snapshot(render_bottom_popup(&app.chat_widget, /*width*/ 96))
+    );
+}
+
+#[test]
+fn agents_overview_markdown_preview_preserves_layout_and_bounds() {
+    let text = format!("a\r\n\t\u{1b}{}", "界".repeat(600));
+    assert_eq!(
+        super::super::agents_overview_details::preview_markdown(&text),
+        format!("a\n\t{}", "界".repeat(509))
+    );
+}
+
+#[tokio::test]
 async fn agents_overview_reasoning_uses_existing_events_and_expires_with_attachment() {
     let mut app = make_test_app().await;
     let thread_id = ThreadId::new();
@@ -808,8 +959,7 @@ async fn agents_overview_reasoning_uses_existing_events_and_expires_with_attachm
         .insert(thread_id, Some(thread.clone()));
     app.thread_event_channels
         .insert(thread_id, ThreadEventChannel::new(/*capacity*/ 8));
-    let mut view = app.agents_overview_view(vec![thread.clone()], Some(thread_id));
-    view.handle_paste("Keep this draft".into());
+    let view = app.agents_overview_view(vec![thread.clone()], Some(thread_id));
     app.agents_overview.visible_thread_ids = view.thread_ids();
     app.chat_widget.show_bottom_pane_view(Box::new(view));
     for delta in ["**Checking", " cold-start regressions**\nFurther reasoning"] {
@@ -858,6 +1008,7 @@ async fn agents_overview_reasoning_uses_existing_events_and_expires_with_attachm
     );
     assert!(
         details
+            .lines
             .iter()
             .any(|line| line.to_string().contains("Checking cold-start regressions"))
     );
@@ -867,10 +1018,8 @@ async fn agents_overview_reasoning_uses_existing_events_and_expires_with_attachm
     for delta in [format!("**{}", "界".repeat(10_000)), "**".into()] {
         app.track_agents_overview_notification(&reasoning_delta(thread_id, "oversized", &delta));
     }
-    assert_eq!(
-        app.agents_overview_details(&thread, &HashMap::new()),
-        Vec::<Line>::new()
-    );
+    let details = app.agents_overview_details(&thread, &HashMap::new());
+    assert_eq!((details.lines, details.last_message), (Vec::new(), None));
     app.track_agents_overview_notification(&reasoning_delta(
         thread_id,
         "next",
@@ -880,10 +1029,8 @@ async fn agents_overview_reasoning_uses_existing_events_and_expires_with_attachm
         .get_mut(&thread_id)
         .unwrap()
         .mark_replay_only();
-    assert_eq!(
-        app.agents_overview_details(&thread, &HashMap::new()),
-        Vec::<Line>::new()
-    );
+    let details = app.agents_overview_details(&thread, &HashMap::new());
+    assert_eq!((details.lines, details.last_message), (Vec::new(), None));
     app.track_agents_overview_notification(&ServerNotification::ThreadClosed(
         ThreadClosedNotification {
             thread_id: thread_id.to_string(),
@@ -929,7 +1076,14 @@ async fn worktrees_overview_grouping_requires_feature() {
             thread
         })
         .collect::<Vec<_>>();
-    let grouped_heading = format!("{}  2", primary.join("").display());
+    let headings = [primary.join(""), primary.join("subdir").join("child")].map(|path| {
+        crate::text_formatting::center_truncate_path(
+            &crate::status::format_directory_display(&path, /*max_width*/ None),
+            /*max_width*/ 64,
+        )
+    });
+    let display_heading = &headings[0];
+    let grouped_heading = format!("{display_heading}  2");
     let width = 160;
     for enabled in [false, true] {
         app.config
@@ -946,16 +1100,74 @@ async fn worktrees_overview_grouping_requires_feature() {
                 .map(|line| line.split('│').next().unwrap_or(line).trim_end())
                 .collect::<Vec<_>>()
                 .join("\n")
-                .replace(
-                    &primary.join("").display().to_string(),
-                    "/tmp/worktree-root/primary/",
-                )
+                .replace(&headings[1], "/tmp/worktree-root/primary/subdir/child")
+                .replace(display_heading, "/tmp/worktree-root/primary")
                 .replace('\\', "/");
             insta::with_settings!({snapshot_path => "../snapshots"}, {
-                insta::assert_snapshot!("agents_overview_worktree_grouping", grouping);
+                insta::assert_snapshot!(
+                    "agents_overview_worktree_grouping",
+                    normalize_agent_center_snapshot(grouping)
+                );
             });
         }
     }
+}
+
+#[tokio::test]
+async fn overview_model_grouping_shows_details_and_preserves_selection() {
+    let mut app = make_test_app().await;
+    let threads = [
+        ("Older task", Some("model-a"), 1),
+        ("Other model", Some("model-b"), 2),
+        ("Recent task", Some("model-a"), 3),
+        ("Legacy task", None, 4),
+    ]
+    .into_iter()
+    .map(|(name, model, index)| {
+        let mut thread = overview_thread(
+            ThreadId::from_u128(index),
+            /*parent_thread_id*/ None,
+            name,
+            ThreadStatus::Idle,
+        );
+        thread.model = model.map(str::to_string);
+        thread.updated_at = *OVERVIEW_TIMESTAMP + index as i64 - 30;
+        thread
+    })
+    .collect();
+    let selected = ThreadId::from_u128(/*value*/ 1);
+    let mut view = app.agents_overview_view(threads, Some(selected));
+    for _ in 0..2 {
+        view.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+    }
+    assert_eq!(
+        app.agents_overview.view_state.lock().unwrap().grouping,
+        AgentsOverviewGrouping::Model
+    );
+    assert_eq!(
+        view.rows[view.selected_index().unwrap()].thread_id,
+        selected
+    );
+    // Within a model, newer tasks come first; navigation then crosses model groups.
+    for (key, expected) in [
+        (KeyCode::Up, 3),
+        (KeyCode::Down, 1),
+        (KeyCode::Down, 2),
+        (KeyCode::Down, 4),
+    ] {
+        view.handle_key_event(key.into());
+        assert_eq!(
+            view.rows[view.selected_index().unwrap()].thread_id,
+            ThreadId::from_u128(expected)
+        );
+    }
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    insta::assert_snapshot!(
+        "agents_overview_model_grouping",
+        render_bottom_popup(&app.chat_widget, /*width*/ 100)
+            .replace(&test_path_display("/tmp/project"), "/tmp/project")
+            .replace("fwd del", "del")
+    );
 }
 
 #[tokio::test]
@@ -1014,67 +1226,23 @@ async fn shared_overview_shows_only_root_sessions() {
     let mut action_view = AgentsOverviewView::new(
         view.rows.clone(),
         Some(first_root),
-        /*exit_on_cancel*/ false,
         /*worktrees_enabled*/ false,
+        /*use_theme_colors*/ true,
         crate::app_event_sender::AppEventSender::new(event_tx),
         app.keymap.clone(),
         Arc::clone(&app.agents_overview.view_state),
     );
     let state = &app.agents_overview.view_state;
-    assert!(!state.lock().unwrap().status_grouping);
-    action_view.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    action_view.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
-    assert!(state.lock().unwrap().status_grouping);
-    app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
-    assert!(state.lock().unwrap().status_grouping);
+    assert_eq!(
+        state.lock().unwrap().grouping,
+        AgentsOverviewGrouping::Project
+    );
+    action_view.handle_key_event(KeyCode::Char('f').into());
+    assert!(action_view.handle_paste("Repair authentication".into()));
+    action_view.handle_key_event(KeyCode::Enter.into());
     assert!(
-        action_view.handle_paste("Use \u{1b}[31mthe\u{1b}[0m current project\u{7}".to_string())
+        matches!(event_rx.try_recv(), Ok(AppEvent::SelectAgentsOverviewThread { thread_id }) if thread_id == second_root)
     );
-    action_view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(matches!(
-        event_rx.try_recv(),
-        Ok(AppEvent::DispatchAgentsOverviewTask { prompt, cwd: None })
-            if prompt == "Use the current project"
-    ));
-    action_view.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    action_view.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
-    assert!(action_view.handle_paste("Fix the flaky tests after all retries complete".to_string()));
-    let area = ratatui::layout::Rect::new(
-        /*x*/ 0, /*y*/ 0, /*width*/ 40, /*height*/ 12,
-    );
-    let mut buffer = ratatui::buffer::Buffer::empty(area);
-    action_view.render(area, &mut buffer);
-    let prompt = buffer
-        .content()
-        .iter()
-        .map(ratatui::buffer::Cell::symbol)
-        .collect::<String>();
-    assert!(prompt.contains("complete"));
-    action_view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(matches!(
-        event_rx.try_recv(),
-        Ok(AppEvent::DispatchAgentsOverviewTask { prompt, cwd: Some(cwd) })
-            if prompt == "Fix the flaky tests after all retries complete"
-                && cwd == test_path_buf("/tmp/project").abs()
-    ));
-    assert!(action_view.handle_paste("   ".to_string()));
-    action_view.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    action_view.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
-    assert!(action_view.handle_paste("Repair authentication".to_string()));
-    action_view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(matches!(
-        event_rx.try_recv(),
-        Ok(AppEvent::SelectAgentsOverviewThread { thread_id }) if thread_id == second_root
-    ));
-    assert!(action_view.handle_paste("Continue working".to_string()));
-    action_view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(matches!(
-        event_rx.try_recv(),
-        Ok(AppEvent::DispatchAgentsOverviewTask { prompt, .. })
-            if prompt.trim() == "Continue working"
-    ));
-    action_view.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
-    action_view.handle_paste("First line\nSecond line".into());
     crate::chatwidget::tests::helpers::set_active_cell(
         &mut app.chat_widget,
         Box::new(crate::history_cell::PlainHistoryCell::new(vec![
@@ -1129,18 +1297,16 @@ async fn shared_overview_shows_only_root_sessions() {
             candidate
         })
         .collect();
-    app.chat_widget
-        .handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    app.chat_widget
-        .handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    app.agents_overview.view_state.lock().unwrap().completion =
+        Some(crate::bottom_pane::ViewCompletion::Accepted);
+    app.chat_widget.pre_draw_tick();
     let view = app.agents_overview_view(threads, /*selected_thread_id*/ None);
     app.chat_widget.show_bottom_pane_view(Box::new(view));
     let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 96);
     assert!(
         rendered
             .lines()
-            .any(|line| line.contains("› ● Inspect unnamed task  current")
-                && line.contains("Needs input"))
+            .any(|line| line.contains("› ● Inspect unnamed task") && line.contains("current"))
     );
 
     app.transcript_cells.push(std::sync::Arc::new(
@@ -1153,8 +1319,9 @@ async fn shared_overview_shows_only_root_sessions() {
     app.render_chat_widget_frame(&mut tui, screen_size)
         .expect("render full-screen dashboard");
     assert_eq!(tui.terminal.viewport_area.height, screen_size.height);
-    app.chat_widget
-        .handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    app.agents_overview.view_state.lock().unwrap().completion =
+        Some(crate::bottom_pane::ViewCompletion::Accepted);
+    app.chat_widget.pre_draw_tick();
     app.render_chat_widget_frame(&mut tui, screen_size)
         .expect("restore conversation after closing dashboard");
     assert!(tui.terminal.viewport_area.height < screen_size.height);
@@ -1229,6 +1396,7 @@ async fn filtered_dashboard_actions_use_configured_shortcuts() {
     keymap.agents.search = Some(KeybindingsSpec::One(KeybindingSpec("f6".to_string())));
     keymap.agents.stop = Some(KeybindingsSpec::One(KeybindingSpec("f10".to_string())));
     keymap.agents.resume = Some(KeybindingsSpec::One(KeybindingSpec("f8".to_string())));
+    keymap.list.cancel = Some(KeybindingsSpec::One(KeybindingSpec("f7".into())));
     keymap.list.move_down = Some(KeybindingsSpec::One(KeybindingSpec("v".into())));
     app.keymap = crate::keymap::RuntimeKeymap::from_config(&keymap).expect("runtime keymap");
     let first = ThreadId::new();
@@ -1256,8 +1424,8 @@ async fn filtered_dashboard_actions_use_configured_shortcuts() {
         )
         .rows,
         Some(first),
-        /*exit_on_cancel*/ false,
         /*worktrees_enabled*/ false,
+        /*use_theme_colors*/ true,
         crate::app_event_sender::AppEventSender::new(event_tx),
         app.keymap.clone(),
         Arc::clone(&app.agents_overview.view_state),
@@ -1265,15 +1433,12 @@ async fn filtered_dashboard_actions_use_configured_shortcuts() {
 
     view.handle_key_event(KeyEvent::new(KeyCode::F(10), KeyModifiers::NONE));
     assert!(event_rx.try_recv().is_err());
-    assert!(view.handle_paste("Do not dispatch this draft".to_string()));
-    view.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    view.handle_key_event(KeyCode::Esc.into());
     for (key, expected) in [('v', second), ('k', first), ('j', first)] {
         view.handle_key_event(KeyCode::Char(key).into());
         let selected = &view.rows[view.selected_index().unwrap()];
         assert_eq!(selected.thread_id, expected);
     }
-    assert_eq!(overview_draft(&app).0, "Do not dispatch this draft");
+
     view.handle_key_event(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE));
     assert!(view.handle_paste("Second task".to_string()));
     view.handle_key_event(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE));
@@ -1293,6 +1458,18 @@ async fn filtered_dashboard_actions_use_configured_shortcuts() {
         Ok(AppEvent::SelectAgentsOverviewThread { thread_id }) if thread_id == second
     ));
     assert!(event_rx.try_recv().is_err());
+    for offline in [false, true] {
+        app.agents_overview
+            .view_state
+            .lock()
+            .unwrap()
+            .connection_notice = offline.then_some("Offline");
+        view.handle_key_event(KeyCode::F(6).into());
+        view.handle_paste("no matching task".into());
+        assert_eq!(view.selected_index(), Some(usize::MAX));
+        view.handle_key_event(KeyCode::F(7).into());
+        assert_eq!(view.selected_index(), Some(0));
+    }
 }
 
 #[tokio::test]
@@ -1317,11 +1494,73 @@ async fn failed_root_switch_keeps_background_requests_on_the_active_session() ->
 }
 
 #[tokio::test]
+async fn root_switch_preserves_vim_line_yank() -> Result<()> {
+    // Keep the large setup and root-switch futures off the test thread's stack.
+    let mut app = Box::pin(make_test_app()).await;
+    trust_fixture_folders(&mut app);
+    std::fs::write(
+        app.local_settings.user_config_path.as_path(),
+        "[tui]\nresume_cwd = \"session\"\n",
+    )?;
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(
+        app.chat_widget.config_ref(),
+    ))
+    .await?;
+    let previous = Box::pin(app_server.start_thread(&app.config)).await?;
+    app.enqueue_primary_thread_session(previous.session, previous.turns)
+        .await?;
+    let target_thread_id = ThreadId::from_string(
+        &app_test_support::create_fake_rollout(
+            app.config.codex_home.as_path(),
+            "2025-01-05T12-00-00",
+            "2025-01-05T12:00:00Z",
+            "Target task",
+            Some(&app.config.model_provider_id),
+            /*git_info*/ None,
+        )
+        .expect("materialize target rollout"),
+    )?;
+    app.chat_widget.toggle_vim_mode_and_notify();
+    app.chat_widget.insert_str("saved line");
+    for code in [KeyCode::Esc, KeyCode::Char('d'), KeyCode::Char('d')] {
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "");
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+
+    Box::pin(app.select_agents_overview_thread(&mut tui, &mut app_server, target_thread_id))
+        .await?;
+
+    assert_eq!(app.current_displayed_thread_id(), Some(target_thread_id));
+    app.chat_widget.toggle_vim_mode_and_notify();
+    app.chat_widget.insert_str("new line");
+    app.chat_widget
+        .handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+    assert_eq!(
+        app.chat_widget.composer_text_with_pending(),
+        "new line\nsaved line"
+    );
+    let composer_lines = render_bottom_popup(&app.chat_widget, /*width*/ 80)
+        .lines()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!(composer_lines, @"› new line\n  saved line");
+    app_server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn root_switch_loads_local_preferences_from_disk() -> Result<()> {
-    let mut app = make_test_app().await;
-    let mut app_server =
-        crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
-    let previous = app_server.start_thread(&app.config).await?;
+    // Keep the large setup and root-switch futures off the test thread's stack.
+    let mut app = Box::pin(make_test_app()).await;
+    trust_fixture_folders(&mut app);
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(
+        app.chat_widget.config_ref(),
+    ))
+    .await?;
+    let previous = Box::pin(app_server.start_thread(&app.config)).await?;
     app.enqueue_primary_thread_session(previous.session, previous.turns)
         .await?;
     let target_thread_id = ThreadId::from_string(
@@ -1339,13 +1578,11 @@ async fn root_switch_loads_local_preferences_from_disk() -> Result<()> {
         app.local_settings.user_config_path.as_path(),
         "[tui]\ntheme = \"dracula\"\nresume_cwd = \"session\"\n[history]\npersistence = \"none\"\n",
     )?;
-    let config = app
-        .rebuild_config_for_cwd(app.config.cwd.to_path_buf())
-        .await?;
+    let config = Box::pin(app.rebuild_config_for_cwd(app.config.cwd.to_path_buf())).await?;
     let expected = crate::local_settings::LocalSettings::from(&config);
     let mut tui = crate::tui::test_support::make_test_tui()?;
 
-    app.select_agents_overview_thread(&mut tui, &mut app_server, target_thread_id)
+    Box::pin(app.select_agents_overview_thread(&mut tui, &mut app_server, target_thread_id))
         .await?;
 
     assert_eq!(app.current_displayed_thread_id(), Some(target_thread_id));
@@ -1358,8 +1595,11 @@ async fn root_switch_loads_local_preferences_from_disk() -> Result<()> {
 #[tokio::test]
 async fn root_switch_preserves_idle_root_with_running_subagent() -> Result<()> {
     let mut app = make_test_app().await;
-    let mut app_server =
-        crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
+    trust_fixture_folders(&mut app);
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(
+        app.chat_widget.config_ref(),
+    ))
+    .await?;
     let previous = app_server.start_thread(&app.config).await?;
     let previous_root_id = previous.session.thread_id;
     app.enqueue_primary_thread_session(previous.session, previous.turns)
@@ -1429,6 +1669,7 @@ async fn root_switch_preserves_idle_root_with_running_subagent() -> Result<()> {
 #[tokio::test]
 async fn overview_selection_applies_user_permissions_only_to_unloaded_threads() -> Result<()> {
     let mut app = make_test_app().await;
+    trust_fixture_folders(&mut app);
     std::fs::write(
         app.config.codex_home.join("config.toml"),
         "[tui]\nresume_cwd = \"session\"\n",
@@ -1455,7 +1696,8 @@ async fn overview_selection_applies_user_permissions_only_to_unloaded_threads() 
             .expect("create historical session"),
         )?);
     }
-    let mut app_server = crate::start_embedded_app_server_for_picker(&server_config).await?;
+    let mut app_server =
+        Box::pin(crate::start_embedded_app_server_for_picker(&server_config)).await?;
     let loaded = app_server
         .resume_thread(
             &crate::local_settings::LocalSettings::from(&server_config),
@@ -1574,7 +1816,9 @@ async fn overview_cold_resume_honors_working_directory_selection() -> Result<()>
         ("session", true, true),
         ("session", false, false),
     ] {
-        let mut app = make_test_app().await;
+        // Keep the large setup and cold-resume futures off the Windows test stack.
+        let mut app = Box::pin(make_test_app()).await;
+        trust_fixture_folders(&mut app);
         let chosen = app.config.codex_home.join("chosen");
         let overridden = app.config.codex_home.join("overridden");
         std::fs::create_dir(&chosen)?;
@@ -1600,7 +1844,8 @@ async fn overview_cold_resume_honors_working_directory_selection() -> Result<()>
             )
             .expect("create historical session"),
         )?;
-        let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
         app.launch_cwd = chosen.to_path_buf();
         app.harness_overrides.cwd = cli_cwd.then(|| {
             if runtime_cwd {
@@ -1616,17 +1861,46 @@ async fn overview_cold_resume_honors_working_directory_selection() -> Result<()>
             test_path_buf("/").abs()
         };
         let mut tui = crate::tui::test_support::make_test_tui()?;
-        app.select_agents_overview_thread(&mut tui, &mut app_server, thread_id)
-            .await?;
-        let observed = app_server
-            .resume_thread(
-                &app.local_settings,
-                app.config.clone(),
-                thread_id,
-                crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
-            )
-            .await?
-            .session;
+        // On this current-thread runtime, the server cannot answer until we yield. Cancel the
+        // pending selection to release its terminal borrow and inspect what the user sees now.
+        let mut selection =
+            Box::pin(app.select_agents_overview_thread(&mut tui, &mut app_server, thread_id));
+        assert!(futures::poll!(&mut selection).is_pending());
+        drop(selection);
+        let pending_loading =
+            crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal).clone();
+        Box::pin(app.select_agents_overview_thread(&mut tui, &mut app_server, thread_id)).await?;
+        // The widget replacement clears the terminal; feedback must remain until the next draw.
+        let loading =
+            crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal).clone();
+        assert_eq!(pending_loading, loading);
+        let loading_text = loading
+            .content
+            .chunks(usize::from(loading.area.width))
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
+            .map(|line| line.trim_end().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        insta::allow_duplicates! {
+            insta::assert_snapshot!(loading_text.trim_end(), @"Loading task…");
+        }
+        Box::pin(app.handle_tui_event(&mut tui, &mut app_server, TuiEvent::Draw)).await?;
+        assert_ne!(
+            crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal),
+            &loading,
+        );
+        let observed = Box::pin(app_server.resume_thread(
+            &app.local_settings,
+            app.config.clone(),
+            thread_id,
+            crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
+        ))
+        .await?
+        .session;
         assert_eq!(
             (app.config.cwd.clone(), observed.cwd),
             (expected_cwd.clone(), expected_cwd),
@@ -1729,13 +2003,10 @@ async fn cancelling_resume_picker_preserves_command_center_state() -> Result<()>
         let view = app.agents_overview_view(threads.into(), Some(selected));
         app.chat_widget.show_bottom_pane_view(Box::new(view));
         for key in [
-            KeyCode::Esc.into(),
-            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
-            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
-            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
-            KeyCode::Esc.into(),
-            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE),
+            KeyCode::Esc.into(),
         ] {
             app.chat_widget.handle_key_event(key);
         }
@@ -1745,7 +2016,7 @@ async fn cancelling_resume_picker_preserves_command_center_state() -> Result<()>
             .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID);
         while event_rx.try_recv().is_ok() {}
         app.chat_widget
-            .handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+            .handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
         assert!(matches!(
             event_rx.try_recv(),
             Ok(AppEvent::OpenResumePicker)
@@ -1768,13 +2039,12 @@ async fn cancelling_resume_picker_preserves_command_center_state() -> Result<()>
                 .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID),
             selection
         );
-        assert_eq!(overview_draft(&app).0, "d");
     }
     Ok(())
 }
 
 #[tokio::test]
-async fn command_center_cursor_tracks_wrapped_footer() {
+async fn command_center_cursor_tracks_fixed_footer() {
     let app = make_test_app().await;
     let mut view = app.agents_overview_view(
         vec![overview_thread(
@@ -1785,9 +2055,9 @@ async fn command_center_cursor_tracks_wrapped_footer() {
         )],
         /*selected_thread_id*/ None,
     );
-    for (key, label) in [('n', "› Describe"), ('f', "Search ›"), ('r', "Rename ›")] {
+    for (key, label) in [('f', "Search ›"), ('r', "Rename ›")] {
         view.handle_key_event(KeyCode::Esc.into());
-        view.handle_key_event(KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL));
+        view.handle_key_event(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
         for width in [48, 96, 120] {
             let area =
                 ratatui::layout::Rect::new(/*x*/ 0, /*y*/ 0, width, /*height*/ 24);
@@ -1819,16 +2089,19 @@ async fn empty_command_center_can_open_resume_picker() {
     app.app_event_tx = crate::app_event_sender::AppEventSender::new(event_tx);
     let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
     app.chat_widget.show_bottom_pane_view(Box::new(view));
-    app.chat_widget.handle_key_event(KeyCode::Esc.into());
     while event_rx.try_recv().is_ok() {}
     app.chat_widget
-        .handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        .handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
     assert!(matches!(
         event_rx.try_recv(),
         Ok(AppEvent::OpenResumePicker)
     ));
+    // Crossterm labels forward Delete as "fwd del" on macOS and "del" elsewhere.
+    let rendered =
+        normalize_agent_center_snapshot(render_bottom_popup(&app.chat_widget, /*width*/ 48))
+            .replace("fwd del", "del");
     insta::with_settings!({snapshot_path => "../snapshots"}, {
-        insta::assert_snapshot!("agents_overview_empty_narrow", render_bottom_popup(&app.chat_widget, /*width*/ 48));
+        insta::assert_snapshot!("agents_overview_empty_narrow", rendered);
     });
 }
 
@@ -1883,6 +2156,7 @@ async fn resume_failure_keeps_command_center_available() {
 #[tokio::test]
 async fn resume_picker_round_trip_preserves_each_threads_input() -> Result<()> {
     let mut app = make_test_app().await;
+    trust_fixture_folders(&mut app);
     std::fs::write(
         app.config.codex_home.join("config.toml"),
         "[tui]\nresume_cwd = \"current\"\n",
@@ -1981,6 +2255,7 @@ async fn resume_picker_round_trip_preserves_each_threads_input() -> Result<()> {
 #[tokio::test]
 async fn command_center_handles_resume_failure_and_success() -> Result<()> {
     let mut app = make_test_app().await;
+    trust_fixture_folders(&mut app);
     std::fs::write(
         app.config.codex_home.join("config.toml"),
         "[tui]\nresume_cwd = \"current\"\n",
@@ -2047,4 +2322,355 @@ async fn command_center_handles_resume_failure_and_success() -> Result<()> {
     );
     server.shutdown().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn command_center_attach_conflict_opens_read_only_and_retries() -> Result<()> {
+    let mut app = Box::pin(make_test_app()).await;
+    trust_fixture_folders(&mut app);
+    std::fs::write(
+        app.config.codex_home.join("config.toml"),
+        "[tui]\nresume_cwd = \"current\"\n",
+    )?;
+    for cwd in [test_path_buf("/"), app.config.cwd.to_path_buf()] {
+        crate::legacy_core::config::set_project_trust_level(
+            app.config.codex_home.as_path(),
+            &cwd,
+            codex_protocol::config_types::TrustLevel::Trusted,
+        )
+        .map_err(std::io::Error::other)?;
+    }
+    let thread_id = ThreadId::from_string(
+        &app_test_support::create_fake_rollout(
+            app.config.codex_home.as_path(),
+            "2025-01-05T12-00-00",
+            "2025-01-05T12:00:00Z",
+            "Saved task",
+            Some(&app.config.model_provider_id),
+            /*git_info*/ None,
+        )
+        .expect("saved task"),
+    )?;
+    let mut owner = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    Box::pin(owner.resume_thread(
+        &app.local_settings,
+        app.config.clone(),
+        thread_id,
+        crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
+    ))
+    .await?;
+    let thread = owner
+        .thread_read(thread_id, /*include_turns*/ false)
+        .await?;
+    let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    app.app_server_target = AppServerTarget::LocalDaemon {
+        allow_embedded_fallback: true,
+        endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
+    };
+    app.chat_widget.remote_connection =
+        crate::status::remote_connection::remote_connection_status_value(
+            &app.app_server_target,
+            /*server_version*/ None,
+        );
+    app.agents_overview
+        .threads
+        .insert(thread_id, Some(thread.clone()));
+    app.chat_widget.insert_str("Retained task draft");
+    app.agents_overview.input_states.insert(
+        thread_id,
+        app.chat_widget
+            .capture_thread_input_state()
+            .expect("task draft"),
+    );
+    app.agents_overview.dispatched_requests.insert(
+        thread_id,
+        vec![ServerRequest::ToolRequestUserInput {
+            request_id: RequestId::Integer(42),
+            params: ToolRequestUserInputParams {
+                thread_id: thread_id.to_string(),
+                turn_id: "turn".into(),
+                item_id: "question".into(),
+                questions: Vec::new(),
+                is_blocking: true,
+                auto_resolution_ms: None,
+            },
+        }],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    app.app_event_tx = AppEventSender::new(tx);
+    let mut view = app.agents_overview_view(vec![thread], Some(thread_id));
+    view.handle_key_event(KeyCode::Esc.into());
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    let selection = app
+        .chat_widget
+        .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID);
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+
+    app.chat_widget.handle_key_event(KeyCode::Right.into());
+    let event = rx.try_recv()?;
+    assert!(
+        matches!(event, AppEvent::SelectAgentsOverviewThread { thread_id: id } if id == thread_id)
+    );
+    Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+    assert_eq!(app.chat_widget.thread_id(), Some(thread_id));
+    assert!(app.chat_widget.is_external_writer_view());
+    assert_eq!(
+        app.thread_event_channels[&thread_id].attachment(),
+        ThreadEventAttachment::ExternalWriter
+    );
+    assert_eq!(app.agents_overview.dispatched_requests[&thread_id].len(), 1);
+    assert_eq!(
+        app.chat_widget.composer_text_with_pending(),
+        "Retained task draft"
+    );
+    let turns = app.thread_event_channels[&thread_id]
+        .store
+        .lock()
+        .await
+        .snapshot()
+        .turns;
+    assert!(serde_json::to_string(&turns)?.contains("Saved task"));
+    insta::with_settings!({snapshot_path => "../snapshots"}, {
+        insta::assert_snapshot!("agents_overview_attach_conflict", render_bottom_popup(&app.chat_widget, /*width*/ 96));
+    });
+
+    app.handle_key_event(&mut tui, &mut server, KeyCode::Esc.into())
+        .await;
+
+    assert_eq!(
+        app.chat_widget
+            .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID),
+        selection
+    );
+
+    // Opening the displayed task returns to the same frozen snapshot without retrying.
+    Box::pin(app.handle_event(
+        &mut tui,
+        &mut server,
+        AppEvent::SelectAgentsOverviewThread { thread_id },
+    ))
+    .await?;
+    assert!(app.chat_widget.no_modal_or_popup_active());
+    assert!(app.chat_widget.is_external_writer_view());
+    app.chat_widget.handle_paste(" should be ignored".into());
+    assert_eq!(
+        app.chat_widget.composer_text_with_pending(),
+        "Retained task draft"
+    );
+    assert_eq!(
+        app.thread_event_channels[&thread_id]
+            .store
+            .lock()
+            .await
+            .snapshot()
+            .turns,
+        turns
+    );
+
+    // An explicit retry remains read-only while the other server owns the task.
+    Box::pin(app.handle_key_event(&mut tui, &mut server, KeyCode::Char('r').into())).await;
+    assert!(app.chat_widget.is_external_writer_view());
+    assert_eq!(
+        app.chat_widget.composer_text_with_pending(),
+        "Retained task draft"
+    );
+    assert!(
+        server
+            .thread_loaded_list(codex_app_server_protocol::ThreadLoadedListParams {
+                cursor: None,
+                limit: None,
+            })
+            .await?
+            .data
+            .is_empty()
+    );
+
+    // Buffered requests stay untouched while viewing; remove the synthetic request before retry.
+    assert_eq!(
+        app.agents_overview
+            .dispatched_requests
+            .remove(&thread_id)
+            .unwrap()
+            .len(),
+        1
+    );
+    owner.shutdown().await?;
+    Box::pin(app.handle_key_event(&mut tui, &mut server, KeyCode::Char('r').into())).await;
+    assert_eq!(app.chat_widget.thread_id(), Some(thread_id));
+    assert!(!app.chat_widget.is_external_writer_view());
+    assert_eq!(
+        app.thread_event_channels[&thread_id].attachment(),
+        ThreadEventAttachment::Live
+    );
+    assert_eq!(
+        app.chat_widget.composer_text_with_pending(),
+        "Retained task draft"
+    );
+    assert!(app.chat_widget.no_modal_or_popup_active());
+    server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn command_center_refresh_failure_is_inline_and_clears_on_success() -> Result<()> {
+    let mut app = make_test_app().await;
+    let server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    let mut view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+    view.handle_key_event(KeyCode::Char('f').into());
+    view.handle_paste("Keep searching".into());
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    let before = render_bottom_popup(&app.chat_widget, /*width*/ 48);
+    for result in [
+        Err("unavailable".into()),
+        Ok(AgentsOverviewThreadRefresh {
+            threads: HashMap::new(),
+            last_messages: HashMap::new(),
+            recent_seed_complete: false,
+        }),
+    ] {
+        let request_id = Uuid::new_v4();
+        app.agents_overview.request_id = Some(request_id);
+        app.apply_agents_overview_thread_refresh(&server, request_id, result);
+        assert!(
+            app.agents_overview
+                .view_state
+                .lock()
+                .unwrap()
+                .refresh_failed
+        );
+    }
+    let notice = render_bottom_popup(&app.chat_widget, /*width*/ 32)
+        .lines()
+        .last()
+        .unwrap()
+        .to_owned();
+    insta::assert_snapshot!(notice, @r"
+  Error loading tasks
+    ");
+    let request_id = Uuid::new_v4();
+    app.agents_overview.request_id = Some(request_id);
+    app.apply_agents_overview_thread_refresh(
+        &server,
+        request_id,
+        Ok(AgentsOverviewThreadRefresh {
+            threads: HashMap::new(),
+            last_messages: HashMap::new(),
+            recent_seed_complete: true,
+        }),
+    );
+    assert_eq!(render_bottom_popup(&app.chat_widget, /*width*/ 48), before);
+    server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn command_center_action_failures_remain_visible() -> Result<()> {
+    let mut app = Box::pin(make_test_app()).await;
+    let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let thread_id = ThreadId::new();
+    let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    for (event, expected) in [
+        (
+            AppEvent::SelectAgentsOverviewThread { thread_id },
+            "is unavailable",
+        ),
+        (
+            AppEvent::RenameAgentsOverviewThread {
+                thread_id,
+                name: "New name".into(),
+            },
+            "Failed to rename task",
+        ),
+        (
+            AppEvent::StopAgentsOverviewThread { thread_id },
+            "Failed to stop background task",
+        ),
+    ] {
+        Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+        let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 96);
+        assert!(rendered.contains("Unable to complete action"), "{rendered}");
+        assert!(rendered.contains(expected), "{rendered}");
+        app.chat_widget.handle_key_event(KeyCode::Esc.into());
+        assert!(
+            render_bottom_popup(&app.chat_widget, /*width*/ 96).contains("Agent command center")
+        );
+    }
+    // The retained primary task can also fail in the nested agent-attachment path.
+    app.primary_thread_id = Some(thread_id);
+    Box::pin(app.handle_event(
+        &mut tui,
+        &mut server,
+        AppEvent::SelectAgentsOverviewThread { thread_id },
+    ))
+    .await?;
+    let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 96);
+    assert!(rendered.contains("Unable to complete action"), "{rendered}");
+    assert!(rendered.contains("is no longer available"), "{rendered}");
+    server.shutdown().await?;
+    Ok(())
+}
+#[path = "agents_overview_actions_tests.rs"]
+mod actions;
+
+fn trust_fixture_folders(app: &mut App) {
+    let projects = serde_json::json!({
+        test_path_buf("/").display().to_string(): {"trust_level": "trusted"},
+        app.config.cwd.display().to_string(): {"trust_level": "trusted"},
+    });
+    app.cli_kv_overrides.push((
+        "projects".into(),
+        toml::Value::try_from(projects).expect("trust fixture"),
+    ));
+}
+
+#[path = "agents_overview_usage_tests.rs"]
+mod usage;
+
+#[tokio::test]
+async fn command_center_new_actions_use_selection_and_leave_metadata_text_alone() {
+    let mut app = make_test_app().await;
+    app.config.features.enable(Feature::Worktrees).unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    app.app_event_tx = AppEventSender::new(tx);
+    let id = ThreadId::new();
+    let mut target = overview_thread(
+        id,
+        /*parent_thread_id*/ None,
+        "Task",
+        ThreadStatus::Idle,
+    );
+    target.cwd = test_path_buf("/tmp/checkout/subdir").abs();
+    let mut view = app.agents_overview_view(vec![target.clone()], Some(id));
+    for _ in 0..3 {
+        view.handle_key_event(KeyCode::Char('n').into());
+        assert!(
+            matches!(rx.try_recv(), Ok(AppEvent::NewAgentsOverviewSession { cwd: Some(cwd) }) if cwd == target.cwd)
+        );
+        view.handle_key_event(KeyCode::Char('w').into());
+        assert!(
+            matches!(rx.try_recv(), Ok(AppEvent::NewAgentsOverviewWorktree { cwd: Some(cwd) }) if cwd == target.cwd)
+        );
+        view.handle_key_event(KeyCode::Char('g').into());
+    }
+    view.handle_key_event(KeyCode::Char('r').into());
+    for character in "nwogrxfha".chars() {
+        view.handle_key_event(KeyCode::Char(character).into());
+    }
+    assert!(rx.try_recv().is_err());
+    view.handle_key_event(KeyCode::Enter.into());
+    assert!(
+        matches!(rx.try_recv(), Ok(AppEvent::RenameAgentsOverviewThread { name, .. }) if name.ends_with("nwogrxfha"))
+    );
+    let mut empty = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+    empty.handle_key_event(KeyCode::Char('n').into());
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::NewAgentsOverviewSession { cwd: None })
+    ));
+    app.config.features.disable(Feature::Worktrees).unwrap();
+    let mut disabled = app.agents_overview_view(vec![target], Some(id));
+    disabled.handle_key_event(KeyCode::Char('w').into());
+    assert!(rx.try_recv().is_err());
 }

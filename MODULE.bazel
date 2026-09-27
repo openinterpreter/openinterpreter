@@ -125,6 +125,7 @@ osx.frameworks(names = [
     "IOSurface",
     "IOKit",
     "Kernel",
+    "LocalAuthentication",
     "Metal",
     "MetalKit",
     "OpenGL",
@@ -141,6 +142,11 @@ use_repo(osx, "macos_sdk")
 # Needed to disable xcode...
 bazel_dep(name = "apple_support", version = "2.1.0")
 bazel_dep(name = "rules_cc", version = "0.2.18")
+
+# Windows voice jobs explicitly select the installed MSVC C toolchains.
+cc_configure = use_extension("@rules_cc//cc:extensions.bzl", "cc_configure_extension")
+use_repo(cc_configure, "local_config_cc")
+
 single_version_override(
     module_name = "rules_cc",
     patch_strip = 1,
@@ -159,6 +165,7 @@ single_version_override(
     patches = [
         "//patches:rules_foreign_cc_make_cppflags.patch",
         "//patches:rules_foreign_cc_make_xcompile.patch",
+        "//patches:rules_foreign_cc_make_msvc_stdint.patch",
     ],
     version = "0.15.1",
 )
@@ -202,6 +209,7 @@ rules_rust.patch(
         "//patches:rules_rust_windows_process_wrapper_skip_temp_outputs.patch",
         # Group build-script argument files to avoid Windows command-line limits.
         "//patches:rules_rust_group_build_script_arg_files.patch",
+        "//patches:rules_rust_windows_execroot_separators.patch",
     ],
     strip = 1,
 )
@@ -611,6 +619,27 @@ crate.annotation(
         "@rules_foreign_cc//toolchains:current_ninja_toolchain",
     ],
     crate = "opusic-sys",
+)
+
+# The musl CLI's allocator needs declared native tools and consistent header flags.
+crate.annotation(
+    build_script_env = {
+        "MAKE": "$${pwd}/$(MAKE)",
+        "NM": "$${pwd}/$(execpath @llvm//tools:llvm-nm)",
+        "RANLIB": "$${pwd}/$(execpath @llvm//tools:llvm-ranlib)",
+    },
+    build_script_toolchains = ["@rules_foreign_cc//toolchains:current_make_toolchain"],
+    build_script_tools = [
+        "@llvm//tools:llvm-nm",
+        "@llvm//tools:llvm-ranlib",
+        "@rules_foreign_cc//toolchains:current_make_toolchain",
+    ],
+    crate = "tikv-jemalloc-sys",
+    patch_args = ["-p1"],
+    patches = [
+        "//patches:tikv-jemalloc-sys_make_env.patch",
+        "//patches:tikv-jemalloc-sys_dependency_flags.patch",
+    ],
 )
 
 inject_repo(crate, "rules_foreign_cc")

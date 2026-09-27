@@ -1,7 +1,6 @@
 use crate::ensure_layout;
 use crate::extensions::seed_extension_instructions;
 use crate::guard;
-use crate::memory_root;
 use crate::metrics::MEMORY_STARTUP;
 use crate::phase1;
 use crate::phase2;
@@ -11,6 +10,7 @@ use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_features::Feature;
 use codex_login::AuthManager;
+use codex_protocol::MemoryVersion;
 use codex_protocol::ThreadId;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::SessionSource;
@@ -37,46 +37,58 @@ pub fn start_memories_startup_task(
         return;
     }
 
-    let context = Arc::new(MemoryStartupContext::new(
-        thread_manager,
-        Arc::clone(&auth_manager),
-        thread_id,
-        thread,
-        config.as_ref(),
-        source.clone(),
-    ));
+    let versions = if config.memories.dual_write {
+        vec![MemoryVersion::V1, MemoryVersion::V2]
+    } else {
+        vec![config.memories.version]
+    };
+    for version in versions {
+        let mut pipeline_config = config.as_ref().clone();
+        pipeline_config.memories.version = version;
+        let config = Arc::new(pipeline_config);
+        let auth_manager = Arc::clone(&auth_manager);
+        let parent_permission_profile = parent_permission_profile.clone();
+        let context = Arc::new(MemoryStartupContext::new(
+            Arc::clone(&thread_manager),
+            Arc::clone(&auth_manager),
+            thread_id,
+            Arc::clone(&thread),
+            config.as_ref(),
+            source.clone(),
+        ));
+        tokio::spawn(async move {
+            if context.memory_store().await.is_none() {
+                warn!("state db unavailable for memories startup pipeline; skipping");
+                return;
+            }
+            let root = config
+                .codex_home
+                .join(config.memories.version.directory_name());
+            if let Err(err) = ensure_layout(&root).await {
+                warn!("failed preparing memories root: {err}");
+                return;
+            }
+            if let Err(err) = seed_extension_instructions(&root).await {
+                warn!("failed seeding memory extension instructions: {err}");
+            }
 
-    if context.state_db().is_none() {
-        warn!("state db unavailable for memories startup pipeline; skipping");
-        return;
+            // Clean memories to make preserve DB size. This does not consume tokens so can be
+            // done before the quota check.
+            phase1::prune(context.as_ref(), &config).await;
+
+            if !guard::rate_limits_ok(&auth_manager, &config).await {
+                context.counter(
+                    MEMORY_STARTUP,
+                    /*inc*/ 1,
+                    &[("status", "skipped_rate_limit")],
+                );
+                return;
+            }
+
+            // Run phase 1.
+            phase1::run(Arc::clone(&context), Arc::clone(&config)).await;
+            // Run phase 2.
+            phase2::run(context, config, parent_permission_profile).await;
+        });
     }
-
-    tokio::spawn(async move {
-        let root = memory_root(&config.codex_home);
-        if let Err(err) = ensure_layout(&root).await {
-            warn!("failed preparing memories root: {err}");
-            return;
-        }
-        if let Err(err) = seed_extension_instructions(&root).await {
-            warn!("failed seeding memory extension instructions: {err}");
-        }
-
-        // Clean memories to make preserve DB size. This does not consume tokens so can be
-        // done before the quota check.
-        phase1::prune(context.as_ref(), &config).await;
-
-        if !guard::rate_limits_ok(&auth_manager, &config).await {
-            context.counter(
-                MEMORY_STARTUP,
-                /*inc*/ 1,
-                &[("status", "skipped_rate_limit")],
-            );
-            return;
-        }
-
-        // Run phase 1.
-        phase1::run(Arc::clone(&context), Arc::clone(&config)).await;
-        // Run phase 2.
-        phase2::run(context, config, parent_permission_profile).await;
-    });
 }

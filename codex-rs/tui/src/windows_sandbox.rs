@@ -1,147 +1,169 @@
-//! TUI-owned Windows sandbox helpers retained while setup still runs in the local client process.
-//!
-//! TODO: These helpers inspect and modify the TUI host, so they do not support
-//! cross-platform remote app servers. Move readiness and setup to the existing
-//! `windowsSandbox/*` RPCs while preserving the pending permission profile,
-//! use the server platform reported during initialization, and add a remote
-//! equivalent for read-root grants.
+//! Windows sandbox configuration, managed requirements, and executor selection for the TUI.
 
-use crate::legacy_core::config::Config;
-use codex_config::types::WindowsSandboxModeToml;
-use codex_features::Feature;
-#[cfg(target_os = "windows")]
-use codex_otel::SessionTelemetry;
+use codex_app_server_client::AppServerRequestHandle;
+use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::ConfigReadResponse;
+use codex_app_server_protocol::ConfigRequirementsReadResponse;
+use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::WindowsSandboxImplementation;
+use codex_app_server_protocol::WindowsSandboxSetupMode;
 use codex_protocol::config_types::WindowsSandboxLevel;
-#[cfg(target_os = "windows")]
-use codex_protocol::models::PermissionProfile;
-#[cfg(target_os = "windows")]
-use codex_utils_absolute_path::AbsolutePathBuf;
-#[cfg(target_os = "windows")]
-use std::collections::HashMap;
-use std::path::Path;
-#[cfg(target_os = "windows")]
-use std::path::PathBuf;
+use uuid::Uuid;
 
-#[cfg(target_os = "windows")]
-pub(crate) fn record_world_writable_scan_result(
-    session_telemetry: &SessionTelemetry,
-    result: &anyhow::Result<usize>,
-) {
-    let (flagged_count, result) = match result {
-        Ok(flagged_count) => (*flagged_count as i64, "success"),
-        Err(_) => (0, "error"),
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WindowsSandboxConfig {
+    pub(crate) mxc_selected: bool,
+    pub(crate) mode: Option<WindowsSandboxSetupMode>,
+    // None means policy has not been loaded; a loaded null list allows both modes.
+    pub(crate) requirements: Option<Option<Vec<WindowsSandboxSetupMode>>>,
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl WindowsSandboxConfig {
+    pub(crate) fn from_responses(
+        config: &ConfigReadResponse,
+        requirements: ConfigRequirementsReadResponse,
+    ) -> Self {
+        let configured_sandbox = config
+            .config
+            .additional
+            .get("windows")
+            .and_then(|windows| windows.get("sandbox"));
+        let mxc_selected = configured_sandbox
+            .and_then(|implementation| serde_json::from_value(implementation.clone()).ok())
+            == Some(WindowsSandboxImplementation::Mxc);
+        let mut state = Self {
+            mxc_selected,
+            mode: configured_sandbox
+                .and_then(|mode| serde_json::from_value(mode.clone()).ok())
+                .or_else(|| {
+                    if mxc_selected {
+                        return None;
+                    }
+                    let features = config.config.additional.get("features")?;
+                    [
+                        (
+                            "elevated_windows_sandbox",
+                            WindowsSandboxSetupMode::Elevated,
+                        ),
+                        (
+                            "experimental_windows_sandbox",
+                            WindowsSandboxSetupMode::Unelevated,
+                        ),
+                        (
+                            "enable_experimental_windows_sandbox",
+                            WindowsSandboxSetupMode::Unelevated,
+                        ),
+                    ]
+                    .into_iter()
+                    .find_map(|(key, mode)| {
+                        (features.get(key).and_then(serde_json::Value::as_bool) == Some(true))
+                            .then_some(mode)
+                    })
+                }),
+            requirements: Some(
+                requirements
+                    .requirements
+                    .and_then(|requirements| requirements.allowed_windows_sandbox_implementations)
+                    .map(|allowed| {
+                        allowed
+                            .into_iter()
+                            .filter_map(|implementation| match implementation {
+                                WindowsSandboxImplementation::Elevated => {
+                                    Some(WindowsSandboxSetupMode::Elevated)
+                                }
+                                WindowsSandboxImplementation::Unelevated => {
+                                    Some(WindowsSandboxSetupMode::Unelevated)
+                                }
+                                WindowsSandboxImplementation::Mxc => None,
+                            })
+                            .collect()
+                    }),
+            ),
+        };
+        if !state.mxc_selected
+            && let Some(Some(allowed)) = &state.requirements
+            && !state.mode.is_some_and(|mode| allowed.contains(&mode))
+        {
+            // Managed requirements prefer elevated when the configured value is disallowed.
+            state.mode = [
+                WindowsSandboxSetupMode::Elevated,
+                WindowsSandboxSetupMode::Unelevated,
+            ]
+            .into_iter()
+            .find(|mode| allowed.contains(mode));
+        }
+        state
+    }
+
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.mxc_selected || self.mode.is_some()
+    }
+
+    pub(crate) fn level(&self) -> WindowsSandboxLevel {
+        match self.mode {
+            Some(WindowsSandboxSetupMode::Elevated) => WindowsSandboxLevel::Elevated,
+            Some(WindowsSandboxSetupMode::Unelevated) => WindowsSandboxLevel::RestrictedToken,
+            None => WindowsSandboxLevel::Disabled,
+        }
+    }
+
+    pub(crate) fn allows(&self, mode: WindowsSandboxSetupMode) -> bool {
+        match &self.requirements {
+            Some(Some(allowed)) => allowed.contains(&mode),
+            Some(None) => true,
+            None => false,
+        }
+    }
+
+    pub(crate) fn requires_elevated(&self) -> bool {
+        self.mode == Some(WindowsSandboxSetupMode::Elevated)
+            && matches!(self.requirements, Some(Some(_)))
+    }
+
+    pub(crate) async fn read(
+        handle: AppServerRequestHandle,
+        cwd: String,
+    ) -> color_eyre::Result<Self> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let config = crate::config_update::read_effective_config(handle.clone(), cwd).await?;
+            let requirements = handle
+                .request_typed(ClientRequest::ConfigRequirementsRead {
+                    request_id: RequestId::String(format!(
+                        "tui-windows-sandbox-requirements-{}",
+                        Uuid::new_v4()
+                    )),
+                    params: None,
+                })
+                .await?;
+            Ok(Self::from_responses(&config, requirements))
+        })
+        .await?
+    }
+}
+
+/// A server-local connection can still select remote executors. Missing selections are unknown.
+pub(crate) fn host_from_environments(
+    environments: Option<&[codex_app_server_protocol::ThreadEnvironment]>,
+) -> crate::app::WindowsSandboxHost {
+    use crate::app::WindowsSandboxHost;
+    let Some(environments) = environments.filter(|environments| !environments.is_empty()) else {
+        return WindowsSandboxHost::Unknown;
     };
-    session_telemetry.histogram(
-        "codex.windows_sandbox.world_writable_scan_flagged_directories",
-        flagged_count,
-        &[("result", result)],
-    );
-}
-
-pub(crate) fn level_from_config(config: &Config) -> WindowsSandboxLevel {
-    match config.permissions.windows_sandbox_mode {
-        Some(WindowsSandboxModeToml::Elevated) => WindowsSandboxLevel::Elevated,
-        Some(WindowsSandboxModeToml::Unelevated) => WindowsSandboxLevel::RestrictedToken,
-        None if config.features.enabled(Feature::WindowsSandboxElevated) => {
-            WindowsSandboxLevel::Elevated
-        }
-        None if config.features.enabled(Feature::WindowsSandbox) => {
-            WindowsSandboxLevel::RestrictedToken
-        }
-        None => WindowsSandboxLevel::Disabled,
+    let local = environments
+        .iter()
+        .any(|environment| environment.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID);
+    let remote = environments
+        .iter()
+        .any(|environment| environment.environment_id != codex_exec_server::LOCAL_ENVIRONMENT_ID);
+    match (local, remote) {
+        (true, false) => WindowsSandboxHost::Local,
+        (true, true) => WindowsSandboxHost::Mixed,
+        (false, true) => WindowsSandboxHost::Remote,
+        (false, false) => WindowsSandboxHost::Unknown,
     }
 }
 
-#[cfg(target_os = "windows")]
-pub(crate) use codex_windows_sandbox::sandbox_setup_is_complete;
-
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn sandbox_setup_is_complete(_codex_home: &Path) -> bool {
-    false
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn prepare_elevated_sandbox(
-    permission_profile: &PermissionProfile,
-    workspace_roots: &[AbsolutePathBuf],
-    command_cwd: &Path,
-    env_map: &HashMap<String, String>,
-    codex_home: &Path,
-) -> anyhow::Result<()> {
-    if !sandbox_setup_is_complete(codex_home) {
-        let permissions = codex_windows_sandbox::ResolvedWindowsSandboxPermissions::try_from_permission_profile_for_workspace_roots(
-            permission_profile,
-            workspace_roots,
-        )?;
-        codex_windows_sandbox::run_elevated_setup(codex_windows_sandbox::SandboxSetupRequest {
-            permissions: &permissions,
-            command_cwd,
-            env_map,
-            codex_home,
-            proxy_enforced: false,
-        })?;
-    }
-    codex_windows_sandbox::run_setup_refresh(
-        permission_profile,
-        workspace_roots,
-        command_cwd,
-        env_map,
-        codex_home,
-        /*proxy_enforced*/ false,
-    )
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn elevated_setup_failure_details(err: &anyhow::Error) -> Option<(String, String)> {
-    let failure = codex_windows_sandbox::extract_setup_failure(err)?;
-    Some((
-        failure.code.as_str().to_string(),
-        codex_windows_sandbox::sanitize_setup_metric_tag_value(&failure.message),
-    ))
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn elevated_setup_failure_metric_name(err: &anyhow::Error) -> &'static str {
-    if codex_windows_sandbox::extract_setup_failure(err).is_some_and(|failure| {
-        matches!(
-            failure.code,
-            codex_windows_sandbox::SetupErrorCode::OrchestratorHelperLaunchCanceled
-        )
-    }) {
-        "codex.windows_sandbox.elevated_setup_canceled"
-    } else {
-        "codex.windows_sandbox.elevated_setup_failure"
-    }
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn grant_read_root_non_elevated(
-    permission_profile: &PermissionProfile,
-    workspace_roots: &[AbsolutePathBuf],
-    command_cwd: &Path,
-    env_map: &HashMap<String, String>,
-    codex_home: &Path,
-    read_root: &Path,
-) -> anyhow::Result<PathBuf> {
-    if !read_root.is_absolute() {
-        anyhow::bail!("path must be absolute: {}", read_root.display());
-    }
-    if !read_root.exists() {
-        anyhow::bail!("path does not exist: {}", read_root.display());
-    }
-    if !read_root.is_dir() {
-        anyhow::bail!("path must be a directory: {}", read_root.display());
-    }
-
-    let canonical_root = dunce::canonicalize(read_root)?;
-    codex_windows_sandbox::run_setup_refresh_with_extra_read_roots(
-        permission_profile,
-        workspace_roots,
-        command_cwd,
-        env_map,
-        codex_home,
-        vec![canonical_root.clone()],
-        /*proxy_enforced*/ false,
-    )?;
-    Ok(canonical_root)
-}
+#[cfg(test)]
+#[path = "windows_sandbox_tests.rs"]
+mod tests;

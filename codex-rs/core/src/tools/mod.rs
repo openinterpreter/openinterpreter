@@ -1,4 +1,5 @@
 mod approvals;
+pub(crate) mod call_trace;
 pub(crate) mod code_mode;
 pub(crate) mod context;
 mod control_tool_analytics;
@@ -8,6 +9,7 @@ pub(crate) mod handlers;
 pub(crate) mod hook_names;
 pub(crate) mod hosted_spec;
 pub(crate) mod lifecycle;
+mod multi_agent_tool;
 pub(crate) mod network_approval;
 pub(crate) mod orchestrator;
 pub(crate) mod parallel;
@@ -18,6 +20,7 @@ pub(crate) mod sandboxing;
 pub(crate) mod spec_plan;
 pub(crate) mod tool_dispatch_trace;
 mod tool_namespaces_info;
+mod user_messaging;
 
 use std::borrow::Cow;
 
@@ -31,7 +34,8 @@ use codex_tools::ToolName;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::formatted_truncate_text;
 use codex_utils_output_truncation::truncate_text;
-pub(crate) use executed_tool_calls::ExecutedToolCallRecorder;
+pub(crate) use executed_tool_calls::ExecutedToolCalls;
+pub(crate) use multi_agent_tool::MULTI_AGENT_V2_NAMESPACE_DESCRIPTION;
 pub use router::ToolRouter;
 
 /// Legacy boundaries such as hook payloads, telemetry tags, and Responses tool

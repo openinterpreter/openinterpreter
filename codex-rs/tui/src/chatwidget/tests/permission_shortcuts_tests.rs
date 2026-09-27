@@ -14,8 +14,7 @@ async fn permission_shortcuts_cycle_builtin_modes() {
     chat.chat_keymap.previous_permission_mode = vec![crate::key_hint::plain(KeyCode::F(7))];
     #[cfg(target_os = "windows")]
     {
-        chat.local_settings.notices.hide_world_writable_warning = Some(true);
-        chat.set_windows_sandbox_mode(Some(WindowsSandboxModeToml::Unelevated));
+        chat.set_windows_sandbox_mode(Some(WindowsSandboxSetupMode::Unelevated));
     }
     for (current, reviewer, key, expected, next_reviewer) in [
         (":workspace", User, KeyCode::F(8), ":workspace", AutoReview),
@@ -68,8 +67,6 @@ async fn permission_shortcuts_cycle_builtin_modes() {
     #[cfg(target_os = "windows")]
     {
         chat.set_windows_sandbox_mode(/*mode*/ None);
-        chat.set_feature_enabled(Feature::WindowsSandbox, /*enabled*/ false);
-        chat.set_feature_enabled(Feature::WindowsSandboxElevated, /*enabled*/ false);
         chat.config
             .permissions
             .set_permission_profile(PermissionProfile::read_only())
@@ -87,6 +84,20 @@ async fn permission_shortcuts_cycle_builtin_modes() {
             })
         ));
         assert!(rx.try_recv().is_err());
+        chat.complete_permission_shortcut(thread_id);
+        chat.windows_sandbox_host = crate::app::WindowsSandboxHost::Remote;
+        chat.handle_key_event(KeyEvent::from(KeyCode::F(8)));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AppEvent::ApplyPermissionShortcut {
+                selection: PermissionProfileSelection {
+                    profile_id,
+                    approvals_reviewer: Some(User),
+                    ..
+                },
+                ..
+            }) if profile_id == ":workspace"
+        ));
     }
 }
 

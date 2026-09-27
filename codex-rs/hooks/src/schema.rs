@@ -851,7 +851,7 @@ fn permission_mode_schema(_gen: &mut SchemaGenerator) -> Schema {
 }
 
 fn session_start_source_schema(_gen: &mut SchemaGenerator) -> Schema {
-    string_enum_schema(&["startup", "resume", "clear", "compact"])
+    string_enum_schema(&["startup", "resume", "clear", "compact", "fork"])
 }
 
 fn compaction_trigger_schema(_gen: &mut SchemaGenerator) -> Schema {

@@ -1,5 +1,6 @@
 use super::*;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::SearchToolCallParams;
 use core_test_support::assert_regex_match;
 use pretty_assertions::assert_eq;
@@ -96,6 +97,7 @@ fn mcp_tool_output_response_item_includes_wall_time() {
             meta: None,
         },
         tool_input: json!({}),
+        result_metadata_capture_allowed: false,
         wall_time: std::time::Duration::from_millis(1250),
         original_image_detail_supported: false,
         truncation_policy: TruncationPolicy::Bytes(1024),
@@ -142,6 +144,7 @@ fn mcp_tool_output_response_item_truncates_large_structured_content() {
             meta: None,
         },
         tool_input: json!({}),
+        result_metadata_capture_allowed: false,
         wall_time: std::time::Duration::from_millis(1250),
         original_image_detail_supported: false,
         truncation_policy: TruncationPolicy::Bytes(128),
@@ -192,6 +195,7 @@ fn mcp_tool_output_response_item_preserves_content_items() {
             meta: None,
         },
         tool_input: json!({}),
+        result_metadata_capture_allowed: false,
         wall_time: std::time::Duration::from_millis(500),
         original_image_detail_supported: false,
         truncation_policy: TruncationPolicy::Bytes(1024),
@@ -214,7 +218,9 @@ fn mcp_tool_output_response_item_preserves_content_items() {
                             text: "Wall time: 0.5000 seconds\nOutput:".to_string(),
                         },
                         FunctionCallOutputContentItem::InputImage {
-                            image_url: image_url.to_string(),
+                            image: ImageReference::Inline {
+                                image_url: image_url.to_string()
+                            },
                             detail: Some(DEFAULT_IMAGE_DETAIL),
                         },
                     ]
@@ -251,6 +257,7 @@ fn mcp_tool_output_code_mode_result_preserves_content_without_private_metadata(
             })),
         },
         tool_input: json!({}),
+        result_metadata_capture_allowed: false,
         wall_time: std::time::Duration::from_millis(1250),
         original_image_detail_supported: false,
         truncation_policy,
@@ -291,7 +298,9 @@ fn custom_tool_calls_can_derive_text_from_content_items() {
                 text: "line 1".to_string(),
             },
             FunctionCallOutputContentItem::InputImage {
-                image_url: "data:image/png;base64,AAA".to_string(),
+                image: ImageReference::Inline {
+                    image_url: "data:image/png;base64,AAA".to_string(),
+                },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             },
             FunctionCallOutputContentItem::InputText {
@@ -311,7 +320,9 @@ fn custom_tool_calls_can_derive_text_from_content_items() {
                     text: "line 1".to_string(),
                 },
                 FunctionCallOutputContentItem::InputImage {
-                    image_url: "data:image/png;base64,AAA".to_string(),
+                    image: ImageReference::Inline {
+                        image_url: "data:image/png;base64,AAA".to_string(),
+                    },
                     detail: Some(DEFAULT_IMAGE_DETAIL),
                 },
                 FunctionCallOutputContentItem::InputText {

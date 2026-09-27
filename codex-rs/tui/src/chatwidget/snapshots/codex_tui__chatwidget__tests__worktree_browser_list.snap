@@ -1,12 +1,12 @@
 ---
 source: tui/src/chatwidget/tests/worktree_picker_tests.rs
-assertion_line: 100
 expression: "render_bottom_popup(&chat, 80)"
 ---
   Managed worktrees
-  Select a worktree to resume its owner or copy its working directory
+  Select a worktree to resume, copy its path, or delete it
 
 
-› /repo/worktree  Owner: 00000000-0000-0000-0000-000000000001
 
-  Press enter to confirm or esc to go back
+› Fix login form  updated 2h ago · /repo/worktree
+
+  enter select · esc back

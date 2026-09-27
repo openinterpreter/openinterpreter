@@ -1,0 +1,6 @@
+---
+source: tui/src/chatwidget/realtime_tests/handoff_privacy.rs
+assertion_line: 1188
+expression: rendered
+---
+• Typed beginning and typed tail

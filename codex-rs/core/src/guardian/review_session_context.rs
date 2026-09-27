@@ -54,29 +54,12 @@ impl ReviewContextPolicy {
         if self == Self::Legacy {
             return Ok(None);
         }
-        let Some(envelope) = history.annotated_items().iter().rev().find(|envelope| {
-            matches!(
-                envelope.item,
-                ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
-            )
-        }) else {
+        let Some(checkpoint) =
+            codex_history::CompactionCheckpoint::latest(history.annotated_items())
+        else {
             return Ok(None);
         };
-
-        let item = &envelope.item;
-        let valid = match item {
-            ResponseItem::Compaction {
-                id: Some(_),
-                encrypted_content,
-                ..
-            } if !encrypted_content.is_empty() => true,
-            ResponseItem::ContextCompaction {
-                id: Some(_),
-                encrypted_content: Some(encrypted_content),
-                ..
-            } if !encrypted_content.is_empty() => true,
-            _ => false,
-        };
+        let valid = checkpoint.is_usable();
         if !valid && !strict {
             return Ok(None);
         }
@@ -87,19 +70,11 @@ impl ReviewContextPolicy {
         if strict {
             // A resumed parent may now use a different model. Compare the actual
             // checkpoint producer with the selected reviewer, not the live parent model.
-            let producer_hash = envelope
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.compaction_model_hash.as_deref());
             anyhow::ensure!(
-                producer_hash
-                    .zip(reviewer_compaction_hash)
-                    .is_some_and(|(producer, reviewer)| {
-                        !producer.is_empty() && producer == reviewer
-                    }),
+                checkpoint.is_compatible_with(reviewer_compaction_hash),
                 "parent compaction checkpoint is incompatible with the Guardian review model or its compatibility is unknown"
             );
         }
-        Ok(Some(item.clone()))
+        Ok(Some(checkpoint.item.clone()))
     }
 }

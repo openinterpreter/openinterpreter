@@ -99,6 +99,19 @@ pub(super) async fn ensure_user_model_provider_can_be_bedrock(
         )));
     }
 
+    if layers
+        .effective_config()
+        .get("model_providers")
+        .and_then(|providers| providers.get(AMAZON_BEDROCK_PROVIDER_ID))
+        .and_then(|provider| provider.get("aws"))
+        .and_then(|aws| aws.get("credential_export"))
+        .is_some()
+    {
+        return Err(invalid_request(
+            "Amazon Bedrock is configured to use `aws.credential_export`. Please clear this setting to use another sign-in method.",
+        ));
+    }
+
     Ok(())
 }
 

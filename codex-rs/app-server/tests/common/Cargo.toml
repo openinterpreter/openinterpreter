@@ -21,7 +21,7 @@ codex-core = { workspace = true }
 codex-exec-server = { workspace = true }
 codex-features = { workspace = true }
 codex-login = { workspace = true }
-codex-models-manager = { workspace = true }
+codex-model-provider = { workspace = true }
 codex-protocol = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 serde = { workspace = true }

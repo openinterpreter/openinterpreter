@@ -1,3 +1,24 @@
+use super::replace_path_and_deduplicate;
+use pretty_assertions::assert_eq;
+use std::path::Path;
+
+#[test]
+fn replace_path_and_deduplicate_preserves_other_paths_and_order() {
+    let old_path = Path::new("old");
+    let new_path = Path::new("new");
+    let extra = Path::new("extra");
+    let descendant = Path::new("old/child");
+
+    assert_eq!(
+        replace_path_and_deduplicate(
+            vec![old_path, extra, descendant, new_path, extra],
+            old_path,
+            new_path,
+        ),
+        vec![new_path, extra, descendant]
+    );
+}
+
 #[cfg(unix)]
 mod symlinks {
     use super::super::resolve_symlink_write_paths;

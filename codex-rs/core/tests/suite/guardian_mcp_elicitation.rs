@@ -403,7 +403,10 @@ async fn node_elicitations_attribute_independent_reviews_without_changing_action
     let actions = [
         (
             "access_browser_origin",
-            json!({"origin": "https://example.com"}),
+            json!({
+                "origin": "https://example.com",
+                "description": "payload ".repeat(/*n*/ 256) + "required argument suffix",
+            }),
         ),
         ("webmcp:write_record", json!({"record": {"value": 42}})),
     ];
@@ -605,11 +608,11 @@ async fn node_elicitations_attribute_independent_reviews_without_changing_action
                 "tool": "mcp_tool_call", "server": server_name,
                 "tool_name": meta[index]["tool_name"], "arguments": meta[index]["tool_params"],
                 "connector_id": "inner-connector", "connector_name": "Inner Connector",
-                "connector_description": "Connector for the reviewed inner action",
                 "tool_title": "Inner action",
-                "tool_description": "Review this action independently from JavaScript".repeat(220),
             })
         );
+        assert!(prompt.contains("<guardian_tool_descriptions>"));
+        assert!(prompt.contains("Connector for the reviewed inner action"));
     }
     let [tool_item] = tool_items.as_slice() else {
         panic!("expected one completed enclosing tool item: {tool_items:?}");
@@ -768,5 +771,155 @@ async fn user_review_preserves_unsupported_guardian_elicitations(mode: &str) -> 
             .contains("decline")
     );
     test.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn yielded_code_mode_elicitation_keeps_live_invocation_metadata() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(Ok(()), "the MCP fixture requires a host Python interpreter");
+
+    let server = responses::start_mock_server().await;
+    let meta = json!([{
+        "codex_strict_auto_review": true,
+        "codex_sensitive_action": true,
+        "tool_name": "write_record",
+        "tool_params": {"value": 42},
+        "connector_id": "inner-connector",
+    }]);
+    let mcp_servers = serde_json::from_value(json!({
+        "node_repl": {
+            "command": if cfg!(windows) { "python" } else { "python3" },
+            "args": ["-u", "-c", ELICITATION_SERVER, meta.to_string(), "forward"],
+            "default_tools_approval_mode": "approve",
+        }
+    }))?;
+    let mut builder = test_codex()
+        .with_model_info_override("gpt-5.4", |model| {
+            model.tool_mode = Some(codex_protocol::openai_models::ToolMode::CodeMode);
+            model.experimental_supported_tools = vec!["test_sync_tool".to_string()];
+        })
+        .with_config(move |config| {
+            config
+                .features
+                .enable(codex_features::Feature::CodeMode)
+                .unwrap();
+            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+            config.approvals_reviewer = ApprovalsReviewer::User;
+            config.mcp_servers.set(mcp_servers).unwrap();
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+    wait_for_mcp_server(&test.codex, "node_repl").await?;
+    let barrier = r#"await tools.test_sync_tool({barrier: {
+        id: "elicitation-origin", participants: 2, timeout_ms: 60000
+    }});"#;
+    responses::mount_sse_once(&server, responses::sse(vec![
+        responses::ev_response_created("origin-a"),
+        responses::ev_custom_tool_call("cell-a", "exec", &format!(
+            "// @exec: {{\"yield_time_ms\": 1}}\n{barrier}\ntext(await tools.mcp__node_repl__js({{code: 'write_record()'}}));"
+        )),
+        responses::ev_completed("origin-a"),
+    ])).await;
+    let yielded = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![responses::ev_completed("a-finished")]),
+    )
+    .await;
+    test.submit_text_turn("Start A and leave its cell running.")
+        .await?;
+    let output = yielded.single_request().custom_tool_call_output("cell-a");
+    let text = output["output"]
+        .as_str()
+        .or_else(|| output["output"][0]["text"].as_str())
+        .context("A should return text")?;
+    let cell_id = text
+        .strip_prefix("Script running with cell ID ")
+        .and_then(|text| text.lines().next())
+        .context("A should yield a running cell")?
+        .to_string();
+
+    responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_custom_tool_call("cell-b", "exec", barrier),
+            responses::ev_completed("b-started"),
+        ]),
+    )
+    .await;
+    let guardian = responses::mount_sse_once_match(
+        &server,
+        body_partial_json(json!({"client_metadata": {"x-openai-subagent": "guardian"}})),
+        responses::sse(vec![
+            responses::ev_assistant_message(
+                "review-result",
+                &json!({
+                    "risk_level": "low", "user_authorization": "high", "outcome": "allow",
+                    "rationale": "The user requested the action.",
+                })
+                .to_string(),
+            ),
+            responses::ev_completed("review-done"),
+        ]),
+    )
+    .await;
+    responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_function_call(
+                "wait-a",
+                "wait",
+                &json!({
+                    "cell_id": cell_id, "yield_time_ms": 60000,
+                })
+                .to_string(),
+            ),
+            responses::ev_completed("b-wait"),
+        ]),
+    )
+    .await;
+    responses::mount_sse_once(
+        &server,
+        responses::sse(vec![responses::ev_completed("b-finished")]),
+    )
+    .await;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Run B and wait for A.".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let mut invocation_id = None;
+    let mut assessment_target = None;
+    loop {
+        let event =
+            tokio::time::timeout(Duration::from_secs(60), test.codex.next_event()).await??;
+        match event.msg {
+            EventMsg::ItemCompleted(event) => {
+                if let TurnItem::McpToolCall(item) = event.item {
+                    invocation_id = Some(item.id);
+                }
+            }
+            EventMsg::GuardianAssessment(assessment)
+                if assessment.status == GuardianAssessmentStatus::Approved =>
+            {
+                assessment_target = assessment.target_item_id;
+            }
+            EventMsg::ElicitationRequest(_) => panic!("strict review must not prompt the user"),
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
+        }
+    }
+    assert!(invocation_id.is_some(), "A's tool must complete during B");
+    assert_eq!(assessment_target, invocation_id);
+    assert_eq!(
+        guardian
+            .requests()
+            .iter()
+            .filter(
+                |request| request.body_json()["client_metadata"]["x-openai-subagent"] == "guardian"
+            )
+            .count(),
+        1
+    );
     Ok(())
 }

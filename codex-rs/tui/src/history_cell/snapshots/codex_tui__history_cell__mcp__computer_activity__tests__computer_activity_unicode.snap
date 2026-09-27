@@ -1,0 +1,7 @@
+---
+source: tui/src/history_cell/computer_activity_tests.rs
+expression: "render(&cell, 24)"
+---
+• Used computer · 1
+  action · 1 failed
+  └ Failed: diagnostic …

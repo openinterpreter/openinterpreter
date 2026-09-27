@@ -114,6 +114,12 @@ impl RequestPluginInstallHandler {
             }
         };
 
+        if turn.session_source.is_non_root_agent() {
+            return Err(FunctionCallError::RespondToModel(
+                "request_plugin_install can only be used by the root thread".to_string(),
+            ));
+        }
+
         let (requested_tool_id, requested_tool_type, suggest_reason) = match self.presentation {
             ToolSuggestPresentation::ListTool => {
                 let args: RequestPluginInstallArgs = parse_arguments(&arguments)?;
@@ -220,7 +226,7 @@ impl RequestPluginInstallHandler {
                 .analytics_events_client
                 .track_plugin_install_requested(
                     build_track_events_context(
-                        turn.model_info().slug.clone(),
+                        step_context.settings.model_info.slug.clone(),
                         session.thread_id.to_string(),
                         turn.sub_id.clone(),
                         turn.originator.clone(),
@@ -283,14 +289,16 @@ impl RequestPluginInstallHandler {
                 Some(_) => "unknown",
                 None => "unavailable",
             };
-            turn.session_telemetry.record_plugin_install_suggestion(
-                tool_type,
-                tool.id(),
-                tool.name(),
-                response_action,
-                user_confirmed,
-                completed,
-            );
+            step_context
+                .session_telemetry
+                .record_plugin_install_suggestion(
+                    tool_type,
+                    tool.id(),
+                    tool.name(),
+                    response_action,
+                    user_confirmed,
+                    completed,
+                );
         }
 
         let content = serde_json::to_string(&RequestPluginInstallResult {

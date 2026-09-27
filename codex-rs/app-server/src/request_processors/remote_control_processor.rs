@@ -132,6 +132,7 @@ fn map_enable_error(err: RemoteControlEnableError) -> JSONRPCErrorError {
     match err {
         RemoteControlEnableError::Unavailable(err) => map_unavailable(err),
         RemoteControlEnableError::DisabledByRequirements(err) => invalid_request(err.to_string()),
+        RemoteControlEnableError::AuthenticationChanged => internal_error(err.to_string()),
     }
 }
 

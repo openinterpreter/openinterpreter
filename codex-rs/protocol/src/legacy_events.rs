@@ -20,6 +20,8 @@ use crate::items::SubAgentActivityItem;
 use crate::items::TurnItem;
 use crate::items::UserMessageItem;
 use crate::items::WebSearchItem;
+use crate::items::trim_trailing_default_image_details;
+use crate::models::ImageReference;
 use crate::protocol::AgentMessageContentDeltaEvent;
 use crate::protocol::AgentMessageEvent;
 use crate::protocol::AgentReasoningEvent;
@@ -58,9 +60,11 @@ use crate::protocol::ReasoningContentDeltaEvent;
 use crate::protocol::ReasoningRawContentDeltaEvent;
 use crate::protocol::SubAgentActivityEvent;
 use crate::protocol::UserMessageEvent;
+use crate::protocol::UserMessageImageKind;
 use crate::protocol::ViewImageToolCallEvent;
 use crate::protocol::WebSearchBeginEvent;
 use crate::protocol::WebSearchEndEvent;
+use crate::user_input::UserInput;
 
 /// Converts canonical item lifecycle events back into the legacy raw event stream used by
 /// compatibility consumers that have not migrated to `TurnItem`.
@@ -78,11 +82,32 @@ impl UserMessageItem {
     pub fn as_legacy_user_message_event(&self) -> UserMessageEvent {
         // Legacy user-message events flatten only text inputs into `message` and
         // rebase text element ranges onto that concatenated text.
+        let mut file_ids = Vec::new();
+        let mut file_id_details = Vec::new();
+        let mut image_order = Vec::new();
+        for input in &self.content {
+            if let UserInput::Image { image, detail } = input {
+                match image {
+                    ImageReference::Inline { .. } => {
+                        image_order.push(UserMessageImageKind::Inline);
+                    }
+                    ImageReference::File { file_id } => {
+                        image_order.push(UserMessageImageKind::File);
+                        file_ids.push(file_id.clone());
+                        file_id_details.push(*detail);
+                    }
+                }
+            }
+        }
+        let file_id_details = trim_trailing_default_image_details(file_id_details);
         UserMessageEvent {
             client_id: self.client_id.clone(),
             message: self.message(),
             images: Some(self.image_urls()),
             image_details: self.image_details(),
+            file_ids: (!file_ids.is_empty()).then_some(file_ids),
+            file_id_details,
+            image_order,
             local_images: self.local_image_paths(),
             local_image_details: self.local_image_details(),
             audio: Some(self.audio_urls()),
@@ -472,9 +497,10 @@ impl FileChangeItem {
 }
 
 impl McpToolCallItem {
-    pub fn as_legacy_begin_event(&self) -> EventMsg {
+    pub fn as_legacy_begin_event(&self, turn_id: String) -> EventMsg {
         EventMsg::McpToolCallBegin(McpToolCallBeginEvent {
             call_id: self.id.clone(),
+            turn_id,
             invocation: McpInvocation {
                 server: self.server.clone(),
                 tool: self.tool.clone(),
@@ -482,6 +508,7 @@ impl McpToolCallItem {
             },
             connector_id: self.connector_id.clone(),
             mcp_app_resource_uri: self.mcp_app_resource_uri.clone(),
+            mcp_app_ui: self.mcp_app_ui.clone(),
             link_id: self.link_id.clone(),
             app_name: self.app_name.clone(),
             action_name: self.action_name.clone(),
@@ -490,7 +517,7 @@ impl McpToolCallItem {
         })
     }
 
-    pub fn as_legacy_end_event(&self) -> Option<EventMsg> {
+    pub fn as_legacy_end_event(&self, turn_id: String) -> Option<EventMsg> {
         let result = match (&self.result, &self.error) {
             (Some(result), _) => Ok(result.clone()),
             (None, Some(error)) => Err(error.message.clone()),
@@ -499,12 +526,14 @@ impl McpToolCallItem {
 
         Some(EventMsg::McpToolCallEnd(McpToolCallEndEvent {
             call_id: self.id.clone(),
+            turn_id,
             invocation: McpInvocation {
                 server: self.server.clone(),
                 tool: self.tool.clone(),
                 arguments: (!self.arguments.is_null()).then(|| self.arguments.clone()),
             },
             mcp_app_resource_uri: self.mcp_app_resource_uri.clone(),
+            mcp_app_ui: self.mcp_app_ui.clone(),
             connector_id: self.connector_id.clone(),
             link_id: self.link_id.clone(),
             app_name: self.app_name.clone(),
@@ -542,7 +571,10 @@ impl TurnItem {
                 .as_legacy_end_event(String::new())
                 .into_iter()
                 .collect(),
-            TurnItem::McpToolCall(item) => item.as_legacy_end_event().into_iter().collect(),
+            TurnItem::McpToolCall(item) => item
+                .as_legacy_end_event(String::new())
+                .into_iter()
+                .collect(),
             TurnItem::Reasoning(item) => item.as_legacy_events(show_raw_agent_reasoning),
             TurnItem::ContextCompaction(item) => vec![item.as_legacy_event()],
         }
@@ -562,7 +594,7 @@ impl HasLegacyEvent for ItemStartedEvent {
                 })]
             }
             TurnItem::FileChange(item) => vec![item.as_legacy_begin_event(self.turn_id.clone())],
-            TurnItem::McpToolCall(item) => vec![item.as_legacy_begin_event()],
+            TurnItem::McpToolCall(item) => vec![item.as_legacy_begin_event(self.turn_id.clone())],
             TurnItem::CommandExecution(item) => {
                 vec![item.as_legacy_begin_event(self.turn_id.clone(), self.started_at_ms)]
             }
@@ -581,6 +613,10 @@ impl HasLegacyEvent for ItemStartedEvent {
 impl HasLegacyEvent for ItemCompletedEvent {
     fn as_legacy_events(&self, show_raw_agent_reasoning: bool) -> Vec<EventMsg> {
         match &self.item {
+            TurnItem::McpToolCall(item) => item
+                .as_legacy_end_event(self.turn_id.clone())
+                .into_iter()
+                .collect(),
             TurnItem::FileChange(item) => item
                 .as_legacy_end_event(self.turn_id.clone())
                 .into_iter()

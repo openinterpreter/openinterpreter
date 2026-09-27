@@ -1,0 +1,6 @@
+---
+source: tui/src/app/user_verification_tests.rs
+assertion_line: 273
+expression: rendered
+---
+⚠ User verification is unavailable for remote workspaces.

@@ -212,7 +212,10 @@ impl ExecCommandHandler {
             && SandboxManager::new().select_initial(
                 turn_environment.permission_profile(),
                 SandboxablePreference::Auto,
-                turn_environment.config().windows_sandbox_level,
+                codex_protocol::sandbox::effective_windows_sandbox_type(
+                    turn_environment.config().windows_sandbox_type,
+                    turn_environment.config().windows_sandbox_level,
+                ),
                 turn.network.is_some(),
             ) != SandboxType::None;
         // `to_abs_path()` alone cannot identify foreign drive paths: `file:///C:/repo` is
@@ -286,7 +289,6 @@ impl ExecCommandHandler {
                 )));
             }
         }
-        let process_id = manager.allocate_process_id().await;
         let resolved_command = get_command(
             &args,
             shell,
@@ -322,14 +324,7 @@ impl ExecCommandHandler {
         let requested_additional_permissions = additional_permissions.clone();
         let sandbox_context =
             turn_environment.sandbox_context(/*additional_permissions*/ None);
-        let Some(permission_context) =
-            file_system_sandbox_policy_context_for_cwd(&sandbox_context, &cwd)
-        else {
-            manager.release_process_id(process_id).await;
-            return Err(FunctionCallError::RespondToModel(
-                "selected environment sandbox context is missing cwd".to_string(),
-            ));
-        };
+        let permission_context = file_system_sandbox_policy_context_for_cwd(&sandbox_context, &cwd);
         let effective_additional_permissions = apply_granted_turn_permissions(
             context.session.as_ref(),
             turn_environment,
@@ -351,7 +346,6 @@ impl ExecCommandHandler {
             && !effective_additional_permissions.permissions_preapproved
             && prompt_is_rejected_by_policy(approval_policy, /*prompt_is_rule*/ false).is_some()
         {
-            manager.release_process_id(process_id).await;
             return Err(FunctionCallError::RespondToModel(format!(
                 "approval policy is {approval_policy:?}; reject command — you cannot ask for escalated permissions if the approval policy is {approval_policy:?}"
             )));
@@ -377,7 +371,6 @@ impl ExecCommandHandler {
         ) {
             Ok(normalized) => normalized,
             Err(err) => {
-                manager.release_process_id(process_id).await;
                 return Err(FunctionCallError::RespondToModel(err));
             }
         };
@@ -395,19 +388,13 @@ impl ExecCommandHandler {
             "exec_command",
         )
         .await;
-        // Keep the reservation when interception returns `Ok(None)`: the normal command below
-        // still needs this process ID.
-        if intercepted_patch.is_err() {
-            manager.release_process_id(process_id).await;
-        }
         if let Some(output) = intercepted_patch? {
-            manager.release_process_id(process_id).await;
             return Ok(boxed_tool_output(ExecCommandToolOutput {
                 event_call_id: String::new(),
                 chunk_id: String::new(),
                 wall_time: std::time::Duration::ZERO,
                 raw_output: output.into_text().into_bytes(),
-                truncation_policy: turn.model_info().truncation_policy.into(),
+                truncation_policy: step_context.settings.model_info.truncation_policy.into(),
                 max_output_tokens,
                 process_id: None,
                 exit_code: None,
@@ -417,7 +404,18 @@ impl ExecCommandHandler {
             }));
         }
 
-        emit_unified_exec_tty_metric(&turn.session_telemetry, tty);
+        emit_unified_exec_tty_metric(&step_context.session_telemetry, tty);
+        crate::tools::lifecycle::notify_command_start(
+            context.session.as_ref(),
+            context.step_context.turn.as_ref(),
+            &context.call_id,
+            &command,
+            &cwd,
+            fs.as_ref(),
+        )
+        .await;
+        // Preparation can be cancelled. Reserve a process only once it is done.
+        let process_id = manager.allocate_process_id().await;
         let request = ExecCommandRequest {
             command,
             shell_type,
@@ -461,7 +459,7 @@ impl ExecCommandHandler {
                     chunk_id: generate_chunk_id(),
                     wall_time: output.duration,
                     raw_output: output_text.into_bytes(),
-                    truncation_policy: turn.model_info().truncation_policy.into(),
+                    truncation_policy: step_context.settings.model_info.truncation_policy.into(),
                     max_output_tokens,
                     // Sandbox denial is terminal, so there is no live
                     // process for write_stdin to resume.
@@ -501,14 +499,16 @@ fn one_shot_exec_command_spec(spec: ToolSpec) -> ToolSpec {
             "Maximum command runtime. Defaults to 10000 ms.".to_string(),
         )),
     );
-    if let Some(output_properties) = spec
-        .output_schema
-        .as_mut()
-        .and_then(|schema| schema.get_mut("properties"))
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        output_properties.remove("session_id");
-    }
+    spec.output_schema = spec.output_schema.map(|schema| {
+        let mut schema = schema.into_value();
+        if let Some(output_properties) = schema
+            .get_mut("properties")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            output_properties.remove("session_id");
+        }
+        schema.into()
+    });
     ToolSpec::Function(spec)
 }
 

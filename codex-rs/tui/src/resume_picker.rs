@@ -11,17 +11,15 @@ use crate::color::is_light;
 use crate::key_hint::KeyBindingListExt;
 use crate::key_hint::is_plain_text_key_event;
 use crate::keymap::ListAction;
-use crate::keymap::ListKeymap;
-use crate::keymap::PagerKeymap;
-use crate::keymap::RuntimeChordKeymap;
 use crate::keymap::RuntimeKeymap;
 use crate::legacy_core::config::Config;
 use crate::legacy_core::config::edit::ConfigEditsBuilder;
 use crate::markdown_render::render_streaming_markdown_lines_with_width_and_cwd as render_assistant;
 use crate::pager_overlay::Overlay;
 use crate::status::format_directory_display;
-use crate::style::footer_hint_key_style;
 use crate::style::footer_hint_label_style;
+use crate::style::readable_color_on;
+use crate::style::secondary_text_style;
 use crate::terminal_palette::best_color;
 use crate::terminal_palette::default_bg;
 use crate::text_formatting::truncate_text;
@@ -55,8 +53,6 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
-use ratatui::layout::Constraint;
-use ratatui::layout::Layout;
 use ratatui::layout::Rect;
 use ratatui::layout::Size;
 use ratatui::style::Color;
@@ -76,7 +72,12 @@ use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
 mod archive;
+mod layout;
 mod page_loading;
+
+#[cfg(test)]
+#[path = "resume_picker_color_tests.rs"]
+mod color_tests;
 
 use page_loading::PageCwdFilter;
 use page_loading::PageLoadMode;
@@ -99,7 +100,6 @@ const SESSION_META_CWD_ICON: &str = "⌁";
 const FOOTER_COMPACT_BREAKPOINT: u16 = 120;
 const FOOTER_HINT_LEFT_PADDING: usize = 1;
 const FOOTER_HINT_GAP: usize = 3;
-const PICKER_CHROME_HEIGHT: u16 = 8;
 const PICKER_LIST_HORIZONTAL_INSET: u16 = 4;
 
 #[derive(Debug, Clone)]
@@ -333,6 +333,7 @@ struct SessionPickerViewPersistence {
 }
 
 struct SessionPickerRunOptions {
+    use_theme_colors: bool,
     show_all: bool,
     filter_cwd: Option<PathBuf>,
     local_filter_cwd: Option<PathBuf>,
@@ -342,10 +343,8 @@ struct SessionPickerRunOptions {
     provider_filter: ProviderFilter,
     initial_density: SessionListDensity,
     view_persistence: Option<SessionPickerViewPersistence>,
-    pager_keymap: PagerKeymap,
-    list_keymap: ListKeymap,
+    keymap: RuntimeKeymap,
     initial_page_mode: PageLoadMode,
-    chord_keymap: Arc<RuntimeChordKeymap>,
 }
 
 /// Interactive session picker that lists app-server threads with simple search,
@@ -444,6 +443,7 @@ async fn run_resume_picker_with_launch_context(
     let provider_filter = picker_provider_filter(config, uses_remote_workspace);
     let runtime_keymap = picker_runtime_keymap(local_settings)?;
     let options = SessionPickerRunOptions {
+        use_theme_colors: local_settings.tui.status_line_use_colors,
         show_all,
         filter_cwd: cwd_filter,
         local_filter_cwd,
@@ -457,14 +457,12 @@ async fn run_resume_picker_with_launch_context(
         view_persistence: Some(SessionPickerViewPersistence {
             codex_home: local_settings.codex_home.to_path_buf(),
         }),
-        pager_keymap: runtime_keymap.pager,
-        list_keymap: runtime_keymap.list,
+        keymap: runtime_keymap,
         initial_page_mode: if uses_remote_workspace {
             PageLoadMode::StoreDefault
         } else {
             PageLoadMode::StateDbOnly
         },
-        chord_keymap: runtime_keymap.chords,
     };
     run_session_picker_with_loader(
         tui,
@@ -504,6 +502,7 @@ pub async fn run_fork_picker_with_app_server(
     let provider_filter = picker_provider_filter(config, uses_remote_workspace);
     let runtime_keymap = picker_runtime_keymap(local_settings)?;
     let options = SessionPickerRunOptions {
+        use_theme_colors: local_settings.tui.status_line_use_colors,
         show_all,
         filter_cwd: cwd_filter,
         local_filter_cwd,
@@ -517,14 +516,12 @@ pub async fn run_fork_picker_with_app_server(
         view_persistence: Some(SessionPickerViewPersistence {
             codex_home: local_settings.codex_home.to_path_buf(),
         }),
-        pager_keymap: runtime_keymap.pager,
-        list_keymap: runtime_keymap.list,
+        keymap: runtime_keymap,
         initial_page_mode: if uses_remote_workspace {
             PageLoadMode::StoreDefault
         } else {
             PageLoadMode::StateDbOnly
         },
-        chord_keymap: runtime_keymap.chords,
     };
     run_session_picker_with_loader(
         tui,
@@ -559,19 +556,18 @@ async fn run_session_picker_with_loader(
         options.action,
     );
     state.local_filter_cwd = options.local_filter_cwd;
+    state.use_theme_colors = options.use_theme_colors;
     state.worktrees_enabled = options.worktrees_enabled;
     state.density = options.initial_density;
     state.view_persistence = options.view_persistence;
-    state.pager_keymap = options.pager_keymap;
-    state.list_keymap = options.list_keymap;
-    state.chord_keymap = options.chord_keymap;
+    state.keymap = options.keymap;
     state.launch_context = options.launch_context;
     state.initial_page_mode = options.initial_page_mode;
     state.start_initial_load();
     state.request_frame();
 
     if let Ok(size) = alt.tui.terminal.size() {
-        let list_height = size.height.saturating_sub(PICKER_CHROME_HEIGHT) as usize;
+        let list_height = usize::from(layout::areas(Rect::from(size)).list.height);
         state.update_viewport(list_height, list_viewport_width(size.width));
         state.ensure_minimum_rows_for_view(list_height);
     }
@@ -613,7 +609,7 @@ async fn run_session_picker_with_loader(
                     TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) | TuiEvent::FocusGained => {
                         let list_width = list_viewport_width(screen_size.width);
                         let list_height =
-                            usize::from(screen_size.height.saturating_sub(PICKER_CHROME_HEIGHT));
+                            usize::from(layout::areas(Rect::from(screen_size)).list.height);
                         state.update_viewport(list_height, list_width);
                         state.ensure_minimum_rows_for_view(list_height);
                         draw_picker(alt.tui, &state, screen_size)?;
@@ -621,7 +617,7 @@ async fn run_session_picker_with_loader(
                             state.open_pending_transcript_if_ready();
                         }
                     }
-                    TuiEvent::FocusLost => {}
+                    TuiEvent::FocusLost | TuiEvent::Mouse(_) => {}
                 }
             }
             Some(event) = background_events.next() => {
@@ -828,6 +824,7 @@ impl Drop for AltScreenGuard<'_> {
 }
 
 struct PickerState {
+    use_theme_colors: bool,
     // Resolve local filesystem membership once per cwd for each page-loading cycle.
     local_cwd_matches: HashMap<PathBuf, bool>,
     requester: FrameRequester,
@@ -869,10 +866,8 @@ struct PickerState {
     pending_transcript_cancellation: Option<oneshot::Sender<()>>,
     transcript_loading_frame_shown: bool,
     overlay: Option<Overlay>,
-    pager_keymap: PagerKeymap,
-    list_keymap: ListKeymap,
+    keymap: RuntimeKeymap,
     initial_page_mode: PageLoadMode,
-    chord_keymap: Arc<RuntimeChordKeymap>,
     chord_matcher: crate::keymap::KeyChordMatcher,
 }
 
@@ -1028,6 +1023,7 @@ impl PickerState {
         action: SessionPickerAction,
     ) -> Self {
         Self {
+            use_theme_colors: true,
             requester,
             relative_time_reference: None,
             pagination: PaginationState::new(),
@@ -1068,25 +1064,30 @@ impl PickerState {
             pending_transcript_cancellation: None,
             transcript_loading_frame_shown: false,
             overlay: None,
-            pager_keymap: RuntimeKeymap::defaults().pager,
-            list_keymap: RuntimeKeymap::defaults().list,
+            keymap: RuntimeKeymap::defaults(),
             initial_page_mode: PageLoadMode::StoreDefault,
-            chord_keymap: Arc::default(),
             chord_matcher: crate::keymap::KeyChordMatcher::default(),
         }
     }
 
     fn route_key_chord(&mut self, key: KeyEvent) -> Option<KeyEvent> {
-        let context = if self.overlay.is_some() {
+        if matches!(&self.overlay, Some(Overlay::Transcript(overlay)) if overlay.owns_interaction_key(key))
+        {
+            self.chord_matcher.cancel();
+            return Some(key);
+        }
+        let context = if matches!(&self.overlay, Some(Overlay::Transcript(overlay)) if overlay.is_search_active())
+        {
+            crate::keymap::KeymapContext::Editor
+        } else if self.overlay.is_some() {
             crate::keymap::KeymapContext::Pager
         } else {
             crate::keymap::KeymapContext::List
         };
         match self.chord_matcher.advance(
             key,
-            &self.chord_keymap,
+            &self.keymap.chords,
             crate::keymap::KeymapContextSet::new(context),
-            tokio::time::Instant::now(),
         ) {
             crate::keymap::KeyChordMatch::PassThrough => Some(key),
             crate::keymap::KeyChordMatch::Completed(dispatch_event) => Some(dispatch_event),
@@ -1124,10 +1125,11 @@ impl PickerState {
         else {
             return;
         };
-        self.overlay = Some(Overlay::new_transcript(
-            cells.clone(),
-            self.pager_keymap.clone(),
-        ));
+        let mut overlay = Overlay::new_transcript(cells.clone(), self.keymap.pager.clone());
+        if let Overlay::Transcript(view) = &mut overlay {
+            view.set_keymap_bindings(&self.keymap);
+        }
+        self.overlay = Some(overlay);
         self.pending_transcript_open = None;
         self.transcript_loading_frame_shown = false;
         self.request_frame();
@@ -1189,7 +1191,7 @@ impl PickerState {
                 modifiers,
                 ..
             } if modifiers.contains(KeyModifiers::CONTROL) => Some(SessionSelection::Exit),
-            key if self.list_keymap.cancel.is_pressed(key) => {
+            key if self.keymap.list.cancel.is_pressed(key) => {
                 if let Some(thread_id) = self.pending_transcript_open.take()
                     && matches!(
                         self.transcript_cells.get(&thread_id),
@@ -1214,7 +1216,7 @@ impl PickerState {
         if self.is_transcript_loading() {
             return Ok(self.handle_transcript_loading_key(key));
         }
-        if !self.list_keymap.page_down.is_pressed(key) {
+        if !self.keymap.list.page_down.is_pressed(key) {
             self.pending_page_down_target = None;
         }
         // The session picker is always searchable, so plain text belongs to
@@ -1229,7 +1231,7 @@ impl PickerState {
             } if modifiers.contains(KeyModifiers::CONTROL) => {
                 return Ok(Some(SessionSelection::Exit));
             }
-            _ if self.list_keymap.cancel.is_pressed(key) => {
+            _ if self.keymap.list.cancel.is_pressed(key) => {
                 if self.query.is_empty() {
                     return Ok(Some(SessionSelection::StartFresh));
                 }
@@ -1277,9 +1279,9 @@ impl PickerState {
             } /* ^O */ => {
                 self.toggle_density().await;
             }
-            _ if self.list_keymap.accept.is_pressed(key)
+            _ if self.keymap.list.accept.is_pressed(key)
                 && !matches!(self.archive_state, archive::ArchiveState::Idle) => {}
-            _ if self.list_keymap.accept.is_pressed(key) => {
+            _ if self.keymap.list.accept.is_pressed(key) => {
                 if let Some(row) = self.filtered_rows.get(self.selected) {
                     let path = row.path.clone();
                     if let Some(thread_id) = row.thread_id {
@@ -1305,14 +1307,14 @@ impl PickerState {
                     self.request_frame();
                 }
             }
-            _ if allow_plain_char_navigation && self.list_keymap.move_up.is_pressed(key) => {
+            _ if allow_plain_char_navigation && self.keymap.list.move_up.is_pressed(key) => {
                 if self.selected > 0 {
                     self.selected -= 1;
                     self.ensure_selected_visible();
                 }
                 self.request_frame();
             }
-            _ if allow_plain_char_navigation && self.list_keymap.move_down.is_pressed(key) => {
+            _ if allow_plain_char_navigation && self.keymap.list.move_down.is_pressed(key) => {
                 if self.selected + 1 < self.filtered_rows.len() {
                     self.selected += 1;
                     self.ensure_selected_visible();
@@ -1320,7 +1322,7 @@ impl PickerState {
                 self.maybe_load_more_for_scroll();
                 self.request_frame();
             }
-            _ if allow_plain_char_navigation && self.list_keymap.page_up.is_pressed(key) => {
+            _ if allow_plain_char_navigation && self.keymap.list.page_up.is_pressed(key) => {
                 let step = self.view_rows.unwrap_or(10).max(1);
                 if self.selected > 0 {
                     self.selected = self.selected.saturating_sub(step);
@@ -1328,20 +1330,20 @@ impl PickerState {
                     self.request_frame();
                 }
             }
-            _ if allow_plain_char_navigation && self.list_keymap.jump_top.is_pressed(key)
+            _ if allow_plain_char_navigation && self.keymap.list.jump_top.is_pressed(key)
                 && !self.filtered_rows.is_empty() => {
                     self.selected = 0;
                     self.ensure_selected_visible();
                     self.request_frame();
                 }
-            _ if allow_plain_char_navigation && self.list_keymap.jump_bottom.is_pressed(key)
+            _ if allow_plain_char_navigation && self.keymap.list.jump_bottom.is_pressed(key)
                 && !self.filtered_rows.is_empty() => {
                     self.selected = self.filtered_rows.len().saturating_sub(1);
                     self.ensure_selected_visible();
                     self.maybe_load_more_for_scroll();
                     self.request_frame();
                 }
-            _ if allow_plain_char_navigation && self.list_keymap.page_down.is_pressed(key)
+            _ if allow_plain_char_navigation && self.keymap.list.page_down.is_pressed(key)
                 && !self.filtered_rows.is_empty() => {
                     let step = self.view_rows.unwrap_or(10).max(1);
                     let target = self.selected.saturating_add(step);
@@ -1370,8 +1372,8 @@ impl PickerState {
                 self.request_frame();
             }
             _ if allow_plain_char_navigation
-                && (self.list_keymap.move_left.is_pressed(key)
-                    || self.list_keymap.move_right.is_pressed(key)) =>
+                && (self.keymap.list.move_left.is_pressed(key)
+                    || self.keymap.list.move_right.is_pressed(key)) =>
             {
                 self.change_focused_toolbar_value();
                 self.request_frame();
@@ -2101,54 +2103,7 @@ fn parse_timestamp_str(ts: &str) -> Option<DateTime<Utc>> {
 }
 
 fn draw_picker(tui: &mut Tui, state: &PickerState, screen_size: Size) -> std::io::Result<()> {
-    // Render full-screen overlay
-    tui.draw(screen_size.height, |frame| {
-        let area = frame.area();
-        let [header, _header_gap, search, _search_gap, list, footer] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(area.height.saturating_sub(PICKER_CHROME_HEIGHT)),
-            Constraint::Length(4),
-        ])
-        .areas(area);
-
-        let chrome = |area: Rect| {
-            Rect::new(
-                area.x.saturating_add(1),
-                area.y,
-                area.width.saturating_sub(2),
-                area.height,
-            )
-        };
-
-        // Header
-        let header_title = if default_bg().is_some_and(is_light) {
-            state.action.title().bold().fg(best_color((0, 100, 0)))
-        } else {
-            state.action.title().bold().cyan()
-        };
-        let header_line: Line = vec![header_title].into();
-        frame.render_widget_ref(&header_line, chrome(header));
-
-        // Search line
-        let search = chrome(search);
-        frame.render_widget_ref(&search_line(state, search.width), search);
-
-        let list = Rect::new(
-            list.x.saturating_add(2),
-            list.y,
-            list_viewport_width(list.width),
-            list.height,
-        );
-        render_list(frame, list, state);
-        if state.is_transcript_loading() {
-            render_transcript_loading_overlay(frame, list);
-        }
-
-        render_picker_footer(frame, footer, state, list.height);
-    })
+    tui.draw(screen_size.height, |frame| layout::render(frame, state))
 }
 
 fn list_viewport_width(width: u16) -> u16 {
@@ -2157,38 +2112,40 @@ fn list_viewport_width(width: u16) -> u16 {
 
 fn search_line(state: &PickerState, width: u16) -> Line<'_> {
     if let Some(error) = state.inline_error.as_deref() {
-        return Line::from(error.red());
+        return Line::from(truncate_text(error, usize::from(width)).red());
     }
-    let search = if state.query.is_empty() {
-        "Type to search".dim()
+    if state.query.is_empty() {
+        "Type to search".set_style(secondary_text_style()).into()
     } else {
-        format!("Search: {}", state.query).into()
-    };
-    let search_width = UnicodeWidthStr::width(search.content.as_ref());
-    let mut toolbar = toolbar_line(state, /*compact*/ false);
-    if search_width.saturating_add(toolbar.width()) > usize::from(width.saturating_sub(2)) {
-        toolbar = toolbar_line(state, /*compact*/ true);
+        truncate_text(&format!("Search: {}", state.query), usize::from(width)).into()
     }
-    let toolbar_width = toolbar.width();
-    let spacer_width = width
-        .saturating_sub((search_width + toolbar_width) as u16)
-        .max(2) as usize;
-    let available_search_width = width
-        .saturating_sub(toolbar_width as u16)
-        .saturating_sub(spacer_width as u16) as usize;
-    let search = if search_width > available_search_width {
-        let truncated = truncate_text(search.content.as_ref(), available_search_width);
-        if state.query.is_empty() {
-            truncated.dim()
-        } else {
-            truncated.into()
-        }
-    } else {
-        search
-    };
+}
 
-    let mut spans = vec![search, " ".repeat(spacer_width).into()];
-    spans.extend(toolbar.spans);
+fn toolbar_for_width(state: &PickerState, width: u16) -> Line<'static> {
+    let toolbar = toolbar_line(state, /*compact*/ false);
+    if toolbar.width() <= usize::from(width) {
+        return toolbar;
+    }
+    let toolbar = toolbar_line(state, /*compact*/ true);
+    if toolbar.width() <= usize::from(width) {
+        return toolbar;
+    }
+    // Keep the control affected by the arrow keys visible when the compact strip cannot fit.
+    let spans = match state.toolbar_focus {
+        ToolbarControl::Filter => filter_control_spans(state, /*compact*/ true),
+        ToolbarControl::Sort => sort_control_spans(state, /*compact*/ true),
+        ToolbarControl::Status => vec![
+            "Status:".set_style(secondary_text_style()),
+            toolbar_value(
+                match state.status {
+                    SessionStatus::Active => "Active",
+                    SessionStatus::Archived => "Archived",
+                },
+                /*active*/ true,
+                /*focused*/ true,
+            ),
+        ],
+    };
     spans.into()
 }
 
@@ -2200,7 +2157,7 @@ fn toolbar_line(state: &PickerState, compact: bool) -> Line<'static> {
         "   "
     };
     spans.extend(filter_control_spans(state, compact));
-    spans.push(separator.dim());
+    spans.push(separator.set_style(secondary_text_style()));
     if matches!(state.action, SessionPickerAction::Resume) {
         let status_focused = state.toolbar_focus == ToolbarControl::Status;
         if compact {
@@ -2214,7 +2171,7 @@ fn toolbar_line(state: &PickerState, compact: bool) -> Line<'static> {
                 status_focused,
             ));
         } else {
-            spans.push("Status: ".dim());
+            spans.push("Status: ".set_style(secondary_text_style()));
             spans.push(toolbar_value(
                 "Active",
                 state.status == SessionStatus::Active,
@@ -2226,7 +2183,7 @@ fn toolbar_line(state: &PickerState, compact: bool) -> Line<'static> {
                 status_focused,
             ));
         }
-        spans.push(separator.dim());
+        spans.push(separator.set_style(secondary_text_style()));
     }
     spans.extend(sort_control_spans(state, compact));
     spans.into()
@@ -2236,7 +2193,7 @@ fn sort_control_spans(state: &PickerState, compact: bool) -> Vec<Span<'static>> 
     let sort_focused = state.toolbar_focus == ToolbarControl::Sort;
     if compact {
         return vec![
-            "Sort:".dim(),
+            "Sort:".set_style(secondary_text_style()),
             toolbar_value(
                 sort_key_label(state.sort_key),
                 /*active*/ true,
@@ -2245,7 +2202,7 @@ fn sort_control_spans(state: &PickerState, compact: bool) -> Vec<Span<'static>> 
         ];
     }
     vec![
-        "Sort: ".dim(),
+        "Sort: ".set_style(secondary_text_style()),
         toolbar_value(
             sort_key_label(ThreadSortKey::UpdatedAt),
             state.sort_key == ThreadSortKey::UpdatedAt,
@@ -2263,7 +2220,7 @@ fn filter_control_spans(state: &PickerState, compact: bool) -> Vec<Span<'static>
     let filter_focused = state.toolbar_focus == ToolbarControl::Filter;
     if compact || state.filter_cwd.is_none() {
         return vec![
-            "Filter:".dim(),
+            "Filter:".set_style(secondary_text_style()),
             toolbar_value(
                 filter_mode_label(state.filter_mode),
                 /*active*/ true,
@@ -2272,7 +2229,7 @@ fn filter_control_spans(state: &PickerState, compact: bool) -> Vec<Span<'static>
         ];
     }
     vec![
-        "Filter: ".dim(),
+        "Filter: ".set_style(secondary_text_style()),
         toolbar_value(
             filter_mode_label(SessionFilterMode::Cwd),
             state.filter_mode == SessionFilterMode::Cwd,
@@ -2287,15 +2244,16 @@ fn filter_control_spans(state: &PickerState, compact: bool) -> Vec<Span<'static>
 }
 
 fn toolbar_value(label: &'static str, active: bool, focused: bool) -> Span<'static> {
+    let value = format!(" {label} ");
     if active {
-        let value = format!("[{label}]");
-        if focused {
-            value.magenta()
+        value.set_style(if focused {
+            crate::bottom_pane::active_tab_style()
         } else {
-            value.into()
-        }
+            let style = crate::style::user_message_style().bold().not_dim();
+            style.fg(readable_color_on(Color::Reset, style.bg))
+        })
     } else {
-        format!(" {label} ").dim()
+        value.set_style(secondary_text_style())
     }
 }
 
@@ -2360,7 +2318,10 @@ fn render_picker_footer_separator(
             progress_width,
             1,
         );
-        frame.render_widget_ref(&Line::from(progress_label.dim()), percent_area);
+        frame.render_widget_ref(
+            &Line::from(progress_label.set_style(secondary_text_style())),
+            percent_area,
+        );
     }
 }
 
@@ -2476,7 +2437,7 @@ fn footer_hint_lines(state: &PickerState, width: u16) -> Vec<Line<'static>> {
         SessionListDensity::Dense => "comfy",
     };
     let mut first_row_hints = Vec::new();
-    if let Some(accept) = state.list_keymap.primary_hint(ListAction::Accept) {
+    if let Some(accept) = state.keymap.list.primary_hint(ListAction::Accept) {
         first_row_hints.push(PickerFooterHint {
             key: accept.display_label(),
             wide_label: action_label.to_string(),
@@ -2492,7 +2453,7 @@ fn footer_hint_lines(state: &PickerState, width: u16) -> Vec<Line<'static>> {
             priority: 2,
         });
     }
-    if let Some(cancel) = state.list_keymap.primary_hint(ListAction::Cancel) {
+    if let Some(cancel) = state.keymap.list.primary_hint(ListAction::Cancel) {
         first_row_hints.push(PickerFooterHint {
             key: cancel.display_label(),
             wide_label: esc_label.to_string(),
@@ -2516,7 +2477,7 @@ fn footer_hint_lines(state: &PickerState, width: u16) -> Vec<Line<'static>> {
     ]);
     let option_keys = [ListAction::MoveLeft, ListAction::MoveRight]
         .into_iter()
-        .filter_map(|action| state.list_keymap.primary_hint(action))
+        .filter_map(|action| state.keymap.list.primary_hint(action))
         .map(super::key_hint::ShortcutHint::display_label)
         .collect::<Vec<_>>()
         .join("/");
@@ -2550,7 +2511,7 @@ fn footer_hint_lines(state: &PickerState, width: u16) -> Vec<Line<'static>> {
     ];
     let browse_keys = [ListAction::MoveUp, ListAction::MoveDown]
         .into_iter()
-        .filter_map(|action| state.list_keymap.primary_hint(action))
+        .filter_map(|action| state.keymap.list.primary_hint(action))
         .map(super::key_hint::ShortcutHint::display_label)
         .collect::<Vec<_>>()
         .join("/");
@@ -2578,21 +2539,19 @@ fn hint_line_for_row(hints: &[PickerFooterHint], width: u16) -> Line<'static> {
     if let Some(line) = fit_footer_hints(hints, FooterHintLabelMode::Compact, width) {
         return line;
     }
-    if let Some(line) = fit_footer_hints(hints, FooterHintLabelMode::KeyOnly, width) {
-        return line;
-    }
-
     let mut retained = (0..hints.len()).collect::<Vec<_>>();
     retained.sort_by_key(|idx| hints[*idx].priority);
-    for retain_count in (1..=retained.len()).rev() {
-        let mut candidate_indices = retained[..retain_count].to_vec();
-        candidate_indices.sort_unstable();
-        let candidate = candidate_indices
-            .iter()
-            .map(|idx| &hints[*idx])
-            .collect::<Vec<_>>();
-        if let Some(line) = fit_footer_hint_refs(&candidate, FooterHintLabelMode::KeyOnly, width) {
-            return line;
+    for mode in [FooterHintLabelMode::Compact, FooterHintLabelMode::KeyOnly] {
+        for retain_count in (1..=retained.len()).rev() {
+            let mut candidate_indices = retained[..retain_count].to_vec();
+            candidate_indices.sort_unstable();
+            let candidate = candidate_indices
+                .iter()
+                .map(|idx| &hints[*idx])
+                .collect::<Vec<_>>();
+            if let Some(line) = fit_footer_hint_refs(&candidate, mode, width) {
+                return line;
+            }
         }
     }
     Line::default()
@@ -2637,14 +2596,23 @@ fn render_transcript_loading_overlay(frame: &mut crate::custom_terminal::Frame, 
 
 fn transcript_loading_overlay_style() -> Style {
     let Some(bg) = default_bg() else {
-        return Style::default().bg(Color::DarkGray);
+        return Style::default()
+            .fg(Color::Reset)
+            .bg(Color::Reset)
+            .not_dim()
+            .not_reversed();
     };
     let (overlay, alpha) = if is_light(bg) {
         ((0, 0, 0), 0.08)
     } else {
         ((255, 255, 255), 0.14)
     };
-    Style::default().bg(best_color(blend(overlay, bg, alpha)))
+    let fill = best_color(blend(overlay, bg, alpha));
+    Style::default()
+        .bg(fill)
+        .fg(readable_color_on(Color::Reset, Some(fill)))
+        .not_dim()
+        .not_reversed()
 }
 
 #[derive(Clone, Copy)]
@@ -2681,7 +2649,7 @@ fn fit_footer_hint_refs(
         if idx > 0 {
             spans.push(" ".repeat(gap_width).set_style(footer_hint_label_style()));
         }
-        spans.push(hint.key.clone().set_style(footer_hint_key_style()));
+        spans.extend(crate::key_hint::key_label_spans(&hint.key));
         let label = match mode {
             FooterHintLabelMode::Wide => Some(hint.wide_label.as_str()),
             FooterHintLabelMode::Compact => Some(hint.compact_label.as_str()),
@@ -2782,7 +2750,13 @@ fn render_list(frame: &mut crate::custom_terminal::Frame, area: Rect, state: &Pi
     }
 
     if state.pagination.is_loading() && y < content_area.y.saturating_add(content_area.height) {
-        let loading_line: Line = vec!["  ".into(), "Loading older sessions…".italic().dim()].into();
+        let loading_line: Line = vec![
+            "  ".into(),
+            "Loading older sessions…"
+                .set_style(secondary_text_style())
+                .italic(),
+        ]
+        .into();
         let rect = Rect::new(area.x, y, area.width, 1);
         frame.render_widget_ref(&loading_line, rect);
     }
@@ -2805,7 +2779,12 @@ fn render_list(frame: &mut crate::custom_terminal::Frame, area: Rect, state: &Pi
 }
 
 fn more_line(label: &'static str) -> Line<'static> {
-    vec![label.dim()].into()
+    vec![
+        label
+            .fg(crate::style::accent_color_on(/*background*/ None))
+            .not_dim(),
+    ]
+    .into()
 }
 
 fn render_session_lines(
@@ -2836,23 +2815,17 @@ fn render_comfortable_session_lines(
 ) -> Vec<Line<'static>> {
     let marker = selection_marker(is_selected, is_expanded);
     let title = truncate_text(row.display_preview(), width.saturating_sub(2) as usize);
-    let title = if is_selected {
-        selected_session_title_span(title)
-    } else {
-        title.into()
-    };
+    let title = session_title_span(title, row.thread_id, state.use_theme_colors, is_selected);
     let title_line = Line::from(vec![marker, title]);
     let mut lines = vec![title_line];
     let row_style = if is_selected {
-        Some(dense_selected_style())
+        dense_selected_style()
     } else if is_zebra {
-        Some(dense_zebra_style())
+        dense_zebra_style()
     } else {
-        None
+        Style::default()
     };
-    if let Some(style) = row_style {
-        lines = apply_session_row_background(lines, style, width);
-    }
+    lines = apply_session_row_background(lines, row_style, width);
     if is_expanded {
         lines.extend(render_transcript_preview_lines(row, state, width));
         return lines;
@@ -2882,11 +2855,7 @@ fn render_comfortable_session_lines(
         show_cwd,
         width,
     );
-    if let Some(style) = row_style {
-        lines.extend(apply_session_row_background(footer_lines, style, width));
-    } else {
-        lines.extend(footer_lines);
-    }
+    lines.extend(apply_session_row_background(footer_lines, row_style, width));
     lines
 }
 
@@ -2908,7 +2877,21 @@ fn apply_line_background(mut line: Line<'static>, style: Style, width: u16) -> L
     }
     line.style = line.style.patch(style);
     for span in &mut line.spans {
-        span.style = span.style.patch(style);
+        // Preserve each role's hue and weight, then resolve it against the painted row.
+        span.style = style.patch(span.style);
+        if style
+            .add_modifier
+            .contains(ratatui::style::Modifier::REVERSED)
+        {
+            span.style.fg = style.fg;
+            span.style = span.style.reversed();
+        } else {
+            span.style.fg = Some(readable_color_on(
+                span.style.fg.unwrap_or(Color::Reset),
+                span.style.bg,
+            ));
+            span.style = span.style.not_reversed();
+        }
     }
     line
 }
@@ -2935,6 +2918,8 @@ fn render_dense_session_lines(
         marker,
         date: &date,
         title: row.display_preview(),
+        thread_id: row.thread_id,
+        use_theme_colors: state.use_theme_colors,
         is_selected,
         is_zebra,
         width,
@@ -2946,6 +2931,8 @@ fn render_dense_session_lines(
 }
 
 struct DenseSummaryInput<'a> {
+    thread_id: Option<ThreadId>,
+    use_theme_colors: bool,
     marker: Span<'static>,
     date: &'a str,
     title: &'a str,
@@ -2958,34 +2945,27 @@ fn dense_summary_line(input: DenseSummaryInput<'_>) -> Line<'static> {
     let marker_width = input.marker.width();
     let available = (input.width as usize).saturating_sub(marker_width);
     let columns = dense_columns(available);
-    let title = if input.is_selected {
-        selected_session_title_span(dense_column_text(input.title, columns.title_width))
-    } else {
-        dense_column_text(input.title, columns.title_width).into()
-    };
+    let title = session_title_span(
+        dense_column_text(input.title, columns.title_width),
+        input.thread_id,
+        input.use_theme_colors,
+        input.is_selected,
+    );
 
     let spans = vec![
         input.marker,
-        dense_column_text(input.date, columns.date_width).dim(),
+        dense_column_text(input.date, columns.date_width).set_style(secondary_text_style()),
         title,
     ];
-    let mut line = Line::from(spans);
-    if input.is_selected {
-        let padding = (input.width as usize).saturating_sub(line.width());
-        if padding > 0 {
-            line.spans
-                .push(" ".repeat(padding).set_style(dense_selected_style()));
-        }
-        line = line.style(dense_selected_style());
+    let line = Line::from(spans);
+    let row_style = if input.is_selected {
+        dense_selected_style()
     } else if input.is_zebra {
-        let padding = (input.width as usize).saturating_sub(line.width());
-        if padding > 0 {
-            line.spans
-                .push(" ".repeat(padding).set_style(dense_zebra_style()));
-        }
-        line = line.style(dense_zebra_style());
-    }
-    line
+        dense_zebra_style()
+    } else {
+        Style::default()
+    };
+    apply_line_background(line, row_style, input.width)
 }
 
 struct DenseColumns {
@@ -3006,7 +2986,7 @@ fn dense_zebra_style() -> Style {
 }
 
 fn dense_selected_style() -> Style {
-    selected_session_style().patch(dense_row_background_style(/*selected*/ true))
+    selected_session_style()
 }
 
 fn dense_row_background_style(selected: bool) -> Style {
@@ -3030,21 +3010,27 @@ fn dense_column_text(text: &str, width: usize) -> String {
 fn selection_marker(is_selected: bool, is_expanded: bool) -> Span<'static> {
     match (is_selected, is_expanded) {
         (true, true) => "⌄ ".set_style(selected_session_style().bold()),
-        (true, false) => "❯ ".set_style(selected_session_style().bold()),
+        (true, false) => "› ".set_style(selected_session_style()),
         (false, _) => "  ".into(),
     }
 }
 
 fn selected_session_style() -> Style {
-    if default_bg().is_some_and(is_light) {
-        Style::default().fg(Color::Magenta)
-    } else {
-        Style::default().fg(Color::Yellow)
-    }
+    crate::style::selection_style()
 }
 
-fn selected_session_title_span(title: String) -> Span<'static> {
-    title.set_style(selected_session_style())
+fn session_title_span(
+    title: String,
+    thread_id: Option<ThreadId>,
+    use_theme_colors: bool,
+    is_selected: bool,
+) -> Span<'static> {
+    let title = if use_theme_colors && let Some(thread_id) = thread_id {
+        title.fg(crate::thread_color::thread_color(thread_id))
+    } else {
+        title.into()
+    };
+    if is_selected { title.bold() } else { title }
 }
 
 fn render_footer_lines(
@@ -3163,7 +3149,7 @@ fn footer_line(parts: Vec<FooterPart>, width: usize, cwd_width: usize) -> Line<'
         if idx > 0 {
             let gap_width = SESSION_META_FIELD_GAP_WIDTH.min(remaining_width);
             if gap_width > 0 {
-                spans.push(" ".repeat(gap_width).dim());
+                spans.push(" ".repeat(gap_width).set_style(secondary_text_style()));
                 remaining_width = remaining_width.saturating_sub(gap_width);
             }
         }
@@ -3178,7 +3164,7 @@ fn footer_line(parts: Vec<FooterPart>, width: usize, cwd_width: usize) -> Line<'
         if let Some(target_width) = target_width {
             let padding = target_width.saturating_sub(used_width);
             if padding > 0 {
-                spans.push(" ".repeat(padding).dim());
+                spans.push(" ".repeat(padding).set_style(secondary_text_style()));
                 remaining_width = remaining_width.saturating_sub(padding);
             }
         }
@@ -3196,7 +3182,7 @@ fn push_footer_part(
     let Some(prefix) = part.prefix() else {
         let text = truncate_text(&text, available_width);
         let width = UnicodeWidthStr::width(text.as_str());
-        spans.push(text.dim());
+        spans.push(text.set_style(secondary_text_style()));
         return width;
     };
 
@@ -3204,14 +3190,14 @@ fn push_footer_part(
     if available_width <= prefix_width {
         let prefix = truncate_text(prefix, available_width);
         let width = UnicodeWidthStr::width(prefix.as_str());
-        spans.push(prefix.dim());
+        spans.push(prefix.set_style(secondary_text_style()));
         return width;
     }
 
-    spans.push(prefix.dim());
+    spans.push(prefix.set_style(secondary_text_style()));
     let mut used_width = prefix_width;
     if !text.is_empty() && used_width < available_width {
-        spans.push(" ".dim());
+        spans.push(" ".set_style(secondary_text_style()));
         used_width += 1;
     }
     let text_width = target_width
@@ -3221,8 +3207,10 @@ fn push_footer_part(
     let text = truncate_text(&text, text_width);
     let rendered_text_width = UnicodeWidthStr::width(text.as_str());
     match part {
-        FooterPart::Branch(None) | FooterPart::Cwd(None) => spans.push(text.dim().italic()),
-        _ => spans.push(text.dim()),
+        FooterPart::Branch(None) | FooterPart::Cwd(None) => {
+            spans.push(text.set_style(secondary_text_style()).italic())
+        }
+        _ => spans.push(text.set_style(secondary_text_style())),
     }
     used_width + rendered_text_width
 }
@@ -3238,12 +3226,24 @@ fn render_transcript_preview_lines(
     };
     let preview_lines = match state.transcript_previews.get(&thread_id) {
         Some(TranscriptPreviewState::Loading) => {
-            vec![vec!["  │ ".dim(), "Loading recent transcript...".italic().dim()].into()]
+            vec![
+                vec![
+                    "  │ ".set_style(secondary_text_style()),
+                    "Loading recent transcript..."
+                        .set_style(secondary_text_style())
+                        .italic(),
+                ]
+                .into(),
+            ]
         }
         Some(TranscriptPreviewState::Failed) => vec![
             vec![
-                "  │ ".dim(),
-                "Could not load transcript preview".italic().red(),
+                "  │ ".set_style(secondary_text_style()),
+                "Could not load transcript preview"
+                    .set_style(crate::style::status_style(
+                        crate::style::StatusTone::Failure,
+                    ))
+                    .italic(),
             ]
             .into(),
         ],
@@ -3273,11 +3273,10 @@ fn render_expanded_session_details(
         .as_ref()
         .map(|path| format_directory_display(path, /*max_width*/ None))
         .unwrap_or_else(|| "-".to_string());
-    let branch = row
-        .git_branch
-        .as_ref()
-        .map(|branch| format!("{SESSION_META_BRANCH_ICON} {branch}"))
-        .unwrap_or_else(|| format!("{SESSION_META_BRANCH_ICON} no branch"));
+    let branch = format!(
+        "{SESSION_META_BRANCH_ICON} {}",
+        row.git_branch.as_deref().unwrap_or("no branch")
+    );
 
     vec![
         expanded_detail_line("Session:", &session, width),
@@ -3290,8 +3289,12 @@ fn render_expanded_session_details(
         ),
         expanded_detail_line("Directory:", &directory, width),
         expanded_detail_line("Branch:", &branch, width),
-        vec!["  │".dim()].into(),
-        vec!["  │ ".dim(), "Conversation:".dim()].into(),
+        vec!["  │".set_style(secondary_text_style())].into(),
+        vec![
+            "  │ ".set_style(secondary_text_style()),
+            "Conversation:".set_style(secondary_text_style()),
+        ]
+        .into(),
     ]
 }
 
@@ -3303,8 +3306,10 @@ fn render_conversation_preview_lines(
     if lines.is_empty() {
         return vec![
             vec![
-                "  └ ".dim(),
-                "No transcript preview available".italic().dim(),
+                "  └ ".set_style(secondary_text_style()),
+                "No transcript preview available"
+                    .set_style(secondary_text_style())
+                    .italic(),
             ]
             .into(),
         ];
@@ -3341,11 +3346,17 @@ fn render_transcript_content_lines(
             conversation_user_style(),
         )],
         TranscriptPreviewSpeaker::Assistant => {
-            let mut lines = render_assistant(&line.text, /*width*/ None, cwd, &|_| false)
-                .lines
-                .into_iter()
-                .map(|line| line.line)
-                .collect::<Vec<_>>();
+            let mut lines = render_assistant(
+                &line.text,
+                /*width*/ None,
+                cwd,
+                &|_| false,
+                crate::markdown_render::ListSpacing::AfterMultiline,
+            )
+            .lines
+            .into_iter()
+            .map(|line| line.line)
+            .collect::<Vec<_>>();
             for line in &mut lines {
                 *line = conversation_content_line(line.clone(), conversation_assistant_style());
             }
@@ -3388,19 +3399,14 @@ fn connector_style_from_content(style: Style) -> Style {
 }
 
 fn conversation_assistant_style() -> Style {
-    if default_bg().is_some_and(is_light) {
-        Style::default().fg(Color::Gray)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    }
+    secondary_text_style()
 }
 
 fn conversation_user_style() -> Style {
-    if default_bg().is_some_and(is_light) {
-        Style::default().fg(Color::DarkGray).italic()
-    } else {
-        Style::default().fg(Color::Gray).italic()
-    }
+    Style::default()
+        .fg(readable_color_on(Color::Reset, /*background*/ None))
+        .not_dim()
+        .italic()
 }
 
 fn expanded_detail_line(label: &'static str, value: &str, width: u16) -> Line<'static> {
@@ -3411,9 +3417,9 @@ fn expanded_detail_line(label: &'static str, value: &str, width: u16) -> Line<'s
         .saturating_sub(prefix_width + LABEL_WIDTH + gap_width)
         .max(1);
     vec![
-        "  │ ".dim(),
-        format!("{label:<LABEL_WIDTH$}").dim(),
-        "  ".dim(),
+        "  │ ".set_style(secondary_text_style()),
+        format!("{label:<LABEL_WIDTH$}").set_style(secondary_text_style()),
+        "  ".set_style(secondary_text_style()),
         truncate_text(value, value_width).into(),
     ]
     .into()
@@ -3436,7 +3442,7 @@ fn expanded_time_detail_line(
     expanded_detail_line(label, &value, width)
 }
 
-fn format_relative_time(reference: DateTime<Utc>, ts: Option<DateTime<Utc>>) -> String {
+pub(crate) fn format_relative_time(reference: DateTime<Utc>, ts: Option<DateTime<Utc>>) -> String {
     let Some(ts) = ts else {
         return "-".to_string();
     };
@@ -3495,26 +3501,41 @@ fn render_empty_state_line(state: &PickerState) -> Line<'static> {
         if state.search_state.is_active()
             || (state.pagination.is_loading() && state.pagination.next_cursor.is_some())
         {
-            return vec!["Searching…".italic().dim()].into();
+            return vec!["Searching…".set_style(secondary_text_style()).italic()].into();
         }
         if state.pagination.reached_scan_cap {
             let msg = format!(
                 "Search scanned first {} sessions; more may exist",
                 state.pagination.num_scanned_files
             );
-            return vec![Span::from(msg).italic().dim()].into();
+            return vec![Span::from(msg).set_style(secondary_text_style()).italic()].into();
         }
-        return vec!["No results for your search".italic().dim()].into();
+        return vec![
+            "No results for your search"
+                .set_style(secondary_text_style())
+                .italic(),
+        ]
+        .into();
     }
 
     if state.pagination.is_loading() {
         if state.all_rows.is_empty() && state.pagination.num_scanned_files == 0 {
-            return vec!["Loading sessions…".italic().dim()].into();
+            return vec![
+                "Loading sessions…"
+                    .set_style(secondary_text_style())
+                    .italic(),
+            ]
+            .into();
         }
-        return vec!["Loading older sessions…".italic().dim()].into();
+        return vec![
+            "Loading older sessions…"
+                .set_style(secondary_text_style())
+                .italic(),
+        ]
+        .into();
     }
 
-    vec!["No sessions yet".italic().dim()].into()
+    vec!["No sessions yet".set_style(secondary_text_style()).italic()].into()
 }
 
 #[cfg(test)]
@@ -4520,15 +4541,15 @@ mod tests {
         assert!(footer_lines_text(&state, /*width*/ 220).contains("ctrl+o dense view"));
         assert!(footer_lines_text(&state, /*width*/ 220).contains("ctrl+t transcript"));
         assert!(footer_lines_text(&state, /*width*/ 220).contains("ctrl+e expand"));
-        state.list_keymap.move_left = vec![crate::key_hint::ctrl(KeyCode::Char('h'))];
-        state.list_keymap.move_right = vec![crate::key_hint::ctrl(KeyCode::Char('l'))];
+        state.keymap.list.move_left = vec![crate::key_hint::ctrl(KeyCode::Char('h'))];
+        state.keymap.list.move_right = vec![crate::key_hint::ctrl(KeyCode::Char('l'))];
         let remapped_footer = footer_lines_text(&state, /*width*/ 220);
         assert!(
-            remapped_footer.contains("ctrl + h/ctrl + l change option"),
+            remapped_footer.contains("ctrl+h/ctrl+l change option"),
             "{remapped_footer}"
         );
-        state.list_keymap.move_left.clear();
-        state.list_keymap.move_right.clear();
+        state.keymap.list.move_left.clear();
+        state.keymap.list.move_right.clear();
         assert!(!footer_lines_text(&state, /*width*/ 220).contains("change option"));
 
         state.density = SessionListDensity::Dense;
@@ -4598,7 +4619,7 @@ mod tests {
     }
 
     #[test]
-    fn hint_line_prioritizes_keybinds_when_very_narrow() {
+    fn hint_line_preserves_primary_action_labels_when_very_narrow() {
         let loader = page_only_loader(|_| {});
         let mut state = PickerState::new(
             FrameRequester::test_dummy(),
@@ -4619,13 +4640,10 @@ mod tests {
             .join("\n");
 
         assert!(lines.iter().all(|line| line.width() <= width as usize));
-        assert!(rendered.contains("enter"));
-        assert!(rendered.contains("esc"));
-        assert!(rendered.contains("ctrl+c"));
-        assert!(rendered.contains("ctrl+o"));
-        assert!(rendered.contains("ctrl+t"));
-        assert!(rendered.contains("ctrl+e"));
-        assert!(rendered.contains("↑/↓"));
+        assert_eq!(
+            rendered,
+            " enter resume   esc new   ctrl+c quit\n ctrl+o comfy   ctrl+t preview"
+        );
     }
 
     #[test]
@@ -5132,6 +5150,14 @@ mod tests {
             /*filter_cwd*/ None,
             SessionPickerAction::Resume,
         );
+        state.keymap = RuntimeKeymap::from_config(
+            &serde_json::from_value(serde_json::json!({
+                "pager": {"scroll_up": ["ctrl-space x", "ctrl-x ctrl-space"]},
+                "editor": {"move_line_start": ["alt-a", "ctrl-x h"]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         state.pending_transcript_open = Some(thread_id);
         let cells: TranscriptCells =
             vec![Arc::new(PlainHistoryCell::new(vec!["transcript".into()]))];
@@ -5156,6 +5182,63 @@ mod tests {
 
         assert!(matches!(state.overlay, Some(Overlay::Transcript(_))));
         assert_eq!(state.pending_transcript_open, None);
+        let select = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+        assert_eq!(state.route_key_chord(select), Some(select));
+        assert_eq!(
+            state.route_key_chord(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            None
+        );
+        assert!(state.chord_matcher.is_pending());
+        assert_eq!(state.route_key_chord(select), Some(select));
+        assert!(!state.chord_matcher.is_pending());
+        let mut tui = crate::tui::test_support::make_test_tui().expect("tui");
+        state
+            .handle_overlay_event(
+                &mut tui,
+                TuiEvent::Key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE)),
+            )
+            .unwrap();
+        state
+            .handle_overlay_event(&mut tui, TuiEvent::Paste("tail".into()))
+            .unwrap();
+        for (keys, insertion) in [
+            (
+                vec![KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)],
+                "A",
+            ),
+            (
+                vec![
+                    KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+                    KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+                ],
+                "B",
+            ),
+        ] {
+            for key in keys {
+                if let Some(key) = state.route_key_chord(key) {
+                    state
+                        .handle_overlay_event(&mut tui, TuiEvent::Key(key))
+                        .unwrap();
+                }
+            }
+            state
+                .handle_overlay_event(&mut tui, TuiEvent::Paste(insertion.into()))
+                .unwrap();
+        }
+        let area = Rect::new(
+            /*x*/ 0, /*y*/ 0, /*width*/ 80, /*height*/ 12,
+        );
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        let Some(Overlay::Transcript(overlay)) = &mut state.overlay else {
+            panic!("transcript preview");
+        };
+        overlay.render(area, &mut buffer);
+        let text = buffer
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(text.contains("BAtail"), "Find query: {text}");
     }
 
     #[tokio::test]
@@ -5395,7 +5478,7 @@ session_picker_view = "dense"
     }
 
     #[test]
-    fn search_line_renders_sort_and_filter_tabs() {
+    fn toolbar_renders_sort_and_filter_tabs() {
         use crate::custom_terminal::Terminal;
         use crate::test_backend::VT100Backend;
 
@@ -5416,7 +5499,7 @@ session_picker_view = "dense"
 
         {
             let mut frame = terminal.get_frame();
-            let line = search_line(&state, frame.area().width);
+            let line = toolbar_for_width(&state, frame.area().width);
             frame.render_widget_ref(&line, frame.area());
         }
         terminal.flush().expect("flush");
@@ -5428,7 +5511,7 @@ session_picker_view = "dense"
     }
 
     #[test]
-    fn search_line_compacts_toolbar_on_narrow_width() {
+    fn toolbar_compacts_on_narrow_width() {
         let loader = page_only_loader(|_| {});
         let state = PickerState::new(
             FrameRequester::test_dummy(),
@@ -5439,12 +5522,12 @@ session_picker_view = "dense"
             SessionPickerAction::Resume,
         );
 
-        let line = search_line(&state, /*width*/ 40).to_string();
+        let line = toolbar_for_width(&state, /*width*/ 40).to_string();
 
-        assert!(line.contains("Filter:[Cwd]"));
-        assert!(line.contains("[Active]"));
-        assert!(line.contains("Sort:[Updated]"));
-        assert!(line.find("Filter:[Cwd]") < line.find("Sort:[Updated]"));
+        assert!(line.contains("Filter: Cwd "));
+        assert!(line.contains(" Active "));
+        assert!(line.contains("Sort: Updated "));
+        assert!(line.find("Filter: Cwd ") < line.find("Sort: Updated "));
     }
 
     fn dense_snapshot_row() -> Row {
@@ -5595,6 +5678,8 @@ session_picker_view = "dense"
             marker: selection_marker(/*is_selected*/ true, /*is_expanded*/ false),
             date: "15m ago",
             title: "Selected dense row",
+            thread_id: None,
+            use_theme_colors: true,
             is_selected: true,
             is_zebra: false,
             width: 80,
@@ -5602,7 +5687,7 @@ session_picker_view = "dense"
 
         assert_eq!(line.width(), 80);
         assert_eq!(line.style.fg, selected_session_style().fg);
-        assert_eq!(line.spans[0].content, "❯ ");
+        assert_eq!(line.spans[0].content, "› ");
     }
 
     #[test]
@@ -5611,6 +5696,8 @@ session_picker_view = "dense"
             marker: selection_marker(/*is_selected*/ false, /*is_expanded*/ false),
             date: "15m ago",
             title: "Zebra dense row",
+            thread_id: None,
+            use_theme_colors: true,
             is_selected: false,
             is_zebra: true,
             width: 80,
@@ -6223,7 +6310,7 @@ session_picker_view = "dense"
         );
 
         assert_eq!(
-            search_line(&state, /*width*/ 80)
+            toolbar_for_width(&state, /*width*/ 80)
                 .to_string()
                 .matches("Cwd")
                 .count(),
@@ -6322,10 +6409,10 @@ session_picker_view = "dense"
             /*filter_cwd*/ None,
             SessionPickerAction::Resume,
         );
-        state.list_keymap.page_down = vec![crate::key_hint::ctrl(KeyCode::Char('d'))];
-        state.list_keymap.page_up = vec![crate::key_hint::ctrl(KeyCode::Char('u'))];
-        state.list_keymap.jump_bottom = vec![crate::key_hint::ctrl(KeyCode::Char('y'))];
-        state.list_keymap.jump_top = vec![crate::key_hint::ctrl(KeyCode::Char('a'))];
+        state.keymap.list.page_down = vec![crate::key_hint::ctrl(KeyCode::Char('d'))];
+        state.keymap.list.page_up = vec![crate::key_hint::ctrl(KeyCode::Char('u'))];
+        state.keymap.list.jump_bottom = vec![crate::key_hint::ctrl(KeyCode::Char('y'))];
+        state.keymap.list.jump_top = vec![crate::key_hint::ctrl(KeyCode::Char('a'))];
 
         let mut items = Vec::new();
         for idx in 0..20 {
@@ -6384,7 +6471,7 @@ session_picker_view = "dense"
             /*filter_cwd*/ None,
             SessionPickerAction::Resume,
         );
-        state.list_keymap.cancel = vec![crate::key_hint::ctrl(KeyCode::Char('c'))];
+        state.keymap.list.cancel = vec![crate::key_hint::ctrl(KeyCode::Char('c'))];
 
         let selection = state
             .handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
@@ -6733,7 +6820,7 @@ session_picker_view = "dense"
     }
 
     #[test]
-    fn thread_to_transcript_cells_shows_raw_reasoning_over_summary_when_enabled() {
+    fn thread_to_transcript_cells_retains_summary_and_raw_reasoning_when_enabled() {
         use crate::thread_transcript::thread_to_transcript_cells;
 
         let thread_id = ThreadId::new();
@@ -6796,8 +6883,7 @@ session_picker_view = "dense"
         .collect::<Vec<_>>()
         .join("\n");
 
-        assert!(rendered.contains("raw reasoning content"));
-        assert!(!rendered.contains("public summary"));
+        assert_eq!(rendered, "• public summary\n  \n  raw reasoning content");
     }
 
     #[tokio::test]
