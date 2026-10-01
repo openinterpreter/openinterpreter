@@ -21,6 +21,7 @@ use codex_app_server_protocol::ThreadSection;
 use codex_app_server_protocol::ThreadSectionAppearance;
 use codex_app_server_protocol::ThreadSectionMoveParams;
 use codex_app_server_protocol::ThreadSectionMoveResponse;
+use codex_config::types::ShellEnvironmentPolicyToml;
 use codex_config::types::WindowsSandboxModeToml;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ThreadIdleCause;
@@ -4282,7 +4283,7 @@ impl ThreadRequestProcessor {
                 )));
             }
             let config_snapshot = existing_thread.config_snapshot().await;
-            let mismatch_details = collect_resume_override_mismatches(params, &config_snapshot);
+            let mut mismatch_details = collect_resume_override_mismatches(params, &config_snapshot);
             if !mismatch_details.is_empty() {
                 let has_subscribers = !self
                     .thread_state_manager
@@ -4324,13 +4325,65 @@ impl ThreadRequestProcessor {
                     }
                 }
 
+                // A subscribed idle thread cannot be torn down for cold resume,
+                // yet a renewed shell bridge must not keep the previous caller's
+                // environment. Rebind only this explicit policy; all other
+                // loaded-thread overrides retain their existing semantics.
+                if let Some(policy) = params
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.get("shell_environment_policy"))
+                {
+                    if is_running || !matches!(loaded_status, ThreadStatus::Idle) {
+                        return Err(invalid_request(
+                            "cannot update shell environment policy of an active thread",
+                        ));
+                    }
+                    let policy: ShellEnvironmentPolicyToml = serde_json::from_value(policy.clone())
+                        .map_err(|error| {
+                            invalid_request(format!(
+                                "invalid shell environment policy for loaded thread: {error}"
+                            ))
+                        })?;
+                    let policy: codex_protocol::config_types::ShellEnvironmentPolicy =
+                        policy.into();
+                    let rotated = existing_thread
+                        .rotate_shell_environment_values(policy)
+                        .await
+                        .map_err(|error| {
+                            invalid_request(format!(
+                                "invalid shell environment policy for loaded thread: {error}"
+                            ))
+                        })?;
+                    if !rotated {
+                        return Err(invalid_request(
+                            "loaded thread may only rotate existing shell environment values",
+                        ));
+                    }
+                    mismatch_details.retain(|detail| {
+                        detail != "config overrides were provided and ignored while running"
+                    });
+                    if params
+                        .config
+                        .as_ref()
+                        .is_some_and(|config| config.len() > 1)
+                    {
+                        mismatch_details.push(
+                            "other config overrides were provided and ignored while running"
+                                .to_string(),
+                        );
+                    }
+                }
+
                 // Preserve rejoin semantics when another client can still observe
                 // the loaded thread or shutdown did not complete.
-                tracing::warn!(
-                    "thread/resume overrides ignored for loaded thread {}: {}",
-                    existing_thread_id,
-                    mismatch_details.join("; ")
-                );
+                if !mismatch_details.is_empty() {
+                    tracing::warn!(
+                        "thread/resume overrides ignored for loaded thread {}: {}",
+                        existing_thread_id,
+                        mismatch_details.join("; ")
+                    );
+                }
             }
             let redact_resume_payloads =
                 should_redact_thread_resume_payloads(app_server_client_name.as_deref());

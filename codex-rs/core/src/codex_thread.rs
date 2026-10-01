@@ -24,6 +24,7 @@ use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
@@ -820,6 +821,15 @@ impl CodexThread {
 
     pub async fn config_snapshot(&self) -> ThreadConfigSnapshot {
         self.session.thread_config_snapshot().await
+    }
+
+    /// Rebind the shell environment of an idle loaded thread when its owner
+    /// resumes it. Active turns retain their existing turn context.
+    pub async fn rotate_shell_environment_values(
+        &self,
+        policy: ShellEnvironmentPolicy,
+    ) -> ConstraintResult<bool> {
+        self.session.rotate_shell_environment_values(policy).await
     }
 
     /// Returns the active turn's reviewer, including live updates, or the thread default.
