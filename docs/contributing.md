@@ -67,7 +67,7 @@ Update [Models](/docs/models), [Providers](/docs/providers), or
 ## Security
 
 Do not report vulnerabilities in public issue threads. Follow the repository's
-[security policy](../SECURITY.md) instead.
+[security policy](https://github.com/openinterpreter/openinterpreter/blob/main/SECURITY.md) instead.
 
 ## Community values
 
