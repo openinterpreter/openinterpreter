@@ -149,6 +149,27 @@ wire_api = "chat"
 
 Set `APPNZ_API_KEY` to your app.nz API key.
 
+### Cheaper Inference
+
+[Cheaper Inference](https://cheaperinference.com/) is a hosted
+OpenAI-compatible gateway. Each model costs 15–60% less than the list price of
+its lab. Add it as a custom chat-completions provider:
+
+```toml
+model_provider = "cheaperinference"
+model = "gpt-5.4-mini"
+
+[model_providers.cheaperinference]
+name = "Cheaper Inference"
+base_url = "https://api.cheaperinference.com/v1"
+env_key = "CHEAPER_INFERENCE_API_KEY"
+wire_api = "chat"
+```
+
+Set `CHEAPER_INFERENCE_API_KEY` to your Cheaper Inference API key. See the
+[model list](https://cheaperinference.com/#models) for other model IDs, such as
+`gpt-5.4` or `claude-sonnet-5`.
+
 ## Harness
 
 Open Interpreter adds a `harness` setting for compatibility modes that shape

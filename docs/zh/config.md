@@ -144,6 +144,27 @@ wire_api = "chat"
 
 将 `APPNZ_API_KEY` 设置为你的 app.nz API 密钥。
 
+### Cheaper Inference
+
+[Cheaper Inference](https://cheaperinference.com/) 是一个托管的 OpenAI 兼容网关。
+每个模型的价格比其所属实验室的标价低 15–60%。可以将它添加为自定义
+chat-completions 提供商：
+
+```toml
+model_provider = "cheaperinference"
+model = "gpt-5.4-mini"
+
+[model_providers.cheaperinference]
+name = "Cheaper Inference"
+base_url = "https://api.cheaperinference.com/v1"
+env_key = "CHEAPER_INFERENCE_API_KEY"
+wire_api = "chat"
+```
+
+将 `CHEAPER_INFERENCE_API_KEY` 设置为你的 Cheaper Inference API 密钥。其他模型
+ID（例如 `gpt-5.4` 或 `claude-sonnet-5`）请参阅
+[模型列表](https://cheaperinference.com/#models)。
+
 ## Harness
 
 Open Interpreter 增加了 `harness` 设置，用于兼容模式，使代理的交互界面类似其他编码 harness，同时仍在原生 Open Interpreter 运行时中运行。

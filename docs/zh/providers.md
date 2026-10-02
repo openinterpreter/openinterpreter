@@ -100,6 +100,18 @@ env_key = "APPNZ_API_KEY"
 wire_api = "chat"
 ```
 
+[Cheaper Inference](https://cheaperinference.com/) 是一个托管的兼容 OpenAI 的
+chat-completions 网关。每个模型的价格比其所属实验室的标价低 15–60%。其提供商
+配置如下：
+
+```toml
+[model_providers.cheaperinference]
+name = "Cheaper Inference"
+base_url = "https://api.cheaperinference.com/v1"
+env_key = "CHEAPER_INFERENCE_API_KEY"
+wire_api = "chat"
+```
+
 ## 身份验证
 
 提供商的身份验证可以来源于：
