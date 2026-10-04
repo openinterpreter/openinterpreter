@@ -316,6 +316,15 @@ impl<T: HttpTransport> ChatCompletionsCompatClient<T> {
 /// for upstreams that don't support them keeps every harness working without
 /// changing behavior on the providers that rely on them.
 fn sanitize_chat_body_for_provider(body: &mut Value, base_url: &str) {
+    // Gemini's OpenAI-compatible endpoint rejects `store`, including `false`.
+    if base_url.parse::<http::Uri>().ok().is_some_and(|uri| {
+        uri.host()
+            .is_some_and(|host| host.eq_ignore_ascii_case("generativelanguage.googleapis.com"))
+    }) && let Some(obj) = body.as_object_mut()
+    {
+        obj.remove("store");
+    }
+
     let host = base_url.to_ascii_lowercase();
     let is_deepseek = host.contains("api.deepseek.com");
     let is_openrouter = is_openrouter_base_url(&host);
@@ -699,6 +708,67 @@ mod tests {
     }
 
     #[test]
+    fn gemini_sanitizer_removes_only_store() {
+        let expected = serde_json::json!({
+            "model": "gemini-2.5-pro",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true,
+            "parallel_tool_calls": true,
+            "response_format": {"type": "json_object"},
+            "reasoning_effort": "high",
+            "service_tier": "auto",
+            "max_tokens": 64000
+        });
+
+        for base_url in [
+            "https://generativelanguage.googleapis.com/v1beta/openai/",
+            "https://GENERATIVELANGUAGE.GOOGLEAPIS.COM/v1beta/openai",
+            "https://generativelanguage.googleapis.com:443/v1beta/openai/",
+        ] {
+            for store in [None, Some(false), Some(true)] {
+                let mut body = expected.clone();
+                if let Some(store) = store {
+                    body["store"] = Value::Bool(store);
+                }
+
+                sanitize_chat_body_for_provider(&mut body, base_url);
+
+                assert_eq!(body, expected, "base URL: {base_url}, store: {store:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn gemini_sanitizer_preserves_other_hosts_and_invalid_urls() {
+        let expected = serde_json::json!({
+            "model": "gemini-2.5-pro",
+            "messages": [{"role": "user", "content": "hello"}],
+            "store": false,
+            "stream": true
+        });
+
+        for base_url in [
+            "https://api.openai.com/v1",
+            "https://example.com/v1",
+            "https://aiplatform.googleapis.com/v1",
+            "https://generativelanguage.googleapis.com.example.com/v1",
+            "https://example.com/generativelanguage.googleapis.com",
+            "https://example.com/v1?upstream=generativelanguage.googleapis.com",
+            "https://generativelanguage.googleapis.com@example.com/v1",
+            "https://generativelanguage.googleapis.com\n/v1",
+            "https://[generativelanguage.googleapis.com/v1",
+            "/generativelanguage.googleapis.com/v1",
+            "",
+        ] {
+            let mut body = expected.clone();
+
+            sanitize_chat_body_for_provider(&mut body, base_url);
+
+            assert_eq!(body, expected, "base URL: {base_url:?}");
+        }
+    }
+
+    #[test]
     fn groq_sanitizer_removes_openai_only_fields() {
         let mut body = serde_json::json!({
             "model": "openai/gpt-oss-120b",
@@ -859,6 +929,72 @@ mod tests {
                 verbosity: Some(OpenAiVerbosity::Low),
                 format: None,
             }),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_request_omits_store_for_the_effective_gemini_upstream() {
+        let gemini_url = "https://generativelanguage.googleapis.com/v1beta/openai";
+        let other_url = "https://example.com/v1";
+        for (base_url, upstream_url, expected_store) in [
+            (gemini_url, None, None),
+            (other_url, None, Some(false)),
+            (other_url, Some(gemini_url), None),
+            (gemini_url, Some(other_url), Some(false)),
+        ] {
+            let client = ChatCompletionsCompatClient::new(
+                RecordingTransport::default(),
+                Provider {
+                    base_url: base_url.to_string(),
+                    ..test_provider()
+                },
+                Arc::new(StaticAuth),
+            );
+            let mut options = ResponsesOptions::default();
+            if let Some(upstream_url) = upstream_url {
+                options.extra_headers.insert(
+                    CHAT_WIRE_UPSTREAM_URL_HEADER,
+                    upstream_url.parse().expect("valid upstream header"),
+                );
+            }
+            let request = ResponsesApiRequest {
+                model: "gemini-2.5-pro".to_string(),
+                ..test_request()
+            };
+
+            let _stream = client
+                .stream_request(request, options)
+                .await
+                .expect("chat request should stream");
+
+            let recorded = client
+                .transport
+                .last_request
+                .lock()
+                .expect("recorded request");
+            let body = recorded
+                .as_ref()
+                .and_then(|request| request.body.as_ref())
+                .and_then(RequestBody::json)
+                .expect("chat request JSON body");
+            let mut expected = serde_json::json!({
+                "model": "gemini-2.5-pro",
+                "messages": [
+                    {"role": "system", "content": "be terse"},
+                    {"role": "user", "content": "hello"}
+                ],
+                "stream": true,
+                "tool_choice": "auto",
+                "parallel_tool_calls": true,
+                "verbosity": "low"
+            });
+            if let Some(store) = expected_store {
+                expected["store"] = Value::Bool(store);
+            }
+            assert_eq!(
+                body, &expected,
+                "base URL: {base_url}, upstream: {upstream_url:?}"
+            );
         }
     }
 
