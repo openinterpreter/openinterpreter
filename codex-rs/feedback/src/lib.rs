@@ -57,7 +57,9 @@ const DEFAULT_MAX_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
 // Keep the existing destination until the replacement receiver is verified and selected.
 const FEEDBACK_ENDPOINT_DSN: &str =
     "https://ae32ed50620d7a7792c1ce5df38b3e3e@o33249.ingest.us.sentry.io/4510195390611458";
-const VERIFIED_FEEDBACK_ENDPOINT_DSN: &str = "https://public@feedback.openinterpreter.com/1";
+// The selected receiver requires a distinct report passcode. Neither the TUI
+// feedback note nor the app-server upload params has a dedicated secret field;
+// never use a prefix in the reason or silently submit an unreadable report.
 
 #[derive(Clone, Copy)]
 enum FeedbackUploadMode {
@@ -68,7 +70,9 @@ enum FeedbackUploadMode {
 fn feedback_endpoint_dsn(config: Option<&str>) -> Result<&'static str> {
     match config {
         None => Ok(FEEDBACK_ENDPOINT_DSN),
-        Some("cloud-run") => Ok(VERIFIED_FEEDBACK_ENDPOINT_DSN),
+        Some("cloud-run") => Err(anyhow!(
+            "OIX feedback endpoint requires a dedicated report passcode input; keep the legacy destination"
+        )),
         Some(_) => Err(anyhow!("invalid OIX feedback endpoint selector")),
     }
 }
@@ -993,9 +997,11 @@ mod tests {
             FEEDBACK_ENDPOINT_DSN,
             "https://ae32ed50620d7a7792c1ce5df38b3e3e@o33249.ingest.us.sentry.io/4510195390611458"
         );
-        assert_eq!(
-            feedback_endpoint_dsn(Some("cloud-run")).unwrap(),
-            VERIFIED_FEEDBACK_ENDPOINT_DSN
+        assert!(
+            feedback_endpoint_dsn(Some("cloud-run"))
+                .unwrap_err()
+                .to_string()
+                .contains("dedicated report passcode input")
         );
         assert!(feedback_endpoint_dsn(Some("https://untrusted.example/1")).is_err());
         assert!(feedback_endpoint_dsn(Some("")).is_err());
