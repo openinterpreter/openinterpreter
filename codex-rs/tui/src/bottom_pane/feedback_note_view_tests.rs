@@ -469,6 +469,37 @@ fn dedicated_passcode_waits_for_multiline_note_paste_to_end() {
 }
 
 #[test]
+fn server_requested_passcode_retries_original_note_without_putting_secret_in_reason() {
+    let (tx_raw, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+    let mut view = FeedbackNoteView::passcode_retry(
+        FeedbackCategory::Bug,
+        Some("turn-123".into()),
+        AppEventSender::new(tx_raw),
+        false,
+        FeedbackAudience::External,
+        Some("original report note".into()),
+    );
+    assert!(view.entering_passcode);
+    assert_eq!(view.textarea.text(), "original report note");
+    assert!(rx.try_recv().is_err());
+    assert!(view.handle_paste("operator-secret-123".into()));
+    assert!(!render(&view, 70).contains("operator-secret-123"));
+    view.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let AppEvent::SubmitFeedback {
+        reason,
+        report_passcode,
+        turn_id,
+        ..
+    } = rx.try_recv().unwrap()
+    else {
+        panic!("expected feedback retry");
+    };
+    assert_eq!(reason.as_deref(), Some("original report note"));
+    assert_eq!(turn_id.as_deref(), Some("turn-123"));
+    assert_eq!(report_passcode.unwrap().into_inner(), "operator-secret-123");
+}
+
+#[test]
 fn feedback_note_cancel_does_not_submit() {
     let (tx_raw, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let mut view = FeedbackNoteView::new(

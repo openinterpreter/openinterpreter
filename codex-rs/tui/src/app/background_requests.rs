@@ -592,6 +592,9 @@ impl App {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         let origin_thread_id = self.chat_widget.thread_id();
+        let missing_passcode = report_passcode.is_none();
+        let retry_reason = reason.clone();
+        let retry_turn_id = turn_id.clone();
         let rollout_path = if include_logs {
             self.chat_widget.rollout_path()
         } else {
@@ -611,6 +614,16 @@ impl App {
                 .await
                 .map(|response| response.thread_id)
                 .map_err(|err| err.to_string());
+            if app_server_requests_feedback_passcode(missing_passcode, &result) {
+                app_event_tx.send(AppEvent::FeedbackPasscodeRequired {
+                    origin_thread_id,
+                    category,
+                    reason: retry_reason,
+                    turn_id: retry_turn_id,
+                    include_logs,
+                });
+                return;
+            }
             app_event_tx.send(AppEvent::FeedbackSubmitted {
                 origin_thread_id,
                 category,
@@ -1265,6 +1278,17 @@ pub(super) async fn write_hook_enabled(
         .wrap_err("config/batchWrite failed while updating hook enablement in TUI")
 }
 
+fn app_server_requests_feedback_passcode(
+    missing_passcode: bool,
+    result: &Result<String, String>,
+) -> bool {
+    missing_passcode
+        && result
+            .as_ref()
+            .err()
+            .is_some_and(|err| err.contains("feedback report passcode required"))
+}
+
 pub(super) fn build_feedback_upload_params(
     origin_thread_id: Option<ThreadId>,
     rollout_path: Option<PathBuf>,
@@ -1355,6 +1379,21 @@ mod tests {
     use codex_protocol::mcp::Tool;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn passcode_prompt_requires_authoritative_server_error_and_no_prior_passcode() {
+        let required = Err("feedback upload failed: feedback report passcode required".to_string());
+        assert!(app_server_requests_feedback_passcode(true, &required));
+        assert!(!app_server_requests_feedback_passcode(false, &required));
+        assert!(!app_server_requests_feedback_passcode(
+            true,
+            &Err("feedback endpoint rejected upload with HTTP status 403".to_string())
+        ));
+        assert!(!app_server_requests_feedback_passcode(
+            true,
+            &Ok("submitted".to_string())
+        ));
+    }
 
     #[tokio::test]
     async fn fetch_thread_usage_uses_app_server_auth_after_persisted_account_changes() {

@@ -75,16 +75,40 @@ impl FeedbackNoteView {
         include_logs: bool,
         feedback_audience: FeedbackAudience,
     ) -> Self {
-        let requires_passcode =
-            std::env::var("OIX_FEEDBACK_INGEST").is_ok_and(|value| value == "cloud-run");
+        // The app-server may run on another host. Only its upload response can
+        // establish whether a report passcode is required; the TUI's local
+        // environment is never an authority for the remote upload endpoint.
         Self::new_with_passcode_requirement(
             category,
             turn_id,
             app_event_tx,
             include_logs,
             feedback_audience,
-            requires_passcode,
+            false,
         )
+    }
+
+    pub(crate) fn passcode_retry(
+        category: FeedbackCategory,
+        turn_id: Option<String>,
+        app_event_tx: AppEventSender,
+        include_logs: bool,
+        feedback_audience: FeedbackAudience,
+        reason: Option<String>,
+    ) -> Self {
+        let mut view = Self::new_with_passcode_requirement(
+            category,
+            turn_id,
+            app_event_tx,
+            include_logs,
+            feedback_audience,
+            true,
+        );
+        if let Some(reason) = reason {
+            view.textarea.insert_str(&reason);
+        }
+        view.entering_passcode = true;
+        view
     }
 
     fn new_with_passcode_requirement(

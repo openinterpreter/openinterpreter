@@ -1566,6 +1566,16 @@ pub(crate) enum AppEvent {
         result: Result<String, String>,
     },
 
+    /// The app-server, not the TUI environment, requires a report passcode.
+    /// Only the ordinary note is retained here; the passcode is entered later.
+    FeedbackPasscodeRequired {
+        origin_thread_id: Option<ThreadId>,
+        category: FeedbackCategory,
+        reason: Option<String>,
+        turn_id: Option<String>,
+        include_logs: bool,
+    },
+
     /// Launch the external editor after a normal draw has completed.
     LaunchExternalEditor,
 
