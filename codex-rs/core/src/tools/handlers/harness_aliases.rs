@@ -1945,27 +1945,39 @@ async fn handle_edit(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
     let text = std::fs::read_to_string(&path)
         .map_err(|err| FunctionCallError::RespondToModel(format!("Edit failed: {err}")))?;
     let replacements = edit_replacements(&args)?;
-    let mut updated = text.clone();
-    let mut total_matches = 0usize;
+    let mut spans = Vec::new();
     for replacement in &replacements {
-        let matches = text.matches(&replacement.old_text).count();
-        if matches == 0 {
+        let matches = text
+            .match_indices(&replacement.old_text)
+            .map(|(start, old)| (start, start + old.len(), replacement.new_text.as_str()))
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
             return Err(FunctionCallError::RespondToModel(
                 "Edit failed: old_string not found".to_string(),
             ));
         }
-        if matches > 1 && !args.replace_all {
+        if matches.len() > 1 && !args.replace_all {
             return Err(FunctionCallError::RespondToModel(
                 "Edit failed: old_string found multiple times; set replace_all to true or provide more context".to_string(),
             ));
         }
-        total_matches += matches;
-        updated = if args.replace_all {
-            updated.replace(&replacement.old_text, &replacement.new_text)
-        } else {
-            updated.replacen(&replacement.old_text, &replacement.new_text, 1)
-        };
+        spans.extend(matches);
     }
+    spans.sort_by_key(|(start, _, _)| *start);
+    if spans.windows(2).any(|pair| pair[1].0 < pair[0].1) {
+        return Err(FunctionCallError::RespondToModel(
+            "Edit failed: edits overlap; merge them into one edit".to_string(),
+        ));
+    }
+    let total_matches = spans.len();
+    let mut updated = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for (start, end, new_text) in spans {
+        updated.push_str(&text[cursor..start]);
+        updated.push_str(new_text);
+        cursor = end;
+    }
+    updated.push_str(&text[cursor..]);
     let changes = harness_file_change(&path, Some(&text), &updated);
     emit_harness_file_change(&invocation, &changes, HarnessFileChangeStage::Started).await;
     if let Err(err) = std::fs::write(&path, &updated) {
@@ -4458,6 +4470,69 @@ mod tests {
                 if event.status == PatchApplyStatus::Completed
                     && event.changes.contains_key(&path)
         ));
+    }
+
+    #[tokio::test]
+    async fn pi_edit_matches_every_edit_against_the_original_file() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let path = workspace.path().join("rename.rs");
+        std::fs::write(&path, "let alpha = 1;\nlet beta = 2;\n").expect("seed file");
+        let invocation = invocation_with_harness(
+            &workspace,
+            "edit",
+            json!({
+                "path": "rename.rs",
+                "edits": [
+                    {"oldText": "alpha", "newText": "beta"},
+                    {"oldText": "beta", "newText": "gamma"}
+                ]
+            }),
+            Some("pi"),
+        )
+        .await;
+
+        HarnessAliasHandler::EditLower
+            .handle(invocation)
+            .await
+            .expect("edit should succeed");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read edited file"),
+            "let beta = 1;\nlet gamma = 2;\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn pi_edit_rejects_overlapping_edits() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let path = workspace.path().join("overlap.txt");
+        std::fs::write(&path, "one two three\n").expect("seed file");
+        let invocation = invocation_with_harness(
+            &workspace,
+            "edit",
+            json!({
+                "path": "overlap.txt",
+                "edits": [
+                    {"oldText": "one two", "newText": "1 2"},
+                    {"oldText": "two three", "newText": "2 3"}
+                ]
+            }),
+            Some("pi"),
+        )
+        .await;
+
+        let Err(err) = HarnessAliasHandler::EditLower.handle(invocation).await else {
+            panic!("overlapping edits should fail");
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "Edit failed: edits overlap; merge them into one edit"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read untouched file"),
+            "one two three\n"
+        );
     }
 
     #[tokio::test]
