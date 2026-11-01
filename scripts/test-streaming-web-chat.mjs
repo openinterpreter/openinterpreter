@@ -221,6 +221,9 @@ for await (const line of createInterface({ input: process.stdin })) {
     if (text === 'early') send({ method: 'item/agentMessage/delta', params: { threadId: 't', turnId: id, delta: 'y'.repeat(17000) } });
     send({ id: m.id, result: { turn: { id } } });
     if (text === 'early') continue;
+    // Let the bridge process turn/start before its normal stream. Only the
+    // explicit 'early' case should exercise the pre-response queue limit.
+    await new Promise(resolve => setTimeout(resolve, 20));
     for (let i = 0, n = text === 'large' ? 71000 : 30; i < n; i += 1000)
       send({ method: 'item/agentMessage/delta', params: { threadId: 't', turnId: id, delta: 'x'.repeat(Math.min(1000, n - i)) } });
     if (text !== 'large') send({ method: 'turn/completed', params: { threadId: 't', turn: { id, status: 'completed' } } });
