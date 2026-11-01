@@ -8,6 +8,28 @@ import write_provider_catalog as catalog
 
 
 class ProviderCatalogRefreshTests(unittest.TestCase):
+    def test_api_base_url_resolution(self):
+        source_url = "https://generativelanguage.googleapis.com/v1beta"
+        override_url = source_url + "/openai"
+        for source, override, expected in (
+            (source_url, override_url, override_url),
+            (source_url, None, source_url),
+            (None, override_url, override_url),
+        ):
+            with self.subTest(source=source, override=override):
+                provider = {
+                    "name": "Google",
+                    "api": source,
+                    "models": {"example": {"tool_call": True}},
+                }
+                overrides = (
+                    {"api_base_url_overrides": {"google": override}}
+                    if override is not None
+                    else {}
+                )
+                entry = catalog.build_provider_entry("google", provider, overrides)
+                self.assertEqual(entry["base_url"], expected)
+
     def test_exclusions_apply_after_source_and_additions(self):
         overrides = {
             "provider_model_additions": {
