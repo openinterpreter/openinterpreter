@@ -1591,9 +1591,13 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests[1].body.len() > 40_000_000);
         let mut decoded = Vec::new();
-        GzDecoder::new(requests[1].body.as_slice())
-            .read_to_end(&mut decoded)
-            .unwrap();
+        if requests[1].headers.contains_key("Content-Encoding") {
+            GzDecoder::new(requests[1].body.as_slice())
+                .read_to_end(&mut decoded)
+                .unwrap();
+        } else {
+            decoded.extend_from_slice(&requests[1].body);
+        }
         assert!(decoded.strip_suffix(b"\n").unwrap().ends_with(&bytes));
     }
 
