@@ -24,6 +24,7 @@ use crate::MAX_DECODED_UPLOAD_BYTES;
 
 pub(super) const DEFAULT_RATE_LIMIT: Duration = Duration::from_secs(/*secs*/ 60);
 
+#[derive(Clone, Copy)]
 pub(super) enum EnvelopeKind {
     Event,
     Attachment,
@@ -34,12 +35,20 @@ pub(super) fn envelope_request(
     dsn: &Dsn,
     body: Bytes,
     timeout: Duration,
+    kind: EnvelopeKind,
 ) -> RouteAwareRequestBuilder {
     let sentry_options = ClientOptions::default();
     let sentry_auth = dsn.to_auth(Some(sentry_options.user_agent.as_ref()));
     let request = client_pool
         .post(dsn.envelope_api_url().as_str())
         .header("X-Sentry-Auth", sentry_auth.to_string());
+    let request = if matches!(kind, EnvelopeKind::Event)
+        && dsn.envelope_api_url().host_str() != Some("o33249.ingest.us.sentry.io")
+    {
+        request.header("X-Feedback-Signed-Uploads", "1")
+    } else {
+        request
+    };
     // Persisted parts retain their encoding. Gzip's magic bytes cannot begin
     // an uncompressed envelope, which starts with a JSON header.
     let request = if body.starts_with(&[0x1f, 0x8b]) {
@@ -58,14 +67,14 @@ pub(super) async fn send_envelope(
     kind: EnvelopeKind,
     deadline: Instant,
     rate_limited: &mut bool,
-) -> Result<StatusCode> {
+) -> Result<(StatusCode, Option<String>)> {
     let body = Bytes::from(body);
     // Retain the exact request bytes for at most two diagnostic retries. Never replay the core.
     let mut retry_delays = [250, 500].map(Duration::from_millis).into_iter();
     let response = loop {
         let timeout = deadline.saturating_duration_since(Instant::now());
         anyhow::ensure!(!timeout.is_zero(), "feedback upload deadline exceeded");
-        let response = envelope_request(client_pool, dsn, body.clone(), timeout)
+        let response = envelope_request(client_pool, dsn, body.clone(), timeout, kind)
             .send()
             .await;
         if response.as_ref().is_ok_and(|response| {
@@ -122,8 +131,20 @@ pub(super) async fn send_envelope(
         tokio::time::sleep(delay).await;
     };
     response
-        .map(|response| response.status())
-        .context("failed to upload feedback to Sentry")
+        .map(|response| {
+            let capability = if matches!(kind, EnvelopeKind::Event) {
+                response
+                    .headers()
+                    .get("X-Feedback-Upload-Capability")
+                    .and_then(|value| value.to_str().ok())
+                    .filter(|value| value.len() >= 32 && value.len() <= 128 && value.is_ascii())
+                    .map(str::to_string)
+            } else {
+                None
+            };
+            (response.status(), capability)
+        })
+        .context("failed to upload feedback to selected endpoint")
 }
 
 pub(super) fn sentry_rate_limit_delay(headers: &HeaderMap) -> Option<Duration> {
@@ -170,7 +191,7 @@ pub(super) fn encode_envelope(envelope: &Envelope) -> io::Result<(Vec<u8>, usize
     envelope.to_writer(&mut writer)?;
     let decoded_bytes = writer.bytes;
     let mut body = writer.inner.finish()?;
-    // Already-compressed attachments can grow beyond Sentry's 200 MiB wire limit.
+    // Already-compressed attachments can grow when wrapped in an envelope.
     // Reuse the buffer for the raw envelope when gzip does not make it smaller.
     if body.len() >= decoded_bytes {
         body.clear();

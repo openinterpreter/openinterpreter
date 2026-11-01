@@ -16,11 +16,12 @@ use sentry::protocol::EnvelopeItem;
 use sentry::types::Dsn;
 use sentry::types::Uuid;
 
+use crate::FEEDBACK_ENDPOINT_DSN;
 use crate::FeedbackAttachment;
 use crate::FeedbackSnapshot;
 use crate::MAX_DECODED_UPLOAD_BYTES;
 use crate::MAX_EVENT_BYTES;
-use crate::SENTRY_DSN;
+use crate::MAX_UPLOAD_BYTES;
 use crate::upload;
 
 // Background parts must tolerate slow links without inheriting the interactive
@@ -54,7 +55,12 @@ impl FeedbackTransport {
                 http_client_factory,
                 ClientRouteClass::Other,
             ),
-            dsn: SENTRY_DSN
+            // Persisted report parts still use the legacy whole-envelope
+            // transport. They cannot switch to a receiver with an 8 MiB body
+            // ceiling until the report API persists a signed-upload capability
+            // and finalizes each large original. Interactive feedback has that
+            // protocol; silently routing this transport would lose 64 MiB logs.
+            dsn: FEEDBACK_ENDPOINT_DSN
                 .parse()
                 .map_err(|_| anyhow!("invalid feedback DSN"))?,
         })
@@ -67,6 +73,7 @@ impl FeedbackTransport {
             &self.dsn,
             envelope.into(),
             REPORT_PART_UPLOAD_TIMEOUT,
+            upload::EnvelopeKind::Attachment,
         )
         .send()
         .await;
@@ -147,8 +154,56 @@ fn prepare_envelope(envelope: Envelope, max_decoded_bytes: usize) -> Result<Vec<
     let (bytes, decoded_bytes) =
         upload::encode_envelope(&envelope).context("failed to serialize feedback envelope")?;
     anyhow::ensure!(
-        decoded_bytes <= max_decoded_bytes,
+        bytes.len() <= MAX_UPLOAD_BYTES && decoded_bytes <= max_decoded_bytes,
         "feedback envelope exceeds the size limit"
     );
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FEEDBACK_ENDPOINT_DSN;
+    use super::FeedbackTransport;
+    use super::prepare_report_attachment;
+    use crate::FeedbackAttachment;
+    use crate::MAX_UPLOAD_BYTES;
+    use codex_http_client::HttpClientFactory;
+    use codex_http_client::OutboundProxyPolicy;
+
+    #[test]
+    fn persisted_report_transport_remains_on_compatible_envelope_receiver() {
+        let transport =
+            FeedbackTransport::new(HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault))
+                .unwrap();
+        let expected: sentry::types::Dsn = FEEDBACK_ENDPOINT_DSN.parse().unwrap();
+        assert_eq!(
+            transport.dsn.envelope_api_url(),
+            expected.envelope_api_url()
+        );
+    }
+
+    #[test]
+    fn persisted_report_rejects_wire_body_above_legacy_receiver_limit() {
+        let mut seed = 0x1234_5678_9abc_def0_u64;
+        let bytes = (0..MAX_UPLOAD_BYTES + 1024)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed as u8
+            })
+            .collect();
+        let result = prepare_report_attachment(
+            "12345678-1234-1234-1234-123456789abc",
+            FeedbackAttachment {
+                filename: "incompressible.log".to_string(),
+                content_type: None,
+                buffer: bytes,
+            },
+        );
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "feedback envelope exceeds the size limit"
+        );
+    }
 }
