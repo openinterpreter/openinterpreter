@@ -163,12 +163,20 @@ fn prepare_envelope(envelope: Envelope, max_decoded_bytes: usize) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::FEEDBACK_ENDPOINT_DSN;
+    use super::FeedbackDelivery;
     use super::FeedbackTransport;
     use super::prepare_report_attachment;
     use crate::FeedbackAttachment;
     use crate::MAX_UPLOAD_BYTES;
+    use codex_http_client::ClientRouteClass;
     use codex_http_client::HttpClientFactory;
     use codex_http_client::OutboundProxyPolicy;
+    use codex_http_client::RouteAwareClientPool;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
 
     #[test]
     fn persisted_report_transport_remains_on_compatible_envelope_receiver() {
@@ -179,6 +187,52 @@ mod tests {
         assert_eq!(
             transport.dsn.envelope_api_url(),
             expected.envelope_api_url()
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_retry_is_caller_owned_exact_bytes_and_never_has_passcode_header() {
+        let server = MockServer::start().await;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let attempt = AtomicUsize::new(0);
+        Mock::given(method("POST"))
+            .and(path("/api/42/envelope/"))
+            .respond_with(move |_: &wiremock::Request| {
+                if attempt.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(429)
+                } else {
+                    ResponseTemplate::new(200)
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
+        let transport = FeedbackTransport {
+            client_pool: RouteAwareClientPool::new_without_redirects_or_request_logging(
+                factory,
+                ClientRouteClass::Other,
+            ),
+            dsn: format!("http://public@{}/42", server.address())
+                .parse()
+                .unwrap(),
+        };
+        let bytes = b"{\"event_id\":\"123\"}\n{\"type\":\"attachment\"}\nhello".to_vec();
+        assert!(matches!(
+            transport.send(bytes.clone()).await,
+            FeedbackDelivery::Rejected { status: 429, .. }
+        ));
+        assert!(matches!(
+            transport.send(bytes.clone()).await,
+            FeedbackDelivery::Accepted { .. }
+        ));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests[0].body, bytes);
+        assert_eq!(requests[1].body, bytes);
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.headers.contains_key("X-Feedback-Report-Passcode"))
         );
     }
 

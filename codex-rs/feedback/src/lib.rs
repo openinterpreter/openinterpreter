@@ -57,9 +57,7 @@ const DEFAULT_MAX_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
 // Keep the existing destination until the replacement receiver is verified and selected.
 const FEEDBACK_ENDPOINT_DSN: &str =
     "https://ae32ed50620d7a7792c1ce5df38b3e3e@o33249.ingest.us.sentry.io/4510195390611458";
-// The selected receiver requires a distinct report passcode. Neither the TUI
-// feedback note nor the app-server upload params has a dedicated secret field;
-// never use a prefix in the reason or silently submit an unreadable report.
+const VERIFIED_FEEDBACK_ENDPOINT_DSN: &str = "https://public@feedback.openinterpreter.com/1";
 
 #[derive(Clone, Copy)]
 enum FeedbackUploadMode {
@@ -67,20 +65,30 @@ enum FeedbackUploadMode {
     Signed,
 }
 
-fn feedback_endpoint_dsn(config: Option<&str>) -> Result<&'static str> {
+fn feedback_endpoint_dsn(config: Option<&str>, passcode: Option<&str>) -> Result<&'static str> {
     match config {
         None => Ok(FEEDBACK_ENDPOINT_DSN),
-        Some("cloud-run") => Err(anyhow!(
-            "OIX feedback endpoint requires a dedicated report passcode input; keep the legacy destination"
-        )),
+        Some("cloud-run") => {
+            anyhow::ensure!(
+                valid_report_passcode(passcode),
+                "feedback report passcode required"
+            );
+            Ok(VERIFIED_FEEDBACK_ENDPOINT_DSN)
+        }
         Some(_) => Err(anyhow!("invalid OIX feedback endpoint selector")),
     }
 }
 
-fn configured_feedback_endpoint_dsn() -> Result<&'static str> {
+fn valid_report_passcode(passcode: Option<&str>) -> bool {
+    passcode.is_some_and(|value| {
+        (12..=128).contains(&value.len()) && value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    })
+}
+
+fn configured_feedback_endpoint_dsn(passcode: Option<&str>) -> Result<&'static str> {
     match std::env::var("OIX_FEEDBACK_INGEST") {
-        Ok(config) => feedback_endpoint_dsn(Some(&config)),
-        Err(std::env::VarError::NotPresent) => feedback_endpoint_dsn(None),
+        Ok(config) => feedback_endpoint_dsn(Some(&config), passcode),
+        Err(std::env::VarError::NotPresent) => feedback_endpoint_dsn(None, passcode),
         Err(std::env::VarError::NotUnicode(_)) => {
             Err(anyhow!("invalid OIX feedback endpoint selector"))
         }
@@ -505,6 +513,8 @@ pub struct FeedbackAttachment {
 pub struct FeedbackUploadOptions<'a> {
     pub classification: &'a str,
     pub reason: Option<&'a str>,
+    /// Dedicated ephemeral input, never an event tag, attachment, URL or log.
+    pub report_passcode: Option<&'a str>,
     pub tags: Option<&'a BTreeMap<String, String>>,
     pub include_logs: bool,
     /// Generated attachments that are already buffered and safe to upload.
@@ -603,10 +613,11 @@ impl FeedbackSnapshot {
         options: FeedbackUploadOptions<'_>,
         http_client_factory: &HttpClientFactory,
     ) -> Result<()> {
+        let dsn = configured_feedback_endpoint_dsn(options.report_passcode)?;
         self.upload_feedback_with_dsn(
             options,
             http_client_factory,
-            configured_feedback_endpoint_dsn()?,
+            dsn,
             Instant::now() + UPLOAD_TIMEOUT,
         )
         .await
@@ -673,6 +684,11 @@ impl FeedbackSnapshot {
             &dsn,
             event_body,
             upload::EnvelopeKind::Event,
+            if matches!(mode, FeedbackUploadMode::Signed) {
+                options.report_passcode
+            } else {
+                None
+            },
             deadline,
             &mut rate_limited,
         )
@@ -737,6 +753,7 @@ impl FeedbackSnapshot {
                     &dsn,
                     body,
                     upload::EnvelopeKind::Attachment,
+                    None,
                     deadline,
                     &mut rate_limited,
                 )
@@ -992,19 +1009,126 @@ mod tests {
 
     #[test]
     fn feedback_endpoint_requires_explicit_opt_in_without_changing_legacy_default() {
-        assert_eq!(feedback_endpoint_dsn(None).unwrap(), FEEDBACK_ENDPOINT_DSN);
+        assert_eq!(
+            feedback_endpoint_dsn(None, None).unwrap(),
+            FEEDBACK_ENDPOINT_DSN
+        );
         assert_eq!(
             FEEDBACK_ENDPOINT_DSN,
             "https://ae32ed50620d7a7792c1ce5df38b3e3e@o33249.ingest.us.sentry.io/4510195390611458"
         );
         assert!(
-            feedback_endpoint_dsn(Some("cloud-run"))
+            feedback_endpoint_dsn(Some("cloud-run"), None)
                 .unwrap_err()
                 .to_string()
-                .contains("dedicated report passcode input")
+                .contains("report passcode required")
         );
-        assert!(feedback_endpoint_dsn(Some("https://untrusted.example/1")).is_err());
-        assert!(feedback_endpoint_dsn(Some("")).is_err());
+        assert!(feedback_endpoint_dsn(Some("cloud-run"), Some("short")).is_err());
+        assert!(
+            feedback_endpoint_dsn(Some("cloud-run"), Some("contains newline\nsecret")).is_err()
+        );
+        assert_eq!(
+            feedback_endpoint_dsn(Some("cloud-run"), Some("valid-secret-123")).unwrap(),
+            VERIFIED_FEEDBACK_ENDPOINT_DSN
+        );
+        assert!(feedback_endpoint_dsn(Some("https://untrusted.example/1"), None).is_err());
+        assert!(feedback_endpoint_dsn(Some(""), None).is_err());
+    }
+
+    #[tokio::test]
+    async fn signed_event_sends_passcode_only_in_header_and_rejects_wrong_passcode() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/42/envelope/"))
+            .and(header("X-Feedback-Report-Passcode", "operator-secret-123"))
+            .respond_with(ResponseTemplate::new(StatusCode::FORBIDDEN))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let secret = "operator-secret-123";
+        let dsn = format!("http://public@{}/42", server.address());
+        let result = CodexFeedback::new()
+            .snapshot(None)
+            .upload_feedback_with_dsn(
+                FeedbackUploadOptions {
+                    classification: "bug",
+                    reason: Some("ordinary note"),
+                    report_passcode: Some(secret),
+                    tags: None,
+                    include_logs: false,
+                    extra_attachments: &[],
+                    extra_attachment_paths: &[],
+                    session_source: Some(SessionSource::Cli),
+                    logs_override: None,
+                },
+                &HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+                &dsn,
+                Instant::now() + UPLOAD_TIMEOUT,
+            )
+            .await;
+        assert!(result.unwrap_err().to_string().contains("403"));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let mut decoded = String::new();
+        GzDecoder::new(requests[0].body.as_slice())
+            .read_to_string(&mut decoded)
+            .unwrap();
+        assert!(decoded.contains("ordinary note"));
+        assert!(!decoded.contains(secret));
+    }
+
+    #[tokio::test]
+    async fn signed_event_delivers_passcode_and_keeps_it_off_attachment_requests() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/42/envelope/"))
+            .respond_with(ResponseTemplate::new(StatusCode::OK).insert_header(
+                "X-Feedback-Upload-Capability",
+                "12345678901234567890123456789012",
+            ))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let attachment = FeedbackAttachment {
+            filename: "small.txt".into(),
+            content_type: None,
+            buffer: b"small payload".to_vec(),
+        };
+        let dsn = format!("http://public@{}/42", server.address());
+        CodexFeedback::new()
+            .snapshot(None)
+            .upload_feedback_with_dsn(
+                FeedbackUploadOptions {
+                    classification: "bug",
+                    reason: Some("ordinary note"),
+                    report_passcode: Some("operator-secret-123"),
+                    tags: None,
+                    include_logs: false,
+                    extra_attachments: &[attachment],
+                    extra_attachment_paths: &[],
+                    session_source: Some(SessionSource::Cli),
+                    logs_override: None,
+                },
+                &HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+                &dsn,
+                Instant::now() + UPLOAD_TIMEOUT,
+            )
+            .await
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("X-Feedback-Report-Passcode")
+                .unwrap(),
+            "operator-secret-123"
+        );
+        assert!(
+            !requests[1]
+                .headers
+                .contains_key("X-Feedback-Report-Passcode")
+        );
     }
 
     #[test]
@@ -1093,6 +1217,7 @@ mod tests {
                 FeedbackUploadOptions {
                     classification: "bug",
                     reason: Some("private feedback"),
+                    report_passcode: None,
                     tags: None,
                     include_logs: true,
                     extra_attachments,
@@ -1166,6 +1291,7 @@ mod tests {
                 FeedbackUploadOptions {
                     classification: "bug",
                     reason: None,
+                    report_passcode: None,
                     tags: None,
                     include_logs: true,
                     extra_attachments: &attachments,
@@ -1306,6 +1432,7 @@ mod tests {
                 FeedbackUploadOptions {
                     classification: "bug",
                     reason: Some("large diagnostic upload"),
+                    report_passcode: None,
                     tags: None,
                     include_logs: false,
                     extra_attachments: &[],
@@ -1401,6 +1528,7 @@ mod tests {
                 FeedbackUploadOptions {
                     classification: "bug",
                     reason: None,
+                    report_passcode: None,
                     tags: None,
                     include_logs: false,
                     extra_attachments: &[attachment],
@@ -1441,6 +1569,7 @@ mod tests {
                 FeedbackUploadOptions {
                     classification: "bug",
                     reason: None,
+                    report_passcode: None,
                     tags: None,
                     include_logs: false,
                     extra_attachments: &[attachment],
@@ -1489,6 +1618,7 @@ mod tests {
                     FeedbackUploadOptions {
                         classification: "bug",
                         reason: None,
+                        report_passcode: None,
                         tags: None,
                         include_logs: false,
                         extra_attachments: &[],

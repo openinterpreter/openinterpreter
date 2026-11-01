@@ -585,6 +585,7 @@ impl App {
         app_server: &AppServerSession,
         category: FeedbackCategory,
         reason: Option<String>,
+        report_passcode: Option<crate::app_event::SecretReportPasscode>,
         turn_id: Option<String>,
         include_logs: bool,
     ) {
@@ -601,6 +602,7 @@ impl App {
             rollout_path,
             category,
             reason,
+            report_passcode.map(crate::app_event::SecretReportPasscode::into_inner),
             turn_id,
             include_logs,
         );
@@ -1268,6 +1270,7 @@ pub(super) fn build_feedback_upload_params(
     rollout_path: Option<PathBuf>,
     category: FeedbackCategory,
     reason: Option<String>,
+    report_passcode: Option<String>,
     turn_id: Option<String>,
     include_logs: bool,
 ) -> FeedbackUploadParams {
@@ -1280,6 +1283,7 @@ pub(super) fn build_feedback_upload_params(
     FeedbackUploadParams {
         classification: crate::bottom_pane::feedback_classification(category).to_string(),
         reason,
+        report_passcode,
         thread_id: origin_thread_id.map(|thread_id| thread_id.to_string()),
         include_logs,
         extra_log_files,
@@ -1654,6 +1658,7 @@ mod tests {
             Some(rollout_path.clone()),
             FeedbackCategory::SafetyCheck,
             Some("needs follow-up".to_string()),
+            /*report_passcode*/ None,
             Some("turn-123".to_string()),
             /*include_logs*/ true,
         );
@@ -1680,6 +1685,7 @@ mod tests {
             Some(PathBuf::from("/tmp/rollout.jsonl")),
             FeedbackCategory::GoodResult,
             /*reason*/ None,
+            /*report_passcode*/ None,
             /*turn_id*/ None,
             /*include_logs*/ false,
         );

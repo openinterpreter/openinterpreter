@@ -2334,10 +2334,11 @@ impl App {
             AppEvent::SubmitFeedback {
                 category,
                 reason,
+                report_passcode,
                 turn_id,
                 include_logs,
             } => {
-                self.submit_feedback(app_server, category, reason, turn_id, include_logs);
+                self.submit_feedback(app_server, category, reason, report_passcode, turn_id, include_logs);
             }
             AppEvent::FeedbackSubmitted {
                 origin_thread_id,

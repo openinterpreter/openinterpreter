@@ -65,6 +65,7 @@ pub(super) async fn send_envelope(
     dsn: &Dsn,
     body: Vec<u8>,
     kind: EnvelopeKind,
+    report_passcode: Option<&str>,
     deadline: Instant,
     rate_limited: &mut bool,
 ) -> Result<(StatusCode, Option<String>)> {
@@ -74,9 +75,15 @@ pub(super) async fn send_envelope(
     let response = loop {
         let timeout = deadline.saturating_duration_since(Instant::now());
         anyhow::ensure!(!timeout.is_zero(), "feedback upload deadline exceeded");
-        let response = envelope_request(client_pool, dsn, body.clone(), timeout, kind)
-            .send()
-            .await;
+        anyhow::ensure!(
+            report_passcode.is_none() || matches!(kind, EnvelopeKind::Event),
+            "report passcode only permitted on feedback events"
+        );
+        let mut request = envelope_request(client_pool, dsn, body.clone(), timeout, kind);
+        if let Some(passcode) = report_passcode {
+            request = request.header("X-Feedback-Report-Passcode", passcode);
+        }
+        let response = request.send().await;
         if response.as_ref().is_ok_and(|response| {
             sentry_rate_limit_delay(response.headers()).is_some_and(|delay| !delay.is_zero())
                 || (response.status().is_success()

@@ -906,6 +906,7 @@ async fn live_app_server_turn_started_sets_feedback_turn_id() {
         Ok(AppEvent::SubmitFeedback {
             category: crate::app_event::FeedbackCategory::Bug,
             reason: None,
+            report_passcode: None,
             turn_id: Some(turn_id),
             include_logs: false,
         }) if turn_id == "turn-1"
