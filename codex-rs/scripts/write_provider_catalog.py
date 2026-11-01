@@ -132,7 +132,7 @@ def build_provider_entry(
     api_overrides = overrides.get("api_base_url_overrides", {})
     if not isinstance(api_overrides, dict):
         api_overrides = {}
-    base_url = provider.get("api") or api_overrides.get(provider_id)
+    base_url = api_overrides.get(provider_id) or provider.get("api")
     if not isinstance(base_url, str) or not base_url:
         raise SystemExit(f"missing api/base_url for provider {provider_id}")
 
@@ -477,7 +477,7 @@ def should_include_provider(
     api_overrides = overrides.get("api_base_url_overrides", {})
     if not isinstance(api_overrides, dict):
         api_overrides = {}
-    base_url = provider.get("api") or api_overrides.get(provider_id)
+    base_url = api_overrides.get(provider_id) or provider.get("api")
     if not isinstance(base_url, str) or not base_url:
         return False
     if "${" in base_url:
