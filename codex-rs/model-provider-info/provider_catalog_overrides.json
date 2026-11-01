@@ -175,6 +175,50 @@
                 "input_modalities": ["text", "image"],
                 "priority": -1
             }
+        ],
+        "minimax": [
+            {
+                "id": "MiniMax-M3.1-Flash",
+                "display_name": "MiniMax-M3.1-Flash",
+                "description": "minimax \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+                "reasoning": true,
+                "input_modalities": ["text", "image"],
+                "context_window": 1000000,
+                "priority": 7
+            }
+        ],
+        "minimax-cn": [
+            {
+                "id": "MiniMax-M3.1-Flash",
+                "display_name": "MiniMax-M3.1-Flash",
+                "description": "minimax \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+                "reasoning": true,
+                "input_modalities": ["text", "image"],
+                "context_window": 1000000,
+                "priority": 7
+            }
+        ],
+        "minimax-coding-plan": [
+            {
+                "id": "MiniMax-M3.1-Flash",
+                "display_name": "MiniMax-M3.1-Flash",
+                "description": "minimax \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+                "reasoning": true,
+                "input_modalities": ["text", "image"],
+                "context_window": 1000000,
+                "priority": 7
+            }
+        ],
+        "minimax-cn-coding-plan": [
+            {
+                "id": "MiniMax-M3.1-Flash",
+                "display_name": "MiniMax-M3.1-Flash",
+                "description": "minimax \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+                "reasoning": true,
+                "input_modalities": ["text", "image"],
+                "context_window": 1000000,
+                "priority": 7
+            }
         ]
     },
     "additional_provider_entries": [
