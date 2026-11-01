@@ -149,6 +149,29 @@ wire_api = "chat"
 
 Set `APPNZ_API_KEY` to your app.nz API key.
 
+### AI Stupid Level
+
+[AI Stupid Level](https://aistupidlevel.info/router) is a hosted OpenAI-compatible
+router. Each request goes to the model that currently scores best on its
+continuously re-run coding, reasoning and tool-use benchmarks, called with your
+own provider keys. Add it as a custom chat-completions provider and use a
+routing mode as the `model`:
+
+```toml
+model_provider = "aistupidlevel"
+model = "auto-coding"
+
+[model_providers.aistupidlevel]
+name = "AI Stupid Level"
+base_url = "https://aistupidlevel.info/v1"
+env_key = "ASL_ROUTER_KEY"
+wire_api = "chat"
+```
+
+Set `ASL_ROUTER_KEY` to your AI Stupid Level router key. `auto-coding` picks the
+best coding model, `auto-tooling` suits long agent sessions with many tool
+calls, and `auto-best` uses the best overall score.
+
 ## Harness
 
 Open Interpreter adds a `harness` setting for compatibility modes that shape
