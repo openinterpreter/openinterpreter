@@ -103,7 +103,6 @@ pub const MAX_ATTACHMENTS_BYTES: usize = 126 * 1024 * 1024;
 // This bounds the decoded request including framing, not guaranteed attachment storage.
 // https://develop.sentry.dev/sdk/foundations/envelopes/#size-limits
 const MAX_DECODED_UPLOAD_BYTES: usize = 200 * 1024 * 1024;
-const MAX_UPLOAD_BYTES: usize = 40_000_000;
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
 const FEEDBACK_TAGS_TARGET: &str = "feedback_tags";
 // Leave room for every feature, usage settings, and request/auth diagnostics.
@@ -742,12 +741,6 @@ impl FeedbackSnapshot {
                     return Ok(());
                 }
                 let body = upload::encode_attachment_envelope(&headers, attachment)?;
-                if matches!(mode, FeedbackUploadMode::Legacy) {
-                    anyhow::ensure!(
-                        body.len() <= MAX_UPLOAD_BYTES,
-                        "feedback envelope exceeds the size limit"
-                    );
-                }
                 let (response_status, _) = upload::send_envelope(
                     &client_pool,
                     &dsn,
@@ -1557,7 +1550,17 @@ mod tests {
             .expect(/*r*/ 2)
             .mount(&server)
             .await;
-        let bytes = vec![b'a'; signed_upload::DIRECT_UPLOAD_THRESHOLD + 1024 * 1024];
+        // The legacy endpoint must still accept incompressible 40–64 MiB
+        // attachments: the new public receiver's body ceiling is unrelated.
+        let mut seed = 0x1234_5678_9abc_def0_u64;
+        let bytes: Vec<u8> = (0..40_000_000 + 1024)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed as u8
+            })
+            .collect();
         let attachment = FeedbackAttachment {
             filename: "legacy-large.log".to_string(),
             content_type: None,
@@ -1586,6 +1589,7 @@ mod tests {
             .unwrap();
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 2);
+        assert!(requests[1].body.len() > 40_000_000);
         let mut decoded = Vec::new();
         GzDecoder::new(requests[1].body.as_slice())
             .read_to_end(&mut decoded)

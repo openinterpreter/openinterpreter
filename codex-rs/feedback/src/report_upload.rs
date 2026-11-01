@@ -21,7 +21,6 @@ use crate::FeedbackAttachment;
 use crate::FeedbackSnapshot;
 use crate::MAX_DECODED_UPLOAD_BYTES;
 use crate::MAX_EVENT_BYTES;
-use crate::MAX_UPLOAD_BYTES;
 use crate::upload;
 
 // Background parts must tolerate slow links without inheriting the interactive
@@ -153,8 +152,11 @@ pub fn prepare_report_attachment(
 fn prepare_envelope(envelope: Envelope, max_decoded_bytes: usize) -> Result<Vec<u8>> {
     let (bytes, decoded_bytes) =
         upload::encode_envelope(&envelope).context("failed to serialize feedback envelope")?;
+    // Persisted reports retain the legacy receiver's larger whole-envelope
+    // contract. The 40 MB interactive body ceiling is not this transport's
+    // limit: a 64 MiB incompressible report attachment must not be truncated.
     anyhow::ensure!(
-        bytes.len() <= MAX_UPLOAD_BYTES && decoded_bytes <= max_decoded_bytes,
+        decoded_bytes <= max_decoded_bytes,
         "feedback envelope exceeds the size limit"
     );
     Ok(bytes)
@@ -167,7 +169,7 @@ mod tests {
     use super::FeedbackTransport;
     use super::prepare_report_attachment;
     use crate::FeedbackAttachment;
-    use crate::MAX_UPLOAD_BYTES;
+    const INTERACTIVE_WIRE_LIMIT: usize = 40_000_000;
     use codex_http_client::ClientRouteClass;
     use codex_http_client::HttpClientFactory;
     use codex_http_client::OutboundProxyPolicy;
@@ -237,9 +239,9 @@ mod tests {
     }
 
     #[test]
-    fn persisted_report_rejects_wire_body_above_legacy_receiver_limit() {
+    fn persisted_report_preserves_incompressible_attachment_above_interactive_limit() {
         let mut seed = 0x1234_5678_9abc_def0_u64;
-        let bytes = (0..MAX_UPLOAD_BYTES + 1024)
+        let bytes = (0..INTERACTIVE_WIRE_LIMIT + 1024)
             .map(|_| {
                 seed ^= seed << 13;
                 seed ^= seed >> 7;
@@ -247,7 +249,7 @@ mod tests {
                 seed as u8
             })
             .collect();
-        let result = prepare_report_attachment(
+        let encoded = prepare_report_attachment(
             "12345678-1234-1234-1234-123456789abc",
             FeedbackAttachment {
                 filename: "incompressible.log".to_string(),
@@ -255,9 +257,6 @@ mod tests {
                 buffer: bytes,
             },
         );
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "feedback envelope exceeds the size limit"
-        );
+        assert!(encoded.unwrap().len() > INTERACTIVE_WIRE_LIMIT);
     }
 }
