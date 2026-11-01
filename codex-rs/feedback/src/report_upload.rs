@@ -195,7 +195,8 @@ mod tests {
     #[tokio::test]
     async fn persisted_retry_is_caller_owned_exact_bytes_and_never_has_passcode_header() {
         let server = MockServer::start().await;
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
         let attempt = AtomicUsize::new(0);
         Mock::given(method("POST"))
             .and(path("/api/42/envelope/"))
