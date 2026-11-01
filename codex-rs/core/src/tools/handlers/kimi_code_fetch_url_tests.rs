@@ -20,6 +20,7 @@ use super::FETCH_URL_UNVERIFIED;
 use super::MAX_FETCH_BODY_BYTES;
 use super::PinnedDns;
 use super::PublicHttpTarget;
+use super::extract_page_text;
 use super::fetch_client_builder;
 use super::read_fetch_body;
 use super::resolve_public_http_url_with_lookup;
@@ -287,6 +288,28 @@ async fn stops_reading_oversized_chunked_body_without_content_length() {
     );
     assert_eq!(body.len(), MAX_FETCH_BODY_BYTES);
     assert!(body.bytes().all(|byte| byte == b'A'));
+}
+
+#[tokio::test]
+async fn escaped_entities_in_fetched_page_are_decoded_once() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let addr = spawn_static_http_server(
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        b"<p>Write &amp;lt;div&amp;gt; to show a literal &lt;div&gt; tag.</p>",
+        Arc::clone(&hits),
+    )
+    .await;
+    let response = reqwest::Client::new()
+        .get(format!("http://{addr}/"))
+        .send()
+        .await
+        .expect("static response");
+    let body = read_fetch_body(response).await.expect("body");
+
+    assert_eq!(
+        extract_page_text(&body),
+        "Write &lt;div&gt; to show a literal <div> tag."
+    );
 }
 
 async fn spawn_static_http_server(
