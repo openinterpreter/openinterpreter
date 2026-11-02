@@ -469,6 +469,9 @@ fn synthetic_sse_from_chat_completion_response(body: &[u8]) -> Result<String, Ap
         if let Some(reasoning_content) = message.get("reasoning_content") {
             delta.insert("reasoning_content".to_string(), reasoning_content.clone());
         }
+        if let Some(reasoning) = message.get("reasoning") {
+            delta.insert("reasoning".to_string(), reasoning.clone());
+        }
         if let Some(tool_calls) = message.get("tool_calls") {
             delta.insert("tool_calls".to_string(), tool_calls.clone());
         }
@@ -828,6 +831,32 @@ mod tests {
         assert!(sse.contains("\"tool_calls\""));
         assert!(sse.contains("\"finish_reason\":\"tool_calls\""));
         assert!(sse.contains("\"id\":\"bash:0\""));
+    }
+
+    #[test]
+    fn synthetic_sse_preserves_both_reasoning_fields() {
+        for message in [
+            serde_json::json!({"reasoning": "think"}),
+            serde_json::json!({"reasoning_content": "think"}),
+            serde_json::json!({"reasoning_content": "preferred", "reasoning": "fallback"}),
+            serde_json::json!({"reasoning_content": null, "reasoning": "fallback"}),
+        ] {
+            let body = serde_json::json!({
+                "choices": [{"index": 0, "message": message, "finish_reason": "stop"}]
+            });
+            let sse = synthetic_sse_from_chat_completion_response(
+                &serde_json::to_vec(&body).expect("response JSON"),
+            )
+            .expect("synthetic SSE");
+            let first = sse
+                .lines()
+                .next()
+                .expect("first event")
+                .strip_prefix("data: ")
+                .expect("SSE data");
+            let chunk: serde_json::Value = serde_json::from_str(first).expect("chunk JSON");
+            assert_eq!(chunk["choices"][0]["delta"], message);
+        }
     }
 
     fn test_request() -> ResponsesApiRequest {
