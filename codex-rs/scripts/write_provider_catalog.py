@@ -32,7 +32,7 @@ def load_models_dev_catalog() -> dict[str, dict]:
 
 
 def load_overrides() -> dict[str, object]:
-    return json.loads(OVERRIDES_PATH.read_text())
+    return json.loads(OVERRIDES_PATH.read_text(encoding="utf-8"))
 
 
 def supported_provider_npm_packages(overrides: dict[str, object]) -> set[str]:
@@ -565,7 +565,7 @@ def write_catalog(selected_provider_ids: set[str] | None = None) -> int:
             raise SystemExit(
                 "selected providers were not generated: " + ", ".join(sorted(missing))
             )
-        existing_payload = json.loads(OUTPUT_PATH.read_text())
+        existing_payload = json.loads(OUTPUT_PATH.read_text(encoding="utf-8"))
         providers = [
             provider
             for provider in existing_payload.get("providers", [])
@@ -586,7 +586,7 @@ def write_catalog(selected_provider_ids: set[str] | None = None) -> int:
         "generated_from": generated_from(overrides),
         "providers": providers,
     }
-    OUTPUT_PATH.write_text(json.dumps(payload, indent=2) + "\n")
+    OUTPUT_PATH.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     print(f"Wrote {len(providers)} provider entries to {OUTPUT_PATH}")
     return 0
 
