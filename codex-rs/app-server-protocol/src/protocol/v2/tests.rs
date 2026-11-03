@@ -129,6 +129,9 @@ fn thread_background_terminals_list_response_round_trips_foreign_paths() {
             data: vec![ThreadBackgroundTerminal {
                 item_id: "item_123".to_string(),
                 process_id: "42".to_string(),
+                turn_id: None,
+                native_process_id: None,
+                terminal_generation: None,
                 command: "run server".to_string(),
                 cwd: PathUri::parse(uri)
                     .expect("cross-platform path URI should parse")
@@ -143,6 +146,9 @@ fn thread_background_terminals_list_response_round_trips_foreign_paths() {
             "data": [{
                 "itemId": "item_123",
                 "processId": "42",
+                "turnId": null,
+                "nativeProcessId": null,
+                "terminalGeneration": null,
                 "command": "run server",
                 "cwd": expected_cwd,
                 "osPid": null,

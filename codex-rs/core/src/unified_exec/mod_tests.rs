@@ -1,5 +1,6 @@
 use super::*;
 use crate::codex_thread::BackgroundTerminalInfo;
+use crate::codex_thread::BackgroundTerminalStatusPhase;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::exec::ExecCapturePolicy;
 use crate::exec::ExecExpiration;
@@ -139,8 +140,11 @@ async fn exec_command_with_tty(
         let entry = ProcessEntry {
             process: Arc::clone(&process),
             plugin_metrics_sidecar: None,
+            turn_id: turn.sub_id.clone(),
             call_id: context.call_id.clone(),
             process_id,
+            native_process_id: format!("native-{process_id}"),
+            terminal_generation: 1,
             cwd: cwd.clone().into(),
             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             hook_command: cmd.to_string(),
@@ -363,7 +367,10 @@ async fn unified_exec_persists_across_requests() -> anyhow::Result<()> {
         session.list_background_terminals().await,
         vec![BackgroundTerminalInfo {
             item_id: "call".to_string(),
+            turn_id: turn.sub_id.clone(),
             process_id: process_id.to_string(),
+            native_process_id: "native-1000".to_string(),
+            terminal_generation: 1,
             command: "bash -i".to_string(),
             cwd: cwd.into(),
         }]
@@ -396,6 +403,92 @@ async fn unified_exec_persists_across_requests() -> anyhow::Result<()> {
     assert!(session.terminate_background_terminal(process_id).await);
     assert!(!session.terminate_background_terminal(process_id).await);
     assert!(session.list_background_terminals().await.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_status_is_owner_bound_and_retains_terminal_metrics() -> anyhow::Result<()> {
+    skip_if_sandbox!(Ok(()));
+
+    let (session, turn) = test_session_and_turn().await;
+    let open_shell = exec_command(
+        &session, &turn, "bash -i", /*yield_time_ms*/ 2_500, /*workdir*/ None,
+    )
+    .await?;
+    let process_id = open_shell.process_id.expect("expected process id");
+    let terminal = session
+        .list_background_terminals()
+        .await
+        .into_iter()
+        .find(|terminal| terminal.process_id == process_id.to_string())
+        .expect("expected background terminal");
+
+    let running = session
+        .read_background_terminal_status(
+            &turn.sub_id,
+            &terminal.item_id,
+            &terminal.native_process_id,
+            Some(1),
+        )
+        .await;
+    assert_eq!(running.phase, BackgroundTerminalStatusPhase::Running);
+    assert!(running.terminal_generation.is_some());
+    assert!(running.output_sha256.is_some());
+    assert!(running.observation_timed_out);
+
+    let wrong_owner = session
+        .read_background_terminal_status(
+            "different-turn",
+            &terminal.item_id,
+            &terminal.native_process_id,
+            None,
+        )
+        .await;
+    assert_eq!(wrong_owner.phase, BackgroundTerminalStatusPhase::Unknown);
+
+    let output = write_stdin(
+        &session,
+        &turn,
+        process_id,
+        "printf native-status\nsleep 0.5\nexit 7\n",
+        /*yield_time_ms*/ 250,
+    )
+    .await?;
+    assert!(!output.raw_output.is_empty());
+
+    let exited = session
+        .read_background_terminal_status(
+            &turn.sub_id,
+            &terminal.item_id,
+            &terminal.native_process_id,
+            Some(1_000),
+        )
+        .await;
+    assert_eq!(exited.phase, BackgroundTerminalStatusPhase::Exited);
+    assert!(exited.output_bytes > 0);
+    assert_eq!(exited.exit_code, Some(7));
+    assert_eq!(exited.terminal_generation, running.terminal_generation);
+
+    let repeated = session
+        .read_background_terminal_status(
+            &turn.sub_id,
+            &terminal.item_id,
+            &terminal.native_process_id,
+            None,
+        )
+        .await;
+    assert_eq!(repeated, exited);
+
+    let unknown = session
+        .read_background_terminal_status(
+            &turn.sub_id,
+            &terminal.item_id,
+            "foreign-native-process",
+            None,
+        )
+        .await;
+    assert_eq!(unknown.phase, BackgroundTerminalStatusPhase::Unknown);
 
     Ok(())
 }
@@ -615,8 +708,11 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
         ProcessEntry {
             process,
             plugin_metrics_sidecar: None,
+            turn_id: turn.sub_id.clone(),
             call_id: "call".to_string(),
             process_id,
+            native_process_id: format!("native-{process_id}"),
+            terminal_generation: 1,
             cwd: cwd.into(),
             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             hook_command: "sleep 60".to_string(),
@@ -700,8 +796,11 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
         ProcessEntry {
             process: Arc::clone(&process),
             plugin_metrics_sidecar: None,
+            turn_id: turn.sub_id.clone(),
             call_id: "call".to_string(),
             process_id,
+            native_process_id: format!("native-{process_id}"),
+            terminal_generation: 1,
             cwd: cwd.into(),
             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             hook_command: "sleep 60".to_string(),

@@ -48,6 +48,9 @@ mod background_terminal_pagination_tests {
         ThreadBackgroundTerminal {
             item_id: format!("item-{process_id}"),
             process_id: process_id.to_string(),
+            turn_id: None,
+            native_process_id: None,
+            terminal_generation: None,
             command: format!("command-{process_id}"),
             cwd: LegacyAppPathString::from_string(cwd),
             os_pid: None,

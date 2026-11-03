@@ -1222,6 +1222,16 @@ pub struct ThreadBackgroundTerminalsListParams {
 pub struct ThreadBackgroundTerminal {
     pub item_id: String,
     pub process_id: String,
+    /// The turn that owns this native unified-exec entry, when available.
+    #[ts(optional = nullable)]
+    pub turn_id: Option<String>,
+    /// Opaque server-issued native unified-exec custody identity. This is not
+    /// the client-supplied command/exec `processId` namespace.
+    #[ts(optional = nullable)]
+    pub native_process_id: Option<String>,
+    /// Monotonic server generation for the native entry.
+    #[ts(optional = nullable)]
+    pub terminal_generation: Option<u64>,
     pub command: String,
     pub cwd: LegacyAppPathString,
     pub os_pid: Option<u32>,
@@ -1237,6 +1247,50 @@ pub struct ThreadBackgroundTerminalsListResponse {
     /// Opaque cursor to pass to the next call to continue after the last item.
     /// If None, there are no more items to return.
     pub next_cursor: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadBackgroundTerminalsStatusParams {
+    pub thread_id: String,
+    /// Exact owning turn sub-id from the command execution item.
+    pub turn_id: String,
+    /// Exact command execution item id.
+    pub item_id: String,
+    /// Opaque native unified-exec identity returned by the list method.
+    pub native_process_id: String,
+    /// Bounded observation wait. The server caps this at 1000ms.
+    #[ts(optional = nullable)]
+    pub max_wait_ms: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export_to = "v2/")]
+pub enum ThreadBackgroundTerminalStatusPhase {
+    Running,
+    Exited,
+    Unknown,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadBackgroundTerminalsStatusResponse {
+    pub phase: ThreadBackgroundTerminalStatusPhase,
+    /// Bytes observed by the native output collector, including capped bytes.
+    pub output_bytes: u64,
+    /// SHA-256 of the observed output bytes. Null for `unknown`.
+    pub output_sha256: Option<String>,
+    /// Whether the bounded native output retention cap was reached.
+    pub output_cap_reached: bool,
+    /// Process exit code, only when a terminal exit was observed.
+    pub exit_code: Option<i32>,
+    /// Stable server-issued lifecycle generation for this native entry.
+    pub terminal_generation: Option<u64>,
+    /// True when the bounded observation window ended before exit was seen.
+    pub observation_timed_out: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

@@ -901,6 +901,19 @@ impl Session {
             .await
     }
 
+    pub(crate) async fn read_background_terminal_status(
+        &self,
+        turn_id: &str,
+        item_id: &str,
+        native_process_id: &str,
+        max_wait_ms: Option<u32>,
+    ) -> crate::codex_thread::BackgroundTerminalStatus {
+        self.services
+            .unified_exec_manager
+            .read_background_terminal_status(turn_id, item_id, native_process_id, max_wait_ms)
+            .await
+    }
+
     async fn handle_task_abort(
         self: &Arc<Self>,
         task: RunningTask,
