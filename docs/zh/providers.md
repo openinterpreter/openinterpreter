@@ -100,6 +100,17 @@ env_key = "APPNZ_API_KEY"
 wire_api = "chat"
 ```
 
+同样，[AI Stupid Level](https://aistupidlevel.info/router) 是兼容 OpenAI 的
+chat-completions 路由器，其 `auto-coding` 模型会把每个请求发送到当前编码基准得分最高的模型：
+
+```toml
+[model_providers.aistupidlevel]
+name = "AI Stupid Level"
+base_url = "https://aistupidlevel.info/v1"
+env_key = "ASL_ROUTER_KEY"
+wire_api = "chat"
+```
+
 ## 身份验证
 
 提供商的身份验证可以来源于：
