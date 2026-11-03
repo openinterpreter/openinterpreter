@@ -47,6 +47,8 @@ struct Delta {
     #[serde(default)]
     reasoning_content: Option<String>,
     #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
     tool_calls: Option<Vec<ToolCallDelta>>,
 }
 
@@ -233,7 +235,7 @@ async fn process_chat_sse(
 
         for choice in chunk.choices {
             if let Some(delta) = choice.delta {
-                if let Some(reasoning_content) = delta.reasoning_content
+                if let Some(reasoning_content) = delta.reasoning_content.or(delta.reasoning)
                     && !reasoning_content.is_empty()
                 {
                     if !state.reasoning_item_started {
@@ -853,5 +855,62 @@ mod tests {
                 text: "think again".to_string(),
             }]
         )));
+    }
+    #[tokio::test]
+    async fn spawn_chat_stream_accepts_reasoning_fields_without_duplicates() {
+        for (delta, expected) in [
+            (serde_json::json!({"reasoning": "think"}), "think"),
+            (serde_json::json!({"reasoning_content": "think"}), "think"),
+            (
+                serde_json::json!({"reasoning_content": "preferred", "reasoning": "fallback"}),
+                "preferred",
+            ),
+            (
+                serde_json::json!({"reasoning_content": null, "reasoning": "fallback"}),
+                "fallback",
+            ),
+            (
+                serde_json::json!({"reasoning_content": "", "reasoning": "fallback"}),
+                "",
+            ),
+        ] {
+            let chunk = serde_json::json!({
+                "id": "chatcmpl-reasoning",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": "stop"}]
+            });
+            let sse = format!("data: {chunk}\n\ndata: [DONE]\n\n");
+            let mut stream = spawn_chat_stream(
+                Box::pin(futures::stream::once(async move { Ok(sse.into()) })),
+                Duration::from_secs(1),
+                /*telemetry*/ None,
+                HashMap::new(),
+            );
+            let mut deltas = Vec::new();
+            let mut completed = Vec::new();
+            while let Some(event) = stream.next().await {
+                match event.expect("chat stream event") {
+                    ResponseEvent::ReasoningContentDelta { delta, .. } => deltas.push(delta),
+                    ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
+                        content: Some(content),
+                        ..
+                    }) => completed.extend(content),
+                    _ => {}
+                }
+            }
+            let expected_deltas = if expected.is_empty() {
+                vec![]
+            } else {
+                vec![expected.to_string()]
+            };
+            assert_eq!(deltas, expected_deltas);
+            let expected_content = if expected.is_empty() {
+                vec![]
+            } else {
+                vec![ReasoningItemContent::ReasoningText {
+                    text: expected.to_string(),
+                }]
+            };
+            assert_eq!(completed, expected_content);
+        }
     }
 }
