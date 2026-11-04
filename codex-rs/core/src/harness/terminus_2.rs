@@ -1387,7 +1387,10 @@ fn pager_screen_from_raw_lines(raw_lines: &[String]) -> String {
         }
         let mut start = 0;
         while start < line.len() {
-            let end = (start + 160).min(line.len());
+            let mut end = (start + 160).min(line.len());
+            while end < line.len() && !line.is_char_boundary(end) {
+                end -= 1;
+            }
             wrapped.push(&line[start..end]);
             start = end;
         }
@@ -1816,6 +1819,17 @@ mod tests {
                 "{portion}\n[... output limited to {TERMINUS_2_OUTPUT_LIMIT_BYTES} bytes; {omitted} interior bytes omitted ...]\n{portion}"
             )
         );
+    }
+
+    #[test]
+    fn pager_screen_wraps_multibyte_lines_on_char_boundaries() {
+        // 80 three-byte chars (240 bytes) exceed the 160-byte wrap width; a
+        // byte-based slice lands inside a character and panics.
+        let line = "\u{65e5}".repeat(80);
+        let screen = pager_screen_from_raw_lines(&[line]);
+        for segment in screen.lines().filter(|segment| *segment != ":") {
+            assert!(segment.chars().all(|c| c == '\u{65e5}'));
+        }
     }
 
     #[test]
