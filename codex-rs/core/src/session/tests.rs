@@ -1769,6 +1769,66 @@ async fn reload_user_config_layer_updates_effective_apps_config() {
 }
 
 #[tokio::test]
+async fn loaded_session_shell_policy_update_applies_to_future_turns_only() {
+    let (session, current_turn) = make_session_and_context().await;
+    let previous = current_turn
+        .config
+        .permissions
+        .shell_environment_policy
+        .clone();
+    let mut initial = previous.clone();
+    initial.r#set.insert(
+        "INTERPRETER_CALLER_TOKEN".to_string(),
+        "old-binding".to_string(),
+    );
+    session
+        .update_settings(SessionSettingsUpdate {
+            shell_environment_policy: Some(initial.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("seed existing shell policy");
+
+    let mut next = initial;
+    next.r#set.insert(
+        "INTERPRETER_CALLER_TOKEN".to_string(),
+        "replacement".to_string(),
+    );
+
+    assert!(
+        session
+            .rotate_shell_environment_values(next.clone())
+            .await
+            .expect("rotate loaded thread shell value")
+    );
+
+    let mut expanded = next.clone();
+    expanded
+        .r#set
+        .insert("UNRELATED_SECRET".to_string(), "not-allowed".to_string());
+    assert!(
+        !session
+            .rotate_shell_environment_values(expanded)
+            .await
+            .expect("reject new shell variable")
+    );
+
+    let configuration = session.state.lock().await.session_configuration.clone();
+    assert_eq!(configuration.shell_environment_policy, next);
+    assert_eq!(
+        session
+            .build_effective_session_config(&configuration)
+            .permissions
+            .shell_environment_policy,
+        next
+    );
+    assert_eq!(
+        current_turn.config.permissions.shell_environment_policy,
+        previous
+    );
+}
+
+#[tokio::test]
 async fn reload_user_config_layer_keeps_previous_config_for_malformed_shell_policy() {
     let (session, _turn_context) = make_session_and_context().await;
     let codex_home = session.codex_home().await;

@@ -20,6 +20,7 @@ use std::time::Instant;
 
 use crate::app_event::AppEvent;
 use crate::app_event::FeedbackCategory;
+use crate::app_event::SecretReportPasscode;
 use crate::app_event_sender::AppEventSender;
 use crate::key_hint;
 use crate::key_hint::has_ctrl_or_alt;
@@ -60,6 +61,10 @@ pub(crate) struct FeedbackNoteView {
     intro_scroll: Cell<usize>,
     intro_page_height: Cell<usize>,
     complete: bool,
+    requires_passcode: bool,
+    entering_passcode: bool,
+    passcode_input: String,
+    passcode_error: bool,
 }
 
 impl FeedbackNoteView {
@@ -69,6 +74,50 @@ impl FeedbackNoteView {
         app_event_tx: AppEventSender,
         include_logs: bool,
         feedback_audience: FeedbackAudience,
+    ) -> Self {
+        // The app-server may run on another host. Only its upload response can
+        // establish whether a report passcode is required; the TUI's local
+        // environment is never an authority for the remote upload endpoint.
+        Self::new_with_passcode_requirement(
+            category,
+            turn_id,
+            app_event_tx,
+            include_logs,
+            feedback_audience,
+            false,
+        )
+    }
+
+    pub(crate) fn passcode_retry(
+        category: FeedbackCategory,
+        turn_id: Option<String>,
+        app_event_tx: AppEventSender,
+        include_logs: bool,
+        feedback_audience: FeedbackAudience,
+        reason: Option<String>,
+    ) -> Self {
+        let mut view = Self::new_with_passcode_requirement(
+            category,
+            turn_id,
+            app_event_tx,
+            include_logs,
+            feedback_audience,
+            true,
+        );
+        if let Some(reason) = reason {
+            view.textarea.insert_str(&reason);
+        }
+        view.entering_passcode = true;
+        view
+    }
+
+    fn new_with_passcode_requirement(
+        category: FeedbackCategory,
+        turn_id: Option<String>,
+        app_event_tx: AppEventSender,
+        include_logs: bool,
+        feedback_audience: FeedbackAudience,
+        requires_passcode: bool,
     ) -> Self {
         Self {
             category,
@@ -82,6 +131,10 @@ impl FeedbackNoteView {
             intro_scroll: Cell::new(0),
             intro_page_height: Cell::new(1),
             complete: false,
+            requires_passcode,
+            entering_passcode: false,
+            passcode_input: String::new(),
+            passcode_error: false,
         }
     }
 
@@ -91,6 +144,9 @@ impl FeedbackNoteView {
         self.app_event_tx.send(AppEvent::SubmitFeedback {
             category: self.category,
             reason,
+            report_passcode: self
+                .requires_passcode
+                .then(|| SecretReportPasscode::new(std::mem::take(&mut self.passcode_input))),
             turn_id: self.turn_id.clone(),
             include_logs: self.include_logs,
         });
@@ -98,6 +154,35 @@ impl FeedbackNoteView {
     }
 
     fn handle_key_event_at(&mut self, key_event: KeyEvent, now: Instant) {
+        if self.entering_passcode {
+            match key_event.code {
+                KeyCode::Esc => {
+                    self.on_ctrl_c();
+                    self.passcode_input.clear();
+                }
+                KeyCode::Backspace => {
+                    self.passcode_input.pop();
+                    self.passcode_error = false;
+                }
+                KeyCode::Enter if key_event.modifiers == KeyModifiers::NONE => {
+                    if (12..=128).contains(&self.passcode_input.len()) {
+                        self.submit();
+                    } else {
+                        self.passcode_error = true;
+                    }
+                }
+                KeyCode::Char(ch)
+                    if key_event.modifiers == KeyModifiers::NONE
+                        && ch.is_ascii_graphic()
+                        && self.passcode_input.len() < 128 =>
+                {
+                    self.passcode_input.push(ch);
+                    self.passcode_error = false;
+                }
+                _ => {}
+            }
+            return;
+        }
         match key_event {
             KeyEvent {
                 code: KeyCode::PageUp,
@@ -133,7 +218,11 @@ impl FeedbackNoteView {
                     self.paste_burst.extend_window(now);
                     self.textarea.insert_str("\n");
                 } else if modifiers == KeyModifiers::NONE {
-                    self.submit();
+                    if self.requires_passcode {
+                        self.entering_passcode = true;
+                    } else {
+                        self.submit();
+                    }
                 } else {
                     self.textarea.input(key_event);
                 }
@@ -183,6 +272,18 @@ impl BottomPaneView for FeedbackNoteView {
     }
 
     fn handle_paste(&mut self, pasted: String) -> bool {
+        if self.entering_passcode {
+            if !pasted.is_empty()
+                && pasted.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+                && self.passcode_input.len() + pasted.len() <= 128
+            {
+                self.passcode_input.push_str(&pasted);
+                self.passcode_error = false;
+            } else {
+                self.passcode_error = true;
+            }
+            return true;
+        }
         if pasted.is_empty() {
             return false;
         }
@@ -194,10 +295,23 @@ impl BottomPaneView for FeedbackNoteView {
 
 impl Renderable for FeedbackNoteView {
     fn desired_height(&self, width: u16) -> u16 {
+        if self.entering_passcode {
+            return 4;
+        }
         self.intro_lines(width, IntroContent::Full).len() as u16 + self.input_height(width) + 2u16
     }
 
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        if self.entering_passcode {
+            return (area.height > 1 && area.width > 2).then_some((
+                area.x.saturating_add(2).saturating_add(
+                    self.passcode_input
+                        .len()
+                        .min(usize::from(area.width.saturating_sub(3))) as u16,
+                ),
+                area.y.saturating_add(1),
+            ));
+        }
         if area.height < 2 || area.width <= 2 {
             return None;
         }
@@ -218,6 +332,31 @@ impl Renderable for FeedbackNoteView {
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
         if area.height == 0 || area.width == 0 {
+            return;
+        }
+        if self.entering_passcode {
+            let lines = [
+                "Report passcode (separate from your feedback note)".to_string(),
+                format!("  {}", "•".repeat(self.passcode_input.len())),
+                if self.passcode_error {
+                    "Passcode must be 12–128 printable characters."
+                } else {
+                    "The passcode is sent only in the protected request header."
+                }
+                .to_string(),
+                "Enter to submit • Esc to cancel".to_string(),
+            ];
+            for (row, line) in lines.iter().take(usize::from(area.height)).enumerate() {
+                Paragraph::new(line.as_str()).render(
+                    Rect {
+                        x: area.x,
+                        y: area.y.saturating_add(row as u16),
+                        width: area.width,
+                        height: 1,
+                    },
+                    buf,
+                );
+            }
             return;
         }
 

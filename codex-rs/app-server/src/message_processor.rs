@@ -1443,6 +1443,11 @@ impl MessageProcessor {
                     .thread_background_terminals_list(params)
                     .await
             }
+            ClientRequest::ThreadBackgroundTerminalsStatus { params, .. } => {
+                self.thread_processor
+                    .thread_background_terminals_status(params)
+                    .await
+            }
             ClientRequest::ThreadBackgroundTerminalsTerminate { params, .. } => {
                 self.thread_processor
                     .thread_background_terminals_terminate(params)

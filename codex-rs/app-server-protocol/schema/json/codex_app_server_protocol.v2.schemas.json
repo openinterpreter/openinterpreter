@@ -7629,6 +7629,13 @@
             "null"
           ]
         },
+        "reportPasscode": {
+          "description": "Dedicated submission secret; never include this in the feedback reason or tags.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "tags": {
           "additionalProperties": {
             "type": "string"

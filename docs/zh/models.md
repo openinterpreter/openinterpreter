@@ -10,6 +10,7 @@ description: Open Interpreter 如何列出模型并展示模型能力。
 
 ```bash
 interpreter -m gpt-6-sol "review this module"
+interpreter -m gpt-6.1-sol "review this module"
 interpreter --oss "use my local open source provider"
 ```
 
@@ -29,14 +30,15 @@ model_verbosity = "medium"
 
 | 提供商 | 设置 | 文本模型 ID | Wire API |
 | --- | --- | --- | --- |
-| OpenAI 预设（上游与 Open Interpreter 补充） | 仅在当前提供商提供这些 ID 时使用 | `gpt-6-astra`、`gpt-6-sol`、`gpt-6-luna`、`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` | 提供商默认值 |
+| OpenAI 预设（上游与 Open Interpreter 补充） | 仅在当前提供商提供这些 ID 时使用 | `gpt-6-astra`、`gpt-6.1-sol`、`gpt-6-sol`、`gpt-6-luna`、`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` | 提供商默认值 |
 | Google AI Studio | 提供商 `google` 和 `GEMINI_API_KEY` | `gemini-3.8-flash`、`gemini-3.7-flash`、`gemini-3.6-flash`、`gemini-3.5-flash`、`gemini-3.5-flash-lite`、`gemini-3.1-flash-lite` | `chat` |
 | DeepSeek | 提供商 `deepseek` 和 `DEEPSEEK_API_KEY` | `deepseek-flash`、`deepseek-v4-pro` | `chat` |
-| Anthropic | 提供商 `anthropic` 和 `ANTHROPIC_API_KEY` | `claude-fable-5-1`、`claude-opus-5-5`、`claude-sonnet-5`、`claude-haiku-4-5-20251001` | 提供商默认值 |
-| Z.AI | 提供商 `zai` 或 `zai-coding-plan` 和 `ZAI_API_KEY` | `glm-5.1`、`glm-5`、`glm-5-turbo`、`glm-4.7-flash` | `chat` |
+| Anthropic | 提供商 `anthropic` 和 `ANTHROPIC_API_KEY` | `claude-fable-5-1`、`claude-opus-5-5`、`claude-sonnet-5-5`、`claude-sonnet-5`、`claude-haiku-4-5-20251001` | 提供商默认值 |
+| Z.AI | 提供商 `zai` 和 `ZAI_API_KEY` | 使用服务实时模型端点返回的准确 ID | `chat` |
+| Z.AI Coding Plan | 提供商 `zai-coding-plan` 和 `ZAI_API_KEY` | `glm-5.3`、`glm-5.3-flash`、`glm-5.2`、`glm-5.1` | `chat` |
 | Z.AI ZCode | 提供商 `zai-zcode` 和 `ZAI_API_KEY` | `glm-5.1`、`glm-5-turbo`、`glm-4.7`、`glm-4.5-air` | `messages` |
 
-OpenAI 风格预设基于上游的 `models-manager/models.json`；Open Interpreter 在自己的副本中补充了 `gpt-6-sol` 和 `gpt-6-luna`。预设元数据并不保证所有提供商都接受这些 ID。Google 当前的[官方 Gemini 模型列表](https://ai.google.dev/gemini-api/docs/models)包含所列的稳定 Gemini 3 Flash 文本 ID，并将 `gemini-3.8-flash` 列为其最智能的 Flash 模型。其 [OpenAI 兼容性指南](https://ai.google.dev/gemini-api/docs/openai)记录了兼容端点。DeepSeek 的[官方模型列表](https://api-docs.deepseek.com/api/list-models/)将 `deepseek-flash` 和 `deepseek-v4-pro` 列为当前 ID；旧的 `deepseek-v4-flash` 仅作为指向现行 Flash 模型的兼容别名。对于 Z.AI，其 [GLM-5.1 指南](https://docs.z.ai/guides/llm/glm-5.1)和 [GLM-5-Turbo 指南](https://docs.z.ai/guides/llm/glm-5-turbo)使用上述 ID；请使用所选服务返回的准确 ID，不要猜测别名。
+OpenAI 风格预设基于上游的 `models-manager/models.json`；捆绑副本包含 `gpt-6.1-sol`、`gpt-6-sol` 和 `gpt-6-luna`。预设元数据并不保证所有提供商都接受这些 ID。Google 当前的[官方 Gemini 模型列表](https://ai.google.dev/gemini-api/docs/models)包含所列的稳定 Gemini 3 Flash 文本 ID，并将 `gemini-3.8-flash` 列为其最智能的 Flash 模型。其 [OpenAI 兼容性指南](https://ai.google.dev/gemini-api/docs/openai)记录了兼容端点。DeepSeek 的[官方模型列表](https://api-docs.deepseek.com/api/list-models/)将 `deepseek-flash` 和 `deepseek-v4-pro` 列为当前 ID；旧的 `deepseek-v4-flash` 仅作为指向现行 Flash 模型的兼容别名。对于 Z.AI，当前 [GLM-5.3 指南](https://docs.z.ai/guides/llm/glm-5.3)使用 `glm-5.3`，[GLM-5.3-Flash 指南](https://docs.z.ai/guides/vlm/glm-5.3-flash)记录 `glm-5.3-flash` 和 `glm-5.3-flashx`；请使用所选服务返回的准确 ID，不要猜测别名。
 
 ## 模型元数据的来源
 

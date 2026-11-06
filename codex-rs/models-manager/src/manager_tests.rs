@@ -18,6 +18,7 @@ use codex_login::TokenData;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::openai_models::ModelAccessPrograms;
 use codex_protocol::openai_models::ModelsResponse;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::turn_input::CyberAccessProgram;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -825,6 +826,44 @@ async fn get_model_info_tracks_fallback_usage() {
         .await;
     assert!(unknown.used_fallback_model_metadata);
     assert_eq!(unknown.slug, "model-that-does-not-exist");
+}
+
+#[tokio::test]
+async fn get_model_info_uses_bundled_gpt_6_1_sol_metadata() {
+    let codex_home = tempdir().expect("temp dir");
+    let manager = openai_manager_for_tests(
+        codex_home.path().to_path_buf(),
+        TestModelsEndpoint::new(Vec::new()),
+    );
+
+    let model = manager
+        .get_model_info("gpt-6.1-sol", &ModelsManagerConfig::default())
+        .await;
+
+    assert!(!model.used_fallback_model_metadata);
+    assert_eq!(model.display_name, "GPT-6.1-Sol");
+    // `models.json` is the ChatGPT/Codex OAuth descriptor, whose upstream
+    // limits and Ultra multi-agent mode differ from the public API catalog.
+    assert_eq!(model.default_reasoning_level, Some(ReasoningEffort::Low));
+    assert_eq!(model.context_window, Some(272_000));
+    assert_eq!(model.max_context_window, Some(872_000));
+    assert!(model.supports_reasoning_effort_updates);
+    assert_eq!(
+        model.multi_agent_reasoning_effort,
+        Some(ReasoningEffort::XHigh)
+    );
+    assert!(
+        model
+            .supported_reasoning_levels
+            .iter()
+            .any(|level| level.effort == ReasoningEffort::Medium)
+    );
+    assert!(
+        model
+            .supported_reasoning_levels
+            .iter()
+            .any(|level| level.effort == ReasoningEffort::Ultra)
+    );
 }
 
 #[tokio::test]

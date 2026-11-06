@@ -16,11 +16,11 @@ use sentry::protocol::EnvelopeItem;
 use sentry::types::Dsn;
 use sentry::types::Uuid;
 
+use crate::FEEDBACK_ENDPOINT_DSN;
 use crate::FeedbackAttachment;
 use crate::FeedbackSnapshot;
 use crate::MAX_DECODED_UPLOAD_BYTES;
 use crate::MAX_EVENT_BYTES;
-use crate::SENTRY_DSN;
 use crate::upload;
 
 // Background parts must tolerate slow links without inheriting the interactive
@@ -54,7 +54,12 @@ impl FeedbackTransport {
                 http_client_factory,
                 ClientRouteClass::Other,
             ),
-            dsn: SENTRY_DSN
+            // Persisted report parts still use the legacy whole-envelope
+            // transport. They cannot switch to a receiver with an 8 MiB body
+            // ceiling until the report API persists a signed-upload capability
+            // and finalizes each large original. Interactive feedback has that
+            // protocol; silently routing this transport would lose 64 MiB logs.
+            dsn: FEEDBACK_ENDPOINT_DSN
                 .parse()
                 .map_err(|_| anyhow!("invalid feedback DSN"))?,
         })
@@ -67,6 +72,7 @@ impl FeedbackTransport {
             &self.dsn,
             envelope.into(),
             REPORT_PART_UPLOAD_TIMEOUT,
+            upload::EnvelopeKind::Attachment,
         )
         .send()
         .await;
@@ -146,9 +152,112 @@ pub fn prepare_report_attachment(
 fn prepare_envelope(envelope: Envelope, max_decoded_bytes: usize) -> Result<Vec<u8>> {
     let (bytes, decoded_bytes) =
         upload::encode_envelope(&envelope).context("failed to serialize feedback envelope")?;
+    // Persisted reports retain the legacy receiver's larger whole-envelope
+    // contract. The 40 MB interactive body ceiling is not this transport's
+    // limit: a 64 MiB incompressible report attachment must not be truncated.
     anyhow::ensure!(
         decoded_bytes <= max_decoded_bytes,
         "feedback envelope exceeds the size limit"
     );
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FEEDBACK_ENDPOINT_DSN;
+    use super::FeedbackDelivery;
+    use super::FeedbackTransport;
+    use super::prepare_report_attachment;
+    use crate::FeedbackAttachment;
+    const INTERACTIVE_WIRE_LIMIT: usize = 40_000_000;
+    use codex_http_client::ClientRouteClass;
+    use codex_http_client::HttpClientFactory;
+    use codex_http_client::OutboundProxyPolicy;
+    use codex_http_client::RouteAwareClientPool;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
+
+    #[test]
+    fn persisted_report_transport_remains_on_compatible_envelope_receiver() {
+        let transport =
+            FeedbackTransport::new(HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault))
+                .unwrap();
+        let expected: sentry::types::Dsn = FEEDBACK_ENDPOINT_DSN.parse().unwrap();
+        assert_eq!(
+            transport.dsn.envelope_api_url(),
+            expected.envelope_api_url()
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_retry_is_caller_owned_exact_bytes_and_never_has_passcode_header() {
+        let server = MockServer::start().await;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+        let attempt = AtomicUsize::new(0);
+        Mock::given(method("POST"))
+            .and(path("/api/42/envelope/"))
+            .respond_with(move |_: &wiremock::Request| {
+                if attempt.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(429)
+                } else {
+                    ResponseTemplate::new(200)
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
+        let transport = FeedbackTransport {
+            client_pool: RouteAwareClientPool::new_without_redirects_or_request_logging(
+                factory,
+                ClientRouteClass::Other,
+            ),
+            dsn: format!("http://public@{}/42", server.address())
+                .parse()
+                .unwrap(),
+        };
+        let bytes = b"{\"event_id\":\"123\"}\n{\"type\":\"attachment\"}\nhello".to_vec();
+        assert!(matches!(
+            transport.send(bytes.clone()).await,
+            FeedbackDelivery::Rejected { status: 429, .. }
+        ));
+        assert!(matches!(
+            transport.send(bytes.clone()).await,
+            FeedbackDelivery::Accepted { .. }
+        ));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests[0].body, bytes);
+        assert_eq!(requests[1].body, bytes);
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.headers.contains_key("X-Feedback-Report-Passcode"))
+        );
+    }
+
+    #[test]
+    fn persisted_report_preserves_incompressible_attachment_above_interactive_limit() {
+        let mut seed = 0x1234_5678_9abc_def0_u64;
+        let bytes = (0..INTERACTIVE_WIRE_LIMIT + 1024)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed as u8
+            })
+            .collect();
+        let encoded = prepare_report_attachment(
+            "12345678-1234-1234-1234-123456789abc",
+            FeedbackAttachment {
+                filename: "incompressible.log".to_string(),
+                content_type: None,
+                buffer: bytes,
+            },
+        );
+        assert!(encoded.unwrap().len() > INTERACTIVE_WIRE_LIMIT);
+    }
 }

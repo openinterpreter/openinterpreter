@@ -134,7 +134,10 @@ mod tests {
             .map(|model| model.id.as_str())
             .collect::<Vec<_>>();
         model_ids.sort_unstable();
-        assert_eq!(model_ids, vec!["gpt-6-astra", "gpt-6-luna", "gpt-6-sol"]);
+        assert_eq!(
+            model_ids,
+            vec!["gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol"]
+        );
     }
 
     #[test]

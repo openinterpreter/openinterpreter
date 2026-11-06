@@ -3,11 +3,13 @@ pub const OPEN_INTERPRETER_DISPLAY_NAME: &str = "Open Interpreter";
 pub const OPEN_INTERPRETER_COMMAND_NAME: &str = "interpreter";
 pub const OPEN_INTERPRETER_NON_INTERACTIVE_ENV_VAR: &str = "OPEN_INTERPRETER_NONINTERACTIVE";
 
-/// Upstream Codex release whose client behavior is embedded in Open Interpreter.
+/// Codex service compatibility profile validated for Open Interpreter.
 ///
-/// Open Interpreter has an independent product version, so backend compatibility
-/// checks must not interpret that product version as the embedded Codex version.
-pub const OPEN_INTERPRETER_CODEX_COMPATIBILITY_VERSION: &str = "0.156.1";
+/// This is not Open Interpreter's product version or a claim that every upstream
+/// Codex feature is embedded. The model service uses it to select the account's
+/// available catalog and to admit requests; update it only after exercising
+/// account model discovery and an actual model/tool turn with the OIX client.
+pub const OPEN_INTERPRETER_CODEX_COMPATIBILITY_VERSION: &str = "0.159.0";
 
 const CODEX_RELEASE_NOTES_URL: &str = "https://github.com/openai/codex/releases/latest";
 const OPEN_INTERPRETER_RELEASE_NOTES_URL: &str =
@@ -269,6 +271,20 @@ mod tests {
         assert_eq!(
             Product::Codex.codex_compatibility_version(),
             env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    #[test]
+    fn open_interpreter_advertises_the_validated_model_catalog_profile() {
+        // The account model endpoint omits GPT-6.1 Sol for the 0.158 profile;
+        // the 0.159 profile and an OIX model/tool turn were verified together.
+        assert_eq!(
+            Product::OpenInterpreter.codex_compatibility_version(),
+            "0.159.0"
+        );
+        assert_ne!(
+            Product::OpenInterpreter.codex_compatibility_version(),
+            Product::Codex.codex_compatibility_version()
         );
     }
 

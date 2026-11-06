@@ -21,6 +21,7 @@ use codex_app_server_protocol::ThreadSection;
 use codex_app_server_protocol::ThreadSectionAppearance;
 use codex_app_server_protocol::ThreadSectionMoveParams;
 use codex_app_server_protocol::ThreadSectionMoveResponse;
+use codex_config::types::ShellEnvironmentPolicyToml;
 use codex_config::types::WindowsSandboxModeToml;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ThreadIdleCause;
@@ -796,6 +797,15 @@ impl ThreadRequestProcessor {
         params: ThreadBackgroundTerminalsListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         self.thread_background_terminals_list_inner(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn thread_background_terminals_status(
+        &self,
+        params: ThreadBackgroundTerminalsStatusParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.thread_background_terminals_status_inner(params)
             .await
             .map(|response| Some(response.into()))
     }
@@ -2388,6 +2398,9 @@ impl ThreadRequestProcessor {
             .map(|terminal| ThreadBackgroundTerminal {
                 item_id: terminal.item_id,
                 process_id: terminal.process_id,
+                turn_id: Some(terminal.turn_id),
+                native_process_id: Some(terminal.native_process_id),
+                terminal_generation: Some(terminal.terminal_generation),
                 command: terminal.command,
                 cwd: terminal.cwd.into(),
                 os_pid: None,
@@ -2399,6 +2412,43 @@ impl ThreadRequestProcessor {
         let (data, next_cursor) = paginate_background_terminals(&terminals, cursor, limit)?;
 
         Ok(ThreadBackgroundTerminalsListResponse { data, next_cursor })
+    }
+
+    async fn thread_background_terminals_status_inner(
+        &self,
+        params: ThreadBackgroundTerminalsStatusParams,
+    ) -> Result<ThreadBackgroundTerminalsStatusResponse, JSONRPCErrorError> {
+        let ThreadBackgroundTerminalsStatusParams {
+            thread_id,
+            turn_id,
+            item_id,
+            native_process_id,
+            max_wait_ms,
+        } = params;
+        let (_, thread) = self.load_thread(&thread_id).await?;
+        let status = thread
+            .read_background_terminal_status(&turn_id, &item_id, &native_process_id, max_wait_ms)
+            .await;
+        let phase = match status.phase {
+            BackgroundTerminalStatusPhase::Running => {
+                codex_app_server_protocol::ThreadBackgroundTerminalStatusPhase::Running
+            }
+            BackgroundTerminalStatusPhase::Exited => {
+                codex_app_server_protocol::ThreadBackgroundTerminalStatusPhase::Exited
+            }
+            BackgroundTerminalStatusPhase::Unknown => {
+                codex_app_server_protocol::ThreadBackgroundTerminalStatusPhase::Unknown
+            }
+        };
+        Ok(ThreadBackgroundTerminalsStatusResponse {
+            phase,
+            output_bytes: status.output_bytes,
+            output_sha256: status.output_sha256,
+            output_cap_reached: status.output_cap_reached,
+            exit_code: status.exit_code,
+            terminal_generation: status.terminal_generation,
+            observation_timed_out: status.observation_timed_out,
+        })
     }
 
     async fn thread_background_terminals_terminate_inner(
@@ -4282,7 +4332,7 @@ impl ThreadRequestProcessor {
                 )));
             }
             let config_snapshot = existing_thread.config_snapshot().await;
-            let mismatch_details = collect_resume_override_mismatches(params, &config_snapshot);
+            let mut mismatch_details = collect_resume_override_mismatches(params, &config_snapshot);
             if !mismatch_details.is_empty() {
                 let has_subscribers = !self
                     .thread_state_manager
@@ -4324,13 +4374,65 @@ impl ThreadRequestProcessor {
                     }
                 }
 
+                // A subscribed idle thread cannot be torn down for cold resume,
+                // yet a renewed shell bridge must not keep the previous caller's
+                // environment. Rebind only this explicit policy; all other
+                // loaded-thread overrides retain their existing semantics.
+                if let Some(policy) = params
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.get("shell_environment_policy"))
+                {
+                    if is_running || !matches!(loaded_status, ThreadStatus::Idle) {
+                        return Err(invalid_request(
+                            "cannot update shell environment policy of an active thread",
+                        ));
+                    }
+                    let policy: ShellEnvironmentPolicyToml = serde_json::from_value(policy.clone())
+                        .map_err(|error| {
+                            invalid_request(format!(
+                                "invalid shell environment policy for loaded thread: {error}"
+                            ))
+                        })?;
+                    let policy: codex_protocol::config_types::ShellEnvironmentPolicy =
+                        policy.into();
+                    let rotated = existing_thread
+                        .rotate_shell_environment_values(policy)
+                        .await
+                        .map_err(|error| {
+                            invalid_request(format!(
+                                "invalid shell environment policy for loaded thread: {error}"
+                            ))
+                        })?;
+                    if !rotated {
+                        return Err(invalid_request(
+                            "loaded thread may only rotate existing shell environment values",
+                        ));
+                    }
+                    mismatch_details.retain(|detail| {
+                        detail != "config overrides were provided and ignored while running"
+                    });
+                    if params
+                        .config
+                        .as_ref()
+                        .is_some_and(|config| config.len() > 1)
+                    {
+                        mismatch_details.push(
+                            "other config overrides were provided and ignored while running"
+                                .to_string(),
+                        );
+                    }
+                }
+
                 // Preserve rejoin semantics when another client can still observe
                 // the loaded thread or shutdown did not complete.
-                tracing::warn!(
-                    "thread/resume overrides ignored for loaded thread {}: {}",
-                    existing_thread_id,
-                    mismatch_details.join("; ")
-                );
+                if !mismatch_details.is_empty() {
+                    tracing::warn!(
+                        "thread/resume overrides ignored for loaded thread {}: {}",
+                        existing_thread_id,
+                        mismatch_details.join("; ")
+                    );
+                }
             }
             let redact_resume_payloads =
                 should_redact_thread_resume_payloads(app_server_client_name.as_deref());

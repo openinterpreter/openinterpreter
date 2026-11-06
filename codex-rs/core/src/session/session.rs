@@ -395,6 +395,9 @@ impl SessionConfiguration {
         current_environments: &[TurnEnvironmentSelection],
     ) -> ConstraintResult<Self> {
         let mut next_configuration = self.clone();
+        if let Some(policy) = &updates.shell_environment_policy {
+            next_configuration.shell_environment_policy = policy.clone();
+        }
         if let Some(disabled_plugin_ids) = &updates.disabled_plugin_ids {
             next_configuration.disabled_plugin_ids = disabled_plugin_ids.clone();
         }
@@ -603,6 +606,7 @@ pub(crate) struct SessionSettingsUpdate {
     pub(crate) app_server_client_name: Option<String>,
     pub(crate) app_server_client_version: Option<String>,
     pub(crate) disabled_plugin_ids: Option<Vec<String>>,
+    pub(crate) shell_environment_policy: Option<ShellEnvironmentPolicy>,
 }
 
 pub(crate) struct AppServerClientMetadata {

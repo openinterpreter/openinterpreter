@@ -30,7 +30,8 @@
         "openai": [
             "gpt-6-astra",
             "gpt-6-sol",
-            "gpt-6-luna"
+            "gpt-6-luna",
+            "gpt-6.1-sol"
         ]
     },
     "provider_model_exclusions": {
@@ -91,6 +92,20 @@
                 "priority": -1
             }
         ],
+        "openai": [
+            {
+                "id": "gpt-6.1-sol",
+                "display_name": "GPT-6.1 Sol",
+                "description": "gpt-sol • Reasoning • Tool calling • Image input • PDF input",
+                "reasoning": true,
+                "input_modalities": [
+                    "text",
+                    "image"
+                ],
+                "context_window": 1050000,
+                "priority": -1
+            }
+        ],
         "anthropic": [
             {
                 "id": "claude-fable-5-1",
@@ -112,6 +127,13 @@
                 "reasoning": true,
                 "input_modalities": ["text", "image"],
                 "priority": -1
+            },
+            {
+                "id": "claude-sonnet-5-5",
+                "display_name": "Claude Sonnet 5.5",
+                "reasoning": true,
+                "input_modalities": ["text", "image"],
+                "priority": 0
             }
         ],
         "kimi-for-coding": [

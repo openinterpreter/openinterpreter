@@ -80,15 +80,18 @@ class ProviderCatalogRefreshTests(unittest.TestCase):
         for provider_id, excluded in overrides["provider_model_exclusions"].items():
             self.assertTrue(providers[provider_id].isdisjoint(excluded), provider_id)
         for provider_id, expected in {
+            "openai": {"gpt-6.1-sol", "gpt-6-sol"},
             "anthropic": {
                 "claude-fable-5-1",
                 "claude-opus-5-5",
+                "claude-sonnet-5-5",
                 "claude-sonnet-5",
                 "claude-haiku-4-5-20251001",
             },
             "kimi-for-coding": {"k3-256k", "kimi-for-coding"},
             "alibaba": {"qwen3.8-max", "qwen3.8-flash", "qwen3.7-flash"},
             "deepseek": {"deepseek-flash", "deepseek-v4-pro"},
+            "zai-coding-plan": {"glm-5.3", "glm-5.3-flash"},
         }.items():
             self.assertTrue(expected <= providers[provider_id], provider_id)
         for relative_path in ("docs/models.md", "docs/zh/models.md"):
@@ -97,12 +100,16 @@ class ProviderCatalogRefreshTests(unittest.TestCase):
             )
             self.assertNotIn("gpt-5.1-codex", documentation)
             self.assertIn('model = "gpt-6-sol"', documentation)
+            self.assertIn("`gpt-6.1-sol`", documentation)
             for model_id in (
                 "claude-fable-5-1",
                 "claude-opus-5-5",
+                "claude-sonnet-5-5",
                 "claude-sonnet-5",
                 "deepseek-flash",
                 "deepseek-v4-pro",
+                "glm-5.3",
+                "glm-5.3-flash",
             ):
                 self.assertIn(f"`{model_id}`", documentation)
         for relative_path in ("docs/deepseek.md", "docs/zh/deepseek.md"):

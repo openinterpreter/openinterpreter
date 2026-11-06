@@ -1956,6 +1956,32 @@ impl Session {
             .thread_config_snapshot(state.session_configuration.environments.clone())
     }
 
+    pub(crate) async fn rotate_shell_environment_values(
+        &self,
+        policy: codex_protocol::config_types::ShellEnvironmentPolicy,
+    ) -> ConstraintResult<bool> {
+        self.update_settings_if(
+            SessionSettingsUpdate {
+                shell_environment_policy: Some(policy),
+                ..Default::default()
+            },
+            |current, candidate| {
+                let mut permitted = current.shell_environment_policy.clone();
+                permitted.r#set = candidate.shell_environment_policy.r#set.clone();
+                permitted == candidate.shell_environment_policy
+                    && current.shell_environment_policy.r#set.len()
+                        == candidate.shell_environment_policy.r#set.len()
+                    && current
+                        .shell_environment_policy
+                        .r#set
+                        .keys()
+                        .all(|key| candidate.shell_environment_policy.r#set.contains_key(key))
+            },
+        )
+        .await
+        .map(|commit| commit.is_some())
+    }
+
     pub(crate) async fn configured_environment_selections(&self) -> Vec<TurnEnvironmentSelection> {
         let state = self.state.lock().await;
         state.session_configuration.environments.clone()

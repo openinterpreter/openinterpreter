@@ -4764,6 +4764,91 @@ async fn thread_resume_checkpoints_settings_without_advancing_recency() -> Resul
 }
 
 #[tokio::test]
+async fn subscribed_idle_resume_rebinds_shell_policy_without_replacing_thread() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    let rollout = setup_rollout_fixture(codex_home.path(), &server.uri()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+
+    let first_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: rollout.conversation_id.clone(),
+            config: Some(std::collections::HashMap::from([(
+                "shell_environment_policy".to_string(),
+                json!({"set": {"INTERPRETER_CALLER_TOKEN": "old-binding"}}),
+            )])),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadResumeResponse { thread: first, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(first_id)).await??;
+    assert_eq!(first.status, ThreadStatus::Idle);
+
+    let second_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: first.id.clone(),
+            config: Some(std::collections::HashMap::from([(
+                "shell_environment_policy".to_string(),
+                json!({"set": {"INTERPRETER_CALLER_TOKEN": "new-binding"}}),
+            )])),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadResumeResponse { thread: second, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(second_id)).await??;
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.status, ThreadStatus::Idle);
+
+    let expanded_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: first.id.clone(),
+            config: Some(std::collections::HashMap::from([(
+                "shell_environment_policy".to_string(),
+                json!({"set": {"INTERPRETER_CALLER_TOKEN": "new-binding", "UNRELATED_SECRET": "not-allowed"}}),
+            )])),
+            ..Default::default()
+        })
+        .await?;
+    let expanded_error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(expanded_id)),
+    )
+    .await??;
+    assert!(
+        expanded_error
+            .error
+            .message
+            .contains("may only rotate existing")
+    );
+
+    let invalid_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: first.id,
+            config: Some(std::collections::HashMap::from([(
+                "shell_environment_policy".to_string(),
+                json!({"set": 17}),
+            )])),
+            ..Default::default()
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(invalid_id)),
+    )
+    .await??;
+    assert!(
+        error
+            .error
+            .message
+            .contains("invalid shell environment policy")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_resume_keeps_in_flight_turn_streaming() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;

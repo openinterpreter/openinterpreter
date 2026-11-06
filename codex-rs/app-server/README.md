@@ -267,6 +267,16 @@ Read the selection from `threadSettings.disabledPluginIds` in
 across resume. Forks restore the selection from the history retained at the
 requested fork boundary.
 
+# Loaded-thread shell environment rebind
+
+When `thread/resume` rejoins a loaded idle thread that cannot be cold-resumed
+because it has subscribers, the caller may rotate the values of keys already
+present in its `config.shell_environment_policy.set` map. The key set and all
+other shell policy fields must remain unchanged; attempts to add or remove a
+key or alter inheritance/filtering are rejected. An active thread cannot be
+rebound. Other configuration overrides retain their existing loaded-thread
+behavior. No environment values are returned in the response.
+
 # Deprecated thread personality setting
 
 `thread/start`, `thread/resume`, `thread/settings/update`, and `turn/start` still

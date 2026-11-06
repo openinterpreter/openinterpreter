@@ -177,7 +177,7 @@ mod tests {
         let provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
         let models = bundled_provider_model_infos(&provider);
 
-        for model_id in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+        for model_id in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"] {
             assert_eq!(
                 models.iter().filter(|model| model.slug == model_id).count(),
                 1,
@@ -196,6 +196,22 @@ mod tests {
                 )
             }));
         }
+    }
+
+    #[test]
+    fn bundled_provider_models_use_api_catalog_semantics_for_gpt_6_1_sol() {
+        let provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+        let models = bundled_provider_model_infos(&provider);
+        let model = models
+            .iter()
+            .find(|model| model.slug == "gpt-6.1-sol")
+            .expect("gpt-6.1-sol should be in the OpenAI API catalog");
+
+        // API-key discovery uses the public API catalog: its generic reasoning
+        // default is medium and its documented context is 1,050,000 tokens.
+        assert_eq!(model.default_reasoning_level, Some(ReasoningEffort::Medium));
+        assert!(model.supported_reasoning_levels.is_empty());
+        assert_eq!(model.context_window, Some(1_050_000));
     }
 
     #[test]

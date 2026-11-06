@@ -754,6 +754,12 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadBackgroundTerminalsListResponse,
     },
+    #[experimental("thread/backgroundTerminals/status")]
+    ThreadBackgroundTerminalsStatus => "thread/backgroundTerminals/status" {
+        params: v2::ThreadBackgroundTerminalsStatusParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadBackgroundTerminalsStatusResponse,
+    },
     #[experimental("thread/backgroundTerminals/terminate")]
     ThreadBackgroundTerminalsTerminate => "thread/backgroundTerminals/terminate" {
         params: v2::ThreadBackgroundTerminalsTerminateParams,
@@ -3987,6 +3993,35 @@ mod tests {
                     "threadId": "thr_123",
                     "cursor": null,
                     "limit": null
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_thread_background_terminals_status() -> Result<()> {
+        let request = ClientRequest::ThreadBackgroundTerminalsStatus {
+            request_id: RequestId::Integer(8),
+            params: v2::ThreadBackgroundTerminalsStatusParams {
+                thread_id: "thr_123".to_string(),
+                turn_id: "turn_456".to_string(),
+                item_id: "item_789".to_string(),
+                native_process_id: "native_abc".to_string(),
+                max_wait_ms: Some(250),
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "thread/backgroundTerminals/status",
+                "id": 8,
+                "params": {
+                    "threadId": "thr_123",
+                    "turnId": "turn_456",
+                    "itemId": "item_789",
+                    "nativeProcessId": "native_abc",
+                    "maxWaitMs": 250
                 }
             }),
             serde_json::to_value(&request)?,
