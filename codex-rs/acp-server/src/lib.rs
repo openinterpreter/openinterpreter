@@ -870,6 +870,7 @@ impl AppServerAcpAgent {
         cx: ConnectionTo<Client>,
     ) -> Result<StopReason, Error> {
         let mut completed_item_ids = HashSet::new();
+        let mut streamed_agent_messages = HashMap::new();
         loop {
             let event = self.event_rx.recv().await.ok();
             match event {
@@ -881,6 +882,7 @@ impl AppServerAcpAgent {
                         *notification,
                         &cx,
                         &mut completed_item_ids,
+                        &mut streamed_agent_messages,
                     )? {
                         return Ok(stop_reason);
                     }
@@ -1152,11 +1154,16 @@ fn handle_notification(
     notification: ServerNotification,
     cx: &ConnectionTo<Client>,
     completed_item_ids: &mut HashSet<String>,
+    streamed_agent_messages: &mut HashMap<String, String>,
 ) -> Result<Option<StopReason>, Error> {
     match notification {
         ServerNotification::AgentMessageDelta(payload)
             if payload.thread_id == thread_id && payload.turn_id == turn_id =>
         {
+            streamed_agent_messages
+                .entry(payload.item_id)
+                .or_default()
+                .push_str(&payload.delta);
             send_update(
                 session_id,
                 cx,
@@ -1219,14 +1226,26 @@ fn handle_notification(
         ServerNotification::ItemCompleted(payload)
             if payload.thread_id == thread_id && payload.turn_id == turn_id =>
         {
-            send_completed_item_update_if_new(session_id, cx, &payload.item, completed_item_ids)?;
+            send_completed_item_update_if_new(
+                session_id,
+                cx,
+                &payload.item,
+                completed_item_ids,
+                streamed_agent_messages,
+            )?;
         }
         ServerNotification::TurnCompleted(TurnCompletedNotification {
             thread_id: completed_thread_id,
             turn,
         }) if completed_thread_id == thread_id && turn.id == turn_id => {
             for item in &turn.items {
-                send_completed_item_update_if_new(session_id, cx, item, completed_item_ids)?;
+                send_completed_item_update_if_new(
+                    session_id,
+                    cx,
+                    item,
+                    completed_item_ids,
+                    streamed_agent_messages,
+                )?;
             }
             return Ok(Some(stop_reason_from_turn(turn)));
         }
@@ -1295,9 +1314,23 @@ fn send_completed_item_update_if_new(
     cx: &ConnectionTo<Client>,
     item: &codex_app_server_protocol::ThreadItem,
     completed_item_ids: &mut HashSet<String>,
+    streamed_agent_messages: &mut HashMap<String, String>,
 ) -> Result<(), Error> {
     if completed_item_ids.insert(item.id().to_string()) {
-        send_completed_item_update(session_id, cx, item)?;
+        match (item, streamed_agent_messages.remove(item.id())) {
+            (codex_app_server_protocol::ThreadItem::AgentMessage { text, .. }, Some(streamed)) => {
+                // Completion repeats streamed text, but can also contain a missing suffix.
+                let remaining = text.strip_prefix(&streamed).unwrap_or(text);
+                if !remaining.is_empty() {
+                    send_update(
+                        session_id,
+                        cx,
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(remaining.into())),
+                    )?;
+                }
+            }
+            _ => send_completed_item_update(session_id, cx, item)?,
+        }
     }
     Ok(())
 }
@@ -1498,3 +1531,7 @@ fn next_request_id() -> RequestId {
     static NEXT_REQUEST_ID: AtomicI64 = AtomicI64::new(1);
     RequestId::Integer(NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed))
 }
+
+#[cfg(test)]
+#[path = "notification_tests.rs"]
+mod notification_tests;
