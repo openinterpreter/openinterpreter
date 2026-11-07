@@ -52,6 +52,8 @@ SELECT
     token_budget,
     tokens_used,
     time_used_seconds,
+    mission_revision,
+    lifecycle_revision,
     created_at_ms,
     updated_at_ms
 FROM thread_goals
@@ -80,9 +82,11 @@ INSERT INTO thread_goals (
     token_budget,
     tokens_used,
     time_used_seconds,
+    mission_revision,
+    lifecycle_revision,
     created_at_ms,
     updated_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(thread_id) DO UPDATE SET
     goal_id = excluded.goal_id,
     objective = excluded.objective,
@@ -90,6 +94,8 @@ ON CONFLICT(thread_id) DO UPDATE SET
     token_budget = excluded.token_budget,
     tokens_used = excluded.tokens_used,
     time_used_seconds = excluded.time_used_seconds,
+    mission_revision = excluded.mission_revision,
+    lifecycle_revision = excluded.lifecycle_revision,
     created_at_ms = excluded.created_at_ms,
     updated_at_ms = excluded.updated_at_ms
             "#,
@@ -101,6 +107,8 @@ ON CONFLICT(thread_id) DO UPDATE SET
         .bind(goal.token_budget)
         .bind(goal.tokens_used)
         .bind(goal.time_used_seconds)
+        .bind(goal.mission_revision)
+        .bind(goal.lifecycle_revision)
         .bind(datetime_to_epoch_millis(goal.created_at))
         .bind(datetime_to_epoch_millis(goal.updated_at))
         .execute(&mut *transaction)
@@ -173,9 +181,11 @@ INSERT INTO thread_goals (
     token_budget,
     tokens_used,
     time_used_seconds,
+    mission_revision,
+    lifecycle_revision,
     created_at_ms,
     updated_at_ms
-) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)
+) VALUES (?, ?, ?, ?, ?, 0, 0, 1, 1, ?, ?)
 ON CONFLICT(thread_id) DO UPDATE SET
     goal_id = excluded.goal_id,
     objective = excluded.objective,
@@ -183,6 +193,8 @@ ON CONFLICT(thread_id) DO UPDATE SET
     token_budget = excluded.token_budget,
     tokens_used = 0,
     time_used_seconds = 0,
+    mission_revision = 1,
+    lifecycle_revision = 1,
     created_at_ms = excluded.created_at_ms,
     updated_at_ms = excluded.updated_at_ms
 RETURNING
@@ -193,6 +205,8 @@ RETURNING
     token_budget,
     tokens_used,
     time_used_seconds,
+    mission_revision,
+    lifecycle_revision,
     created_at_ms,
     updated_at_ms
             "#,
@@ -230,9 +244,11 @@ INSERT INTO thread_goals (
     token_budget,
     tokens_used,
     time_used_seconds,
+    mission_revision,
+    lifecycle_revision,
     created_at_ms,
     updated_at_ms
-) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)
+) VALUES (?, ?, ?, ?, ?, 0, 0, 1, 1, ?, ?)
 ON CONFLICT(thread_id) DO UPDATE SET
     goal_id = excluded.goal_id,
     objective = excluded.objective,
@@ -240,6 +256,8 @@ ON CONFLICT(thread_id) DO UPDATE SET
     token_budget = excluded.token_budget,
     tokens_used = 0,
     time_used_seconds = 0,
+    mission_revision = 1,
+    lifecycle_revision = 1,
     created_at_ms = excluded.created_at_ms,
     updated_at_ms = excluded.updated_at_ms
 WHERE thread_goals.status = 'complete'
@@ -251,6 +269,8 @@ RETURNING
     token_budget,
     tokens_used,
     time_used_seconds,
+    mission_revision,
+    lifecycle_revision,
     created_at_ms,
     updated_at_ms
             "#,
@@ -289,6 +309,8 @@ RETURNING
 UPDATE thread_goals
 SET
     objective = COALESCE(?, objective),
+    mission_revision = mission_revision + 1,
+    lifecycle_revision = lifecycle_revision + 1,
     status = CASE
         WHEN status = ? AND ? IN (?, ?) THEN status
         WHEN ? = 'active' AND ? IS NOT NULL AND tokens_used >= ? THEN ?
@@ -324,6 +346,8 @@ WHERE thread_id = ?
 UPDATE thread_goals
 SET
     objective = COALESCE(?, objective),
+    mission_revision = CASE WHEN ? IS NOT NULL THEN mission_revision + 1 ELSE mission_revision END,
+    lifecycle_revision = lifecycle_revision + 1,
     status = CASE
         WHEN status = ? AND ? IN (?, ?) THEN status
         WHEN ? = 'active' AND token_budget IS NOT NULL AND tokens_used >= token_budget THEN ?
@@ -334,6 +358,7 @@ WHERE thread_id = ?
   AND (? IS NULL OR goal_id = ?)
             "#,
                 )
+                .bind(objective)
                 .bind(objective)
                 .bind(crate::ThreadGoalStatus::BudgetLimited.as_str())
                 .bind(status.as_str())
@@ -355,6 +380,8 @@ WHERE thread_id = ?
 UPDATE thread_goals
 SET
     objective = COALESCE(?, objective),
+    mission_revision = mission_revision + 1,
+    lifecycle_revision = lifecycle_revision + 1,
     token_budget = ?,
     status = CASE
         WHEN status = 'active' AND ? IS NOT NULL AND tokens_used >= ? THEN ?
@@ -381,10 +408,12 @@ WHERE thread_id = ?
                 if let Some(objective) = objective {
                     sqlx::query(
                         r#"
-UPDATE thread_goals
-SET
-    objective = ?,
-    updated_at_ms = ?
+                        UPDATE thread_goals
+                        SET
+                            objective = ?,
+                            mission_revision = mission_revision + 1,
+                            lifecycle_revision = lifecycle_revision + 1,
+                            updated_at_ms = ?
 WHERE thread_id = ?
   AND (? IS NULL OR goal_id = ?)
             "#,
@@ -444,6 +473,7 @@ WHERE thread_id = ?
 UPDATE thread_goals
 SET
     status = ?,
+    lifecycle_revision = lifecycle_revision + 1,
     updated_at_ms = ?
 WHERE thread_id = ?
   AND (
@@ -485,6 +515,8 @@ RETURNING
     token_budget,
     tokens_used,
     time_used_seconds,
+    mission_revision,
+    lifecycle_revision,
     created_at_ms,
     updated_at_ms
             "#,
@@ -593,6 +625,8 @@ RETURNING
     token_budget,
     tokens_used,
     time_used_seconds,
+    mission_revision,
+    lifecycle_revision,
     created_at_ms,
     updated_at_ms
             "#,
@@ -775,6 +809,101 @@ mod tests {
         assert_eq!(Some(0), replaced.token_budget);
         assert_eq!(0, replaced.tokens_used);
         assert_eq!(0, replaced.time_used_seconds);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_revision_ignores_accounting_but_advances_on_mission_change() {
+        let runtime = test_runtime().await;
+        let thread_id = test_thread_id();
+        upsert_test_thread(&runtime, thread_id).await;
+
+        let goal = runtime
+            .thread_goals()
+            .replace_thread_goal(
+                thread_id,
+                "stable mission",
+                crate::ThreadGoalStatus::Active,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(1, goal.lifecycle_revision);
+
+        let accounted = runtime
+            .thread_goals()
+            .account_thread_goal_usage(
+                thread_id,
+                7,
+                11,
+                GoalAccountingMode::ActiveStatusOnly,
+                Some(goal.goal_id.as_str()),
+            )
+            .await
+            .unwrap();
+        let accounted = match accounted {
+            GoalAccountingOutcome::Updated(goal) => goal,
+            GoalAccountingOutcome::Unchanged(_) => panic!("usage should update"),
+        };
+        assert_eq!(goal.goal_id, accounted.goal_id);
+        assert_eq!(goal.lifecycle_revision, accounted.lifecycle_revision);
+        assert_eq!(11, accounted.tokens_used);
+        assert_eq!(7, accounted.time_used_seconds);
+
+        let edited = runtime
+            .thread_goals()
+            .update_thread_goal(
+                thread_id,
+                GoalUpdate {
+                    objective: Some("edited mission".to_string()),
+                    status: None,
+                    token_budget: None,
+                    expected_goal_id: Some(goal.goal_id.clone()),
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(goal.goal_id, edited.goal_id);
+        assert_eq!(goal.lifecycle_revision + 1, edited.lifecycle_revision);
+    }
+
+    #[tokio::test]
+    async fn mission_identity_survives_same_mission_completion() {
+        let runtime = test_runtime().await;
+        let thread_id = test_thread_id();
+        upsert_test_thread(&runtime, thread_id).await;
+
+        let goal = runtime
+            .thread_goals()
+            .replace_thread_goal(
+                thread_id,
+                "complete the admitted task",
+                crate::ThreadGoalStatus::Active,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let completed = runtime
+            .thread_goals()
+            .update_thread_goal(
+                thread_id,
+                GoalUpdate {
+                    objective: None,
+                    status: Some(crate::ThreadGoalStatus::Complete),
+                    token_budget: None,
+                    expected_goal_id: Some(goal.goal_id.clone()),
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(goal.goal_id, completed.goal_id);
+        assert_eq!(goal.objective, completed.objective);
+        assert_eq!(goal.mission_revision, completed.mission_revision);
+        assert_eq!(goal.lifecycle_revision + 1, completed.lifecycle_revision);
+        assert_eq!(crate::ThreadGoalStatus::Complete, completed.status);
     }
 
     #[tokio::test]

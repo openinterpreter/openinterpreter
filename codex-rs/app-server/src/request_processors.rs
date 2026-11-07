@@ -28,6 +28,10 @@ use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
 use codex_app_server_protocol::AdditionalContextEntry;
 use codex_app_server_protocol::AdditionalContextKind;
+use codex_app_server_protocol::AgentGoalAvailability;
+use codex_app_server_protocol::AgentGoalReadParams;
+use codex_app_server_protocol::AgentGoalReadResponse;
+use codex_app_server_protocol::AgentGoalUnavailableReason;
 use codex_app_server_protocol::AppListUpdatedNotification;
 use codex_app_server_protocol::AppSummary;
 use codex_app_server_protocol::AppTemplateSummary;
@@ -550,6 +554,7 @@ use uuid::Uuid;
 use codex_app_server_protocol::ServerRequest;
 
 mod account_processor;
+mod agent_contract_processor;
 mod apps_processor;
 mod bedrock_auth;
 mod catalog_processor;
@@ -586,6 +591,9 @@ mod turn_processor;
 mod windows_sandbox_processor;
 
 pub(crate) use account_processor::AccountRequestProcessor;
+pub(crate) use agent_contract_processor::AgentContractRequestProcessor;
+pub(crate) use agent_contract_processor::AgentGoalAdmissionValidator;
+pub(crate) use agent_contract_processor::AgentGoalCompletionObserver;
 pub(crate) use apps_processor::AppsRequestProcessor;
 pub(crate) use catalog_processor::CatalogRequestProcessor;
 pub(crate) use command_exec_processor::CommandExecRequestProcessor;

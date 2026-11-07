@@ -69,6 +69,116 @@ impl ThreadGoalRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
+    /// Read a goal for the content-free agent contract without applying the
+    /// legacy `Option<ThreadGoal>` projection.  In particular, an unavailable
+    /// state database and an absent goal are different results, and this read
+    /// never resumes or otherwise changes the goal runtime.
+    pub(crate) async fn agent_goal_read(
+        &self,
+        params: AgentGoalReadParams,
+    ) -> Result<AgentGoalReadResponse, JSONRPCErrorError> {
+        if !self.config.features.enabled(Feature::Goals) {
+            return Ok(AgentGoalReadResponse {
+                availability: AgentGoalAvailability::Unavailable,
+                goal: None,
+                goal_id: None,
+                mission_revision: None,
+                lifecycle_revision: None,
+                explicit_resume_required: false,
+                unavailable_reason: Some(AgentGoalUnavailableReason::GoalsDisabled),
+            });
+        }
+
+        let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
+        let state_db = match self
+            .state_db_for_materialized_thread(thread_id, GoalAccess::Read)
+            .await
+        {
+            Ok(state_db) => state_db,
+            Err(_) => {
+                if self
+                    .thread_manager
+                    .get_thread(thread_id)
+                    .await
+                    .is_ok_and(|thread| thread.rollout_path().is_none())
+                {
+                    return Ok(AgentGoalReadResponse {
+                        availability: AgentGoalAvailability::Unavailable,
+                        goal: None,
+                        goal_id: None,
+                        mission_revision: None,
+                        lifecycle_revision: None,
+                        explicit_resume_required: false,
+                        unavailable_reason: Some(AgentGoalUnavailableReason::EphemeralThread),
+                    });
+                }
+
+                let persisted = codex_rollout::find_thread_path_by_id_str(
+                    &self.config.codex_home,
+                    &thread_id.to_string(),
+                    self.state_db.as_deref(),
+                )
+                .await
+                .ok()
+                .flatten();
+                return Ok(match persisted {
+                    Some(_) => AgentGoalReadResponse {
+                        availability: AgentGoalAvailability::Unavailable,
+                        goal: None,
+                        goal_id: None,
+                        mission_revision: None,
+                        lifecycle_revision: None,
+                        explicit_resume_required: false,
+                        unavailable_reason: Some(AgentGoalUnavailableReason::StateUnavailable),
+                    },
+                    None => AgentGoalReadResponse {
+                        availability: AgentGoalAvailability::NotFound,
+                        goal: None,
+                        goal_id: None,
+                        mission_revision: None,
+                        lifecycle_revision: None,
+                        explicit_resume_required: false,
+                        unavailable_reason: None,
+                    },
+                });
+            }
+        };
+
+        let goal = match state_db.thread_goals().get_thread_goal(thread_id).await {
+            Ok(goal) => goal,
+            Err(_) => {
+                return Ok(AgentGoalReadResponse {
+                    availability: AgentGoalAvailability::Unavailable,
+                    goal: None,
+                    goal_id: None,
+                    mission_revision: None,
+                    lifecycle_revision: None,
+                    explicit_resume_required: false,
+                    unavailable_reason: Some(AgentGoalUnavailableReason::StateUnavailable),
+                });
+            }
+        };
+        let goal_id = goal.as_ref().map(|goal| goal.goal_id.clone());
+        let mission_revision = goal.as_ref().map(|goal| goal.mission_revision);
+        let lifecycle_revision = goal.as_ref().map(|goal| goal.lifecycle_revision);
+        let goal = goal.map(api_thread_goal_from_state);
+        let explicit_resume_required = goal.as_ref().is_some_and(|goal| {
+            matches!(
+                goal.status,
+                ThreadGoalStatus::Paused | ThreadGoalStatus::Blocked
+            )
+        });
+        Ok(AgentGoalReadResponse {
+            availability: AgentGoalAvailability::Available,
+            goal,
+            goal_id,
+            mission_revision,
+            lifecycle_revision,
+            explicit_resume_required,
+            unavailable_reason: None,
+        })
+    }
+
     pub(crate) async fn thread_goal_clear(
         &self,
         request_id: ConnectionRequestId,

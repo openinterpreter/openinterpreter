@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
@@ -64,6 +66,21 @@ pub struct GoalSetOutcome {
     previous_goal: Option<PreviousGoalSnapshot>,
 }
 
+/// Receives the authoritative Goal transition before a later Goal replacement
+/// can hide a completed mission from a durable task receipt. Implementations
+/// must persist only exact task/mission matches and may fail closed when the
+/// completing native turn is unavailable.
+pub type GoalCompletionObserverFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+
+pub trait GoalCompletionObserver: Send + Sync {
+    fn on_goal_completed<'a>(
+        &'a self,
+        goal: &'a codex_state::ThreadGoal,
+        completing_turn_id: Option<String>,
+    ) -> GoalCompletionObserverFuture<'a>;
+}
+
 impl GoalSetOutcome {
     pub fn thread_goal_updated_item(&self) -> RolloutItem {
         RolloutItem::EventMsg(EventMsg::ThreadGoalUpdated(ThreadGoalUpdatedEvent {
@@ -84,14 +101,38 @@ impl GoalSetOutcome {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct GoalService {
     runtimes: Mutex<HashMap<String, Weak<GoalRuntimeHandle>>>,
+    completion_observer: Mutex<Option<Arc<dyn GoalCompletionObserver>>>,
+}
+
+impl fmt::Debug for GoalService {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GoalService")
+            .field("runtimes", &self.runtimes)
+            .field(
+                "completion_observer",
+                &self
+                    .completion_observer
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .is_some(),
+            )
+            .finish()
+    }
 }
 
 impl GoalService {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_completion_observer(&self, observer: Arc<dyn GoalCompletionObserver>) {
+        *self
+            .completion_observer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(observer);
     }
 
     /// Restores persisted goal state into the registered runtime for `thread_id`.
@@ -281,6 +322,25 @@ impl GoalService {
 
         if objective.is_some() {
             fill_empty_thread_preview_if_possible(state_db, thread_id, &goal).await;
+        }
+        if goal.status == codex_state::ThreadGoalStatus::Complete {
+            let observer = self
+                .completion_observer
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if let Some(observer) = observer {
+                let completing_turn_id = runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.current_turn_id());
+                if let Err(err) = observer.on_goal_completed(&goal, completing_turn_id).await {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        %err,
+                        "failed to persist durable task completion at Goal transition"
+                    );
+                }
+            }
         }
         Ok(GoalSetOutcome {
             goal: protocol_goal_from_state(goal.clone()),

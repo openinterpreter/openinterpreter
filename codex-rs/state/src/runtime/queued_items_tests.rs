@@ -44,6 +44,247 @@ async fn competing_runtimes_preserve_fifo_queue_order() {
 }
 
 #[tokio::test]
+async fn admission_claim_is_unique_across_runtimes_and_survives_dispatch() {
+    let (runtime, thread_id) = runtime_with_thread().await;
+    let other = StateRuntime::init(runtime.sqlite().clone(), "test-provider".to_string())
+        .await
+        .unwrap();
+    let admission_id = "same-admission";
+    let (first, second) = tokio::join!(
+        runtime.thread_queue().enqueue_admission(
+            thread_id,
+            r#"{"first":true}"#,
+            admission_id,
+            r#"{"objective":"job","status":"active","updated_at":1}"#,
+            "queue",
+            None,
+        ),
+        other.thread_queue().enqueue_admission(
+            thread_id,
+            r#"{"second":true}"#,
+            admission_id,
+            r#"{"objective":"job","status":"active","updated_at":1}"#,
+            "queue",
+            None,
+        ),
+    );
+    assert_eq!(1, usize::from(first.is_ok()) + usize::from(second.is_ok()));
+
+    let receipt = runtime
+        .thread_queue()
+        .find_admission(thread_id, admission_id)
+        .await
+        .unwrap()
+        .expect("the unique admission must remain readable");
+    assert_eq!(admission_id, receipt.admission_id);
+    assert_eq!("pending", receipt.state);
+
+    // The dispatch claim is persisted before Core is called. Simulate a
+    // process crash in that exact window and reopen through the other runtime:
+    // the row is retained as recoverable evidence and is not visible to the
+    // pending dispatcher.
+    assert!(
+        runtime
+            .thread_queue()
+            .mark_admission_starting(thread_id, &receipt.id)
+            .await
+            .unwrap()
+    );
+    let starting = other
+        .thread_queue()
+        .find_admission(thread_id, admission_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!("starting", starting.state);
+    assert!(
+        runtime
+            .thread_queue()
+            .list_page(thread_id, 0, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let dispatched = runtime
+        .thread_queue()
+        .find_admission(thread_id, admission_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!("starting", dispatched.state);
+    assert!(
+        runtime
+            .thread_queue()
+            .mark_admission_started(thread_id, &receipt.id, "native-turn")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        Some("native-turn".to_string()),
+        runtime
+            .thread_queue()
+            .find_admission(thread_id, admission_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .dispatch_turn_id
+    );
+    assert!(
+        !runtime
+            .thread_queue()
+            .mark_admission_starting(thread_id, &receipt.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        runtime
+            .thread_queue()
+            .enqueue_admission(
+                thread_id,
+                r#"{"retry":true}"#,
+                admission_id,
+                r#"{"objective":"other","status":"active","updated_at":2}"#,
+                "queue",
+                None,
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn terminal_completion_proof_survives_reopen_and_cannot_be_borrowed_by_goal_b() {
+    let (runtime, thread_id) = runtime_with_thread().await;
+    let other = StateRuntime::init(runtime.sqlite().clone(), "test-provider".to_string())
+        .await
+        .unwrap();
+    let admission = runtime
+        .thread_queue()
+        .enqueue_admission(
+            thread_id,
+            r#"{"task":"A"}"#,
+            "task-a",
+            r#"{"goal_id":"goal-a","mission_revision":1,"lifecycle_revision":1,"objective":"mission A","status":"active"}"#,
+            "queue",
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        runtime
+            .thread_queue()
+            .mark_admission_starting(thread_id, &admission.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        runtime
+            .thread_queue()
+            .mark_admission_started(thread_id, &admission.id, "turn-a")
+            .await
+            .unwrap()
+    );
+
+    let completed = runtime
+        .thread_queue()
+        .mark_admission_completed(thread_id, "task-a", "turn-a", "goal-a", 1, 2, "mission A")
+        .await
+        .unwrap()
+        .expect("completion proof should be persisted");
+    assert_eq!(Some("completed".to_string()), completed.terminal_outcome);
+    assert_eq!(Some("turn-a".to_string()), completed.terminal_turn_id);
+    assert_eq!(Some("goal-a".to_string()), completed.terminal_goal_id);
+    assert_eq!(Some(1), completed.terminal_mission_revision);
+    assert_eq!(Some(2), completed.terminal_lifecycle_revision);
+
+    // A reconnect/restart reads the same row, and a later Goal B cannot
+    // overwrite the historical proof or make it look like B completed A.
+    let reopened = other
+        .thread_queue()
+        .find_admission(thread_id, "task-a")
+        .await
+        .unwrap()
+        .expect("terminal proof should survive another runtime");
+    assert_eq!(completed, reopened);
+    let second = other
+        .thread_queue()
+        .mark_admission_completed(thread_id, "task-a", "turn-b", "goal-b", 2, 1, "mission B")
+        .await
+        .unwrap()
+        .expect("existing proof should remain readable");
+    assert_eq!(Some("turn-a".to_string()), second.terminal_turn_id);
+    assert_eq!(Some("goal-a".to_string()), second.terminal_goal_id);
+    assert_eq!(Some(1), second.terminal_mission_revision);
+}
+
+#[tokio::test]
+async fn continuation_completion_retains_dispatch_and_completion_turn_lineage() {
+    let (runtime, thread_id) = runtime_with_thread().await;
+    let admission = runtime
+        .thread_queue()
+        .enqueue_admission(
+            thread_id,
+            r#"{"task":"A"}"#,
+            "task-continuation",
+            r#"{"goal_id":"goal-a","mission_revision":1,"objective":"mission A","status":"active"}"#,
+            "queue",
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        runtime
+            .thread_queue()
+            .mark_admission_starting(thread_id, &admission.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        runtime
+            .thread_queue()
+            .mark_admission_started(thread_id, &admission.id, "turn-a")
+            .await
+            .unwrap()
+    );
+
+    let completed = runtime
+        .thread_queue()
+        .mark_admission_completed_from_continuation(
+            thread_id,
+            "task-continuation",
+            "turn-a-continuation",
+            "goal-a",
+            1,
+            2,
+            "mission A",
+        )
+        .await
+        .unwrap()
+        .expect("continuation completion should be persisted");
+    assert_eq!(Some("turn-a".to_string()), completed.dispatch_turn_id);
+    assert_eq!(
+        Some("turn-a-continuation".to_string()),
+        completed.terminal_turn_id
+    );
+
+    let later_goal = runtime
+        .thread_queue()
+        .mark_admission_completed_from_continuation(
+            thread_id,
+            "task-continuation",
+            "turn-b-continuation",
+            "goal-b",
+            2,
+            1,
+            "mission B",
+        )
+        .await
+        .unwrap()
+        .expect("existing terminal row should remain readable");
+    assert_eq!(completed, later_goal);
+}
+
+#[tokio::test]
 async fn migrating_existing_queue_backfills_thread_revisions() {
     let home = unique_temp_dir();
     tokio::fs::create_dir_all(&home).await.unwrap();

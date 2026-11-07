@@ -11,6 +11,8 @@ mod spec;
 mod steering;
 mod tool;
 
+pub use api::GoalCompletionObserver;
+pub use api::GoalCompletionObserverFuture;
 pub use api::GoalObjectiveUpdate;
 pub use api::GoalService;
 pub use api::GoalServiceError;

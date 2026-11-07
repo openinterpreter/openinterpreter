@@ -27,6 +27,8 @@ use codex_extension_api::ToolPayload;
 use codex_extension_api::TurnErrorInput;
 use codex_extension_api::TurnStartInput;
 use codex_extension_api::TurnStopInput;
+use codex_goal_extension::GoalCompletionObserver;
+use codex_goal_extension::GoalCompletionObserverFuture;
 use codex_goal_extension::GoalExtensionConfig;
 use codex_goal_extension::GoalObjectiveUpdate;
 use codex_goal_extension::GoalRuntimeHandle;
@@ -1516,6 +1518,93 @@ async fn goal_service_sets_gets_and_clears_thread_goal() -> anyhow::Result<()> {
         api.get_thread_goal(runtime.as_ref(), thread_id).await?
     );
     assert!(!api.clear_thread_goal(runtime.as_ref(), thread_id).await?);
+    Ok(())
+}
+
+#[derive(Default)]
+struct CompletionObserverRecorder {
+    completions: Mutex<Vec<(String, String, Option<String>)>>,
+}
+
+impl GoalCompletionObserver for CompletionObserverRecorder {
+    fn on_goal_completed<'a>(
+        &'a self,
+        goal: &'a codex_state::ThreadGoal,
+        completing_turn_id: Option<String>,
+    ) -> GoalCompletionObserverFuture<'a> {
+        let completions = &self.completions;
+        let goal_id = goal.goal_id.clone();
+        let objective = goal.objective.clone();
+        Box::pin(async move {
+            completions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((goal_id, objective, completing_turn_id));
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn goal_completion_is_observed_before_replacement_goal_creation() -> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let harness = GoalExtensionHarness::new(runtime.clone(), thread_id).await?;
+    let observer = Arc::new(CompletionObserverRecorder::default());
+    harness
+        .goal_service
+        .set_completion_observer(observer.clone());
+    harness.start_turn("turn-a", &TokenUsage::default()).await;
+
+    let tools = harness.tools();
+    let create_tool = tool_by_name(&tools, "create_goal");
+    create_tool
+        .handle(tool_call(
+            "create_goal",
+            "create-a",
+            json!({ "objective": "mission A" }),
+        ))
+        .await?;
+    let update_tool = tool_by_name(&tools, "update_goal");
+    update_tool
+        .handle(tool_call(
+            "update_goal",
+            "complete-a",
+            json!({ "status": "complete" }),
+        ))
+        .await?;
+
+    // This replacement is intentionally made before the turn ends and before
+    // any receipt read. The observer must have already retained A's exact
+    // terminal identity and completing turn.
+    let replacement = create_tool
+        .handle(tool_call(
+            "create_goal",
+            "create-b",
+            json!({ "objective": "mission B" }),
+        ))
+        .await?;
+    assert_eq!(
+        json!("mission B"),
+        replacement.code_mode_result(&replacement.payload)["goal"]["objective"]
+    );
+
+    let completions = observer
+        .completions
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    assert_eq!(1, completions.len());
+    assert_eq!("mission A", completions[0].1);
+    assert_eq!(Some("turn-a".to_string()), completions[0].2);
+    let current = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .expect("replacement Goal should be current");
+    assert_eq!("mission B", current.objective);
+    assert_eq!(codex_state::ThreadGoalStatus::Active, current.status);
     Ok(())
 }
 

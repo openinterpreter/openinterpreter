@@ -857,7 +857,11 @@ impl Session {
             self.send_event(turn_context.as_ref(), event).await;
         }
         if cleared_active_turn {
-            self.emit_thread_idle_lifecycle_if_idle(idle_cause).await;
+            self.emit_thread_idle_lifecycle_if_idle_for_turn(
+                idle_cause,
+                Some(turn_context.sub_id.as_str()),
+            )
+            .await;
         }
         // Private reviewers already flushed the terminal event before delivering it.
         // Other buffering writers still need a barrier for the terminal event.

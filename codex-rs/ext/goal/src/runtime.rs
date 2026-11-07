@@ -139,6 +139,10 @@ impl GoalRuntimeHandle {
         Arc::clone(&self.inner.accounting_state)
     }
 
+    pub(crate) fn current_turn_id(&self) -> Option<String> {
+        self.inner.accounting_state.current_turn_id()
+    }
+
     pub(crate) fn root_accounting_state(&self) -> Option<Arc<GoalAccountingState>> {
         self.inner.root_accounting_state.clone()
     }

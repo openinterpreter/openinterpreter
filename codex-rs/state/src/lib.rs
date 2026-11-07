@@ -28,6 +28,7 @@ pub use model::Project;
 pub use model::ProjectRoot;
 pub use model::ProjectSortKey;
 pub use model::ProjectsPage;
+pub use model::QueuedAdmissionRecord;
 pub use model::QueuedUserSubmissionRecord;
 pub use model::RolloutMigrationCursor;
 pub use model::RolloutMigrationSkippedRollout;
