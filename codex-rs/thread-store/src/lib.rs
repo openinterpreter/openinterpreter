@@ -20,6 +20,7 @@ pub use codex_state::AddThreadAttachmentOutcome;
 pub use codex_state::MAX_QUEUE_ITEMS;
 pub use codex_state::MAX_THREAD_ATTACHMENT_PAYLOAD_BYTES;
 pub use codex_state::ProjectSortKey;
+pub use codex_state::QueuedAdmissionRecord;
 pub use codex_state::QueuedUserSubmissionRecord;
 pub use codex_state::RemoveThreadAttachmentOutcome;
 pub use codex_state::ThreadAttachment;

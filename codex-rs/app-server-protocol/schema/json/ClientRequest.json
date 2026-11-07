@@ -34,6 +34,49 @@
       ],
       "type": "string"
     },
+    "AgentInventoryScope": {
+      "oneOf": [
+        {
+          "description": "The caller and every persisted descendant in its agent tree.",
+          "enum": [
+            "tree"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Only direct persisted children of the caller.",
+          "enum": [
+            "children"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The caller and every persisted descendant in its subtree.",
+          "enum": [
+            "subtree"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "AgentInventoryVisibility": {
+      "oneOf": [
+        {
+          "description": "Include known persisted identities even when their runtime is unloaded.",
+          "enum": [
+            "known"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Include only identities with a currently loaded runtime.",
+          "enum": [
+            "loaded"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "AgentMessageInputContent": {
       "oneOf": [
         {
@@ -77,6 +120,36 @@
           "type": "object"
         }
       ]
+    },
+    "AgentTaskGoalBinding": {
+      "description": "The caller's fresh, full native-goal readback that authorizes one new substantive admission.  The server never fills this from an older goal and never resumes a paused, blocked, or complete goal as a side effect.",
+      "properties": {
+        "goalId": {
+          "type": "string"
+        },
+        "lifecycleRevision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "missionRevision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/ThreadGoalStatus"
+        }
+      },
+      "required": [
+        "goalId",
+        "lifecycleRevision",
+        "missionRevision",
+        "objective",
+        "status"
+      ],
+      "type": "object"
     },
     "ApprovalsReviewer": {
       "description": "Configures who approval requests are routed to for review. Examples include sandbox escapes, blocked network access, MCP approval prompts, and ARC escalations. Defaults to `user`. `auto_review` uses a carefully prompted subagent to gather relevant context and apply a risk-based decision framework before approving or denying the request. The legacy value `guardian_subagent` is accepted for compatibility.",

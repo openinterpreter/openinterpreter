@@ -867,6 +867,60 @@ pub struct ThreadGoalSetResponse {
     pub goal: ThreadGoal,
 }
 
+/// The content-free metadata for a file-backed managed Goal document.
+///
+/// `path` is relative to the Codex state home; callers must not receive the
+/// absolute state-home path.  The document bytes are addressed by the
+/// mission revision and digest so a consumer can fail closed on drift.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalDocument {
+    pub path: String,
+    pub sha256: String,
+    #[ts(type = "number")]
+    pub byte_length: i64,
+    #[ts(type = "number")]
+    pub mission_revision: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalDocumentSetParams {
+    pub thread_id: String,
+    pub document: String,
+    #[ts(optional = nullable)]
+    pub status: Option<ThreadGoalStatus>,
+    #[serde(default)]
+    #[ts(optional = nullable, type = "number | null")]
+    pub expected_mission_revision: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalDocumentSetResponse {
+    pub goal: ThreadGoal,
+    pub document: ThreadGoalDocument,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalDocumentGetParams {
+    pub thread_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalDocumentGetResponse {
+    pub goal: Option<ThreadGoal>,
+    pub document: Option<ThreadGoalDocument>,
+    pub content: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]

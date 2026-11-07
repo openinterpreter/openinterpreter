@@ -289,7 +289,7 @@ impl ThreadQueueRequestProcessor {
     }
 }
 
-fn ensure_direct_input_allowed(
+pub(super) fn ensure_direct_input_allowed(
     loaded_thread: Option<&CodexThread>,
     source: &SessionSource,
 ) -> Result<(), JSONRPCErrorError> {
@@ -308,7 +308,7 @@ fn ensure_direct_input_allowed(
     }
 }
 
-fn submission_into_turn_input(
+pub(super) fn submission_into_turn_input(
     input: Vec<UserInput>,
     client_user_message_id: Option<String>,
 ) -> TurnInput {

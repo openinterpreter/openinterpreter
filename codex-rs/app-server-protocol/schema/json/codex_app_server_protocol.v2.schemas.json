@@ -322,6 +322,122 @@
       },
       "type": "object"
     },
+    "AgentGoalAvailability": {
+      "enum": [
+        "available",
+        "unavailable",
+        "notfound"
+      ],
+      "type": "string"
+    },
+    "AgentGoalUnavailableReason": {
+      "enum": [
+        "goals_disabled",
+        "state_unavailable",
+        "ephemeral_thread",
+        "caller_not_owner"
+      ],
+      "type": "string"
+    },
+    "AgentInventoryAvailability": {
+      "enum": [
+        "available",
+        "unavailable",
+        "notfound"
+      ],
+      "type": "string"
+    },
+    "AgentInventoryEntry": {
+      "properties": {
+        "agentId": {
+          "type": "string"
+        },
+        "agentNickname": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agentPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agentRole": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parentThreadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "residency": {
+          "$ref": "#/definitions/AgentRuntimeResidency"
+        },
+        "status": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentRuntimeStatus"
+            }
+          ],
+          "description": "Runtime status is intentionally content-free.  Completed/errored text is never included in this inventory."
+        }
+      },
+      "required": [
+        "agentId",
+        "residency",
+        "status"
+      ],
+      "type": "object"
+    },
+    "AgentInventoryScope": {
+      "oneOf": [
+        {
+          "description": "The caller and every persisted descendant in its agent tree.",
+          "enum": [
+            "tree"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Only direct persisted children of the caller.",
+          "enum": [
+            "children"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The caller and every persisted descendant in its subtree.",
+          "enum": [
+            "subtree"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "AgentInventoryVisibility": {
+      "oneOf": [
+        {
+          "description": "Include known persisted identities even when their runtime is unloaded.",
+          "enum": [
+            "known"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Include only identities with a currently loaded runtime.",
+          "enum": [
+            "loaded"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "AgentMessageDelivery": {
       "enum": [
         "async"
@@ -398,6 +514,123 @@
       ]
     },
     "AgentPath": {
+      "type": "string"
+    },
+    "AgentRuntimeResidency": {
+      "enum": [
+        "loaded",
+        "known"
+      ],
+      "type": "string"
+    },
+    "AgentRuntimeStatus": {
+      "enum": [
+        "pending_init",
+        "running",
+        "interrupted",
+        "completed",
+        "errored",
+        "shutdown",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "AgentSessionAvailability": {
+      "enum": [
+        "available",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "AgentSessionPhase": {
+      "enum": [
+        "running",
+        "exited",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "AgentTaskAdmissionState": {
+      "enum": [
+        "never_seen",
+        "queued",
+        "dispatched",
+        "blocked",
+        "unknown",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "AgentTaskBlocker": {
+      "enum": [
+        "goal_unavailable",
+        "goal_not_found",
+        "goal_not_active",
+        "goal_changed",
+        "thread_unavailable",
+        "queue_unavailable"
+      ],
+      "type": "string"
+    },
+    "AgentTaskGoalBinding": {
+      "description": "The caller's fresh, full native-goal readback that authorizes one new substantive admission.  The server never fills this from an older goal and never resumes a paused, blocked, or complete goal as a side effect.",
+      "properties": {
+        "goalId": {
+          "type": "string"
+        },
+        "lifecycleRevision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "missionRevision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/ThreadGoalStatus"
+        }
+      },
+      "required": [
+        "goalId",
+        "lifecycleRevision",
+        "missionRevision",
+        "objective",
+        "status"
+      ],
+      "type": "object"
+    },
+    "AgentTaskObservation": {
+      "enum": [
+        "durable",
+        "queue",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "AgentTaskOutcome": {
+      "enum": [
+        "queued",
+        "accepted",
+        "running",
+        "completed",
+        "failed",
+        "unknown",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "AgentTaskTurnState": {
+      "enum": [
+        "not_started",
+        "running",
+        "completed",
+        "failed",
+        "interrupted",
+        "unknown"
+      ],
       "type": "string"
     },
     "AllowDenyRequirement": {
@@ -19121,6 +19354,14 @@
       ],
       "title": "ThreadAttachmentUpdatedNotification",
       "type": "object"
+    },
+    "ThreadBackgroundTerminalStatusPhase": {
+      "enum": [
+        "running",
+        "exited",
+        "unknown"
+      ],
+      "type": "string"
     },
     "ThreadClosedNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
