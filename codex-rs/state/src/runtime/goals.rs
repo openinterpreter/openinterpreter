@@ -67,6 +67,188 @@ WHERE thread_id = ?
         row.map(|row| thread_goal_from_row(&row)).transpose()
     }
 
+    pub async fn get_thread_goal_document(
+        &self,
+        thread_id: ThreadId,
+    ) -> anyhow::Result<Option<crate::ThreadGoalDocument>> {
+        let row = sqlx::query(
+            r#"
+SELECT thread_id, mission_revision, path, sha256, byte_length, updated_at_ms
+FROM thread_goal_documents
+WHERE thread_id = ?
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .fetch_optional(self.pool.as_ref())
+        .await?;
+
+        row.map(|row| {
+            Ok(crate::ThreadGoalDocument {
+                thread_id: ThreadId::try_from(row.try_get::<String, _>("thread_id")?)?,
+                mission_revision: row.try_get("mission_revision")?,
+                path: row.try_get("path")?,
+                sha256: row.try_get("sha256")?,
+                byte_length: row.try_get("byte_length")?,
+                updated_at: epoch_millis_to_datetime(row.try_get("updated_at_ms")?)?,
+            })
+        })
+        .transpose()
+    }
+
+    pub async fn clear_thread_goal_document(&self, thread_id: ThreadId) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM thread_goal_documents WHERE thread_id = ?")
+            .bind(thread_id.to_string())
+            .execute(self.pool.as_ref())
+            .await?;
+        Ok(())
+    }
+
+    pub async fn insert_thread_goal_document(
+        &self,
+        thread_id: ThreadId,
+        objective: &str,
+        status: crate::ThreadGoalStatus,
+        token_budget: Option<i64>,
+        path: &str,
+        sha256: &str,
+        byte_length: i64,
+        mission_revision: i64,
+    ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+        let mut transaction = self.pool.begin().await?;
+        let goal_id = Uuid::new_v4().to_string();
+        let now_ms = datetime_to_epoch_millis(Utc::now());
+        let status = status_after_budget_limit(status, /*tokens_used*/ 0, token_budget);
+        let row = sqlx::query(
+            r#"
+INSERT INTO thread_goals (
+    thread_id, goal_id, objective, status, token_budget, tokens_used,
+    time_used_seconds, mission_revision, lifecycle_revision, created_at_ms, updated_at_ms
+) VALUES (?, ?, ?, ?, ?, 0, 0, ?, 1, ?, ?)
+ON CONFLICT(thread_id) DO UPDATE SET
+    goal_id = excluded.goal_id,
+    objective = excluded.objective,
+    status = excluded.status,
+    token_budget = excluded.token_budget,
+    tokens_used = 0,
+    time_used_seconds = 0,
+    mission_revision = excluded.mission_revision,
+    lifecycle_revision = 1,
+    created_at_ms = excluded.created_at_ms,
+    updated_at_ms = excluded.updated_at_ms
+WHERE thread_goals.status = 'complete'
+RETURNING
+    thread_id, goal_id, objective, status, token_budget, tokens_used,
+    time_used_seconds, mission_revision, lifecycle_revision, created_at_ms, updated_at_ms
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .bind(goal_id)
+        .bind(objective)
+        .bind(status.as_str())
+        .bind(token_budget)
+        .bind(mission_revision)
+        .bind(now_ms)
+        .bind(now_ms)
+        .fetch_optional(&mut *transaction)
+        .await?;
+
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        sqlx::query(
+            r#"
+INSERT INTO thread_goal_documents (
+    thread_id, mission_revision, path, sha256, byte_length, updated_at_ms
+) VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(thread_id) DO UPDATE SET
+    mission_revision = excluded.mission_revision,
+    path = excluded.path,
+    sha256 = excluded.sha256,
+    byte_length = excluded.byte_length,
+    updated_at_ms = excluded.updated_at_ms
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .bind(mission_revision)
+        .bind(path)
+        .bind(sha256)
+        .bind(byte_length)
+        .bind(now_ms)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        thread_goal_from_row(&row).map(Some)
+    }
+
+    pub async fn update_thread_goal_document(
+        &self,
+        thread_id: ThreadId,
+        objective: &str,
+        status: Option<crate::ThreadGoalStatus>,
+        expected_goal_id: &str,
+        expected_mission_revision: i64,
+        path: &str,
+        sha256: &str,
+        byte_length: i64,
+    ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+        let mut transaction = self.pool.begin().await?;
+        let now_ms = datetime_to_epoch_millis(Utc::now());
+        let row = sqlx::query(
+            r#"
+UPDATE thread_goals
+SET objective = ?,
+    status = COALESCE(?, status),
+    mission_revision = mission_revision + 1,
+    lifecycle_revision = lifecycle_revision + 1,
+    updated_at_ms = ?
+WHERE thread_id = ?
+  AND goal_id = ?
+  AND mission_revision = ?
+RETURNING
+    thread_id, goal_id, objective, status, token_budget, tokens_used,
+    time_used_seconds, mission_revision, lifecycle_revision, created_at_ms, updated_at_ms
+            "#,
+        )
+        .bind(objective)
+        .bind(status.map(crate::ThreadGoalStatus::as_str))
+        .bind(now_ms)
+        .bind(thread_id.to_string())
+        .bind(expected_goal_id)
+        .bind(expected_mission_revision)
+        .fetch_optional(&mut *transaction)
+        .await?;
+
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let mission_revision: i64 = row.try_get("mission_revision")?;
+        sqlx::query(
+            r#"
+INSERT INTO thread_goal_documents (
+    thread_id, mission_revision, path, sha256, byte_length, updated_at_ms
+) VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(thread_id) DO UPDATE SET
+    mission_revision = excluded.mission_revision,
+    path = excluded.path,
+    sha256 = excluded.sha256,
+    byte_length = excluded.byte_length,
+    updated_at_ms = excluded.updated_at_ms
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .bind(mission_revision)
+        .bind(path)
+        .bind(sha256)
+        .bind(byte_length)
+        .bind(now_ms)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        thread_goal_from_row(&row).map(Some)
+    }
+
     pub async fn replace_thread_goal_snapshot(
         &self,
         goal: &crate::ThreadGoal,
@@ -503,6 +685,7 @@ WHERE thread_id = ?
         &self,
         thread_id: ThreadId,
     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+        let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
             r#"
 DELETE FROM thread_goals
@@ -522,8 +705,16 @@ RETURNING
             "#,
         )
         .bind(thread_id.to_string())
-        .fetch_optional(self.pool.as_ref())
+        .fetch_optional(&mut *transaction)
         .await?;
+
+        if row.is_some() {
+            sqlx::query("DELETE FROM thread_goal_documents WHERE thread_id = ?")
+                .bind(thread_id.to_string())
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await?;
 
         row.map(|row| thread_goal_from_row(&row)).transpose()
     }

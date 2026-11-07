@@ -649,10 +649,22 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadGoalSetResponse,
     },
+    #[experimental("thread/goal/document/set")]
+    ThreadGoalDocumentSet => "thread/goal/document/set" {
+        params: v2::ThreadGoalDocumentSetParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadGoalDocumentSetResponse,
+    },
     ThreadGoalGet => "thread/goal/get" {
         params: v2::ThreadGoalGetParams,
         serialization: thread_id(params.thread_id),
         response: v2::ThreadGoalGetResponse,
+    },
+    #[experimental("thread/goal/document/get")]
+    ThreadGoalDocumentGet => "thread/goal/document/get" {
+        params: v2::ThreadGoalDocumentGetParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadGoalDocumentGetResponse,
     },
     ThreadGoalClear => "thread/goal/clear" {
         params: v2::ThreadGoalClearParams,

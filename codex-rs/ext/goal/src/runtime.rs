@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
@@ -11,6 +12,9 @@ use codex_core::TurnStartOptions;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ThreadGoal;
+use sha2::Digest;
+use sha2::Sha256;
+use tokio::fs;
 
 use crate::accounting::BudgetLimitedGoalDisposition;
 use crate::accounting::GoalAccountingState;
@@ -23,6 +27,8 @@ use crate::steering::objective_updated_steering_item;
 use crate::tool::protocol_goal_from_state;
 use tokio::sync::Semaphore;
 use tokio::sync::SemaphorePermit;
+
+const MANAGED_GOAL_POINTER_PREFIX: &str = "managed Goal document: ";
 
 #[derive(Clone)]
 pub struct GoalRuntimeHandle {
@@ -239,8 +245,19 @@ impl GoalRuntimeHandle {
                         .mark_idle_goal_active(goal.goal_id.clone());
                 }
                 if objective_changed {
-                    let item = objective_updated_steering_item(&protocol_goal_from_state(goal));
-                    self.inject_active_turn_steering(item).await;
+                    match self.goal_for_prompt(&goal).await {
+                        Ok(goal) => {
+                            let item = objective_updated_steering_item(&goal);
+                            self.inject_active_turn_steering(item).await;
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                thread_id = %self.inner.thread_id,
+                                %err,
+                                "skipping managed Goal objective steering"
+                            );
+                        }
+                    }
                 }
                 self.continue_if_idle().await?;
             }
@@ -416,6 +433,7 @@ impl GoalRuntimeHandle {
             .map_err(|err| err.to_string())?;
         match goal {
             Some(goal) if goal.status == codex_state::ThreadGoalStatus::Active => {
+                self.goal_for_prompt(&goal).await?;
                 self.inner
                     .accounting_state
                     .mark_idle_goal_active(goal.goal_id);
@@ -475,10 +493,9 @@ impl GoalRuntimeHandle {
             .get::<TurnStartOptions>()
             .map(|options| options.as_ref().clone())
             .unwrap_or_default();
-        let item = continuation_steering_item(
-            &protocol_goal_from_state(goal),
-            thread.config().await.update_plan_enabled,
-        );
+        let prompt_goal = self.goal_for_prompt(&goal).await?;
+        let item =
+            continuation_steering_item(&prompt_goal, thread.config().await.update_plan_enabled);
 
         match thread
             .start_turn_if_idle(
@@ -538,6 +555,69 @@ impl GoalRuntimeHandle {
         if thread.inject_if_running(vec![item]).await.is_err() {
             tracing::debug!("skipping goal steering because no turn is active");
         }
+    }
+
+    /// Validates a managed document without mutating the turn.  A Goal created
+    /// through the legacy text API has no managed-document row and remains
+    /// governed by its existing objective; once a managed row exists, any
+    /// missing, drifted, or unverifiable bytes are a typed admission failure.
+    pub(crate) async fn validate_managed_goal_document_for_turn(&self) -> Result<(), String> {
+        let Ok(Some(goal)) = self
+            .inner
+            .state_dbs
+            .thread_goals()
+            .get_thread_goal(self.thread_id())
+            .await
+        else {
+            return Ok(());
+        };
+        if goal.status != codex_state::ThreadGoalStatus::Active {
+            return Ok(());
+        }
+        let Ok(Some(_)) = self
+            .inner
+            .state_dbs
+            .thread_goals()
+            .get_thread_goal_document(self.thread_id())
+            .await
+        else {
+            if goal.objective.starts_with(MANAGED_GOAL_POINTER_PREFIX) {
+                return Err("managed Goal document metadata is missing".to_string());
+            }
+            return Ok(());
+        };
+        self.goal_for_prompt(&goal).await.map(|_| ())
+    }
+
+    pub(crate) async fn inject_managed_goal_document_for_active_turn(&self) -> Result<(), String> {
+        let Ok(Some(goal)) = self
+            .inner
+            .state_dbs
+            .thread_goals()
+            .get_thread_goal(self.thread_id())
+            .await
+        else {
+            return Ok(());
+        };
+        if goal.status != codex_state::ThreadGoalStatus::Active {
+            return Ok(());
+        }
+        let Ok(Some(_)) = self
+            .inner
+            .state_dbs
+            .thread_goals()
+            .get_thread_goal_document(self.thread_id())
+            .await
+        else {
+            if goal.objective.starts_with(MANAGED_GOAL_POINTER_PREFIX) {
+                return Err("managed Goal document metadata is missing".to_string());
+            }
+            return Ok(());
+        };
+        let goal = self.goal_for_prompt(&goal).await?;
+        self.inject_active_turn_steering(objective_updated_steering_item(&goal))
+            .await;
+        Ok(())
     }
 
     pub(crate) async fn account_active_goal_progress(
@@ -683,5 +763,49 @@ impl GoalRuntimeHandle {
                 .is_none_or(|expected_goal_id| goal.goal_id == expected_goal_id)
                 .then_some(goal.status)
         }))
+    }
+
+    async fn goal_for_prompt(&self, goal: &codex_state::ThreadGoal) -> Result<ThreadGoal, String> {
+        let Some(document) = self
+            .inner
+            .state_dbs
+            .thread_goals()
+            .get_thread_goal_document(self.thread_id())
+            .await
+            .map_err(|err| err.to_string())?
+        else {
+            if goal.objective.starts_with(MANAGED_GOAL_POINTER_PREFIX) {
+                return Err("managed Goal document metadata is missing".to_string());
+            }
+            return Ok(protocol_goal_from_state(goal.clone()));
+        };
+        if document.mission_revision != goal.mission_revision {
+            return Err(
+                "managed Goal document mission revision does not match the current Goal"
+                    .to_string(),
+            );
+        }
+        let relative_path = Path::new(document.path.as_str());
+        if relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err("managed Goal document path is outside the state directory".to_string());
+        }
+        let path = self.inner.state_dbs.sqlite().home().join(relative_path);
+        let bytes = fs::read(path)
+            .await
+            .map_err(|err| format!("managed Goal document read failed: {err}"))?;
+        if bytes.len() as i64 != document.byte_length
+            || format!("{:x}", Sha256::digest(&bytes)) != document.sha256
+        {
+            return Err("managed Goal document digest or byte length mismatch".to_string());
+        }
+        let objective = String::from_utf8(bytes)
+            .map_err(|_| "managed Goal document is not valid UTF-8".to_string())?;
+        let mut prompt_goal = protocol_goal_from_state(goal.clone());
+        prompt_goal.objective = objective;
+        Ok(prompt_goal)
     }
 }

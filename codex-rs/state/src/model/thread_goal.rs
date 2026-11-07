@@ -76,6 +76,19 @@ pub struct ThreadGoal {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Metadata for the file-backed mission document associated with the current
+/// managed Goal. The path is relative to the StateRuntime home so callers
+/// cannot redirect the runtime to an arbitrary filesystem location.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ThreadGoalDocument {
+    pub thread_id: ThreadId,
+    pub mission_revision: i64,
+    pub path: String,
+    pub sha256: String,
+    pub byte_length: i64,
+    pub updated_at: DateTime<Utc>,
+}
+
 pub(crate) struct ThreadGoalRow {
     pub thread_id: String,
     pub goal_id: String,

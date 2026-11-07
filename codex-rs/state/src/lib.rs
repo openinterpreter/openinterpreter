@@ -61,6 +61,7 @@ pub use model::Stage1StartupClaimParams;
 pub use model::ThreadAttachment;
 pub use model::ThreadAttachmentPage;
 pub use model::ThreadGoal;
+pub use model::ThreadGoalDocument;
 pub use model::ThreadGoalStatus;
 pub use model::ThreadMetadata;
 pub use model::ThreadMetadataBuilder;

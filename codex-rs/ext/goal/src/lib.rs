@@ -13,12 +13,15 @@ mod tool;
 
 pub use api::GoalCompletionObserver;
 pub use api::GoalCompletionObserverFuture;
+pub use api::GoalDocumentSetOutcome;
+pub use api::GoalDocumentSetRequest;
 pub use api::GoalObjectiveUpdate;
 pub use api::GoalService;
 pub use api::GoalServiceError;
 pub use api::GoalSetOutcome;
 pub use api::GoalSetRequest;
 pub use api::GoalTokenBudgetUpdate;
+pub use api::MAX_MANAGED_GOAL_DOCUMENT_BYTES;
 pub use extension::GoalExtension;
 pub use extension::GoalExtensionConfig;
 pub use extension::install_with_backend;

@@ -18,6 +18,7 @@ use crate::accounting::BudgetLimitedGoalDisposition;
 use crate::accounting::GoalAccountingState;
 use crate::analytics::GoalAnalytics;
 use crate::analytics::GoalEventAttribution;
+use crate::api::GoalService;
 use crate::events::GoalEventEmitter;
 use crate::metrics::GoalMetrics;
 use crate::spec::CREATE_GOAL_TOOL_NAME;
@@ -33,6 +34,7 @@ pub(crate) struct GoalToolExecutor {
     kind: GoalToolKind,
     thread_id: ThreadId,
     state_db: Arc<codex_state::StateRuntime>,
+    goal_service: Arc<GoalService>,
     accounting_state: Arc<GoalAccountingState>,
     analytics: GoalAnalytics,
     event_emitter: GoalEventEmitter,
@@ -78,6 +80,7 @@ impl GoalToolExecutor {
     pub(crate) fn get(
         thread_id: ThreadId,
         state_db: Arc<codex_state::StateRuntime>,
+        goal_service: Arc<GoalService>,
         accounting_state: Arc<GoalAccountingState>,
         analytics: GoalAnalytics,
         event_emitter: GoalEventEmitter,
@@ -88,6 +91,7 @@ impl GoalToolExecutor {
             execution_allowed: true,
             thread_id,
             state_db,
+            goal_service,
             accounting_state,
             analytics,
             event_emitter,
@@ -99,6 +103,7 @@ impl GoalToolExecutor {
     pub(crate) fn create(
         thread_id: ThreadId,
         state_db: Arc<codex_state::StateRuntime>,
+        goal_service: Arc<GoalService>,
         accounting_state: Arc<GoalAccountingState>,
         analytics: GoalAnalytics,
         event_emitter: GoalEventEmitter,
@@ -110,6 +115,7 @@ impl GoalToolExecutor {
             execution_allowed: true,
             thread_id,
             state_db,
+            goal_service,
             accounting_state,
             analytics,
             event_emitter,
@@ -121,6 +127,7 @@ impl GoalToolExecutor {
     pub(crate) fn update(
         thread_id: ThreadId,
         state_db: Arc<codex_state::StateRuntime>,
+        goal_service: Arc<GoalService>,
         accounting_state: Arc<GoalAccountingState>,
         analytics: GoalAnalytics,
         event_emitter: GoalEventEmitter,
@@ -131,6 +138,7 @@ impl GoalToolExecutor {
             execution_allowed: true,
             thread_id,
             state_db,
+            goal_service,
             accounting_state,
             analytics,
             event_emitter,
@@ -293,6 +301,7 @@ impl GoalToolExecutor {
                     "cannot update goal because this thread has no goal".to_string(),
                 )
             })?;
+        self.goal_service.observe_goal_completion(&goal).await;
         self.metrics
             .record_terminal_if_status_changed(previous_status, &goal);
         self.analytics.status_changed(

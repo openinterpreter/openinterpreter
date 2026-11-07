@@ -1362,8 +1362,18 @@ impl MessageProcessor {
                     .thread_goal_set(request_id.clone(), params)
                     .await
             }
+            ClientRequest::ThreadGoalDocumentSet { params, .. } => {
+                self.thread_goal_processor
+                    .thread_goal_document_set(request_id.clone(), params)
+                    .await
+            }
             ClientRequest::ThreadGoalGet { params, .. } => {
                 self.thread_goal_processor.thread_goal_get(params).await
+            }
+            ClientRequest::ThreadGoalDocumentGet { params, .. } => {
+                self.thread_goal_processor
+                    .thread_goal_document_get(params)
+                    .await
             }
             ClientRequest::ThreadGoalClear { params, .. } => {
                 self.thread_goal_processor

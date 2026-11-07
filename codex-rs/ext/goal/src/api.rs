@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
+use std::path::Path;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -14,6 +16,10 @@ use codex_protocol::protocol::ThreadGoalStatus;
 use codex_protocol::protocol::ThreadGoalUpdatedEvent;
 use codex_protocol::protocol::validate_thread_goal_objective;
 use codex_rollout::RolloutItem;
+use sha2::Digest;
+use sha2::Sha256;
+use tokio::fs;
+use tokio::io::AsyncWriteExt;
 
 use crate::runtime::GoalRuntimeHandle;
 use crate::runtime::PreviousGoalSnapshot;
@@ -57,6 +63,39 @@ pub struct GoalSetRequest<'a> {
     pub status: Option<ThreadGoalStatus>,
     pub token_budget: GoalTokenBudgetUpdate,
     pub max_goal_token_budget: Option<i64>,
+}
+
+pub const MAX_MANAGED_GOAL_DOCUMENT_BYTES: usize = 1024 * 1024;
+const MANAGED_GOAL_DOCUMENT_DIRECTORY: &str = "managed-goals";
+
+pub struct GoalDocumentSetRequest<'a> {
+    pub thread_id: ThreadId,
+    pub document: &'a str,
+    pub status: Option<ThreadGoalStatus>,
+    pub expected_mission_revision: Option<i64>,
+}
+
+pub struct GoalDocumentSetOutcome {
+    goal: GoalSetOutcome,
+    document: codex_state::ThreadGoalDocument,
+}
+
+impl GoalDocumentSetOutcome {
+    pub fn goal(&self) -> ThreadGoal {
+        self.goal.goal.clone()
+    }
+
+    pub fn document(&self) -> codex_state::ThreadGoalDocument {
+        self.document.clone()
+    }
+
+    pub fn thread_goal_updated_item(&self) -> RolloutItem {
+        self.goal.thread_goal_updated_item()
+    }
+
+    pub async fn apply_runtime_effects(&self, goal_service: &GoalService) {
+        self.goal.apply_runtime_effects(goal_service).await;
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -241,6 +280,22 @@ impl GoalService {
                     GoalServiceError::Internal(format!("failed to read thread goal: {err}"))
                 })?;
             if let Some(existing_goal) = existing_goal.as_ref() {
+                if state_db
+                    .thread_goals()
+                    .get_thread_goal_document(thread_id)
+                    .await
+                    .map_err(|err| {
+                        GoalServiceError::Internal(format!(
+                            "failed to read managed Goal document metadata: {err}"
+                        ))
+                    })?
+                    .is_some()
+                {
+                    return Err(GoalServiceError::InvalidRequest(
+                        "managed Goal objectives must be edited with thread/goal/document/set"
+                            .to_string(),
+                    ));
+                }
                 let previous_goal = PreviousGoalSnapshot::from(existing_goal);
                 state_db
                     .thread_goals()
@@ -323,30 +378,249 @@ impl GoalService {
         if objective.is_some() {
             fill_empty_thread_preview_if_possible(state_db, thread_id, &goal).await;
         }
-        if goal.status == codex_state::ThreadGoalStatus::Complete {
-            let observer = self
-                .completion_observer
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
-            if let Some(observer) = observer {
-                let completing_turn_id = runtime
-                    .as_ref()
-                    .and_then(|runtime| runtime.current_turn_id());
-                if let Err(err) = observer.on_goal_completed(&goal, completing_turn_id).await {
-                    tracing::warn!(
-                        thread_id = %thread_id,
-                        %err,
-                        "failed to persist durable task completion at Goal transition"
-                    );
-                }
-            }
-        }
+        self.observe_goal_completion(&goal).await;
         Ok(GoalSetOutcome {
             goal: protocol_goal_from_state(goal.clone()),
             state_goal: goal,
             previous_goal,
         })
+    }
+
+    /// Atomically installs a file-backed mission document and its concise
+    /// native Goal pointer. The document is written and synced first; the
+    /// SQLite Goal pointer plus its digest metadata are then committed with a
+    /// mission-revision CAS. A failed CAS leaves the prior Goal and document
+    /// untouched and never creates a second active mission.
+    pub async fn set_thread_goal_document(
+        &self,
+        state_db: &codex_state::StateRuntime,
+        request: GoalDocumentSetRequest<'_>,
+    ) -> Result<GoalDocumentSetOutcome, GoalServiceError> {
+        if request.document.is_empty() {
+            return Err(GoalServiceError::InvalidRequest(
+                "managed Goal document must not be empty".to_string(),
+            ));
+        }
+        if request.document.len() > MAX_MANAGED_GOAL_DOCUMENT_BYTES {
+            return Err(GoalServiceError::InvalidRequest(format!(
+                "managed Goal document must be at most {MAX_MANAGED_GOAL_DOCUMENT_BYTES} bytes"
+            )));
+        }
+
+        let thread_id = request.thread_id;
+        let runtime = self.runtime_for_thread(thread_id);
+        let _goal_state_permit = match runtime.as_ref() {
+            Some(runtime) => Some(
+                runtime
+                    .goal_state_permit()
+                    .await
+                    .map_err(GoalServiceError::Internal)?,
+            ),
+            None => None,
+        };
+
+        let existing_goal = state_db
+            .thread_goals()
+            .get_thread_goal(thread_id)
+            .await
+            .map_err(|err| {
+                GoalServiceError::Internal(format!("failed to read thread goal: {err}"))
+            })?;
+        if let Some(expected) = request.expected_mission_revision
+            && existing_goal.as_ref().map(|goal| goal.mission_revision) != Some(expected)
+        {
+            return Err(GoalServiceError::InvalidRequest(format!(
+                "managed Goal mission revision changed; expected {expected}"
+            )));
+        }
+
+        let mission_revision = existing_goal
+            .as_ref()
+            .map_or(1, |goal| goal.mission_revision + 1);
+        let digest = format!("{:x}", Sha256::digest(request.document.as_bytes()));
+        let relative_path = PathBuf::from(MANAGED_GOAL_DOCUMENT_DIRECTORY)
+            .join(thread_id.to_string())
+            .join(format!("mission-{mission_revision}-{digest}.md"));
+        let absolute_path = state_db.sqlite().home().join(&relative_path);
+        let created_file = write_managed_goal_document(&absolute_path, request.document.as_bytes())
+            .await
+            .map_err(|err| {
+                GoalServiceError::Internal(format!("failed to write Goal document: {err}"))
+            })?;
+        let pointer = format!(
+            "managed Goal document: {} (sha256={digest}, bytes={}, mission_revision={mission_revision})",
+            relative_path.display(),
+            request.document.len()
+        );
+
+        let status = request
+            .status
+            .unwrap_or(codex_protocol::protocol::ThreadGoalStatus::Active);
+        let result = if let Some(existing_goal) = existing_goal.as_ref() {
+            state_db
+                .thread_goals()
+                .update_thread_goal_document(
+                    thread_id,
+                    &pointer,
+                    Some(state_goal_status(status)),
+                    &existing_goal.goal_id,
+                    existing_goal.mission_revision,
+                    &relative_path.to_string_lossy(),
+                    &digest,
+                    request.document.len() as i64,
+                )
+                .await
+        } else {
+            state_db
+                .thread_goals()
+                .insert_thread_goal_document(
+                    thread_id,
+                    &pointer,
+                    state_goal_status(status),
+                    None,
+                    &relative_path.to_string_lossy(),
+                    &digest,
+                    request.document.len() as i64,
+                    mission_revision,
+                )
+                .await
+        };
+        let goal = match result {
+            Ok(Some(goal)) => goal,
+            Ok(None) => {
+                if created_file {
+                    let _ = fs::remove_file(&absolute_path).await;
+                }
+                return Err(GoalServiceError::InvalidRequest(
+                    "managed Goal changed during document update; retry from a fresh read"
+                        .to_string(),
+                ));
+            }
+            Err(err) => {
+                if created_file {
+                    let _ = fs::remove_file(&absolute_path).await;
+                }
+                return Err(GoalServiceError::Internal(format!(
+                    "failed to commit Goal document pointer: {err}"
+                )));
+            }
+        };
+
+        if let Some(runtime) = runtime.as_ref() {
+            runtime.clear_pending_turn_start_options().await;
+        }
+        fill_empty_thread_preview_if_possible(state_db, thread_id, &goal).await;
+        self.observe_goal_completion(&goal).await;
+        let document = state_db
+            .thread_goals()
+            .get_thread_goal_document(thread_id)
+            .await
+            .map_err(|err| {
+                GoalServiceError::Internal(format!("failed to read committed Goal document: {err}"))
+            })?
+            .ok_or_else(|| {
+                GoalServiceError::Internal(
+                    "committed Goal document metadata is missing".to_string(),
+                )
+            })?;
+        Ok(GoalDocumentSetOutcome {
+            goal: GoalSetOutcome {
+                goal: protocol_goal_from_state(goal.clone()),
+                state_goal: goal,
+                previous_goal: existing_goal.as_ref().map(PreviousGoalSnapshot::from),
+            },
+            document,
+        })
+    }
+
+    pub async fn read_thread_goal_document(
+        &self,
+        state_db: &codex_state::StateRuntime,
+        thread_id: ThreadId,
+    ) -> Result<
+        Option<(
+            codex_state::ThreadGoal,
+            codex_state::ThreadGoalDocument,
+            String,
+        )>,
+        GoalServiceError,
+    > {
+        let Some(goal) = state_db
+            .thread_goals()
+            .get_thread_goal(thread_id)
+            .await
+            .map_err(|err| {
+                GoalServiceError::Internal(format!("failed to read thread goal: {err}"))
+            })?
+        else {
+            return Ok(None);
+        };
+        let Some(document) = state_db
+            .thread_goals()
+            .get_thread_goal_document(thread_id)
+            .await
+            .map_err(|err| {
+                GoalServiceError::Internal(format!("failed to read Goal document metadata: {err}"))
+            })?
+        else {
+            return Ok(None);
+        };
+        if document.mission_revision != goal.mission_revision {
+            return Err(GoalServiceError::Internal(
+                "Goal document mission revision does not match the current Goal".to_string(),
+            ));
+        }
+        let relative_path = Path::new(document.path.as_str());
+        if relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(GoalServiceError::Internal(
+                "Goal document path is outside the managed state directory".to_string(),
+            ));
+        }
+        let path = state_db.sqlite().home().join(relative_path);
+        let bytes = fs::read(&path).await.map_err(|err| {
+            GoalServiceError::Internal(format!("failed to read Goal document: {err}"))
+        })?;
+        if bytes.len() as i64 != document.byte_length
+            || format!("{:x}", Sha256::digest(&bytes)) != document.sha256
+        {
+            return Err(GoalServiceError::Internal(
+                "Goal document digest or byte length does not match durable metadata".to_string(),
+            ));
+        }
+        let content = String::from_utf8(bytes).map_err(|_| {
+            GoalServiceError::Internal("Goal document is not valid UTF-8".to_string())
+        })?;
+        Ok(Some((goal, document, content)))
+    }
+
+    /// Persists any durable task completion that is proven by this exact Goal
+    /// transition. Tool-backed Goal mutations use this same hook so a
+    /// replacement Goal cannot hide a completion before the next receipt read.
+    pub(crate) async fn observe_goal_completion(&self, goal: &codex_state::ThreadGoal) {
+        if goal.status != codex_state::ThreadGoalStatus::Complete {
+            return;
+        }
+        let observer = self
+            .completion_observer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(observer) = observer {
+            let completing_turn_id = self
+                .runtime_for_thread(goal.thread_id)
+                .and_then(|runtime| runtime.current_turn_id());
+            if let Err(err) = observer.on_goal_completed(goal, completing_turn_id).await {
+                tracing::warn!(
+                    thread_id = %goal.thread_id,
+                    %err,
+                    "failed to persist durable task completion at Goal transition"
+                );
+            }
+        }
     }
 
     pub async fn clear_thread_goal(
@@ -425,4 +699,41 @@ impl GoalService {
     fn runtimes(&self) -> std::sync::MutexGuard<'_, HashMap<String, Weak<GoalRuntimeHandle>>> {
         self.runtimes.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+fn state_goal_status(status: ThreadGoalStatus) -> codex_state::ThreadGoalStatus {
+    match status {
+        ThreadGoalStatus::Active => codex_state::ThreadGoalStatus::Active,
+        ThreadGoalStatus::Paused => codex_state::ThreadGoalStatus::Paused,
+        ThreadGoalStatus::Blocked => codex_state::ThreadGoalStatus::Blocked,
+        ThreadGoalStatus::UsageLimited => codex_state::ThreadGoalStatus::UsageLimited,
+        ThreadGoalStatus::BudgetLimited => codex_state::ThreadGoalStatus::BudgetLimited,
+        ThreadGoalStatus::Complete => codex_state::ThreadGoalStatus::Complete,
+    }
+}
+
+async fn write_managed_goal_document(path: &Path, bytes: &[u8]) -> Result<bool, std::io::Error> {
+    if let Ok(existing) = fs::read(path).await {
+        if existing == bytes {
+            return Ok(false);
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "managed Goal document path already contains different bytes",
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .await?;
+    file.write_all(bytes).await?;
+    file.sync_all().await?;
+    drop(file);
+    fs::rename(&temporary, path).await?;
+    Ok(true)
 }

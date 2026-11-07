@@ -29,6 +29,7 @@ use codex_extension_api::TurnStartInput;
 use codex_extension_api::TurnStopInput;
 use codex_goal_extension::GoalCompletionObserver;
 use codex_goal_extension::GoalCompletionObserverFuture;
+use codex_goal_extension::GoalDocumentSetRequest;
 use codex_goal_extension::GoalExtensionConfig;
 use codex_goal_extension::GoalObjectiveUpdate;
 use codex_goal_extension::GoalRuntimeHandle;
@@ -1578,16 +1579,15 @@ async fn goal_completion_is_observed_before_replacement_goal_creation() -> anyho
     // This replacement is intentionally made before the turn ends and before
     // any receipt read. The observer must have already retained A's exact
     // terminal identity and completing turn.
-    let replacement = create_tool
-        .handle(tool_call(
-            "create_goal",
-            "create-b",
-            json!({ "objective": "mission B" }),
-        ))
-        .await?;
+    let replacement_invocation = tool_call(
+        "create_goal",
+        "create-b",
+        json!({ "objective": "mission B" }),
+    );
+    let replacement = create_tool.handle(replacement_invocation.clone()).await?;
     assert_eq!(
         json!("mission B"),
-        replacement.code_mode_result(&replacement.payload)["goal"]["objective"]
+        replacement.code_mode_result(&replacement_invocation.payload)["goal"]["objective"]
     );
 
     let completions = observer
@@ -1683,6 +1683,200 @@ async fn goal_service_enforces_maximum_token_budget_on_creation_and_updates() ->
         )
         .await?;
     assert_eq!(goal.goal.token_budget, Some(100));
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_goal_document_round_trips_edits_and_rejects_stale_revision() -> anyhow::Result<()>
+{
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let legacy_goal_file = runtime.sqlite().home().join("GOAL.md");
+    tokio::fs::write(&legacy_goal_file, b"pre-existing goal file").await?;
+    let service = GoalService::new();
+    let document = format!("# managed mission\n{}", "x".repeat(5_000));
+
+    let first = service
+        .set_thread_goal_document(
+            runtime.as_ref(),
+            GoalDocumentSetRequest {
+                thread_id,
+                document: &document,
+                status: None,
+                expected_mission_revision: None,
+            },
+        )
+        .await?;
+    let first_goal = first.goal();
+    let first_document = first.document();
+    assert!(document.len() > 4_000);
+    assert!(first_goal.objective.len() < 4_000);
+    assert!(!first_goal.objective.contains(&document));
+    assert_eq!(first_document.mission_revision, 1);
+    assert!(first_document.path.starts_with("managed-goals/"));
+    assert_eq!(first_document.byte_length, document.len() as i64);
+    assert_eq!(
+        tokio::fs::read(&legacy_goal_file).await?,
+        b"pre-existing goal file"
+    );
+
+    let (_, stored_document, stored_content) = service
+        .read_thread_goal_document(runtime.as_ref(), thread_id)
+        .await?
+        .expect("managed Goal document should be readable");
+    assert_eq!(stored_document, first_document);
+    assert_eq!(stored_content, document);
+
+    let direct_text_edit = service
+        .set_thread_goal(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Set("narrow text must not replace the document"),
+                status: None,
+                token_budget: GoalTokenBudgetUpdate::Keep,
+                max_goal_token_budget: None,
+            },
+        )
+        .await
+        .expect_err("managed Goal objectives must use the document CAS method");
+    assert!(
+        direct_text_edit
+            .to_string()
+            .contains("thread/goal/document/set")
+    );
+    assert_eq!(
+        service
+            .read_thread_goal_document(runtime.as_ref(), thread_id)
+            .await?
+            .expect("managed document must remain after rejected legacy edit")
+            .2,
+        document
+    );
+
+    let replacement = "revised mission";
+    let second = service
+        .set_thread_goal_document(
+            runtime.as_ref(),
+            GoalDocumentSetRequest {
+                thread_id,
+                document: replacement,
+                status: None,
+                expected_mission_revision: Some(1),
+            },
+        )
+        .await?;
+    assert_eq!(second.document().mission_revision, 2);
+    assert_eq!(
+        service
+            .read_thread_goal_document(runtime.as_ref(), thread_id)
+            .await?
+            .expect("replacement document should be readable")
+            .2,
+        replacement
+    );
+
+    let stale = match service
+        .set_thread_goal_document(
+            runtime.as_ref(),
+            GoalDocumentSetRequest {
+                thread_id,
+                document: "must not replace current mission",
+                status: None,
+                expected_mission_revision: Some(1),
+            },
+        )
+        .await
+    {
+        Ok(_) => panic!("stale mission revision must fail closed"),
+        Err(error) => error,
+    };
+    assert!(stale.to_string().contains("mission revision changed"));
+    assert_eq!(
+        service
+            .read_thread_goal_document(runtime.as_ref(), thread_id)
+            .await?
+            .expect("current document should remain intact")
+            .2,
+        replacement
+    );
+    assert!(
+        service
+            .clear_thread_goal(runtime.as_ref(), thread_id)
+            .await?
+    );
+    assert!(
+        runtime
+            .thread_goals()
+            .get_thread_goal_document(thread_id)
+            .await?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_turn_fails_closed_when_managed_goal_document_drift_is_detected()
+-> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let harness = GoalExtensionHarness::new(runtime.clone(), thread_id).await?;
+    let document = "full mission retained for recoverable retry";
+    let outcome = harness
+        .goal_service
+        .set_thread_goal_document(
+            runtime.as_ref(),
+            GoalDocumentSetRequest {
+                thread_id,
+                document,
+                status: None,
+                expected_mission_revision: None,
+            },
+        )
+        .await?;
+    let document_path = runtime
+        .sqlite()
+        .home()
+        .join(outcome.document().path.as_str());
+    tokio::fs::remove_file(document_path).await?;
+
+    let gate_error = harness
+        .turn_start_gate("turn-with-drift")
+        .await
+        .expect_err("managed document drift must reject turn admission");
+    assert!(
+        gate_error.contains("Goal document"),
+        "unexpected gate error: {gate_error}"
+    );
+
+    // A loaded USER/PEER/TIMER turn must not be accounted to a Goal whose full
+    // mission cannot be authenticated. The persisted Goal/document metadata are
+    // left intact so the next resume can recover the missing file instead of
+    // silently narrowing the mission.
+    harness
+        .start_turn("turn-with-drift", &TokenUsage::default())
+        .await;
+    harness
+        .record_token_usage("turn-with-drift", &input_token_usage(7))
+        .await;
+    harness.stop_turn("turn-with-drift").await;
+
+    let goal = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .expect("Goal should remain persisted after recoverable document drift");
+    assert_eq!(codex_state::ThreadGoalStatus::Active, goal.status);
+    assert_eq!(0, goal.tokens_used);
+    assert!(
+        runtime
+            .thread_goals()
+            .get_thread_goal_document(thread_id)
+            .await?
+            .is_some()
+    );
     Ok(())
 }
 
@@ -1875,6 +2069,24 @@ impl GoalExtensionHarness {
                 })
                 .await;
         }
+    }
+
+    async fn turn_start_gate(&self, turn_id: &str) -> Result<(), String> {
+        let turn_store = ExtensionData::new(turn_id);
+        let collaboration_mode = default_collaboration_mode();
+        for contributor in self.registry.turn_lifecycle_contributors() {
+            contributor
+                .turn_start_gate(TurnStartInput {
+                    turn_id,
+                    collaboration_mode: &collaboration_mode,
+                    token_usage_at_turn_start: None,
+                    session_store: &self.session_store,
+                    thread_store: &self.thread_store,
+                    turn_store: &turn_store,
+                })
+                .await?;
+        }
+        Ok(())
     }
 
     async fn stop_turn(&self, turn_id: &str) {

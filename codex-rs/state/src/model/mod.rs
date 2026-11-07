@@ -35,6 +35,7 @@ pub use thread_attachment::RemoveThreadAttachmentOutcome;
 pub use thread_attachment::ThreadAttachment;
 pub use thread_attachment::ThreadAttachmentPage;
 pub use thread_goal::ThreadGoal;
+pub use thread_goal::ThreadGoalDocument;
 pub use thread_goal::ThreadGoalStatus;
 pub use thread_metadata::Anchor;
 pub use thread_metadata::BackfillStats;
