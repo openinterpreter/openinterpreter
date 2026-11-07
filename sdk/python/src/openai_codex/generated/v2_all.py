@@ -108,6 +108,36 @@ class AdditionalNetworkPermissions(BaseModel):
     enabled: bool | None = None
 
 
+class AgentGoalAvailability(Enum):
+    available = "available"
+    unavailable = "unavailable"
+    notfound = "notfound"
+
+
+class AgentGoalUnavailableReason(Enum):
+    goals_disabled = "goals_disabled"
+    state_unavailable = "state_unavailable"
+    ephemeral_thread = "ephemeral_thread"
+    caller_not_owner = "caller_not_owner"
+
+
+class AgentInventoryAvailability(Enum):
+    available = "available"
+    unavailable = "unavailable"
+    notfound = "notfound"
+
+
+class AgentInventoryScope(Enum):
+    tree = "tree"
+    children = "children"
+    subtree = "subtree"
+
+
+class AgentInventoryVisibility(Enum):
+    known = "known"
+    loaded = "loaded"
+
+
 class AgentMessageDelivery(RootModel[Literal["async"]]):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -157,6 +187,75 @@ class AgentPath(RootModel[str]):
         populate_by_name=True,
     )
     root: str
+
+
+class AgentRuntimeResidency(Enum):
+    loaded = "loaded"
+    known = "known"
+
+
+class AgentRuntimeStatus(Enum):
+    pending_init = "pending_init"
+    running = "running"
+    interrupted = "interrupted"
+    completed = "completed"
+    errored = "errored"
+    shutdown = "shutdown"
+    unknown = "unknown"
+
+
+class AgentSessionAvailability(Enum):
+    available = "available"
+    unavailable = "unavailable"
+
+
+class AgentSessionPhase(Enum):
+    running = "running"
+    exited = "exited"
+    unknown = "unknown"
+
+
+class AgentTaskAdmissionState(Enum):
+    never_seen = "never_seen"
+    queued = "queued"
+    dispatched = "dispatched"
+    blocked = "blocked"
+    unknown = "unknown"
+    unavailable = "unavailable"
+
+
+class AgentTaskBlocker(Enum):
+    goal_unavailable = "goal_unavailable"
+    goal_not_found = "goal_not_found"
+    goal_not_active = "goal_not_active"
+    goal_changed = "goal_changed"
+    thread_unavailable = "thread_unavailable"
+    queue_unavailable = "queue_unavailable"
+
+
+class AgentTaskObservation(Enum):
+    durable = "durable"
+    queue = "queue"
+    unavailable = "unavailable"
+
+
+class AgentTaskOutcome(Enum):
+    queued = "queued"
+    accepted = "accepted"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+    unknown = "unknown"
+    unavailable = "unavailable"
+
+
+class AgentTaskTurnState(Enum):
+    not_started = "not_started"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+    interrupted = "interrupted"
+    unknown = "unknown"
 
 
 class AllowDenyRequirement(Enum):
@@ -1440,6 +1539,13 @@ class FeedbackUploadParams(BaseModel):
     extra_log_files: Annotated[list[str] | None, Field(alias="extraLogFiles")] = None
     include_logs: Annotated[bool | None, Field(alias="includeLogs")] = None
     reason: str | None = None
+    report_passcode: Annotated[
+        str | None,
+        Field(
+            alias="reportPasscode",
+            description="Dedicated submission secret; never include this in the feedback reason or tags.",
+        ),
+    ] = None
     tags: dict[str, Any] | None = None
     thread_id: Annotated[str | None, Field(alias="threadId")] = None
 
@@ -1768,6 +1874,17 @@ class InputAudioFunctionCallOutputContentItem(BaseModel):
     type: Annotated[
         Literal["input_audio"], Field(title="InputAudioFunctionCallOutputContentItemType")
     ]
+
+
+class InputVideoFunctionCallOutputContentItem(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: str | None = None
+    type: Annotated[
+        Literal["input_video"], Field(title="InputVideoFunctionCallOutputContentItemType")
+    ]
+    video_url: str
 
 
 class EncryptedContentFunctionCallOutputContentItem(BaseModel):
@@ -2166,6 +2283,83 @@ class InternalChatMessageMetadataPassthrough(BaseModel):
         populate_by_name=True,
     )
     turn_id: str | None = None
+
+
+class InterpreterHarness(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    description: str
+    id: str | None = None
+    is_recommended: Annotated[bool, Field(alias="isRecommended")]
+    label: str
+
+
+class InterpreterHarnessListParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    model: str | None = None
+    provider_id: Annotated[str, Field(alias="providerId")]
+
+
+class InterpreterHarnessListResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    data: list[InterpreterHarness]
+
+
+class InterpreterHarnessSetParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    harness: str | None = None
+    profile: str | None = None
+
+
+class InterpreterHarnessSetResponse(BaseModel):
+    pass
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+
+
+class InterpreterModelListParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    include_hidden: Annotated[bool | None, Field(alias="includeHidden")] = None
+    model_provider: Annotated[str | None, Field(alias="modelProvider")] = None
+
+
+class InterpreterModelSetResponse(BaseModel):
+    pass
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+
+
+class InterpreterProviderListParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    include_unconfigured: Annotated[bool | None, Field(alias="includeUnconfigured")] = None
+
+
+class InterpreterProviderSetParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    profile: str | None = None
+    provider_id: Annotated[str, Field(alias="providerId")]
+
+
+class InterpreterProviderSetResponse(BaseModel):
+    pass
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
 
 
 class LegacyAppPathString(RootModel[str]):
@@ -2752,6 +2946,13 @@ class ModelListParams(BaseModel):
     limit: Annotated[
         int | None,
         Field(description="Optional page size; defaults to a reasonable server-side value.", ge=0),
+    ] = None
+    model_provider: Annotated[
+        str | None,
+        Field(
+            alias="modelProvider",
+            description="Optional provider id to list models for instead of the active provider.",
+        ),
     ] = None
 
 
@@ -5145,6 +5346,12 @@ class ThreadAttachmentUpdatedNotification(BaseModel):
     thread_id: Annotated[str, Field(alias="threadId")]
 
 
+class ThreadBackgroundTerminalStatusPhase(Enum):
+    running = "running"
+    exited = "exited"
+    unknown = "unknown"
+
+
 class ThreadClosedNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -6515,6 +6722,12 @@ class WindowsWorldWritableWarningNotification(BaseModel):
     sample_paths: Annotated[list[str], Field(alias="samplePaths")]
 
 
+class WireApiDto(Enum):
+    responses = "responses"
+    chat = "chat"
+    messages = "messages"
+
+
 class WorkspaceMessageType(Enum):
     headline = "headline"
     announcement = "announcement"
@@ -6579,6 +6792,35 @@ class AdditionalContextEntry(BaseModel):
     )
     kind: AdditionalContextKind
     value: str
+
+
+class AgentInventoryEntry(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    agent_id: Annotated[str, Field(alias="agentId")]
+    agent_nickname: Annotated[str | None, Field(alias="agentNickname")] = None
+    agent_path: Annotated[str | None, Field(alias="agentPath")] = None
+    agent_role: Annotated[str | None, Field(alias="agentRole")] = None
+    parent_thread_id: Annotated[str | None, Field(alias="parentThreadId")] = None
+    residency: AgentRuntimeResidency
+    status: Annotated[
+        AgentRuntimeStatus,
+        Field(
+            description="Runtime status is intentionally content-free.  Completed/errored text is never included in this inventory."
+        ),
+    ]
+
+
+class AgentTaskGoalBinding(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    goal_id: Annotated[str, Field(alias="goalId")]
+    lifecycle_revision: Annotated[int, Field(alias="lifecycleRevision")]
+    mission_revision: Annotated[int, Field(alias="missionRevision")]
+    objective: str
+    status: ThreadGoalStatus
 
 
 class AppConfig(BaseModel):
@@ -7259,6 +7501,61 @@ class ModelProviderCapabilitiesReadRequest(BaseModel):
         Field(title="ModelProvider/capabilities/readRequestMethod"),
     ]
     params: ModelProviderCapabilitiesReadParams
+
+
+class InterpreterProviderListRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[
+        Literal["interpreter/provider/list"], Field(title="Interpreter/provider/listRequestMethod")
+    ]
+    params: InterpreterProviderListParams
+
+
+class InterpreterProviderSetRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[
+        Literal["interpreter/provider/set"], Field(title="Interpreter/provider/setRequestMethod")
+    ]
+    params: InterpreterProviderSetParams
+
+
+class InterpreterModelListRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[
+        Literal["interpreter/model/list"], Field(title="Interpreter/model/listRequestMethod")
+    ]
+    params: InterpreterModelListParams
+
+
+class InterpreterHarnessListRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[
+        Literal["interpreter/harness/list"], Field(title="Interpreter/harness/listRequestMethod")
+    ]
+    params: InterpreterHarnessListParams
+
+
+class InterpreterHarnessSetRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[
+        Literal["interpreter/harness/set"], Field(title="Interpreter/harness/setRequestMethod")
+    ]
+    params: InterpreterHarnessSetParams
 
 
 class ExperimentalFeatureListRequest(BaseModel):
@@ -8074,6 +8371,7 @@ class FunctionCallOutputContentItem(
         | InputImageFunctionCallOutputContentItem
         | FileIdFunctionCallOutputContentItem
         | InputAudioFunctionCallOutputContentItem
+        | InputVideoFunctionCallOutputContentItem
         | EncryptedContentFunctionCallOutputContentItem
     ]
 ):
@@ -8085,6 +8383,7 @@ class FunctionCallOutputContentItem(
         | InputImageFunctionCallOutputContentItem
         | FileIdFunctionCallOutputContentItem
         | InputAudioFunctionCallOutputContentItem
+        | InputVideoFunctionCallOutputContentItem
         | EncryptedContentFunctionCallOutputContentItem,
         Field(
             description="Responses API compatible content items that can be returned by a tool call. This is a subset of ContentItem with the types we support as function call outputs."
@@ -8336,6 +8635,37 @@ class HooksListResponse(BaseModel):
         populate_by_name=True,
     )
     data: list[HooksListEntry]
+
+
+class InterpreterModelSetParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    model: str
+    profile: str | None = None
+    reasoning_effort: Annotated[ReasoningEffort | None, Field(alias="reasoningEffort")] = None
+
+
+class InterpreterProvider(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    base_url: Annotated[str | None, Field(alias="baseUrl")] = None
+    configured: bool
+    description: str
+    env_key: Annotated[str | None, Field(alias="envKey")] = None
+    id: str
+    is_current: Annotated[bool, Field(alias="isCurrent")]
+    is_default: Annotated[bool, Field(alias="isDefault")]
+    name: str
+    wire_api: Annotated[WireApiDto | None, Field(alias="wireApi")] = None
+
+
+class InterpreterProviderListResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    data: list[InterpreterProvider]
 
 
 class ListMcpServerStatusParams(BaseModel):
@@ -10339,6 +10669,17 @@ class ReviewStartRequest(BaseModel):
     params: ReviewStartParams
 
 
+class InterpreterModelSetRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[
+        Literal["interpreter/model/set"], Field(title="Interpreter/model/setRequestMethod")
+    ]
+    params: InterpreterModelSetParams
+
+
 class McpServerStatusListRequest(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -10674,6 +11015,13 @@ class HookCompletedNotification(BaseModel):
     run: HookRunSummary
     thread_id: Annotated[str, Field(alias="threadId")]
     turn_id: Annotated[str | None, Field(alias="turnId")] = None
+
+
+class InterpreterModelListResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    data: list[Model]
 
 
 class ListMcpServerStatusResponse(BaseModel):
@@ -12317,6 +12665,12 @@ class ClientRequest(
         | ReviewStartRequest
         | ModelListRequest
         | ModelProviderCapabilitiesReadRequest
+        | InterpreterProviderListRequest
+        | InterpreterProviderSetRequest
+        | InterpreterModelListRequest
+        | InterpreterModelSetRequest
+        | InterpreterHarnessListRequest
+        | InterpreterHarnessSetRequest
         | ExperimentalFeatureListRequest
         | PermissionProfileListRequest
         | ExperimentalFeatureEnablementSetRequest
@@ -12424,6 +12778,12 @@ class ClientRequest(
         | ReviewStartRequest
         | ModelListRequest
         | ModelProviderCapabilitiesReadRequest
+        | InterpreterProviderListRequest
+        | InterpreterProviderSetRequest
+        | InterpreterModelListRequest
+        | InterpreterModelSetRequest
+        | InterpreterHarnessListRequest
+        | InterpreterHarnessSetRequest
         | ExperimentalFeatureListRequest
         | PermissionProfileListRequest
         | ExperimentalFeatureEnablementSetRequest

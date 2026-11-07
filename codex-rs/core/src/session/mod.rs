@@ -2707,6 +2707,17 @@ impl Session {
         ))
     }
 
+    /// Returns the currently active root turn identity without exposing turn
+    /// content or mutation authority. Callers use this to avoid attributing a
+    /// different running turn to an older durable task receipt.
+    pub(crate) async fn active_turn_id(&self) -> Option<String> {
+        let active = self.active_turn.lock().await;
+        active
+            .as_ref()
+            .and_then(|active| active.task.as_ref())
+            .map(|task| task.turn_context.sub_id.clone())
+    }
+
     pub(crate) async fn persist_network_policy_amendment(
         &self,
         amendment: &NetworkPolicyAmendment,
