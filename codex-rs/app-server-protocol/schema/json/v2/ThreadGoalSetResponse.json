@@ -47,6 +47,31 @@
       ],
       "type": "object"
     },
+    "ThreadGoalRevision": {
+      "properties": {
+        "goalId": {
+          "type": "string"
+        },
+        "lifecycleRevision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "missionRevision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/definitions/ThreadGoalStatus"
+        }
+      },
+      "required": [
+        "goalId",
+        "lifecycleRevision",
+        "missionRevision",
+        "status"
+      ],
+      "type": "object"
+    },
     "ThreadGoalStatus": {
       "enum": [
         "active",
@@ -62,10 +87,14 @@
   "properties": {
     "goal": {
       "$ref": "#/definitions/ThreadGoal"
+    },
+    "revision": {
+      "$ref": "#/definitions/ThreadGoalRevision"
     }
   },
   "required": [
-    "goal"
+    "goal",
+    "revision"
   ],
   "title": "ThreadGoalSetResponse",
   "type": "object"

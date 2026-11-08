@@ -4587,6 +4587,36 @@
     },
     "ThreadGoalClearParams": {
       "properties": {
+        "expectedGoalId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedLifecycleRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "expectedMissionRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "expectedStatus": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadGoalStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "threadId": {
           "type": "string"
         }
@@ -4595,6 +4625,68 @@
         "threadId"
       ],
       "type": "object"
+    },
+    "ThreadGoalDocumentCreateAdmissionState": {
+      "description": "The initial-create admission state is intentionally closed: the caller must say it observed a genuine absent Goal, not send null fields.",
+      "enum": [
+        "noGoal"
+      ],
+      "type": "string"
+    },
+    "ThreadGoalDocumentCreatePrecondition": {
+      "description": "The one canonical file-backed Goal creation precondition. `absent` is an explicit authenticated no-Goal admission state; it is never inferred from an unavailable, denied, timed-out, or unloaded read. `completed` requires the exact four-field predecessor tuple.",
+      "oneOf": [
+        {
+          "properties": {
+            "admissionState": {
+              "$ref": "#/definitions/ThreadGoalDocumentCreateAdmissionState"
+            },
+            "kind": {
+              "enum": [
+                "absent"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "admissionState",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "expectedGoalId": {
+              "type": "string"
+            },
+            "expectedLifecycleRevision": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "expectedMissionRevision": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "expectedStatus": {
+              "$ref": "#/definitions/ThreadGoalStatus"
+            },
+            "kind": {
+              "enum": [
+                "completed"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "expectedGoalId",
+            "expectedLifecycleRevision",
+            "expectedMissionRevision",
+            "expectedStatus",
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "ThreadGoalGetParams": {
       "properties": {
@@ -4609,6 +4701,37 @@
     },
     "ThreadGoalSetParams": {
       "properties": {
+        "expectedGoalId": {
+          "description": "All four expected fields are required together for an atomic Goal CAS when an existing Goal is being changed. Objective and token-budget edits are included in the same transaction; mission_revision advances for those edits and lifecycle_revision advances for every successful mutation. Omit all four only when the authoritative read found no Goal and this request is creating the first Goal.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedLifecycleRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "expectedMissionRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "expectedStatus": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadGoalStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "objective": {
           "type": [
             "string",

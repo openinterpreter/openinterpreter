@@ -89,6 +89,28 @@ pub struct ThreadGoalDocument {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Durable receipt for a managed Goal identity transition.  The current
+/// `thread_goals` row is intentionally replaceable, so a response-loss retry
+/// must not depend on whichever Goal happens to be current later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadGoalCreationReceipt {
+    pub creation_id: String,
+    pub request_digest: String,
+    /// `None` is the durable proof that this creation used the explicit
+    /// no-Goal admission precondition.  It is not inferred from an unavailable
+    /// or failed read.
+    pub previous_goal: Option<ThreadGoal>,
+    pub goal: ThreadGoal,
+    pub document: ThreadGoalDocument,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreadGoalDocumentCreateOutcome {
+    Created(ThreadGoalCreationReceipt),
+    Replayed(ThreadGoalCreationReceipt),
+    Conflict(String),
+}
+
 pub(crate) struct ThreadGoalRow {
     pub thread_id: String,
     pub goal_id: String,

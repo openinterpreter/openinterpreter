@@ -103,64 +103,184 @@ WHERE thread_id = ?
         Ok(())
     }
 
-    pub async fn insert_thread_goal_document(
+    /// Atomically starts a new managed Goal only after the caller's exact
+    /// completed predecessor is still current.  `creation_id` is the durable
+    /// idempotency key: a response-loss retry returns the recorded result, and
+    /// a different request with the same key conflicts without replacing a
+    /// Goal a second time.
+    pub async fn create_thread_goal_document(
         &self,
         thread_id: ThreadId,
+        creation_id: &str,
+        request_digest: &str,
+        expected_goal_id: &str,
+        expected_status: crate::ThreadGoalStatus,
+        expected_mission_revision: i64,
+        expected_lifecycle_revision: i64,
         objective: &str,
         status: crate::ThreadGoalStatus,
         token_budget: Option<i64>,
         path: &str,
         sha256: &str,
         byte_length: i64,
-        mission_revision: i64,
-    ) -> anyhow::Result<Option<crate::ThreadGoal>> {
-        let mut transaction = self.pool.begin().await?;
+    ) -> anyhow::Result<crate::ThreadGoalDocumentCreateOutcome> {
+        // Claim the SQLite write slot before reading the predecessor.  A
+        // deferred transaction can read the same completed Goal concurrently,
+        // then fail with SQLITE_BUSY when both callers promote their snapshots
+        // to writers; BEGIN IMMEDIATE makes the loser re-read the durable
+        // creation receipt instead of surfacing a response-loss retry as an
+        // ambiguous database error.
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let receipt_row = sqlx::query(CREATION_RECEIPT_SELECT)
+            .bind(thread_id.to_string())
+            .bind(creation_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if let Some(row) = receipt_row {
+            let receipt = creation_receipt_from_row(&row)?;
+            transaction.commit().await?;
+            return Ok(if receipt.request_digest == request_digest {
+                crate::ThreadGoalDocumentCreateOutcome::Replayed(receipt)
+            } else {
+                crate::ThreadGoalDocumentCreateOutcome::Conflict(
+                    "goal_creation_conflict: creationId was already used for a different request"
+                        .to_string(),
+                )
+            });
+        }
+
+        let previous_row = sqlx::query(
+            r#"
+SELECT
+    thread_id, goal_id, objective, status, token_budget, tokens_used,
+    time_used_seconds, mission_revision, lifecycle_revision, created_at_ms, updated_at_ms
+FROM thread_goals
+WHERE thread_id = ?
+  AND goal_id = ?
+  AND status = ?
+  AND mission_revision = ?
+  AND lifecycle_revision = ?
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .bind(expected_goal_id)
+        .bind(expected_status.as_str())
+        .bind(expected_mission_revision)
+        .bind(expected_lifecycle_revision)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(previous_row) = previous_row else {
+            transaction.rollback().await?;
+            return Ok(crate::ThreadGoalDocumentCreateOutcome::Conflict(
+                "goal_creation_conflict: expected completed Goal identity is no longer current"
+                    .to_string(),
+            ));
+        };
+        let previous_goal = thread_goal_from_row(&previous_row)?;
         let goal_id = Uuid::new_v4().to_string();
         let now_ms = datetime_to_epoch_millis(Utc::now());
         let status = status_after_budget_limit(status, /*tokens_used*/ 0, token_budget);
+
+        let claimed = sqlx::query(
+            r#"
+INSERT INTO thread_goal_creation_receipts (
+    thread_id, creation_id, request_digest,
+    previous_goal_id, previous_objective, previous_status,
+    previous_token_budget, previous_tokens_used, previous_time_used_seconds,
+    previous_mission_revision, previous_lifecycle_revision,
+    previous_created_at_ms, previous_updated_at_ms,
+    goal_id, objective, status, token_budget, tokens_used, time_used_seconds,
+    mission_revision, lifecycle_revision, created_at_ms, updated_at_ms,
+    document_path, document_sha256, document_byte_length, document_updated_at_ms
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1, 1, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(thread_id, creation_id) DO NOTHING
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .bind(creation_id)
+        .bind(request_digest)
+        .bind(&previous_goal.goal_id)
+        .bind(&previous_goal.objective)
+        .bind(previous_goal.status.as_str())
+        .bind(previous_goal.token_budget)
+        .bind(previous_goal.tokens_used)
+        .bind(previous_goal.time_used_seconds)
+        .bind(previous_goal.mission_revision)
+        .bind(previous_goal.lifecycle_revision)
+        .bind(datetime_to_epoch_millis(previous_goal.created_at))
+        .bind(datetime_to_epoch_millis(previous_goal.updated_at))
+        .bind(&goal_id)
+        .bind(objective)
+        .bind(status.as_str())
+        .bind(token_budget)
+        .bind(now_ms)
+        .bind(now_ms)
+        .bind(path)
+        .bind(sha256)
+        .bind(byte_length)
+        .bind(now_ms)
+        .execute(&mut *transaction)
+        .await?;
+        if claimed.rows_affected() == 0 {
+            let row = sqlx::query(CREATION_RECEIPT_SELECT)
+                .bind(thread_id.to_string())
+                .bind(creation_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+            let receipt = creation_receipt_from_row(&row)?;
+            transaction.commit().await?;
+            return Ok(if receipt.request_digest == request_digest {
+                crate::ThreadGoalDocumentCreateOutcome::Replayed(receipt)
+            } else {
+                crate::ThreadGoalDocumentCreateOutcome::Conflict(
+                    "goal_creation_conflict: creationId was already used for a different request"
+                        .to_string(),
+                )
+            });
+        }
+
         let row = sqlx::query(
             r#"
-INSERT INTO thread_goals (
-    thread_id, goal_id, objective, status, token_budget, tokens_used,
-    time_used_seconds, mission_revision, lifecycle_revision, created_at_ms, updated_at_ms
-) VALUES (?, ?, ?, ?, ?, 0, 0, ?, 1, ?, ?)
-ON CONFLICT(thread_id) DO UPDATE SET
-    goal_id = excluded.goal_id,
-    objective = excluded.objective,
-    status = excluded.status,
-    token_budget = excluded.token_budget,
-    tokens_used = 0,
-    time_used_seconds = 0,
-    mission_revision = excluded.mission_revision,
-    lifecycle_revision = 1,
-    created_at_ms = excluded.created_at_ms,
-    updated_at_ms = excluded.updated_at_ms
-WHERE thread_goals.status = 'complete'
+UPDATE thread_goals
+SET goal_id = ?, objective = ?, status = ?, token_budget = ?,
+    tokens_used = 0, time_used_seconds = 0,
+    mission_revision = 1, lifecycle_revision = 1,
+    created_at_ms = ?, updated_at_ms = ?
+WHERE thread_id = ?
+  AND goal_id = ?
+  AND status = ?
+  AND mission_revision = ?
+  AND lifecycle_revision = ?
 RETURNING
     thread_id, goal_id, objective, status, token_budget, tokens_used,
     time_used_seconds, mission_revision, lifecycle_revision, created_at_ms, updated_at_ms
             "#,
         )
-        .bind(thread_id.to_string())
-        .bind(goal_id)
+        .bind(&goal_id)
         .bind(objective)
         .bind(status.as_str())
         .bind(token_budget)
-        .bind(mission_revision)
         .bind(now_ms)
         .bind(now_ms)
+        .bind(thread_id.to_string())
+        .bind(expected_goal_id)
+        .bind(expected_status.as_str())
+        .bind(expected_mission_revision)
+        .bind(expected_lifecycle_revision)
         .fetch_optional(&mut *transaction)
         .await?;
-
         let Some(row) = row else {
-            transaction.commit().await?;
-            return Ok(None);
+            transaction.rollback().await?;
+            return Ok(crate::ThreadGoalDocumentCreateOutcome::Conflict(
+                "goal_creation_conflict: predecessor changed before the new Goal could be committed"
+                    .to_string(),
+            ));
         };
         sqlx::query(
             r#"
 INSERT INTO thread_goal_documents (
     thread_id, mission_revision, path, sha256, byte_length, updated_at_ms
-) VALUES (?, ?, ?, ?, ?, ?)
+) VALUES (?, 1, ?, ?, ?, ?)
 ON CONFLICT(thread_id) DO UPDATE SET
     mission_revision = excluded.mission_revision,
     path = excluded.path,
@@ -170,7 +290,6 @@ ON CONFLICT(thread_id) DO UPDATE SET
             "#,
         )
         .bind(thread_id.to_string())
-        .bind(mission_revision)
         .bind(path)
         .bind(sha256)
         .bind(byte_length)
@@ -178,16 +297,178 @@ ON CONFLICT(thread_id) DO UPDATE SET
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
-        thread_goal_from_row(&row).map(Some)
+
+        let goal = thread_goal_from_row(&row)?;
+        let document = crate::ThreadGoalDocument {
+            thread_id,
+            mission_revision: 1,
+            path: path.to_string(),
+            sha256: sha256.to_string(),
+            byte_length,
+            updated_at: epoch_millis_to_datetime(now_ms)?,
+        };
+        Ok(crate::ThreadGoalDocumentCreateOutcome::Created(
+            crate::ThreadGoalCreationReceipt {
+                creation_id: creation_id.to_string(),
+                request_digest: request_digest.to_string(),
+                previous_goal: Some(previous_goal),
+                goal,
+                document,
+            },
+        ))
     }
 
-    pub async fn update_thread_goal_document(
+    /// Atomically starts the first managed Goal for a thread whose caller has
+    /// supplied the explicit `absent/noGoal` precondition.  The durable
+    /// creation receipt records a null predecessor so a cold response-loss
+    /// replay returns the original identity without treating an unavailable
+    /// read as absence.
+    pub async fn create_initial_thread_goal_document(
+        &self,
+        thread_id: ThreadId,
+        creation_id: &str,
+        request_digest: &str,
+        objective: &str,
+        status: crate::ThreadGoalStatus,
+        token_budget: Option<i64>,
+        path: &str,
+        sha256: &str,
+        byte_length: i64,
+    ) -> anyhow::Result<crate::ThreadGoalDocumentCreateOutcome> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let receipt_row = sqlx::query(CREATION_RECEIPT_SELECT)
+            .bind(thread_id.to_string())
+            .bind(creation_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if let Some(row) = receipt_row {
+            let receipt = creation_receipt_from_row(&row)?;
+            transaction.commit().await?;
+            return Ok(if receipt.request_digest == request_digest {
+                crate::ThreadGoalDocumentCreateOutcome::Replayed(receipt)
+            } else {
+                crate::ThreadGoalDocumentCreateOutcome::Conflict(
+                    "goal_creation_conflict: creationId was already used for a different request"
+                        .to_string(),
+                )
+            });
+        }
+
+        let existing =
+            sqlx::query_scalar::<_, i64>("SELECT 1 FROM thread_goals WHERE thread_id = ? LIMIT 1")
+                .bind(thread_id.to_string())
+                .fetch_optional(&mut *transaction)
+                .await?;
+        if existing.is_some() {
+            transaction.rollback().await?;
+            return Ok(crate::ThreadGoalDocumentCreateOutcome::Conflict(
+                "goal_creation_conflict: expected an authenticated absent/noGoal predecessor"
+                    .to_string(),
+            ));
+        }
+
+        let goal_id = Uuid::new_v4().to_string();
+        let now_ms = datetime_to_epoch_millis(Utc::now());
+        let status = status_after_budget_limit(status, /*tokens_used*/ 0, token_budget);
+        let row = sqlx::query(
+            r#"
+INSERT INTO thread_goals (
+    thread_id, goal_id, objective, status, token_budget, tokens_used,
+    time_used_seconds, mission_revision, lifecycle_revision, created_at_ms, updated_at_ms
+) VALUES (?, ?, ?, ?, ?, 0, 0, 1, 1, ?, ?)
+RETURNING
+    thread_id, goal_id, objective, status, token_budget, tokens_used,
+    time_used_seconds, mission_revision, lifecycle_revision, created_at_ms, updated_at_ms
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .bind(&goal_id)
+        .bind(objective)
+        .bind(status.as_str())
+        .bind(token_budget)
+        .bind(now_ms)
+        .bind(now_ms)
+        .fetch_one(&mut *transaction)
+        .await?;
+
+        sqlx::query(
+            r#"
+INSERT INTO thread_goal_documents (
+    thread_id, mission_revision, path, sha256, byte_length, updated_at_ms
+) VALUES (?, 1, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .bind(path)
+        .bind(sha256)
+        .bind(byte_length)
+        .bind(now_ms)
+        .execute(&mut *transaction)
+        .await?;
+
+        sqlx::query(
+            r#"
+INSERT INTO thread_goal_creation_receipts (
+    thread_id, creation_id, request_digest,
+    previous_goal_id, previous_objective, previous_status,
+    previous_token_budget, previous_tokens_used, previous_time_used_seconds,
+    previous_mission_revision, previous_lifecycle_revision,
+    previous_created_at_ms, previous_updated_at_ms,
+    goal_id, objective, status, token_budget, tokens_used, time_used_seconds,
+    mission_revision, lifecycle_revision, created_at_ms, updated_at_ms,
+    document_path, document_sha256, document_byte_length, document_updated_at_ms
+) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+          ?, ?, ?, ?, 0, 0, 1, 1, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .bind(creation_id)
+        .bind(request_digest)
+        .bind(&goal_id)
+        .bind(objective)
+        .bind(status.as_str())
+        .bind(token_budget)
+        .bind(now_ms)
+        .bind(now_ms)
+        .bind(path)
+        .bind(sha256)
+        .bind(byte_length)
+        .bind(now_ms)
+        .execute(&mut *transaction)
+        .await?;
+
+        transaction.commit().await?;
+        let goal = thread_goal_from_row(&row)?;
+        let document = crate::ThreadGoalDocument {
+            thread_id,
+            mission_revision: 1,
+            path: path.to_string(),
+            sha256: sha256.to_string(),
+            byte_length,
+            updated_at: epoch_millis_to_datetime(now_ms)?,
+        };
+        Ok(crate::ThreadGoalDocumentCreateOutcome::Created(
+            crate::ThreadGoalCreationReceipt {
+                creation_id: creation_id.to_string(),
+                request_digest: request_digest.to_string(),
+                previous_goal: None,
+                goal,
+                document,
+            },
+        ))
+    }
+
+    /// Atomically updates a managed Goal pointer and its document metadata
+    /// under the complete supervisor-owned identity/revision condition.
+    pub async fn update_thread_goal_document_cas(
         &self,
         thread_id: ThreadId,
         objective: &str,
         status: Option<crate::ThreadGoalStatus>,
         expected_goal_id: &str,
+        expected_status: crate::ThreadGoalStatus,
         expected_mission_revision: i64,
+        expected_lifecycle_revision: i64,
         path: &str,
         sha256: &str,
         byte_length: i64,
@@ -204,7 +485,9 @@ SET objective = ?,
     updated_at_ms = ?
 WHERE thread_id = ?
   AND goal_id = ?
+  AND status = ?
   AND mission_revision = ?
+  AND lifecycle_revision = ?
 RETURNING
     thread_id, goal_id, objective, status, token_budget, tokens_used,
     time_used_seconds, mission_revision, lifecycle_revision, created_at_ms, updated_at_ms
@@ -215,7 +498,9 @@ RETURNING
         .bind(now_ms)
         .bind(thread_id.to_string())
         .bind(expected_goal_id)
+        .bind(expected_status.as_str())
         .bind(expected_mission_revision)
+        .bind(expected_lifecycle_revision)
         .fetch_optional(&mut *transaction)
         .await?;
 
@@ -628,6 +913,141 @@ WHERE thread_id = ?
         self.get_thread_goal(thread_id).await
     }
 
+    /// Applies an external Goal mutation with a complete identity/revision CAS.
+    /// The conditional UPDATE is one SQLite statement, so objective, budget,
+    /// status and both revisions cannot be split across a stale read/write.
+    pub async fn update_thread_goal_cas(
+        &self,
+        thread_id: ThreadId,
+        update: GoalUpdate,
+        expected_goal_id: &str,
+        expected_status: crate::ThreadGoalStatus,
+        expected_mission_revision: i64,
+        expected_lifecycle_revision: i64,
+    ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+        let GoalUpdate {
+            objective,
+            status,
+            token_budget,
+            expected_goal_id: _,
+        } = update;
+        let objective_changed = objective.is_some();
+        let token_budget_changed = token_budget.is_some();
+        if !objective_changed && !token_budget_changed && status.is_none() {
+            return Ok(self.get_thread_goal(thread_id).await?.filter(|goal| {
+                goal.goal_id == expected_goal_id
+                    && goal.status == expected_status
+                    && goal.mission_revision == expected_mission_revision
+                    && goal.lifecycle_revision == expected_lifecycle_revision
+            }));
+        }
+        let new_token_budget = token_budget.flatten();
+        let now_ms = datetime_to_epoch_millis(Utc::now());
+        let result = sqlx::query(
+            r#"
+UPDATE thread_goals
+SET
+    objective = CASE WHEN ? THEN ? ELSE objective END,
+    mission_revision = CASE WHEN ? THEN mission_revision + 1 ELSE mission_revision END,
+    lifecycle_revision = lifecycle_revision + 1,
+    status = CASE
+        WHEN ? IS NOT NULL THEN
+            CASE
+                WHEN status = 'budget_limited' AND ? IN ('paused', 'blocked') THEN status
+                WHEN ? = 'active'
+                    AND (CASE WHEN ? THEN ? ELSE token_budget END) IS NOT NULL
+                    AND tokens_used >= (CASE WHEN ? THEN ? ELSE token_budget END)
+                    THEN 'budget_limited'
+                ELSE ?
+            END
+        WHEN ? THEN
+            CASE
+                WHEN status = 'active' AND ? IS NOT NULL AND tokens_used >= ?
+                    THEN 'budget_limited'
+                ELSE status
+            END
+        ELSE status
+    END,
+    token_budget = CASE WHEN ? THEN ? ELSE token_budget END,
+    updated_at_ms = ?
+WHERE thread_id = ?
+  AND goal_id = ?
+  AND status = ?
+  AND mission_revision = ?
+  AND lifecycle_revision = ?
+            "#,
+        )
+        .bind(objective_changed)
+        .bind(objective)
+        .bind(objective_changed)
+        .bind(status.map(|status| status.as_str()))
+        .bind(status.map(|status| status.as_str()))
+        .bind(status.map(|status| status.as_str()))
+        .bind(token_budget_changed)
+        .bind(new_token_budget)
+        .bind(token_budget_changed)
+        .bind(new_token_budget)
+        .bind(status.map(|status| status.as_str()))
+        .bind(token_budget_changed)
+        .bind(new_token_budget)
+        .bind(new_token_budget)
+        .bind(token_budget_changed)
+        .bind(new_token_budget)
+        .bind(now_ms)
+        .bind(thread_id.to_string())
+        .bind(expected_goal_id)
+        .bind(expected_status.as_str())
+        .bind(expected_mission_revision)
+        .bind(expected_lifecycle_revision)
+        .execute(self.pool.as_ref())
+        .await?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get_thread_goal(thread_id).await
+    }
+
+    /// Deletes a Goal and its managed-document metadata in one conditional
+    /// transaction. The caller must supply the complete identity snapshot.
+    pub async fn delete_thread_goal_cas(
+        &self,
+        thread_id: ThreadId,
+        expected_goal_id: &str,
+        expected_status: crate::ThreadGoalStatus,
+        expected_mission_revision: i64,
+        expected_lifecycle_revision: i64,
+    ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            r#"
+DELETE FROM thread_goals
+WHERE thread_id = ?
+  AND goal_id = ?
+  AND status = ?
+  AND mission_revision = ?
+  AND lifecycle_revision = ?
+RETURNING
+    thread_id, goal_id, objective, status, token_budget, tokens_used,
+    time_used_seconds, mission_revision, lifecycle_revision, created_at_ms, updated_at_ms
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .bind(expected_goal_id)
+        .bind(expected_status.as_str())
+        .bind(expected_mission_revision)
+        .bind(expected_lifecycle_revision)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if row.is_some() {
+            sqlx::query("DELETE FROM thread_goal_documents WHERE thread_id = ?")
+                .bind(thread_id.to_string())
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await?;
+        row.map(|row| thread_goal_from_row(&row)).transpose()
+    }
+
     pub async fn pause_active_thread_goal(
         &self,
         thread_id: ThreadId,
@@ -834,6 +1254,119 @@ RETURNING
         let updated = thread_goal_from_row(&row)?;
         Ok(GoalAccountingOutcome::Updated(updated))
     }
+}
+
+const CREATION_RECEIPT_SELECT: &str = r#"
+SELECT
+    thread_id AS previous_thread_id,
+    previous_goal_id AS previous_goal_id,
+    previous_objective AS previous_objective,
+    previous_status AS previous_status,
+    previous_token_budget AS previous_token_budget,
+    previous_tokens_used AS previous_tokens_used,
+    previous_time_used_seconds AS previous_time_used_seconds,
+    previous_mission_revision AS previous_mission_revision,
+    previous_lifecycle_revision AS previous_lifecycle_revision,
+    previous_created_at_ms AS previous_created_at_ms,
+    previous_updated_at_ms AS previous_updated_at_ms,
+    thread_id AS goal_thread_id,
+    goal_id AS goal_goal_id,
+    objective AS goal_objective,
+    status AS goal_status,
+    token_budget AS goal_token_budget,
+    tokens_used AS goal_tokens_used,
+    time_used_seconds AS goal_time_used_seconds,
+    mission_revision AS goal_mission_revision,
+    lifecycle_revision AS goal_lifecycle_revision,
+    created_at_ms AS goal_created_at_ms,
+    updated_at_ms AS goal_updated_at_ms,
+    thread_id AS document_thread_id,
+    mission_revision AS document_mission_revision,
+    document_path AS document_path,
+    document_sha256 AS document_sha256,
+    document_byte_length AS document_byte_length,
+    document_updated_at_ms AS document_updated_at_ms,
+    creation_id,
+    request_digest
+FROM thread_goal_creation_receipts
+WHERE thread_id = ?
+  AND creation_id = ?
+"#;
+
+fn creation_receipt_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> anyhow::Result<crate::ThreadGoalCreationReceipt> {
+    let previous_goal = thread_goal_from_creation_row_optional(row, "previous")?;
+    let goal = thread_goal_from_creation_row_optional(row, "goal")?.ok_or_else(|| {
+        anyhow::anyhow!("managed Goal creation receipt is missing its resulting Goal")
+    })?;
+    let document = crate::ThreadGoalDocument {
+        thread_id: ThreadId::try_from(row.try_get::<String, _>("document_thread_id")?)?,
+        mission_revision: row.try_get("document_mission_revision")?,
+        path: row.try_get("document_path")?,
+        sha256: row.try_get("document_sha256")?,
+        byte_length: row.try_get("document_byte_length")?,
+        updated_at: epoch_millis_to_datetime(row.try_get("document_updated_at_ms")?)?,
+    };
+    Ok(crate::ThreadGoalCreationReceipt {
+        creation_id: row.try_get("creation_id")?,
+        request_digest: row.try_get("request_digest")?,
+        previous_goal,
+        goal,
+        document,
+    })
+}
+
+fn thread_goal_from_creation_row_optional(
+    row: &sqlx::sqlite::SqliteRow,
+    prefix: &str,
+) -> anyhow::Result<Option<crate::ThreadGoal>> {
+    let column = |name: &str| format!("{prefix}_{name}");
+    let goal_id: Option<String> = row.try_get(column("goal_id").as_str())?;
+    let Some(goal_id) = goal_id else {
+        return Ok(None);
+    };
+    Ok(Some(thread_goal_from_row_fields(
+        row.try_get(column("thread_id").as_str())?,
+        goal_id,
+        row.try_get(column("objective").as_str())?,
+        row.try_get(column("status").as_str())?,
+        row.try_get(column("token_budget").as_str())?,
+        row.try_get(column("tokens_used").as_str())?,
+        row.try_get(column("time_used_seconds").as_str())?,
+        row.try_get(column("mission_revision").as_str())?,
+        row.try_get(column("lifecycle_revision").as_str())?,
+        row.try_get(column("created_at_ms").as_str())?,
+        row.try_get(column("updated_at_ms").as_str())?,
+    )?))
+}
+
+fn thread_goal_from_row_fields(
+    thread_id: String,
+    goal_id: String,
+    objective: String,
+    status: String,
+    token_budget: Option<i64>,
+    tokens_used: i64,
+    time_used_seconds: i64,
+    mission_revision: i64,
+    lifecycle_revision: i64,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+) -> anyhow::Result<crate::ThreadGoal> {
+    crate::ThreadGoal::try_from(ThreadGoalRow {
+        thread_id,
+        goal_id,
+        objective,
+        status,
+        token_budget,
+        tokens_used,
+        time_used_seconds,
+        mission_revision,
+        lifecycle_revision,
+        created_at_ms,
+        updated_at_ms,
+    })
 }
 
 fn thread_goal_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<crate::ThreadGoal> {
