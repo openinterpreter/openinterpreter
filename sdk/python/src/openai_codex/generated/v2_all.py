@@ -5412,25 +5412,21 @@ class ThreadExtra(BaseModel):
     )
 
 
-class ThreadGoalClearParams(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    thread_id: Annotated[str, Field(alias="threadId")]
-
-
-class ThreadGoalClearResponse(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    cleared: bool
-
-
 class ThreadGoalClearedNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
     thread_id: Annotated[str, Field(alias="threadId")]
+
+
+class ThreadGoalDocument(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    byte_length: Annotated[int, Field(alias="byteLength")]
+    mission_revision: Annotated[int, Field(alias="missionRevision")]
+    path: str
+    sha256: str
 
 
 class ThreadGoalGetParams(BaseModel):
@@ -7004,15 +7000,6 @@ class ThreadGoalGetRequest(BaseModel):
     id: RequestId
     method: Annotated[Literal["thread/goal/get"], Field(title="Thread/goal/getRequestMethod")]
     params: ThreadGoalGetParams
-
-
-class ThreadGoalClearRequest(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    id: RequestId
-    method: Annotated[Literal["thread/goal/clear"], Field(title="Thread/goal/clearRequestMethod")]
-    params: ThreadGoalClearParams
 
 
 class ThreadMetadataUpdateRequest(BaseModel):
@@ -9909,17 +9896,45 @@ class ThreadGoal(BaseModel):
     updated_at: Annotated[int, Field(alias="updatedAt")]
 
 
-class ThreadGoalGetResponse(BaseModel):
+class ThreadGoalClearParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
-    goal: ThreadGoal | None = None
+    expected_goal_id: Annotated[str | None, Field(alias="expectedGoalId")] = None
+    expected_lifecycle_revision: Annotated[int | None, Field(alias="expectedLifecycleRevision")] = (
+        None
+    )
+    expected_mission_revision: Annotated[int | None, Field(alias="expectedMissionRevision")] = None
+    expected_status: Annotated[ThreadGoalStatus | None, Field(alias="expectedStatus")] = None
+    thread_id: Annotated[str, Field(alias="threadId")]
+
+
+class ThreadGoalRevision(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    goal_id: Annotated[str, Field(alias="goalId")]
+    lifecycle_revision: Annotated[int, Field(alias="lifecycleRevision")]
+    mission_revision: Annotated[int, Field(alias="missionRevision")]
+    status: ThreadGoalStatus
 
 
 class ThreadGoalSetParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    expected_goal_id: Annotated[
+        str | None,
+        Field(
+            alias="expectedGoalId",
+            description="All four expected fields are required together for an atomic Goal CAS. Objective and token-budget edits are included in the same transaction; mission_revision advances for those edits and lifecycle_revision advances for every successful mutation. Omit all four for legacy unconditional set.",
+        ),
+    ] = None
+    expected_lifecycle_revision: Annotated[int | None, Field(alias="expectedLifecycleRevision")] = (
+        None
+    )
+    expected_mission_revision: Annotated[int | None, Field(alias="expectedMissionRevision")] = None
+    expected_status: Annotated[ThreadGoalStatus | None, Field(alias="expectedStatus")] = None
     objective: str | None = None
     status: ThreadGoalStatus | None = None
     thread_id: Annotated[str, Field(alias="threadId")]
@@ -9931,6 +9946,7 @@ class ThreadGoalSetResponse(BaseModel):
         populate_by_name=True,
     )
     goal: ThreadGoal
+    revision: ThreadGoalRevision
 
 
 class ThreadGoalUpdatedNotification(BaseModel):
@@ -10619,6 +10635,15 @@ class ThreadGoalSetRequest(BaseModel):
     id: RequestId
     method: Annotated[Literal["thread/goal/set"], Field(title="Thread/goal/setRequestMethod")]
     params: ThreadGoalSetParams
+
+
+class ThreadGoalClearRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["thread/goal/clear"], Field(title="Thread/goal/clearRequestMethod")]
+    params: ThreadGoalClearParams
 
 
 class ThreadListRequest(BaseModel):
@@ -11476,6 +11501,22 @@ class SessionSource(RootModel[SessionSourceValue | CustomSessionSource | SubAgen
         populate_by_name=True,
     )
     root: SessionSourceValue | CustomSessionSource | SubAgentSessionSource
+
+
+class ThreadGoalClearResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    cleared: bool
+    revision: ThreadGoalRevision | None = None
+
+
+class ThreadGoalGetResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    goal: ThreadGoal | None = None
+    revision: ThreadGoalRevision | None = None
 
 
 class FunctionCallOutputThreadItem(BaseModel):

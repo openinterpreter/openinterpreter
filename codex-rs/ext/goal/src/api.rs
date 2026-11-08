@@ -31,13 +31,16 @@ use crate::tool::validate_goal_budget;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GoalServiceError {
     InvalidRequest(String),
+    Conflict(String),
     Internal(String),
 }
 
 impl fmt::Display for GoalServiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidRequest(message) | Self::Internal(message) => f.write_str(message),
+            Self::InvalidRequest(message) | Self::Conflict(message) | Self::Internal(message) => {
+                f.write_str(message)
+            }
         }
     }
 }
@@ -65,6 +68,43 @@ pub struct GoalSetRequest<'a> {
     pub max_goal_token_budget: Option<i64>,
 }
 
+/// Complete identity snapshot required for an external lifecycle mutation.
+/// Accounting updates intentionally do not advance either revision, but a
+/// status mutation must still match both revisions to avoid stale writers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GoalCas {
+    pub goal_id: String,
+    pub status: ThreadGoalStatus,
+    pub mission_revision: i64,
+    pub lifecycle_revision: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GoalIdentity {
+    pub goal_id: String,
+    pub status: ThreadGoalStatus,
+    pub mission_revision: i64,
+    pub lifecycle_revision: i64,
+}
+
+impl From<&codex_state::ThreadGoal> for GoalIdentity {
+    fn from(goal: &codex_state::ThreadGoal) -> Self {
+        Self {
+            goal_id: goal.goal_id.clone(),
+            status: match goal.status {
+                codex_state::ThreadGoalStatus::Active => ThreadGoalStatus::Active,
+                codex_state::ThreadGoalStatus::Paused => ThreadGoalStatus::Paused,
+                codex_state::ThreadGoalStatus::Blocked => ThreadGoalStatus::Blocked,
+                codex_state::ThreadGoalStatus::UsageLimited => ThreadGoalStatus::UsageLimited,
+                codex_state::ThreadGoalStatus::BudgetLimited => ThreadGoalStatus::BudgetLimited,
+                codex_state::ThreadGoalStatus::Complete => ThreadGoalStatus::Complete,
+            },
+            mission_revision: goal.mission_revision,
+            lifecycle_revision: goal.lifecycle_revision,
+        }
+    }
+}
+
 pub const MAX_MANAGED_GOAL_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MANAGED_GOAL_DOCUMENT_DIRECTORY: &str = "managed-goals";
 
@@ -73,6 +113,7 @@ pub struct GoalDocumentSetRequest<'a> {
     pub document: &'a str,
     pub status: Option<ThreadGoalStatus>,
     pub expected_mission_revision: Option<i64>,
+    pub expected_goal: Option<GoalCas>,
 }
 
 pub struct GoalDocumentSetOutcome {
@@ -87,6 +128,10 @@ impl GoalDocumentSetOutcome {
 
     pub fn document(&self) -> codex_state::ThreadGoalDocument {
         self.document.clone()
+    }
+
+    pub fn identity(&self) -> GoalIdentity {
+        self.goal.identity()
     }
 
     pub fn thread_goal_updated_item(&self) -> RolloutItem {
@@ -121,6 +166,10 @@ pub trait GoalCompletionObserver: Send + Sync {
 }
 
 impl GoalSetOutcome {
+    pub fn identity(&self) -> GoalIdentity {
+        GoalIdentity::from(&self.state_goal)
+    }
+
     pub fn thread_goal_updated_item(&self) -> RolloutItem {
         RolloutItem::EventMsg(EventMsg::ThreadGoalUpdated(ThreadGoalUpdatedEvent {
             thread_id: self.goal.thread_id,
@@ -226,6 +275,25 @@ impl GoalService {
         state_db: &codex_state::StateRuntime,
         request: GoalSetRequest<'_>,
     ) -> Result<GoalSetOutcome, GoalServiceError> {
+        self.set_thread_goal_inner(state_db, request, None).await
+    }
+
+    pub async fn set_thread_goal_cas(
+        &self,
+        state_db: &codex_state::StateRuntime,
+        request: GoalSetRequest<'_>,
+        expected: GoalCas,
+    ) -> Result<GoalSetOutcome, GoalServiceError> {
+        self.set_thread_goal_inner(state_db, request, Some(expected))
+            .await
+    }
+
+    async fn set_thread_goal_inner(
+        &self,
+        state_db: &codex_state::StateRuntime,
+        request: GoalSetRequest<'_>,
+        expected: Option<GoalCas>,
+    ) -> Result<GoalSetOutcome, GoalServiceError> {
         let GoalSetRequest {
             thread_id,
             objective,
@@ -252,7 +320,6 @@ impl GoalService {
             validate_goal_budget(token_budget.flatten(), max_goal_token_budget)
                 .map_err(GoalServiceError::InvalidRequest)?;
         }
-
         let runtime = self.runtime_for_thread(thread_id);
         // Hold this through the prepare/write window so idle continuation cannot
         // launch from goal state that this external mutation is about to change.
@@ -269,6 +336,30 @@ impl GoalService {
             && let Err(err) = runtime.prepare_external_goal_mutation().await
         {
             tracing::warn!("failed to prepare external goal mutation: {err}");
+        }
+
+        if let Some(expected) = expected.as_ref() {
+            let matches = state_db
+                .thread_goals()
+                .get_thread_goal(thread_id)
+                .await
+                .map_err(|err| {
+                    GoalServiceError::Internal(format!(
+                        "failed to read Goal CAS precondition: {err}"
+                    ))
+                })?
+                .is_some_and(|goal| {
+                    goal.goal_id == expected.goal_id
+                        && goal.mission_revision == expected.mission_revision
+                        && goal.lifecycle_revision == expected.lifecycle_revision
+                        && state_status_from_protocol(expected.status) == goal.status
+                });
+            if !matches {
+                return Err(GoalServiceError::Conflict(
+                    "goal_cas_conflict: goalId/status/missionRevision/lifecycleRevision changed"
+                        .to_string(),
+                ));
+            }
         }
 
         let (goal, previous_goal) = if let Some(objective) = objective {
@@ -297,25 +388,45 @@ impl GoalService {
                     ));
                 }
                 let previous_goal = PreviousGoalSnapshot::from(existing_goal);
-                state_db
-                    .thread_goals()
-                    .update_thread_goal(
-                        thread_id,
-                        codex_state::GoalUpdate {
-                            objective: Some(objective.to_string()),
-                            status,
-                            token_budget,
-                            expected_goal_id: Some(existing_goal.goal_id.clone()),
-                        },
-                    )
-                    .await
+                let update = codex_state::GoalUpdate {
+                    objective: Some(objective.to_string()),
+                    status,
+                    token_budget,
+                    expected_goal_id: Some(existing_goal.goal_id.clone()),
+                };
+                let updated = if let Some(expected) = expected.as_ref() {
+                    state_db
+                        .thread_goals()
+                        .update_thread_goal_cas(
+                            thread_id,
+                            update,
+                            &expected.goal_id,
+                            state_status_from_protocol(expected.status),
+                            expected.mission_revision,
+                            expected.lifecycle_revision,
+                        )
+                        .await
+                } else {
+                    state_db
+                        .thread_goals()
+                        .update_thread_goal(thread_id, update)
+                        .await
+                };
+                updated
                     .map_err(|err| {
                         GoalServiceError::Internal(format!("failed to update thread goal: {err}"))
                     })?
                     .ok_or_else(|| {
-                        GoalServiceError::InvalidRequest(format!(
-                            "cannot update goal for thread {thread_id}: no goal exists"
-                        ))
+                        if expected.is_some() {
+                            GoalServiceError::Conflict(
+                                "goal_cas_conflict: goal changed during conditional update"
+                                    .to_string(),
+                            )
+                        } else {
+                            GoalServiceError::InvalidRequest(format!(
+                                "cannot update goal for thread {thread_id}: no goal exists"
+                            ))
+                        }
                     })
                     .map(|goal| (goal, Some(previous_goal)))?
             } else {
@@ -348,25 +459,51 @@ impl GoalService {
                 })?;
             let previous_goal = PreviousGoalSnapshot::from(&existing_goal);
             let expected_goal_id = existing_goal.goal_id.clone();
-            state_db
-                .thread_goals()
-                .update_thread_goal(
-                    thread_id,
-                    codex_state::GoalUpdate {
-                        objective: None,
-                        status,
-                        token_budget,
-                        expected_goal_id: Some(expected_goal_id),
-                    },
-                )
-                .await
+            let updated = if let Some(expected) = expected.as_ref() {
+                state_db
+                    .thread_goals()
+                    .update_thread_goal_cas(
+                        thread_id,
+                        codex_state::GoalUpdate {
+                            objective: None,
+                            status,
+                            token_budget,
+                            expected_goal_id: Some(expected_goal_id.clone()),
+                        },
+                        &expected.goal_id,
+                        state_status_from_protocol(expected.status),
+                        expected.mission_revision,
+                        expected.lifecycle_revision,
+                    )
+                    .await
+            } else {
+                state_db
+                    .thread_goals()
+                    .update_thread_goal(
+                        thread_id,
+                        codex_state::GoalUpdate {
+                            objective: None,
+                            status,
+                            token_budget,
+                            expected_goal_id: Some(expected_goal_id),
+                        },
+                    )
+                    .await
+            };
+            updated
                 .map_err(|err| {
                     GoalServiceError::Internal(format!("failed to update thread goal: {err}"))
                 })?
                 .ok_or_else(|| {
-                    GoalServiceError::InvalidRequest(format!(
-                        "cannot update goal for thread {thread_id}: no goal exists"
-                    ))
+                    if expected.is_some() {
+                        GoalServiceError::Conflict(
+                            "goal_cas_conflict: goal changed during conditional update".to_string(),
+                        )
+                    } else {
+                        GoalServiceError::InvalidRequest(format!(
+                            "cannot update goal for thread {thread_id}: no goal exists"
+                        ))
+                    }
                 })
                 .map(|goal| (goal, Some(previous_goal)))?
         };
@@ -426,7 +563,8 @@ impl GoalService {
             .map_err(|err| {
                 GoalServiceError::Internal(format!("failed to read thread goal: {err}"))
             })?;
-        if let Some(expected) = request.expected_mission_revision
+        if request.expected_goal.is_none()
+            && let Some(expected) = request.expected_mission_revision
             && existing_goal.as_ref().map(|goal| goal.mission_revision) != Some(expected)
         {
             return Err(GoalServiceError::InvalidRequest(format!(
@@ -457,19 +595,45 @@ impl GoalService {
             .status
             .unwrap_or(codex_protocol::protocol::ThreadGoalStatus::Active);
         let result = if let Some(existing_goal) = existing_goal.as_ref() {
-            state_db
-                .thread_goals()
-                .update_thread_goal_document(
-                    thread_id,
-                    &pointer,
-                    Some(state_goal_status(status)),
-                    &existing_goal.goal_id,
-                    existing_goal.mission_revision,
-                    &relative_path.to_string_lossy(),
-                    &digest,
-                    request.document.len() as i64,
-                )
-                .await
+            if let Some(expected) = request.expected_goal.as_ref() {
+                state_db
+                    .thread_goals()
+                    .update_thread_goal_document_cas(
+                        thread_id,
+                        &pointer,
+                        Some(state_goal_status(status)),
+                        &expected.goal_id,
+                        state_goal_status(expected.status),
+                        expected.mission_revision,
+                        expected.lifecycle_revision,
+                        &relative_path.to_string_lossy(),
+                        &digest,
+                        request.document.len() as i64,
+                    )
+                    .await
+            } else {
+                state_db
+                    .thread_goals()
+                    .update_thread_goal_document(
+                        thread_id,
+                        &pointer,
+                        Some(state_goal_status(status)),
+                        &existing_goal.goal_id,
+                        existing_goal.mission_revision,
+                        &relative_path.to_string_lossy(),
+                        &digest,
+                        request.document.len() as i64,
+                    )
+                    .await
+            }
+        } else if request.expected_goal.is_some() {
+            if created_file {
+                let _ = fs::remove_file(&absolute_path).await;
+            }
+            return Err(GoalServiceError::Conflict(
+                "goal_document_cas_conflict: no current Goal matches the expected identity"
+                    .to_string(),
+            ));
         } else {
             state_db
                 .thread_goals()
@@ -491,10 +655,16 @@ impl GoalService {
                 if created_file {
                     let _ = fs::remove_file(&absolute_path).await;
                 }
-                return Err(GoalServiceError::InvalidRequest(
-                    "managed Goal changed during document update; retry from a fresh read"
-                        .to_string(),
-                ));
+                return Err(if request.expected_goal.is_some() {
+                    GoalServiceError::Conflict(
+                        "goal_document_cas_conflict: Goal identity or revision changed".to_string(),
+                    )
+                } else {
+                    GoalServiceError::InvalidRequest(
+                        "managed Goal changed during document update; retry from a fresh read"
+                            .to_string(),
+                    )
+                });
             }
             Err(err) => {
                 if created_file {
@@ -667,6 +837,60 @@ impl GoalService {
         }
 
         Ok(cleared)
+    }
+
+    pub async fn clear_thread_goal_cas(
+        &self,
+        state_db: &codex_state::StateRuntime,
+        thread_id: ThreadId,
+        expected: GoalCas,
+    ) -> Result<codex_state::ThreadGoal, GoalServiceError> {
+        let runtime = self.runtime_for_thread(thread_id);
+        let goal_state_permit = match runtime.as_ref() {
+            Some(runtime) => Some(
+                runtime
+                    .goal_state_permit()
+                    .await
+                    .map_err(GoalServiceError::Internal)?,
+            ),
+            None => None,
+        };
+        if let Some(runtime) = runtime.as_ref()
+            && let Err(err) = runtime.prepare_external_goal_mutation().await
+        {
+            tracing::warn!("failed to prepare external goal CAS clear: {err}");
+        }
+
+        let cleared = state_db
+            .thread_goals()
+            .delete_thread_goal_cas(
+                thread_id,
+                &expected.goal_id,
+                state_status_from_protocol(expected.status),
+                expected.mission_revision,
+                expected.lifecycle_revision,
+            )
+            .await
+            .map_err(|err| {
+                GoalServiceError::Internal(format!("failed to clear thread Goal: {err}"))
+            })?;
+        let Some(goal) = cleared else {
+            return Err(GoalServiceError::Conflict(
+                "goal_cas_conflict: goalId/status/missionRevision/lifecycleRevision changed"
+                    .to_string(),
+            ));
+        };
+        if let Some(runtime) = runtime.as_ref() {
+            runtime.clear_pending_turn_start_options().await;
+        }
+        drop(goal_state_permit);
+        drop(runtime);
+        if let Some(runtime) = self.runtime_for_thread(thread_id)
+            && let Err(err) = runtime.apply_external_goal_clear(goal.clone()).await
+        {
+            tracing::warn!("failed to apply external Goal CAS clear runtime effects: {err}");
+        }
+        Ok(goal)
     }
 
     pub(crate) fn register_runtime(&self, runtime: &Arc<GoalRuntimeHandle>) {

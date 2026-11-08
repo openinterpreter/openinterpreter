@@ -21980,6 +21980,36 @@
       "ThreadGoalClearParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "expectedGoalId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expectedLifecycleRevision": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expectedMissionRevision": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expectedStatus": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadGoalStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "threadId": {
             "type": "string"
           }
@@ -21995,6 +22025,16 @@
         "properties": {
           "cleared": {
             "type": "boolean"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadGoalRevision"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -22014,6 +22054,32 @@
           "threadId"
         ],
         "title": "ThreadGoalClearedNotification",
+        "type": "object"
+      },
+      "ThreadGoalDocument": {
+        "description": "The content-free metadata for a file-backed managed Goal document.\n\n`path` is relative to the Codex state home; callers must not receive the absolute state-home path.  The document bytes are addressed by the mission revision and digest so a consumer can fail closed on drift.",
+        "properties": {
+          "byteLength": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "missionRevision": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "byteLength",
+          "missionRevision",
+          "path",
+          "sha256"
+        ],
         "type": "object"
       },
       "ThreadGoalGetParams": {
@@ -22041,14 +22107,80 @@
                 "type": "null"
               }
             ]
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadGoalRevision"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "title": "ThreadGoalGetResponse",
         "type": "object"
       },
+      "ThreadGoalRevision": {
+        "properties": {
+          "goalId": {
+            "type": "string"
+          },
+          "lifecycleRevision": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "missionRevision": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/ThreadGoalStatus"
+          }
+        },
+        "required": [
+          "goalId",
+          "lifecycleRevision",
+          "missionRevision",
+          "status"
+        ],
+        "type": "object"
+      },
       "ThreadGoalSetParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "expectedGoalId": {
+            "description": "All four expected fields are required together for an atomic Goal CAS. Objective and token-budget edits are included in the same transaction; mission_revision advances for those edits and lifecycle_revision advances for every successful mutation. Omit all four for legacy unconditional set.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expectedLifecycleRevision": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expectedMissionRevision": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expectedStatus": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadGoalStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "objective": {
             "type": [
               "string",
@@ -22087,10 +22219,14 @@
         "properties": {
           "goal": {
             "$ref": "#/definitions/v2/ThreadGoal"
+          },
+          "revision": {
+            "$ref": "#/definitions/v2/ThreadGoalRevision"
           }
         },
         "required": [
-          "goal"
+          "goal",
+          "revision"
         ],
         "title": "ThreadGoalSetResponse",
         "type": "object"

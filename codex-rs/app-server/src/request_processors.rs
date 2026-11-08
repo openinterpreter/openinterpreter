@@ -241,6 +241,7 @@ use codex_app_server_protocol::ThreadGoalDocumentSetParams;
 use codex_app_server_protocol::ThreadGoalDocumentSetResponse;
 use codex_app_server_protocol::ThreadGoalGetParams;
 use codex_app_server_protocol::ThreadGoalGetResponse;
+use codex_app_server_protocol::ThreadGoalRevision;
 use codex_app_server_protocol::ThreadGoalSetParams;
 use codex_app_server_protocol::ThreadGoalSetResponse;
 use codex_app_server_protocol::ThreadGoalStatus;
