@@ -870,10 +870,12 @@ pub struct ThreadGoalSetParams {
     )]
     #[ts(optional = nullable, type = "number | null")]
     pub token_budget: Option<Option<i64>>,
-    /// All four expected fields are required together for an atomic Goal CAS.
-    /// Objective and token-budget edits are included in the same transaction;
-    /// mission_revision advances for those edits and lifecycle_revision advances
-    /// for every successful mutation. Omit all four for legacy unconditional set.
+    /// All four expected fields are required together for an atomic Goal CAS
+    /// when an existing Goal is being changed. Objective and token-budget edits
+    /// are included in the same transaction; mission_revision advances for
+    /// those edits and lifecycle_revision advances for every successful
+    /// mutation. Omit all four only when the authoritative read found no Goal
+    /// and this request is creating the first Goal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub expected_goal_id: Option<String>,
@@ -921,15 +923,13 @@ pub struct ThreadGoalDocumentSetParams {
     pub document: String,
     #[ts(optional = nullable)]
     pub status: Option<ThreadGoalStatus>,
-    /// Legacy document-only CAS. When supplied without the other expected
-    /// fields it retains the pre-existing mission-revision behavior.
-    #[serde(default)]
+    /// All four expected fields must be supplied together for an existing
+    /// managed Goal. A request without any expected fields is reserved for
+    /// first creation when `thread/goal/get` is genuinely empty; a lone
+    /// mission revision is not a supported mutation contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable, type = "number | null")]
     pub expected_mission_revision: Option<i64>,
-    /// For supervisor-owned document edits, all four expected fields must be
-    /// supplied together. This conditionally updates the Goal pointer and its
-    /// document metadata in one transaction and rejects stale status/lifecycle
-    /// state without changing either the file or Goal row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub expected_goal_id: Option<String>,

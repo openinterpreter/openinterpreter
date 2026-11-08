@@ -112,7 +112,6 @@ pub struct GoalDocumentSetRequest<'a> {
     pub thread_id: ThreadId,
     pub document: &'a str,
     pub status: Option<ThreadGoalStatus>,
-    pub expected_mission_revision: Option<i64>,
     pub expected_goal: Option<GoalCas>,
 }
 
@@ -563,13 +562,11 @@ impl GoalService {
             .map_err(|err| {
                 GoalServiceError::Internal(format!("failed to read thread goal: {err}"))
             })?;
-        if request.expected_goal.is_none()
-            && let Some(expected) = request.expected_mission_revision
-            && existing_goal.as_ref().map(|goal| goal.mission_revision) != Some(expected)
-        {
-            return Err(GoalServiceError::InvalidRequest(format!(
-                "managed Goal mission revision changed; expected {expected}"
-            )));
+        if existing_goal.is_some() && request.expected_goal.is_none() {
+            return Err(GoalServiceError::InvalidRequest(
+                "managed Goal document updates require expected goalId/status/missionRevision/lifecycleRevision; omit them only for first creation"
+                    .to_string(),
+            ));
         }
 
         let mission_revision = existing_goal

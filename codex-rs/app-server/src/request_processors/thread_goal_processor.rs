@@ -83,6 +83,19 @@ impl ThreadGoalRequestProcessor {
             .get_thread_goal(&state_db, thread_id)
             .await
             .map_err(goal_service_error)?;
+        if existing_goal.is_some()
+            && goal_document_cas_from_params(
+                params.expected_goal_id.clone(),
+                params.expected_status.clone(),
+                params.expected_mission_revision,
+                params.expected_lifecycle_revision,
+            )?
+            .is_none()
+        {
+            return Err(invalid_params(
+                "thread/goal/document/set requires expectedGoalId, expectedStatus, expectedMissionRevision, and expectedLifecycleRevision for an existing Goal",
+            ));
+        }
         let resulting_status = params
             .status
             .map(ThreadGoalStatus::to_core)
@@ -110,7 +123,6 @@ impl ThreadGoalRequestProcessor {
                     thread_id,
                     document: params.document.as_str(),
                     status: params.status.map(ThreadGoalStatus::to_core),
-                    expected_mission_revision: params.expected_mission_revision,
                     expected_goal: goal_document_cas_from_params(
                         params.expected_goal_id.clone(),
                         params.expected_status.clone(),
@@ -419,6 +431,11 @@ impl ThreadGoalRequestProcessor {
             .get_thread_goal(&state_db, thread_id)
             .await
             .map_err(goal_service_error)?;
+        if existing_goal.is_some() && expected.is_none() {
+            return Err(invalid_params(
+                "thread/goal/set requires expectedGoalId, expectedStatus, expectedMissionRevision, and expectedLifecycleRevision for an existing Goal",
+            ));
+        }
         let resulting_status = params
             .status
             .map(ThreadGoalStatus::to_core)
@@ -573,6 +590,17 @@ impl ThreadGoalRequestProcessor {
         self.reconcile_thread_goal_rollout(thread_id, &state_db)
             .await?;
 
+        let prior = state_db
+            .thread_goals()
+            .get_thread_goal(thread_id)
+            .await
+            .map_err(|err| internal_error(format!("failed to read thread goal: {err}")))?;
+        if prior.is_some() && expected.is_none() {
+            return Err(invalid_params(
+                "thread/goal/clear requires expectedGoalId, expectedStatus, expectedMissionRevision, and expectedLifecycleRevision for an existing Goal",
+            ));
+        }
+
         let listener_command_tx = {
             let thread_state = self.thread_state_manager.thread_state(thread_id).await;
             let thread_state = thread_state.lock().await;
@@ -586,11 +614,6 @@ impl ThreadGoalRequestProcessor {
                 .map_err(goal_service_error)?;
             (true, Some(api_goal_revision((&goal).into())))
         } else {
-            let prior = state_db
-                .thread_goals()
-                .get_thread_goal(thread_id)
-                .await
-                .map_err(|err| internal_error(format!("failed to read thread goal: {err}")))?;
             let cleared = self
                 .goal_service
                 .clear_thread_goal(&state_db, thread_id)
@@ -913,17 +936,19 @@ fn goal_document_cas_from_params(
     expected_mission_revision: Option<i64>,
     expected_lifecycle_revision: Option<i64>,
 ) -> Result<Option<GoalCas>, JSONRPCErrorError> {
-    let identity_fields = [expected_goal_id.is_some(), expected_status.is_some()]
-        .into_iter()
-        .filter(|present| *present)
-        .count()
-        + usize::from(expected_lifecycle_revision.is_some());
-    if identity_fields == 0 {
-        // Preserve the pre-existing mission-revision-only document CAS for
-        // callers that have not adopted the full supervisor condition.
+    let present = [
+        expected_goal_id.is_some(),
+        expected_status.is_some(),
+        expected_mission_revision.is_some(),
+        expected_lifecycle_revision.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    if present == 0 {
         return Ok(None);
     }
-    if identity_fields != 3 || expected_mission_revision.is_none() {
+    if present != 4 {
         return Err(invalid_params(
             "document Goal CAS requires expectedGoalId, expectedStatus, expectedMissionRevision, and expectedLifecycleRevision together",
         ));
