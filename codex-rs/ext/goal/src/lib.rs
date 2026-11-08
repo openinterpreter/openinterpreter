@@ -11,10 +11,14 @@ mod spec;
 mod steering;
 mod tool;
 
+pub use api::GoalCas;
 pub use api::GoalCompletionObserver;
 pub use api::GoalCompletionObserverFuture;
+pub use api::GoalDocumentCreateOutcome;
+pub use api::GoalDocumentCreateRequest;
 pub use api::GoalDocumentSetOutcome;
 pub use api::GoalDocumentSetRequest;
+pub use api::GoalIdentity;
 pub use api::GoalObjectiveUpdate;
 pub use api::GoalService;
 pub use api::GoalServiceError;

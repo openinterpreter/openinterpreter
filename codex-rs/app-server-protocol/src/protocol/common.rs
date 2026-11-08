@@ -655,6 +655,12 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadGoalDocumentSetResponse,
     },
+    #[experimental("thread/goal/document/create")]
+    ThreadGoalDocumentCreate => "thread/goal/document/create" {
+        params: v2::ThreadGoalDocumentCreateParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadGoalDocumentCreateResponse,
+    },
     ThreadGoalGet => "thread/goal/get" {
         params: v2::ThreadGoalGetParams,
         serialization: thread_id(params.thread_id),
@@ -2588,6 +2594,10 @@ mod tests {
                 objective: Some("ship it".to_string()),
                 status: None,
                 token_budget: None,
+                expected_goal_id: None,
+                expected_status: None,
+                expected_mission_revision: None,
+                expected_lifecycle_revision: None,
             },
         };
         assert_eq!(
@@ -4524,6 +4534,10 @@ mod tests {
                 objective: Some("ship goal mode".to_string()),
                 status: Some(v2::ThreadGoalStatus::Active),
                 token_budget: Some(Some(10_000)),
+                expected_goal_id: None,
+                expected_status: None,
+                expected_mission_revision: None,
+                expected_lifecycle_revision: None,
             },
         };
         let get_request = ClientRequest::ThreadGoalGet {
@@ -4536,6 +4550,10 @@ mod tests {
             request_id: RequestId::Integer(3),
             params: v2::ThreadGoalClearParams {
                 thread_id: "thr_123".to_string(),
+                expected_goal_id: None,
+                expected_status: None,
+                expected_mission_revision: None,
+                expected_lifecycle_revision: None,
             },
         };
 

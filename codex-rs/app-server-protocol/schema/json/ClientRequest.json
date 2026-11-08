@@ -4587,6 +4587,36 @@
     },
     "ThreadGoalClearParams": {
       "properties": {
+        "expectedGoalId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedLifecycleRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "expectedMissionRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "expectedStatus": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadGoalStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "threadId": {
           "type": "string"
         }
@@ -4609,6 +4639,37 @@
     },
     "ThreadGoalSetParams": {
       "properties": {
+        "expectedGoalId": {
+          "description": "All four expected fields are required together for an atomic Goal CAS. Objective and token-budget edits are included in the same transaction; mission_revision advances for those edits and lifecycle_revision advances for every successful mutation. Omit all four for legacy unconditional set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedLifecycleRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "expectedMissionRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "expectedStatus": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadGoalStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "objective": {
           "type": [
             "string",
