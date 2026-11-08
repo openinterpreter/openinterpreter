@@ -96,7 +96,10 @@ pub struct ThreadGoalDocument {
 pub struct ThreadGoalCreationReceipt {
     pub creation_id: String,
     pub request_digest: String,
-    pub previous_goal: ThreadGoal,
+    /// `None` is the durable proof that this creation used the explicit
+    /// no-Goal admission precondition.  It is not inferred from an unavailable
+    /// or failed read.
+    pub previous_goal: Option<ThreadGoal>,
     pub goal: ThreadGoal,
     pub document: ThreadGoalDocument,
 }

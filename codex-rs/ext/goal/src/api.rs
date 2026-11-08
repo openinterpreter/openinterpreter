@@ -83,6 +83,22 @@ pub struct GoalCas {
     pub lifecycle_revision: i64,
 }
 
+/// The single managed-document creation contract.  `Absent` is accepted only
+/// with the explicit native `noGoal` admission state; an unavailable, denied,
+/// timed-out, or unloaded read is never converted to this variant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GoalDocumentCreateAdmissionState {
+    NoGoal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GoalDocumentCreatePrecondition {
+    Absent {
+        admission_state: GoalDocumentCreateAdmissionState,
+    },
+    Completed(GoalCas),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GoalIdentity {
     pub goal_id: String,
@@ -130,7 +146,7 @@ pub struct GoalDocumentCreateRequest<'a> {
     pub status: Option<ThreadGoalStatus>,
     pub token_budget: Option<i64>,
     pub max_goal_token_budget: Option<i64>,
-    pub expected_goal: GoalCas,
+    pub precondition: GoalDocumentCreatePrecondition,
 }
 
 pub struct GoalDocumentSetOutcome {
@@ -141,7 +157,7 @@ pub struct GoalDocumentSetOutcome {
 pub struct GoalDocumentCreateOutcome {
     goal: GoalSetOutcome,
     document: codex_state::ThreadGoalDocument,
-    previous_identity: GoalIdentity,
+    previous_identity: Option<GoalIdentity>,
     creation_id: String,
     replayed: bool,
 }
@@ -159,7 +175,7 @@ impl GoalDocumentCreateOutcome {
         self.goal.identity()
     }
 
-    pub fn previous_identity(&self) -> GoalIdentity {
+    pub fn previous_identity(&self) -> Option<GoalIdentity> {
         self.previous_identity.clone()
     }
 
@@ -622,16 +638,20 @@ impl GoalService {
             .map_err(|err| {
                 GoalServiceError::Internal(format!("failed to read thread goal: {err}"))
             })?;
-        if existing_goal.is_some() && request.expected_goal.is_none() {
+        let Some(existing_goal) = existing_goal else {
             return Err(GoalServiceError::InvalidRequest(
-                "managed Goal document updates require expected goalId/status/missionRevision/lifecycleRevision; omit them only for first creation"
+                "managed Goal document creation requires thread/goal/document/create with an explicit absent/noGoal precondition"
                     .to_string(),
             ));
-        }
+        };
+        let Some(expected_goal) = request.expected_goal.as_ref() else {
+            return Err(GoalServiceError::InvalidRequest(
+                "managed Goal document updates require expected goalId/status/missionRevision/lifecycleRevision"
+                    .to_string(),
+            ));
+        };
 
-        let mission_revision = existing_goal
-            .as_ref()
-            .map_or(1, |goal| goal.mission_revision + 1);
+        let mission_revision = existing_goal.mission_revision + 1;
         let digest = format!("{:x}", Sha256::digest(request.document.as_bytes()));
         let relative_path = PathBuf::from(MANAGED_GOAL_DOCUMENT_DIRECTORY)
             .join(thread_id.to_string())
@@ -651,61 +671,21 @@ impl GoalService {
         let status = request
             .status
             .unwrap_or(codex_protocol::protocol::ThreadGoalStatus::Active);
-        let result = if let Some(existing_goal) = existing_goal.as_ref() {
-            if let Some(expected) = request.expected_goal.as_ref() {
-                state_db
-                    .thread_goals()
-                    .update_thread_goal_document_cas(
-                        thread_id,
-                        &pointer,
-                        Some(state_goal_status(status)),
-                        &expected.goal_id,
-                        state_goal_status(expected.status),
-                        expected.mission_revision,
-                        expected.lifecycle_revision,
-                        &relative_path.to_string_lossy(),
-                        &digest,
-                        request.document.len() as i64,
-                    )
-                    .await
-            } else {
-                state_db
-                    .thread_goals()
-                    .update_thread_goal_document(
-                        thread_id,
-                        &pointer,
-                        Some(state_goal_status(status)),
-                        &existing_goal.goal_id,
-                        existing_goal.mission_revision,
-                        &relative_path.to_string_lossy(),
-                        &digest,
-                        request.document.len() as i64,
-                    )
-                    .await
-            }
-        } else if request.expected_goal.is_some() {
-            if created_file {
-                let _ = fs::remove_file(&absolute_path).await;
-            }
-            return Err(GoalServiceError::Conflict(
-                "goal_document_cas_conflict: no current Goal matches the expected identity"
-                    .to_string(),
-            ));
-        } else {
-            state_db
-                .thread_goals()
-                .insert_thread_goal_document(
-                    thread_id,
-                    &pointer,
-                    state_goal_status(status),
-                    None,
-                    &relative_path.to_string_lossy(),
-                    &digest,
-                    request.document.len() as i64,
-                    mission_revision,
-                )
-                .await
-        };
+        let result = state_db
+            .thread_goals()
+            .update_thread_goal_document_cas(
+                thread_id,
+                &pointer,
+                Some(state_goal_status(status)),
+                &expected_goal.goal_id,
+                state_goal_status(expected_goal.status),
+                expected_goal.mission_revision,
+                expected_goal.lifecycle_revision,
+                &relative_path.to_string_lossy(),
+                &digest,
+                request.document.len() as i64,
+            )
+            .await;
         let goal = match result {
             Ok(Some(goal)) => goal,
             Ok(None) => {
@@ -754,7 +734,7 @@ impl GoalService {
             goal: GoalSetOutcome {
                 goal: protocol_goal_from_state(goal.clone()),
                 state_goal: goal,
-                previous_goal: existing_goal.as_ref().map(PreviousGoalSnapshot::from),
+                previous_goal: Some(PreviousGoalSnapshot::from(&existing_goal)),
             },
             document,
         })
@@ -784,18 +764,24 @@ impl GoalService {
                 "creationId must be non-empty and at most 256 bytes".to_string(),
             ));
         }
-        if request.expected_goal.goal_id.trim().is_empty()
-            || request.expected_goal.goal_id.len() > 256
-        {
-            return Err(GoalServiceError::InvalidRequest(
-                "expected Goal id must be non-empty and at most 256 bytes".to_string(),
-            ));
-        }
-        if request.expected_goal.status != ThreadGoalStatus::Complete {
-            return Err(GoalServiceError::InvalidRequest(
-                "goal creation requires an expected completed Goal".to_string(),
-            ));
-        }
+        let expected_goal = match &request.precondition {
+            GoalDocumentCreatePrecondition::Absent { admission_state } => match admission_state {
+                GoalDocumentCreateAdmissionState::NoGoal => None,
+            },
+            GoalDocumentCreatePrecondition::Completed(expected_goal) => {
+                if expected_goal.goal_id.trim().is_empty() || expected_goal.goal_id.len() > 256 {
+                    return Err(GoalServiceError::InvalidRequest(
+                        "expected Goal id must be non-empty and at most 256 bytes".to_string(),
+                    ));
+                }
+                if expected_goal.status != ThreadGoalStatus::Complete {
+                    return Err(GoalServiceError::InvalidRequest(
+                        "completed predecessor requires expectedStatus=complete".to_string(),
+                    ));
+                }
+                Some(expected_goal)
+            }
+        };
         let objective = request.objective.trim();
         validate_thread_goal_objective(objective).map_err(GoalServiceError::InvalidRequest)?;
         validate_goal_budget(request.token_budget, request.max_goal_token_budget)
@@ -810,10 +796,19 @@ impl GoalService {
                     "objective": objective,
                     "status": state_status.as_str(),
                     "token_budget": request.token_budget,
-                    "expected_goal_id": request.expected_goal.goal_id,
-                    "expected_status": state_status_from_protocol(request.expected_goal.status).as_str(),
-                    "expected_mission_revision": request.expected_goal.mission_revision,
-                    "expected_lifecycle_revision": request.expected_goal.lifecycle_revision,
+                    "precondition": match &request.precondition {
+                        GoalDocumentCreatePrecondition::Absent { .. } => serde_json::json!({
+                            "kind": "absent",
+                            "admission_state": "no_goal",
+                        }),
+                        GoalDocumentCreatePrecondition::Completed(expected_goal) => serde_json::json!({
+                            "kind": "completed",
+                            "expected_goal_id": expected_goal.goal_id,
+                            "expected_status": state_status_from_protocol(expected_goal.status).as_str(),
+                            "expected_mission_revision": expected_goal.mission_revision,
+                            "expected_lifecycle_revision": expected_goal.lifecycle_revision,
+                        }),
+                    },
                 }))
                 .map_err(|err| GoalServiceError::Internal(format!(
                     "failed to hash Goal creation request: {err}"
@@ -851,24 +846,44 @@ impl GoalService {
             tracing::warn!("failed to prepare external Goal creation: {err}");
         }
 
-        let result = state_db
-            .thread_goals()
-            .create_thread_goal_document(
-                request.thread_id,
-                request.creation_id,
-                &request_digest,
-                &request.expected_goal.goal_id,
-                state_status_from_protocol(request.expected_goal.status),
-                request.expected_goal.mission_revision,
-                request.expected_goal.lifecycle_revision,
-                objective,
-                state_status,
-                request.token_budget,
-                &relative_path.to_string_lossy(),
-                &digest,
-                request.document.len() as i64,
-            )
-            .await;
+        let result = match expected_goal {
+            None => {
+                state_db
+                    .thread_goals()
+                    .create_initial_thread_goal_document(
+                        request.thread_id,
+                        request.creation_id,
+                        &request_digest,
+                        objective,
+                        state_status,
+                        request.token_budget,
+                        &relative_path.to_string_lossy(),
+                        &digest,
+                        request.document.len() as i64,
+                    )
+                    .await
+            }
+            Some(expected_goal) => {
+                state_db
+                    .thread_goals()
+                    .create_thread_goal_document(
+                        request.thread_id,
+                        request.creation_id,
+                        &request_digest,
+                        &expected_goal.goal_id,
+                        state_status_from_protocol(expected_goal.status),
+                        expected_goal.mission_revision,
+                        expected_goal.lifecycle_revision,
+                        objective,
+                        state_status,
+                        request.token_budget,
+                        &relative_path.to_string_lossy(),
+                        &digest,
+                        request.document.len() as i64,
+                    )
+                    .await
+            }
+        };
         let result = match result {
             Ok(result) => result,
             Err(err) => {
@@ -885,11 +900,14 @@ impl GoalService {
             }
         };
         let (receipt, replayed) = receipt;
-        let previous_identity = GoalIdentity::from(&receipt.previous_goal);
+        let previous_identity = receipt.previous_goal.as_ref().map(GoalIdentity::from);
         let outcome = GoalSetOutcome {
             goal: protocol_goal_from_state(receipt.goal.clone()),
             state_goal: receipt.goal,
-            previous_goal: Some(PreviousGoalSnapshot::from(&receipt.previous_goal)),
+            previous_goal: receipt
+                .previous_goal
+                .as_ref()
+                .map(PreviousGoalSnapshot::from),
         };
         Ok(GoalDocumentCreateOutcome {
             goal: outcome,

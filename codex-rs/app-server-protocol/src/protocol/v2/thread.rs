@@ -950,10 +950,48 @@ pub struct ThreadGoalDocumentSetResponse {
     pub revision: ThreadGoalRevision,
 }
 
-/// Starts a new file-backed Goal after an exact completed predecessor.  The
-/// `creationId` is an opaque idempotency key and must be reused for a
-/// response-loss retry, never for a different mission.  All four predecessor
-/// fields are mandatory; the server returns a typed conflict if any changed.
+/// The one canonical file-backed Goal creation precondition. `absent` is an
+/// explicit authenticated no-Goal admission state; it is never inferred from
+/// an unavailable, denied, timed-out, or unloaded read. `completed` requires
+/// the exact four-field predecessor tuple.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum ThreadGoalDocumentCreatePrecondition {
+    Absent {
+        #[serde(rename = "admissionState")]
+        admission_state: ThreadGoalDocumentCreateAdmissionState,
+    },
+    Completed {
+        #[serde(rename = "expectedGoalId")]
+        expected_goal_id: String,
+        #[serde(rename = "expectedStatus")]
+        expected_status: ThreadGoalStatus,
+        #[ts(type = "number")]
+        #[serde(rename = "expectedMissionRevision")]
+        expected_mission_revision: i64,
+        #[ts(type = "number")]
+        #[serde(rename = "expectedLifecycleRevision")]
+        expected_lifecycle_revision: i64,
+    },
+}
+
+/// The initial-create admission state is intentionally closed: the caller
+/// must say it observed a genuine absent Goal, not send null fields.
+#[derive(
+    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS, ExperimentalApi,
+)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum ThreadGoalDocumentCreateAdmissionState {
+    NoGoal,
+}
+
+/// Starts a new file-backed Goal from either the explicit absent/noGoal state
+/// or an exact completed predecessor. The `creationId` is an opaque
+/// idempotency key and must be reused for a response-loss retry, never for a
+/// different mission. A successful initial create returns `previousRevision`
+/// as null.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -968,12 +1006,7 @@ pub struct ThreadGoalDocumentCreateParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable, type = "number | null")]
     pub token_budget: Option<i64>,
-    pub expected_goal_id: String,
-    pub expected_status: ThreadGoalStatus,
-    #[ts(type = "number")]
-    pub expected_mission_revision: i64,
-    #[ts(type = "number")]
-    pub expected_lifecycle_revision: i64,
+    pub precondition: ThreadGoalDocumentCreatePrecondition,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
@@ -983,7 +1016,7 @@ pub struct ThreadGoalDocumentCreateResponse {
     pub creation_id: String,
     pub goal: ThreadGoal,
     pub document: ThreadGoalDocument,
-    pub previous_revision: ThreadGoalRevision,
+    pub previous_revision: Option<ThreadGoalRevision>,
     pub revision: ThreadGoalRevision,
     pub replayed: bool,
 }

@@ -30,6 +30,9 @@ use codex_extension_api::TurnStopInput;
 use codex_goal_extension::GoalCas;
 use codex_goal_extension::GoalCompletionObserver;
 use codex_goal_extension::GoalCompletionObserverFuture;
+use codex_goal_extension::GoalDocumentCreateAdmissionState;
+use codex_goal_extension::GoalDocumentCreateOutcome;
+use codex_goal_extension::GoalDocumentCreatePrecondition;
 use codex_goal_extension::GoalDocumentCreateRequest;
 use codex_goal_extension::GoalDocumentSetRequest;
 use codex_goal_extension::GoalExtensionConfig;
@@ -55,6 +58,33 @@ use codex_protocol::protocol::TruncationPolicy;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
+
+async fn create_initial_managed_goal_document(
+    service: &GoalService,
+    runtime: &codex_state::StateRuntime,
+    thread_id: ThreadId,
+    creation_id: &'static str,
+    document: &str,
+    status: Option<ThreadGoalStatus>,
+) -> anyhow::Result<GoalDocumentCreateOutcome> {
+    Ok(service
+        .create_thread_goal_document(
+            runtime,
+            GoalDocumentCreateRequest {
+                thread_id,
+                creation_id,
+                document,
+                objective: "managed mission",
+                status,
+                token_budget: None,
+                max_goal_token_budget: None,
+                precondition: GoalDocumentCreatePrecondition::Absent {
+                    admission_state: GoalDocumentCreateAdmissionState::NoGoal,
+                },
+            },
+        )
+        .await?)
+}
 
 #[tokio::test]
 async fn installed_goal_tools_create_goal_and_fill_empty_preview() -> anyhow::Result<()> {
@@ -1699,17 +1729,15 @@ async fn managed_goal_document_round_trips_edits_and_rejects_stale_revision() ->
     let service = GoalService::new();
     let document = format!("# managed mission\n{}", "x".repeat(5_000));
 
-    let first = service
-        .set_thread_goal_document(
-            runtime.as_ref(),
-            GoalDocumentSetRequest {
-                thread_id,
-                document: &document,
-                status: None,
-                expected_goal: None,
-            },
-        )
-        .await?;
+    let first = create_initial_managed_goal_document(
+        &service,
+        runtime.as_ref(),
+        thread_id,
+        "round-trip-initial",
+        &document,
+        None,
+    )
+    .await?;
     let first_goal = first.goal();
     let first_document = first.document();
     assert!(document.len() > 4_000);
@@ -1855,6 +1883,107 @@ async fn managed_goal_document_round_trips_edits_and_rejects_stale_revision() ->
 }
 
 #[tokio::test]
+async fn managed_goal_document_initial_create_is_atomic_idempotent_and_replayable()
+-> anyhow::Result<()> {
+    let tempdir = TempDir::new()?;
+    let sqlite_home = tempdir.keep().as_path().abs();
+    let thread_id = test_thread_id()?;
+    let runtime = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(sqlite_home.clone()),
+        "test-provider".to_string(),
+    )
+    .await?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let service = Arc::new(GoalService::new());
+
+    let (left, right) = tokio::join!(
+        create_initial_managed_goal_document(
+            service.as_ref(),
+            runtime.as_ref(),
+            thread_id,
+            "initial-create-1",
+            "initial mission",
+            Some(ThreadGoalStatus::Active),
+        ),
+        create_initial_managed_goal_document(
+            service.as_ref(),
+            runtime.as_ref(),
+            thread_id,
+            "initial-create-1",
+            "initial mission",
+            Some(ThreadGoalStatus::Active),
+        ),
+    );
+    let left = left?;
+    let right = right?;
+    assert_ne!(left.replayed(), right.replayed());
+    let created = if left.replayed() { &right } else { &left };
+    let replayed = if left.replayed() { &left } else { &right };
+    assert!(created.previous_identity().is_none());
+    assert_eq!(created.identity().goal_id, replayed.identity().goal_id);
+    assert_eq!(created.document().mission_revision, 1);
+
+    let conflict = match service
+        .create_thread_goal_document(
+            runtime.as_ref(),
+            GoalDocumentCreateRequest {
+                thread_id,
+                creation_id: "initial-create-1",
+                document: "different bytes",
+                objective: "different mission",
+                status: Some(ThreadGoalStatus::Active),
+                token_budget: None,
+                max_goal_token_budget: None,
+                precondition: GoalDocumentCreatePrecondition::Absent {
+                    admission_state: GoalDocumentCreateAdmissionState::NoGoal,
+                },
+            },
+        )
+        .await
+    {
+        Ok(_) => panic!("creationId must not be reused for a different request"),
+        Err(error) => error,
+    };
+    assert!(conflict.to_string().contains("creationId"));
+
+    runtime.close().await;
+    drop(runtime);
+    let reopened = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(sqlite_home),
+        "test-provider".to_string(),
+    )
+    .await?;
+    let retry = create_initial_managed_goal_document(
+        service.as_ref(),
+        reopened.as_ref(),
+        thread_id,
+        "initial-create-1",
+        "initial mission",
+        Some(ThreadGoalStatus::Active),
+    )
+    .await?;
+    assert!(retry.replayed());
+    assert!(retry.previous_identity().is_none());
+    assert_eq!(retry.identity().goal_id, created.identity().goal_id);
+    assert_eq!(retry.document().byte_length, "initial mission".len() as i64);
+
+    let set_without_precondition = service
+        .set_thread_goal_document(
+            reopened.as_ref(),
+            GoalDocumentSetRequest {
+                thread_id: test_thread_id()?,
+                document: "unrelated",
+                status: None,
+                expected_goal: None,
+            },
+        )
+        .await;
+    assert!(set_without_precondition.is_err());
+    reopened.close().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn managed_goal_document_full_cas_rejects_stale_status_and_updates_atomically()
 -> anyhow::Result<()> {
     let runtime = test_runtime().await?;
@@ -1862,17 +1991,15 @@ async fn managed_goal_document_full_cas_rejects_stale_status_and_updates_atomica
     seed_thread_metadata(runtime.as_ref(), thread_id).await?;
     let service = GoalService::new();
 
-    let first = service
-        .set_thread_goal_document(
-            runtime.as_ref(),
-            GoalDocumentSetRequest {
-                thread_id,
-                document: "mission A",
-                status: Some(ThreadGoalStatus::Active),
-                expected_goal: None,
-            },
-        )
-        .await?;
+    let first = create_initial_managed_goal_document(
+        &service,
+        runtime.as_ref(),
+        thread_id,
+        "stale-status-initial",
+        "mission A",
+        Some(ThreadGoalStatus::Active),
+    )
+    .await?;
     let first_identity = first.identity();
 
     service
@@ -2111,18 +2238,15 @@ async fn active_turn_fails_closed_when_managed_goal_document_drift_is_detected()
     seed_thread_metadata(runtime.as_ref(), thread_id).await?;
     let harness = GoalExtensionHarness::new(runtime.clone(), thread_id).await?;
     let document = "full mission retained for recoverable retry";
-    let outcome = harness
-        .goal_service
-        .set_thread_goal_document(
-            runtime.as_ref(),
-            GoalDocumentSetRequest {
-                thread_id,
-                document,
-                status: None,
-                expected_goal: None,
-            },
-        )
-        .await?;
+    let outcome = create_initial_managed_goal_document(
+        &harness.goal_service,
+        runtime.as_ref(),
+        thread_id,
+        "drift-initial",
+        document,
+        None,
+    )
+    .await?;
     let document_path = runtime
         .sqlite()
         .home()
@@ -2658,17 +2782,15 @@ async fn managed_goal_document_create_after_complete_is_atomic_and_idempotent() 
     seed_thread_metadata(runtime.as_ref(), thread_id).await?;
     let service = Arc::new(GoalService::new());
 
-    let first = service
-        .set_thread_goal_document(
-            runtime.as_ref(),
-            GoalDocumentSetRequest {
-                thread_id,
-                document: "completed mission A",
-                status: Some(ThreadGoalStatus::Active),
-                expected_goal: None,
-            },
-        )
-        .await?;
+    let first = create_initial_managed_goal_document(
+        &service,
+        runtime.as_ref(),
+        thread_id,
+        "completed-predecessor-initial",
+        "completed mission A",
+        Some(ThreadGoalStatus::Active),
+    )
+    .await?;
     let completed = service
         .set_thread_goal_cas(
             runtime.as_ref(),
@@ -2700,12 +2822,12 @@ async fn managed_goal_document_create_after_complete_is_atomic_and_idempotent() 
         status: Some(ThreadGoalStatus::Active),
         token_budget: None,
         max_goal_token_budget: None,
-        expected_goal: GoalCas {
+        precondition: GoalDocumentCreatePrecondition::Completed(GoalCas {
             goal_id: expected.goal_id.clone(),
             status: expected.status,
             mission_revision: expected.mission_revision,
             lifecycle_revision: expected.lifecycle_revision,
-        },
+        }),
     };
     let (left, right) = tokio::join!(
         service.create_thread_goal_document(runtime.as_ref(), create("mission-b-1")),
@@ -2718,7 +2840,7 @@ async fn managed_goal_document_create_after_complete_is_atomic_and_idempotent() 
     let replayed = if left.replayed() { &left } else { &right };
     assert_eq!(created.identity().goal_id, replayed.identity().goal_id);
     assert_ne!(created.identity().goal_id, expected.goal_id);
-    assert_eq!(created.previous_identity(), expected);
+    assert_eq!(created.previous_identity(), Some(expected.clone()));
     assert_eq!(created.identity().mission_revision, 1);
 
     // A response-loss retry remains a replay even after another reader has
@@ -2765,17 +2887,15 @@ async fn managed_goal_document_create_replays_after_state_runtime_reopen() -> an
     seed_thread_metadata(runtime.as_ref(), thread_id).await?;
     let service = GoalService::new();
 
-    let first = service
-        .set_thread_goal_document(
-            runtime.as_ref(),
-            GoalDocumentSetRequest {
-                thread_id,
-                document: "completed mission before restart",
-                status: Some(ThreadGoalStatus::Active),
-                expected_goal: None,
-            },
-        )
-        .await?;
+    let first = create_initial_managed_goal_document(
+        &service,
+        runtime.as_ref(),
+        thread_id,
+        "restart-predecessor-initial",
+        "completed mission before restart",
+        Some(ThreadGoalStatus::Active),
+    )
+    .await?;
     let completed = service
         .set_thread_goal_cas(
             runtime.as_ref(),
@@ -2806,12 +2926,12 @@ async fn managed_goal_document_create_replays_after_state_runtime_reopen() -> an
         status: Some(ThreadGoalStatus::Active),
         token_budget: None,
         max_goal_token_budget: None,
-        expected_goal: GoalCas {
+        precondition: GoalDocumentCreatePrecondition::Completed(GoalCas {
             goal_id: expected.goal_id.clone(),
             status: expected.status,
             mission_revision: expected.mission_revision,
             lifecycle_revision: expected.lifecycle_revision,
-        },
+        }),
     };
 
     let created = service

@@ -5,9 +5,11 @@ import type { ThreadGoalStatus } from "./ThreadGoalStatus";
 
 export type ThreadGoalSetParams = { threadId: string, objective?: string | null, status?: ThreadGoalStatus | null, tokenBudget?: number | null,
 /**
- * All four expected fields are required together for an atomic Goal CAS.
- * Objective and token-budget edits are included in the same transaction;
- * mission_revision advances for those edits and lifecycle_revision advances
- * for every successful mutation. Omit all four for legacy unconditional set.
+ * All four expected fields are required together for an atomic Goal CAS
+ * when an existing Goal is being changed. Objective and token-budget edits
+ * are included in the same transaction; mission_revision advances for
+ * those edits and lifecycle_revision advances for every successful
+ * mutation. Omit all four only when the authoritative read found no Goal
+ * and this request is creating the first Goal.
  */
 expectedGoalId?: string | null, expectedStatus?: ThreadGoalStatus | null, expectedMissionRevision?: number | null, expectedLifecycleRevision?: number | null, };

@@ -529,6 +529,8 @@ export type { ThreadGoalClearParams } from "./ThreadGoalClearParams";
 export type { ThreadGoalClearResponse } from "./ThreadGoalClearResponse";
 export type { ThreadGoalClearedNotification } from "./ThreadGoalClearedNotification";
 export type { ThreadGoalDocument } from "./ThreadGoalDocument";
+export type { ThreadGoalDocumentCreateAdmissionState } from "./ThreadGoalDocumentCreateAdmissionState";
+export type { ThreadGoalDocumentCreatePrecondition } from "./ThreadGoalDocumentCreatePrecondition";
 export type { ThreadGoalGetParams } from "./ThreadGoalGetParams";
 export type { ThreadGoalGetResponse } from "./ThreadGoalGetResponse";
 export type { ThreadGoalRevision } from "./ThreadGoalRevision";

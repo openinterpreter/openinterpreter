@@ -4,6 +4,8 @@ use super::thread_input::ensure_direct_input_allowed;
 use super::*;
 use crate::error_code::goal_conflict;
 use codex_goal_extension::GoalCas;
+use codex_goal_extension::GoalDocumentCreateAdmissionState;
+use codex_goal_extension::GoalDocumentCreatePrecondition;
 use codex_goal_extension::GoalDocumentCreateRequest;
 use codex_goal_extension::GoalDocumentSetRequest;
 use codex_goal_extension::GoalObjectiveUpdate;
@@ -84,15 +86,18 @@ impl ThreadGoalRequestProcessor {
             .get_thread_goal(&state_db, thread_id)
             .await
             .map_err(goal_service_error)?;
-        if existing_goal.is_some()
-            && goal_document_cas_from_params(
-                params.expected_goal_id.clone(),
-                params.expected_status.clone(),
-                params.expected_mission_revision,
-                params.expected_lifecycle_revision,
-            )?
-            .is_none()
-        {
+        if existing_goal.is_none() {
+            return Err(invalid_params(
+                "thread/goal/document/set cannot create a Goal; use thread/goal/document/create with an explicit absent/noGoal precondition",
+            ));
+        }
+        let expected_goal = goal_document_cas_from_params(
+            params.expected_goal_id.clone(),
+            params.expected_status.clone(),
+            params.expected_mission_revision,
+            params.expected_lifecycle_revision,
+        )?;
+        if expected_goal.is_none() {
             return Err(invalid_params(
                 "thread/goal/document/set requires expectedGoalId, expectedStatus, expectedMissionRevision, and expectedLifecycleRevision for an existing Goal",
             ));
@@ -124,12 +129,7 @@ impl ThreadGoalRequestProcessor {
                     thread_id,
                     document: params.document.as_str(),
                     status: params.status.map(ThreadGoalStatus::to_core),
-                    expected_goal: goal_document_cas_from_params(
-                        params.expected_goal_id.clone(),
-                        params.expected_status.clone(),
-                        params.expected_mission_revision,
-                        params.expected_lifecycle_revision,
-                    )?,
+                    expected_goal,
                 },
             )
             .await
@@ -203,14 +203,38 @@ impl ThreadGoalRequestProcessor {
         }
 
         let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
-        if params.expected_goal_id.trim().is_empty() || params.expected_goal_id.len() > 256 {
-            return Err(invalid_params("expectedGoalId is invalid"));
-        }
-        if params.expected_status != ThreadGoalStatus::Complete {
-            return Err(invalid_params(
-                "thread/goal/document/create requires expectedStatus=complete",
-            ));
-        }
+        let precondition = match &params.precondition {
+            ThreadGoalDocumentCreatePrecondition::Absent { admission_state } => {
+                match admission_state {
+                    ThreadGoalDocumentCreateAdmissionState::NoGoal => {
+                        GoalDocumentCreatePrecondition::Absent {
+                            admission_state: GoalDocumentCreateAdmissionState::NoGoal,
+                        }
+                    }
+                }
+            }
+            ThreadGoalDocumentCreatePrecondition::Completed {
+                expected_goal_id,
+                expected_status,
+                expected_mission_revision,
+                expected_lifecycle_revision,
+            } => {
+                if expected_goal_id.trim().is_empty() || expected_goal_id.len() > 256 {
+                    return Err(invalid_params("expectedGoalId is invalid"));
+                }
+                if *expected_status != ThreadGoalStatus::Complete {
+                    return Err(invalid_params(
+                        "thread/goal/document/create completed precondition requires expectedStatus=complete",
+                    ));
+                }
+                GoalDocumentCreatePrecondition::Completed(GoalCas {
+                    goal_id: expected_goal_id.clone(),
+                    status: expected_status.to_core(),
+                    mission_revision: *expected_mission_revision,
+                    lifecycle_revision: *expected_lifecycle_revision,
+                })
+            }
+        };
         let state_db = self
             .state_db_for_materialized_thread(thread_id, GoalAccess::Mutate)
             .await?;
@@ -251,19 +275,14 @@ impl ThreadGoalRequestProcessor {
                     status: params.status.map(ThreadGoalStatus::to_core),
                     token_budget: params.token_budget,
                     max_goal_token_budget,
-                    expected_goal: GoalCas {
-                        goal_id: params.expected_goal_id,
-                        status: params.expected_status.to_core(),
-                        mission_revision: params.expected_mission_revision,
-                        lifecycle_revision: params.expected_lifecycle_revision,
-                    },
+                    precondition,
                 },
             )
             .await
             .map_err(goal_service_error)?;
         let goal = ThreadGoal::from(outcome.goal());
         let document = api_thread_goal_document_from_state(outcome.document());
-        let previous_revision = api_goal_revision(outcome.previous_identity());
+        let previous_revision = outcome.previous_identity().map(api_goal_revision);
         let revision = api_goal_revision(outcome.identity());
         let replayed = outcome.replayed();
 
