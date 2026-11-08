@@ -249,6 +249,82 @@ ON CONFLICT(thread_id) DO UPDATE SET
         thread_goal_from_row(&row).map(Some)
     }
 
+    /// Atomically updates a managed Goal pointer and its document metadata
+    /// under the complete supervisor-owned identity/revision condition.
+    pub async fn update_thread_goal_document_cas(
+        &self,
+        thread_id: ThreadId,
+        objective: &str,
+        status: Option<crate::ThreadGoalStatus>,
+        expected_goal_id: &str,
+        expected_status: crate::ThreadGoalStatus,
+        expected_mission_revision: i64,
+        expected_lifecycle_revision: i64,
+        path: &str,
+        sha256: &str,
+        byte_length: i64,
+    ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+        let mut transaction = self.pool.begin().await?;
+        let now_ms = datetime_to_epoch_millis(Utc::now());
+        let row = sqlx::query(
+            r#"
+UPDATE thread_goals
+SET objective = ?,
+    status = COALESCE(?, status),
+    mission_revision = mission_revision + 1,
+    lifecycle_revision = lifecycle_revision + 1,
+    updated_at_ms = ?
+WHERE thread_id = ?
+  AND goal_id = ?
+  AND status = ?
+  AND mission_revision = ?
+  AND lifecycle_revision = ?
+RETURNING
+    thread_id, goal_id, objective, status, token_budget, tokens_used,
+    time_used_seconds, mission_revision, lifecycle_revision, created_at_ms, updated_at_ms
+            "#,
+        )
+        .bind(objective)
+        .bind(status.map(crate::ThreadGoalStatus::as_str))
+        .bind(now_ms)
+        .bind(thread_id.to_string())
+        .bind(expected_goal_id)
+        .bind(expected_status.as_str())
+        .bind(expected_mission_revision)
+        .bind(expected_lifecycle_revision)
+        .fetch_optional(&mut *transaction)
+        .await?;
+
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let mission_revision: i64 = row.try_get("mission_revision")?;
+        sqlx::query(
+            r#"
+INSERT INTO thread_goal_documents (
+    thread_id, mission_revision, path, sha256, byte_length, updated_at_ms
+) VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(thread_id) DO UPDATE SET
+    mission_revision = excluded.mission_revision,
+    path = excluded.path,
+    sha256 = excluded.sha256,
+    byte_length = excluded.byte_length,
+    updated_at_ms = excluded.updated_at_ms
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .bind(mission_revision)
+        .bind(path)
+        .bind(sha256)
+        .bind(byte_length)
+        .bind(now_ms)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        thread_goal_from_row(&row).map(Some)
+    }
+
     pub async fn replace_thread_goal_snapshot(
         &self,
         goal: &crate::ThreadGoal,
@@ -626,6 +702,141 @@ WHERE thread_id = ?
         }
 
         self.get_thread_goal(thread_id).await
+    }
+
+    /// Applies an external Goal mutation with a complete identity/revision CAS.
+    /// The conditional UPDATE is one SQLite statement, so objective, budget,
+    /// status and both revisions cannot be split across a stale read/write.
+    pub async fn update_thread_goal_cas(
+        &self,
+        thread_id: ThreadId,
+        update: GoalUpdate,
+        expected_goal_id: &str,
+        expected_status: crate::ThreadGoalStatus,
+        expected_mission_revision: i64,
+        expected_lifecycle_revision: i64,
+    ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+        let GoalUpdate {
+            objective,
+            status,
+            token_budget,
+            expected_goal_id: _,
+        } = update;
+        let objective_changed = objective.is_some();
+        let token_budget_changed = token_budget.is_some();
+        if !objective_changed && !token_budget_changed && status.is_none() {
+            return Ok(self.get_thread_goal(thread_id).await?.filter(|goal| {
+                goal.goal_id == expected_goal_id
+                    && goal.status == expected_status
+                    && goal.mission_revision == expected_mission_revision
+                    && goal.lifecycle_revision == expected_lifecycle_revision
+            }));
+        }
+        let new_token_budget = token_budget.flatten();
+        let now_ms = datetime_to_epoch_millis(Utc::now());
+        let result = sqlx::query(
+            r#"
+UPDATE thread_goals
+SET
+    objective = CASE WHEN ? THEN ? ELSE objective END,
+    mission_revision = CASE WHEN ? THEN mission_revision + 1 ELSE mission_revision END,
+    lifecycle_revision = lifecycle_revision + 1,
+    status = CASE
+        WHEN ? IS NOT NULL THEN
+            CASE
+                WHEN status = 'budget_limited' AND ? IN ('paused', 'blocked') THEN status
+                WHEN ? = 'active'
+                    AND (CASE WHEN ? THEN ? ELSE token_budget END) IS NOT NULL
+                    AND tokens_used >= (CASE WHEN ? THEN ? ELSE token_budget END)
+                    THEN 'budget_limited'
+                ELSE ?
+            END
+        WHEN ? THEN
+            CASE
+                WHEN status = 'active' AND ? IS NOT NULL AND tokens_used >= ?
+                    THEN 'budget_limited'
+                ELSE status
+            END
+        ELSE status
+    END,
+    token_budget = CASE WHEN ? THEN ? ELSE token_budget END,
+    updated_at_ms = ?
+WHERE thread_id = ?
+  AND goal_id = ?
+  AND status = ?
+  AND mission_revision = ?
+  AND lifecycle_revision = ?
+            "#,
+        )
+        .bind(objective_changed)
+        .bind(objective)
+        .bind(objective_changed)
+        .bind(status.map(|status| status.as_str()))
+        .bind(status.map(|status| status.as_str()))
+        .bind(status.map(|status| status.as_str()))
+        .bind(token_budget_changed)
+        .bind(new_token_budget)
+        .bind(token_budget_changed)
+        .bind(new_token_budget)
+        .bind(status.map(|status| status.as_str()))
+        .bind(token_budget_changed)
+        .bind(new_token_budget)
+        .bind(new_token_budget)
+        .bind(token_budget_changed)
+        .bind(new_token_budget)
+        .bind(now_ms)
+        .bind(thread_id.to_string())
+        .bind(expected_goal_id)
+        .bind(expected_status.as_str())
+        .bind(expected_mission_revision)
+        .bind(expected_lifecycle_revision)
+        .execute(self.pool.as_ref())
+        .await?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get_thread_goal(thread_id).await
+    }
+
+    /// Deletes a Goal and its managed-document metadata in one conditional
+    /// transaction. The caller must supply the complete identity snapshot.
+    pub async fn delete_thread_goal_cas(
+        &self,
+        thread_id: ThreadId,
+        expected_goal_id: &str,
+        expected_status: crate::ThreadGoalStatus,
+        expected_mission_revision: i64,
+        expected_lifecycle_revision: i64,
+    ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            r#"
+DELETE FROM thread_goals
+WHERE thread_id = ?
+  AND goal_id = ?
+  AND status = ?
+  AND mission_revision = ?
+  AND lifecycle_revision = ?
+RETURNING
+    thread_id, goal_id, objective, status, token_budget, tokens_used,
+    time_used_seconds, mission_revision, lifecycle_revision, created_at_ms, updated_at_ms
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .bind(expected_goal_id)
+        .bind(expected_status.as_str())
+        .bind(expected_mission_revision)
+        .bind(expected_lifecycle_revision)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if row.is_some() {
+            sqlx::query("DELETE FROM thread_goal_documents WHERE thread_id = ?")
+                .bind(thread_id.to_string())
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await?;
+        row.map(|row| thread_goal_from_row(&row)).transpose()
     }
 
     pub async fn pause_active_thread_goal(

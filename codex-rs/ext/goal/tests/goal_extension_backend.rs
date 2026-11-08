@@ -27,6 +27,7 @@ use codex_extension_api::ToolPayload;
 use codex_extension_api::TurnErrorInput;
 use codex_extension_api::TurnStartInput;
 use codex_extension_api::TurnStopInput;
+use codex_goal_extension::GoalCas;
 use codex_goal_extension::GoalCompletionObserver;
 use codex_goal_extension::GoalCompletionObserverFuture;
 use codex_goal_extension::GoalDocumentSetRequest;
@@ -1704,7 +1705,7 @@ async fn managed_goal_document_round_trips_edits_and_rejects_stale_revision() ->
                 thread_id,
                 document: &document,
                 status: None,
-                expected_mission_revision: None,
+                expected_goal: None,
             },
         )
         .await?;
@@ -1727,6 +1728,31 @@ async fn managed_goal_document_round_trips_edits_and_rejects_stale_revision() ->
         .expect("managed Goal document should be readable");
     assert_eq!(stored_document, first_document);
     assert_eq!(stored_content, document);
+
+    let missing_cas = match service
+        .set_thread_goal_document(
+            runtime.as_ref(),
+            GoalDocumentSetRequest {
+                thread_id,
+                document: "must not replace without a full Goal tuple",
+                status: None,
+                expected_goal: None,
+            },
+        )
+        .await
+    {
+        Ok(_) => panic!("existing managed Goal edits must require the full CAS tuple"),
+        Err(error) => error,
+    };
+    assert!(missing_cas.to_string().contains("require expected"));
+    assert_eq!(
+        service
+            .read_thread_goal_document(runtime.as_ref(), thread_id)
+            .await?
+            .expect("managed document should remain after missing CAS")
+            .2,
+        document
+    );
 
     let direct_text_edit = service
         .set_thread_goal(
@@ -1756,6 +1782,7 @@ async fn managed_goal_document_round_trips_edits_and_rejects_stale_revision() ->
     );
 
     let replacement = "revised mission";
+    let first_identity = first.identity();
     let second = service
         .set_thread_goal_document(
             runtime.as_ref(),
@@ -1763,7 +1790,12 @@ async fn managed_goal_document_round_trips_edits_and_rejects_stale_revision() ->
                 thread_id,
                 document: replacement,
                 status: None,
-                expected_mission_revision: Some(1),
+                expected_goal: Some(GoalCas {
+                    goal_id: first_identity.goal_id.clone(),
+                    status: first_identity.status,
+                    mission_revision: first_identity.mission_revision,
+                    lifecycle_revision: first_identity.lifecycle_revision,
+                }),
             },
         )
         .await?;
@@ -1784,7 +1816,12 @@ async fn managed_goal_document_round_trips_edits_and_rejects_stale_revision() ->
                 thread_id,
                 document: "must not replace current mission",
                 status: None,
-                expected_mission_revision: Some(1),
+                expected_goal: Some(GoalCas {
+                    goal_id: first_identity.goal_id,
+                    status: first_identity.status,
+                    mission_revision: first_identity.mission_revision,
+                    lifecycle_revision: first_identity.lifecycle_revision,
+                }),
             },
         )
         .await
@@ -1792,7 +1829,7 @@ async fn managed_goal_document_round_trips_edits_and_rejects_stale_revision() ->
         Ok(_) => panic!("stale mission revision must fail closed"),
         Err(error) => error,
     };
-    assert!(stale.to_string().contains("mission revision changed"));
+    assert!(stale.to_string().contains("goal_document_cas_conflict"));
     assert_eq!(
         service
             .read_thread_goal_document(runtime.as_ref(), thread_id)
@@ -1817,6 +1854,255 @@ async fn managed_goal_document_round_trips_edits_and_rejects_stale_revision() ->
 }
 
 #[tokio::test]
+async fn managed_goal_document_full_cas_rejects_stale_status_and_updates_atomically()
+-> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let service = GoalService::new();
+
+    let first = service
+        .set_thread_goal_document(
+            runtime.as_ref(),
+            GoalDocumentSetRequest {
+                thread_id,
+                document: "mission A",
+                status: Some(ThreadGoalStatus::Active),
+                expected_goal: None,
+            },
+        )
+        .await?;
+    let first_identity = first.identity();
+
+    service
+        .set_thread_goal(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Keep,
+                status: Some(ThreadGoalStatus::Paused),
+                token_budget: GoalTokenBudgetUpdate::Keep,
+                max_goal_token_budget: None,
+            },
+        )
+        .await?;
+
+    let stale = match service
+        .set_thread_goal_document(
+            runtime.as_ref(),
+            GoalDocumentSetRequest {
+                thread_id,
+                document: "must not replace paused mission",
+                status: Some(ThreadGoalStatus::Active),
+                expected_goal: Some(GoalCas {
+                    goal_id: first_identity.goal_id,
+                    status: first_identity.status,
+                    mission_revision: first_identity.mission_revision,
+                    lifecycle_revision: first_identity.lifecycle_revision,
+                }),
+            },
+        )
+        .await
+    {
+        Ok(_) => panic!("stale status must fail closed"),
+        Err(error) => error,
+    };
+    assert!(stale.to_string().contains("goal_document_cas_conflict"));
+    let unchanged = service
+        .read_thread_goal_document(runtime.as_ref(), thread_id)
+        .await?
+        .expect("managed document should remain after stale CAS");
+    assert_eq!(unchanged.2, "mission A");
+    assert_eq!(unchanged.0.status, codex_state::ThreadGoalStatus::Paused);
+
+    let current = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .expect("Goal should remain present");
+    let updated = service
+        .set_thread_goal_document(
+            runtime.as_ref(),
+            GoalDocumentSetRequest {
+                thread_id,
+                document: "mission A revised under paused state",
+                status: Some(ThreadGoalStatus::Paused),
+                expected_goal: Some(GoalCas {
+                    goal_id: current.goal_id.clone(),
+                    status: ThreadGoalStatus::Paused,
+                    mission_revision: current.mission_revision,
+                    lifecycle_revision: current.lifecycle_revision,
+                }),
+            },
+        )
+        .await?;
+    assert_eq!(
+        updated.document().mission_revision,
+        current.mission_revision + 1
+    );
+    assert_eq!(updated.identity().status, ThreadGoalStatus::Paused);
+    assert_eq!(
+        service
+            .read_thread_goal_document(runtime.as_ref(), thread_id)
+            .await?
+            .expect("updated managed document should be readable")
+            .2,
+        "mission A revised under paused state"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn goal_cas_covers_objective_budget_and_clear_without_stale_effects() -> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let service = GoalService::new();
+    let first = service
+        .set_thread_goal(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Set("initial objective"),
+                status: Some(ThreadGoalStatus::Active),
+                token_budget: GoalTokenBudgetUpdate::Set(Some(100)),
+                max_goal_token_budget: None,
+            },
+        )
+        .await?;
+    let first_identity = first.identity();
+    let updated = service
+        .set_thread_goal_cas(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Set("edited objective"),
+                status: Some(ThreadGoalStatus::Active),
+                token_budget: GoalTokenBudgetUpdate::Set(Some(200)),
+                max_goal_token_budget: None,
+            },
+            GoalCas {
+                goal_id: first_identity.goal_id.clone(),
+                status: first_identity.status,
+                mission_revision: first_identity.mission_revision,
+                lifecycle_revision: first_identity.lifecycle_revision,
+            },
+        )
+        .await?;
+    assert_eq!(updated.goal.objective, "edited objective");
+    assert_eq!(updated.goal.token_budget, Some(200));
+    assert_eq!(
+        updated.identity().mission_revision,
+        first_identity.mission_revision + 1
+    );
+    assert_eq!(
+        updated.identity().lifecycle_revision,
+        first_identity.lifecycle_revision + 1
+    );
+
+    let current_identity = updated.identity();
+    let stale_cases = [
+        GoalCas {
+            goal_id: "different-goal".to_string(),
+            status: current_identity.status,
+            mission_revision: current_identity.mission_revision,
+            lifecycle_revision: current_identity.lifecycle_revision,
+        },
+        GoalCas {
+            goal_id: current_identity.goal_id.clone(),
+            status: ThreadGoalStatus::Paused,
+            mission_revision: current_identity.mission_revision,
+            lifecycle_revision: current_identity.lifecycle_revision,
+        },
+        GoalCas {
+            goal_id: current_identity.goal_id.clone(),
+            status: current_identity.status,
+            mission_revision: first_identity.mission_revision,
+            lifecycle_revision: current_identity.lifecycle_revision,
+        },
+        GoalCas {
+            goal_id: current_identity.goal_id.clone(),
+            status: current_identity.status,
+            mission_revision: current_identity.mission_revision,
+            lifecycle_revision: first_identity.lifecycle_revision,
+        },
+    ];
+    for stale in stale_cases {
+        let error = match service
+            .set_thread_goal_cas(
+                runtime.as_ref(),
+                GoalSetRequest {
+                    thread_id,
+                    objective: GoalObjectiveUpdate::Set("must not replace current objective"),
+                    status: None,
+                    token_budget: GoalTokenBudgetUpdate::Keep,
+                    max_goal_token_budget: None,
+                },
+                stale,
+            )
+            .await
+        {
+            Ok(_) => panic!("stale Goal CAS must not mutate the current Goal"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("goal_cas_conflict"));
+    }
+    assert_eq!(
+        runtime
+            .thread_goals()
+            .get_thread_goal(thread_id)
+            .await?
+            .expect("current Goal should remain after stale CAS attempts")
+            .objective,
+        "edited objective"
+    );
+
+    let stale_clear = service
+        .clear_thread_goal_cas(
+            runtime.as_ref(),
+            thread_id,
+            GoalCas {
+                goal_id: first_identity.goal_id,
+                status: first_identity.status,
+                mission_revision: first_identity.mission_revision,
+                lifecycle_revision: first_identity.lifecycle_revision,
+            },
+        )
+        .await
+        .expect_err("a stale clear must not remove the edited Goal");
+    assert!(stale_clear.to_string().contains("goal_cas_conflict"));
+    assert!(
+        runtime
+            .thread_goals()
+            .get_thread_goal(thread_id)
+            .await?
+            .is_some()
+    );
+
+    let cleared = service
+        .clear_thread_goal_cas(
+            runtime.as_ref(),
+            thread_id,
+            GoalCas {
+                goal_id: current_identity.goal_id,
+                status: current_identity.status,
+                mission_revision: current_identity.mission_revision,
+                lifecycle_revision: current_identity.lifecycle_revision,
+            },
+        )
+        .await?;
+    assert_eq!(cleared.objective, "edited objective");
+    assert!(
+        runtime
+            .thread_goals()
+            .get_thread_goal(thread_id)
+            .await?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn active_turn_fails_closed_when_managed_goal_document_drift_is_detected()
 -> anyhow::Result<()> {
     let runtime = test_runtime().await?;
@@ -1832,7 +2118,7 @@ async fn active_turn_fails_closed_when_managed_goal_document_drift_is_detected()
                 thread_id,
                 document,
                 status: None,
-                expected_mission_revision: None,
+                expected_goal: None,
             },
         )
         .await?;
