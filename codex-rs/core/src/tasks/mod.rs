@@ -857,7 +857,11 @@ impl Session {
             self.send_event(turn_context.as_ref(), event).await;
         }
         if cleared_active_turn {
-            self.emit_thread_idle_lifecycle_if_idle(idle_cause).await;
+            self.emit_thread_idle_lifecycle_if_idle_for_turn(
+                idle_cause,
+                Some(turn_context.sub_id.as_str()),
+            )
+            .await;
         }
         // Private reviewers already flushed the terminal event before delivering it.
         // Other buffering writers still need a barrier for the terminal event.
@@ -898,6 +902,19 @@ impl Session {
         self.services
             .unified_exec_manager
             .terminate_process(process_id)
+            .await
+    }
+
+    pub(crate) async fn read_background_terminal_status(
+        &self,
+        turn_id: &str,
+        item_id: &str,
+        native_process_id: &str,
+        max_wait_ms: Option<u32>,
+    ) -> crate::codex_thread::BackgroundTerminalStatus {
+        self.services
+            .unified_exec_manager
+            .read_background_terminal_status(turn_id, item_id, native_process_id, max_wait_ms)
             .await
     }
 

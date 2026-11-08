@@ -343,6 +343,9 @@ async fn output_collection_stays_bounded_across_repeated_drains() {
     let cancellation_token = CancellationToken::new();
     let output = OutputHandles {
         output_buffer: Arc::clone(&output_buffer),
+        output_metrics: Arc::new(tokio::sync::Mutex::new(
+            super::super::process::OutputMetrics::default(),
+        )),
         output_notify: Arc::clone(&output_notify),
         output_closed: Arc::clone(&output_closed),
         output_closed_notify: Arc::clone(&output_closed_notify),
@@ -400,6 +403,9 @@ async fn output_collection_preserves_omissions_from_drained_buffer() {
     cancellation_token.cancel();
     let output = OutputHandles {
         output_buffer,
+        output_metrics: Arc::new(tokio::sync::Mutex::new(
+            super::super::process::OutputMetrics::default(),
+        )),
         output_notify,
         output_closed,
         output_closed_notify,
@@ -623,8 +629,11 @@ async fn pruning_does_not_evict_live_process_while_exited_process_is_finalizing(
                     Arc::clone(&live_process)
                 },
                 plugin_metrics_sidecar: None,
+                turn_id: turn.sub_id.clone(),
                 call_id: format!("call-{process_id}"),
                 process_id,
+                native_process_id: format!("native-{process_id}"),
+                terminal_generation: 1,
                 cwd: cwd.clone(),
                 initial_exec_command_active: Arc::new(AtomicBool::new(false)),
                 hook_command: format!("command-{process_id}"),

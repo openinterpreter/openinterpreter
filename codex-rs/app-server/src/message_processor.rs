@@ -24,6 +24,9 @@ use crate::outgoing_message::RequestContext;
 use crate::plugin_config_reload;
 use crate::plugin_config_reload::PluginStartupConfig;
 use crate::request_processors::AccountRequestProcessor;
+use crate::request_processors::AgentContractRequestProcessor;
+use crate::request_processors::AgentGoalAdmissionValidator;
+use crate::request_processors::AgentGoalCompletionObserver;
 use crate::request_processors::AppsRequestProcessor;
 use crate::request_processors::CatalogRequestProcessor;
 use crate::request_processors::CommandExecRequestProcessor;
@@ -162,6 +165,7 @@ pub(crate) struct MessageProcessor {
     project_processor: ProjectRequestProcessor,
     remote_control_processor: RemoteControlRequestProcessor,
     search_processor: SearchRequestProcessor,
+    agent_contract_processor: AgentContractRequestProcessor,
     thread_goal_processor: ThreadGoalRequestProcessor,
     thread_queue_processor: ThreadQueueRequestProcessor,
     thread_processor: ThreadRequestProcessor,
@@ -480,6 +484,7 @@ impl MessageProcessor {
         );
         let remote_control_processor = RemoteControlRequestProcessor::new(remote_control_handle);
         let search_processor = SearchRequestProcessor::new(outgoing.clone());
+        let agent_queue_service = queue_service.clone();
         let thread_goal_processor = ThreadGoalRequestProcessor::new(
             Arc::clone(&thread_manager),
             outgoing.clone(),
@@ -489,12 +494,27 @@ impl MessageProcessor {
             Arc::clone(&goal_service),
             config_manager.clone(),
         );
+        if let Some(queue_service) = agent_queue_service.as_ref() {
+            queue_service.set_admission_validator(Arc::new(AgentGoalAdmissionValidator::new(
+                thread_goal_processor.clone(),
+            )));
+            goal_service.set_completion_observer(Arc::new(AgentGoalCompletionObserver::new(
+                Arc::clone(queue_service),
+            )));
+        }
         let thread_queue_processor = ThreadQueueRequestProcessor::new(
             Arc::clone(&thread_manager),
             Arc::clone(&thread_store),
             outgoing.clone(),
             config_manager.clone(),
             queue_service,
+        );
+        let agent_contract_processor = AgentContractRequestProcessor::new(
+            Arc::clone(&thread_manager),
+            Arc::clone(&thread_store),
+            agent_queue_service,
+            thread_goal_processor.clone(),
+            thread_state_manager.clone(),
         );
         let project_processor = ProjectRequestProcessor::new(
             Arc::clone(&thread_store),
@@ -602,6 +622,7 @@ impl MessageProcessor {
             project_processor,
             remote_control_processor,
             search_processor,
+            agent_contract_processor,
             thread_goal_processor,
             thread_queue_processor,
             thread_processor,
@@ -1341,14 +1362,49 @@ impl MessageProcessor {
                     .thread_goal_set(request_id.clone(), params)
                     .await
             }
+            ClientRequest::ThreadGoalDocumentSet { params, .. } => {
+                self.thread_goal_processor
+                    .thread_goal_document_set(request_id.clone(), params)
+                    .await
+            }
             ClientRequest::ThreadGoalGet { params, .. } => {
                 self.thread_goal_processor.thread_goal_get(params).await
+            }
+            ClientRequest::ThreadGoalDocumentGet { params, .. } => {
+                self.thread_goal_processor
+                    .thread_goal_document_get(params)
+                    .await
             }
             ClientRequest::ThreadGoalClear { params, .. } => {
                 self.thread_goal_processor
                     .thread_goal_clear(request_id.clone(), params)
                     .await
             }
+            ClientRequest::AgentInventoryList { params, .. } => self
+                .agent_contract_processor
+                .inventory_list(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::AgentGoalRead { params, .. } => self
+                .agent_contract_processor
+                .goal_read(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::AgentTaskAdmit { params, .. } => self
+                .agent_contract_processor
+                .task_admit(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::AgentTaskReceiptRead { params, .. } => self
+                .agent_contract_processor
+                .task_receipt_read(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::AgentSessionStatus { params, .. } => self
+                .agent_contract_processor
+                .session_status(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::ThreadQueueAdd { params, .. } => self
                 .thread_queue_processor
                 .add(params)
@@ -1441,6 +1497,11 @@ impl MessageProcessor {
             ClientRequest::ThreadBackgroundTerminalsList { params, .. } => {
                 self.thread_processor
                     .thread_background_terminals_list(params)
+                    .await
+            }
+            ClientRequest::ThreadBackgroundTerminalsStatus { params, .. } => {
+                self.thread_processor
+                    .thread_background_terminals_status(params)
                     .await
             }
             ClientRequest::ThreadBackgroundTerminalsTerminate { params, .. } => {
