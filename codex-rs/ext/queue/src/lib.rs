@@ -6,7 +6,12 @@ use codex_extension_api::ExtensionRegistryBuilder;
 
 mod service;
 
+pub use service::QueueAdmissionCompletionProof;
+pub use service::QueueAdmissionState;
+pub use service::QueueAdmissionValidation;
+pub use service::QueueAdmissionValidator;
 pub use service::QueueServiceError;
+pub use service::QueuedAdmission;
 pub use service::QueuedItem;
 pub use service::QueuedItemService;
 

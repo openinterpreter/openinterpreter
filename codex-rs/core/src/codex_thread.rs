@@ -203,9 +203,44 @@ struct OutOfBandElicitations {
 #[derive(Debug, Eq, PartialEq)]
 pub struct BackgroundTerminalInfo {
     pub item_id: String,
+    pub turn_id: String,
     pub process_id: String,
+    pub native_process_id: String,
+    pub terminal_generation: u64,
     pub command: String,
     pub cwd: PathUri,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackgroundTerminalStatusPhase {
+    Running,
+    Exited,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackgroundTerminalStatus {
+    pub phase: BackgroundTerminalStatusPhase,
+    pub output_bytes: u64,
+    pub output_sha256: Option<String>,
+    pub output_cap_reached: bool,
+    pub exit_code: Option<i32>,
+    pub terminal_generation: Option<u64>,
+    pub observation_timed_out: bool,
+}
+
+impl BackgroundTerminalStatus {
+    pub(crate) fn unknown() -> Self {
+        Self {
+            phase: BackgroundTerminalStatusPhase::Unknown,
+            output_bytes: 0,
+            output_sha256: None,
+            output_cap_reached: false,
+            exit_code: None,
+            terminal_generation: None,
+            observation_timed_out: false,
+        }
+    }
 }
 
 /// Conduit for the bidirectional stream of messages that compose a thread
@@ -299,6 +334,16 @@ impl CodexThread {
 
     pub async fn emit_thread_idle_lifecycle_if_idle(&self, cause: ThreadIdleCause) {
         self.session.emit_thread_idle_lifecycle_if_idle(cause).await;
+    }
+
+    pub async fn emit_thread_idle_lifecycle_if_idle_for_turn(
+        &self,
+        cause: ThreadIdleCause,
+        turn_id: Option<&str>,
+    ) {
+        self.session
+            .emit_thread_idle_lifecycle_if_idle_for_turn(cause, turn_id)
+            .await;
     }
 
     #[doc(hidden)]
@@ -659,12 +704,29 @@ impl CodexThread {
         self.io.agent_status().await
     }
 
+    /// Content-free active-turn identity for owner-bound receipt correlation.
+    pub async fn active_turn_id(&self) -> Option<String> {
+        self.session.active_turn_id().await
+    }
+
     pub async fn list_background_terminals(&self) -> Vec<BackgroundTerminalInfo> {
         self.session.list_background_terminals().await
     }
 
     pub async fn terminate_background_terminal(&self, process_id: i32) -> bool {
         self.session.terminate_background_terminal(process_id).await
+    }
+
+    pub async fn read_background_terminal_status(
+        &self,
+        turn_id: &str,
+        item_id: &str,
+        native_process_id: &str,
+        max_wait_ms: Option<u32>,
+    ) -> BackgroundTerminalStatus {
+        self.session
+            .read_background_terminal_status(turn_id, item_id, native_process_id, max_wait_ms)
+            .await
     }
 
     pub(crate) fn subscribe_status(&self) -> watch::Receiver<AgentStatus> {

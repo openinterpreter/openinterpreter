@@ -867,6 +867,60 @@ pub struct ThreadGoalSetResponse {
     pub goal: ThreadGoal,
 }
 
+/// The content-free metadata for a file-backed managed Goal document.
+///
+/// `path` is relative to the Codex state home; callers must not receive the
+/// absolute state-home path.  The document bytes are addressed by the
+/// mission revision and digest so a consumer can fail closed on drift.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalDocument {
+    pub path: String,
+    pub sha256: String,
+    #[ts(type = "number")]
+    pub byte_length: i64,
+    #[ts(type = "number")]
+    pub mission_revision: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalDocumentSetParams {
+    pub thread_id: String,
+    pub document: String,
+    #[ts(optional = nullable)]
+    pub status: Option<ThreadGoalStatus>,
+    #[serde(default)]
+    #[ts(optional = nullable, type = "number | null")]
+    pub expected_mission_revision: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalDocumentSetResponse {
+    pub goal: ThreadGoal,
+    pub document: ThreadGoalDocument,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalDocumentGetParams {
+    pub thread_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalDocumentGetResponse {
+    pub goal: Option<ThreadGoal>,
+    pub document: Option<ThreadGoalDocument>,
+    pub content: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -1222,6 +1276,16 @@ pub struct ThreadBackgroundTerminalsListParams {
 pub struct ThreadBackgroundTerminal {
     pub item_id: String,
     pub process_id: String,
+    /// The turn that owns this native unified-exec entry, when available.
+    #[ts(optional = nullable)]
+    pub turn_id: Option<String>,
+    /// Opaque server-issued native unified-exec custody identity. This is not
+    /// the client-supplied command/exec `processId` namespace.
+    #[ts(optional = nullable)]
+    pub native_process_id: Option<String>,
+    /// Monotonic server generation for the native entry.
+    #[ts(optional = nullable)]
+    pub terminal_generation: Option<u64>,
     pub command: String,
     pub cwd: LegacyAppPathString,
     pub os_pid: Option<u32>,
@@ -1237,6 +1301,50 @@ pub struct ThreadBackgroundTerminalsListResponse {
     /// Opaque cursor to pass to the next call to continue after the last item.
     /// If None, there are no more items to return.
     pub next_cursor: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadBackgroundTerminalsStatusParams {
+    pub thread_id: String,
+    /// Exact owning turn sub-id from the command execution item.
+    pub turn_id: String,
+    /// Exact command execution item id.
+    pub item_id: String,
+    /// Opaque native unified-exec identity returned by the list method.
+    pub native_process_id: String,
+    /// Bounded observation wait. The server caps this at 1000ms.
+    #[ts(optional = nullable)]
+    pub max_wait_ms: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export_to = "v2/")]
+pub enum ThreadBackgroundTerminalStatusPhase {
+    Running,
+    Exited,
+    Unknown,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadBackgroundTerminalsStatusResponse {
+    pub phase: ThreadBackgroundTerminalStatusPhase,
+    /// Bytes observed by the native output collector, including capped bytes.
+    pub output_bytes: u64,
+    /// SHA-256 of the observed output bytes. Null for `unknown`.
+    pub output_sha256: Option<String>,
+    /// Whether the bounded native output retention cap was reached.
+    pub output_cap_reached: bool,
+    /// Process exit code, only when a terminal exit was observed.
+    pub exit_code: Option<i32>,
+    /// Stable server-issued lifecycle generation for this native entry.
+    pub terminal_generation: Option<u64>,
+    /// True when the bounded observation window ended before exit was seen.
+    pub observation_timed_out: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

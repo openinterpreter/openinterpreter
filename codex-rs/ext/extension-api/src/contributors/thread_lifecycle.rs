@@ -69,6 +69,10 @@ pub enum ThreadIdleCause {
 pub struct ThreadIdleInput<'a> {
     /// Why the thread became idle.
     pub cause: ThreadIdleCause,
+    /// The native turn that just reached this idle boundary, when the host
+    /// has an exact completion identity. Resume-only idle notifications do
+    /// not have a turn id.
+    pub turn_id: Option<&'a str>,
     /// Store scoped to the host session runtime.
     pub session_store: &'a ExtensionData,
     /// Store scoped to this thread runtime.
