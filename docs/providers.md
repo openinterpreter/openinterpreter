@@ -261,6 +261,7 @@ Common generated providers include:
 | `qihang-ai` | QiHang | `chat` | `QIHANG_API_KEY` | 9 |
 | `regolo-ai` | Regolo AI | `chat` | `REGOLO_API_KEY` | 10 |
 | `routing-run` | routing.run | `chat` | `ROUTING_RUN_API_KEY` | 24 |
+| `runcrate` | Runcrate | `chat` | `RUNCRATE_API_KEY` | 4 |
 | `sarvam` | Sarvam AI | `chat` | `SARVAM_API_KEY` | 2 |
 | `scaleway` | Scaleway | `chat` | `SCALEWAY_API_KEY` | 14 |
 | `stackit` | STACKIT | `chat` | `STACKIT_API_KEY` | 5 |

@@ -102,6 +102,7 @@ mod tests {
         assert!(provider_ids.contains(&"zhipuai"));
         assert!(provider_ids.contains(&"zai"));
         assert!(provider_ids.contains(&"zai-zcode"));
+        assert!(provider_ids.contains(&"runcrate"));
         assert!(provider_ids.contains(&"siliconflow"));
         assert!(provider_ids.contains(&"alibaba"));
         assert!(provider_ids.contains(&"modelscope"));
@@ -146,6 +147,27 @@ mod tests {
         assert_eq!(provider.base_url, "https://api.z.ai/api/anthropic");
         assert_eq!(provider.wire_api, WireApi::Messages);
         assert!(provider.env_http_headers.is_none());
+    }
+
+    #[test]
+    fn runcrate_catalog_entry_uses_chat_wire_api_and_text_models() {
+        let provider = bundled_provider_catalog_entry("runcrate").expect("Runcrate provider");
+        assert_eq!(provider.base_url, "https://api.runcrate.ai/v1");
+        assert_eq!(provider.env_key.as_deref(), Some("RUNCRATE_API_KEY"));
+        assert_eq!(provider.wire_api, WireApi::Chat);
+        assert!(provider.env_http_headers.is_none());
+        assert!(
+            provider
+                .models
+                .iter()
+                .any(|model| model.id == "deepseek-ai/DeepSeek-V4.1-Flash")
+        );
+        assert!(
+            provider
+                .models
+                .iter()
+                .all(|model| model.input_modalities.contains(&InputModality::Text))
+        );
     }
 
     #[test]

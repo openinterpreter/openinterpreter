@@ -231,6 +231,62 @@
                     "priority": 2
                 }
             ]
+        },
+        {
+            "id": "runcrate",
+            "name": "Runcrate",
+            "env_key": "RUNCRATE_API_KEY",
+            "base_url": "https://api.runcrate.ai/v1",
+            "wire_api": "chat",
+            "sort_priority": 100,
+            "models": [
+                {
+                    "id": "deepseek-ai/DeepSeek-V4.1-Flash",
+                    "display_name": "DeepSeek V4.1 Flash",
+                    "description": "deepseek • Reasoning • Tool calling • Image input",
+                    "reasoning": true,
+                    "input_modalities": [
+                        "text",
+                        "image"
+                    ],
+                    "context_window": 1048576,
+                    "priority": -1
+                },
+                {
+                    "id": "moonshotai/Kimi-K3",
+                    "display_name": "Kimi K3",
+                    "description": "kimi • Reasoning • Tool calling • Image input",
+                    "reasoning": true,
+                    "input_modalities": [
+                        "text",
+                        "image"
+                    ],
+                    "context_window": 1048576,
+                    "priority": 0
+                },
+                {
+                    "id": "zai-org/GLM-5.3",
+                    "display_name": "GLM 5.3",
+                    "description": "glm • Reasoning • Tool calling",
+                    "reasoning": true,
+                    "input_modalities": [
+                        "text"
+                    ],
+                    "context_window": 1048576,
+                    "priority": 1
+                },
+                {
+                    "id": "Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo",
+                    "display_name": "Qwen3 Coder 480B A35B",
+                    "description": "qwen • Tool calling",
+                    "reasoning": false,
+                    "input_modalities": [
+                        "text"
+                    ],
+                    "context_window": 262144,
+                    "priority": 2
+                }
+            ]
         }
     ],
     "live_model_sources": {
