@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: "Successful rust-release workflow run containing all six target artifacts"
+        description: "Successful attested rust-release workflow run containing all six target artifacts"
         required: true
       tag:
         description: "Existing rust-vX.Y.Z tag to publish"
@@ -15,6 +15,7 @@ on:
 
 permissions:
   actions: read
+  attestations: read
   contents: write
 
 jobs:
@@ -41,17 +42,20 @@ jobs:
           run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}")"
           [[ "$(jq -r .name <<<"$run_json")" == "rust-release" ]]
           [[ "$(jq -r .conclusion <<<"$run_json")" == "success" ]]
+          [[ "$(jq -r .event <<<"$run_json")" == "push" ]]
           [[ "$(jq -r .head_sha <<<"$run_json")" == "$tagged_sha" ]]
 
-          artifacts_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts")"
-          actual="$(jq -r '.artifacts[] | select(.expired == false) | .name' <<<"$artifacts_json" | sort)"
+          artifacts_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100")"
+          [[ "$(jq -r .total_count <<<"$artifacts_json")" -le 100 ]]
+          actual="$(jq -r '.artifacts[] | select(.expired == false) | .name | select(test("^(aarch64|x86_64)-(apple-darwin|unknown-linux-musl|pc-windows-msvc)$") or . == "open-interpreter-release-provenance")' <<<"$artifacts_json" | sort)"
           expected="$(printf '%s\n' \
             aarch64-apple-darwin \
             aarch64-pc-windows-msvc \
             aarch64-unknown-linux-musl \
             x86_64-apple-darwin \
             x86_64-pc-windows-msvc \
-            x86_64-unknown-linux-musl)"
+            x86_64-unknown-linux-musl \
+            open-interpreter-release-provenance | sort)"
           [[ "$actual" == "$expected" ]]
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v4.3.0
@@ -62,7 +66,20 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Stage installers and checksums
+      - name: Verify original package and manifest provenance
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          tagged_sha="$(git rev-list -n 1 "$TAG")"
+          python3 .github/scripts/oix-release-provenance.py verify \
+            --dist dist --repo "$GITHUB_REPOSITORY" \
+            --ref "refs/tags/$TAG" --commit "$tagged_sha" --run-id "$RUN_ID"
+
+      - name: Stage installers
         shell: bash
         run: |
           set -euo pipefail
@@ -71,8 +88,6 @@ jobs:
           cd dist
           [[ "$(find . -maxdepth 1 -name 'open-interpreter-package-*.tar.gz' | wc -l)" -eq 6 ]]
           [[ "$(find . -maxdepth 1 -name 'open-interpreter-package-*.tar.zst' | wc -l)" -eq 6 ]]
-          sha256sum open-interpreter-package-*.tar.gz open-interpreter-package-*.tar.zst \
-            > codex-package_SHA256SUMS
 
       - name: Publish release
         uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.5.0
@@ -84,6 +99,6 @@ jobs:
           files: |
             dist/open-interpreter-package-*.tar.gz
             dist/open-interpreter-package-*.tar.zst
-            dist/codex-package_SHA256SUMS
+            dist/open-interpreter-package_SHA256SUMS
             dist/install.sh
             dist/install.ps1
