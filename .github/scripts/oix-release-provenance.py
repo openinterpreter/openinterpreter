@@ -7,6 +7,7 @@ must consume those original bytes, never create a substitute attestation.
 
 import argparse
 import hashlib
+import json
 import pathlib
 import re
 import subprocess
@@ -30,12 +31,20 @@ def asset(dist, name):
 
 
 def verify_attestation(path, args):
-    subprocess.run(
+    result = subprocess.run(
         ["gh", "attestation", "verify", str(path), "--repo", args.repo,
-         "--signer-workflow", f"{args.repo}/.github/workflows/rust-release.yml",
-         "--source-ref", args.ref, "--source-digest", args.commit],
-        check=True, stdout=subprocess.DEVNULL,
+         "--cert-identity", f"https://github.com/{args.repo}/.github/workflows/rust-release.yml@{args.ref}",
+         "--source-ref", args.ref, "--source-digest", args.commit,
+         "--format", "json"],
+        check=True, capture_output=True, text=True,
     )
+    verified = json.loads(result.stdout)
+    run_prefix = f"https://github.com/{args.repo}/actions/runs/{args.run_id}/attempts/"
+    checked(isinstance(verified, list) and any(
+        re.fullmatch(re.escape(run_prefix) + r"[1-9][0-9]*",
+                     item.get("verificationResult", {}).get("signature", {}).get("certificate", {}).get("runInvocationURI", ""))
+        for item in verified if isinstance(item, dict)),
+        f"no verified attestation from original build run {args.run_id} for {path.name}")
 
 
 def main():
@@ -75,5 +84,5 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+    except (ValueError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         sys.exit(f"release provenance verification failed: {exc}")

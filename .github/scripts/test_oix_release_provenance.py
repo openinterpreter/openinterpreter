@@ -29,11 +29,13 @@ class ReleaseProvenanceTest(unittest.TestCase):
         gh = bin_dir / "gh"
         gh.write_text("#!/bin/sh\n"
                       "printf '%s\\n' \"$*\" >> \"$GH_CALLS\"\n"
-                      "[ \"${GH_FAIL:-}\" != \"$(basename \"$3\")\" ]\n")
+                      "[ \"${GH_FAIL:-}\" != \"$(basename \"$3\")\" ] || exit 1\n"
+                      "printf '[{\"verificationResult\":{\"signature\":{\"certificate\":{\"runInvocationURI\":\"%s\"}}}}]\\n' \"$GH_RUN_URI\"\n")
         gh.chmod(0o755)
         self.calls = self.root / "calls"
         self.env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                    "GH_CALLS": str(self.calls)}
+                    "GH_CALLS": str(self.calls),
+                    "GH_RUN_URI": "https://github.com/openinterpreter/openinterpreter/actions/runs/123/attempts/1"}
 
     def run_script(self, mode):
         return subprocess.run(
@@ -50,7 +52,7 @@ class ReleaseProvenanceTest(unittest.TestCase):
         self.assertEqual(len(calls), 9)
         self.assertTrue(all("--source-ref " + REF in c and
                             "--source-digest " + COMMIT in c and
-                            "--signer-workflow openinterpreter/openinterpreter/.github/workflows/rust-release.yml" in c
+                            "--cert-identity https://github.com/openinterpreter/openinterpreter/.github/workflows/rust-release.yml@" + REF in c
                             for c in calls))
         self.assertIn("open-interpreter-package_SHA256SUMS", calls[-1])
 
@@ -69,6 +71,11 @@ class ReleaseProvenanceTest(unittest.TestCase):
 
     def test_failed_attestation_fails_closed(self):
         self.env["GH_FAIL"] = NAMES[0]
+        self.assertNotEqual(self.run_script("prepare").returncode, 0)
+        self.assertFalse((self.dist / "open-interpreter-package_SHA256SUMS").exists())
+
+    def test_different_run_attestation_fails_closed(self):
+        self.env["GH_RUN_URI"] = "https://github.com/openinterpreter/openinterpreter/actions/runs/124/attempts/1"
         self.assertNotEqual(self.run_script("prepare").returncode, 0)
         self.assertFalse((self.dist / "open-interpreter-package_SHA256SUMS").exists())
 
