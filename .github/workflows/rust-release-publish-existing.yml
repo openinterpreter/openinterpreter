@@ -45,7 +45,8 @@ jobs:
           [[ "$(jq -r .event <<<"$run_json")" == "push" ]]
           [[ "$(jq -r .head_sha <<<"$run_json")" == "$tagged_sha" ]]
 
-          artifacts_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts")"
+          artifacts_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100")"
+          [[ "$(jq -r .total_count <<<"$artifacts_json")" -le 100 ]]
           actual="$(jq -r '.artifacts[] | select(.expired == false) | .name | select(test("^(aarch64|x86_64)-(apple-darwin|unknown-linux-musl|pc-windows-msvc)$") or . == "open-interpreter-release-provenance")' <<<"$artifacts_json" | sort)"
           expected="$(printf '%s\n' \
             aarch64-apple-darwin \
