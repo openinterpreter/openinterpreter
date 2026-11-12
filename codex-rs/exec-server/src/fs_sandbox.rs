@@ -555,9 +555,9 @@ pub(crate) fn spawn_command(
     command.stdin(stdin);
     // A helper is a known executable: native launch errors must not retry through fork.
     command.fallback(SpawnFallback::ReturnError);
-    // macOS cannot receive passed fds with close-on-exec set atomically.
+    // The helper receives only its explicit stdio; close unrelated inherited fds.
     #[cfg(target_os = "macos")]
-    command.descriptor_policy(DescriptorPolicy::StdioOnly);
+    command.descriptor_policy(DescriptorPolicy::Explicit);
     command.spawn().map_err(io_error)
 }
 
