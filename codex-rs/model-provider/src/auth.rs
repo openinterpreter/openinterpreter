@@ -735,7 +735,7 @@ mod legacy_auth_tests {
             .await
             .expect("auth should resolve");
 
-        assert!(auth.to_auth_headers().is_empty());
+        assert!(auth.to_auth_headers().unwrap().is_empty());
     }
 
     #[test]
@@ -775,7 +775,7 @@ mod legacy_auth_tests {
             .await
             .expect("auth should resolve");
 
-        assert!(auth.to_auth_headers().is_empty());
+        assert!(auth.to_auth_headers().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -791,7 +791,7 @@ mod legacy_auth_tests {
             .await
             .expect("auth should resolve");
 
-        assert!(auth.to_auth_headers().is_empty());
+        assert!(auth.to_auth_headers().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -808,7 +808,8 @@ mod legacy_auth_tests {
             resolve_provider_auth(Some(&ambient_auth), &provider, /*codex_home*/ None)
                 .await
                 .expect("auth should resolve")
-                .to_auth_headers();
+                .to_auth_headers()
+                .expect("explicit bearer should resolve");
 
         assert_eq!(
             headers.get(AUTHORIZATION),
@@ -837,7 +838,8 @@ mod legacy_auth_tests {
             resolve_provider_auth(Some(&command_auth), &provider, /*codex_home*/ None)
                 .await
                 .expect("auth should resolve")
-                .to_auth_headers();
+                .to_auth_headers()
+                .expect("command auth should resolve");
 
         assert_eq!(
             headers.get(AUTHORIZATION),
@@ -863,7 +865,7 @@ mod legacy_auth_tests {
             .await
             .expect("auth should resolve");
 
-        assert_eq!(auth.to_auth_headers(), expected);
+        assert_eq!(auth.to_auth_headers().unwrap(), expected);
     }
 
     #[test]
@@ -876,7 +878,7 @@ mod legacy_auth_tests {
         expected.insert("x-external-auth", HeaderValue::from_static("enabled"));
         let auth = CodexAuth::Headers(AuthHeaders::new(expected.clone()));
 
-        let actual = auth_provider_from_auth(&auth).to_auth_headers();
+        let actual = auth_provider_from_auth(&auth).to_auth_headers().unwrap();
 
         assert_eq!(actual, expected);
     }
@@ -928,7 +930,7 @@ mod legacy_auth_tests {
         let provider = auth_provider_from_auth_manager(Arc::clone(&auth_manager), &expected_auth);
 
         assert_eq!(
-            provider.to_auth_headers().get(AUTHORIZATION),
+            provider.to_auth_headers().unwrap().get(AUTHORIZATION),
             Some(&HeaderValue::from_static("Bearer header.e30.first"))
         );
 
@@ -942,7 +944,7 @@ mod legacy_auth_tests {
         auth_manager.reload().await;
 
         let resolved_headers = provider
-            .resolve_auth_headers()
+            .apply_auth_headers(HeaderMap::new())
             .await
             .expect("managed auth headers should resolve");
         assert_eq!(
@@ -959,7 +961,7 @@ mod legacy_auth_tests {
         .expect("save switched-account auth");
         auth_manager.reload().await;
 
-        assert!(provider.to_auth_headers().is_empty());
+        assert!(provider.to_auth_headers().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -988,7 +990,7 @@ mod legacy_auth_tests {
                 task_id: "task-run-1".to_string(),
             })
         );
-        let headers = auth.auth.to_auth_headers();
+        let headers = auth.auth.to_auth_headers().unwrap();
         assert!(
             headers
                 .get(http::header::AUTHORIZATION)
@@ -1002,7 +1004,7 @@ mod legacy_auth_tests {
         let auth = agent_identity_auth(/*chatgpt_account_is_fedramp*/ true).await;
         let provider = auth_provider_from_auth(&CodexAuth::AgentIdentity(auth));
 
-        let headers = provider.to_auth_headers();
+        let headers = provider.to_auth_headers().unwrap();
 
         assert!(
             headers
@@ -1047,7 +1049,7 @@ mod legacy_auth_tests {
         .await
         .expect("fallback should resolve bearer auth");
 
-        let headers = provider_auth.auth.to_auth_headers();
+        let headers = provider_auth.auth.to_auth_headers().unwrap();
         assert_eq!(
             headers
                 .get(http::header::AUTHORIZATION)
