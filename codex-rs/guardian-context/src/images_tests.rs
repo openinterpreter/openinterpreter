@@ -41,6 +41,10 @@ fn image_selection_preserves_source_policy_order_and_both_limits() {
             name: None,
             namespace: None,
             output: FunctionCallOutputPayload::from_content_items(vec![
+                FunctionCallOutputContentItem::InputVideo {
+                    video_url: "data:video/mp4;base64,ignored".into(),
+                    id: None,
+                },
                 FunctionCallOutputContentItem::InputImage {
                     image: ImageReference::Inline {
                         image_url: "tool".into(),
