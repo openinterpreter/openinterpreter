@@ -12,11 +12,6 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
-# cargo-shear 1.11.2 misses these uses in active request/auth code and tests.
-# Keep the dependency audit strict for every other package and dependency.
-[package.metadata.cargo-shear]
-ignored = ["base64", "codex-runtime-agent-instance"]
-
 [dependencies]
 chrono = { workspace = true }
 codex-api = { workspace = true }
