@@ -1,0 +1,88 @@
+name: Bazel lock reconciliation candidate (review only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact 40-character PR head to reconcile (must match dispatch ref)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    name: Generate review-only MODULE.bazel.lock
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment:
+      name: bazel
+      deployment: false
+    steps:
+      - name: Require exact dispatch source
+        shell: bash
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_SHA" == "$EXPECTED_SOURCE_SHA" ]]
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+
+      - name: Check source identity
+        shell: bash
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SOURCE_SHA" ]]
+          [[ -z "$(git status --porcelain)" ]]
+
+      - name: Prepare Bazel CI
+        uses: ./.github/actions/prepare-bazel-ci
+        with:
+          target: x86_64-unknown-linux-gnu
+          cache-scope: bazel-lock-review
+
+      - name: Generate candidate and verify it under error mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./.github/scripts/run_bazel_with_buildbuddy.py mod deps --lockfile_mode=update
+          ./.github/scripts/run_bazel_with_buildbuddy.py mod deps --lockfile_mode=error
+
+      - name: Bind candidate to source and package review artifact
+        shell: bash
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/verify_bazel_lock_regeneration.py \
+            --source-sha "$EXPECTED_SOURCE_SHA" \
+            --run-id "$WORKFLOW_RUN_ID" \
+            --run-attempt "$WORKFLOW_RUN_ATTEMPT" \
+            --output-dir "$RUNNER_TEMP/bazel-lock-review"
+
+      - name: Upload review-only candidate (never commit or publish)
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: bazel-lock-review-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bazel-lock-review/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Check for a clean worktree after candidate
+        if: always() && !cancelled()
+        shell: bash
+        run: |
+          # The candidate may change exactly this one file; no other tracked
+          # source may be modified by the generator.
+          unexpected="$(git diff --name-only -- . ':!MODULE.bazel.lock')"
+          [[ -z "$unexpected" ]]
