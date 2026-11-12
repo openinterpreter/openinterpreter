@@ -1069,6 +1069,87 @@ impl FileSystemSandboxPolicy {
             || self.metadata_write_denial(path, context).is_none()
     }
 
+    /// Widen an approved command on its selected executor without dropping read denials.
+    /// A denial that cannot be proved against that executor leaves the original
+    /// profile in force rather than publishing an incompletely protected grant.
+    pub fn for_approved_command(&self, context: &FileSystemSandboxPolicyContext<'_>) -> Self {
+        if self.kind != FileSystemSandboxKind::Restricted {
+            return self.clone();
+        }
+        let Some(root) = file_system_root(context) else {
+            return self.clone();
+        };
+        if context.workspace_roots.is_empty()
+            && self.entries.iter().any(|entry| {
+                entry.access == FileSystemAccessMode::Deny
+                    && (matches!(
+                        &entry.path,
+                        FileSystemPath::Special {
+                            value: FileSystemSpecialPath::ProjectRoots { .. }
+                        }
+                    ) || matches!(
+                        &entry.path,
+                        FileSystemPath::GlobPattern { pattern }
+                            if pattern.starts_with(PROJECT_ROOTS_GLOB_PATTERN_PREFIX)
+                    ))
+            })
+        {
+            return self.clone();
+        }
+        let Ok(matcher) = ReadDenyMatcher::try_new_with_context(self, context) else {
+            return self.clone();
+        };
+        if matcher
+            .as_ref()
+            .is_some_and(|matcher| matcher.is_read_denied_uri(&root, context))
+        {
+            return self.clone();
+        }
+        let Some(materialized) = self
+            .clone()
+            .try_materialize_project_roots_with_path_uris(context.workspace_roots)
+        else {
+            return self.clone();
+        };
+        let denials = materialized
+            .entries
+            .into_iter()
+            .filter(|entry| entry.access == FileSystemAccessMode::Deny)
+            .collect::<Vec<_>>();
+        if denials.iter().any(|entry| match &entry.path {
+            FileSystemPath::Path { path } => path == &root || !path.starts_with(&root),
+            FileSystemPath::GlobPattern { .. } => false,
+            FileSystemPath::Special { .. } => true,
+        }) {
+            return self.clone();
+        }
+        let mut entries = vec![FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            FileSystemAccessMode::Write,
+        )];
+        entries.extend(denials);
+        for name in PROTECTED_METADATA_PATH_NAMES {
+            let Ok(path) = root.join_descendant(name) else {
+                return self.clone();
+            };
+            if matcher
+                .as_ref()
+                .is_some_and(|matcher| matcher.is_read_denied_uri(&path, context))
+            {
+                continue;
+            }
+            entries.push(FileSystemSandboxEntry::new(
+                path.into(),
+                FileSystemAccessMode::Write,
+            ));
+        }
+        let mut approved = Self::restricted(entries);
+        approved.glob_scan_max_depth = self.glob_scan_max_depth;
+        approved
+    }
+
     fn metadata_write_denial(
         &self,
         path: &PathUri,
@@ -2712,3 +2793,7 @@ fn resolve_gitdir_from_file(dot_git: &AbsolutePathBuf) -> Option<AbsolutePathBuf
 #[cfg(test)]
 #[path = "permissions_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "permissions/target_approved_materialization_tests.rs"]
+mod approved_materialization_tests;
