@@ -9,16 +9,21 @@
 //! used by default HTTP headers.
 
 mod bundled_provider_catalog;
+mod capabilities;
 
 pub use bundled_provider_catalog::BundledProviderCatalogEntry;
 pub use bundled_provider_catalog::BundledProviderModelEntry;
 pub use bundled_provider_catalog::bundled_provider_catalog;
 pub use bundled_provider_catalog::bundled_provider_catalog_entry;
 pub use bundled_provider_catalog::bundled_provider_catalog_entry_for_base_url;
+pub use capabilities::ModelProviderCapabilities;
+pub use capabilities::RemoteCompactionSupport;
 
 use codex_api::Provider as ApiProvider;
 use codex_api::RetryConfig as ApiRetryConfig;
 use codex_api::is_azure_responses_provider;
+use codex_http_client::OPENAI_ORGANIZATION_HEADER;
+use codex_http_client::OPENAI_PROJECT_HEADER;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::config_types::ModelProviderAuthInfo;
 use codex_protocol::error::CodexErr;
@@ -36,6 +41,7 @@ use std::fmt;
 use std::num::NonZeroU64;
 use std::path::Component;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::PoisonError;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -416,7 +422,20 @@ other non-default provider fields are not supported"
         Ok(())
     }
 
+    /// Reject relative ADC paths for GCP before a credential source is selected.
+    pub fn validate_gcp_credential_file(&self) -> Result<(), String> {
+        if let Some(credential_file) = &self.credential_file
+            && !credential_file.is_absolute()
+        {
+            return Err("provider credential_file must be an absolute path".to_string());
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.is_gcp() {
+            self.validate_gcp_credential_file()?;
+        }
         if let Some(gateway) = &self.gateway_oauth {
             gateway.validate(self)?;
         }
