@@ -297,19 +297,6 @@ impl SqliteConfig {
         .await
     }
 
-    pub(crate) fn memories_v2_db_path(&self) -> PathBuf {
-        MEMORIES_V2_DB.path(self.home())
-    }
-
-    pub(crate) async fn open_memories_v2_db(&self) -> anyhow::Result<SqlitePool> {
-        self.open_runtime_db(
-            MEMORIES_V2_DB,
-            &crate::migrations::runtime_memories_migrator(),
-            /*telemetry_override*/ None,
-        )
-        .await
-    }
-
     /// Return the path to the durable user-message queue database.
     pub fn queue_db_path(&self) -> PathBuf {
         QUEUE_DB.path(self)
