@@ -1,3 +1,11 @@
+#[path = "manager_errors.rs"]
+mod errors;
+pub use errors::PluginInstallError;
+pub use errors::PluginUninstallError;
+use errors::marketplace_error_sub_error_type;
+use errors::marketplace_error_type;
+use errors::plugin_install_error_type;
+
 #[path = "remote_mutations.rs"]
 mod remote_mutations;
 pub use remote_mutations::RemotePluginInstallOutcome;
