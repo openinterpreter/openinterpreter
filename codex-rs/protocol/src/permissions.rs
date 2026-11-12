@@ -25,13 +25,27 @@ use crate::protocol::SandboxPolicy;
 use crate::protocol::WritableRoot;
 
 mod deny_read_validator;
+mod enforcement;
+mod local_aliases;
 mod target;
 mod windows_glob;
 
+use local_aliases::LocalPolicyContext;
+
 pub use deny_read_validator::DenyReadValidator;
 pub use deny_read_validator::DenyReadViolation;
+pub use enforcement::FileSystemPolicyProjection;
+pub use enforcement::ResolvedFileSystemPermissions;
+pub use local_aliases::LocalFileSystemPolicyMatcher;
 pub use windows_glob::WindowsDenyReadGlobScan;
 pub use windows_glob::windows_deny_read_glob_scan;
+
+/// Selects native execution projection or an unresolved, lossless transport template.
+#[derive(Clone, Copy)]
+pub(crate) enum LegacySandboxPolicyProjection<'a> {
+    Cwd(&'a Path),
+    Template,
+}
 
 const PROTECTED_METADATA_GIT_PATH_NAME: &str = ".git";
 const PROTECTED_METADATA_AGENTS_PATH_NAME: &str = ".agents";
@@ -667,6 +681,7 @@ impl FileSystemSandboxPolicy {
         self.has_denied_read_restrictions_for_convention(Some(PathConvention::native()))
     }
 
+    /// Returns whether this policy denies reads on the selected executor.
     fn has_denied_read_restrictions_for_convention(
         &self,
         convention: Option<PathConvention>,
