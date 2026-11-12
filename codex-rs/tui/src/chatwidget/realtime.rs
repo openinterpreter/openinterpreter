@@ -3,6 +3,9 @@
 //! Interleaved speakers retain separate displays so settled caption text never reanimates.
 
 mod recording_controls;
+mod failure_metrics;
+mod navigation;
+mod session_lock;
 mod transcript_replay;
 
 use super::ChatWidget;

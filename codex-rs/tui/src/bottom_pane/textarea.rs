@@ -54,6 +54,8 @@ use unicode_segmentation::UnicodeSegmentation;
 mod editing;
 mod hyperlinks;
 mod mouse;
+mod register;
+mod single_line;
 mod vim;
 mod vim_commands;
 mod vim_search;

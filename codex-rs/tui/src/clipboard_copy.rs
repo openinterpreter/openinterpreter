@@ -20,6 +20,9 @@
 //! Image paste lives in `clipboard_paste`.
 
 mod tmux;
+mod primary;
+mod worker;
+mod wsl;
 
 use base64::Engine;
 use std::io::Write;

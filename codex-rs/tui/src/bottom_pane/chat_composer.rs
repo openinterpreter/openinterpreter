@@ -396,7 +396,9 @@ mod footer_state;
 mod history_search;
 mod inline_input;
 mod mouse;
+mod native_status;
 mod paste_input;
+mod passive_hints;
 mod popup_state;
 mod reconnect;
 pub(crate) use reconnect::RestrictedInputMode;
@@ -5123,6 +5125,8 @@ mod paste_tests;
 #[cfg(test)]
 #[path = "chat_composer/snapshot_tests.rs"]
 mod snapshot_tests;
+#[cfg(test)]
+mod skill_completion_tests;
 
 #[cfg(test)]
 #[path = "chat_composer/mentions_layout_tests.rs"]

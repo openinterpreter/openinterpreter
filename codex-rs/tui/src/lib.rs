@@ -247,6 +247,7 @@ mod theme_picker;
 mod thread_color;
 mod thread_transcript;
 mod token_usage;
+mod transcript_image;
 mod tool_output;
 mod tooltips;
 mod transcript_mode;
@@ -2394,6 +2395,7 @@ fn should_show_provider_setup_wizard(
             .is_login_method_allowed(ForcedLoginMethod::Api)
 }
 
+mod daemon_recovery;
 mod daemon_startup;
 mod daemon_telemetry;
 

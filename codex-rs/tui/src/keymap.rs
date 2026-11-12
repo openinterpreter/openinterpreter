@@ -41,6 +41,8 @@ pub(crate) use vim_search::VimSearchKeymap;
 #[cfg(test)]
 #[path = "keymap/conflict_tests.rs"]
 mod conflict_tests;
+#[cfg(test)]
+mod select_transcript_tests;
 
 #[cfg(test)]
 #[path = "keymap/voice_tests.rs"]
