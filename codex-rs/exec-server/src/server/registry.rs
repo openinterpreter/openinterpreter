@@ -5,7 +5,9 @@ use opentelemetry::trace::TraceContextExt;
 use std::sync::Arc;
 
 use crate::local_file_system::resolve_existing_path;
+use crate::protocol::CAPABILITIES_DISCOVER_V2_METHOD;
 use crate::protocol::CAPABILITY_ROOTS_DISCOVER_METHOD;
+use crate::protocol::DiscoverV2CapabilitiesRequest;
 use crate::protocol::ENVIRONMENT_CONFIG_READ_METHOD;
 use crate::protocol::ENVIRONMENT_INFO_METHOD;
 use crate::protocol::ENVIRONMENT_STATUS_METHOD;
@@ -30,6 +32,7 @@ use crate::protocol::FS_WRITE_BLOCK_METHOD;
 use crate::protocol::FS_WRITE_FILE_METHOD;
 use crate::protocol::FsCloseParams;
 use crate::protocol::FsReadBlockParams;
+use crate::protocol::FsWriteBlockParams;
 use crate::protocol::HTTP_REQUEST_METHOD;
 use crate::protocol::HttpRequestParams;
 use crate::protocol::INITIALIZE_METHOD;

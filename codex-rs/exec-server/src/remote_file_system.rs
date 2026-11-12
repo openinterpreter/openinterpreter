@@ -332,6 +332,15 @@ impl RemoteFileSystem {
     }
 }
 
+/// A cancelled write must stop later lookups from joining pre-cancellation metadata requests.
+struct MetadataInvalidation<'a>(&'a RemoteFileSystem);
+
+impl Drop for MetadataInvalidation<'_> {
+    fn drop(&mut self) {
+        self.0.lock_metadata_requests().clear();
+    }
+}
+
 impl ExecutorFileSystem for RemoteFileSystem {
     fn watch_missing(
         &self,
