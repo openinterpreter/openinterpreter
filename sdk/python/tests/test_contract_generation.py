@@ -81,6 +81,19 @@ def test_generated_files_are_up_to_date(tmp_path, format_output):
         ]
 
 
+def test_generated_realtime_transport_is_a_valid_root_union():
+    from openai_codex.generated.v2_all import ThreadRealtimeStartTransport
+
+    assert set(ThreadRealtimeStartTransport.model_fields) == {"root"}
+    transport = ThreadRealtimeStartTransport.model_validate(
+        {"type": "existingCall", "callId": "call-1"}
+    )
+    assert transport.model_dump(by_alias=True) == {
+        "type": "existingCall",
+        "callId": "call-1",
+    }
+
+
 def test_generate_types_no_format_routes_to_the_generator():
     script = runpy.run_path(str(ROOT / "scripts" / "update_sdk_artifacts.py"))
     args = script["parse_args"](["generate-types", "--no-format"])
