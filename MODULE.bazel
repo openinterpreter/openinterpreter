@@ -245,6 +245,11 @@ rules_rust.patch(
         # Prefer Rust's direct linker for Windows/MSVC and keep hermetic
         # LLVM's non-.lib runtime artifacts compatible with it.
         "//patches:rules_rust_windows_msvc_direct_link_args.patch",
+        # When the Rust toolchain has no direct linker, the selected C++
+        # clang-cl driver cannot consume rustc's MSVC linker flags. Bind the
+        # declared sibling lld-link for those rustc actions, including the
+        # process_wrapper bootstrap, without changing C/C++ driver selection.
+        "//patches:rules_rust_declared_msvc_linker.patch",
         # Skip transient native-Windows linker outputs while consolidating
         # dependency search paths.
         "//patches:rules_rust_windows_process_wrapper_skip_temp_outputs.patch",
