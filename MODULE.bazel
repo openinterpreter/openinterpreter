@@ -550,6 +550,20 @@ crate.annotation(
     workspace_cargo_toml = "src/Cargo.toml",
 )
 
+# The pinned MXC Git revision places its Cargo workspace below the root.
+crate.annotation(
+    crate = "mxc_config_contract",
+    workspace_cargo_toml = "src/Cargo.toml",
+)
+crate.annotation(
+    crate = "mxc_telemetry",
+    workspace_cargo_toml = "src/Cargo.toml",
+)
+crate.annotation(
+    crate = "wxc_common",
+    workspace_cargo_toml = "src/Cargo.toml",
+)
+
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 # Cargo keeps vendored OpenSSL for musl; Bazel already supplies its own OpenSSL.
