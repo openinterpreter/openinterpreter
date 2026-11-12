@@ -213,29 +213,6 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct RetryAuth {
-        request_limits: Mutex<Vec<Option<usize>>>,
-    }
-
-    impl AuthProvider for RetryAuth {
-        fn add_auth_headers(&self, headers: &mut HeaderMap) {
-            headers.insert(http::header::AUTHORIZATION, "Bearer test".parse().unwrap());
-        }
-
-        fn apply_auth(&self, mut request: Request) -> AuthProviderFuture<'_> {
-            Box::pin(async move {
-                let mut limits = self.request_limits.lock().unwrap();
-                limits.push(request.response_body_limit_bytes);
-                if limits.len() == 1 {
-                    return Err(AuthError::Transient("retry authentication".to_string()));
-                }
-                self.add_auth_headers(&mut request.headers);
-                Ok(request)
-            })
-        }
-    }
-
     fn provider(base_url: &str) -> Provider {
         Provider {
             name: "test".to_string(),

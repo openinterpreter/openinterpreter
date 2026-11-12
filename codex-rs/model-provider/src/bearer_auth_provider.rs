@@ -1,3 +1,4 @@
+use codex_api::AuthError;
 use codex_api::AuthProvider;
 use codex_http_client::CHATGPT_ACCOUNT_ID_HEADER;
 use codex_login::auth::is_fedramp_api_key;
@@ -38,7 +39,7 @@ impl BearerAuthProvider {
 }
 
 impl AuthProvider for BearerAuthProvider {
-    fn add_auth_headers(&self, headers: &mut HeaderMap) {
+    fn add_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), AuthError> {
         if let Some(token) = self.token.as_ref() {
             let header_value = if self.use_bearer_prefix {
                 format!("Bearer {token}")
@@ -91,7 +92,7 @@ mod tests {
         let auth = BearerAuthProvider::for_test(Some("access-token"), Some("workspace-123"));
         let mut headers = HeaderMap::new();
 
-        auth.add_auth_headers(&mut headers);
+        auth.add_auth_headers(&mut headers).unwrap();
 
         assert_eq!(
             headers
@@ -118,7 +119,7 @@ mod tests {
         };
         let mut headers = HeaderMap::new();
 
-        auth.add_auth_headers(&mut headers);
+        auth.add_auth_headers(&mut headers).unwrap();
 
         assert_eq!(
             headers
@@ -139,7 +140,7 @@ mod tests {
         };
         let mut headers = HeaderMap::new();
 
-        auth.add_auth_headers(&mut headers);
+        auth.add_auth_headers(&mut headers).unwrap();
 
         assert_eq!(
             headers
