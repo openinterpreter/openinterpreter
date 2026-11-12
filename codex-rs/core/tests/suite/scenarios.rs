@@ -80,6 +80,9 @@ mod injected_agent_mail;
 #[path = "scenarios_incremental_tools_resume.rs"]
 mod incremental_tools_resume;
 
+#[path = "scenarios_retained_tool_outputs.rs"]
+mod retained_tool_outputs;
+
 #[path = "scenarios_shared_instructions.rs"]
 mod shared_instructions;
 

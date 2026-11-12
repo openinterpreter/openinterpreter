@@ -54,6 +54,9 @@ use wiremock::matchers::body_partial_json;
 #[path = "command_lifecycle_tests.rs"]
 mod command_lifecycle;
 
+#[path = "tool_observation_tests.rs"]
+mod tool_observation_tests;
+
 struct RecordedHistory {
     call_id: String,
     arguments: String,
