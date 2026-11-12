@@ -136,7 +136,9 @@ where
             .host_with_port()
             .ok_or_else(|| OpaqueError::from_display("network target is missing a port"))?;
 
-        connector
+        let policy = DialPolicy::for_target(input.extensions(), &target).cloned();
+        let attempts = Arc::new(AtomicU8::new(0));
+        let result = connector
             .with_connector(TargetCheckedStreamConnector {
                 state: self.state.clone(),
                 authorization: policy

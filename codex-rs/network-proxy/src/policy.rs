@@ -71,6 +71,7 @@ pub(crate) fn is_default_proxy_bypass_host(host: &str) -> bool {
     }
 }
 
+/// Classifies IP literals excluded from public network destinations; does not resolve DNS.
 pub fn is_non_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => is_non_public_ipv4(ip),
@@ -142,112 +143,8 @@ pub(crate) fn compile_allowlist(patterns: &[String]) -> Result<DomainPatternSet>
     DomainPatternSet::new(patterns, GlobalWildcard::Allow)
 }
 
-fn normalize_dns_host_or_ip_literal(host: &str) -> String {
-    let host = host.to_ascii_lowercase();
-    let host = host.trim_end_matches('.');
-    if let Some(ip) = normalize_ip_literal(host) {
-        return ip;
-    }
-    host.to_string()
-}
-
-pub(crate) fn unscoped_ip_literal(host: &str) -> Option<&str> {
-    let (ip, _) = host.split_once('%')?;
-    ip.parse::<IpAddr>().ok()?;
-    Some(ip)
-}
-
-fn normalize_ip_literal(host: &str) -> Option<String> {
-    if host.parse::<IpAddr>().is_ok() {
-        return Some(host.to_string());
-    }
-    for delimiter in ["%25", "%"] {
-        if let Some((ip, scope)) = host.split_once(delimiter)
-            && ip.parse::<IpAddr>().is_ok()
-        {
-            return Some(format!("{ip}%{scope}"));
-        }
-    }
-    None
-}
-
-fn normalize_pattern(pattern: &str) -> String {
-    let pattern = pattern.trim();
-    if pattern == "*" {
-        return "*".to_string();
-    }
-
-    let (prefix, remainder) = if let Some(domain) = pattern.strip_prefix("**.") {
-        ("**.", domain)
-    } else if let Some(domain) = pattern.strip_prefix("*.") {
-        ("*.", domain)
-    } else {
-        ("", pattern)
-    };
-
-    let remainder = normalize_host(remainder);
-    if prefix.is_empty() {
-        remainder
-    } else {
-        format!("{prefix}{remainder}")
-    }
-}
-
-pub(crate) fn is_global_wildcard_domain_pattern(pattern: &str) -> bool {
-    let normalized = normalize_pattern(pattern);
-    expand_domain_pattern(&normalized)
-        .iter()
-        .any(|candidate| candidate == "*")
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum GlobalWildcard {
-    Allow,
-    Reject,
-}
-
-pub(crate) fn compile_allowlist_globset(patterns: &[String]) -> Result<GlobSet> {
-    compile_globset_with_policy(patterns, GlobalWildcard::Allow)
-}
-
-pub(crate) fn compile_denylist_globset(patterns: &[String]) -> Result<GlobSet> {
-    compile_globset_with_policy(patterns, GlobalWildcard::Reject)
-}
-
-// Browser network-policy matchers implement a subset of this hostname grammar.
-// Keep changes to shared grammar and normalization in sync with their contract
-// cases and the Rust tests below, including compile_globset_supports_question_mark_wildcards.
-fn compile_globset_with_policy(
-    patterns: &[String],
-    global_wildcard: GlobalWildcard,
-) -> Result<GlobSet> {
-    let mut builder = GlobSetBuilder::new();
-    let mut seen = HashSet::new();
-    for pattern in patterns {
-        if global_wildcard == GlobalWildcard::Reject && is_global_wildcard_domain_pattern(pattern) {
-            bail!(
-                "unsupported global wildcard domain pattern \"*\"; use exact hosts or scoped wildcards like *.example.com or **.example.com"
-            );
-        }
-        let pattern = normalize_pattern(pattern);
-        // Supported domain patterns:
-        // - "example.com": match the exact host
-        // - "*.example.com": match any subdomain (not the apex)
-        // - "**.example.com": match the apex and any subdomain
-        // - "api?.example.com": match exactly one character after "api"
-        // - "*": match every host when explicitly enabled for allowlist compilation
-        for candidate in expand_domain_pattern(&pattern) {
-            if !seen.insert(candidate.clone()) {
-                continue;
-            }
-            let glob = GlobBuilder::new(&candidate)
-                .case_insensitive(true)
-                .build()
-                .with_context(|| format!("invalid glob pattern: {candidate}"))?;
-            builder.add(glob);
-        }
-    }
-    Ok(builder.build()?)
+pub(crate) fn compile_denylist(patterns: &[String]) -> Result<DomainPatternSet> {
+    DomainPatternSet::new(patterns, GlobalWildcard::Reject)
 }
 
 #[derive(Debug, Clone)]
@@ -417,10 +314,7 @@ mod tests {
             (" API?.EXAMPLE.COM. ", "API1.EXAMPLE.COM.", true),
         ] {
             let patterns = [pattern.to_string()];
-            for set in [
-                compile_allowlist_globset(&patterns)?,
-                compile_denylist_globset(&patterns)?,
-            ] {
+            for set in [compile_allowlist(&patterns)?, compile_denylist(&patterns)?] {
                 assert_eq!(
                     set.is_match(normalize_host(host)),
                     expected,

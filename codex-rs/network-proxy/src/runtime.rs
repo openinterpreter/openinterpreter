@@ -286,6 +286,8 @@ pub struct NetworkProxyState {
     state: Arc<RwLock<ConfigState>>,
     /// Belongs to this proxy; config retains omission for launches on other executors.
     pub(crate) local_binding_policy: LocalBindingPolicy,
+    pub(crate) proxy_private_ips_via_upstream: bool,
+    pub(crate) tcp_upstream_proxy: Option<crate::TcpUpstreamProxy>,
     reloader: Arc<dyn ConfigReloader>,
     blocked_request_observer: Arc<RwLock<Option<Arc<dyn BlockedRequestObserver>>>>,
     pub(crate) policy_audit_observer: Option<NetworkPolicyAuditObserver>,
@@ -326,6 +328,8 @@ impl Clone for NetworkProxyState {
         Self {
             state: self.state.clone(),
             local_binding_policy: self.local_binding_policy,
+            proxy_private_ips_via_upstream: self.proxy_private_ips_via_upstream,
+            tcp_upstream_proxy: self.tcp_upstream_proxy.clone(),
             reloader: self.reloader.clone(),
             blocked_request_observer: self.blocked_request_observer.clone(),
             policy_audit_observer: self.policy_audit_observer.clone(),
@@ -457,6 +461,8 @@ impl NetworkProxyState {
             local_aws_signers: Arc::new(std::sync::RwLock::new(state.local_aws_signers())),
             state: Arc::new(RwLock::new(state)),
             local_binding_policy,
+            proxy_private_ips_via_upstream: false,
+            tcp_upstream_proxy: None,
             reloader,
             blocked_request_observer: Arc::new(RwLock::new(blocked_request_observer)),
             policy_audit_observer: None,
@@ -624,10 +630,13 @@ impl NetworkProxyState {
         let parent_env = std::env::vars_os()
             .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
             .collect();
-        self.credential_broker
-            .discover_parent_credentials_for_environment(&parent_env, env, environment_id);
-        self.credential_broker
-            .virtualize_child_env_for_environment(env, environment_id);
+        let credential_broker = self.credential_broker();
+        credential_broker.discover_parent_credentials_for_environment(
+            &parent_env,
+            env,
+            environment_id,
+        );
+        credential_broker.virtualize_child_env_for_environment(env, environment_id);
     }
 
     pub(crate) fn restore_child_credentials(
@@ -664,35 +673,6 @@ impl NetworkProxyState {
         command: &mut [String],
     ) {
         self.credential_broker()
-            .restore_and_disable_child_env(env, command);
-    }
-
-    pub(crate) fn virtualize_snapshot_credentials(
-        &self,
-        env: &mut HashMap<String, String>,
-        environment_id: Option<&str>,
-    ) {
-        self.credential_broker
-            .virtualize_snapshot_env(env, environment_id);
-    }
-
-    pub(crate) fn child_credential_alias_matches(
-        &self,
-        key: &str,
-        value: &str,
-        snapshot_value: &str,
-        environment_id: Option<&str>,
-    ) -> bool {
-        self.credential_broker
-            .child_alias_matches(key, value, snapshot_value, environment_id)
-    }
-
-    pub(crate) fn restore_and_disable_child_credentials(
-        &self,
-        env: &mut HashMap<String, String>,
-        command: &mut [String],
-    ) {
-        self.credential_broker
             .restore_and_disable_child_env(env, command);
     }
 
@@ -762,48 +742,8 @@ impl NetworkProxyState {
         self.credential_broker().restore_text(text)
     }
 
-    pub(crate) fn credential_broker_environment(
-        &self,
-        env: &HashMap<String, String>,
-    ) -> crate::CredentialBrokerEnvironment {
-        self.credential_broker.environment(env)
-    }
-
-    pub(crate) fn credential_broker_environment_for_text(
-        &self,
-        text: &str,
-        env: &HashMap<String, String>,
-    ) -> crate::CredentialBrokerEnvironment {
-        self.credential_broker.environment_for_text(text, env)
-    }
-
-    pub(crate) fn credential_broker_source_matches_text(
-        &self,
-        source: &str,
-        source_value: &str,
-        text: &str,
-    ) -> bool {
-        self.credential_broker
-            .source_matches_text(source, source_value, text)
-    }
-
-    pub(crate) fn credential_broker_sources_allowed(
-        &self,
-        value: &str,
-        virtualized: &str,
-        source_env: &HashMap<String, String>,
-        is_allowed: impl Fn(&str) -> bool,
-    ) -> bool {
-        self.credential_broker
-            .provider_sources_allowed(value, virtualized, source_env, is_allowed)
-    }
-
-    pub(crate) fn restore_brokered_text(&self, text: &mut String) -> bool {
-        self.credential_broker.restore_text(text)
-    }
-
     pub fn inject_request_credentials(&self, host: &str, headers: &mut rama_http::HeaderMap) {
-        self.credential_broker
+        self.credential_broker()
             .inject_request_headers_for_environment(host, headers, self.environment_id());
     }
 
@@ -822,7 +762,7 @@ impl NetworkProxyState {
     }
 
     pub(crate) fn credential_broker_config_revision(&self) -> u64 {
-        self.credential_broker.config_revision()
+        self.credential_broker().config_revision()
     }
 
     pub(crate) async fn current_cfg_with_brokerage_provenance(
@@ -859,7 +799,7 @@ impl NetworkProxyState {
             Ok(mut new_state) => {
                 {
                     let mut guard = self.state.write().await;
-                    self.credential_broker
+                    self.credential_broker()
                         .configure(&self.local_binding_policy.resolved_config(&new_state.config));
                     // Log policy diffs without dumping potentially sensitive config values.
                     log_policy_changes(&guard.config, &new_state.config);
@@ -881,7 +821,7 @@ impl NetworkProxyState {
     pub async fn replace_config_state(&self, mut new_state: ConfigState) -> Result<()> {
         self.reload_if_needed().await?;
         let mut guard = self.state.write().await;
-        self.credential_broker
+        self.credential_broker()
             .configure(&self.local_binding_policy.resolved_config(&new_state.config));
         log_policy_changes(&guard.config, &new_state.config);
         new_state.blocked = guard.blocked.clone();
@@ -892,8 +832,13 @@ impl NetworkProxyState {
     }
 
     pub async fn host_blocked(&self, host: &str, port: u16) -> Result<HostBlockDecision> {
-        self.host_blocked_with_local_binding(host, port, /*allow_local_binding*/ None)
-            .await
+        self.host_blocked_with_local_binding(
+            host,
+            port,
+            /*allow_local_binding*/ None,
+            HostAuthorization::RequireAllowlist,
+        )
+        .await
     }
 
     pub(crate) async fn host_blocked_with_local_binding(
@@ -901,7 +846,34 @@ impl NetworkProxyState {
         host: &str,
         port: u16,
         allow_local_binding: Option<bool>,
+        authorization: HostAuthorization,
     ) -> Result<HostBlockDecision> {
+        self.host_blocked_with_lookup(
+            host,
+            port,
+            allow_local_binding,
+            authorization,
+            |host, port| async move {
+                lookup_host((host.as_str(), port))
+                    .await
+                    .map(Iterator::collect)
+            },
+        )
+        .await
+    }
+
+    async fn host_blocked_with_lookup<F, Fut>(
+        &self,
+        host: &str,
+        port: u16,
+        allow_local_binding: Option<bool>,
+        authorization: HostAuthorization,
+        lookup: F,
+    ) -> Result<HostBlockDecision>
+    where
+        F: FnOnce(String, u16) -> Fut,
+        Fut: Future<Output = std::io::Result<Vec<SocketAddr>>>,
+    {
         self.reload_if_needed().await?;
         let host = match Host::parse(host) {
             Ok(host) => host,
@@ -1215,7 +1187,7 @@ impl NetworkProxyState {
             let guard = self.state.read().await;
             guard.mitm_hooks.contains_key(&normalized_host)
         };
-        let protocols = self.credential_broker.host_protocols_for_environment(
+        let protocols = self.credential_broker().host_protocols_for_environment(
             &normalized_host,
             port,
             self.environment_id(),
@@ -1308,12 +1280,12 @@ impl NetworkProxyState {
             Some(mut new_state) => {
                 {
                     let mut guard = self.state.write().await;
-                    self.credential_broker
+                    self.credential_broker()
                         .configure(&self.local_binding_policy.resolved_config(&new_state.config));
                     log_policy_changes(&guard.config, &new_state.config);
                     new_state.blocked = guard.blocked.clone();
                     new_state.blocked_total = guard.blocked_total;
-                    *guard = new_state;
+                    self.install_config(&mut guard, new_state);
                 }
                 let source = self.reloader.source_label();
                 info!("reloaded config from {source}");
@@ -1497,10 +1469,8 @@ pub(crate) fn network_proxy_state_for_policy(
     }
     let state = ConfigState {
         executor_os: crate::Platform::native(),
-        allow_set: crate::policy::compile_allowlist_globset(
-            &config.allowed_domains().unwrap_or_default(),
-        )
-        .unwrap(),
+        allow_set: crate::policy::compile_allowlist(&config.allowed_domains().unwrap_or_default())
+            .unwrap(),
         blocked: VecDeque::new(),
         blocked_total: 0,
         brokerage_created_default_allowlist,
@@ -2064,7 +2034,7 @@ mod tests {
     async fn host_blocked_denies_equivalent_ip_literals_before_local_binding() {
         let state = network_proxy_state_for_policy(NetworkProxyConfig {
             allow_local_binding: Some(true),
-            ..network_settings(&["*"], &["fd00::1"])
+            ..network_settings(&["*"], &["fd00::1", "127.0.0.1"])
         });
 
         for host in [

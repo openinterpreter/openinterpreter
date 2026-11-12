@@ -2,6 +2,8 @@
 
 mod attribution;
 mod authorization_path;
+mod aws_sigv4;
+mod body_budget;
 mod brokered_tunnel;
 mod certs;
 mod config;
@@ -24,11 +26,13 @@ mod request_cancellation;
 mod request_disconnect;
 mod responses;
 mod runtime;
+mod secret_substitution;
 mod socket_path;
 mod socks5;
 mod state;
 #[cfg(target_os = "macos")]
 mod system_dns;
+mod tcp_upstream;
 mod upstream;
 #[cfg(target_os = "windows")]
 mod windows_proxy_ingress;
@@ -57,6 +61,7 @@ pub use credential_broker::CREDENTIAL_BROKER_ACTIVE_ENV_KEY;
 pub use credential_broker::CredentialAuthMethod;
 pub use credential_broker::CredentialBrokerContext;
 pub use credential_broker::CredentialBrokerEnvironment;
+pub use credential_broker::CredentialMaskingFailureMode;
 pub use credential_broker::CredentialProviderConfig;
 pub use credential_broker::brokered_credential_binding_env_keys;
 pub use credential_broker::brokered_credential_dummy_env_keys;

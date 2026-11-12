@@ -256,11 +256,8 @@ where
         .unwrap_or_default();
 
     let http_service = HttpServer::auto(executor).service(
-        (
-            (request_ctx.policy.scheme == Scheme::HTTPS)
-                .then(RemoveResponseHeaderLayer::hop_by_hop),
-            (request_ctx.policy.scheme == Scheme::HTTPS).then(RemoveRequestHeaderLayer::hop_by_hop),
-        )
+        (request_ctx.policy.scheme == Scheme::HTTPS)
+            .then(RemoveResponseHeaderLayer::hop_by_hop)
             .into_layer(service_fn({
                 let request_ctx = request_ctx.clone();
                 move |req| {
@@ -354,17 +351,12 @@ async fn forward_request(req: Request, request_ctx: &MitmRequestContext) -> Resu
         .authority(authority.as_str())
         .path_and_query(path.as_str())
         .build()?;
-    // Server-wide OPTIONS must not borrow authority from a narrower credential URL prefix.
-    let credential_path = if path == "*" { "/" } else { &path };
-    let credential_destination = format!(
-        "{}://{authority}{credential_path}",
-        request_ctx.policy.scheme
+    apply_request_credentials(
+        &mut parts.headers,
+        hook_actions.as_ref(),
+        request_ctx.policy.app_state.as_ref(),
+        &credential_destination,
     );
-    request_ctx
-        .policy
-        .app_state
-        .inject_request_credentials(&credential_destination, &mut parts.headers);
-    apply_mitm_hook_actions(&mut parts.headers, hook_actions.as_ref());
     parts
         .headers
         .insert(HOST, HeaderValue::from_str(&authority)?);
@@ -385,7 +377,25 @@ async fn forward_request(req: Request, request_ctx: &MitmRequestContext) -> Resu
         body
     };
 
-    let upstream_req = Request::from_parts(parts, body);
+    let mut upstream_req = Request::from_parts(parts, body);
+    if let Some(substitution) = hook_actions
+        .as_ref()
+        .and_then(|actions| actions.body_secret_substitution.as_ref())
+    {
+        let Ok(substituted) = substitution.apply(upstream_req).await else {
+            return Ok(request_ctx.policy.deny_hook(&method, client).await);
+        };
+        upstream_req = substituted;
+    }
+    if let Some((signer, guest)) = signing {
+        let Ok(signed) = signer.sign(upstream_req, &guest).await else {
+            return Ok(request_ctx.policy.deny_hook(&method, client).await);
+        };
+        upstream_req = signed;
+    }
+    if let Some(policy) = &request_ctx.dial_policy {
+        upstream_req.extensions_mut().insert(policy.clone());
+    }
     let upstream_resp = if request_ctx.policy.scheme == Scheme::HTTP {
         crate::brokered_tunnel::forward_http_request(upstream_req, &request_ctx.upstream).await?
     } else {
@@ -521,29 +531,13 @@ async fn evaluate_mitm_policy(
         )
         .await?
     {
-        HookEvaluation::Matched { actions } => Some(actions),
-        HookEvaluation::HookedHostNoMatch => {
-            let _ = policy
-                .app_state
-                .record_blocked(BlockedRequest::new(BlockedRequestArgs {
-                    host: policy.target_host.clone(),
-                    reason: REASON_MITM_HOOK_DENIED.to_string(),
-                    client: client.clone(),
-                    method: Some(method.clone()),
-                    mode: Some(policy.mode),
-                    protocol: policy.scheme.to_string(),
-                    decision: None,
-                    source: None,
-                    port: Some(policy.target_port),
-                }))
-                .await;
-            warn!(
-                "MITM blocked by hook policy (host={}, method={method}, mode={:?})",
-                policy.target_host, policy.mode
-            );
-            return Ok(MitmPolicyDecision::Block(blocked_text_response(
-                REASON_MITM_HOOK_DENIED,
-            )));
+        HookEvaluation::Matched { actions } if policy.placeholders_match(req, &actions) => {
+            Some(actions)
+        }
+        HookEvaluation::Matched { .. } | HookEvaluation::HookedHostNoMatch => {
+            return Ok(MitmPolicyDecision::Block(
+                policy.deny_hook(&method, client).await,
+            ));
         }
         HookEvaluation::NoHooksForHost => None,
     };

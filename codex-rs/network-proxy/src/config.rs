@@ -222,7 +222,7 @@ impl NetworkProxyConfig {
             self.credential_broker_enabled_mitm |= !self.mitm;
             self.mitm = true;
         } else if self.credential_broker_enabled_mitm {
-            self.mitm = !self.mitm_hooks.is_empty();
+            self.mitm = !self.mitm_hooks.is_empty() || self.mitm_ca.is_some();
             self.credential_broker_enabled_mitm = false;
         }
     }
@@ -805,6 +805,32 @@ mod tests {
                 original.mitm
             );
         }
+    }
+
+    #[test]
+    fn disabling_credential_broker_preserves_external_ca_added_while_enabled() {
+        let mut config = NetworkProxyConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        config.set_credential_broker_enabled(/*enabled*/ true);
+        let ca = NetworkMitmCaConfig {
+            certificate_file: "/run/proxy/ca.pem".to_string(),
+            private_key_file: "/run/proxy/key.pem".to_string(),
+        };
+        config.mitm_ca = Some(ca.clone());
+
+        config.set_credential_broker_enabled(/*enabled*/ false);
+
+        assert_eq!(
+            config,
+            NetworkProxyConfig {
+                enabled: true,
+                mitm: true,
+                mitm_ca: Some(ca),
+                ..Default::default()
+            }
+        );
     }
 
     #[test]

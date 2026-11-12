@@ -545,6 +545,7 @@ impl AsyncRead for Socks5TcpConnection {
     ) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Direct(stream) => Pin::new(stream).poll_read(cx, buf),
+            Self::Tunnel(stream) => Pin::new(stream).poll_read(cx, buf),
             Self::Mitm { .. } | Self::DetectProtocol { .. } => Poll::Ready(Ok(())),
         }
     }
@@ -558,6 +559,7 @@ impl AsyncWrite for Socks5TcpConnection {
     ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
             Self::Direct(stream) => Pin::new(stream).poll_write(cx, buf),
+            Self::Tunnel(stream) => Pin::new(stream).poll_write(cx, buf),
             Self::Mitm { .. } | Self::DetectProtocol { .. } => Poll::Ready(Ok(buf.len())),
         }
     }
@@ -565,6 +567,7 @@ impl AsyncWrite for Socks5TcpConnection {
     fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Direct(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Tunnel(stream) => Pin::new(stream).poll_flush(cx),
             Self::Mitm { .. } | Self::DetectProtocol { .. } => Poll::Ready(Ok(())),
         }
     }
@@ -572,6 +575,7 @@ impl AsyncWrite for Socks5TcpConnection {
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Direct(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Tunnel(stream) => Pin::new(stream).poll_shutdown(cx),
             Self::Mitm { .. } | Self::DetectProtocol { .. } => Poll::Ready(Ok(())),
         }
     }
@@ -581,7 +585,7 @@ impl Socket for Socks5TcpConnection {
     fn local_addr(&self) -> io::Result<SocketAddr> {
         match self {
             Self::Direct(stream) => stream.local_addr(),
-            Self::Mitm { .. } | Self::DetectProtocol { .. } => {
+            Self::Tunnel(_) | Self::Mitm { .. } | Self::DetectProtocol { .. } => {
                 Ok(SocketAddr::from(([0, 0, 0, 0], 0)))
             }
         }
@@ -590,7 +594,7 @@ impl Socket for Socks5TcpConnection {
     fn peer_addr(&self) -> io::Result<SocketAddr> {
         match self {
             Self::Direct(stream) => stream.peer_addr(),
-            Self::Mitm { .. } | Self::DetectProtocol { .. } => {
+            Self::Tunnel(_) | Self::Mitm { .. } | Self::DetectProtocol { .. } => {
                 Ok(SocketAddr::from(([0, 0, 0, 0], 0)))
             }
         }
@@ -601,6 +605,7 @@ impl ExtensionsRef for Socks5TcpConnection {
     fn extensions(&self) -> &Extensions {
         match self {
             Self::Direct(stream) => stream.extensions(),
+            Self::Tunnel(stream) => stream.extensions(),
             Self::Mitm { extensions, .. } | Self::DetectProtocol { extensions, .. } => extensions,
         }
     }
@@ -610,6 +615,7 @@ impl ExtensionsMut for Socks5TcpConnection {
     fn extensions_mut(&mut self) -> &mut Extensions {
         match self {
             Self::Direct(stream) => stream.extensions_mut(),
+            Self::Tunnel(stream) => stream.extensions_mut(),
             Self::Mitm { extensions, .. } | Self::DetectProtocol { extensions, .. } => extensions,
         }
     }
@@ -680,10 +686,11 @@ async fn proxy_socks5_tcp(
                     }
                     info!("SOCKS opaque upstream dial started (target={target})");
                     let connect_started_at = Instant::now();
-                    let EstablishedClientConnection { conn: upstream, .. } =
-                        TargetCheckedTcpConnector::new(state)
-                            .serve(TcpRequest::new(target.clone()))
-                            .await?;
+                    let EstablishedClientConnection { conn: upstream, .. } = connect_opaque_tcp(
+                        state,
+                        TcpRequest::new_with_extensions(target.clone(), extensions),
+                    )
+                    .await?;
                     info!(
                         "SOCKS opaque upstream dial established (target={target}, elapsed_ms={})",
                         connect_started_at.elapsed().as_millis()
