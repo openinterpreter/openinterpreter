@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::Arc;
 
-use codex_exec_server::EnvironmentManager;
-use codex_exec_server::FileSystemEnvironmentAccessor;
-use codex_exec_server::FileSystemSandboxContext;
+use codex_exec_server::EnvironmentAccess;
+mod discovery_v2;
+
 use codex_extension_api::SelectedPluginSnapshot;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::protocol::Product;
@@ -99,30 +98,8 @@ impl SkillProvider for ExecutorSkillProvider {
                 } = &selected_root.location;
                 let authority =
                     SkillAuthority::new(SkillSourceKind::Executor, selected_root_id.clone());
-                let file_system = query
-                    .resolved_executor_roots
-                    .iter()
-                    .find(|root| root.selected_root() == &selected_root)
-                    .map(|root| root.environment().get_filesystem())
-                    .or_else(|| {
-                        self.environment_manager
-                            .get_environment(environment_id)
-                            .map(|environment| environment.get_filesystem())
-                    });
-                let Some(file_system) = file_system else {
-                    catalog.warnings.push(format!(
-                        "Selected capability root `{selected_root_id}` references unavailable environment `{environment_id}`."
-                    ));
-                    continue;
-                };
-                // TODO(anp): Take this accessor from the selected turn root when discovery receives
-                // turn permissions; until then, preserve direct access through its existing filesystem.
-                let outcome = load_environment_skills_from_root(
-                    &FileSystemEnvironmentAccessor::unrestricted(&file_system),
-                    path,
-                    self.restriction_product,
-                )
-                .await;
+                let outcome =
+                    load_environment_skills_from_root(fs, path, self.restriction_product).await;
                 catalog.warnings.extend(outcome.warnings);
                 for skill in outcome.skills {
                     catalog.push_entry(catalog_entry_from_skill(
@@ -322,15 +299,6 @@ async fn read_bounded_text(
             "failed to read executor skill resource {resource}: {err}"
         ))
     };
-    if sandbox.is_some_and(FileSystemSandboxContext::should_read_from_sandbox)
-        && path.infer_path_convention() == Some(PathConvention::Windows)
-        && sandbox.is_some_and(|context| !context.windows_sandbox_is_requested())
-    {
-        return Err(SkillProviderError::new(
-            "executor skill resource requires an unavailable filesystem sandbox",
-        ));
-    }
-
     let mut stream = file_system
         .read_file_stream(path)
         .await
