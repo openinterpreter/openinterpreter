@@ -20,6 +20,7 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::KIMI_CODE_PROVIDER_ID;
 use codex_login::auth::AgentIdentityAuth;
+use codex_login::auth::AgentIdentityAuthError;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_login::kimi_code;
 use codex_login::kimi_code::KimiCodeAuthError;
@@ -422,7 +423,9 @@ pub(crate) async fn resolve_provider_auth_for_scope(
             return Ok(ResolvedProviderAuth::for_agent_identity(auth.clone()));
         }
 
-        if let Some(auth_manager) = auth_manager.as_ref() {
+        if should_bootstrap_chatgpt_agent_identity(scope.agent_identity_policy, auth)
+            && let Some(auth_manager) = auth_manager.as_ref()
+        {
             match auth_manager
                 .agent_identity_auth(scope.agent_identity_policy, scope.session_source)
                 .await
@@ -430,16 +433,27 @@ pub(crate) async fn resolve_provider_auth_for_scope(
                 Ok(Some(auth)) => return Ok(ResolvedProviderAuth::for_agent_identity(auth)),
                 Ok(None) => {}
                 Err(err) => {
-                    if scope.agent_identity_policy == AgentIdentityAuthPolicy::ChatGptAuth
-                        && scope.agent_identity_session_fallback.engage()
+                    if let Some(AgentIdentityAuthError::BootstrapUnavailable {
+                        operation,
+                        attempts,
+                        message,
+                    }) = err
+                        .get_ref()
+                        .and_then(|source| source.downcast_ref::<AgentIdentityAuthError>())
                     {
+                        let newly_engaged = scope.agent_identity_session_fallback.engage();
+                        tracing::warn!(
+                            operation,
+                            attempts = *attempts,
+                            error = %message,
+                            newly_engaged,
+                            "agent identity bootstrap unavailable; using ChatGPT bearer auth for this session"
+                        );
                         return resolve_provider_auth(auth, provider, /*codex_home*/ None)
                             .await
                             .map(ResolvedProviderAuth::new);
                     }
-                    return Err(CodexErr::Fatal(format!(
-                        "Agent Identity authentication failed: {err}"
-                    )));
+                    return Err(err.into());
                 }
             }
         }
@@ -448,6 +462,14 @@ pub(crate) async fn resolve_provider_auth_for_scope(
     resolve_provider_auth(auth, provider, /*codex_home*/ None)
         .await
         .map(ResolvedProviderAuth::new)
+}
+
+fn should_bootstrap_chatgpt_agent_identity(
+    agent_identity_policy: AgentIdentityAuthPolicy,
+    auth: Option<&CodexAuth>,
+) -> bool {
+    agent_identity_policy == AgentIdentityAuthPolicy::ChatGptAuth
+        && matches!(auth, Some(CodexAuth::Chatgpt(_)))
 }
 
 /// Resolves the stored Kimi Code OAuth access token for the `kimi-for-coding`
@@ -1064,6 +1086,70 @@ mod legacy_auth_tests {
         );
         assert!(fallback.is_engaged());
         assert_eq!(registration_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn chatgpt_non_retryable_bootstrap_failure_does_not_fallback() {
+        let server = MockServer::start().await;
+        let registration_count = Arc::new(AtomicUsize::new(0));
+        mount_transient_agent_registration(
+            &server,
+            /*status*/ 403,
+            Arc::clone(&registration_count),
+        )
+        .await;
+        let (_codex_home, auth_manager, auth) = chatgpt_auth_manager(server.uri()).await;
+        let provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+        let fallback = AgentIdentitySessionFallback::default();
+
+        let result = resolve_provider_auth_for_scope(
+            Some(auth_manager),
+            Some(&auth),
+            &provider,
+            provider_auth_scope(AgentIdentityAuthPolicy::ChatGptAuth, fallback.clone()),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "authorization denial must not become bearer auth"
+        );
+        assert!(!fallback.is_engaged());
+        assert_eq!(registration_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn agent_bootstrap_requires_chatgpt_auth_not_policy_alone() {
+        assert!(!should_bootstrap_chatgpt_agent_identity(
+            AgentIdentityAuthPolicy::ChatGptAuth,
+            None,
+        ));
+        assert!(!should_bootstrap_chatgpt_agent_identity(
+            AgentIdentityAuthPolicy::JwtOnly,
+            None,
+        ));
+
+        let server = MockServer::start().await;
+        let registration_count = Arc::new(AtomicUsize::new(0));
+        mount_transient_agent_registration(
+            &server,
+            /*status*/ 403,
+            Arc::clone(&registration_count),
+        )
+        .await;
+        let (_codex_home, auth_manager, _auth) = chatgpt_auth_manager(server.uri()).await;
+        let provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+        let fallback = AgentIdentitySessionFallback::default();
+        resolve_provider_auth_for_scope(
+            Some(auth_manager),
+            None,
+            &provider,
+            provider_auth_scope(AgentIdentityAuthPolicy::ChatGptAuth, fallback.clone()),
+        )
+        .await
+        .expect("no auth must not bootstrap an agent identity");
+        assert!(!fallback.is_engaged());
+        assert_eq!(registration_count.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
