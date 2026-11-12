@@ -55,7 +55,7 @@ jobs:
           ruby <<'RUBY'
           require "yaml"
 
-          release = YAML.load_file(".github/workflows/rust-release.yml")
+          release = YAML.safe_load(File.read(".github/workflows/rust-release.yml"), aliases: true)
           tags = release.fetch(true).fetch("push").fetch("tags")
           raise "release workflow missing tag trigger" unless tags.any? { |tag| tag.include?("v*.*.*") }
 
@@ -98,7 +98,7 @@ jobs:
           finalize_macos = jobs.fetch("finalize-macos")
           raise "macOS finalization must depend on the derived mode" unless Array(finalize_macos.fetch("needs")).include?("resolve_macos_signing_mode")
 
-          windows = YAML.load_file(".github/workflows/rust-release-windows.yml")
+          windows = YAML.safe_load(File.read(".github/workflows/rust-release-windows.yml"), aliases: true)
           workflow_call = windows.fetch(true).fetch("workflow_call")
           signing_input = workflow_call.fetch("inputs").fetch("signing_mode")
           raise "Windows release workflow must require signing_mode" unless signing_input.fetch("required") == true
@@ -108,7 +108,7 @@ jobs:
           caller_windows = jobs.fetch("build-windows")
           raise "caller must pass the derived Windows signing mode" unless caller_windows.fetch("with").fetch("signing_mode").include?("resolve_windows_signing_mode.outputs.signing_mode")
 
-          cargo_ci = YAML.load_file(".github/workflows/cargo-ci.yml")
+          cargo_ci = YAML.safe_load(File.read(".github/workflows/cargo-ci.yml"), aliases: true)
           cargo_steps = cargo_ci.fetch("jobs").fetch("fmt-build-test").fetch("steps")
           cleanup = cargo_steps.find { |step| step["name"] == "Invalidate cached rusty_v8 build output" }
           raise "cargo CI missing rusty_v8 cleanup" unless cleanup
@@ -155,13 +155,13 @@ jobs:
           (reusable + manual_only).each do |file|
             path = File.join(".github/workflows", file)
             next unless File.exist?(path)
-            workflow = YAML.load_file(path)
+            workflow = YAML.safe_load(File.read(path), aliases: true)
             triggers = workflow.fetch(true)
             expected = reusable.include?(file) ? %w[workflow_call workflow_dispatch] : %w[workflow_dispatch]
             raise "#{file} triggers #{triggers.keys.inspect} differ from #{expected.inspect}" unless triggers.keys.sort == expected.sort
           end
 
-          blocking = YAML.load_file(".github/workflows/blocking-ci.yml").fetch("jobs")
+          blocking = YAML.safe_load(File.read(".github/workflows/blocking-ci.yml"), aliases: true).fetch("jobs")
           reusable.each do |file|
             job = blocking.values.find { |item| item["uses"] == "./.github/workflows/#{file}" }
             raise "#{file} must be invoked by blocking CI" unless job
