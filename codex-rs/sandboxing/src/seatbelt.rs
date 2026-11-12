@@ -1053,3 +1053,11 @@ mod daemon_socket_tests;
 #[cfg(test)]
 #[path = "seatbelt_fcntl_tests.rs"]
 mod fcntl_tests;
+
+#[cfg(test)]
+#[path = "seatbelt_network_tests.rs"]
+mod network_tests;
+
+#[cfg(test)]
+#[path = "seatbelt_tls_tests.rs"]
+mod tls_tests;
