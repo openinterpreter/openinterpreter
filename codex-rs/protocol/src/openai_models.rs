@@ -635,8 +635,8 @@ impl ModelInfo {
 
 /// A strongly-typed template for assembling model instructions and developer messages.
 ///
-/// `instructions_template` is literal text. The deprecated `instructions_variables` field is
-/// retained to decode catalogs produced before personality selection was removed.
+/// `instructions_template` is literal text. Deprecated `instructions_variables` catalog data is
+/// ignored when decoding catalogs produced before personality selection was removed.
 #[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
 pub struct ModelMessages {
     /// Optional model-owned Apps wording, transported without runtime interpretation.
@@ -1796,11 +1796,6 @@ mod tests {
             let response = ModelsResponse {
                 models: vec![test_model(Some(ModelMessages {
                     instructions_template: template.map(str::to_owned),
-                    instructions_variables: Some(ModelInstructionsVariables {
-                        personality_default: Some("default".to_string()),
-                        personality_friendly: Some("friendly".to_string()),
-                        personality_pragmatic: Some("pragmatic".to_string()),
-                    }),
                     ..Default::default()
                 }))],
             };
@@ -1821,13 +1816,6 @@ mod tests {
             tools: Some(ToolMessages {
                 send_user_message_async: Some(ToolMessage {
                     description: Some("Catalog description".to_string()),
-                    ..Default::default()
-                }),
-                multi_agent: Some(MultiAgentToolMessages {
-                    spawn_agent: Some(ToolMessage {
-                        description: Some("Catalog spawn description".to_string()),
-                        ..Default::default()
-                    }),
                     ..Default::default()
                 }),
                 multi_agent: Some(MultiAgentToolMessages {
