@@ -648,6 +648,28 @@ mod auth_refresh_tests;
 #[cfg(test)]
 mod legacy_auth_tests {
     use super::*;
+    use codex_agent_identity::generate_agent_key_material;
+    use codex_login::AuthCredentialsStoreMode;
+    use codex_login::AuthKeyringBackendKind;
+    use codex_login::auth::AgentIdentityAuthRecord;
+    use codex_login::auth::BedrockApiKeyAuth;
+    use codex_login::auth::login_with_chatgpt_auth_tokens;
+    use codex_model_provider_info::WireApi;
+    use codex_model_provider_info::create_oss_provider_with_base_url;
+    use codex_protocol::account::PlanType;
+    use codex_protocol::config_types::ModelProviderAuthInfo;
+    use codex_protocol::error::CodexErrorDetails;
+    use http::header::AUTHORIZATION;
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+    use std::num::NonZeroU64;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicUsize;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
 
     static NEXT_CODEX_HOME_ID: AtomicUsize = AtomicUsize::new(0);
     const TEST_CHATGPT_ID_TOKEN: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJlbWFpbCI6InVzZXJAZXhhbXBsZS5jb20iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiaHR0cHM6Ly9hcGkub3BlbmFpLmNvbS9hdXRoIjp7ImNoYXRncHRfdXNlcl9pZCI6InVzZXItMTIzNDUiLCJ1c2VyX2lkIjoidXNlci0xMjM0NSIsImNoYXRncHRfcGxhbl90eXBlIjoicHJvIiwiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjb3VudC0xMjMifX0.c2ln";
