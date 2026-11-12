@@ -1,11 +1,15 @@
-//! Projects bounded root evidence for worker reviewers using the session's capture policy.
+//! Projects bounded retained root evidence for worker reviewers.
 //! Retained root instructions stay authoritative while old checkpoints use legacy review.
-//! Projection limits do not change authorization completeness; unavailable source text does.
+//! Selects recent user and assistant evidence together by source order.
+//! Explicit assistant commentary is excluded; confirmed messaging survives compaction.
+//! Projection omissions keep missing authorization and assistant context explicit.
 //! Retained-history reconciliation owns recovery order and missing-instruction provenance.
 //! Known positions preserve host order, not delivery order or inferred question-answer pairs.
+//! Unmatched legacy instructions supplement retained facts without claiming a known ordering.
+//! Optional handoff filtering narrows assistant context using surviving calls as relevance boundaries.
+//! Handoff projection preserves saved heartbeat instructions and the active turn's skills.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 
 use super::LocalAgentControl;
 use crate::codex_thread::GuardianRootMessage;
@@ -40,6 +44,213 @@ use codex_protocol::protocol::MultiAgentVersion;
 struct CapturedRootConversation {
     history: ContextManager,
     handoff_boundaries: Vec<RetainedContextOrder>,
+}
+
+impl RootConversationSource for CapturedRootConversation {
+    fn prepare(
+        &self,
+        budgeting: codex_guardian_context::ContextBudgeting,
+    ) -> codex_guardian_context::PreparedRootContext {
+        let root_history = &self.history;
+        // Join calls to host-confirmed outputs in this snapshot. Older outputs without
+        // captured text cannot establish what was sent, including after a hook rewrite.
+        let delivered_candidates = root_history
+            .annotated_items()
+            .iter()
+            .rev()
+            .filter_map(|envelope| {
+                let ResponseItem::FunctionCallOutput {
+                    call_id: Some(call_id),
+                    ..
+                } = &envelope.item
+                else {
+                    return None;
+                };
+                let text = envelope
+                    .metadata
+                    .as_ref()?
+                    .delivered_assistant_message
+                    .as_deref()?;
+                Some(RootDeliveredMessage { call_id, text })
+            })
+            .collect::<Vec<_>>();
+        let retained_context = root_history.retained_context();
+        let reconciled = ReconciledRetainedContext::new(
+            Some(retained_context),
+            root_history
+                .annotated_items()
+                .iter()
+                .filter_map(|envelope| {
+                    let item = &envelope.item;
+                    let Some(TurnItem::UserMessage(message)) = parse_turn_item(item) else {
+                        return None;
+                    };
+                    let text = message.message();
+                    if is_summary_message(&text)
+                        || text.trim_start().starts_with("<user_action>")
+                        || is_contextual_user_fragment(&ContentItem::InputText {
+                            text: text.clone(),
+                        })
+                    {
+                        return None;
+                    }
+                    let order = envelope
+                        .metadata
+                        .as_ref()
+                        .filter(|metadata| !metadata.inherited_user_message)
+                        .and_then(|metadata| metadata.user_input_order);
+                    Some((
+                        order,
+                        RetainedUserMessage {
+                            phase: None,
+                            origin: codex_history::UserInputOrigin::from_message(item),
+                            turn_id: item.turn_id().unwrap_or_default().to_owned(),
+                            message_id: item.id().map(|id| id.as_str().to_owned()),
+                            text,
+                            complete: false,
+                        },
+                    ))
+                }),
+        );
+        let mut missing_root_instructions = reconciled.missing_user_messages;
+        let user_candidates = reconciled
+            .ordered_entries()
+            .filter_map(|(order, entry)| match entry {
+                RetainedContextEntry::UserMessage(message) => {
+                    let text = if message.text.is_empty() && !message.complete {
+                        // Older records may omit a large instruction. Recover that exact
+                        // source while it remains available in the parent context.
+                        let original = message.message_id.as_deref().and_then(|id| {
+                            root_history
+                                .raw_items()
+                                .chain(root_history.guardian_history_items().into_iter().flatten())
+                                .find(|item| {
+                                    item.id().is_some_and(|item_id| item_id.as_str() == id)
+                                })
+                        });
+                        let Some(TurnItem::UserMessage(original)) =
+                            original.and_then(parse_turn_item)
+                        else {
+                            missing_root_instructions = true;
+                            return None;
+                        };
+                        Cow::Owned(original.message())
+                    } else {
+                        Cow::Borrowed(message.text.as_str())
+                    };
+                    let is_goal_update = UserGoalUpdate::matches_text(&text);
+                    // A retained placeholder cannot recover an omitted goal restriction.
+                    missing_root_instructions |= is_goal_update && !message.complete;
+                    if is_contextual_user_fragment(&ContentItem::InputText {
+                        text: text.to_string(),
+                    }) && !is_goal_update
+                    {
+                        return None;
+                    }
+                    (!is_summary_message(&text) && !text.trim_start().starts_with("<user_action>"))
+                        .then(|| RootMessageCandidate {
+                            order: Some(order),
+                            message: GuardianRootMessage::User(text.to_string()),
+                        })
+                }
+                RetainedContextEntry::VerifiedAnswer(answer) => Some(RootMessageCandidate {
+                    order: Some(order),
+                    message: GuardianRootMessage::UserInput(
+                        codex_guardian_context::render_original_verified_answer(answer),
+                    ),
+                }),
+                RetainedContextEntry::AssistantMessage(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let original_missing_root_instructions = missing_root_instructions;
+        let retained_user_sources = reconciled
+            .ordered_entries()
+            .filter_map(|(_, entry)| match entry {
+                RetainedContextEntry::UserMessage(message) => Some(message.clone()),
+                RetainedContextEntry::AssistantMessage(_)
+                | RetainedContextEntry::VerifiedAnswer(_) => None,
+            })
+            .collect();
+        let assistant_candidates = root_history
+            .annotated_items()
+            .iter()
+            .filter(|envelope| {
+                !envelope
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.compaction_output)
+            })
+            .filter_map(|envelope| {
+                let content = match &envelope.item {
+                    ResponseItem::FunctionCall { call_id, .. } => {
+                        RootAssistantContent::DeliveredCall {
+                            call_id: call_id.clone(),
+                        }
+                    }
+                    ResponseItem::Message {
+                        role,
+                        content,
+                        phase,
+                        ..
+                    } if role == "assistant" && *phase != Some(MessagePhase::Commentary) => {
+                        RootAssistantContent::Text(content)
+                    }
+                    _ => return None,
+                };
+                Some(RootAssistantCandidate {
+                    message_id: envelope.item.id().map(|id| id.as_str().to_owned()),
+                    order: envelope
+                        .metadata
+                        .as_ref()
+                        .filter(|metadata| !metadata.inherited_user_message)
+                        .and_then(|metadata| metadata.user_input_order)
+                        .map(RetainedContextOrder::Local),
+                    content,
+                })
+            })
+            .collect::<Vec<_>>();
+        let retained_assistant_candidates = reconciled
+            .ordered_entries()
+            .filter_map(|(order, entry)| {
+                let RetainedContextEntry::AssistantMessage(message) = entry else {
+                    return None;
+                };
+                let standalone_eligible = !(message.phase == Some(MessagePhase::Commentary)
+                    || message.message_id.as_deref().is_some_and(|id| {
+                        root_history
+                            .raw_items()
+                            .chain(root_history.guardian_history_items().into_iter().flatten())
+                            .any(|item| {
+                                matches!(item, ResponseItem::Message {
+                                id: Some(source_id), phase: Some(MessagePhase::Commentary), ..
+                            } if source_id.as_str() == id)
+                            })
+                    }));
+                Some(RootRetainedAssistant {
+                    order,
+                    message,
+                    standalone_eligible,
+                })
+            })
+            .collect::<Vec<_>>();
+        let request_candidates = RootConversationCandidates {
+            user_messages: user_candidates,
+            assistant_messages: assistant_candidates,
+            retained_assistants: retained_assistant_candidates,
+            delivered_messages: delivered_candidates,
+            retained_user_sources,
+            handoff_boundaries: self.handoff_boundaries.clone(),
+            latest_user_turn_id: reconciled.latest_user_turn_id.clone(),
+            missing_root_instructions: original_missing_root_instructions,
+            missing_assistant_context: retained_context.has_omitted_assistant_messages(),
+            missing_verified_answers: !retained_context.verified_answers_complete(),
+        };
+        codex_guardian_context::prepare_root_context(
+            &request_candidates,
+            root_history.original_legacy_user_messages(),
+            budgeting,
+        )
+    }
 }
 
 impl LocalAgentControl {
@@ -86,232 +297,23 @@ impl LocalAgentControl {
             Vec::new()
         };
         let history = root_history.conversation_history_snapshot();
-        // Join calls to host-confirmed outputs in this snapshot. Older outputs without
-        // captured text cannot establish what was sent, including after a hook rewrite.
-        let delivered_messages = root_history
-            .annotated_items()
-            .iter()
-            .rev()
-            .filter_map(|envelope| {
-                let ResponseItem::FunctionCallOutput {
-                    call_id: Some(call_id),
-                    ..
-                } = &envelope.item
-                else {
-                    return None;
-                };
-                let text = envelope
-                    .metadata
-                    .as_ref()?
-                    .delivered_assistant_message
-                    .as_deref()?;
-                Some((call_id.as_str(), text))
-            })
-            .take(MAX_ROOT_MESSAGES)
-            .collect::<HashMap<_, _>>();
+        let history_reset_version = root_history.reset_version;
+        let request_candidates = RootConversationInput::new(CapturedRootConversation {
+            history: root_history,
+            handoff_boundaries,
+        });
+        let prepared = request_candidates.prepare(codex_guardian_context::ContextBudgeting::Fixed);
         let root_evidence = root_thread
             .session
             .services
             .thread_extension_data
             .get_or_init(GuardianReviewEvidence::default);
-        let context_mode = root_thread.session.guardian_context_mode;
-        let mut latest_user_turn_id = None;
-        let (messages, authorization_version) = if context_mode == GuardianContextMode::ThreadOwned
-        {
-            let retained_context = root_history.retained_context();
-            let reconciled = ReconciledRetainedContext::new(
-                Some(retained_context),
-                root_history
-                    .annotated_items()
-                    .iter()
-                    .filter_map(|envelope| {
-                        let item = &envelope.item;
-                        let Some(TurnItem::UserMessage(message)) = parse_turn_item(item) else {
-                            return None;
-                        };
-                        let text = message.message();
-                        if is_summary_message(&text)
-                            || text.trim_start().starts_with("<user_action>")
-                        {
-                            return None;
-                        }
-                        let order = envelope
-                            .metadata
-                            .as_ref()
-                            .filter(|metadata| !metadata.inherited_user_message)
-                            .and_then(|metadata| metadata.user_input_order);
-                        Some((
-                            order,
-                            RetainedUserMessage {
-                                turn_id: item.turn_id().unwrap_or_default().to_owned(),
-                                message_id: item.id().map(|id| id.as_str().to_owned()),
-                                text,
-                                complete: false,
-                            },
-                        ))
-                    }),
-            );
-            let mut missing_root_instructions = reconciled.missing_user_messages;
-            let mut messages = reconciled
-                .ordered_entries()
-                .filter_map(|(order, entry)| match entry {
-                    RetainedContextEntry::UserMessage(message) => {
-                        let text = if message.text.is_empty() && !message.complete {
-                            // Older records may omit a large instruction. Recover that exact
-                            // source while it remains available in the parent context.
-                            let original = message.message_id.as_deref().and_then(|id| {
-                                root_history.raw_items().chain(history.review_items()).find(
-                                    |item| item.id().is_some_and(|item_id| item_id.as_str() == id),
-                                )
-                            });
-                            let Some(TurnItem::UserMessage(original)) =
-                                original.and_then(parse_turn_item)
-                            else {
-                                missing_root_instructions = true;
-                                return None;
-                            };
-                            Cow::Owned(original.message())
-                        } else {
-                            Cow::Borrowed(message.text.as_str())
-                        };
-                        if is_contextual_user_fragment(&ContentItem::InputText {
-                            text: text.to_string(),
-                        }) {
-                            return None;
-                        }
-                        (!is_summary_message(&text)
-                            && !text.trim_start().starts_with("<user_action>"))
-                        .then(|| {
-                            latest_user_turn_id = Some(message.turn_id.clone());
-                            (
-                                Some(order),
-                                GuardianRootMessage::User(
-                                    guardian_truncate_text(&text, GUARDIAN_MAX_ROOT_MESSAGE_TOKENS)
-                                        .0,
-                                ),
-                            )
-                        })
-                    }
-                    RetainedContextEntry::VerifiedAnswer(answer) => {
-                        codex_guardian_context::render_verified_answer(answer)
-                            .map(|text| (Some(order), GuardianRootMessage::UserInput(text)))
-                    }
-                })
-                .collect::<Vec<_>>();
-            messages.drain(..messages.len().saturating_sub(MAX_ROOT_MESSAGES));
-            // Optional assistant context cannot evict required grants or restrictions.
-            let mut assistant_messages = root_history
-                .annotated_items()
-                .iter()
-                .filter_map(|envelope| {
-                    let text = root_assistant_text(&envelope.item, &delivered_messages)?;
-                    let order = envelope
-                        .metadata
-                        .as_ref()
-                        .filter(|metadata| !metadata.inherited_user_message)
-                        .and_then(|metadata| metadata.user_input_order)
-                        .map(RetainedContextOrder::Local);
-                    let message = if order.is_some() {
-                        GuardianRootMessage::Assistant(text)
-                    } else {
-                        GuardianRootMessage::UnorderedAssistant(text)
-                    };
-                    Some((order, message))
-                })
-                .collect::<Vec<_>>();
-            let available = MAX_ROOT_MESSAGES.saturating_sub(messages.len());
-            assistant_messages.drain(..assistant_messages.len().saturating_sub(available));
-            messages.extend(assistant_messages);
-            // Select evidence by priority first, then restore recorded order. Older assistant
-            // context has no comparable position and is explicitly labeled at the end.
-            messages.sort_by_key(|(order, _)| (order.is_none(), *order));
-            let mut messages = messages
-                .into_iter()
-                .map(|(_, message)| message)
-                .collect::<Vec<_>>();
-            let mut authorization_version = root_evidence.authorization_version(history.as_ref());
-            if !authorization_version.retained_context_complete {
-                messages.insert(
-                    /*index*/ 0,
-                    GuardianRootMessage::IncompleteVerifiedAnswers,
-                );
-            }
-            if missing_root_instructions {
-                authorization_version.retained_context_complete = false;
-                messages.insert(
-                    /*index*/ 0,
-                    GuardianRootMessage::IncompleteRootInstructions,
-                );
-            }
-            messages.insert(/*index*/ 0, GuardianRootMessage::RetainedContextScope);
-            (messages, authorization_version)
-        } else {
-            let mut messages = history
-                .review_items()
-                .filter_map(|item| match (parse_turn_item(item), item) {
-                    (Some(TurnItem::UserMessage(message)), _) => {
-                        let message = message.message();
-                        (!is_summary_message(&message)
-                            && !message.trim_start().starts_with("<user_action>"))
-                        .then(|| {
-                            latest_user_turn_id = item.turn_id().map(str::to_owned);
-                            GuardianRootMessage::User(
-                                guardian_truncate_text(&message, GUARDIAN_MAX_ROOT_MESSAGE_TOKENS)
-                                    .0,
-                            )
-                        })
-                    }
-                    (_, ResponseItem::FunctionCall { call_id, .. }) => root_evidence
-                        .user_input_for_call(history.as_ref(), call_id)
-                        .map(GuardianRootMessage::UserInput),
-                    _ => root_assistant_text(item, &delivered_messages)
-                        .map(GuardianRootMessage::Assistant),
-                })
-                .collect::<Vec<_>>();
-            let authorization_version = root_evidence.authorization_version(history.as_ref());
-            if !authorization_version.retained_context_complete {
-                // Keep the host warning even when the root-message cap evicts older evidence.
-                messages.push(GuardianRootMessage::IncompleteVerifiedAnswers);
-            }
-            messages.drain(..messages.len().saturating_sub(MAX_ROOT_MESSAGES));
-            (messages, authorization_version)
-        };
-        let trusted_skill_paths = latest_user_turn_id
-            .as_deref()
-            .map(|turn_id| root_evidence.trusted_skill_paths(turn_id))
-            .unwrap_or_default();
-        Some(GuardianRootSnapshot {
+        Some(root_evidence.root_snapshot(
             root_thread_id,
-            authorization_version,
-            messages,
-            trusted_skill_paths,
-        })
+            history_reset_version,
+            history.as_ref(),
+            prepared,
+            request_candidates,
+        ))
     }
-}
-
-fn root_assistant_text(
-    item: &ResponseItem,
-    delivered_messages: &HashMap<&str, &str>,
-) -> Option<String> {
-    let text = match item {
-        ResponseItem::FunctionCall { call_id, .. } => {
-            (*delivered_messages.get(call_id.as_str())?).to_owned()
-        }
-        _ => {
-            let Some(TurnItem::AgentMessage(message)) = parse_turn_item(item) else {
-                return None;
-            };
-            if !matches!(message.phase, None | Some(MessagePhase::FinalAnswer)) {
-                return None;
-            }
-            message
-                .content
-                .iter()
-                .map(|content| match content {
-                    AgentMessageContent::Text { text } => text.as_str(),
-                })
-                .collect::<String>()
-        }
-    };
-    Some(guardian_truncate_text(&text, GUARDIAN_MAX_ROOT_MESSAGE_TOKENS).0)
 }
