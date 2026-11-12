@@ -147,7 +147,9 @@ async fn local_compaction_respects_tool_metadata_state(
         let expected_config = session.get_config().await;
         let mut config = (*expected_config).clone();
         config.features.disable(Feature::ExecutedToolCallMetadata)?;
-        session.refresh_runtime_config(expected_config, config).await;
+        session
+            .refresh_runtime_config(expected_config, config)
+            .await;
     }
 
     let mock = responses::mount_sse_once(
