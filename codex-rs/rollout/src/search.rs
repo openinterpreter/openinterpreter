@@ -125,7 +125,6 @@ async fn scan_rollout_matches(
     let mut matches = HashMap::new();
     let mut dirs = vec![root.to_path_buf()];
     let json_search_term = case_insensitive_literal_regex(json_search_term)?;
-    let mut patterns = None;
 
     while let Some(dir) = dirs.pop() {
         let mut entries = match tokio::fs::read_dir(dir).await {

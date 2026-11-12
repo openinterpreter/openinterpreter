@@ -131,6 +131,7 @@ impl ModelContextScan {
                     state.full && !self.active_segment.saw_compaction;
             }
             RolloutItem::EventMsg(_)
+            | RolloutItem::DynamicToolsUpdated { .. }
             | RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::RealtimeItem(_)
@@ -181,5 +182,27 @@ fn response_item_counts_as_user_turn(response_item: &ResponseItemEnvelope) -> bo
             role == "assistant" && InterAgentCommunication::is_message_content(content)
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::ThreadId;
+
+    #[test]
+    fn dynamic_tool_catalog_is_retained_without_creating_a_context_boundary() {
+        let mut scan = ModelContextScan::default();
+        assert_eq!(
+            scan.push(RolloutItem::DynamicToolsUpdated {
+                thread_id: ThreadId::new(),
+                tools: vec![],
+            }),
+            ModelContextScanProgress::Continue
+        );
+        assert!(matches!(
+            scan.finish().as_slice(),
+            [RolloutItem::DynamicToolsUpdated { tools, .. }] if tools.is_empty()
+        ));
     }
 }
