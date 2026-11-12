@@ -130,33 +130,41 @@ jobs:
           bash -n .github/scripts/resolve-release-signing-mode.sh
           python3 .github/scripts/test_release_signing_mode.py
 
-      - name: Confirm inherited heavyweight workflows are manual-only
+      - name: Confirm inherited heavyweight workflows have scoped triggers
         run: |
           set -euo pipefail
           ruby <<'RUBY'
           require "yaml"
 
-          manual_only = %w[
+          reusable = %w[
             bazel.yml
             blob-size-policy.yml
             cargo-deny.yml
-            ci.yml
             codespell.yml
-            python-sdk-release.yml
             rust-ci.yml
+            sdk.yml
+          ]
+          manual_only = %w[
+            ci.yml
+            python-sdk-release.yml
             rust-ci-full.yml
             rusty-v8-release.yml
-            sdk.yml
             v8-canary.yml
           ]
 
-          manual_only.each do |file|
+          (reusable + manual_only).each do |file|
             path = File.join(".github/workflows", file)
             next unless File.exist?(path)
             workflow = YAML.load_file(path)
             triggers = workflow.fetch(true)
-            unexpected = triggers.keys - ["workflow_dispatch"]
-            raise "#{file} should stay manual-only, found #{unexpected.inspect}" unless unexpected.empty?
+            expected = reusable.include?(file) ? %w[workflow_call workflow_dispatch] : %w[workflow_dispatch]
+            raise "#{file} triggers #{triggers.keys.inspect} differ from #{expected.inspect}" unless triggers.keys.sort == expected.sort
+          end
+
+          blocking = YAML.load_file(".github/workflows/blocking-ci.yml").fetch("jobs")
+          reusable.each do |file|
+            job = blocking.values.find { |item| item["uses"] == "./.github/workflows/#{file}" }
+            raise "#{file} must be invoked by blocking CI" unless job
           end
           RUBY
 
@@ -181,6 +189,15 @@ jobs:
       - name: Test with PowerShell
         shell: pwsh
         run: scripts/install/test_install_ps1.ps1
+
+      # The pinned V8 Git dependency contains paths longer than MAX_PATH under
+      # the runner's default Cargo home. Keep the cache and checkout root short.
+      - name: Use a short Windows Cargo home
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path 'C:\c' -Force | Out-Null
+          'CARGO_HOME=C:\c' >> $env:GITHUB_ENV
+          git config --global core.longpaths true
 
       # This intentionally mirrors the release binary set, not merely one
       # Windows-only crate. Windows-only Rust modules and target-specific native
