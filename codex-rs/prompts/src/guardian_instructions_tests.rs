@@ -1,7 +1,10 @@
 //! Covers policy substitution, terminal output contracts, truncation, and rejection-text overrides.
 
 use codex_context_fragments::ContextualUserFragment;
+use codex_guardian_context::TRANSCRIPT_JSON_INSTRUCTIONS;
 use codex_guardian_context::truncate_text;
+use codex_protocol::TranscriptFormat;
+use codex_protocol_test_support::ContentItemTestExt;
 use pretty_assertions::assert_eq;
 
 use super::GuardianClassifierInstructions;
@@ -21,13 +24,78 @@ fn reviewer_policy_substitution_preserves_template_layout_and_appends_contract()
             "",
             "Policy: \n\nReview contract.\n",
         ),
+        (
+            "Tenant: {{ tenant_policy_config }}\nAdditional: {{ extra_policy }}",
+            "Tenant policy.",
+            "Tenant: Tenant policy.\nAdditional: \n\nReview contract.\n",
+        ),
         ("", "Tenant policy.", "\n\nReview contract.\n"),
     ] {
         assert_eq!(
-            GuardianPolicyInstructions::new(policy, template, "Review contract.").render(),
-            expected,
+            GuardianPolicyInstructions::new(
+                TranscriptFormat::Json,
+                policy,
+                "",
+                template,
+                "Review contract."
+            )
+            .render()
+            .expect_text(),
+            format!("{TRANSCRIPT_JSON_INSTRUCTIONS}\n\n{expected}"),
         );
     }
+}
+
+#[test]
+fn reviewer_extra_policy_substitution_preserves_tenant_policy() {
+    for (template, extra_policy, expected) in [
+        (
+            "Tenant: {{ tenant_policy_config }}\nAdditional: {{ extra_policy }}\nAgain: {{ extra_policy }}",
+            " \nAdditional policy.\n ",
+            "Tenant: Tenant policy.\nAdditional: Additional policy.\nAgain: Additional policy.\n\nReview contract.\n",
+        ),
+        (
+            "Tenant: {{ tenant_policy_config }}\nAdditional: {{ extra_policy }}",
+            " \n\t",
+            "Tenant: Tenant policy.\nAdditional: \n\nReview contract.\n",
+        ),
+        (
+            "Tenant: {{ tenant_policy_config }}",
+            "Additional policy.",
+            "Tenant: Tenant policy.\n\nReview contract.\n",
+        ),
+    ] {
+        assert_eq!(
+            GuardianPolicyInstructions::new(
+                TranscriptFormat::Json,
+                "Tenant policy.",
+                extra_policy,
+                template,
+                "Review contract.",
+            )
+            .render()
+            .expect_text(),
+            format!("{TRANSCRIPT_JSON_INSTRUCTIONS}\n\n{expected}"),
+        );
+    }
+}
+
+#[test]
+fn reviewer_policy_substitution_keeps_inserted_policy_text_literal() {
+    assert_eq!(
+        GuardianPolicyInstructions::new(
+            TranscriptFormat::Json,
+            "Tenant says {{ tenant_policy_config }} and {{ extra_policy }}.",
+            "Additional says {{ tenant_policy_config }} and {{ extra_policy }}.",
+            "Tenant: {{ tenant_policy_config }}\nAdditional: {{ extra_policy }}",
+            "Review contract.",
+        )
+        .render()
+        .expect_text(),
+        format!(
+            "{TRANSCRIPT_JSON_INSTRUCTIONS}\n\nTenant: Tenant says {{{{ tenant_policy_config }}}} and {{{{ extra_policy }}}}.\nAdditional: Additional says {{{{ tenant_policy_config }}}} and {{{{ extra_policy }}}}.\n\nReview contract.\n"
+        ),
+    );
 }
 
 #[test]
@@ -50,18 +118,21 @@ fn classifier_policy_substitution_and_legacy_append_keep_one_terminal_contract_b
         ),
     ] {
         for max_tokens in [None, Some(20)] {
+            let expected = match max_tokens {
+                Some(max_tokens) => truncate_text(expected, max_tokens),
+                None => expected.to_owned(),
+            };
             assert_eq!(
                 GuardianClassifierInstructions::new(
+                    TranscriptFormat::Json,
                     instructions,
                     policy,
                     "Classifier contract.",
                     max_tokens,
                 )
-                .render(),
-                match max_tokens {
-                    Some(max_tokens) => truncate_text(expected, max_tokens),
-                    None => expected.to_owned(),
-                },
+                .render()
+                .expect_text(),
+                format!("{TRANSCRIPT_JSON_INSTRUCTIONS}\n\n{expected}"),
             );
         }
     }
