@@ -1,6 +1,7 @@
 name: repo-checks
 
 on:
+  workflow_call:
   workflow_dispatch:
 jobs:
   build-test:

@@ -1,6 +1,7 @@
 name: blob-size-policy
 
 on:
+  workflow_call:
   workflow_dispatch:
 jobs:
   check:

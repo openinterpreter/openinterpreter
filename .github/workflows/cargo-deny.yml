@@ -1,6 +1,7 @@
 name: cargo-deny
 
 on:
+  workflow_call:
   workflow_dispatch:
 
 # Cargo's libgit2 transport has been flaky when fetching git dependencies with

@@ -1,6 +1,7 @@
 name: sdk
 
 on:
+  workflow_call:
   workflow_dispatch:
 jobs:
   python-sdk-installation:
