@@ -7,23 +7,37 @@ mod coverage;
 mod decision;
 mod feedback;
 mod input_budget;
+mod permissions;
 mod prompt;
 pub(crate) use input_budget::PendingReviewContext;
 pub(crate) use input_budget::check_pending as check_pending_guardian_input;
 pub(crate) use input_budget::finalize as finalize_guardian_input;
+pub(crate) use input_budget::should_compact as should_compact_guardian_input;
+pub(crate) use permissions::for_tool as tool_permission_context;
+mod recorded_tool_call;
+pub(crate) use recorded_tool_call::review_tool_call;
 mod request_budget;
 pub(crate) use request_budget::ExhaustedReviewBudget;
-pub(crate) use request_budget::check_prompt as check_guardian_prompt_budget;
-pub(crate) use request_budget::observe as observe_guardian_request;
+pub(crate) use request_budget::prepare_prompt as prepare_guardian_prompt;
+mod response_resampling;
+pub(crate) use response_resampling::ResponseResampling;
 mod review;
 mod review_session;
 mod reviewer_config;
+pub use reviewer_config::guardian_policy_model;
 pub(crate) use reviewer_config::resolve_review_model;
+mod routing;
+pub(crate) use routing::ParentResponse;
+pub(crate) use routing::PendingReviewRouting;
 mod runtime;
+mod score_authorization;
+pub use score_authorization::ScoreAuthorization;
+pub(crate) use score_authorization::ServingAssessment;
 #[cfg(test)]
 pub(crate) mod test_host;
 
 use codex_protocol::items::ModelInvocationContext;
+use codex_protocol::openai_models::CatalogModel;
 use std::sync::Arc;
 
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -48,9 +62,7 @@ pub(crate) use codex_guardian_reviewer::guardian_truncate_text;
 pub(crate) use codex_guardian_reviewer::is_basic_session_source;
 pub(crate) use decision::decide_approval;
 pub(crate) use decision::spawn_approval_decision;
-pub(crate) use prompt::guardian_truncate_text;
 pub(crate) use review::GuardianReviewOptions;
-pub(crate) use review::is_basic_session_source;
 pub(crate) use review::new_guardian_review_id;
 pub(crate) use review::routes_approval_policy_to_guardian;
 pub use review_session::GuardianReviewSession;
@@ -59,19 +71,21 @@ pub use review_session::GuardianReviewState;
 pub use review_session::PreparedGuardianContext;
 pub use review_session::prepare_review_prewarm;
 
-pub(crate) use review_session::prompt_cache_key_override_for_review_session;
+pub(crate) use codex_guardian_reviewer::prompt_cache_key_override_for_review_session;
 pub(crate) use runtime::ReviewAction;
+pub(crate) use runtime::from_approval_action;
 
+pub(crate) use codex_guardian_reviewer::GUARDIAN_REVIEWER_NAME;
 pub(crate) use codex_guardian_reviewer::REVIEW_TIMEOUT as GUARDIAN_REVIEW_TIMEOUT;
-pub(crate) const GUARDIAN_REVIEWER_NAME: &str = "guardian";
 pub(crate) const AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX: &str =
     codex_guardian_context::MANUAL_APPROVAL_DEVELOPER_PREFIX;
-const GUARDIAN_MAX_TOOL_ENTRY_TOKENS: usize = codex_guardian_context::ContextProfile::synchronous()
-    .transcript
-    .entry_limits
-    .tool_tokens;
+const GUARDIAN_MAX_TOOL_ENTRY_TOKENS: usize = {
+    const PROFILE: &codex_guardian_context::ContextProfile =
+        &codex_guardian_context::ContextProfile::synchronous();
+    PROFILE.transcript.entry_limits.tool_tokens
+};
 pub(crate) const GUARDIAN_MAX_ROOT_MESSAGE_TOKENS: usize = 900;
-pub(crate) const GUARDIAN_MAX_NODE_REPL_TOOL_RESULT_TOKENS: usize = 6_000;
+pub(crate) use codex_guardian_reviewer::GUARDIAN_MAX_NODE_REPL_TOOL_RESULT_TOKENS;
 
 /// Captures review inputs from the issuing step without retaining its MCP bindings or tool router.
 /// Background network approvals and Unix interception use the active task's resolved settings.
@@ -80,14 +94,15 @@ pub(crate) const GUARDIAN_MAX_NODE_REPL_TOOL_RESULT_TOKENS: usize = 6_000;
 /// MCP elicitations use their live invocation's issuing step when available, otherwise turn inputs.
 #[derive(Clone)]
 pub(crate) struct GuardianReviewContext {
-    /// The latest response ID received in this turn when review was requested.
-    pub(crate) parent_response_id: Option<String>,
+    pub(crate) serving_assessment: Option<Arc<ServingAssessment>>,
+    /// The latest response ID and its connection affinity when review was requested.
+    pub(crate) parent_response: Option<Arc<ParentResponse>>,
     turn: Arc<TurnContext>,
     review_execution: Option<codex_direct_tool_timing::ReviewExecution>,
     environments: TurnEnvironmentSnapshot,
     project_instructions: Option<Arc<LoadedAgentsMd>>,
     // Model and reasoning inputs are carried for the follow-up Guardian and V2 migrations.
-    pub(crate) model_info: Arc<ModelInfo>,
+    pub(crate) model_info: Arc<CatalogModel>,
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
     pub(crate) reasoning_summary: ReasoningSummary,
     pub(crate) personality: Option<Personality>,
@@ -96,6 +111,17 @@ pub(crate) struct GuardianReviewContext {
 }
 
 impl GuardianReviewContext {
+    /// Keep the issuing instructions across retries even if a later turn selects other environments.
+    async fn capture_project_instructions(&mut self, session: &crate::session::session::Session) {
+        if self.project_instructions.is_none() {
+            self.project_instructions = session
+                .services
+                .agents_md_manager
+                .project_snapshot(&self.turn.config, &self.environments)
+                .await;
+        }
+    }
+
     pub(crate) fn model_context(&self) -> ModelInvocationContext {
         ModelInvocationContext {
             model_slug: self.model_info.slug.clone(),
@@ -113,11 +139,11 @@ impl GuardianReviewContext {
         environments: &TurnEnvironmentSnapshot,
     ) -> Self {
         Self {
-            parent_response_id: turn
-                .extension_data
-                .get::<codex_api::ResponseId>()
-                .map(|id| id.0.clone()),
+            serving_assessment: None,
+            review_execution: None,
+            parent_response: turn.extension_data.get::<ParentResponse>(),
             environments: environments.clone(),
+            project_instructions: None,
             model_info: Arc::clone(&settings.model_info),
             reasoning_effort: settings.reasoning_effort().cloned(),
             reasoning_summary: settings.reasoning_summary,
@@ -159,11 +185,11 @@ impl From<&Arc<StepContext>> for GuardianReviewContext {
 impl From<Arc<TurnContext>> for GuardianReviewContext {
     fn from(turn: Arc<TurnContext>) -> Self {
         Self {
-            parent_response_id: turn
-                .extension_data
-                .get::<codex_api::ResponseId>()
-                .map(|id| id.0.clone()),
+            serving_assessment: None,
+            review_execution: None,
+            parent_response: turn.extension_data.get::<ParentResponse>(),
             environments: turn.initial_environments.clone(),
+            project_instructions: None,
             model_info: Arc::clone(turn.model_info()),
             reasoning_effort: turn.reasoning_effort().cloned(),
             reasoning_summary: turn.reasoning_summary(),
@@ -184,7 +210,6 @@ impl From<&Arc<TurnContext>> for GuardianReviewContext {
 #[cfg(test)]
 use codex_guardian_reviewer::guardian_output_schema;
 
-pub(crate) use approval_request::format_guardian_action_pretty;
 #[cfg(test)]
 use approval_request::guardian_assessment_action;
 #[cfg(test)]
@@ -196,9 +221,7 @@ use prompt::GuardianTranscriptCursor;
 #[cfg(test)]
 use prompt::build_guardian_prompt_items;
 #[cfg(test)]
-use prompt::build_guardian_prompt_items_with_parent_turn;
-#[cfg(test)]
-use prompt::render_guardian_transcript_entries;
+use prompt::collect_guardian_prompt_items_with_parent_turn;
 #[cfg(test)]
 use review::run_guardian_review_session_with_retry as run_guardian_review_session_for_test;
 #[cfg(test)]
