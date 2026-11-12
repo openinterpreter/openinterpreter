@@ -39,6 +39,14 @@ use tracing::warn;
 #[path = "application_network.rs"]
 pub(crate) mod application_network;
 
+/// Retained model routes cannot silently adopt a changed managed provider.
+/// Keep the existing bounded public error without exposing provider identifiers.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Your organization's required model provider settings changed. Restart Codex to apply them; this request was not sent"
+)]
+pub(crate) struct ModelProviderRequirementsChanged;
+
 /// Shared app-server entry point for loading effective Codex configuration.
 #[derive(Clone)]
 pub(crate) struct ConfigManager {
@@ -407,12 +415,7 @@ impl ConfigManager {
         if selection_changed || definition_changed {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
-                ModelProviderError::ModelProviderPolicyConflict {
-                    model_provider: current.model_provider_id.clone(),
-                    required_model_provider: requirements
-                        .model_provider
-                        .unwrap_or_else(|| current.model_provider_id.clone()),
-                },
+                ModelProviderRequirementsChanged,
             ));
         }
         Ok(())
