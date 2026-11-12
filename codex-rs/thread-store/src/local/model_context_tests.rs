@@ -90,7 +90,7 @@ async fn model_context_revision_invalidates_after_append_or_removal() {
 }
 
 #[tokio::test]
-async fn stops_at_newest_usable_compaction_and_keeps_companions() {
+async fn compaction_without_context_baseline_retains_full_replay_and_companions() {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 1001);
     let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
@@ -134,12 +134,36 @@ async fn stops_at_newest_usable_compaction_and_keeps_companions() {
         serde_json::to_value(context.items).expect("serialize context"),
         serde_json::to_value(vec![
             RolloutItem::SessionMeta(Box::new(session_meta)),
+            user_message("older history"),
+            compacted("older compaction", Some(Vec::new())),
+            user_message("superseded suffix"),
             checkpoint,
             world_state,
             turn_context,
         ])
         .expect("serialize expected context")
     );
+}
+
+#[tokio::test]
+async fn empty_wake_without_full_world_state_cannot_bound_model_context() {
+    let home = TempDir::new().expect("temp dir");
+    let path = write_paginated_rollout(
+        home.path(),
+        "2025-01-03T13-00-09",
+        Uuid::from_u128(/*v*/ 1011),
+        [
+            user_message("older context"),
+            turn_started("wake"),
+            compacted("checkpoint", Some(Vec::new())),
+            RolloutItem::WorldState(WorldStateItem::patch(Default::default())),
+            turn_context(home.path(), "wake"),
+            contextual_user_message(),
+            turn_complete("wake"),
+        ],
+    );
+
+    assert_reverse_scan_matches_full_history(home.path(), path.as_path()).await;
 }
 
 #[tokio::test]

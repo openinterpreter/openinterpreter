@@ -1,10 +1,16 @@
 //! Collects persisted rollout items needed to reconstruct the most recent context window.
 //!
 //! Storage readers feed items newest-to-oldest. The scan stops at the newest compaction that has
-//! both replacement history and a window number, or at the beginning of the rollout when no such
-//! compaction exists. Items are returned in chronological order.
+//! both replacement history and a window number and a compatible completed turn context with a
+//! durable user or full-world-state baseline. Missing fields and rollback require full replay.
+//! Items are returned in chronological order; callers prepend canonical head metadata.
 
+use crate::ResponseItemEnvelope;
 use crate::RolloutItem;
+use codex_protocol::items::TurnItem;
+use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::InterAgentCommunication;
 
 /// Whether a reverse model-context scan needs more rollout items.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,33 +23,23 @@ pub enum ModelContextScanProgress {
 
 /// Finds a bounded suffix for reconstructing the most recent context window.
 ///
-/// A compaction with replacement history and a window number is a complete conversation-history
-/// boundary. Records after it provide any companion state that was persisted. Older compactions
-/// missing either field require the complete rollout so reconstruction can rebuild their history
-/// or window number.
+/// A compaction with replacement history and a window number is a conversation-history boundary
+/// only after a compatible completed turn establishes its context baseline. A retained full world
+/// state after that turn's compaction can serve as its baseline even for an empty-input wake.
+/// Legacy rollback or an incomplete compaction require the entire rollout for reconstruction.
 #[derive(Debug, Default)]
 pub struct ModelContextScan {
     items_newest_first: Vec<RolloutItem>,
-    requires_full_replay: bool,
+    saw_compaction: bool,
+    saw_completed_turn_context: bool,
+    must_scan_to_start: bool,
+    active_segment: ActiveTurnSegment,
 }
 
 impl ModelContextScan {
     /// Adds the next newest-to-oldest rollout item and reports whether the reader can stop.
     pub fn push(&mut self, item: RolloutItem) -> ModelContextScanProgress {
-        let progress = if self.requires_full_replay {
-            ModelContextScanProgress::Continue
-        } else if let RolloutItem::Compacted(compacted) = &item {
-            if compacted.replacement_history.is_some() && compacted.window_number.is_some() {
-                ModelContextScanProgress::Complete
-            } else {
-                // This compaction cannot be reconstructed from a bounded suffix. Do not stop at
-                // an older compaction because this newer one still affects the surviving history.
-                self.requires_full_replay = true;
-                ModelContextScanProgress::Continue
-            }
-        } else {
-            ModelContextScanProgress::Continue
-        };
+        let progress = self.observe(&item);
         self.items_newest_first.push(item);
         progress
     }
