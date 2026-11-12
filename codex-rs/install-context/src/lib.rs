@@ -595,11 +595,6 @@ mod tests {
         fs::write(bin_dir.join(CODE_MODE_HOST_EXECUTABLE_NAME), "")?;
         fs::write(resources_dir.join(TEST_RESOURCE_NAME), "")?;
         fs::write(path_dir.join(default_rg_command()), "")?;
-        if !cfg!(windows) {
-            let zsh_path = resources_dir.join(zsh_resource_path());
-            fs::create_dir_all(zsh_path.parent().expect("zsh path should have parent"))?;
-            fs::write(&zsh_path, "")?;
-        }
         let canonical_package_dir =
             AbsolutePathBuf::from_absolute_path(package_dir.path().canonicalize()?)?;
         let canonical_bin_dir = AbsolutePathBuf::from_absolute_path(bin_dir.canonicalize()?)?;
@@ -654,19 +649,6 @@ mod tests {
             context.bundled_resource(TEST_RESOURCE_NAME),
             Some(canonical_resources_dir.join(TEST_RESOURCE_NAME))
         );
-        if cfg!(windows) {
-            assert_eq!(context.bundled_zsh_path(), None);
-            assert_eq!(context.bundled_zsh_bin_dir(), None);
-        } else {
-            assert_eq!(
-                context.bundled_zsh_path(),
-                Some(canonical_resources_dir.join(zsh_resource_path()))
-            );
-            assert_eq!(
-                context.bundled_zsh_bin_dir(),
-                Some(canonical_resources_dir.join(ZSH_DIRNAME).join(BIN_DIRNAME))
-            );
-        }
         Ok(())
     }
 
