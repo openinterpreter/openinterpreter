@@ -14,6 +14,9 @@ mod projectless_directory_tests;
 #[cfg(windows)]
 mod windows;
 
+pub use application::LocalApplicationRequirements;
+pub use application::load_local_application_requirements;
+
 use self::layer_io::LoadedConfigLayers;
 use crate::CONFIG_TOML_FILE;
 use crate::CloudConfigBundleLayers;
@@ -209,21 +212,24 @@ pub async fn load_config_layers_state(
     let mut cloud_config_binding = None;
     let mut applied_config_server = None;
 
-    if !overrides.ignore_managed_requirements
-        && let Some(bundle) = cloud_config_bundle.get().await.map_err(io::Error::other)?
-    {
-        let cloud_config_base_dir = AbsolutePathBuf::from_absolute_path(codex_home)?;
-        let bundle_layers = if strict_config {
-            CloudConfigBundleLayers::from_bundle_strict_config(bundle, &cloud_config_base_dir)?
-        } else {
-            CloudConfigBundleLayers::from_bundle(bundle, &cloud_config_base_dir)?
-        };
-        let CloudConfigBundleLayers {
-            enterprise_managed_config,
-            enterprise_managed_requirements,
-        } = bundle_layers;
-        bundle_requirements_layers = enterprise_managed_requirements;
-        cloud_config_layers = enterprise_managed_config;
+    if !overrides.ignore_managed_requirements {
+        let snapshot = cloud_config_bundle.get_snapshot().await;
+        cloud_config_binding = snapshot.binding;
+        applied_config_server = snapshot.config_server;
+        if let Some(bundle) = snapshot.bundle.map_err(io::Error::other)? {
+            let cloud_config_base_dir = AbsolutePathBuf::from_absolute_path(codex_home)?;
+            let bundle_layers = if strict_config {
+                CloudConfigBundleLayers::from_bundle_strict_config(bundle, &cloud_config_base_dir)?
+            } else {
+                CloudConfigBundleLayers::from_bundle(bundle, &cloud_config_base_dir)?
+            };
+            let CloudConfigBundleLayers {
+                enterprise_managed_config,
+                enterprise_managed_requirements,
+            } = bundle_layers;
+            bundle_requirements_layers = enterprise_managed_requirements;
+            cloud_config_layers = enterprise_managed_config;
+        }
     }
 
     let (config_requirements_toml, loaded_config_layers, requirements_layers) =
@@ -336,7 +342,9 @@ pub async fn load_config_layers_state(
         );
     }
 
+    let requirements = ConfigRequirements::try_from(config_requirements_toml.clone())?;
     let mut is_projectless = false;
+    let mut project_trust = None;
     if !ignore_project_config && let Some(cwd) = cwd {
         let mut merged_so_far = TomlValue::Table(toml::map::Map::new());
         for layer in &layers {
@@ -415,6 +423,21 @@ pub async fn load_config_layers_state(
         is_projectless = !project_trust_context.has_project_root_marker
             && project_trust_context.checkout_root.is_none()
             && project_layers.layers.is_empty();
+        project_trust = if !is_projectless && project_layers.layers.is_empty() {
+            Some(project_trust_context.decision_for_dir(&cwd))
+        } else {
+            normalized_project_trust_keys(cwd.as_path())
+                .iter()
+                .find_map(|key| project_trust_context.saved_decision(key))
+                .or_else(|| {
+                    let layer = project_layers
+                        .layers
+                        .iter()
+                        .rfind(|layer| layer.is_disabled())?;
+                    let dir = layer.config_folder()?.parent()?;
+                    Some(project_trust_context.decision_for_dir(&dir))
+                })
+        };
         layers.extend(project_layers.layers);
         startup_warnings.extend(project_layers.startup_warnings);
     }
@@ -493,13 +516,15 @@ pub async fn load_config_layers_state(
         return Err(err);
     }
 
-    let mut config_layer_stack = ConfigLayerStack::new(
-        layers,
-        config_requirements_toml.clone().try_into()?,
-        config_requirements_toml.into_toml(),
-    )?
-    .with_user_and_project_exec_policy_rules_ignored(ignore_user_and_project_exec_policy_rules);
+    let mut config_layer_stack =
+        ConfigLayerStack::new(layers, requirements, config_requirements_toml.into_toml())?
+            .with_cloud_config_binding(cloud_config_binding)
+            .with_applied_config_server(applied_config_server)
+            .with_user_and_project_exec_policy_rules_ignored(
+                ignore_user_and_project_exec_policy_rules,
+            );
     config_layer_stack.is_projectless = is_projectless;
+    config_layer_stack.project_trust = project_trust;
     startup_warnings.extend(ignored_config_warning(
         &config_layer_stack,
         &requirements_layers,

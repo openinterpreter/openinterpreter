@@ -6,6 +6,7 @@ use crate::format_config_layer_source;
 use super::fingerprint::record_origins;
 use super::fingerprint::version_for_toml;
 use super::key_aliases::normalize_key_aliases;
+use super::key_aliases::normalized_with_key_aliases;
 use super::merge::merge_toml_values;
 use crate::CloudConfigBundleLoader;
 use crate::ConfigLayer;
@@ -249,6 +250,9 @@ impl ConfigLayerEntry {
 
 #[derive(Debug, Clone, Default)]
 pub struct ConfigLayerStack {
+    cloud_config_binding: Option<crate::CloudConfigBundleBinding>,
+    mcp_ema_cancellation: crate::McpEmaCancellation,
+    applied_config_server: Option<std::sync::Arc<crate::ConfigServer>>,
     /// Cached TOML projection derived only from `requirements_toml`.
     /// Construction validates provider definitions and reports serialization errors,
     /// so `effective_config()` can replace complete entries without a fallible conversion.
@@ -275,6 +279,22 @@ pub struct ConfigLayerStack {
     /// `Some(vec![])` means it checked and found nothing to report.
     startup_warnings: Option<Vec<String>>,
     pub(crate) is_projectless: bool,
+    pub project_trust: Option<crate::loader::ProjectTrustDecision>,
+}
+
+impl PartialEq for ConfigLayerStack {
+    fn eq(&self, other: &Self) -> bool {
+        self.applied_config_server == other.applied_config_server
+            && self.model_provider_requirements == other.model_provider_requirements
+            && self.layers == other.layers
+            && self.requirements == other.requirements
+            && self.requirements_toml == other.requirements_toml
+            && self.ignore_user_and_project_exec_policy_rules
+                == other.ignore_user_and_project_exec_policy_rules
+            && self.startup_warnings == other.startup_warnings
+            && self.is_projectless == other.is_projectless
+            && self.project_trust == other.project_trust
+    }
 }
 
 impl ConfigLayerStack {
@@ -288,7 +308,10 @@ impl ConfigLayerStack {
         let model_provider_requirements = Some(crate::model_provider_requirements::to_config(
             &requirements_toml,
         )?);
-        Ok(Self {
+        let stack = Self {
+            cloud_config_binding: None,
+            mcp_ema_cancellation: crate::McpEmaCancellation::default(),
+            applied_config_server: None,
             model_provider_requirements,
             layers,
             requirements,
@@ -296,7 +319,32 @@ impl ConfigLayerStack {
             ignore_user_and_project_exec_policy_rules: false,
             startup_warnings: None,
             is_projectless: false,
-        })
+            project_trust: None,
+        };
+        stack.validate_project_mitm_profiles()?;
+        Ok(stack)
+    }
+
+    pub fn validate_project_mitm_profiles(&self) -> std::io::Result<()> {
+        crate::loader::validate_project_mitm_profiles(
+            self.layers_low_to_high()
+                .map(|layer| (&layer.name, &layer.config)),
+            self.requirements_toml
+                .permissions
+                .iter()
+                .flat_map(|permissions| {
+                    permissions.profiles.iter().map(|(name, profile)| {
+                        (
+                            name.clone(),
+                            profile.extends.clone(),
+                            profile
+                                .network
+                                .as_ref()
+                                .is_some_and(|network| network.mitm.is_some()),
+                        )
+                    })
+                }),
+        )
     }
 
     pub fn with_user_and_project_exec_policy_rules_ignored(
@@ -485,6 +533,9 @@ impl ConfigLayerStack {
         }
         Ok(Self {
             layers,
+            cloud_config_binding: self.cloud_config_binding.clone(),
+            mcp_ema_cancellation: self.mcp_ema_cancellation.clone(),
+            applied_config_server: self.applied_config_server.clone(),
             model_provider_requirements: self.model_provider_requirements.clone(),
             requirements: self.requirements.clone(),
             requirements_toml: self.requirements_toml.clone(),
@@ -492,6 +543,7 @@ impl ConfigLayerStack {
                 .ignore_user_and_project_exec_policy_rules,
             startup_warnings: self.startup_warnings.clone(),
             is_projectless: self.is_projectless,
+            project_trust: self.project_trust.clone(),
         })
     }
 
@@ -579,6 +631,9 @@ impl ConfigLayerStack {
         }
         Self {
             layers,
+            cloud_config_binding: self.cloud_config_binding.clone(),
+            mcp_ema_cancellation: self.mcp_ema_cancellation.clone(),
+            applied_config_server: self.applied_config_server.clone(),
             model_provider_requirements: self.model_provider_requirements.clone(),
             requirements: self.requirements.clone(),
             requirements_toml: self.requirements_toml.clone(),
@@ -586,6 +641,7 @@ impl ConfigLayerStack {
                 .ignore_user_and_project_exec_policy_rules,
             startup_warnings: self.startup_warnings.clone(),
             is_projectless: self.is_projectless,
+            project_trust: self.project_trust.clone(),
         }
     }
 

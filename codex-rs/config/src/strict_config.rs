@@ -14,9 +14,11 @@ use crate::diagnostics::span_for_toml_key_path;
 use crate::diagnostics::text_range_from_span;
 use crate::format_config_layer_source;
 use crate::requirements_layers::strip_cloud_auth_requirements;
+use crate::types::Tui;
 use codex_features::is_known_feature_key;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
 use serde::de::DeserializeOwned;
+use std::any::TypeId;
 use std::collections::BTreeSet;
 use std::fmt::Write;
 use std::path::Path;
@@ -112,6 +114,27 @@ pub(crate) fn unknown_feature_toml_value_field(value: &TomlValue) -> Option<Stri
         .into_iter()
         .next()
         .map(|path_segments| path_segments.join("."))
+}
+
+/// `serde_ignored` does not see unknown keys consumed by flattened TUI settings.
+pub(crate) fn unknown_tui_toml_value_path(value: &TomlValue) -> Vec<Vec<String>> {
+    let Some(tui_value) = value.as_table().and_then(|root| root.get("tui")) else {
+        return Vec::new();
+    };
+    let Some(configured_tui) = tui_value.as_table() else {
+        return Vec::new();
+    };
+    let Ok(tui) = tui_value.clone().try_into::<Tui>() else {
+        return Vec::new();
+    };
+    let Ok(TomlValue::Table(serialized_tui)) = TomlValue::try_from(tui) else {
+        return Vec::new();
+    };
+    configured_tui
+        .keys()
+        .filter(|key| !serialized_tui.contains_key(*key))
+        .map(|key| vec!["tui".to_string(), key.clone()])
+        .collect()
 }
 
 fn unknown_field_error_from_paths(

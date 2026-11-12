@@ -17,6 +17,24 @@ use crate::McpServerConfig;
 use crate::McpServerTransportConfig;
 use crate::types::PluginMcpServerEmaAuthConfig;
 
+/// Authentication method for a confidential enterprise MCP client.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpEmaTokenEndpointAuthMethod {
+    #[default]
+    ClientSecretBasic,
+    ClientSecretPost,
+}
+
+impl McpEmaTokenEndpointAuthMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ClientSecretBasic => "client_secret_basic",
+            Self::ClientSecretPost => "client_secret_post",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct McpServerIdpOAuthConfig {

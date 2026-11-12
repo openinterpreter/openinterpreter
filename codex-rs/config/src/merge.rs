@@ -1,6 +1,5 @@
 use crate::key_aliases::normalize_base_key_aliases;
 use crate::key_aliases::normalize_key_aliases;
-use crate::key_aliases::normalized_with_key_aliases;
 use codex_network_proxy::normalize_host;
 use toml::Value as TomlValue;
 
@@ -71,7 +70,11 @@ pub fn is_structured_feature_path<S: AsRef<str>>(path: &[S]) -> bool {
     features.as_ref() == "features"
         && matches!(
             feature.as_ref(),
-            "code_mode" | "multi_agent_v2" | "network_proxy" | "sleep_tool"
+            "code_mode"
+                | "multi_agent_v2"
+                | "network_proxy"
+                | "sleep_tool"
+                | "runtime_agent_instances"
         )
 }
 

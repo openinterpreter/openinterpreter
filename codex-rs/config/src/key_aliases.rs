@@ -60,6 +60,11 @@ pub(crate) fn normalize_key_aliases(value: &TomlValue) -> TomlValue {
     normalize_key_aliases_at_path(value, &[])
 }
 
+/// Normalize alias paths for origin tracking without changing the recorded layer.
+pub(crate) fn normalized_with_key_aliases(value: &TomlValue, path: &[String]) -> TomlValue {
+    normalize_key_aliases_at_path(value, path)
+}
+
 fn normalize_key_aliases_at_path(value: &TomlValue, path: &[String]) -> TomlValue {
     // Alias normalization cannot affect subtrees outside the registered legacy paths.
     if !CONFIG_KEY_ALIASES.iter().any(|alias| {

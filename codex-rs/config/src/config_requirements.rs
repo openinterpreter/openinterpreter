@@ -1,5 +1,7 @@
 use crate::ApplicationRequirementsToml;
 use codex_features::FeatureToml;
+use codex_features::RuntimeAgentInstancesConfigToml;
+use codex_features::RuntimeAuthMode;
 use codex_model_provider_info::ModelProviderInfo;
 pub use codex_model_provider_info::ResidencyRequirement;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -932,6 +934,10 @@ impl fmt::Display for WebSearchModeRequirement {
 #[derive(Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct WindowsRequirementsToml {
     pub allowed_sandbox_implementations: Option<Vec<WindowsSandboxImplementationToml>>,
+    /// False denies explicit and automatic MXC selection.
+    pub allow_mxc: Option<bool>,
+    /// Require MXC as the selected local Windows backend.
+    pub require_mxc: Option<bool>,
 }
 
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -944,6 +950,8 @@ pub enum WindowsSandboxImplementationToml {
 impl WindowsRequirementsToml {
     pub fn is_empty(&self) -> bool {
         self.allowed_sandbox_implementations.is_none()
+            && self.allow_mxc.is_none()
+            && self.require_mxc.is_none()
     }
 }
 
@@ -1849,10 +1857,23 @@ impl ConfigRequirementsToml {
         if let Some(enabled) = self.feedback.as_ref().and_then(|feedback| feedback.enabled) {
             config.feedback.get_or_insert_default().enabled = Some(enabled);
         }
+        if let Some(requirements) = &self.otel
+            && !requirements.is_empty()
+        {
+            apply_otel_requirements(config.otel.get_or_insert_default(), requirements);
+        }
     }
 
     /// Returns the exact managed field affected by editing `segments`.
     pub fn exact_requirement_for_config_path(&self, segments: &[String]) -> Option<&'static str> {
+        if let Some(field) = self
+            .application
+            .as_ref()
+            .and_then(|application| application.storage.as_ref())
+            .and_then(|storage| storage.exact_requirement_for_config_path(segments))
+        {
+            return Some(field);
+        }
         if self.model_providers.as_ref().is_some_and(|providers| {
             providers
                 .keys()
@@ -1860,7 +1881,8 @@ impl ConfigRequirementsToml {
         }) {
             return Some("model_providers");
         }
-        let managed_fields: [(bool, &[&str], &'static str); 9] = [
+        let otel = self.otel.as_ref();
+        let managed_fields: [(bool, &[&str], &'static str); 18] = [
             (
                 self.model_provider.is_some(),
                 &["model_provider"],
@@ -2308,11 +2330,17 @@ impl TryFrom<ConfigRequirementsWithSources> for ConfigRequirements {
                 /*source*/ None,
             ),
         };
-        let windows_sandbox_mode = match windows {
+        let mxc_requirement_source = windows
+            .as_ref()
+            .filter(|windows| windows.value.allow_mxc == Some(false))
+            .map(|windows| windows.source.clone());
+        let mut windows_sandbox_mode = match windows {
             Some(Sourced {
                 value:
                     WindowsRequirementsToml {
                         allowed_sandbox_implementations: Some(implementations),
+                        allow_mxc: _,
+                        require_mxc: _,
                     },
                 source: requirement_source,
             }) => {
@@ -2358,6 +2386,8 @@ impl TryFrom<ConfigRequirementsWithSources> for ConfigRequirements {
                 value:
                     WindowsRequirementsToml {
                         allowed_sandbox_implementations: None,
+                        allow_mxc: _,
+                        require_mxc: _,
                     },
                 ..
             })
@@ -3364,6 +3394,8 @@ tracestate = { managed = { tenant = "enterprise", region = "us" }, other = { kee
         };
         let windows = WindowsRequirementsToml {
             allowed_sandbox_implementations: Some(vec![WindowsSandboxImplementationToml::Elevated]),
+            allow_mxc: None,
+            require_mxc: Some(true),
         };
         let enforce_residency = ResidencyRequirement::Us;
         let enforce_source = source.clone();
