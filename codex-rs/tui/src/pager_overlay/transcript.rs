@@ -445,6 +445,20 @@ impl TranscriptOverlay {
                     Err(error) => error,
                 });
             }
+            ViewAction::CopyOnSelect(_) | ViewAction::PrimarySelection(_) => {
+                if let Some((_, result)) = self.view.copy_action(
+                    tui,
+                    &self.cells,
+                    &action,
+                    crate::clipboard_copy::CopyFormat::PlainText,
+                ) {
+                    self.notice = Some(match result {
+                        Ok(status) => status.message("selection"),
+                        Err(error) => error,
+                    });
+                }
+            }
+            ViewAction::ExitSelectMode => {}
             ViewAction::OpenLink(url) => {
                 if let Err(error) = webbrowser::open(&url) {
                     self.notice = Some(format!("Could not open link: {error}"));

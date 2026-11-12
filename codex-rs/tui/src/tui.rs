@@ -721,6 +721,8 @@ pub struct Tui {
     overlay_input: OverlayInput,
     // Selection copies survive closing a transcript overlay or startup session picker.
     selection_clipboard_lease: Option<crate::clipboard_copy::ClipboardLease>,
+    /// Shared bounded worker for nonblocking transcript and PRIMARY selection copies.
+    pub(crate) clipboard: crate::clipboard_copy::worker::ClipboardWorker,
     // Keeps unmanaged process stderr writes out of the inline viewport.
     _stderr_guard: terminal_stderr::TerminalStderrGuard,
 }
@@ -795,6 +797,7 @@ impl Tui {
             owned_screen: false,
             overlay_input: OverlayInput::Default,
             selection_clipboard_lease: None,
+            clipboard: Default::default(),
             _stderr_guard: stderr_guard,
         }
     }

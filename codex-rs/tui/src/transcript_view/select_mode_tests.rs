@@ -343,12 +343,9 @@ fn confirmed_copy_keeps_the_select_mode_caret_on_the_active_grapheme() {
     };
     assert_eq!(text, "ab");
     assert_eq!(
-        view.copy_selected_text_with(
-            &cells,
-            &text,
-            /*clear_selection*/ true,
-            |_, _| { Ok(CopyStatus::Confirmed) }
-        ),
+        view.copy_selected_text_with_format(&cells, &text, /*clear_selection*/ true, |_, _| {
+            Ok(CopyStatus::Confirmed)
+        }),
         Ok(CopyStatus::Confirmed)
     );
     assert!(view.select_mode.is_some());

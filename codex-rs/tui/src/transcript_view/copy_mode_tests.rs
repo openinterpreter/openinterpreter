@@ -11,7 +11,7 @@ use std::path::Path;
 fn payload(view: &mut TranscriptView, cells: &[Arc<dyn HistoryCell>]) -> String {
     let selected = view.selected_text(cells).unwrap();
     let mut copied = String::new();
-    view.copy_selected_text_with(
+    view.copy_selected_text_with_format(
         cells,
         &selected,
         /*clear_selection*/ false,
@@ -99,7 +99,7 @@ fn navigate_copy_resize_and_exit() {
         "Latest **plan**\n\n> assistant quote\n\n```rust\nassistant code\n```"
     );
     let selected = view.selected_text(&cells).unwrap();
-    view.copy_selected_text_with(
+    view.copy_selected_text_with_format(
         &cells,
         &selected,
         /*clear_selection*/ true,
@@ -215,7 +215,7 @@ fn marker_only_prompt_is_a_copy_target() {
     else {
         panic!("expected a copy action");
     };
-    view.copy_selected_text_with(
+    view.copy_selected_text_with_format(
         &cells,
         &selection,
         /*clear_selection*/ true,
@@ -354,7 +354,7 @@ fn copy_completion_keeps_payload_count_and_follow_intent() {
         render(&mut view, &cells, /*width*/ 40, /*height*/ 5);
         view.begin_copy_mode(&cells, /*guard*/ None);
         let selected = view.selected_text(&cells).unwrap();
-        view.copy_selected_text_with(
+        view.copy_selected_text_with_format(
             &cells,
             &selected,
             /*clear_selection*/ true,
@@ -470,7 +470,7 @@ fn copy_input_guard_is_released_on_all_selector_exits() {
                 view.begin_selection(&cells, /*column*/ 2, /*row*/ 0, /*clicks*/ 1)
             }
             "confirmed" => {
-                view.copy_selected_text_with(
+                view.copy_selected_text_with_format(
                     &cells,
                     "response",
                     /*clear_selection*/ true,

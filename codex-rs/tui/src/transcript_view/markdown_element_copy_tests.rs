@@ -220,7 +220,7 @@ fn mouse_selected_blockquote_copies_without_markers() {
         );
     }
     let plain = view.selected_text(&cells).unwrap();
-    view.copy_selected_text_with(
+    view.copy_selected_text_with_format(
         &cells,
         &plain,
         /*clear_selection*/ true,

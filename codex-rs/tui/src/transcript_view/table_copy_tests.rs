@@ -197,7 +197,7 @@ fn empty_selected_rows_keep_copy_spacing_without_newline_highlights() {
         highlighted.push(format!("{}\n{}", text.trim_end(), selected.trim_end()));
     }
     let plain = view.selected_text(&cells).unwrap();
-    view.copy_selected_text_with(
+    view.copy_selected_text_with_format(
         &cells,
         &plain,
         /*clear_selection*/ false,

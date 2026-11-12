@@ -49,7 +49,7 @@ fn selected_markdown_preserves_lists_and_inline_code() {
         &cells,
     );
     let plain = view.selected_text(&cells).unwrap();
-    view.copy_selected_text_with(
+    view.copy_selected_text_with_format(
         &cells,
         &plain,
         /*clear_selection*/ true,
@@ -469,7 +469,7 @@ fn copied_selection_keeps_its_revision_and_format_across_resize() {
     view.render(narrow, &mut Buffer::empty(narrow), &cells);
     assert_eq!(view.selected_text(&cells).as_deref(), Some("selected"));
     for clear_selection in [false, true] {
-        view.copy_selected_text_with(&cells, "selected", clear_selection, |text, format| {
+        view.copy_selected_text_with_format(&cells, "selected", clear_selection, |text, format| {
             assert_eq!((text, format), ("selected", CopyFormat::PlainText));
             Ok(CopyStatus::Pending(1))
         })
@@ -657,7 +657,7 @@ fn selected_hard_breaks_survive_surrounding_blocks() {
     view.begin_selection(&cells, /*column*/ 2, /*row*/ 0, /*clicks*/ 1);
     view.extend_selection(/*column*/ 79, /*row*/ 39);
     let plain = view.selected_text(&cells).unwrap();
-    view.copy_selected_text_with(&cells, &plain, /*clear_selection*/ true, |text, format| {
+    view.copy_selected_text_with_format(&cells, &plain, /*clear_selection*/ true, |text, format| {
         let CopyFormat::MarkdownSelection(source) = format else {
             panic!("expected rich selection");
         };
@@ -692,7 +692,7 @@ fn selected_open_code_fence_keeps_streamed_rows_in_one_block() {
     view.begin_selection(&cells, /*column*/ 2, /*row*/ 0, /*clicks*/ 1);
     view.extend_selection(/*column*/ 79, /*row*/ 9);
     let plain = view.selected_text(&cells).unwrap();
-    view.copy_selected_text_with(
+    view.copy_selected_text_with_format(
         &cells,
         &plain,
         /*clear_selection*/ true,

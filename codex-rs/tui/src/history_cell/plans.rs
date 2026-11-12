@@ -152,6 +152,10 @@ impl ProposedPlanCell {
 }
 
 impl HistoryCell for ProposedPlanCell {
+    fn copy_source(&self) -> Option<&str> {
+        Some(&self.plan_markdown)
+    }
+
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         visible_lines(self.display_hyperlink_lines(width))
     }
@@ -207,6 +211,15 @@ pub(crate) struct PlanUpdateCell {
 }
 
 impl HistoryCell for PlanUpdateCell {
+    fn tool_call_labels(&self) -> Vec<String> {
+        vec!["Updated plan".into()]
+    }
+
+    fn activity_disclosure(&self, width: u16) -> Option<super::ActivityDisclosure> {
+        self.has_hidden_activity_details(width)
+            .then_some(super::ActivityDisclosure::Generic)
+    }
+
     fn activity_ids(&self) -> Vec<String> {
         vec![self.activity_id.clone()]
     }

@@ -92,7 +92,7 @@ fn copy_on_select_waits_for_release_and_confirmed_delivery() {
                 Err("clipboard unavailable".to_owned()),
                 Ok(CopyStatus::Confirmed),
             ] {
-                view.copy_selected_text_with(
+                view.copy_selected_text_with_format(
                     &cells,
                     &copied,
                     selection_copy.clear_selection(),
