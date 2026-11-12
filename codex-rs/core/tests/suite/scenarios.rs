@@ -29,9 +29,14 @@ use codex_login::CodexAuth;
 use codex_models_manager::bundled_models_response;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
+use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
+use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
+use codex_protocol::dynamic_tools::DynamicToolResponse;
+use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::AgentMessageDelivery;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ImageReference;
+use codex_protocol::openai_models::ToolMessage;
 use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
@@ -75,6 +80,15 @@ mod agent_message_board;
 #[path = "scenarios_agent_eviction_tests.rs"]
 mod agent_eviction;
 
+#[path = "scenarios_context_management_tools.rs"]
+mod context_management_tools;
+
+#[path = "scenarios_dynamic_tools.rs"]
+mod dynamic_tools;
+
+#[path = "scenarios_exec_tools.rs"]
+mod exec_tools;
+
 #[path = "scenarios_guardian_sender_context.rs"]
 mod guardian_sender_context;
 
@@ -95,6 +109,9 @@ mod mailbox_preemption;
 
 #[path = "scenarios_managed_human_approval_tests.rs"]
 mod managed_human_approval;
+
+#[path = "scenarios_mcp_resource_messages.rs"]
+mod mcp_resource_messages;
 
 #[path = "scenarios_incremental_tools_resume.rs"]
 mod incremental_tools_resume;
