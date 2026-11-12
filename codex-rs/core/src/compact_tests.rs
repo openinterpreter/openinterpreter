@@ -27,7 +27,7 @@ use test_case::test_case;
 #[test_case(true; "metadata enabled")]
 #[test_case(false; "metadata disabled after capture")]
 #[tokio::test]
-async fn local_compaction_respects_tool_metadata_state(
+async fn local_compaction_retries_preserve_instructions_and_tool_metadata(
     metadata_enabled: bool,
 ) -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
@@ -48,12 +48,20 @@ async fn local_compaction_respects_tool_metadata_state(
     )
     .await;
 
-    let mut items = vec![user_message("Update the plan")];
-    for index in 0..5 {
+    // Retries trim the original prefix and early user messages.
+    let mut items = vec![
+        ContextualUserFragment::into(BaseInstructionsFragment("Window A".to_string())),
+        user_message("First turn"),
+        user_message("Rebuilt context"),
+        user_message("Update the plan"),
+    ];
+    for index in 0..300 {
         let call_id = format!("direct-{index}");
         let arguments = json!({"plan": [{"step": "x".repeat(7 * 1024), "status": "completed"}]});
         assert!(serde_json::to_vec(&arguments)?.len() < 8 * 1024);
         items.push(ResponseItem::FunctionCall {
+            status: None,
+            encrypted_content: None,
             id: None,
             name: "update_plan".to_string(),
             namespace: None,
@@ -95,6 +103,7 @@ async fn local_compaction_respects_tool_metadata_state(
                 arguments: "{}".to_string(),
             },
             encrypted_function_args: None,
+            native_call: None,
         },
         &ToolCallSource::CodeMode {
             cell_id: cell.as_str().to_string(),
@@ -130,7 +139,7 @@ async fn local_compaction_respects_tool_metadata_state(
             _ => None,
         })
         .collect::<serde_json::Result<Vec<_>>>()?;
-    assert_eq!(outputs.len(), 5);
+    assert_eq!(outputs.len(), 300);
     let metadata_bytes: usize = outputs
         .iter()
         .map(|item| {
@@ -141,43 +150,40 @@ async fn local_compaction_respects_tool_metadata_state(
         .sum();
     // Compaction does not rebudget source records as a normal inference request.
     // Passthrough bytes are also excluded from model token estimates.
-    assert!(metadata_bytes > 32 * 1024);
+    assert!(metadata_bytes > 2 * 1024 * 1024);
 
-    // Freeze the step before changing future thread defaults; manual compaction
-    // receives this same captured request snapshot from CompactTask.
-    let step_context = session
-        .capture_step_context(
-            Arc::clone(&turn),
-            &tokio_util::sync::CancellationToken::new(),
-        )
+    if !metadata_enabled {
+        let current_config = session.get_config().await;
+        let mut config = current_config.as_ref().clone();
+        config.features.disable(Feature::ExecutedToolCallMetadata)?;
+        let _ = session.refresh_runtime_config(current_config, config).await;
+    }
+
+    let failed = responses::sse_failed("failed", "context_length_exceeded", "Context too long");
+    let mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            failed.clone(),
+            failed,
+            responses::sse(vec![
+                responses::ev_assistant_message("summary", "The prior calls finished."),
+                responses::ev_completed("compact-response"),
+            ]),
+        ],
+    )
+    .await;
+    let step = session
+        .capture_step_context(turn, &tokio_util::sync::CancellationToken::new())
         .await?;
     let world_state = Arc::new(
         session
-            .build_world_state_for_step(&step_context, /*new_window*/ true)
+            .build_world_state_for_step(&step, /*new_window*/ true)
             .await?,
     );
-
-    if !metadata_enabled {
-        let expected_config = session.get_config().await;
-        let mut config = (*expected_config).clone();
-        config.features.disable(Feature::ExecutedToolCallMetadata)?;
-        session
-            .refresh_runtime_config(expected_config, config)
-            .await;
-    }
-
-    let mock = responses::mount_sse_once(
-        &server,
-        responses::sse(vec![
-            responses::ev_assistant_message("summary", "The prior calls finished."),
-            responses::ev_completed("compact-response"),
-        ]),
-    )
-    .await;
     // OpenAI identity keeps the client from removing passthrough for compatibility.
     run_compact_task(
         Arc::clone(&session),
-        step_context,
+        step,
         world_state,
         vec![UserInput::Text {
             text: "Summarize the conversation.".to_string(),
@@ -186,16 +192,26 @@ async fn local_compaction_respects_tool_metadata_state(
     )
     .await?;
 
-    let request = mock.single_request();
-    assert!(request.inputs_of_type("compaction_trigger").is_empty());
+    let requests = mock.requests();
     assert_eq!(
-        request.custom_tool_call_output("exec"),
-        serde_json::to_value(expected_code_mode_output)?,
+        requests
+            .iter()
+            .map(|request| request.message_input_texts("developer").into_iter().next())
+            .collect::<Vec<_>>(),
+        [
+            Some("Window A".to_string()),
+            Some("Window A".to_string()),
+            Some("Window A".to_string())
+        ],
     );
+    for request in &requests {
+        assert!(request.inputs_of_type("compaction_trigger").is_empty());
+        assert_eq!(
+            request.custom_tool_call_output("exec"),
+            serde_json::to_value(&expected_code_mode_output)?,
+        );
+    }
     for mut output in outputs {
-        let call_id = output["call_id"].as_str().expect("source call id");
-        let compact_output = request.function_call_output(call_id);
-        assert_eq!(compact_output["output"], json!("Plan updated"));
         if !metadata_enabled {
             let metadata = output["internal_chat_message_metadata_passthrough"]
                 .as_object_mut()
@@ -203,10 +219,15 @@ async fn local_compaction_respects_tool_metadata_state(
             metadata.remove("executed_tool_calls");
             metadata.remove("tool_calls_complete");
         }
-        assert_eq!(
-            compact_output["internal_chat_message_metadata_passthrough"],
-            output["internal_chat_message_metadata_passthrough"]
-        );
+        let call_id = output["call_id"].as_str().expect("source call id");
+        for request in &requests {
+            let compact_output = request.function_call_output(call_id);
+            assert_eq!(compact_output["output"], json!("Plan updated"));
+            assert_eq!(
+                compact_output["internal_chat_message_metadata_passthrough"],
+                output["internal_chat_message_metadata_passthrough"]
+            );
+        }
     }
     let compacted_history = session.clone_history().await;
     let expected_summary = format!("{SUMMARY_PREFIX}\nThe prior calls finished.");

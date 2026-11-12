@@ -15,7 +15,6 @@ use super::*;
 mod config_refresh_tests;
 use crate::agents_md_manager::AgentsMdManager;
 use crate::agents_md_manager::SessionInstructions;
-use crate::compact::InitialContextInjection;
 use crate::config::ConfigBuilder;
 use crate::config::ConfigOverrides;
 use crate::context::ContextualUserFragment;
@@ -11724,6 +11723,7 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
             Vec::new(),
             |config| {
                 config.features.enable(Feature::TokenBudget).unwrap();
+                config.features.enable(Feature::IncrementalTools).unwrap();
             },
         )
         .await;
@@ -11741,18 +11741,29 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
     update_turn_settings_for_test(Arc::get_mut(&mut turn_context).unwrap(), |settings| {
         let model_info = Arc::make_mut(&mut settings.model_info);
         model_info.slug = "model-a".to_string();
+        model_info.use_responses_lite = true;
         model_info.context_window = None;
         model_info.max_context_window = None;
         let messages = model_info.model_messages.as_mut().unwrap();
         messages.instructions_template = Some("A instructions".to_string());
-        messages.instructions_variables = None;
     });
+    session.state.lock().await.base_instructions_provenance =
+        Some(codex_protocol::models::BaseInstructionsProvenance::Model {
+            model: "base-model".to_string(),
+        });
     session
         .set_previous_turn_settings(Some(PreviousTurnSettings {
             model: "base-model".to_string(),
             comp_hash: None,
+            cyber_access_program: None,
             realtime_active: None,
         }))
+        .await;
+    session
+        .replace_history(
+            vec![user_message("Existing legacy window")],
+            Some(turn_context.to_turn_context_item()),
+        )
         .await;
     let step_a = session
         .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
@@ -11764,12 +11775,13 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
             .await
             .unwrap(),
     );
-    let retained = crate::compact::InitialContextInjection::BeforeLastUserMessage {
-        world_state: Arc::clone(&world_a),
-        step_context: Arc::clone(&step_a),
-    };
-    let (initial_a, _) =
-        crate::compact::build_compaction_initial_context(&session, &retained).await;
+    let (initial_a, expected_snapshot) = crate::compact::build_compaction_replacement_history(
+        &session,
+        &step_a,
+        &world_a,
+        Vec::new(),
+    )
+    .await;
 
     let mut selected_b = step_a.settings.selected().clone();
     selected_b.collaboration_mode.settings.model = "model-b".to_string();
@@ -11799,16 +11811,23 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
         .unwrap();
     let initial_b = session
         .build_initial_context_with_world_state(&step_b, &world_b)
-        .await;
+        .await
+        .0;
+    let initial_b = crate::context_manager::updates::merge_world_state_updates(initial_b);
     let turn_contributions_b = session.build_turn_context_contribution_items(&step_b).await;
-    let (restored_a, restored_world) =
-        crate::compact::build_compaction_initial_context(&session, &retained).await;
+    let (restored_a, restored_snapshot) = crate::compact::build_compaction_replacement_history(
+        &session,
+        &step_a,
+        &world_a,
+        Vec::new(),
+    )
+    .await;
 
     assert_eq!(restored_a, initial_a);
-    assert!(Arc::ptr_eq(restored_world.as_ref().unwrap(), &world_a));
+    assert_eq!(restored_snapshot, expected_snapshot);
     let initial_a = initial_a
         .into_iter()
-        .map(ResponseItemEnvelope::into_item)
+        .map(|item| item.item)
         .collect::<Vec<_>>();
     let a_text = developer_input_texts(&initial_a).join("\n");
     let b_text = developer_input_texts(&initial_b).join("\n");
@@ -12397,9 +12416,14 @@ async fn remote_compaction_v2_retains_only_the_selected_step(first_attempt: Firs
     crate::compact_remote_v2::run_inline_remote_auto_compact_task(
         Arc::clone(&session),
         Arc::clone(&primary),
-        Some(Arc::clone(&fallback)),
+        Arc::clone(&fallback),
         &mut client_session,
-        InitialContextInjection::DoNotInject,
+        Arc::new(
+            session
+                .build_world_state_for_step(&fallback, /*new_window*/ true)
+                .await
+                .unwrap(),
+        ),
         CompactionReason::ModelDownshift,
         CompactionPhase::PreTurn,
         /*candidate*/ None,

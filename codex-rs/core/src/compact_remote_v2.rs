@@ -16,6 +16,8 @@ use crate::compact::CompactionAnalyticsDetails;
 use crate::compact::compaction_status_from_result;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
+use crate::compact_pending_input::MAX_RETAINED_AGENT_MESSAGE_TOKENS;
+use crate::compact_pending_input::is_retained_pending_mail;
 use crate::compact_remote_history::HistoryItemGroup;
 use crate::compact_remote_history::history_item_groups;
 use crate::context::world_state::WorldState;
@@ -52,13 +54,14 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::AudioReference;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::FunctionCallOutputContentItem;
 #[cfg(test)]
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TruncationPolicy;
-use codex_rollout_trace::CompactionCheckpointTracePayload;
 use codex_rollout_trace::InferenceTraceContext;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::truncate_text;
@@ -258,7 +261,7 @@ async fn run_remote_compact_task_inner(
         .track(sess.as_ref(), status, codex_error, analytics_details)
         .await;
     match result {
-        Ok(()) => Ok(()),
+        Ok(installed) => Ok(installed),
         Err(err)
             if matches!(err.details(), CodexErrorDetails::TurnAborted)
                 || matches!(phase, CompactionPhase::PostTurn) =>
@@ -277,165 +280,6 @@ async fn run_remote_compact_task_inner(
             Err(err)
         }
     }
-}
-
-async fn run_remote_compact_task_inner_impl(
-    sess: &Arc<Session>,
-    step_context: &Arc<StepContext>,
-    fallback_step_context: Option<&Arc<StepContext>>,
-    mut client_session: Option<&mut ModelClientSession>,
-    initial_context_injection: InitialContextInjection,
-    compaction_metadata: CompactionTurnMetadata,
-    analytics_details: &mut CompactionAnalyticsDetails,
-) -> CodexResult<()> {
-    let turn_context = &step_context.turn;
-    let context_compaction_item = ContextCompactionItem::new();
-    let compaction_id = context_compaction_item.id.clone();
-    let compaction_trace = sess.services.rollout_thread_trace.compaction_trace_context(
-        turn_context.sub_id.as_str(),
-        compaction_id.as_str(),
-        turn_context.model_info().slug.as_str(),
-        turn_context.provider.info().name.as_str(),
-    );
-    let compaction_item = TurnItem::ContextCompaction(context_compaction_item);
-    sess.emit_turn_item_started(turn_context, &compaction_item)
-        .await;
-
-    let attempt = run_remote_compact_v2_attempt(
-        sess,
-        step_context,
-        client_session.as_deref_mut(),
-        &compaction_trace,
-        compaction_metadata,
-        analytics_details,
-    )
-    .await;
-    let (attempt, compaction_turn_context) = match attempt {
-        Ok(attempt) => (attempt, turn_context),
-        Err(error) => {
-            let Some(fallback_step_context) = fallback_step_context else {
-                return Err(error);
-            };
-            if !should_retry_with_current_model(&error) {
-                return Err(error);
-            }
-            sess.set_last_known_step_context(fallback_step_context)
-                .await;
-            let fallback_turn_context = &fallback_step_context.turn;
-            let fallback_compaction_trace =
-                sess.services.rollout_thread_trace.compaction_trace_context(
-                    fallback_turn_context.sub_id.as_str(),
-                    compaction_id.as_str(),
-                    fallback_turn_context.model_info().slug.as_str(),
-                    fallback_turn_context.provider.info().name.as_str(),
-                );
-            let fallback_result = run_remote_compact_v2_attempt(
-                sess,
-                fallback_step_context,
-                client_session,
-                &fallback_compaction_trace,
-                compaction_metadata,
-                analytics_details,
-            )
-            .await;
-            record_model_fallback(
-                &sess.services.session_telemetry,
-                turn_context.model_info().slug.as_str(),
-                fallback_turn_context.model_info().slug.as_str(),
-                compaction_metadata.reason(),
-                compaction_metadata.implementation(),
-                fallback_result.as_ref().err(),
-            );
-            match fallback_result {
-                Ok(attempt) => (attempt, fallback_turn_context),
-                Err(_) => return Err(error),
-            }
-        }
-    };
-    let RemoteCompactV2Attempt {
-        trace_input_history,
-        prompt_input,
-        prompt_input_metadata,
-        compaction_output,
-        compaction_response_id,
-        token_usage,
-        owned_client_session: _owned_client_session,
-    } = attempt;
-    if let Some(token_usage) = token_usage {
-        sess.record_rollout_budget_usage(&token_usage)?;
-        analytics_details.active_context_tokens_before = Some(token_usage.input_tokens);
-        analytics_details.compaction_summary_tokens = Some(token_usage.output_tokens);
-        analytics_details.cached_input_tokens = Some(token_usage.cached_input_tokens);
-        analytics_details.cache_write_input_tokens = Some(token_usage.cache_write_input_tokens);
-    }
-    let (compacted_history, retained_images) = build_v2_compacted_history(
-        prompt_input,
-        prompt_input_metadata,
-        compaction_output,
-        sess.enabled(Feature::RetainClientDeveloperMessages),
-        if sess.enabled(Feature::CompactionImageBudget) {
-            RetainedImageBudget::Enabled
-        } else {
-            RetainedImageBudget::Disabled
-        },
-    );
-    analytics_details.retained_image_count = Some(retained_images);
-    let (new_window_number, new_window_ids) = sess.advance_auto_compact_window().await;
-    let (initial_context, world_state_baseline) =
-        build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await;
-    let new_history =
-        insert_initial_context_before_last_real_user_or_summary(compacted_history, initial_context);
-
-    let reference_context_item = match initial_context_injection {
-        InitialContextInjection::DoNotInject => None,
-        InitialContextInjection::BeforeLastUserMessage { step_context, .. } => {
-            Some(step_context.to_turn_context_item())
-        }
-    };
-    if let Some(trace_input_history) = trace_input_history.as_deref() {
-        let replacement_history = new_history
-            .iter()
-            .map(|envelope| envelope.item.clone())
-            .collect::<Vec<_>>();
-        compaction_trace.record_installed(&CompactionCheckpointTracePayload {
-            input_history: trace_input_history,
-            replacement_history: &replacement_history,
-        });
-    }
-    let reviewer_compaction_hash = if sess.enabled(Feature::GuardianThreadContext)
-        && crate::context::GuardianContextMode::from_history(
-            sess.conversation_history_snapshot().await.as_ref(),
-        ) == crate::context::GuardianContextMode::Legacy
-        && let Some(review_turn) = sess.turn_context_for_sub_id(&turn_context.sub_id).await
-    {
-        // Previous-model compaction must remain compatible with the continuing turn's
-        // reviewer, including model changes accepted while compaction was running.
-        let mut review_context = crate::guardian::GuardianReviewContext::from(&review_turn);
-        review_context.model_info = review_turn.capture_current_model_info();
-        let (_, reviewer) = crate::guardian::resolve_review_model(sess, &review_context).await;
-        reviewer.comp_hash.clone()
-    } else {
-        None
-    };
-    sess.replace_compacted_history(
-        new_history,
-        reference_context_item,
-        world_state_baseline,
-        CompactedHistoryMetadata {
-            message: String::new(),
-            window_number: new_window_number,
-            window_ids: new_window_ids,
-            compaction_response_id: Some(compaction_response_id),
-            compaction_model_hash: compaction_turn_context.model_info().comp_hash.clone(),
-            reviewer_compaction_hash,
-        },
-    )
-    .await;
-    sess.recompute_token_usage(compaction_turn_context).await;
-
-    sess.emit_turn_item_completed(compaction_turn_context, compaction_item)
-        .await;
-    Ok(())
 }
 
 struct RemoteCompactionV2Output {
@@ -496,12 +340,9 @@ async fn run_remote_compaction_request_v2(
                 prompt,
                 &settings.model_info,
                 &turn_context.session_telemetry,
-                sess.reasoning_effort_for_request(
-                    &turn_context.initial_settings,
-                    RequestEffortUsage::Compaction,
-                )
-                .await,
-                turn_context.reasoning_summary(),
+                sess.reasoning_effort_for_request(settings, RequestEffortUsage::Compaction)
+                    .await,
+                settings.reasoning_summary,
                 step_context.settings.service_tier.clone(),
                 responses_metadata,
                 &InferenceTraceContext::disabled(),
@@ -521,6 +362,11 @@ async fn run_remote_compaction_request_v2(
         };
         match result {
             Ok(compaction_output) => return Ok(compaction_output),
+            Err(err)
+                if submitted_audio.is_some_and(|audio| audio.matches_rejection(err.details())) =>
+            {
+                return Err(err);
+            }
             Err(err) => {
                 handle_response_stream_error(
                     &mut retry_state,
@@ -666,7 +512,9 @@ fn build_v2_compacted_history(
     let pending_sequence = crate::compact_pending_input::pending_mail_sequence(&prompt_input);
     let retained = v2_history_item_groups(prompt_input)
         .filter(|group| {
-            is_retained_for_remote_compaction_v2(&group.source, retain_client_developer_messages)
+            is_retained_for_remote_compaction_v2(&group.source, features)
+                || pending_sequence
+                    .is_some_and(|first| is_retained_pending_mail(&group.source, first))
         })
         .flat_map(HistoryItemGroup::into_items)
         .collect::<Vec<_>>();
@@ -716,8 +564,11 @@ fn v2_history_item_groups(
 
 fn is_retained_for_remote_compaction_v2(
     envelope: &ResponseItemEnvelope,
-    retain_client_developer_messages: bool,
+    features: &Features,
 ) -> bool {
+    if features.enabled(Feature::RetainClientToolOutputs) && is_retained_tool_output(envelope) {
+        return true;
+    }
     let item = &envelope.item;
     if let ResponseItem::AgentMessage {
         author,
@@ -755,7 +606,8 @@ fn is_retained_for_remote_compaction_v2(
             Some(TurnItem::UserMessage(_) | TurnItem::HookPrompt(_))
         ),
         "developer" => {
-            retain_client_developer_messages && is_client_authored_developer_message(envelope)
+            features.enabled(Feature::RetainClientDeveloperMessages)
+                && is_client_authored_developer_message(envelope)
         }
         _ => false,
     }
@@ -1105,9 +957,12 @@ mod tests {
 
     #[test]
     fn build_v2_compacted_history_filters_to_installed_retention_shape() {
-        let hook = codex_protocol::items::build_hook_prompt_message(&[
-            codex_protocol::items::HookPromptFragment::from_single_hook("hook", "hook-run"),
-        ])
+        let hook = codex_protocol::items::build_hook_prompt_message(
+            &[codex_protocol::items::HookPromptFragment::from_single_hook(
+                "hook", "hook-run",
+            )],
+            &codex_protocol_test_support::uuid_v7_item_id_generator_for_test(),
+        )
         .expect("hook prompt");
         let input = vec![
             message("developer", "dev", /*phase*/ None),
