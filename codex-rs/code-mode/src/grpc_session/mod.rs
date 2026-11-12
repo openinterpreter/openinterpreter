@@ -5,30 +5,39 @@ use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use codex_code_mode_protocol::CellId;
+use codex_code_mode_protocol::CodeModeOutputTruncation;
 use codex_code_mode_protocol::CodeModeSession;
 use codex_code_mode_protocol::CodeModeSessionCellExecutionLimits;
 use codex_code_mode_protocol::CodeModeSessionDelegate;
+use codex_code_mode_protocol::CodeModeSessionOptions;
 use codex_code_mode_protocol::CodeModeSessionProvider;
 use codex_code_mode_protocol::CodeModeSessionProviderFuture;
 use codex_code_mode_protocol::CodeModeSessionResultFuture;
 use codex_code_mode_protocol::ExecuteRequest;
 use codex_code_mode_protocol::StartedCell;
+use codex_code_mode_protocol::TerminateRequest;
 use codex_code_mode_protocol::WaitOutcome;
 use codex_code_mode_protocol::WaitRequest;
 use codex_code_mode_protocol::grpc;
 use codex_code_mode_protocol::grpc::code_mode_host_client::CodeModeHostClient;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
+use futures::TryFutureExt;
+use rand::Rng;
+use tokio::sync::Semaphore;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tonic::transport::Channel;
 use tracing::Instrument;
 
+pub use self::deadline::GrpcSessionOpenError;
+use self::deadline::RequestError;
 use self::operations::WaitSlot;
 use self::state::ClosedCell;
 use self::state::SessionState;
@@ -43,6 +52,7 @@ mod conversion;
 mod deadline;
 mod generation;
 mod operations;
+mod process_metrics;
 mod reconnect;
 mod state;
 mod transport;
@@ -50,6 +60,10 @@ mod transport;
 type GrpcClient = CodeModeHostClient<GrpcTransport>;
 
 const SHUTDOWN_ERROR: &str = "code mode session is shutting down";
+const ROUTE_HEADER: &str = "x-code-mode-route";
+// Bound result-delivery RPCs, not running tools. A full completion burst can
+// exhaust HTTP/2's small-DATA-frame budget and disconnect every shared session.
+const MAX_IN_FLIGHT_COMPLETIONS: usize = 64;
 
 fn inject_span_traceparent<T>(request: &mut tonic::Request<T>, span: &tracing::Span) {
     if let Some(traceparent) =
@@ -61,9 +75,17 @@ fn inject_span_traceparent<T>(request: &mut tonic::Request<T>, span: &tracing::S
 }
 
 /// Creates code-mode sessions over an HTTP/2 gRPC connection.
+///
+/// Metrics requests do not open sessions, retry RPCs, or explicitly reset the
+/// connection. URL providers may initialize their client or establish a network
+/// connection; caller-supplied channels and transports retain their reconnect
+/// policy. Preventing child creation requires a process-owned transport.
 #[derive(Clone)]
 pub struct GrpcCodeModeSessionProvider {
     transport: Arc<SharedTransport>,
+    completion_permits: Arc<Semaphore>,
+    // Reloaded threads share this counter rather than reusing a cell namespace.
+    next_generation: Arc<AtomicU64>,
 }
 
 impl GrpcCodeModeSessionProvider {
@@ -88,10 +110,41 @@ impl GrpcCodeModeSessionProvider {
         Self::from_transport(SharedTransport::with_channel(channel))
     }
 
+    /// Uses a caller-owned transport, which can prevent observation RPCs from
+    /// starting or replacing process-owned connections.
+    pub fn with_transport<T>(transport: T) -> Self
+    where
+        T: tower::Service<
+                tonic::codegen::http::Request<tonic::body::Body>,
+                Response = tonic::codegen::http::Response<tonic::body::Body>,
+                Error = tonic::Status,
+            > + Clone
+            + Send
+            + Sync
+            + 'static,
+        T::Future: Send + 'static,
+    {
+        Self::from_transport(SharedTransport::with_transport(
+            tower::util::BoxCloneSyncService::new(transport),
+        ))
+    }
+
     fn from_transport(transport: SharedTransport) -> Self {
         Self {
             transport: Arc::new(transport),
+            completion_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_COMPLETIONS)),
+            next_generation: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    /// Opens a new session and preserves the terminal admission status for the caller.
+    pub async fn open_session(
+        &self,
+        options: CodeModeSessionOptions,
+    ) -> Result<Arc<dyn CodeModeSession>, GrpcSessionOpenError> {
+        let session = Arc::new(reconnect::ReconnectableSession::new(self.clone(), options));
+        session.initialize().await?;
+        Ok(session)
     }
 
     #[tracing::instrument(name = "code_mode.grpc.open_binding", level = "info", skip_all)]
@@ -112,37 +165,110 @@ impl GrpcCodeModeSessionProvider {
             || limits.max_heap_size_bytes.is_some())
         .then_some(limits);
         let open_session_span = tracing::info_span!("code_mode.grpc.open_session");
-        let mut open_session_request = tonic::Request::new(grpc::OpenSessionRequest {
-            cell_execution_limits,
-        });
-        inject_span_traceparent(&mut open_session_request, &open_session_span);
-        let (lease, first) = async {
-            let mut lease =
-                deadline::startup("session opening", client.open_session(open_session_request))
-                    .await?
-                    .into_inner();
-            let first = deadline::startup("session lease opening", lease.message())
-                .await?
-                .ok_or_else(|| "gRPC code-mode session lease ended before opening".to_string())?;
-            Ok::<_, String>((lease, first))
-        }
-        .instrument(open_session_span)
-        .await?;
+        let operation = "session opening";
+        let (lease, first, route) = deadline::enforce(operation, Duration::ZERO, async {
+            let mut retries = 0;
+            loop {
+                let mut request = tonic::Request::new(grpc::OpenSessionRequest {
+                    max_pending_delegate_calls: Some(
+                        codex_code_mode_protocol::host::MAX_PENDING_DELEGATE_CALLS as u32,
+                    ),
+                    cell_execution_limits,
+                    output_truncation: match requested_mode {
+                        CodeModeOutputTruncation::Client => None,
+                        CodeModeOutputTruncation::Server => {
+                            Some(grpc::OutputTruncation::Server.into())
+                        }
+                    },
+                });
+                inject_span_traceparent(&mut request, &open_session_span);
+                let result = async {
+                    let response = client.as_ref().clone().open_session(request).await?;
+                    let route = response.metadata().get(ROUTE_HEADER).cloned();
+                    if route
+                        .as_ref()
+                        .is_some_and(|value| value.as_bytes().len() > 256)
+                    {
+                        return Err(tonic::Status::invalid_argument(
+                            "session routing token is too long",
+                        ));
+                    }
+                    let mut lease = response.into_inner();
+                    let first = lease.message().await?.ok_or_else(|| {
+                        tonic::Status::unavailable("session lease ended before opening")
+                    })?;
+                    Ok::<_, tonic::Status>((lease, first, route))
+                }
+                .await;
+                let Err(error) = &result else { return result };
+                if retries == 4
+                    || !matches!(
+                        error.code(),
+                        tonic::Code::Unavailable | tonic::Code::ResourceExhausted
+                    )
+                {
+                    return result;
+                }
+                // No execution has started, and dropping a failed lease releases
+                // any partial admission. Never apply these retries to Execute.
+                tracing::warn!(%error, retry = retries + 1, "retrying code-mode session admission");
+                if retries > 0 {
+                    let delay_ms = 50_u64 << (retries - 1);
+                    let jitter = rand::rng().random_range(0.9..1.1);
+                    let delay = Duration::from_millis((delay_ms as f64 * jitter) as u64);
+                    tokio::time::sleep(delay).await;
+                }
+                retries += 1;
+            }
+        })
+        .instrument(open_session_span.clone())
+        .await
+        .map_err(|error| match error {
+            RequestError::Failed(status) => GrpcSessionOpenError::AdmissionStatus {
+                code: status.code(),
+                message: deadline::failure(operation, status),
+            },
+            RequestError::TimedOut(reason) => GrpcSessionOpenError::AdmissionTimeout(reason),
+        })?;
         let Some(grpc::session_event::Event::Opened(opened)) = first.event else {
-            return Err("gRPC code-mode session lease omitted its opening event".to_string());
+            return Err("gRPC code-mode session lease omitted its opening event".into());
         };
         validate_identifier(&opened.session_id, "session ID")?;
+        let host_mode =
+            grpc::OutputTruncation::try_from(opened.output_truncation.unwrap_or_default())
+                .map_err(|_| "gRPC code-mode host returned an unknown output truncation mode")?;
+        let output_truncation = match host_mode {
+            grpc::OutputTruncation::Unspecified | grpc::OutputTruncation::Client => {
+                CodeModeOutputTruncation::Client
+            }
+            grpc::OutputTruncation::Server => CodeModeOutputTruncation::Server,
+        };
+        if output_truncation == CodeModeOutputTruncation::Server
+            && requested_mode == CodeModeOutputTruncation::Client
+        {
+            return Err(format!(
+                "gRPC code-mode host selected {output_truncation:?} output truncation, requested {requested_mode:?}"
+            ).into());
+        }
+        if pinned_mode.is_some_and(|previous| previous != output_truncation) {
+            // Dropping the opening lease releases this incompatible session before subscribing.
+            return Err(
+                "gRPC code-mode host changed the session output truncation mode on reconnect"
+                    .into(),
+            );
+        }
 
         let inner = Arc::new(SessionInner {
             id: opened.session_id,
             client,
             runtime: tokio::runtime::Handle::current(),
-            state: Mutex::new(SessionState::default()),
+            state: Mutex::new(SessionState::with_client(client)),
             wait_slots: Mutex::new(HashMap::new()),
             shutdown_requested: AtomicBool::new(false),
             shutdown_result: Mutex::new(None),
             stopped: CancellationToken::new(),
             stream_tasks: TaskTracker::new(),
+            completion_permits: Arc::clone(&self.completion_permits),
             _transport: Arc::clone(&self.transport),
         });
         let mut opening = OpeningSession {
@@ -154,12 +280,12 @@ impl GrpcCodeModeSessionProvider {
             "code_mode.grpc.subscribe_to_tool_calls",
             session.id = %inner.id,
         );
-        let mut request = tonic::Request::new(grpc::SubscribeToToolCallsRequest {
+        let mut request = inner.request(grpc::SubscribeToToolCallsRequest {
             session_id: inner.id.clone(),
             tool_names: Vec::new(),
         });
         inject_span_traceparent(&mut request, &subscribe_span);
-        let mut client = inner.client();
+        let mut client = inner.client()?;
         let response =
             match deadline::startup("tool subscription", client.subscribe_to_tool_calls(request))
                 .instrument(subscribe_span)
@@ -168,7 +294,7 @@ impl GrpcCodeModeSessionProvider {
                 Ok(response) => response,
                 Err(error) => {
                     let _ = wait_for_watch(inner.request_shutdown()).await;
-                    return Err(error);
+                    return Err(error.into());
                 }
             };
         inner.spawn_tool_subscription(response.into_inner());
@@ -192,6 +318,16 @@ impl CodeModeSessionProvider for GrpcCodeModeSessionProvider {
             session.initialize().await?;
             Ok(session as _)
         })
+    }
+
+    fn create_session_with_options<'a>(
+        &'a self,
+        options: CodeModeSessionOptions,
+    ) -> CodeModeSessionProviderFuture<'a> {
+        Box::pin(
+            self.open_session(options)
+                .map_err(|error| error.to_string()),
+        )
     }
 }
 
@@ -217,6 +353,10 @@ impl Drop for OpeningSession {
 }
 
 impl CodeModeSession for GrpcCodeModeSession {
+    fn output_truncation(&self) -> CodeModeOutputTruncation {
+        self.inner.output_truncation
+    }
+
     fn execute<'a>(
         &'a self,
         request: ExecuteRequest,
@@ -225,12 +365,19 @@ impl CodeModeSession for GrpcCodeModeSession {
         Box::pin(self.inner.execute(request, delegate))
     }
 
-    fn wait<'a>(&'a self, request: WaitRequest) -> CodeModeSessionResultFuture<'a, WaitOutcome> {
-        Box::pin(self.inner.wait(request))
+    fn wait<'a>(
+        &'a self,
+        request: WaitRequest,
+        preempt: Option<CancellationToken>,
+    ) -> CodeModeSessionResultFuture<'a, WaitOutcome> {
+        Box::pin(self.inner.wait(request, preempt))
     }
 
-    fn terminate<'a>(&'a self, cell_id: CellId) -> CodeModeSessionResultFuture<'a, WaitOutcome> {
-        Box::pin(self.inner.terminate(cell_id))
+    fn terminate<'a>(
+        &'a self,
+        request: TerminateRequest,
+    ) -> CodeModeSessionResultFuture<'a, WaitOutcome> {
+        Box::pin(self.inner.terminate(request))
     }
 
     fn shutdown<'a>(&'a self) -> CodeModeSessionResultFuture<'a, ()> {
@@ -254,12 +401,24 @@ pub(super) struct SessionInner {
     shutdown_result: Mutex<Option<ShutdownResultReceiver>>,
     pub(super) stopped: CancellationToken,
     stream_tasks: TaskTracker,
+    completion_permits: Arc<Semaphore>,
     _transport: Arc<SharedTransport>,
 }
 
 impl SessionInner {
-    pub(super) fn client(&self) -> GrpcClient {
-        self.client.clone()
+    pub(super) fn client(&self) -> Result<GrpcClient, String> {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .client()
+    }
+
+    pub(super) fn request<T>(&self, message: T) -> tonic::Request<T> {
+        let mut request = tonic::Request::new(message);
+        if let Some(route) = &self.route {
+            request.metadata_mut().insert(ROUTE_HEADER, route.clone());
+        }
+        request
     }
 
     pub(super) fn require_open(&self) -> Result<(), String> {
@@ -290,11 +449,15 @@ impl SessionInner {
     }
 
     fn close_state(&self, failure: Option<String>) {
-        let cells = self
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .close(failure);
+        let cells = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            // Order failure with request_shutdown. Once shutdown starts,
+            // CloseSession owns cleanup; a late error must not cancel its RPC.
+            if failure.is_some() && self.shutdown_requested.load(Ordering::Acquire) {
+                return;
+            }
+            state.close(failure)
+        };
         self.stopped.cancel();
         self.stream_tasks.close();
         for cell_id in cells {
@@ -303,7 +466,10 @@ impl SessionInner {
     }
 
     fn request_shutdown(self: &Arc<Self>) -> ShutdownResultReceiver {
-        self.shutdown_requested.store(true, Ordering::Release);
+        {
+            let _state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            self.shutdown_requested.store(true, Ordering::Release);
+        }
         let mut result = self
             .shutdown_result
             .lock()
@@ -322,21 +488,14 @@ impl SessionInner {
     }
 
     async fn drive_shutdown(&self) -> Result<(), String> {
-        let is_open = self
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .require_open()
-            .is_ok();
-        let result = if is_open {
-            let mut client = self.client();
+        let result = if let Ok(mut client) = self.client() {
             deadline::request(
                 self,
                 "session shutdown",
                 Duration::ZERO,
-                client.close_session(grpc::CloseSessionRequest {
+                client.close_session(self.request(grpc::CloseSessionRequest {
                     session_id: self.id.clone(),
-                }),
+                })),
             )
             .await
             .map(|_| ())

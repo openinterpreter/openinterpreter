@@ -1,8 +1,4 @@
 use super::*;
-use codex_protocol::openai_models::ModelPreset;
-use codex_protocol::openai_models::ModelServiceTier;
-use codex_protocol::openai_models::ReasoningEffort;
-use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_tools::JsonSchemaPrimitiveType;
 use codex_tools::JsonSchemaType;
 use pretty_assertions::assert_eq;
@@ -84,18 +80,6 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     assert!(description.contains("The spawned agent will have the same tools as you"));
     assert!(!description.contains("max_concurrent_threads_per_session"));
     assert!(description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
-    assert!(
-        description
-            .contains("Available model overrides (optional; inherited parent model is preferred):")
-    );
-    assert!(description.contains(
-        "- `visible-model`: visible description Reasoning efforts: medium (default). Service tiers: priority."
-    ));
-    assert!(description.contains(
-        "- `legacy-model`: legacy description Reasoning efforts: medium (default). Service tiers: priority."
-    ));
-    assert!(!description.contains("hidden-model"));
-    assert!(!description.contains("disabled-model"));
     assert!(properties.contains_key("task_name"));
     assert!(properties.contains_key("message"));
     assert_eq!(
@@ -121,8 +105,8 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     );
     assert!(!properties.contains_key("service_tier"));
     assert_eq!(
-        parameters.required.as_ref(),
-        Some(&vec!["task_name".to_string(), "message".to_string()])
+        parameters.required.as_deref(),
+        Some(["task_name".to_string(), "message".to_string()].as_slice())
     );
     assert_eq!(
         output_schema.expect("spawn_agent output schema").to_value()["required"],
@@ -174,13 +158,12 @@ fn spawn_agent_catalog_description_preserves_generated_context() {
 #[test]
 fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
     let tool = create_spawn_agent_tool_v1(SpawnAgentToolOptions {
-        available_models: Vec::new(),
         agent_type_description: "role help".to_string(),
         expose_agent_type: true,
         hide_agent_type_model_reasoning: false,
         expose_spawn_agent_model_overrides: true,
-        multi_agent_version: MultiAgentVersion::V1,
         usage_hint_text: None,
+        ..Default::default()
     });
 
     let ToolSpec::Namespace(namespace) = tool else {
@@ -313,7 +296,10 @@ fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
     assert!(properties.contains_key("reasoning_effort"));
     assert!(!properties.contains_key("service_tier"));
     assert!(!description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
-    assert!(description.contains("Available model overrides"));
+    assert_eq!(
+        description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE_V2),
+        model_catalog_in_context
+    );
 }
 
 #[test]
@@ -386,8 +372,8 @@ fn send_message_tool_requires_message_and_has_no_output_schema() {
         Some("Relative or canonical task name to message (from spawn_agent).")
     );
     assert_eq!(
-        parameters.required.as_ref(),
-        Some(&vec!["target".to_string(), "message".to_string()])
+        parameters.required.as_deref(),
+        Some(["target".to_string(), "message".to_string()].as_slice())
     );
     assert_eq!(output_schema, None);
 }
@@ -427,8 +413,8 @@ fn followup_task_tool_requires_message_and_has_no_output_schema() {
     );
     assert!(!properties.contains_key("items"));
     assert_eq!(
-        parameters.required.as_ref(),
-        Some(&vec!["target".to_string(), "message".to_string()])
+        parameters.required.as_deref(),
+        Some(["target".to_string(), "message".to_string()].as_slice())
     );
     assert_eq!(output_schema, None);
 }

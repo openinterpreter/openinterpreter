@@ -1,5 +1,6 @@
-use std::path::PathBuf;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 
 use crate::agent::LocalAgentControl;
 use crate::agents_md_manager::AgentsMdManager;
@@ -36,8 +37,10 @@ use codex_models_manager::manager::SharedModelsManager;
 use codex_otel::SessionTelemetry;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::mcp::ClientMcpExtensions;
+use codex_protocol::models::AdditionalPermissionProfile;
 use codex_rollout::state_db::StateDbHandle;
 use codex_rollout_trace::ThreadTraceContext;
+use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use codex_skills_extension::HostSkillsService;
 use codex_thread_store::LiveThread;
 use codex_thread_store::ThreadStore;
@@ -52,10 +55,6 @@ pub(crate) struct SessionServices {
     pub(crate) mcp_handler_cache: McpHandlerCache,
     pub(crate) unified_exec_manager: UnifiedExecProcessManager,
     pub(crate) elicitations: ElicitationService,
-    #[cfg_attr(not(unix), allow(dead_code))]
-    pub(crate) shell_zsh_path: Option<PathBuf>,
-    #[cfg_attr(not(unix), allow(dead_code))]
-    pub(crate) main_execve_wrapper_exe: Option<PathBuf>,
     pub(crate) analytics_events_client: AnalyticsEventsClient,
     pub(crate) hooks: ArcSwap<Hooks>,
     pub(crate) rollout_thread_trace: ThreadTraceContext,
@@ -63,6 +62,7 @@ pub(crate) struct SessionServices {
     pub(crate) show_raw_agent_reasoning: bool,
     pub(crate) exec_policy: Arc<ExecPolicyManager>,
     pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) runtime_auth: RuntimeAuthSlot,
     /// Upload-only clients shared across turns without logging signed blob URLs.
     pub(crate) openai_file_upload_client_pool: RouteAwareClientPool,
     pub(crate) models_manager: SharedModelsManager,
@@ -80,8 +80,8 @@ pub(crate) struct SessionServices {
     pub(crate) thread_extension_data: ExtensionData,
     /// MCP extensions fixed when this session is created.
     pub(crate) client_mcp_extensions: ClientMcpExtensions,
-    /// Raw capability selections for this thread. Each model step resolves them against its
-    /// current executor environments before using them.
+    /// Roots supplied when the thread started or loaded from saved history.
+    /// Keep roots for unselected environments so selecting them again restores their capabilities.
     pub(crate) selected_capability_roots: Vec<SelectedCapabilityRoot>,
     pub(crate) mcp_thread_init: ExtensionDataInit,
     pub(crate) agent_control: LocalAgentControl,
@@ -101,4 +101,41 @@ pub(crate) struct SessionServices {
     pub(crate) code_mode_service: CodeModeService,
     pub(crate) tool_search_handler_cache: ToolSearchHandlerCache,
     pub(crate) turn_environments: Arc<ThreadEnvironments>,
+}
+
+impl SessionServices {
+    #[expect(
+        clippy::expect_used,
+        reason = "poisoned grants must not authorize discovery"
+    )]
+    pub(crate) fn granted_permissions(
+        &self,
+        environment_id: &str,
+    ) -> Option<AdditionalPermissionProfile> {
+        self.granted_permissions_by_environment_id
+            .lock()
+            .expect("session permission grants lock poisoned")
+            .get(environment_id)
+            .cloned()
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "poisoned grant state must not authorize further operations"
+    )]
+    pub(crate) fn record_granted_permissions(
+        &self,
+        environment_id: &str,
+        permissions: AdditionalPermissionProfile,
+    ) {
+        let mut grants = self
+            .granted_permissions_by_environment_id
+            .lock()
+            .expect("session permission grants lock poisoned");
+        let granted_permissions =
+            merge_permission_profiles(grants.get(environment_id), Some(&permissions));
+        if let Some(granted_permissions) = granted_permissions {
+            grants.insert(environment_id.to_string(), granted_permissions);
+        }
+    }
 }

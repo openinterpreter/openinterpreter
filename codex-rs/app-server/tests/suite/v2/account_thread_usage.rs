@@ -103,6 +103,7 @@ async fn account_thread_usage_uses_active_workspace_and_canonical_thread_ids() -
                 thread_id: thread_id.to_string(),
                 estimated_usage_credits_micros: 46_000_000,
                 estimated_usage_usd_micros: None,
+                native_usage_usd_micros: None,
                 groups: vec![ThreadUsageBreakdownGroup {
                     model: Some("gpt-5.4".to_string()),
                     reasoning_effort: Some("high".to_string()),
@@ -132,9 +133,14 @@ async fn account_thread_usage_supports_externally_managed_authentication() -> Re
     let access_token = encode_id_token(
         &ChatGptIdTokenClaims::new()
             .email("external@example.com")
-            .plan_type("business")
+            .plan_type("ent26")
             .chatgpt_account_id("external-workspace"),
     )?;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/config/bundle"))
+        .respond_with(ResponseTemplate::new(/*s*/ 200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .with_env_overrides(&[("OPENAI_API_KEY", None)])
@@ -144,7 +150,7 @@ async fn account_thread_usage_supports_externally_managed_authentication() -> Re
         .send_chatgpt_auth_tokens_login_request(
             access_token.clone(),
             "external-workspace".to_string(),
-            Some("business".to_string()),
+            Some("ent26".to_string()),
         )
         .await?;
     let login: LoginAccountResponse =
@@ -159,8 +165,9 @@ async fn account_thread_usage_supports_externally_managed_authentication() -> Re
         .respond_with(ResponseTemplate::new(/*s*/ 200).set_body_json(json!({
             "threads": [{
                 "thread_id": thread_id,
-                "estimated_usage_credits_micros": 21_000_000,
-                "estimated_usage_usd_micros": 840_000
+                "estimated_usage_credits_micros": 0,
+                "estimated_usage_usd_micros": 0,
+                "native_usage_usd_micros": 750_000
             }]
         })))
         .expect(/*r*/ 1)
@@ -176,8 +183,9 @@ async fn account_thread_usage_supports_externally_managed_authentication() -> Re
         response.thread_usage,
         Some(ThreadUsage {
             thread_id: thread_id.to_string(),
-            estimated_usage_credits_micros: 21_000_000,
-            estimated_usage_usd_micros: Some(840_000),
+            estimated_usage_credits_micros: 0,
+            estimated_usage_usd_micros: Some(0),
+            native_usage_usd_micros: Some(750_000),
             groups: Vec::new(),
         })
     );

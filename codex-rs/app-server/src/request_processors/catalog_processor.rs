@@ -23,7 +23,7 @@ const SKILLS_LIST_CWD_CONCURRENCY: usize = 5;
 
 fn skills_to_info(
     skills: &[codex_skills::SkillMetadata],
-    disabled_paths: &HashSet<AbsolutePathBuf>,
+    disabled_paths: &HashSet<PathUri>,
 ) -> Vec<codex_app_server_protocol::SkillMetadata> {
     skills
         .iter()
@@ -61,7 +61,7 @@ fn skills_to_info(
                             .collect(),
                     }
                 }),
-                path: skill.path_to_skills_md.clone(),
+                path: skill.path_to_skills_md.clone().into(),
                 scope: skill.scope.into(),
                 enabled,
                 plugin_id: skill.plugin_id.clone(),
@@ -98,6 +98,7 @@ fn hooks_to_info(hooks: &[codex_hooks::HookListEntry]) -> Vec<HookMetadata> {
                 source_path: hook.source_path.clone(),
                 source: hook.source.into(),
                 plugin_id: hook.plugin_id.clone(),
+                environment_id: hook.environment_id.clone(),
                 display_order: hook.display_order,
                 enabled: hook.enabled,
                 is_managed: hook.is_managed,
@@ -332,6 +333,8 @@ impl CatalogRequestProcessor {
     async fn list_models(
         &self,
         params: ModelListParams,
+        config: Arc<Config>,
+        models_manager: codex_models_manager::manager::SharedModelsManager,
     ) -> Result<ModelListResponse, JSONRPCErrorError> {
         let ModelListParams {
             limit,
@@ -661,6 +664,14 @@ impl CatalogRequestProcessor {
                         config.config_layer_stack,
                     )
                     .with_plugin_skill_snapshots(plugin_skill_snapshots);
+                    let skills_input = match self
+                        .thread_manager
+                        .environment_manager()
+                        .default_environment_id()
+                    {
+                        Some(environment_id) => skills_input.with_environment_id(environment_id),
+                        None => skills_input,
+                    };
                     let snapshot = skills_request
                         .snapshot_for_cwd(&skills_input, force_reload, fs)
                         .await;
@@ -703,12 +714,35 @@ impl CatalogRequestProcessor {
         Ok(SkillsExtraRootsSetResponse {})
     }
 
-    /// Handle `hooks/list` by resolving hooks for each requested cwd.
+    /// Resolve a loaded thread's hook inventory, or inspect configuration for each requested cwd.
     async fn hooks_list_response(
         &self,
         params: HooksListParams,
     ) -> Result<HooksListResponse, JSONRPCErrorError> {
-        let HooksListParams { cwds } = params;
+        let HooksListParams { cwds, thread_id } = params;
+        if let Some(thread_id) = thread_id {
+            if !cwds.is_empty() {
+                return Err(invalid_request("specify either threadId or cwds"));
+            }
+            let thread_id = ThreadId::from_string(&thread_id)
+                .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+            let thread = self
+                .thread_manager
+                .get_thread(thread_id)
+                .await
+                .map_err(|_| invalid_request(format!("thread not found: {thread_id}")))?;
+            let cwd = thread.config_snapshot().await.cwd().to_path_buf();
+            let hooks = thread.list_hooks();
+            return Ok(HooksListResponse {
+                data: vec![codex_app_server_protocol::HooksListEntry {
+                    cwd,
+                    hooks: hooks_to_info(&hooks.hooks),
+                    warnings: hooks.warnings,
+                    errors: Vec::new(),
+                }],
+            });
+        }
+
         let cwds = if cwds.is_empty() {
             vec![self.config.cwd.to_path_buf()]
         } else {
@@ -753,14 +787,17 @@ impl CatalogRequestProcessor {
             } else {
                 codex_core_plugins::PluginHookLoadOutcome::default()
             };
-            let hooks = codex_hooks::list_hooks(codex_hooks::HooksConfig {
+            let hooks_config = codex_hooks::HooksConfig {
                 feature_enabled: hooks_enabled,
                 bypass_hook_trust: config.bypass_hook_trust,
                 config_layer_stack: Some(config.config_layer_stack),
                 plugin_hook_sources: plugin_hooks.hook_sources,
                 plugin_hook_load_warnings: plugin_hooks.hook_load_warnings,
                 ..Default::default()
-            });
+            };
+            let hooks = tokio::task::spawn_blocking(move || codex_hooks::list_hooks(hooks_config))
+                .await
+                .map_err(|err| internal_error(format!("hook discovery task failed: {err}")))?;
             data.push(codex_app_server_protocol::HooksListEntry {
                 cwd,
                 hooks: hooks_to_info(&hooks.hooks),

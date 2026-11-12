@@ -1,0 +1,2274 @@
+//! Exercises message-board backends through their shared trait and host capabilities.
+
+#![expect(
+    clippy::unwrap_used,
+    reason = "shared test helpers assert successful operations"
+)]
+
+use std::num::NonZeroU32;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicI64;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+
+use codex_message_board::*;
+use codex_protocol::AgentPath;
+use codex_protocol::SessionId;
+use codex_protocol::ThreadId;
+use codex_protocol::error::Result;
+use codex_state::SqliteConfig;
+use pretty_assertions::assert_eq;
+
+mod common;
+use common::Host;
+
+#[tokio::test]
+async fn opening_board_preserves_posts_when_corruption_has_no_startup_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let sqlite = SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into().unwrap());
+    let options = LocalBoardOptions::default();
+    let root = ThreadId::new();
+    let host = Arc::new(Host {
+        clock: AtomicI64::default(),
+        fail_clock: AtomicBool::new(false),
+        agent_path_calls: AtomicUsize::default(),
+        members: [(root, AgentPath::root())].into(),
+        fail_notifications: AtomicBool::new(false),
+        active: AtomicBool::new(true),
+        notifications: Mutex::default(),
+    });
+    let path = dir.path().join("agent_message_board_1.sqlite");
+    // Keep the validated fixture alive and copy it to a new file identity so the
+    // board's first open still checks the corruption.
+    let fixture = path.with_extension("fixture");
+    let pool = sqlite.open_read_write_pool(&fixture).await.unwrap();
+    sqlx::raw_sql(
+        "CREATE TABLE unrelated(value INTEGER);
+         INSERT INTO unrelated VALUES (NULL);
+         PRAGMA writable_schema=ON;
+         UPDATE sqlite_schema SET sql='CREATE TABLE unrelated(value INTEGER NOT NULL)' WHERE name='unrelated';
+         PRAGMA writable_schema=OFF;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    tokio::fs::copy(&fixture, &path).await.unwrap();
+    let pool = sqlite
+        .open_read_only_pool(&path, /*busy_timeout*/ None)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("PRAGMA quick_check(1)")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "NULL value in unrelated.value"
+    );
+    pool.close().await;
+
+    let tree = SessionId::from(root);
+    let board = LocalAgentMessageBoard::open(&sqlite, &options, tree, host.clone())
+        .await
+        .unwrap();
+    let request = PostRequest {
+        request_id: "preserved-post".into(),
+        destination: PostDestination::NewChannel("proofs".into()),
+        text: "Preserve this post.".into(),
+        agents_to_notify: Vec::new(),
+    };
+    let metadata = board.post(root, request.clone()).await.unwrap();
+    drop(board);
+    let resumed = LocalAgentMessageBoard::open(&sqlite, &options, tree, host)
+        .await
+        .unwrap();
+    assert_eq!(resumed.post(root, request).await.unwrap(), metadata);
+}
+
+#[tokio::test]
+async fn shared_handles_resume_posts_and_preserve_subscription_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let sqlite = SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into().unwrap());
+    let options = LocalBoardOptions::default();
+    let root = ThreadId::new();
+    let child = ThreadId::new();
+    let child_path = AgentPath::root().join("worker").unwrap();
+    let host = Arc::new(Host {
+        clock: AtomicI64::default(),
+        fail_clock: AtomicBool::new(false),
+        agent_path_calls: AtomicUsize::default(),
+        members: [(root, AgentPath::root()), (child, child_path.clone())].into(),
+        fail_notifications: AtomicBool::new(false),
+        active: AtomicBool::new(true),
+        notifications: Mutex::default(),
+    });
+    let tree = SessionId::from(root);
+    let first = LocalAgentMessageBoard::open(&sqlite, &options, tree, host.clone())
+        .await
+        .unwrap();
+    first
+        .post(
+            child,
+            PostRequest {
+                request_id: "create-proofs".into(),
+                destination: PostDestination::NewChannel("proofs".into()),
+                text: "Share proofs here.".into(),
+                agents_to_notify: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let request = PostRequest {
+        request_id: "call-1".into(),
+        destination: PostDestination::Channel("proofs".into()),
+        text: "é🦀 proof".into(),
+        // The creator receives this through its channel subscription.
+        agents_to_notify: vec![AgentPath::root()],
+    };
+    let second = LocalAgentMessageBoard::open(&sqlite, &options, tree, host.clone())
+        .await
+        .unwrap();
+    let (metadata, duplicate) = tokio::join!(
+        first.post(root, request.clone()),
+        second.post(root, request.clone()),
+    );
+    let metadata = metadata.unwrap();
+    assert_eq!(duplicate.unwrap(), metadata);
+    drop(second);
+    assert_eq!(
+        *host.notifications.lock().unwrap(),
+        vec![(child, metadata.clone())]
+    );
+    drop(first);
+
+    // Reopen an older database, preserving its existing subscriptions.
+    let legacy_pool = sqlite
+        .open_read_write_pool(&dir.path().join("agent_message_board_1.sqlite"))
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE subscription_opt_outs")
+        .execute(&legacy_pool)
+        .await
+        .unwrap();
+    legacy_pool.close().await;
+
+    let resumed = LocalAgentMessageBoard::open(&sqlite, &options, tree, host.clone())
+        .await
+        .unwrap();
+    assert_eq!(resumed.post(root, request).await.unwrap(), metadata);
+    assert_eq!(host.notifications.lock().unwrap().len(), 1);
+    let content = resumed
+        .read_post(
+            child,
+            ReadPostRequest {
+                message_id: metadata.message_id,
+                offset_chars: 1,
+                limit_chars: NonZeroU32::new(2).unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        content,
+        PostContent {
+            metadata: metadata.clone(),
+            text: "🦀 ".into(),
+            n_chars: 8,
+            next_offset_chars: 3,
+        }
+    );
+    let unsubscribed = resumed
+        .set_subscription(
+            root,
+            SubscriptionRequest {
+                target: SubscriptionTarget::Channel("proofs".into()),
+                target_agent: Some(child_path.clone()),
+                change: SubscriptionChange::Unsubscribe,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(unsubscribed.last_message_id, Some(metadata.message_id));
+    // Posting to an existing channel must not re-enable its subscription.
+    resumed
+        .post(
+            child,
+            PostRequest {
+                request_id: "one-off-post".into(),
+                destination: PostDestination::Channel("proofs".into()),
+                text: "One more proof, while staying unsubscribed.".into(),
+                agents_to_notify: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    // Posting still succeeds when the subscriber lookup returns an empty array.
+    resumed
+        .post(
+            root,
+            PostRequest {
+                request_id: "no-subscribers".into(),
+                destination: PostDestination::Channel("proofs".into()),
+                text: "saved without notifications".into(),
+                agents_to_notify: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        *host.notifications.lock().unwrap(),
+        vec![(child, metadata.clone())]
+    );
+    resumed
+        .set_subscription(
+            root,
+            SubscriptionRequest {
+                target: SubscriptionTarget::Thread(metadata.message_id),
+                target_agent: Some(child_path),
+                change: SubscriptionChange::Subscribe,
+            },
+        )
+        .await
+        .unwrap();
+    let reply = resumed
+        .post(
+            root,
+            PostRequest {
+                request_id: "reply".into(),
+                destination: PostDestination::Thread(metadata.message_id),
+                text: "done".into(),
+                agents_to_notify: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    // Excluding the author must keep its subscription for other agents' replies.
+    let child_reply = resumed
+        .post(
+            child,
+            PostRequest {
+                request_id: "child-reply".into(),
+                destination: PostDestination::Thread(metadata.message_id),
+                text: "acknowledged".into(),
+                agents_to_notify: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let mut received = host.notifications.lock().unwrap().clone();
+    received.sort_by_key(|(id, post)| (id.to_string(), post.message_id));
+    let mut expected = vec![
+        (child, metadata.clone()),
+        (root, child_reply),
+        (child, reply),
+    ];
+    expected.sort_by_key(|(id, post)| (id.to_string(), post.message_id));
+    assert_eq!(received, expected);
+
+    resumed
+        .set_subscription(
+            root,
+            SubscriptionRequest {
+                target: SubscriptionTarget::Thread(metadata.thread_id),
+                target_agent: None,
+                change: SubscriptionChange::Unsubscribe,
+            },
+        )
+        .await
+        .unwrap();
+    drop(resumed);
+    let resumed = LocalAgentMessageBoard::open(&sqlite, &options, tree, host.clone())
+        .await
+        .unwrap();
+    resumed
+        .post(
+            root,
+            PostRequest {
+                request_id: "still-opted-out".into(),
+                destination: PostDestination::Thread(metadata.thread_id),
+                text: "one more reply without resubscribing".into(),
+                agents_to_notify: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    // The old reader's query must also see the opt-out after participation.
+    let legacy_pool = sqlite
+        .open_read_write_pool(&dir.path().join("agent_message_board_1.sqlite"))
+        .await
+        .unwrap();
+    let legacy_subscribers: Vec<String> =
+        sqlx::query_scalar("SELECT agent FROM subscriptions WHERE board=? AND target=?")
+            .bind(tree.to_string())
+            .bind(serde_json::to_string(&SubscriptionTarget::Thread(metadata.thread_id)).unwrap())
+            .fetch_all(&legacy_pool)
+            .await
+            .unwrap();
+    assert_eq!(legacy_subscribers, vec![child.to_string()]);
+    legacy_pool.close().await;
+    host.notifications.lock().unwrap().clear();
+    for (index, agents_to_notify) in [Vec::new(), vec![AgentPath::root()], Vec::new()]
+        .into_iter()
+        .enumerate()
+    {
+        let reply = resumed
+            .post(
+                child,
+                PostRequest {
+                    request_id: format!("after-unsubscribe-{index}"),
+                    destination: PostDestination::Thread(metadata.thread_id),
+                    text: "reply after opt-out".into(),
+                    agents_to_notify,
+                },
+            )
+            .await
+            .unwrap();
+        let expected = if index == 1 {
+            vec![(root, reply)]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(
+            std::mem::take(&mut *host.notifications.lock().unwrap()),
+            expected
+        );
+    }
+    resumed
+        .set_subscription(
+            root,
+            SubscriptionRequest {
+                target: SubscriptionTarget::Thread(metadata.thread_id),
+                target_agent: None,
+                change: SubscriptionChange::Subscribe,
+            },
+        )
+        .await
+        .unwrap();
+    let reply = resumed
+        .post(
+            child,
+            PostRequest {
+                request_id: "resubscribed".into(),
+                destination: PostDestination::Thread(metadata.thread_id),
+                text: "notifications restored".into(),
+                agents_to_notify: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(*host.notifications.lock().unwrap(), vec![(root, reply)]);
+
+    let other = LocalAgentMessageBoard::open(&sqlite, &options, SessionId::new(), host.clone())
+        .await
+        .unwrap();
+    assert!(
+        other
+            .read_post(
+                root,
+                ReadPostRequest {
+                    message_id: metadata.message_id,
+                    offset_chars: 0,
+                    limit_chars: NonZeroU32::new(20).unwrap(),
+                }
+            )
+            .await
+            .is_err()
+    );
+    LocalAgentMessageBoard::delete_boards(&sqlite, &options, &[tree])
+        .await
+        .unwrap();
+    let pool = sqlite
+        .open_read_write_pool(&dir.path().join("agent_message_board_1.sqlite"))
+        .await
+        .unwrap();
+    let remaining_opt_outs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subscription_opt_outs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(remaining_opt_outs, 0);
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn in_memory_handles_share_posts_deduplicate_calls_and_release_state() {
+    let root = ThreadId::new();
+    let child = ThreadId::new();
+    let child_path = AgentPath::root().join("worker").unwrap();
+    let host = Arc::new(Host {
+        clock: AtomicI64::default(),
+        fail_clock: AtomicBool::new(false),
+        agent_path_calls: AtomicUsize::default(),
+        members: [(root, AgentPath::root()), (child, child_path.clone())].into(),
+        active: AtomicBool::new(true),
+        fail_notifications: AtomicBool::new(false),
+        notifications: Mutex::default(),
+    });
+    let boards = InMemoryMessageBoards::default();
+    let (board, shared) = tokio::join!(
+        boards.open(root.into(), host.clone()),
+        boards.open(root.into(), host.clone()),
+    );
+    let request = PostRequest {
+        request_id: "same-call".into(),
+        destination: PostDestination::NewChannel("work".into()),
+        text: "done".into(),
+        agents_to_notify: vec![child_path],
+    };
+    let (first, retry) = tokio::join!(
+        board.post(root, request.clone()),
+        shared.post(root, request)
+    );
+    let metadata = first.unwrap();
+    assert_eq!(retry.unwrap(), metadata);
+    assert_eq!(
+        *host.notifications.lock().unwrap(),
+        vec![(child, metadata.clone())]
+    );
+    let read = ReadPostRequest {
+        message_id: metadata.message_id,
+        offset_chars: 0,
+        limit_chars: NonZeroU32::new(20).unwrap(),
+    };
+    assert_eq!(
+        shared.read_post(child, read.clone()).await.unwrap(),
+        PostContent {
+            metadata,
+            text: "done".into(),
+            n_chars: 4,
+            next_offset_chars: 4
+        }
+    );
+    let other = boards.open(SessionId::new(), host.clone()).await;
+    assert!(other.read_post(root, read.clone()).await.is_err());
+    drop(board);
+    drop(shared);
+    let fresh = boards.open(root.into(), host).await;
+    assert!(fresh.read_post(root, read).await.is_err());
+}
+
+enum Backend {
+    Local,
+    InMemory,
+}
+
+impl Backend {
+    async fn open(
+        self,
+        sqlite: &SqliteConfig,
+        identity: SessionId,
+        host: Arc<dyn MessageBoardHost>,
+    ) -> Arc<dyn AgentMessageBoard> {
+        match self {
+            Self::Local => Arc::new(
+                LocalAgentMessageBoard::open(sqlite, &LocalBoardOptions::default(), identity, host)
+                    .await
+                    .unwrap(),
+            ),
+            Self::InMemory => Arc::new(InMemoryAgentMessageBoard::new(identity, host)),
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_requests_do_not_create_channels_or_notify_inactive_agents() {
+    check_failed_requests_do_not_create_channels_or_notify_inactive_agents(Backend::Local).await;
+    check_failed_requests_do_not_create_channels_or_notify_inactive_agents(Backend::InMemory).await;
+}
+
+async fn check_failed_requests_do_not_create_channels_or_notify_inactive_agents(backend: Backend) {
+    let dir = tempfile::tempdir().unwrap();
+    let sqlite = SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into().unwrap());
+    let root = ThreadId::new();
+    let child = ThreadId::new();
+    let child_path = AgentPath::root().join("worker").unwrap();
+    let host = Arc::new(Host {
+        clock: AtomicI64::default(),
+        fail_clock: AtomicBool::new(false),
+        agent_path_calls: AtomicUsize::default(),
+        members: [(root, AgentPath::root()), (child, child_path.clone())].into(),
+        fail_notifications: AtomicBool::new(false),
+        active: AtomicBool::new(false),
+        notifications: Mutex::default(),
+    });
+    let board = backend
+        .open(&sqlite, SessionId::from(root), host.clone())
+        .await;
+    let mut request = PostRequest {
+        request_id: "post".into(),
+        destination: PostDestination::NewChannel("work".into()),
+        text: "first".into(),
+        agents_to_notify: vec![AgentPath::root().join("unknown").unwrap()],
+    };
+    assert!(board.post(root, request.clone()).await.is_err());
+    request.agents_to_notify = vec![child_path.clone()];
+    let posted = board.post(root, request.clone()).await.unwrap();
+    assert_eq!(*host.notifications.lock().unwrap(), Vec::new());
+    host.active.store(true, Ordering::SeqCst);
+    assert_eq!(board.post(root, request.clone()).await.unwrap(), posted);
+    assert_eq!(*host.notifications.lock().unwrap(), Vec::new());
+    request.text = "different".into();
+    assert!(board.post(root, request).await.is_err());
+
+    // Notification failure must not turn a committed write into a failed post.
+    host.fail_notifications.store(true, Ordering::SeqCst);
+    let reply = PostRequest {
+        request_id: "reply".into(),
+        destination: PostDestination::Thread(posted.thread_id),
+        text: "saved even if the notice fails".into(),
+        agents_to_notify: vec![child_path],
+    };
+    let saved = board.post(root, reply.clone()).await.unwrap();
+    host.fail_notifications.store(false, Ordering::SeqCst);
+    assert_eq!(board.post(root, reply).await.unwrap(), saved);
+    assert_eq!(*host.notifications.lock().unwrap(), Vec::new());
+    assert_eq!(
+        board
+            .read_post(
+                root,
+                ReadPostRequest {
+                    message_id: saved.message_id,
+                    offset_chars: 0,
+                    limit_chars: NonZeroU32::new(100).unwrap(),
+                }
+            )
+            .await
+            .unwrap(),
+        PostContent {
+            metadata: saved,
+            text: "saved even if the notice fails".into(),
+            n_chars: 30,
+            next_offset_chars: 30,
+        }
+    );
+}
+
+#[tokio::test]
+async fn queries_enforce_page_and_preview_caps() {
+    check_queries_enforce_page_and_preview_caps(Backend::Local).await;
+    check_queries_enforce_page_and_preview_caps(Backend::InMemory).await;
+}
+
+async fn check_queries_enforce_page_and_preview_caps(backend: Backend) {
+    let dir = tempfile::tempdir().unwrap();
+    let sqlite = SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into().unwrap());
+    let root = ThreadId::new();
+    let host = Arc::new(Host {
+        fail_notifications: AtomicBool::new(false),
+        clock: AtomicI64::default(),
+        fail_clock: AtomicBool::new(false),
+        agent_path_calls: AtomicUsize::default(),
+        members: [(root, AgentPath::root())].into(),
+        active: AtomicBool::new(false),
+        notifications: Mutex::default(),
+    });
+    let board = backend.open(&sqlite, root.into(), host).await;
+    board
+        .create_channel(
+            root,
+            CreateChannelRequest {
+                channel_name: "Straße".into(),
+                description: None,
+                subscription: SubscriptionChange::Unsubscribe,
+            },
+        )
+        .await
+        .unwrap();
+    let text = format!("Straße{}", "x".repeat(1000));
+    for index in 0..51 {
+        board
+            .post(
+                root,
+                PostRequest {
+                    request_id: index.to_string(),
+                    destination: PostDestination::Channel("Straße".into()),
+                    text: text.clone(),
+                    agents_to_notify: vec![],
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let channels = board
+        .list_channels(
+            root,
+            ChannelQuery {
+                query: Some("STRASSE".into()),
+                direction: SortDirection::NewestFirst,
+                page: PageRequest::default(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(channels.channels.results.len(), 1);
+    assert_eq!(channels.channels.results[0].description, None);
+    let query = PostQuery {
+        channel_name: None,
+        query: Some("STRASSE".into()),
+        after_message_id: None,
+        author: None,
+        page: PageRequest {
+            cursor: None,
+            limit: NonZeroU32::MAX,
+        },
+        max_chars_per_post: NonZeroU32::MAX,
+    };
+    let page = board.search_posts(root, query.clone()).await.unwrap();
+    assert_eq!(page.results.len(), 50);
+    assert_eq!(
+        page.results
+            .iter()
+            .map(|post| post.text_preview.chars().count())
+            .sum::<usize>(),
+        20_000
+    );
+    assert!(page.results.iter().all(|post| post.truncated));
+    let last = board
+        .search_posts(
+            root,
+            PostQuery {
+                page: PageRequest {
+                    cursor: page.next_cursor,
+                    limit: NonZeroU32::MAX,
+                },
+                ..query
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(last.results.len(), 1);
+    assert_eq!(last.next_cursor, None);
+}
+
+#[tokio::test]
+async fn queries_page_discussions_and_search_unicode() {
+    check_queries_page_discussions_and_search_unicode(Backend::Local).await;
+    check_queries_page_discussions_and_search_unicode(Backend::InMemory).await;
+}
+
+async fn check_queries_page_discussions_and_search_unicode(backend: Backend) {
+    let dir = tempfile::tempdir().unwrap();
+    let sqlite = SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into().unwrap());
+    let root = ThreadId::new();
+    let host = Arc::new(Host {
+        fail_notifications: AtomicBool::new(false),
+        clock: AtomicI64::default(),
+        fail_clock: AtomicBool::new(false),
+        agent_path_calls: AtomicUsize::default(),
+        members: [(root, AgentPath::root())].into(),
+        active: AtomicBool::new(true),
+        notifications: Mutex::default(),
+    });
+    let board = backend.open(&sqlite, SessionId::from(root), host).await;
+    let request = PostRequest {
+        request_id: "first".into(),
+        destination: PostDestination::NewChannel("work".into()),
+        text: "Éclair".into(),
+        agents_to_notify: vec![],
+    };
+    let first = board.post(root, request).await.unwrap();
+    let second = board
+        .post(
+            root,
+            PostRequest {
+                request_id: "second".into(),
+                destination: PostDestination::Channel("work".into()),
+                text: "second".into(),
+                agents_to_notify: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    let one = NonZeroU32::new(1).unwrap();
+    let query = ThreadQuery {
+        channel_name: "work".into(),
+        sort: ThreadSort::Activity,
+        direction: SortDirection::OldestFirst,
+        page: PageRequest {
+            cursor: None,
+            limit: one,
+        },
+        max_chars_per_post: one,
+    };
+    let page = board.list_threads(root, query.clone()).await.unwrap();
+    assert_eq!(
+        page.results,
+        vec![ThreadSummary {
+            thread_id: first.message_id,
+            root_post: PostPreview {
+                metadata: first.clone(),
+                text_preview: "É".into(),
+                n_chars: 6,
+                truncated: true,
+            },
+            reply_count: 0,
+            last_activity_at: first.created_at,
+            latest_reply: None,
+        }]
+    );
+    let next = board
+        .list_threads(
+            root,
+            ThreadQuery {
+                page: PageRequest {
+                    cursor: page.next_cursor,
+                    limit: one,
+                },
+                ..query.clone()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        next.results,
+        vec![ThreadSummary {
+            thread_id: second.message_id,
+            root_post: PostPreview {
+                metadata: second.clone(),
+                text_preview: "s".into(),
+                n_chars: 6,
+                truncated: true,
+            },
+            reply_count: 0,
+            last_activity_at: second.created_at,
+            latest_reply: None,
+        }]
+    );
+    assert_eq!(next.next_cursor, None);
+    let reply = board
+        .post(
+            root,
+            PostRequest {
+                request_id: "reply".into(),
+                destination: PostDestination::Thread(first.message_id),
+                text: "ÉCLAIR🦀".into(),
+                agents_to_notify: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    // A reply changes activity order without changing creation order.
+    let newest = ThreadQuery {
+        direction: SortDirection::NewestFirst,
+        ..query
+    };
+    assert_eq!(
+        board
+            .list_threads(root, newest.clone())
+            .await
+            .unwrap()
+            .results,
+        vec![ThreadSummary {
+            thread_id: first.message_id,
+            root_post: PostPreview {
+                metadata: first.clone(),
+                text_preview: "É".into(),
+                n_chars: 6,
+                truncated: true,
+            },
+            reply_count: 1,
+            last_activity_at: reply.created_at,
+            latest_reply: Some(PostPreview {
+                metadata: reply.clone(),
+                text_preview: "É".into(),
+                n_chars: 7,
+                truncated: true,
+            }),
+        }]
+    );
+    let created = board
+        .list_threads(
+            root,
+            ThreadQuery {
+                sort: ThreadSort::Created,
+                ..newest
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.results[0].thread_id, second.message_id);
+    let search = board
+        .search_posts(
+            root,
+            PostQuery {
+                channel_name: Some("work".into()),
+                query: Some("éclair".into()),
+                after_message_id: Some(first.message_id),
+                author: Some(AgentPath::root()),
+                page: PageRequest::default(),
+                max_chars_per_post: one,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        search,
+        Page {
+            results: vec![PostPreview {
+                metadata: reply.clone(),
+                text_preview: "É".into(),
+                n_chars: 7,
+                truncated: true
+            }],
+            next_cursor: None
+        }
+    );
+    let thread = board
+        .read_thread(
+            root,
+            ReadThreadRequest {
+                thread_id: first.message_id,
+                page: PageRequest::default(),
+                max_chars_per_post: one,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        thread,
+        ThreadPage {
+            root_post: PostPreview {
+                metadata: first,
+                text_preview: "É".into(),
+                n_chars: 6,
+                truncated: true
+            },
+            replies: search
+        }
+    );
+    let serialized = serde_json::to_value(thread).unwrap();
+    assert_eq!(serialized["n_returned"], 1);
+    assert_eq!(serialized["has_more"], false);
+    let channels = board
+        .list_channels(
+            root,
+            ChannelQuery {
+                query: Some("WORK".into()),
+                direction: SortDirection::NewestFirst,
+                page: PageRequest::default(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(channels.channels.results[0].message_count, 3);
+    assert_eq!(
+        channels.channels.results[0].last_message_id,
+        Some(reply.message_id)
+    );
+    assert!(
+        board
+            .read_thread(
+                root,
+                ReadThreadRequest {
+                    thread_id: reply.message_id,
+                    page: PageRequest::default(),
+                    max_chars_per_post: one
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        board
+            .list_channels(
+                ThreadId::new(),
+                ChannelQuery {
+                    query: None,
+                    direction: SortDirection::NewestFirst,
+                    page: PageRequest::default()
+                }
+            )
+            .await
+            .is_err()
+    );
+}
+
+fn board_tool_call(name: &str, args: serde_json::Value) -> codex_tools::ToolCall<'static> {
+    codex_tools::ToolCall {
+        turn_id: "turn-1".into(),
+        call_id: name.into(),
+        tool_name: codex_tools::ToolName::namespaced("collaboration", name),
+        model: "test".into(),
+        codex_turn_metadata: None,
+        truncation_policy: codex_utils_output_truncation::TruncationPolicy::Bytes(20_000),
+        source: codex_tools::ToolCallSource::Direct,
+        conversation_history: codex_tools::ConversationHistory::default(),
+        turn_item_emitter: Arc::new(codex_tools::NoopTurnItemEmitter),
+        attachment_store: Arc::new(codex_attachment_store::InlineAttachmentStore),
+        ephemeral: false,
+        environments: vec![],
+        payload: codex_tools::ToolPayload::Function {
+            arguments: args.to_string(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn tools_cover_channel_discussions_subscriptions_and_escaped_previews() {
+    check_tools_cover_channel_discussions_subscriptions_and_escaped_previews(Backend::Local).await;
+    check_tools_cover_channel_discussions_subscriptions_and_escaped_previews(Backend::InMemory)
+        .await;
+}
+
+async fn check_tools_cover_channel_discussions_subscriptions_and_escaped_previews(
+    backend: Backend,
+) {
+    use codex_tools::ToolName;
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let sqlite = SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into().unwrap());
+    let root = ThreadId::new();
+    let child = ThreadId::new();
+    let child_path = AgentPath::root().join("worker").unwrap();
+    let host = Arc::new(Host {
+        fail_notifications: AtomicBool::new(false),
+        members: [(root, AgentPath::root()), (child, child_path.clone())].into(),
+        clock: AtomicI64::default(),
+        fail_clock: AtomicBool::new(false),
+        agent_path_calls: AtomicUsize::default(),
+        active: AtomicBool::new(true),
+        notifications: Mutex::default(),
+    });
+    let board = backend.open(&sqlite, root.into(), host.clone()).await;
+    let tools = message_board_tools(
+        &MessageBoardTool::DISCUSSION,
+        board.clone(),
+        root,
+        AgentPath::root(),
+        Some("collaboration"),
+        "Shared tools",
+        /*tool_messages*/ None,
+    );
+    let tool = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool.tool_name() == ToolName::namespaced("collaboration", name))
+            .unwrap()
+    };
+    let created = tool("create_channel")
+        .handle(board_tool_call(
+            "create_channel",
+            json!({"channel_name":"Workflow", "description":"é".repeat(256)}),
+        ))
+        .await
+        .unwrap();
+    let created: ChannelSummary = serde_json::from_str(&created.log_output()).unwrap();
+    assert_eq!(
+        created,
+        ChannelSummary {
+            channel_name: "Workflow".into(),
+            description: Some("é".repeat(256)),
+            permissions: None,
+            created_at: "2026-09-18T12:00:00Z".parse().unwrap(),
+            created_by: AgentPath::root(),
+            message_count: 0,
+            last_message_id: None,
+        }
+    );
+    let channels = tool("get_channels")
+        .handle(board_tool_call("get_channels", json!({"query":"WORK"})))
+        .await
+        .unwrap();
+    let channels: Page<ChannelSummary> = serde_json::from_str(&channels.log_output()).unwrap();
+    assert_eq!(
+        channels,
+        Page {
+            results: vec![created],
+            next_cursor: None
+        }
+    );
+    for (name, enabled) in [("subscribe", true), ("unsubscribe", false)] {
+        let result = tool(name)
+            .handle(board_tool_call(
+                name,
+                json!({"channel_name":"Workflow","target_agent":"worker"}),
+            ))
+            .await
+            .unwrap();
+        let state: SubscriptionState = serde_json::from_str(&result.log_output()).unwrap();
+        assert_eq!(
+            state,
+            SubscriptionState {
+                channel_name: "Workflow".into(),
+                thread_id: None,
+                target_agent: child_path.clone(),
+                enabled,
+                last_message_id: None,
+            }
+        );
+    }
+    let mut last = None;
+    let mut expected_roots = Vec::new();
+    for index in 0..7 {
+        let mut call = board_tool_call(
+            "post",
+            json!({"channel_name":"Workflow","text":"\u{1}".repeat(2000)}),
+        );
+        call.call_id = format!("root-{index}");
+        let posted = tool("post").handle(call).await.unwrap();
+        let post: PostMetadata = serde_json::from_str(&posted.log_output()).unwrap();
+        expected_roots.push(post.thread_id.to_string());
+        let mut call = board_tool_call(
+            "post",
+            json!({"thread_id":post.thread_id,"text":"\u{1}".repeat(2000)}),
+        );
+        call.call_id = format!("reply-{index}");
+        let replied = tool("post").handle(call).await.unwrap();
+        let reply: PostMetadata = serde_json::from_str(&replied.log_output()).unwrap();
+        last = Some((post, reply));
+    }
+    // The subscribed author receives no self-notices; the child is unsubscribed.
+    assert_eq!(*host.notifications.lock().unwrap(), Vec::new());
+    let (last, last_reply) = last.unwrap();
+    for invalid_target in [
+        json!({"channel_name":"Workflow","thread_id":last.thread_id}),
+        json!({"channel_name":"missing"}),
+    ] {
+        assert!(
+            tool("subscribe")
+                .handle(board_tool_call("subscribe", invalid_target))
+                .await
+                .is_err()
+        );
+    }
+    let subscribed = tool("subscribe")
+        .handle(board_tool_call(
+            "subscribe",
+            json!({"thread_id":last.thread_id,"target_agent":"worker"}),
+        ))
+        .await
+        .unwrap();
+    let subscribed: SubscriptionState = serde_json::from_str(&subscribed.log_output()).unwrap();
+    assert_eq!(
+        subscribed,
+        SubscriptionState {
+            channel_name: "Workflow".into(),
+            thread_id: Some(last.thread_id),
+            target_agent: child_path,
+            enabled: true,
+            last_message_id: Some(last_reply.message_id),
+        }
+    );
+    // Another consumer exposes just these readers over the same stored discussion.
+    let tools = message_board_tools(
+        &[MessageBoardTool::ReadThread, MessageBoardTool::ListThreads],
+        board,
+        root,
+        AgentPath::root(),
+        Some("collaboration"),
+        "Shared tools",
+        /*tool_messages*/ None,
+    );
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| tool.tool_name())
+            .collect::<Vec<_>>(),
+        vec![
+            ToolName::namespaced("collaboration", "read_thread"),
+            ToolName::namespaced("collaboration", "list_threads"),
+        ]
+    );
+    let tool = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool.tool_name() == ToolName::namespaced("collaboration", name))
+            .unwrap()
+    };
+    for (name, args) in [
+        ("list_threads", json!({"channel_name":"Workflow"})),
+        ("read_thread", json!({"thread_id":last.thread_id})),
+    ] {
+        let output = tool(name)
+            .handle(board_tool_call(name, args))
+            .await
+            .unwrap();
+        assert!(output.log_output().len() <= 8000);
+        let value: serde_json::Value = serde_json::from_str(&output.log_output()).unwrap();
+        if name == "list_threads" {
+            assert_eq!(value["results"][0]["thread_id"], json!(last.thread_id));
+            assert!(
+                value["results"][0]["root_post"]["truncated"]
+                    .as_bool()
+                    .unwrap()
+            );
+            assert!(
+                value["results"][0]["latest_reply"]["truncated"]
+                    .as_bool()
+                    .unwrap()
+            );
+            let mut page = value;
+            let mut roots = Vec::new();
+            loop {
+                let results = page["results"].as_array().unwrap();
+                assert!(!results.is_empty());
+                roots.extend(
+                    results
+                        .iter()
+                        .map(|thread| thread["thread_id"].as_str().unwrap().to_string()),
+                );
+                assert!(roots.len() <= expected_roots.len());
+                let Some(cursor) = page["next_cursor"].as_str() else {
+                    break;
+                };
+                let output = tool(name)
+                    .handle(board_tool_call(
+                        name,
+                        json!({"channel_name":"Workflow", "cursor":cursor}),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(output.log_output().len() <= 8000);
+                page = serde_json::from_str(&output.log_output()).unwrap();
+            }
+            assert_eq!(
+                roots,
+                expected_roots.iter().rev().cloned().collect::<Vec<_>>()
+            );
+        } else {
+            assert_eq!(value["n_returned"], json!(1));
+            assert_eq!(value["root_post"]["message_id"], json!(last.message_id));
+            assert_eq!(
+                value["results"][0]["message_id"],
+                json!(last_reply.message_id)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn tools_validate_arguments_deduplicate_calls_and_bound_unicode_results() {
+    check_tools_validate_arguments_deduplicate_calls_and_bound_unicode_results(Backend::Local)
+        .await;
+    check_tools_validate_arguments_deduplicate_calls_and_bound_unicode_results(Backend::InMemory)
+        .await;
+}
+
+async fn check_tools_validate_arguments_deduplicate_calls_and_bound_unicode_results(
+    backend: Backend,
+) {
+    use codex_tools::ToolCallSource;
+    use codex_tools::ToolName;
+    use codex_utils_output_truncation::TruncationPolicy;
+    use serde_json::json;
+
+    let dir = tempfile::tempdir().unwrap();
+    let sqlite = SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into().unwrap());
+    let root = ThreadId::new();
+    let child = ThreadId::new();
+    let child_path = AgentPath::root().join("worker").unwrap();
+    let host = Arc::new(Host {
+        fail_notifications: AtomicBool::new(false),
+        members: [(root, AgentPath::root()), (child, child_path.clone())].into(),
+        clock: AtomicI64::default(),
+        fail_clock: AtomicBool::new(false),
+        agent_path_calls: AtomicUsize::default(),
+        active: AtomicBool::new(true),
+        notifications: Mutex::default(),
+    });
+    let board = backend.open(&sqlite, root.into(), host.clone()).await;
+    let mut selected = MessageBoardTool::DISCUSSION.to_vec();
+    selected.extend([MessageBoardTool::Append, MessageBoardTool::UpsertChannel]);
+    let tools = message_board_tools(
+        &selected,
+        board.clone(),
+        root,
+        AgentPath::root(),
+        Some("collaboration"),
+        "Shared tools",
+        /*tool_messages*/ None,
+    );
+    let call = board_tool_call;
+    let tool = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool.tool_name() == ToolName::namespaced("collaboration", name))
+            .unwrap()
+    };
+    for (name, args) in [
+        (
+            "post",
+            json!({"new_channel_name":"low-budget","text":"must not be stored"}),
+        ),
+        (
+            "append",
+            json!({"new_channel_name":"low-budget-append","text":"must not be stored"}),
+        ),
+        ("create_channel", json!({"channel_name":"low-budget"})),
+        (
+            "upsert_channel",
+            json!({"channel_name":"low-budget-upsert","description":"must not be stored"}),
+        ),
+    ] {
+        let mut limited = call(name, args);
+        limited.truncation_policy = TruncationPolicy::Bytes(1);
+        assert!(tool(name).handle(limited).await.is_err());
+    }
+    assert!(
+        tool("create_channel")
+            .handle(call(
+                "create_channel",
+                json!({"channel_name":"too-long", "description":"é".repeat(257)}),
+            ))
+            .await
+            .is_err()
+    );
+    // Escaped descriptions must fit before creation, rather than failing after commit.
+    let mut small_budget = call(
+        "create_channel",
+        json!({"channel_name":"too-small-budget", "description":"\u{1}".repeat(512)}),
+    );
+    small_budget.truncation_policy = TruncationPolicy::Bytes(4096);
+    assert!(tool("create_channel").handle(small_budget).await.is_err());
+    for name in ["post", "append"] {
+        assert!(
+            tool(name)
+                .handle(call(
+                    name,
+                    json!({"text":"invalid","channel_name":"a","new_channel_name":"b"})
+                ))
+                .await
+                .is_err()
+        );
+    }
+    for args in [
+        json!({"text":"no destination"}),
+        json!({"text":"invalid recipient","new_channel_name":"evidence","agents_to_notify":["worker"]}),
+    ] {
+        assert!(tool("append").handle(call("append", args)).await.is_err());
+    }
+    for args in [
+        json!({"channel_name":"policy"}),
+        json!({"description":"missing channel"}),
+        json!({"channel_name":"policy","description":"é".repeat(257)}),
+        json!({"channel_name":"policy","description":"invalid option","subscribe":true}),
+        json!({"channel_name":"policy","description":"invalid option","permissions":{}}),
+    ] {
+        assert!(
+            tool("upsert_channel")
+                .handle(call("upsert_channel", args))
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        tool("get_channels")
+            .handle(call("get_channels", json!({"limit":0})))
+            .await
+            .is_err()
+    );
+    assert!(
+        tool("get_channels")
+            .handle(call("get_channels", json!({"typo":true})))
+            .await
+            .is_err()
+    );
+    assert!(
+        board
+            .list_channels(
+                root,
+                ChannelQuery {
+                    query: None,
+                    direction: SortDirection::NewestFirst,
+                    page: PageRequest::default()
+                }
+            )
+            .await
+            .unwrap()
+            .channels
+            .results
+            .is_empty()
+    );
+
+    let post_call = call(
+        "post",
+        json!({"text":"🦀".repeat(8000),"new_channel_name":"work","agents_to_notify":["worker"]}),
+    );
+    let result = tool("post").handle(post_call.clone()).await.unwrap();
+    let metadata: PostMetadata = serde_json::from_str(&result.log_output()).unwrap();
+    assert_eq!(
+        tool("post").handle(post_call).await.unwrap().log_output(),
+        result.log_output()
+    );
+    assert_eq!(host.notifications.lock().unwrap().len(), 1);
+    let preview = tool("search_posts")
+        .handle(call("search_posts", json!({"query":"🦀"})))
+        .await
+        .unwrap();
+    let preview: Page<PostPreview> = serde_json::from_str(&preview.log_output()).unwrap();
+    assert_eq!(
+        preview,
+        Page {
+            results: vec![PostPreview {
+                metadata: metadata.clone(),
+                text_preview: "🦀".repeat(1000),
+                n_chars: 8000,
+                truncated: true,
+            }],
+            next_cursor: None,
+        }
+    );
+    // An impossible metadata budget stops when both the page and preview reach one.
+    // Unequal limits ensure we keep shrinking while either dimension can still change.
+    for (name, args, expected_reads) in [
+        ("get_channels", json!({"limit":1}), 1),
+        (
+            "list_threads",
+            json!({"channel_name":"work","limit":1,"max_chars_per_post":8}),
+            4,
+        ),
+        ("search_posts", json!({"limit":8,"max_chars_per_post":1}), 4),
+        (
+            "read_thread",
+            json!({"thread_id":metadata.thread_id,"limit":3,"max_chars_per_post":1}),
+            2,
+        ),
+        (
+            "read_post",
+            json!({"message_id":metadata.message_id,"limit_chars":3}),
+            2,
+        ),
+    ] {
+        let mut limited = call(name, args);
+        limited.truncation_policy = TruncationPolicy::Bytes(1);
+        host.agent_path_calls.store(0, Ordering::SeqCst);
+        let error = tool(name).handle(limited).await.err().unwrap();
+        assert_eq!(
+            error,
+            codex_tools::FunctionCallError::RespondToModel(
+                "The output budget is too small for this result's metadata.".into()
+            ),
+        );
+        assert_eq!(
+            host.agent_path_calls.load(Ordering::SeqCst),
+            expected_reads,
+            "{name}",
+        );
+    }
+    let read_call = call("read_post", json!({"message_id":metadata.message_id}));
+    let result = tool("read_post").handle(read_call.clone()).await.unwrap();
+    assert!(result.contains_external_context());
+    assert!(result.log_output().len() <= 8000);
+    let first: PostContent = serde_json::from_str(&result.log_output()).unwrap();
+    assert_eq!(first.text, "🦀".repeat(first.next_offset_chars));
+    assert_eq!(first.n_chars, 8000);
+    let result = tool("read_post").handle(call("read_post", json!({"message_id":metadata.message_id,"offset_chars":first.next_offset_chars,"limit_chars":2}))).await.unwrap();
+    let second: PostContent = serde_json::from_str(&result.log_output()).unwrap();
+    assert_eq!(second.text, "🦀🦀");
+    assert_eq!(second.next_offset_chars, first.next_offset_chars + 2);
+
+    let mut nested = call(
+        "post",
+        json!({"text":"reply","thread_id":metadata.thread_id}),
+    );
+    nested.source = ToolCallSource::CodeMode {
+        cell_id: "cell-1".into(),
+        runtime_tool_call_id: "nested-1".into(),
+    };
+    let first_nested = tool("post")
+        .handle(nested.clone())
+        .await
+        .unwrap()
+        .log_output();
+    nested.source = ToolCallSource::CodeMode {
+        cell_id: "cell-1".into(),
+        runtime_tool_call_id: "nested-2".into(),
+    };
+    assert_ne!(
+        tool("post").handle(nested).await.unwrap().log_output(),
+        first_nested
+    );
+    let result = tool("search_posts")
+        .handle(call(
+            "search_posts",
+            json!({"query":"reply","author":"/root"}),
+        ))
+        .await
+        .unwrap();
+    let page: Page<PostPreview> = serde_json::from_str(&result.log_output()).unwrap();
+    assert_eq!(page.results.len(), 2);
+    assert!(page.results.iter().all(|post| post.text_preview == "reply"));
+
+    let mut nested_read = read_call;
+    nested_read.source = ToolCallSource::CodeMode {
+        cell_id: "cell-1".into(),
+        runtime_tool_call_id: "nested-3".into(),
+    };
+    assert!(
+        tool("read_post")
+            .handle(nested_read)
+            .await
+            .unwrap()
+            .log_output()
+            .len()
+            <= 8000
+    );
+
+    // Explicitly selected Append stores readable evidence, without delivery side effects.
+    host.notifications.lock().unwrap().clear();
+    let append_call = call(
+        "append",
+        json!({"text":"Permission revoked.","new_channel_name":"evidence"}),
+    );
+    let result = tool("append").handle(append_call.clone()).await.unwrap();
+    let appended: PostMetadata = serde_json::from_str(&result.log_output()).unwrap();
+    assert_eq!(
+        tool("append")
+            .handle(append_call)
+            .await
+            .unwrap()
+            .log_output(),
+        result.log_output()
+    );
+    let read = tool("read_post")
+        .handle(call("read_post", json!({"message_id":appended.message_id})))
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<PostContent>(&read.log_output()).unwrap(),
+        PostContent {
+            metadata: appended.clone(),
+            text: "Permission revoked.".into(),
+            n_chars: 19,
+            next_offset_chars: 19,
+        }
+    );
+    let mut conflict = call(
+        "post",
+        json!({"text":"Permission revoked.","new_channel_name":"evidence"}),
+    );
+    conflict.call_id = "append".into();
+    assert!(tool("post").handle(conflict).await.is_err());
+    tool("subscribe")
+        .handle(call(
+            "subscribe",
+            json!({"channel_name":"evidence","target_agent":"worker"}),
+        ))
+        .await
+        .unwrap();
+    for (index, args) in [
+        json!({"text":"Later evidence.","channel_name":"evidence"}),
+        json!({"text":"Related evidence.","thread_id":appended.thread_id}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut append = call("append", args);
+        append.call_id = format!("later-append-{index}");
+        tool("append").handle(append).await.unwrap();
+    }
+    // Normal discussion still does not notify the append author: Append created
+    // neither a channel subscription nor a thread subscription for that author.
+    for (index, destination) in [
+        PostDestination::Channel("evidence".into()),
+        PostDestination::Thread(appended.thread_id),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        board
+            .post(
+                child,
+                PostRequest {
+                    request_id: format!("ordinary-reply-{index}"),
+                    destination,
+                    text: "Discuss this evidence.".into(),
+                    agents_to_notify: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(*host.notifications.lock().unwrap(), Vec::new());
+
+    // Upsert creates metadata without subscribing its author. Updating from another
+    // caller changes only the description, preserving the channel and its evidence.
+    host.clock.store(100, Ordering::SeqCst);
+    let upsert = call(
+        "upsert_channel",
+        json!({"channel_name":"policy","description":"Original policy"}),
+    );
+    assert_eq!(
+        tool("upsert_channel")
+            .handle(upsert)
+            .await
+            .unwrap()
+            .log_output(),
+        "null"
+    );
+    let created = tool("get_channels")
+        .handle(call("get_channels", json!({"query":"policy"})))
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Page<ChannelSummary>>(&created.log_output()).unwrap(),
+        Page {
+            results: vec![ChannelSummary {
+                channel_name: "policy".into(),
+                description: Some("Original policy".into()),
+                permissions: None,
+                created_at: "2026-09-18T12:01:40Z".parse().unwrap(),
+                created_by: AgentPath::root(),
+                message_count: 0,
+                last_message_id: None,
+            }],
+            next_cursor: None,
+        }
+    );
+    board
+        .post(
+            child,
+            PostRequest {
+                request_id: "policy-evidence".into(),
+                destination: PostDestination::Channel("policy".into()),
+                text: "Deployment requires approval.".into(),
+                agents_to_notify: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let channels = call("get_channels", json!({"query":"policy"}));
+    let before = tool("get_channels").handle(channels.clone()).await.unwrap();
+    let mut expected: Page<ChannelSummary> = serde_json::from_str(&before.log_output()).unwrap();
+    let child_tools = message_board_tools(
+        &[MessageBoardTool::UpsertChannel],
+        board,
+        child,
+        child_path,
+        Some("collaboration"),
+        "Shared tools",
+        /*tool_messages*/ None,
+    );
+    host.fail_clock.store(true, Ordering::SeqCst);
+    child_tools[0]
+        .handle(call(
+            "upsert_channel",
+            json!({"channel_name":"policy","description":"Updated policy"}),
+        ))
+        .await
+        .unwrap();
+    expected.results[0].description = Some("Updated policy".into());
+    let after = tool("get_channels").handle(channels).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<Page<ChannelSummary>>(&after.log_output()).unwrap(),
+        expected
+    );
+    assert!(
+        child_tools[0]
+            .handle(call(
+                "upsert_channel",
+                json!({"channel_name":"clock-missing","description":"Must not be created"}),
+            ))
+            .await
+            .is_err()
+    );
+    let missing = tool("get_channels")
+        .handle(call("get_channels", json!({"query":"clock-missing"})))
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Page<ChannelSummary>>(&missing.log_output()).unwrap(),
+        Page {
+            results: Vec::new(),
+            next_cursor: None
+        }
+    );
+    host.fail_clock.store(false, Ordering::SeqCst);
+    let mut posted = call(
+        "post",
+        json!({"channel_name":"policy","text":"More policy evidence."}),
+    );
+    posted.call_id = "after-upsert".into();
+    tool("post").handle(posted).await.unwrap();
+    assert_eq!(*host.notifications.lock().unwrap(), Vec::new());
+}
+
+#[test]
+fn channel_descriptions_validate_construction_and_serialization() {
+    use serde_json::json;
+
+    let description = "é".repeat(256);
+    let request_json = json!({
+        "channel_name": "design",
+        "description": description,
+        "subscription": "Unsubscribe",
+    });
+    let request: CreateChannelRequest = serde_json::from_value(request_json.clone()).unwrap();
+    assert_eq!(
+        request.description,
+        Some(ChannelDescription::try_from(description).unwrap())
+    );
+    assert_eq!(serde_json::to_value(request).unwrap(), request_json);
+
+    let too_long = "é".repeat(257);
+    assert!(ChannelDescription::try_from(too_long.clone()).is_err());
+    assert!(
+        serde_json::from_value::<CreateChannelRequest>(json!({
+            "channel_name": "too-long",
+            "description": too_long,
+            "subscription": "Unsubscribe",
+        }))
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn channel_descriptions_migrate_legacy_storage_and_survive_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let sqlite = SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into().unwrap());
+    let options = LocalBoardOptions::default();
+    let root = ThreadId::new();
+    let host = Arc::new(Host {
+        clock: AtomicI64::default(),
+        fail_clock: AtomicBool::new(false),
+        agent_path_calls: AtomicUsize::default(),
+        members: [(root, AgentPath::root())].into(),
+        active: AtomicBool::new(true),
+        fail_notifications: AtomicBool::new(false),
+        notifications: Mutex::default(),
+    });
+    let pool = sqlite
+        .open_read_write_pool(&dir.path().join("agent_message_board_1.sqlite"))
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE channels (board TEXT NOT NULL, name TEXT NOT NULL, name_search TEXT NOT NULL, created_at TEXT NOT NULL, timestamp INTEGER NOT NULL, author TEXT NOT NULL, PRIMARY KEY(board,name))").execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO channels VALUES (?, 'legacy', 'legacy', '2026-09-17T12:00:00Z', 0, '/root')",
+    )
+    .bind(root.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    let board = LocalAgentMessageBoard::open(&sqlite, &options, root.into(), host.clone())
+        .await
+        .unwrap();
+    let legacy = ChannelSummary {
+        channel_name: "legacy".into(),
+        description: None,
+        permissions: None,
+        created_at: "2026-09-17T12:00:00Z".parse().unwrap(),
+        created_by: AgentPath::root(),
+        message_count: 0,
+        last_message_id: None,
+    };
+    let created = board
+        .create_channel(
+            root,
+            CreateChannelRequest {
+                channel_name: "design".into(),
+                description: Some(
+                    "Design decisions and tradeoffs."
+                        .to_string()
+                        .try_into()
+                        .unwrap(),
+                ),
+                subscription: SubscriptionChange::Unsubscribe,
+            },
+        )
+        .await
+        .unwrap();
+    drop(board);
+    let reopened = LocalAgentMessageBoard::open(&sqlite, &options, root.into(), host)
+        .await
+        .unwrap();
+    let listed = reopened
+        .list_channels(
+            root,
+            ChannelQuery {
+                query: None,
+                direction: SortDirection::NewestFirst,
+                page: PageRequest::default(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.channels,
+        Page {
+            results: vec![created, legacy],
+            next_cursor: None
+        }
+    );
+}
+
+#[tokio::test]
+async fn silent_appends_preserve_evidence_and_explicit_subscriptions()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let sqlite = SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into().unwrap());
+    let root = ThreadId::new();
+    let child = ThreadId::new();
+    let host = Arc::new(Host {
+        clock: AtomicI64::default(),
+        fail_clock: AtomicBool::new(false),
+        agent_path_calls: AtomicUsize::default(),
+        members: [
+            (root, AgentPath::root()),
+            (child, AgentPath::root().join("worker")?),
+        ]
+        .into(),
+        active: AtomicBool::new(true),
+        fail_notifications: AtomicBool::new(false),
+        notifications: Mutex::default(),
+    });
+    let options = LocalBoardOptions {
+        storage_namespace: "evidence_records".into(),
+    };
+    let descriptor = LocalBoard::new(sqlite.clone(), root.into()).with_options(options);
+    let writer = descriptor.read_write().open(host.clone()).await?;
+    let reader = descriptor.read_only().open(host.clone()).await?;
+    // Include characters requiring JSON escaping in the persisted subscription target.
+    let channel = "audit\"\\é";
+    let request = AppendRequest {
+        request_id: "original".into(),
+        destination: PostDestination::NewChannel(channel.into()),
+        text: "Deployment was revoked.".into(),
+    };
+    let original = writer.append(root, request.clone()).await?;
+    assert_eq!(writer.append(root, request.clone()).await?, original);
+    assert!(
+        reader
+            .append(
+                child,
+                AppendRequest {
+                    request_id: "reader".into(),
+                    destination: PostDestination::Channel(channel.into()),
+                    ..request.clone()
+                },
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        writer
+            .append(
+                root,
+                AppendRequest {
+                    text: "A different decision".into(),
+                    ..request.clone()
+                },
+            )
+            .await
+            .is_err()
+    );
+    let query = ChannelQuery {
+        query: None,
+        direction: SortDirection::OldestFirst,
+        page: PageRequest::default(),
+    };
+    let before = writer
+        .list_channels(root, query.clone())
+        .await?
+        .channels
+        .results
+        .remove(0);
+    writer
+        .upsert_channel(
+            child,
+            UpsertChannelRequest {
+                channel_name: channel.into(),
+                description: "Release decisions".to_owned().try_into()?,
+            },
+        )
+        .await?;
+    for (board, can_write) in [(&writer, true), (&reader, false)] {
+        assert_eq!(
+            board.list_channels(root, query.clone()).await?,
+            ChannelPage {
+                channels: Page {
+                    results: vec![ChannelSummary {
+                        description: Some("Release decisions".into()),
+                        permissions: Some(ChannelPermissions {
+                            read: true,
+                            post: can_write,
+                            reply: can_write,
+                            edit_metadata: false,
+                        }),
+                        ..before.clone()
+                    }],
+                    next_cursor: None,
+                },
+                board_permissions: Some(BoardPermissions {
+                    create_channel: can_write,
+                    edit_metadata: false,
+                    manage_permissions: false,
+                }),
+            }
+        );
+    }
+    assert_eq!(
+        reader
+            .read_post(
+                child,
+                ReadPostRequest {
+                    message_id: original.message_id,
+                    offset_chars: 0,
+                    limit_chars: NonZeroU32::MAX,
+                }
+            )
+            .await?,
+        PostContent {
+            metadata: original.clone(),
+            text: request.text.clone(),
+            n_chars: request.text.chars().count(),
+            next_offset_chars: request.text.chars().count(),
+        }
+    );
+    assert!(
+        reader
+            .upsert_channel(
+                child,
+                UpsertChannelRequest {
+                    channel_name: channel.into(),
+                    description: "Changed".to_owned().try_into()?,
+                },
+            )
+            .await
+            .is_err()
+    );
+    writer
+        .create_channel(
+            root,
+            CreateChannelRequest {
+                channel_name: "release".into(),
+                description: Some("Release evidence".to_owned().try_into()?),
+                subscription: SubscriptionChange::Unsubscribe,
+            },
+        )
+        .await?;
+    for name in [channel, "release"] {
+        reader
+            .set_subscription(
+                child,
+                SubscriptionRequest {
+                    target: SubscriptionTarget::Channel(name.into()),
+                    change: SubscriptionChange::Subscribe,
+                    target_agent: None,
+                },
+            )
+            .await?;
+    }
+    let later_request = AppendRequest {
+        request_id: "later".into(),
+        destination: PostDestination::Channel(channel.into()),
+        ..request.clone()
+    };
+    let later = writer.append(root, later_request.clone()).await?;
+    // Retry keys belong to the caller, so another author may use the same ID.
+    assert_ne!(writer.append(child, later_request).await?, later);
+    assert!(host.notifications.lock().unwrap().is_empty());
+    let pool = sqlite
+        .open_read_only_pool(
+            &dir.path().join("message_board_evidence_records_1.sqlite"),
+            /*busy_timeout*/ None,
+        )
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM subscriptions WHERE agent=?")
+            .bind(root.to_string())
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    let first = reader
+        .subscribed_channels(
+            child,
+            PageRequest {
+                cursor: None,
+                limit: NonZeroU32::MIN,
+            },
+        )
+        .await?;
+    let last = reader
+        .subscribed_channels(
+            child,
+            PageRequest {
+                cursor: first.next_cursor,
+                limit: NonZeroU32::MIN,
+            },
+        )
+        .await?;
+    assert_eq!(
+        (first.results, last),
+        (
+            vec![channel.into()],
+            Page {
+                results: vec!["release".into()],
+                next_cursor: None,
+            }
+        )
+    );
+    // Normal posts on this same board still subscribe their author and notify once.
+    let discussion = PostRequest {
+        request_id: "discussion".into(),
+        destination: PostDestination::Channel(channel.into()),
+        text: "Discuss the latest evidence.".into(),
+        agents_to_notify: Vec::new(),
+    };
+    let posted = writer.post(root, discussion.clone()).await?;
+    assert_eq!(writer.post(root, discussion.clone()).await?, posted);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT target FROM subscriptions WHERE agent=?")
+            .bind(root.to_string())
+            .fetch_all(&pool)
+            .await?,
+        vec![serde_json::to_string(&SubscriptionTarget::Thread(
+            posted.thread_id
+        ))?]
+    );
+    assert!(
+        writer
+            .append(
+                root,
+                AppendRequest {
+                    request_id: discussion.request_id.clone(),
+                    destination: discussion.destination.clone(),
+                    text: discussion.text.clone(),
+                },
+            )
+            .await
+            .is_err()
+    );
+    drop((writer, reader));
+    let reopened = descriptor.read_write().open(host.clone()).await?;
+    assert_eq!(reopened.append(root, request).await?, original);
+    assert_eq!(reopened.post(root, discussion).await?, posted);
+    assert_eq!(*host.notifications.lock().unwrap(), vec![(child, posted)]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn bulk_subscriptions_are_atomic_and_scoped_to_the_caller_and_supplied_channels() -> Result<()>
+{
+    use SubscriptionChange::Subscribe;
+    use SubscriptionChange::Unsubscribe;
+    use std::collections::BTreeMap;
+
+    let dir = tempfile::tempdir()?;
+    let sqlite = SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into().unwrap());
+    let owner = ThreadId::new();
+    let reviewer = ThreadId::new();
+    let host = Arc::new(Host {
+        clock: AtomicI64::default(),
+        fail_clock: AtomicBool::default(),
+        agent_path_calls: AtomicUsize::default(),
+        members: [
+            (owner, AgentPath::root()),
+            (reviewer, AgentPath::root().join("reviewer").unwrap()),
+        ]
+        .into(),
+        active: AtomicBool::new(true),
+        fail_notifications: AtomicBool::default(),
+        notifications: Mutex::default(),
+    });
+    let board = LocalBoard::new(sqlite, owner.into());
+    let writer = board.read_write().open(host.clone()).await?;
+    let reader = board.read_only().open(host.clone()).await?;
+    for name in ["build", "release"] {
+        writer
+            .create_channel(
+                owner,
+                CreateChannelRequest {
+                    channel_name: name.into(),
+                    description: None,
+                    subscription: Subscribe,
+                },
+            )
+            .await?;
+    }
+    reader
+        .set_subscriptions(
+            reviewer,
+            &BTreeMap::from([("build", Subscribe), ("release", Subscribe)]),
+        )
+        .await?;
+    let both = vec!["build".to_owned(), "release".to_owned()];
+    assert!(
+        reader
+            .set_subscriptions(
+                reviewer,
+                &BTreeMap::from([("build", Unsubscribe), ("missing", Subscribe)])
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        reader
+            .subscribed_channels(reviewer, PageRequest::default())
+            .await?
+            .results,
+        both
+    );
+    reader
+        .set_subscriptions(reviewer, &BTreeMap::from([("build", Unsubscribe)]))
+        .await?;
+    assert_eq!(
+        reader
+            .subscribed_channels(reviewer, PageRequest::default())
+            .await?
+            .results,
+        vec!["release".to_owned()]
+    );
+    assert_eq!(
+        reader
+            .subscribed_channels(owner, PageRequest::default())
+            .await?
+            .results,
+        both
+    );
+    assert!(host.notifications.lock().unwrap().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_board_setup_survives_reopen() -> Result<()> {
+    use serde_json::json;
+    let dir = tempfile::tempdir()?;
+    let sqlite = SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into().unwrap());
+    let options = LocalBoardOptions {
+        storage_namespace: "setup_test".into(),
+    };
+    let root = ThreadId::new();
+    let host = Arc::new(Host {
+        clock: AtomicI64::default(),
+        fail_clock: AtomicBool::new(false),
+        agent_path_calls: AtomicUsize::default(),
+        members: [(root, AgentPath::root())].into(),
+        active: AtomicBool::new(true),
+        fail_notifications: AtomicBool::new(false),
+        notifications: Mutex::default(),
+    });
+    let setup = json!({"timestamp":"2026-09-18T12:00:00Z","template":{"version":1,"channels":{"policy":{"description":"Shared policies"}}}});
+    configure_local_board(
+        &sqlite,
+        &options,
+        root.into(),
+        serde_json::from_value(setup.clone())?,
+    )
+    .await?;
+    configure_local_board(
+        &sqlite,
+        &options,
+        root.into(),
+        serde_json::from_value(setup.clone())?,
+    )
+    .await?;
+    let board = LocalAgentMessageBoard::open(&sqlite, &options, root.into(), host.clone()).await?;
+    drop(board);
+    let board = LocalAgentMessageBoard::open(&sqlite, &options, root.into(), host.clone()).await?;
+    let query = ChannelQuery {
+        query: None,
+        direction: SortDirection::NewestFirst,
+        page: PageRequest::default(),
+    };
+    let channels = board.list_channels(root, query.clone()).await?;
+    assert_eq!(
+        serde_json::to_value(channels)?,
+        json!({"results":[{
+        "channel_name":"policy", "description":"Shared policies", "created_at":"2026-09-18T12:00:00Z",
+        "created_by":"/root", "message_count":0, "last_message_id":null
+    }],"n_returned":1,"has_more":false,"next_cursor":null})
+    );
+    let mut changed = setup.clone();
+    changed["template"]["channels"]["policy"]["description"] = json!("Changed");
+    assert!(
+        configure_local_board(
+            &sqlite,
+            &options,
+            root.into(),
+            serde_json::from_value(changed)?
+        )
+        .await
+        .is_err()
+    );
+    board
+        .create_channel(
+            root,
+            CreateChannelRequest {
+                channel_name: "new".into(),
+                description: None,
+                subscription: SubscriptionChange::Unsubscribe,
+            },
+        )
+        .await?;
+    configure_local_board(
+        &sqlite,
+        &options,
+        root.into(),
+        serde_json::from_value(setup.clone())?,
+    )
+    .await?;
+    assert_eq!(
+        board
+            .list_channels(root, query)
+            .await?
+            .channels
+            .results
+            .len(),
+        2
+    );
+    LocalAgentMessageBoard::delete_boards(&sqlite, &options, &[root.into()]).await?;
+    assert!(
+        configure_local_board(
+            &sqlite,
+            &options,
+            root.into(),
+            serde_json::from_value(setup)?
+        )
+        .await
+        .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn storage_namespaces_preserve_isolation_reopen_and_deletion() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let sqlite = SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into().unwrap());
+    let root = ThreadId::new();
+    let child = ThreadId::new();
+    let child_path = AgentPath::root().join("worker").unwrap();
+    let host = Arc::new(Host {
+        clock: AtomicI64::default(),
+        fail_clock: AtomicBool::new(false),
+        agent_path_calls: AtomicUsize::default(),
+        members: [(root, AgentPath::root()), (child, child_path)].into(),
+        active: AtomicBool::new(true),
+        fail_notifications: AtomicBool::new(false),
+        notifications: Mutex::default(),
+    });
+    for storage_namespace in ["queue", "goals"] {
+        // Opening and deleting a board must not modify another runtime database.
+        let runtime_database = sqlite
+            .open_read_write_pool(&dir.path().join(format!("{storage_namespace}_1.sqlite")))
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE runtime_data (value TEXT NOT NULL)")
+            .execute(&runtime_database)
+            .await
+            .unwrap();
+        let identity = SessionId::new();
+        let options = LocalBoardOptions {
+            storage_namespace: storage_namespace.into(),
+        };
+        let descriptor = LocalBoard::new(sqlite.clone(), identity).with_options(options.clone());
+        let writer = descriptor.read_write().open(host.clone()).await?;
+        let seed = PostRequest {
+            request_id: "seed".into(),
+            destination: PostDestination::NewChannel("records".into()),
+            text: "Saved evidence".into(),
+            agents_to_notify: Vec::new(),
+        };
+        let metadata = writer.post(root, seed.clone()).await?;
+        let read = ReadPostRequest {
+            message_id: metadata.message_id,
+            offset_chars: 0,
+            limit_chars: NonZeroU32::MAX,
+        };
+        let legacy = LocalAgentMessageBoard::open(
+            &sqlite,
+            &LocalBoardOptions::default(),
+            identity,
+            host.clone(),
+        )
+        .await?;
+        assert!(legacy.read_post(root, read.clone()).await.is_err());
+        let legacy_metadata = legacy.post(root, seed.clone()).await?;
+        // Release the writer before reopening its saved posts.
+        drop(writer);
+        let reopened = descriptor.read_write().open(host.clone()).await?;
+        assert_eq!(
+            reopened.read_post(child, read.clone()).await?,
+            PostContent {
+                metadata,
+                text: seed.text.clone(),
+                n_chars: seed.text.chars().count(),
+                next_offset_chars: seed.text.chars().count(),
+            }
+        );
+        let survivor = LocalBoard::new(sqlite.clone(), SessionId::new())
+            .with_options(LocalBoardOptions {
+                storage_namespace: storage_namespace.into(),
+            })
+            .read_write()
+            .open(host.clone())
+            .await?;
+        let survivor_metadata = survivor.post(root, seed.clone()).await?;
+        let after_deletion = PostRequest {
+            request_id: "after-deletion".into(),
+            destination: PostDestination::Channel("records".into()),
+            ..seed.clone()
+        };
+        let late_append = AppendRequest {
+            request_id: "late-append".into(),
+            destination: PostDestination::NewChannel("late-evidence".into()),
+            text: seed.text.clone(),
+        };
+        let deleted_ids = [identity, SessionId::new()];
+        LocalAgentMessageBoard::delete_boards(&sqlite, &options, &deleted_ids).await?;
+        assert!(reopened.read_post(root, read).await.is_err());
+        assert!(reopened.post(root, seed.clone()).await.is_err());
+        assert!(reopened.append(root, late_append.clone()).await.is_err());
+        assert_eq!(survivor.post(root, seed.clone()).await?, survivor_metadata);
+        survivor.post(root, after_deletion.clone()).await?;
+        survivor.append(root, late_append.clone()).await?;
+        // Fresh pools must retain both markers, including the board never opened before deletion.
+        drop((reopened, survivor));
+        for deleted_id in deleted_ids {
+            let deleted = LocalBoard::new(sqlite.clone(), deleted_id)
+                .with_options(options.clone())
+                .read_write()
+                .open(host.clone())
+                .await?;
+            assert!(deleted.post(root, seed.clone()).await.is_err());
+            assert!(deleted.append(root, late_append.clone()).await.is_err());
+        }
+        assert_eq!(
+            legacy
+                .read_post(
+                    root,
+                    ReadPostRequest {
+                        message_id: legacy_metadata.message_id,
+                        offset_chars: 0,
+                        limit_chars: NonZeroU32::MAX,
+                    },
+                )
+                .await?,
+            PostContent {
+                metadata: legacy_metadata,
+                text: seed.text.clone(),
+                n_chars: seed.text.chars().count(),
+                next_offset_chars: seed.text.chars().count(),
+            }
+        );
+        legacy.post(root, after_deletion).await?;
+        let unopened_options = LocalBoardOptions {
+            storage_namespace: format!("unopened_{storage_namespace}"),
+        };
+        LocalAgentMessageBoard::delete_boards(&sqlite, &unopened_options, &[identity]).await?;
+        assert!(
+            !tokio::fs::try_exists(dir.path().join(format!(
+                "message_board_unopened_{storage_namespace}_1.sqlite"
+            )))
+            .await?
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
+            )
+            .fetch_all(&runtime_database)
+            .await
+            .unwrap(),
+            vec!["runtime_data".to_owned()]
+        );
+    }
+    Ok(())
+}
+
+#[path = "local_board/mcp_tests.rs"]
+mod mcp;
+
+#[path = "local_board/read_view_tests.rs"]
+mod read_view;

@@ -1,12 +1,15 @@
 use codex_core::config::Config;
+use codex_features::Feature;
+use codex_features::RuntimeAuthMode;
 use codex_http_client::HttpClient;
 use codex_http_client::HttpClientFactory;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::default_client::RESIDENCY_HEADER_NAME;
-use codex_login::default_client::create_client;
 use codex_login::default_client::create_client_with_chatgpt_cookies;
 use codex_login::default_client::default_headers;
+use codex_runtime_agent_instance::RuntimeAuthManager;
+use std::sync::Arc;
 
 use anyhow::Context;
 use serde::Serialize;
@@ -24,15 +27,15 @@ struct CachedChatGptClient {
     client: HttpClient,
 }
 
-static PSP_CHATGPT_CLIENT: LazyLock<Mutex<Option<CachedChatGptClient>>> =
+static CHATGPT_CLIENT: LazyLock<Mutex<Option<CachedChatGptClient>>> =
     LazyLock::new(|| Mutex::new(None));
 
-/// Reuse the default client while retaining its configured ChatGPT cookies.
-fn psp_chatgpt_client(factory: HttpClientFactory) -> HttpClient {
+/// Reuse the client and cookies without changing the caller's captured account policy.
+fn chatgpt_client(factory: HttpClientFactory) -> HttpClient {
     let residency = default_headers()
         .get(RESIDENCY_HEADER_NAME)
         .map(|value| value.as_bytes().to_vec());
-    let mut cached = PSP_CHATGPT_CLIENT
+    let mut cached = CHATGPT_CLIENT
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(cached_client) = cached.as_ref()
@@ -56,21 +59,59 @@ pub(crate) async fn chatgpt_get_request<T: DeserializeOwned>(
     config: &Config,
     path: String,
 ) -> anyhow::Result<T> {
-    chatgpt_get_request_with_timeout(config, path, /*timeout*/ None).await
+    let mut config = config.clone();
+    let (auth, runtime) = standalone_auth(&mut config).await?;
+    chatgpt_get_request_with_timeout(
+        &config,
+        &auth,
+        runtime.as_ref(),
+        path,
+        /*timeout*/ None,
+    )
+    .await
 }
 
-pub(crate) async fn chatgpt_get_request_with_timeout<T: DeserializeOwned>(
-    config: &Config,
-    path: String,
-    timeout: Option<Duration>,
-) -> anyhow::Result<T> {
-    let chatgpt_base_url = &config.chatgpt_base_url;
+pub(crate) async fn standalone_auth(
+    config: &mut Config,
+) -> anyhow::Result<(
+    CodexAuth,
+    Option<(Arc<RuntimeAuthManager>, RuntimeAuthMode)>,
+)> {
+    // Standalone commands create one owner. Freeze the caller's account policy before loading
+    // credentials; this temporary manager does not own later account changes.
+    config.application_network_policy = config
+        .application_network_policy
+        .clone()
+        .for_current_account();
+    if config.features.enabled(Feature::RuntimeAgentInstances) {
+        codex_model_provider::validate_runtime_destination(Some(&config.chatgpt_base_url))?;
+    }
     let auth_manager =
         AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
+    let runtime = if config.features.enabled(Feature::RuntimeAgentInstances)
+        && codex_runtime_agent_instance::is_openai_api_url(&config.chatgpt_base_url)
+    {
+        let installation_id = codex_core::resolve_installation_id(&config.codex_home).await?;
+        codex_core::build_runtime_auth_manager(config, auth_manager.clone(), &installation_id)
+            .map(|runtime| (runtime, config.runtime_auth_mode))
+    } else {
+        None
+    };
     let auth = auth_manager
         .auth()
         .await
         .ok_or_else(|| anyhow::anyhow!("ChatGPT auth not available"))?;
+    Ok((auth, runtime))
+}
+
+pub(crate) async fn chatgpt_get_request_with_timeout<T: DeserializeOwned>(
+    config: &Config,
+    auth: &CodexAuth,
+    runtime: Option<&(Arc<RuntimeAuthManager>, RuntimeAuthMode)>,
+    path: String,
+    timeout: Option<Duration>,
+) -> anyhow::Result<T> {
+    let chatgpt_base_url = &config.chatgpt_base_url;
     anyhow::ensure!(
         auth.uses_codex_backend(),
         "ChatGPT backend requests require Codex backend auth"
@@ -79,23 +120,22 @@ pub(crate) async fn chatgpt_get_request_with_timeout<T: DeserializeOwned>(
         auth.get_account_id().is_some(),
         "ChatGPT account ID not available, please re-run `codex login`"
     );
-
     let url = format!(
         "{}/{}",
         chatgpt_base_url.trim_end_matches('/'),
         path.trim_start_matches('/')
     );
 
-    let http_client_factory = config.http_client_factory();
-    let client = if http_client_factory.has_chatgpt_cookies() {
-        psp_chatgpt_client(http_client_factory)
-    } else {
-        create_client()
-    };
+    let (client, request_auth) = prepare_client_auth(config, auth, runtime, &url).await?;
     let mut request = client
         .get(&url)
         .headers(default_headers())
-        .headers(codex_model_provider::auth_provider_from_auth(&auth).to_auth_headers())
+        .headers(
+            request_auth
+                .auth
+                .apply_auth_headers(Default::default())
+                .await?,
+        )
         .header(OAI_PRODUCT_SKU_HEADER, CODEX_PRODUCT_SKU)
         .header("Content-Type", "application/json");
     if let Some(timeout) = timeout {
@@ -118,8 +158,8 @@ pub(crate) async fn chatgpt_get_request_with_timeout<T: DeserializeOwned>(
 
 /// Make a POST request to the ChatGPT backend API with an already-captured auth identity.
 ///
-/// Callers that bind other state to the auth snapshot should pass that same snapshot here rather
-/// than reacquiring auth while the request is in flight.
+/// Callers must capture `auth` and `config.application_network_policy` together and preserve
+/// that snapshot rather than reacquiring either while the request is in flight.
 pub(crate) async fn chatgpt_post_request_with_timeout<
     TResponse: DeserializeOwned,
     TRequest: Serialize + ?Sized,
@@ -130,6 +170,7 @@ pub(crate) async fn chatgpt_post_request_with_timeout<
     body: &TRequest,
     timeout: Duration,
     product_sku: &str,
+    runtime: Option<&(Arc<RuntimeAuthManager>, RuntimeAuthMode)>,
 ) -> anyhow::Result<TResponse> {
     anyhow::ensure!(
         auth.uses_codex_backend(),
@@ -145,16 +186,16 @@ pub(crate) async fn chatgpt_post_request_with_timeout<
         config.chatgpt_base_url.trim_end_matches('/'),
         path.trim_start_matches('/')
     );
-    let http_client_factory = config.http_client_factory();
-    let client = if http_client_factory.has_chatgpt_cookies() {
-        psp_chatgpt_client(http_client_factory)
-    } else {
-        create_client()
-    };
+    let (client, request_auth) = prepare_client_auth(config, auth, runtime, &url).await?;
     let response = client
         .post(&url)
         .headers(default_headers())
-        .headers(codex_model_provider::auth_provider_from_auth(auth).to_auth_headers())
+        .headers(
+            request_auth
+                .auth
+                .apply_auth_headers(Default::default())
+                .await?,
+        )
         .header(OAI_PRODUCT_SKU_HEADER, product_sku)
         .header("Content-Type", "application/json")
         .timeout(timeout)
@@ -174,3 +215,28 @@ pub(crate) async fn chatgpt_post_request_with_timeout<
         anyhow::bail!("Request failed with status {status}: {body}")
     }
 }
+
+/// Keep request credentials and the transport bound to the same account snapshot.
+async fn prepare_client_auth(
+    config: &Config,
+    auth: &CodexAuth,
+    runtime: Option<&(Arc<RuntimeAuthManager>, RuntimeAuthMode)>,
+    url: &str,
+) -> anyhow::Result<(HttpClient, codex_model_provider::ResolvedProviderAuth)> {
+    if runtime.is_some() {
+        codex_model_provider::validate_runtime_destination(Some(url))?;
+    }
+    let resolved = codex_model_provider::auth_provider_for_request(
+        auth,
+        runtime,
+        /*headers*/ &Default::default(),
+    )
+    .await?;
+    let factory = resolved.bind_http_client_factory(config.http_client_factory())?;
+    let client = chatgpt_client(factory);
+    Ok((client, resolved))
+}
+
+#[cfg(test)]
+#[path = "chatgpt_client_runtime_auth_tests.rs"]
+mod runtime_auth_tests;

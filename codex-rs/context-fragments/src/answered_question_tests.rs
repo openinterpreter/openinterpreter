@@ -1,6 +1,7 @@
 //! Bounds, Unicode handling, and escaping for async question replies.
 
 use super::*;
+use codex_protocol_test_support::ContentItemTestExt;
 use pretty_assertions::assert_eq;
 
 #[test]

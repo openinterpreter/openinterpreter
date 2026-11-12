@@ -1,3 +1,6 @@
+use std::io::Read;
+use std::io::Seek;
+use std::io::SeekFrom;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -9,6 +12,10 @@ use codex_exec_server_protocol::JSONRPCResponse;
 use codex_exec_server_protocol::RequestId;
 use futures::SinkExt;
 use futures::StreamExt;
+use opentelemetry::trace::SpanId;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_sdk::trace::InMemorySpanExporter;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use pretty_assertions::assert_eq;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
@@ -20,7 +27,13 @@ use tokio_tungstenite::accept_async;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::task::AbortOnDropHandle;
+use tracing::instrument::WithSubscriber;
+use tracing_subscriber::Layer;
+use tracing_subscriber::filter::filter_fn;
+use tracing_subscriber::layer::SubscriberExt;
+use uuid::Uuid;
 
+use super::HARNESS_KEY_VALIDATION_TIMEOUT;
 use super::HarnessKeyValidator;
 use super::MAX_FAILED_NOISE_HANDSHAKES;
 use super::MAX_HARNESS_KEY_AUTHORIZATION_BYTES;
@@ -28,7 +41,7 @@ use super::NOISE_HANDSHAKE_FAILURE_COOLDOWN;
 use super::RendezvousDisconnectReason;
 use super::run_multiplexed_environment;
 use crate::ExecServerError;
-use crate::ExecServerRuntimePaths;
+use crate::ExecServerRuntimeOptions;
 use crate::connection::JsonRpcConnectionEvent;
 use crate::noise_channel::InitiatorHandshake;
 use crate::noise_channel::NoiseChannelIdentity;
@@ -140,7 +153,7 @@ async fn missing_pong_disconnects_physical_relay() -> Result<()> {
 
     let environment_task = tokio::spawn(run_multiplexed_environment(
         environment_websocket,
-        ConnectionProcessor::new(ExecServerRuntimePaths::new(
+        ConnectionProcessor::new(ExecServerRuntimeOptions::new(
             std::env::current_exe()?,
             /*codex_linux_sandbox_exe*/ None,
         )?),
@@ -171,7 +184,7 @@ async fn pong_keeps_physical_relay_connected() -> Result<()> {
 
     let environment_task = tokio::spawn(run_multiplexed_environment(
         environment_websocket,
-        ConnectionProcessor::new(ExecServerRuntimePaths::new(
+        ConnectionProcessor::new(ExecServerRuntimeOptions::new(
             std::env::current_exe()?,
             /*codex_linux_sandbox_exe*/ None,
         )?),
@@ -220,6 +233,7 @@ impl HarnessKeyValidator for BlockingValidator {
         &self,
         _harness_public_key: &NoiseChannelPublicKey,
         _authorization: &str,
+        _stream_id: Option<Uuid>,
     ) -> impl std::future::Future<Output = Result<(), ExecServerError>> + Send {
         let calls = Arc::clone(&self.calls);
         let release = Arc::clone(&self.release);
@@ -227,6 +241,41 @@ impl HarnessKeyValidator for BlockingValidator {
             calls.fetch_add(1, Ordering::SeqCst);
             release.notified().await;
             Ok(())
+        }
+    }
+}
+
+#[derive(Clone)]
+struct DiagnosticValidator {
+    blocking: BlockingValidator,
+    timeout_started: Arc<Notify>,
+}
+
+impl HarnessKeyValidator for DiagnosticValidator {
+    async fn validate_harness_key(
+        &self,
+        harness_public_key: &NoiseChannelPublicKey,
+        authorization: &str,
+        stream_id: Option<Uuid>,
+    ) -> Result<(), ExecServerError> {
+        match authorization {
+            "reset-authorization-secret" | "timeout-authorization-secret" => {
+                assert!(stream_id.is_some());
+                self.timeout_started.notify_one();
+                std::future::pending().await
+            }
+            "http-authorization-secret" => Err(ExecServerError::EnvironmentRegistryHttp {
+                status: http::StatusCode::SERVICE_UNAVAILABLE,
+                code: None,
+                message: "registry-response-secret".to_string(),
+            }),
+            _ => {
+                // The existing healthy streams use non-UUID identifiers.
+                assert_eq!(stream_id, None);
+                self.blocking
+                    .validate_harness_key(harness_public_key, authorization, stream_id)
+                    .await
+            }
         }
     }
 }
@@ -245,7 +294,7 @@ async fn processor_exit_resets_noise_harness_stream() -> Result<()> {
     let environment_task = AbortOnDropHandle::new(tokio::spawn(run_multiplexed_environment(
         environment_websocket,
         ObservedRegistration(
-            ConnectionProcessor::new(ExecServerRuntimePaths::new(
+            ConnectionProcessor::new(ExecServerRuntimeOptions::new(
                 std::env::current_exe()?,
                 /*codex_linux_sandbox_exe*/ None,
             )?),
@@ -315,7 +364,7 @@ async fn pending_harness_key_validation_does_not_block_new_handshakes() -> Resul
     let calls = Arc::new(AtomicUsize::new(0));
     let environment_task = tokio::spawn(run_multiplexed_environment(
         environment_websocket,
-        ConnectionProcessor::new(ExecServerRuntimePaths::new(
+        ConnectionProcessor::new(ExecServerRuntimeOptions::new(
             std::env::current_exe()?,
             /*codex_linux_sandbox_exe*/ None,
         )?),
@@ -369,7 +418,7 @@ async fn duplicate_handshakes_pause_admission_without_disconnecting() -> Result<
     let release = Arc::new(Notify::new());
     let environment_task = tokio::spawn(run_multiplexed_environment(
         environment_websocket,
-        ConnectionProcessor::new(ExecServerRuntimePaths::new(
+        ConnectionProcessor::new(ExecServerRuntimeOptions::new(
             std::env::current_exe()?,
             /*codex_linux_sandbox_exe*/ None,
         )?),
@@ -478,7 +527,7 @@ async fn oversized_harness_authorization_is_rejected_before_validation() -> Resu
     let calls = Arc::new(AtomicUsize::new(0));
     let environment_task = tokio::spawn(run_multiplexed_environment(
         environment_websocket,
-        ConnectionProcessor::new(ExecServerRuntimePaths::new(
+        ConnectionProcessor::new(ExecServerRuntimeOptions::new(
             std::env::current_exe()?,
             /*codex_linux_sandbox_exe*/ None,
         )?),
@@ -578,14 +627,46 @@ async fn malformed_handshakes_preserve_active_streams_and_admission_recovers() -
     assert_eq!(response.stream_id, healthy_stream_id);
     let mut healthy_transport = handshake.finish(&response.into_handshake_payload()?)?;
 
+    let healthy_stream_id = "healthy";
+    let prologue =
+        noise_channel_prologue(ENVIRONMENT_ID, EXECUTOR_REGISTRATION_ID, healthy_stream_id);
+    let (handshake, request) = InitiatorHandshake::start(
+        &harness_identity,
+        &environment_identity.public_key(),
+        &prologue,
+        b"authorization",
+    )?;
+    release.notify_one();
+    harness_websocket
+        .send(Message::Binary(
+            encode_relay_message_frame(&RelayMessageFrame::handshake(
+                healthy_stream_id.to_string(),
+                request,
+            ))
+            .into(),
+        ))
+        .await?;
+    let response = timeout(
+        Duration::from_secs(1),
+        next_relay_frame(&mut harness_websocket),
+    )
+    .await??;
+    assert_eq!(response.stream_id, healthy_stream_id);
+    let mut healthy_transport = handshake.finish(&response.into_handshake_payload()?)?;
+
+    let valid_stream_id = Uuid::new_v4().to_string();
     for attempt in 0..MAX_FAILED_NOISE_HANDSHAKES {
-        let stream_id = format!("malformed-{attempt}");
+        let stream_id = if attempt == 0 {
+            valid_stream_id.to_uppercase()
+        } else {
+            format!("malformed-{attempt}")
+        };
         let prologue = noise_channel_prologue(ENVIRONMENT_ID, EXECUTOR_REGISTRATION_ID, &stream_id);
         let (_handshake, mut request) = InitiatorHandshake::start(
             &harness_identity,
             &environment_identity.public_key(),
             &prologue,
-            b"authorization",
+            b"handshake-authorization-secret",
         )?;
         let last_byte = request.last_mut().expect("handshake request is not empty");
         *last_byte ^= 1;
@@ -697,7 +778,7 @@ async fn early_data_during_validation_pauses_admission_without_disconnecting() -
     let harness_identity = NoiseChannelIdentity::generate()?;
     let environment_task = tokio::spawn(run_multiplexed_environment(
         environment_websocket,
-        ConnectionProcessor::new(ExecServerRuntimePaths::new(
+        ConnectionProcessor::new(ExecServerRuntimeOptions::new(
             std::env::current_exe()?,
             /*codex_linux_sandbox_exe*/ None,
         )?),

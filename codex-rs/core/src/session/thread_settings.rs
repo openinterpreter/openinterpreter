@@ -2,8 +2,10 @@
 //! with checkpoints written directly to storage.
 
 use super::session::Session;
+use super::session::SessionSettingsCommit;
 use super::session::SessionSettingsUpdate;
 use super::step_settings::StepSettingsUpdate;
+use crate::WithTurnExtensionData;
 use crate::config::ConstraintResult;
 use codex_history::RolloutItem;
 use codex_protocol::protocol::CodexErrorInfo;
@@ -56,8 +58,40 @@ pub(super) async fn update(
     }
 }
 
+/// Applies standalone thread settings. The caller holds the persistence permit through notification.
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "the active-turn guard makes continuation invalidation atomic with turn admission"
+)]
+pub(super) async fn update(
+    session: &Session,
+    overrides: impl Into<WithTurnExtensionData<ThreadSettingsOverrides>>,
+    reply_requested: bool,
+) -> ConstraintResult<SessionSettingsCommit> {
+    let mut updates = prepare_update(overrides, &session.services.selected_capability_roots);
+    updates.host_acceptance_in_reply = reply_requested;
+    let commit = session.update_settings(updates).await?;
+    let active_turn = session.active_turn.lock().await;
+    // A registered running task retains its lineage so it can be recovered after a daemon
+    // restart. Reservations and finishing turns have no interrupted work to continue.
+    if active_turn
+        .as_ref()
+        .is_none_or(|active_turn| active_turn.task.is_none())
+    {
+        session.state.lock().await.last_started_turn_id = None;
+    }
+    Ok(commit)
+}
+
 /// Converts protocol overrides into the internal settings update shape.
-pub(super) fn prepare_update(overrides: ThreadSettingsOverrides) -> SessionSettingsUpdate {
+pub(super) fn prepare_update(
+    overrides: impl Into<WithTurnExtensionData<ThreadSettingsOverrides>>,
+    roots: &[SelectedCapabilityRoot],
+) -> SessionSettingsUpdate {
+    let WithTurnExtensionData {
+        request: overrides,
+        turn_extension_init,
+    } = overrides.into();
     let ThreadSettingsOverrides {
         environments,
         runtime_workspace_roots,
@@ -77,6 +111,7 @@ pub(super) fn prepare_update(overrides: ThreadSettingsOverrides) -> SessionSetti
         disabled_plugin_ids,
     } = overrides;
     SessionSettingsUpdate {
+        turn_extension_init,
         step_settings: StepSettingsUpdate {
             model,
             effort,

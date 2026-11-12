@@ -1,6 +1,7 @@
 //! Deterministic replay from raw trace events to `RolloutTrace`.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -10,15 +11,19 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+use anyhow::ensure;
+use serde::de::IgnoredAny;
 use serde_json::Value;
 
 use crate::bundle::MANIFEST_FILE_NAME;
 use crate::bundle::RAW_EVENT_LOG_FILE_NAME;
 use crate::bundle::REDUCED_TRACE_SCHEMA_VERSION;
+use crate::bundle::TRACE_MANIFEST_SCHEMA_VERSION;
 use crate::bundle::TraceBundleManifest;
 use crate::model::ExecutionStatus;
 use crate::model::RolloutTrace;
 use crate::payload::RawPayloadRef;
+use crate::raw_event::RAW_TRACE_EVENT_SCHEMA_VERSION;
 use crate::raw_event::RawTraceEvent;
 use crate::raw_event::RawTraceEventPayload;
 
@@ -31,6 +36,10 @@ pub(crate) mod test_support;
 mod thread;
 mod tool;
 
+#[cfg(test)]
+#[path = "acceptance_tests.rs"]
+mod acceptance_tests;
+
 use self::code_cell::PendingCodeCellLifecycleEvent;
 use self::code_cell::PendingCodeCellStart;
 use self::code_cell::StartedCodeCell;
@@ -41,11 +50,19 @@ use self::tool::PendingAgentInteractionEdge;
 use self::tool::ToolCallStarted;
 
 /// Replays a local trace bundle into a reduced rollout graph.
+/// A valid prefix has `recording_complete = false`; malformed events or missing
+/// or invalid referenced payloads return an error.
 pub fn replay_bundle(bundle_dir: impl AsRef<Path>) -> Result<RolloutTrace> {
     let bundle_dir = bundle_dir.as_ref();
     let manifest: TraceBundleManifest =
         serde_json::from_reader(File::open(bundle_dir.join(MANIFEST_FILE_NAME))?)
             .with_context(|| format!("read {}", bundle_dir.join(MANIFEST_FILE_NAME).display()))?;
+    // Earlier bundles cannot distinguish accepted output from transport output.
+    ensure!(
+        manifest.schema_version == TRACE_MANIFEST_SCHEMA_VERSION,
+        "trace schema {} cannot establish accepted history; use its matching reducer or record a new bundle",
+        manifest.schema_version
+    );
     let mut reducer = TraceReducer {
         rollout: RolloutTrace::new(
             REDUCED_TRACE_SCHEMA_VERSION,
@@ -57,30 +74,136 @@ pub fn replay_bundle(bundle_dir: impl AsRef<Path>) -> Result<RolloutTrace> {
         bundle_dir: bundle_dir.to_path_buf(),
         next_conversation_item_ordinal: 1,
         next_terminal_operation_ordinal: 1,
+        terminal_ids_by_process: BTreeMap::new(),
+        process_ids_by_terminal: BTreeMap::new(),
         thread_conversation_snapshots: BTreeMap::new(),
         pending_compaction_replacement_item_ids: BTreeMap::new(),
         code_cell_ids_by_runtime: BTreeMap::new(),
         pending_code_cell_starts: BTreeMap::new(),
         pending_code_cell_lifecycle_events: BTreeMap::new(),
         pending_agent_interaction_edges: Vec::new(),
+        first_acceptances: BTreeMap::new(),
+        receipt_only_items: BTreeMap::new(),
     };
 
     let event_log_path = bundle_dir.join(RAW_EVENT_LOG_FILE_NAME);
     let event_log = File::open(&event_log_path)
         .with_context(|| format!("open trace event log {}", event_log_path.display()))?;
-    for (line_index, line) in BufReader::new(event_log).lines().enumerate() {
-        let line = line.with_context(|| format!("read trace event line {}", line_index + 1))?;
+    let mut event_log = BufReader::new(event_log);
+    let mut event_count = 0;
+    let mut line = String::new();
+    for line_number in 1.. {
+        line.clear();
+        if event_log
+            .read_line(&mut line)
+            .with_context(|| format!("read trace event line {line_number}"))?
+            == 0
+        {
+            break;
+        }
         if line.trim().is_empty() {
             continue;
         }
+        ensure!(
+            !reducer.rollout.recording_complete,
+            "trace event after recording completed"
+        );
         let event: RawTraceEvent = serde_json::from_str(&line)
-            .with_context(|| format!("parse trace event line {}", line_index + 1))?;
+            .with_context(|| format!("parse trace event line {line_number}"))?;
+        ensure!(
+            event.schema_version == RAW_TRACE_EVENT_SCHEMA_VERSION,
+            "unsupported trace event schema {} at line {line_number}",
+            event.schema_version,
+        );
+        event_count += 1;
+        ensure!(
+            event.seq == event_count,
+            "missing or reordered trace event {event_count}"
+        );
+        ensure!(
+            event.rollout_id == reducer.rollout.rollout_id,
+            "trace event belongs to another rollout"
+        );
+        // A short write or copy can leave the entire marker except its final newline.
+        // Only the writer's complete record establishes clean closure.
+        if matches!(event.payload, RawTraceEventPayload::RecordingCompleted)
+            && !line.ends_with('\n')
+        {
+            break;
+        }
         reducer.apply_event(event)?;
+    }
+    for payload in reducer.rollout.raw_payloads.values() {
+        // IgnoredAny checks JSON structure but skips UTF-8 validation inside strings.
+        // Read one body as text so opaque payloads get both checks without a JSON tree.
+        let body = std::fs::read_to_string(reducer.bundle_dir.join(&payload.path))
+            .with_context(|| format!("read payload {}", payload.raw_payload_id))?;
+        serde_json::from_str::<IgnoredAny>(&body)
+            .with_context(|| format!("invalid payload {}", payload.raw_payload_id))?;
     }
     // Spawn edges prefer the child task message as their target, but a child can
     // fail before that message is ever reduced. Only after replaying the whole
     // bundle do we know which spawn deliveries need the child-thread fallback.
     reducer.resolve_pending_spawn_edge_fallbacks()?;
+    // Cell starts can be queued until their model output arrives. Link only
+    // materialized cells, after both sides of the dispatch have been replayed.
+    for tool in reducer.rollout.tool_calls.values_mut() {
+        if tool.requester == crate::ToolCallRequester::Model
+            && matches!(&tool.kind, crate::ToolCallKind::Other { name } if name == codex_code_mode::PUBLIC_TOOL_NAME)
+            && let Some(call_id) = &tool.model_visible_call_id
+            && let Some(cell) = reducer.rollout.code_cells.get(
+                &TraceReducer::reduced_code_cell_id_for_model_visible_call(call_id),
+            )
+            && cell.thread_id == tool.thread_id
+            && tool
+                .started_by_codex_turn_id
+                .as_ref()
+                .is_none_or(|turn| turn == &cell.codex_turn_id)
+        {
+            tool.started_code_cell_id = Some(cell.code_cell_id.clone());
+        }
+    }
+
+    // Acceptance and response records can arrive in either order. Select history
+    // after replay, retaining discarded attempts elsewhere in the graph.
+    // Request/checkpoint items include inherited context without local acceptance.
+    for item in reducer.rollout.conversation_items.values_mut() {
+        if let Some(&(at_unix_ms, seq)) = item
+            .responses_item_id
+            .as_ref()
+            .and_then(|id| reducer.first_acceptances.get(&item.thread_id)?.get(id))
+        {
+            item.accepted_at_unix_ms = Some(at_unix_ms);
+            item.accepted_seq = Some(seq);
+        }
+    }
+    let context_item_ids: BTreeSet<_> = reducer
+        .rollout
+        .inference_calls
+        .values()
+        .flat_map(|call| call.request_item_ids.iter())
+        .chain(reducer.rollout.compactions.values().flat_map(|checkpoint| {
+            checkpoint
+                .input_item_ids
+                .iter()
+                .chain(&checkpoint.replacement_item_ids)
+                .chain(std::iter::once(&checkpoint.marker_item_id))
+        }))
+        .collect();
+    for thread in reducer.rollout.threads.values_mut() {
+        let accepted_ids = reducer
+            .first_acceptances
+            .remove(&thread.thread_id)
+            .unwrap_or_default();
+        thread.conversation_item_ids.retain(|id| {
+            let item = &reducer.rollout.conversation_items[id];
+            context_item_ids.contains(id)
+                || item
+                    .responses_item_id
+                    .as_ref()
+                    .is_some_and(|source_id| accepted_ids.contains_key(source_id))
+        });
+    }
 
     Ok(reducer.rollout)
 }
@@ -88,14 +211,17 @@ pub fn replay_bundle(bundle_dir: impl AsRef<Path>) -> Result<RolloutTrace> {
 struct TraceReducer {
     rollout: RolloutTrace,
     bundle_dir: PathBuf,
+    /// First (wall time, sequence) by receiving thread and Responses item ID.
+    first_acceptances: BTreeMap<String, BTreeMap<String, (i64, crate::RawEventSeq)>>,
+    /// Delivered items awaiting their first model-visible sighting, keyed by thread and wire ID.
+    receipt_only_items: BTreeMap<(String, String), String>,
     next_conversation_item_ordinal: u64,
     next_terminal_operation_ordinal: u64,
-    /// Last model-visible conversation snapshot per thread.
-    ///
-    /// Requests and responses both advance this sequence because both are
-    /// model-facing payloads. Repeated request snapshots reuse item IDs only
-    /// when the same normalized item appears at the same position; identical
-    /// content at a new position must remain a distinct conversation item.
+    /// Latest session for each thread-local runtime handle; each exec replaces it.
+    terminal_ids_by_process: BTreeMap<(String, String), String>,
+    /// Retains the begin/end consistency check when a handle is later reused.
+    process_ids_by_terminal: BTreeMap<String, String>,
+    /// Latest request and its response items, used to reconcile the next request.
     thread_conversation_snapshots: BTreeMap<String, Vec<String>>,
     /// Replacement snapshot installed by compaction but not yet seen in a sampling request.
     ///
@@ -142,7 +268,7 @@ impl TraceReducer {
         let payload_path = self.bundle_dir.join(&payload.path);
         let file = File::open(&payload_path)
             .with_context(|| format!("open payload {}", payload.raw_payload_id))?;
-        serde_json::from_reader(file)
+        serde_json::from_reader(BufReader::new(file))
             .with_context(|| format!("parse payload {}", payload.raw_payload_id))
     }
 
@@ -155,6 +281,9 @@ impl TraceReducer {
         }
 
         match event.payload {
+            RawTraceEventPayload::RecordingCompleted => {
+                self.rollout.recording_complete = true;
+            }
             RawTraceEventPayload::RolloutStarted {
                 trace_id,
                 root_thread_id,
@@ -182,6 +311,9 @@ impl TraceReducer {
             RawTraceEventPayload::ThreadEnded { thread_id, status } => {
                 self.end_thread(event.seq, event.wall_time_unix_ms, thread_id, status)?;
             }
+            RawTraceEventPayload::ThreadResumed { thread_id } => {
+                self.resume_thread(&thread_id)?;
+            }
             RawTraceEventPayload::CodexTurnStarted {
                 codex_turn_id,
                 thread_id,
@@ -204,6 +336,29 @@ impl TraceReducer {
                     codex_turn_id,
                     status,
                 )?;
+            }
+            RawTraceEventPayload::HistoryItemAccepted {
+                item_id,
+                agent_message_payload,
+            } => {
+                let thread_id = event
+                    .thread_id
+                    .context("history acceptance has no thread")?;
+                self.thread_mut(&thread_id)?;
+                if let Some(payload) = agent_message_payload {
+                    self.record_agent_receipt(
+                        &thread_id,
+                        event.codex_turn_id,
+                        event.wall_time_unix_ms,
+                        &item_id,
+                        &payload,
+                    )?;
+                }
+                self.first_acceptances
+                    .entry(thread_id)
+                    .or_default()
+                    .entry(item_id)
+                    .or_insert((event.wall_time_unix_ms, event.seq));
             }
             RawTraceEventPayload::InferenceStarted {
                 inference_call_id,
@@ -267,14 +422,22 @@ impl TraceReducer {
             } => {
                 self.assign_mcp_tool_call_correlation(tool_call_id, mcp_call_id)?;
             }
+            RawTraceEventPayload::StdinTargetResolved {
+                tool_call_id,
+                exec_tool_call_id,
+            } => {
+                self.resolve_stdin_target(&tool_call_id, &exec_tool_call_id)?;
+            }
             RawTraceEventPayload::ToolCallRuntimeStarted {
                 tool_call_id,
+                kind,
                 runtime_payload,
             } => {
                 self.start_tool_runtime_observation(
                     event.seq,
                     event.wall_time_unix_ms,
                     tool_call_id,
+                    kind,
                     runtime_payload,
                 )?;
             }
@@ -316,7 +479,7 @@ impl TraceReducer {
                     "code cell start",
                 )?;
                 let reduced_code_cell_id =
-                    self.reduced_code_cell_id_for_model_visible_call(&model_visible_call_id);
+                    Self::reduced_code_cell_id_for_model_visible_call(&model_visible_call_id);
                 self.record_runtime_code_cell_id(
                     &thread_id,
                     &runtime_cell_id,
@@ -338,7 +501,7 @@ impl TraceReducer {
             RawTraceEventPayload::CodeCellInitialResponse {
                 runtime_cell_id,
                 status,
-                ..
+                response_payload,
             } => {
                 let thread_id = self.code_cell_event_thread_id(
                     event.thread_id,
@@ -357,12 +520,13 @@ impl TraceReducer {
                     code_cell_id,
                     runtime_cell_id,
                     status,
+                    response_payload,
                 )?;
             }
             RawTraceEventPayload::CodeCellEnded {
                 runtime_cell_id,
                 status,
-                ..
+                response_payload,
             } => {
                 let thread_id = self.code_cell_event_thread_id(
                     event.thread_id,
@@ -380,6 +544,7 @@ impl TraceReducer {
                     event.wall_time_unix_ms,
                     code_cell_id,
                     status,
+                    response_payload,
                 )?;
             }
             RawTraceEventPayload::CompactionRequestStarted {
@@ -476,7 +641,9 @@ impl TraceReducer {
             }
         }
 
-        Ok(())
+        // Compaction appends input and replacement histories separately. Pending cells
+        // must see both before finding their source and outputs in the ordered history.
+        self.flush_pending_code_cell_starts()
     }
 
     fn insert_raw_payload(&mut self, payload: &RawPayloadRef) {

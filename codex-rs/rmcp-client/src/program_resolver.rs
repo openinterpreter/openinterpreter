@@ -69,6 +69,7 @@ mod tests {
     use super::*;
     use crate::utils::create_env_for_mcp_server;
     use anyhow::Result;
+    #[cfg(windows)]
     use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
@@ -79,24 +80,10 @@ mod tests {
     #[tokio::test]
     async fn test_unix_executes_script_without_extension() -> Result<()> {
         let env = TestExecutableEnv::new()?;
-        // Linux can transiently report ETXTBSY while the freshly written test
-        // script is becoming executable on the backing filesystem.
-        let mut retries = 0;
-        let output = loop {
-            let mut cmd = Command::new(&env.program_name);
-            cmd.envs(&env.mcp_env);
-
-            let output = cmd.output().await;
-            if !output
-                .as_ref()
-                .is_err_and(|err| err.kind() == std::io::ErrorKind::ExecutableFileBusy)
-                || retries == 2
-            {
-                break output;
-            }
-            retries += 1;
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        };
+        let output = Command::new(&env.program_name)
+            .envs(&env.mcp_env)
+            .output()
+            .await;
 
         assert!(
             output.is_ok(),
@@ -214,19 +201,9 @@ mod tests {
             #[cfg(unix)]
             {
                 let file = dir.join(Self::TEST_PROGRAM);
-                fs::write(&file, "#!/bin/sh\nexit 0")?;
-                Self::set_executable(&file)?;
+                codex_utils_cargo_bin::write_executable(&file, "#!/bin/sh\nexit 0")?;
             }
 
-            Ok(())
-        }
-
-        #[cfg(unix)]
-        fn set_executable(path: &Path) -> Result<()> {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(path)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(path, perms)?;
             Ok(())
         }
 

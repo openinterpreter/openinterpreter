@@ -1,6 +1,6 @@
 ---
 source: tui/src/chatwidget/tests/app_server.rs
-expression: "format!(\"transcript:\\n{transcript}\\nfooter:\\n{footer}\\ntitle: {title}\")"
+expression: "normalize_snapshot_paths(format!(\"transcript:\\n{transcript}\\nfooter:\\n{footer}\\ntitle: {title}\"))"
 ---
 transcript:
 

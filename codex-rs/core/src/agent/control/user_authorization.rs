@@ -11,26 +11,36 @@ use super::LocalAgentControl;
 use crate::codex_thread::GuardianRootMessage;
 use crate::codex_thread::GuardianRootSnapshot;
 use crate::compact::is_summary_message;
-use crate::context::GuardianContextMode;
+use crate::context::ContextualUserFragment;
 use crate::context::GuardianReviewEvidence;
+use crate::context::UserGoalUpdate;
 use crate::context::is_contextual_user_fragment;
+use crate::context_manager::ContextManager;
 use crate::event_mapping::parse_turn_item;
-use crate::guardian::GUARDIAN_MAX_ROOT_MESSAGE_TOKENS;
-use crate::guardian::guardian_truncate_text;
+use codex_guardian_context::RootAssistantCandidate;
+use codex_guardian_context::RootAssistantContent;
+use codex_guardian_context::RootConversationCandidates;
+use codex_guardian_context::RootConversationInput;
+use codex_guardian_context::RootConversationSource;
+use codex_guardian_context::RootDeliveredMessage;
+use codex_guardian_context::RootMessageCandidate;
+use codex_guardian_context::RootRetainedAssistant;
 use codex_history::ReconciledRetainedContext;
 use codex_history::RetainedContextEntry;
 use codex_history::RetainedContextOrder;
 use codex_history::RetainedUserMessage;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
-use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::MultiAgentVersion;
 
-const MAX_ROOT_MESSAGES: usize = 8;
+struct CapturedRootConversation {
+    history: ContextManager,
+    handoff_boundaries: Vec<RetainedContextOrder>,
+}
 
 impl LocalAgentControl {
     /// Returns bounded root conversation and authorization state for a MultiAgent V2 worker.
@@ -38,17 +48,43 @@ impl LocalAgentControl {
         &self,
         thread_id: ThreadId,
     ) -> Option<GuardianRootSnapshot> {
-        let root_thread_id = self.state.agent_id_for_path(&AgentPath::root())?;
+        let root_thread_id = self
+            .runtime
+            .registry
+            .agent_id_for_path(&AgentPath::root())?;
         if root_thread_id == thread_id {
             return None;
         }
-        let manager = self.upgrade().ok()?;
+        let manager = self.runtime.upgrade().ok()?;
         let root_thread = manager.get_thread(root_thread_id).await.ok()?;
         if root_thread.multi_agent_version() != Some(MultiAgentVersion::V2) {
             return None;
         }
 
+        let worker_path = root_thread
+            .enabled(codex_features::Feature::GuardianRootHandoffContext)
+            .then(|| {
+                self.runtime
+                    .registry
+                    .agent_metadata_for_thread(thread_id)?
+                    .agent_path
+            })
+            .flatten();
         let root_history = root_thread.session.clone_history().await;
+        let handoff_boundaries = if let Some(worker) = worker_path {
+            super::root_handoff::handoff_boundaries(
+                root_history.annotated_items(),
+                &worker,
+                root_thread
+                    .config()
+                    .await
+                    .multi_agent_v2
+                    .tool_namespace
+                    .as_deref(),
+            )
+        } else {
+            Vec::new()
+        };
         let history = root_history.conversation_history_snapshot();
         // Join calls to host-confirmed outputs in this snapshot. Older outputs without
         // captured text cannot establish what was sent, including after a hook rewrite.

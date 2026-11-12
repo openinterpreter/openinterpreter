@@ -29,6 +29,7 @@ async fn hosted_plugin_runtime_forwards_thread_originator() -> Result<(), Box<dy
             "codex_work_desktop",
             /*ready_selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
+            /*executor_capability_discovery_v2*/ None,
         ))
         .await;
     let [
@@ -53,3 +54,8 @@ async fn hosted_plugin_runtime_forwards_thread_originator() -> Result<(), Box<dy
 
     Ok(())
 }
+
+#[path = "event_stream_tests.rs"]
+mod event_stream_tests;
+#[path = "stream_manager_tests.rs"]
+mod stream_manager_tests;

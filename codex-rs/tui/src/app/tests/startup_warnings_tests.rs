@@ -28,7 +28,6 @@ fn insert_splash(app: &mut App, tui: &mut tui::Tui) {
             /*is_first_event*/ false,
             /*tooltip_override*/ None,
             /*auth_plan*/ None,
-            /*show_fast_status*/ false,
         )),
     );
 }
@@ -39,6 +38,103 @@ fn drain_history(app: &mut App, tui: &mut tui::Tui, events: &mut UnboundedReceiv
             app.insert_history_cell(tui, cell);
         }
     }
+}
+
+#[tokio::test]
+async fn deprecation_delivery_deduplicates_retained_transcript() -> Result<()> {
+    let (mut app, mut events, _op_rx) = make_test_app_with_channels().await;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    tui.set_owned_screen(/*owned*/ false)?;
+    let notice = ServerNotification::DeprecationNotice(
+        codex_app_server_protocol::DeprecationNoticeNotification {
+            summary: "`legacy_option` is deprecated.".into(),
+            details: Some("Remove it from your configuration.".into()),
+        },
+    );
+    app.chat_widget
+        .handle_server_notification(notice.clone(), /*replay_kind*/ None);
+    drain_history(&mut app, &mut tui, &mut events);
+    app.chat_widget.open_warnings(&app.transcript_cells);
+    app.chat_widget.handle_key_event(KeyCode::Esc.into());
+    app.insert_history_cell(
+        &mut tui,
+        Box::new(UserHistoryCell {
+            message: "Hello\nPlease say hello.".into(),
+            text_elements: Vec::new(),
+            local_image_paths: Vec::new(),
+            remote_image_urls: Vec::new(),
+            presentation: Default::default(),
+        }),
+    );
+    app.open_transcript_overlay(&mut tui);
+    // Deliver both duplicates before draining: insertion must not depend on frame timing.
+    for replay_kind in [None, Some(crate::chatwidget::ReplayKind::ThreadSnapshot)] {
+        app.chat_widget
+            .handle_server_notification(notice.clone(), replay_kind);
+    }
+    drain_history(&mut app, &mut tui, &mut events);
+    assert_eq!(app.transcript_cells.len(), 2);
+    assert_eq!(history_cell::warning_count(&app.transcript_cells), 1);
+    let area = Rect::new(
+        /*x*/ 0, /*y*/ 0, /*width*/ 80, /*height*/ 12,
+    );
+    let mut buffer = Buffer::empty(area);
+    let Some(Overlay::Transcript(overlay)) = app.overlay.as_mut() else {
+        panic!("expected transcript")
+    };
+    crate::terminal_palette::with_test_default_colors(/*colors*/ None, || {
+        overlay.render(area, &mut buffer);
+    });
+    insta::assert_snapshot!("deduplicated_deprecation_transcript", format!("{buffer:?}"));
+
+    for (summary, details) in [
+        ("`legacy_option` is deprecated.", None),
+        ("`legacy_option` is deprecated.", Some("Updated guidance.")),
+        ("Another deprecated setting.", Some("Updated guidance.")),
+    ] {
+        app.chat_widget.handle_server_notification(
+            ServerNotification::DeprecationNotice(
+                codex_app_server_protocol::DeprecationNoticeNotification {
+                    summary: summary.into(),
+                    details: details.map(str::to_owned),
+                },
+            ),
+            /*replay_kind*/ None,
+        );
+    }
+    drain_history(&mut app, &mut tui, &mut events);
+    assert_eq!(app.transcript_cells.len(), 5);
+    assert_eq!(history_cell::warning_count(&app.transcript_cells), 2);
+    assert_eq!(
+        history_cell::warning_entries(&app.transcript_cells)
+            .into_iter()
+            .map(|entry| entry.details)
+            .collect::<Vec<_>>(),
+        vec![
+            "`legacy_option` is deprecated.\nRemove it from your configuration.\n\n`legacy_option` is deprecated.\nUpdated guidance.",
+            "Another deprecated setting.\nUpdated guidance.",
+        ],
+    );
+
+    app.reset_app_ui_state_after_clear();
+    app.chat_widget
+        .handle_server_notification(notice.clone(), /*replay_kind*/ None);
+    drain_history(&mut app, &mut tui, &mut events);
+    assert_eq!(app.transcript_cells.len(), 1);
+    assert_eq!(history_cell::warning_count(&app.transcript_cells), 1);
+
+    app.reset_for_thread_switch(&mut tui)?;
+    for replay_kind in [
+        Some(crate::chatwidget::ReplayKind::ResumeInitialMessages),
+        None,
+    ] {
+        app.chat_widget
+            .handle_server_notification(notice.clone(), replay_kind);
+    }
+    drain_history(&mut app, &mut tui, &mut events);
+    assert_eq!(app.transcript_cells.len(), 1);
+    assert_eq!(history_cell::warning_count(&app.transcript_cells), 1);
+    Ok(())
 }
 
 #[tokio::test]
@@ -91,17 +187,22 @@ async fn startup_warnings_preserve_stream_repair_and_backtrack_selection() -> Re
 async fn mcp_startup_summary_counts_servers_and_sign_in_subset() -> Result<()> {
     let (mut app, mut events, _op_rx) = make_test_app_with_channels().await;
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    app.chat_widget
-        .set_mcp_startup_expected_servers(["alpha", "beta", "gamma"].map(str::to_owned));
+    use McpServerStartupState::Failed;
+    use McpServerStartupState::Starting;
     insert_splash(&mut app, &mut tui);
     let sign_in = Some(McpServerStartupFailureReason::ReauthenticationRequired);
-    for (name, failure_reason) in [("alpha", sign_in), ("beta", sign_in), ("gamma", None)] {
+    for (name, status, failure_reason) in [
+        ("gamma", Starting, None),
+        ("alpha", Failed, sign_in),
+        ("beta", Failed, sign_in),
+        ("gamma", Failed, None),
+    ] {
         app.chat_widget.handle_server_notification(
             ServerNotification::McpServerStatusUpdated(McpServerStatusUpdatedNotification {
                 thread_id: None,
                 name: name.into(),
-                status: McpServerStartupState::Failed,
-                error: Some(format!("MCP {name}: connection unavailable")),
+                status,
+                error: (status == Failed).then(|| format!("MCP {name}: connection unavailable")),
                 failure_reason,
             }),
             /*replay_kind*/ None,

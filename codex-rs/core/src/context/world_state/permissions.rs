@@ -1,6 +1,7 @@
 //! Tracks model-visible permission instructions and approved-command prefix changes.
 
 use super::PreviousSectionState;
+use super::SectionTransition;
 use super::WorldStateHash;
 use super::WorldStateSection;
 use crate::context::ApprovedCommandPrefixSaved;
@@ -10,6 +11,7 @@ use codex_execpolicy::Policy;
 use codex_prompts::ApprovalPromptContext;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::format_allow_prefixes;
+use codex_protocol::permissions::FileSystemSandboxPolicyContext;
 use codex_protocol::protocol::AskForApproval;
 use serde::Deserialize;
 use serde::Serialize;
@@ -19,6 +21,7 @@ use std::path::Path;
 /// Permission instructions currently visible to the model.
 #[derive(Clone, Debug)]
 pub(crate) struct PermissionsState {
+    saved_prefix_heading: Option<String>,
     snapshot: PermissionsSnapshot,
     instructions: PermissionsInstructions,
 }
@@ -34,12 +37,14 @@ pub(crate) enum PermissionsSnapshot {
 }
 
 impl PermissionsState {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         permission_profile: &PermissionProfile,
         approval_policy: AskForApproval,
         approval_context: ApprovalPromptContext<'_>,
         exec_policy: &Policy,
         cwd: &Path,
+        paths: Option<&FileSystemSandboxPolicyContext<'_>>,
         exec_permission_approvals_enabled: bool,
         request_permissions_tool_enabled: bool,
     ) -> Self {
@@ -50,6 +55,7 @@ impl PermissionsState {
                 approval_context,
                 exec_policy,
                 cwd,
+                paths,
                 exec_permission_approvals_enabled,
                 request_permissions_tool_enabled,
             )
@@ -61,6 +67,9 @@ impl PermissionsState {
             approved_command_prefixes: exec_policy.get_allowed_prefixes().into_iter().collect(),
         };
         Self {
+            saved_prefix_heading: approval_context
+                .approved_command_prefix_saved_heading()
+                .map(str::to_owned),
             snapshot,
             instructions,
         }
@@ -70,10 +79,6 @@ impl PermissionsState {
 impl WorldStateSection for PermissionsState {
     const ID: &'static str = "permissions";
     type Snapshot = PermissionsSnapshot;
-
-    fn snapshot(&self) -> Self::Snapshot {
-        self.snapshot.clone()
-    }
 
     fn matches_legacy_fragment(role: &str, text: &str) -> bool {
         role == "developer" && PermissionsInstructions::matches_text(text)
@@ -90,7 +95,8 @@ impl WorldStateSection for PermissionsState {
     fn render_diff(
         &self,
         previous: PreviousSectionState<'_, Self::Snapshot>,
-    ) -> Option<Box<dyn ContextualUserFragment>> {
+    ) -> SectionTransition<Self::Snapshot> {
+        let current = self.snapshot.clone();
         match (previous, &self.snapshot) {
             (
                 PreviousSectionState::Known(PermissionsSnapshot::Current {
@@ -103,7 +109,7 @@ impl WorldStateSection for PermissionsState {
                 },
             ) if previous_instructions == instructions => {
                 if previous_prefixes == approved_command_prefixes {
-                    return None;
+                    return (None, Vec::new());
                 }
                 if previous_prefixes.is_subset(approved_command_prefixes) {
                     let added_prefixes = approved_command_prefixes
@@ -111,18 +117,29 @@ impl WorldStateSection for PermissionsState {
                         .cloned()
                         .collect();
                     if let Some(prefixes) = format_allow_prefixes(added_prefixes) {
-                        return Some(Box::new(ApprovedCommandPrefixSaved::new(prefixes)));
+                        return (
+                            Some(current),
+                            vec![WorldStateUpdate::fragment(ApprovedCommandPrefixSaved::new(
+                                prefixes,
+                                self.saved_prefix_heading.as_deref(),
+                            ))],
+                        );
                     }
                 }
             }
             (
                 PreviousSectionState::Known(PermissionsSnapshot::Legacy(previous)),
                 PermissionsSnapshot::Current { .. },
-            ) if previous == &WorldStateHash::from_fragment(&self.instructions) => return None,
+            ) if previous == &WorldStateHash::from_fragment(&self.instructions) => {
+                return (Some(current), Vec::new());
+            }
             _ => {}
         }
 
-        Some(Box::new(self.instructions.clone()))
+        (
+            Some(current),
+            vec![WorldStateUpdate::fragment(self.instructions.clone())],
+        )
     }
 }
 

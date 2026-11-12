@@ -18,7 +18,7 @@ use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
-use core_test_support::test_codex::local_selections;
+use core_test_support::test_codex::local_requests;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use pretty_assertions::assert_eq;
@@ -29,6 +29,9 @@ use wiremock::ResponseTemplate;
 use wiremock::http::Method;
 use wiremock::matchers::method;
 use wiremock::matchers::path_regex;
+
+#[path = "websocket_fallback_close.rs"]
+mod close_code;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn websocket_fallback_switches_to_http_on_upgrade_required_connect() -> Result<()> {
@@ -127,6 +130,52 @@ async fn websocket_fallback_switches_to_http_after_retries_exhausted() -> Result
     Ok(())
 }
 
+#[test_case::test_case(true, Some("invalid_workspace_selected"), 3, 0; "workspace denial on websocket")]
+#[test_case::test_case(false, Some("invalid_workspace_selected"), 0, 2; "workspace denial on http")]
+#[test_case::test_case(true, Some("codex_workspace_access_denied"), 3, 0; "workspace permission denied on websocket")]
+#[test_case::test_case(true, Some("access_program_not_enabled"), 3, 0; "access program denial on websocket")]
+#[test_case::test_case(false, Some("access_program_not_enabled"), 0, 2; "access program denial on http")]
+#[test_case::test_case(true, None, 3, 4; "bare websocket and http denials")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forbidden_responses_retry_only_without_an_explicit_access_denial(
+    supports_websockets: bool,
+    code: Option<&str>,
+    expected_upgrades: u64,
+    expected_posts: u64,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let mut denial = ResponseTemplate::new(403);
+    if let Some(code) = code {
+        denial = denial.set_body_json(serde_json::json!({"detail": {"code": code}}));
+    }
+    for (verb, count) in [("GET", expected_upgrades), ("POST", expected_posts)] {
+        Mock::given(method(verb))
+            .and(path_regex(".*/responses$"))
+            .respond_with(denial.clone())
+            .expect(count)
+            .mount(&server)
+            .await;
+    }
+
+    let test = test_codex()
+        .with_config(move |config| {
+            config.model_provider.supports_websockets = supports_websockets;
+            config.model_provider.stream_max_retries = Some(1);
+            config.model_provider.request_max_retries = Some(1);
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    // A WebSocket-enabled session also attempts a startup prewarm. A typed denial
+    // should leave the next turn eligible for its own WebSocket attempt.
+    test.submit_turn("first").await?;
+    test.submit_turn("second").await?;
+    server.verify().await;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn websocket_fallback_hides_first_websocket_retry_stream_error() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -164,7 +213,7 @@ async fn websocket_fallback_hides_first_websocket_retry_stream_error() -> Result
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(cwd.abs())),
+                environments: Some(local_requests(cwd.abs())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,

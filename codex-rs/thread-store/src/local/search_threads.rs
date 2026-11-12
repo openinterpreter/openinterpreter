@@ -106,7 +106,9 @@ pub(super) async fn search_threads(
         project_id: None,
         archived: params.archived,
         search_term: None,
-        relation_filter: None,
+        relation_filter: params
+            .include_attached_threads
+            .then_some(crate::ThreadRelationFilter::IncludeAttached),
         use_state_db_only: state_db.is_some(),
     };
     let mut remaining_rollouts = matching_rollouts
@@ -125,19 +127,42 @@ pub(super) async fn search_threads(
             sort_direction,
         )
         .await?;
+        let page_thread_ids: Vec<_> = page
+            .items
+            .iter()
+            .filter_map(|item| item.thread_id)
+            .collect();
+        let mut original_paths = None;
         for item in page.items {
             let logical_path = rollout_search_path(item.path.as_path());
-            let Some(snippet) = (match remaining_rollouts.remove(logical_path.as_path()) {
-                Some(Some(snippet)) => Some(snippet),
-                Some(None) => first_rollout_content_match_snippet(item.path.as_path(), search_term)
+            let Some(mut snippet) = remaining_rollouts.remove(logical_path.as_path()) else {
+                continue;
+            };
+            if let Some(account) = &params.account {
+                let Some(thread_id) = item.thread_id else {
+                    continue;
+                };
+                if !account
+                    .includes(
+                        &store.config.codex_home,
+                        thread_id,
+                        Some(&item.path),
+                        &page_thread_ids,
+                        &mut original_paths,
+                    )
+                    .await
+                {
+                    continue;
+                }
+            }
+            if snippet.is_none() {
+                snippet = first_rollout_content_match_snippet(item.path.as_path(), search_term)
                     .await
                     .map_err(|err| ThreadStoreError::Internal {
                         message: format!("failed to read rollout search match: {err}"),
-                    })?,
-                None => None,
-            }) else {
-                continue;
-            };
+                    })?;
+            }
+            let Some(snippet) = snippet else { continue };
             matching_items.push(ThreadSearchItem { item, snippet });
             if matching_items.len() > params.page_size {
                 break;
@@ -155,9 +180,13 @@ pub(super) async fn search_threads(
     let more_matches_available = matching_items.len() > params.page_size;
     matching_items.truncate(params.page_size);
     let next_cursor = if more_matches_available {
-        matching_items
-            .last()
-            .and_then(|item| cursor_from_thread_search_item(item, params.sort_key))
+        matching_items.last().and_then(|item| {
+            if scan_params.use_state_db_only {
+                cursor_from_thread_search_item(item, params.sort_key)
+            } else {
+                item.item.filesystem_cursor(sort_key)
+            }
+        })
     } else {
         None
     }
@@ -233,11 +262,7 @@ fn cursor_from_thread_search_item(
             .or(item.item.created_at.as_deref())?,
         ThreadSortKey::SectionPosition => return None,
     };
-    match sort_key {
-        ThreadSortKey::RecencyAt => parse_cursor(&format!("{timestamp}|{}", item.item.thread_id?)),
-        ThreadSortKey::CreatedAt | ThreadSortKey::UpdatedAt => parse_cursor(timestamp),
-        ThreadSortKey::SectionPosition => None,
-    }
+    parse_cursor(&format!("{timestamp}|{}", item.item.thread_id?))
 }
 
 async fn set_thread_search_result_names(
@@ -248,7 +273,13 @@ async fn set_thread_search_result_names(
         .iter()
         .map(|item| (item.thread.thread_id, item.thread.history_mode))
         .collect::<HashMap<_, _>>();
-    let names = resolve_thread_names(store, &thread_history_modes).await;
+    let names = resolve_thread_names(
+        store,
+        &thread_history_modes,
+        /*use_state_db_only*/ false,
+    )
+    .await
+    .unwrap_or_default();
     for item in items {
         if let Some(name) = names.get(&item.thread.thread_id).cloned() {
             set_thread_name(&mut item.thread, name);

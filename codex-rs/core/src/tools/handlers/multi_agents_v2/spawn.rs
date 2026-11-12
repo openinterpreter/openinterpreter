@@ -10,7 +10,8 @@ use crate::agent::types::SpawnAgentOptions;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::codex_thread::ThreadConfigSnapshot;
-use crate::session::multi_agents::resolve_usage_hints;
+use crate::thread_spawn::ThreadSpawnError;
+use crate::thread_spawn::ThreadSpawnRequest;
 use crate::tools::handlers::multi_agents::collab_tool_call_status;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
@@ -21,6 +22,7 @@ use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::ToolSpec;
+use std::num::NonZeroUsize;
 
 #[derive(Default)]
 pub(crate) struct Handler {
@@ -73,10 +75,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
                     Default::default(),
                 ),
             };
-            let agent_snapshot = result
-                .as_ref()
-                .ok()
-                .and_then(|(_, _, _, snapshot)| snapshot.as_ref());
+            let agent_snapshot = result.as_ref().ok().map(|(_, _, _, snapshot)| snapshot);
 
             analytics.track_collab_tool_call(
                 turn_id,
@@ -109,7 +108,7 @@ async fn handle_spawn_agent(
         SpawnAgentResult,
         ThreadId,
         AgentStatus,
-        Option<ThreadConfigSnapshot>,
+        ThreadConfigSnapshot,
     ),
     FunctionCallError,
 > {
@@ -218,22 +217,36 @@ async fn handle_spawn_agent(
             ),
     )
     .await
-    .map_err(collab_spawn_error)?;
+    .map_err(|err| match err {
+        ThreadSpawnError::Preparation(message) => FunctionCallError::RespondToModel(message),
+        ThreadSpawnError::Backend(err) => {
+            record_collab_spawn_failure(
+                &turn.session_telemetry,
+                turn.config.apps_mcp_product_sku.as_deref(),
+                &err,
+                &call_id,
+                &turn.sub_id,
+                fork_mode.as_ref(),
+                MultiAgentVersion::V2,
+            );
+            collab_spawn_error(err)
+        }
+    })?;
+    let spawned_agent = spawned.agent;
+    let agent_snapshot = spawned.config;
+    let new_agent_path = spawned.task_name;
     let new_thread_id = spawned_agent.thread_id;
     let agent_status = spawned_agent.status;
-    let agent_snapshot = session
-        .services
-        .agent_control
-        .get_agent_config_snapshot(new_thread_id)
-        .await;
     let nickname = agent_snapshot
-        .as_ref()
-        .and_then(|snapshot| snapshot.session_source.get_nickname())
+        .session_source
+        .get_nickname()
         .or(spawned_agent.metadata.agent_nickname);
     emit_sub_agent_activity(
         &session,
         turn,
         SubAgentActivityItem {
+            model: Some(agent_snapshot.model.clone()),
+            reasoning_effort: agent_snapshot.reasoning_effort.clone(),
             id: call_id,
             agent_thread_id: new_thread_id,
             agent_path: new_agent_path.clone(),
@@ -297,22 +310,14 @@ impl SpawnAgentArgs {
         if fork_turns.eq_ignore_ascii_case("none") {
             return Ok(None);
         }
-        if fork_turns.eq_ignore_ascii_case("all") {
+        // Accept legacy turn counts without limiting the inherited history.
+        if fork_turns.eq_ignore_ascii_case("all") || fork_turns.parse::<NonZeroUsize>().is_ok() {
             return Ok(Some(SpawnAgentForkMode::FullHistory));
         }
 
-        let last_n_turns = fork_turns.parse::<usize>().map_err(|_| {
-            FunctionCallError::RespondToModel(
-                "fork_turns must be `none`, `all`, or a positive integer string".to_string(),
-            )
-        })?;
-        if last_n_turns == 0 {
-            return Err(FunctionCallError::RespondToModel(
-                "fork_turns must be `none`, `all`, or a positive integer string".to_string(),
-            ));
-        }
-
-        Ok(Some(SpawnAgentForkMode::LastNTurns(last_n_turns)))
+        Err(FunctionCallError::RespondToModel(
+            "fork_turns must be `none` or `all`".to_string(),
+        ))
     }
 }
 

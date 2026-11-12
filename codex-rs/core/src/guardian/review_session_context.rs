@@ -1,33 +1,19 @@
-//! Owns sync reviewer checkpoint and invalidation policy for both context modes.
-//! Legacy may keep its existing transcript; thread-owned mode requires current parent context.
+//! Reads the root authorization version selected by the extension context policy.
 
-use codex_features::Feature;
-use codex_protocol::models::ResponseItem;
+use codex_guardian_reviewer::ReviewContextPolicy;
 
 use crate::codex_thread::GuardianAuthorizationVersion;
-use crate::config::ManagedFeatures;
-use crate::context::GuardianContextMode;
-use crate::context_manager::ContextManager;
 use crate::session::session::Session;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum ReviewContextPolicy {
-    Legacy,
-    LegacyWithCheckpointReuse,
-    ThreadOwned,
-}
-
-impl ReviewContextPolicy {
-    pub(super) fn for_context(mode: GuardianContextMode, features: &ManagedFeatures) -> Self {
-        match mode {
-            GuardianContextMode::ThreadOwned => Self::ThreadOwned,
-            GuardianContextMode::Legacy
-                if features.enabled(Feature::GuardianReuseParentCompaction) =>
-            {
-                Self::LegacyWithCheckpointReuse
-            }
-            GuardianContextMode::Legacy => Self::Legacy,
-        }
+pub(super) async fn root_review_version(
+    policy: ReviewContextPolicy,
+    session: &Session,
+) -> Option<(GuardianAuthorizationVersion, u64)> {
+    if matches!(
+        policy,
+        ReviewContextPolicy::Legacy | ReviewContextPolicy::LegacyWithCheckpointReuse
+    ) {
+        return None;
     }
 
     pub(super) async fn root_authorization_version(

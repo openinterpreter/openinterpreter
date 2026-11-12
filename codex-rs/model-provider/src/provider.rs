@@ -4,11 +4,12 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::GatewayAuthManager;
 use codex_api::ApiError;
 use codex_api::Provider;
 use codex_api::SharedAuthProvider;
 use codex_api::TransportError;
-use codex_api::is_azure_responses_provider;
+use codex_features::RuntimeAuthMode;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::GatewayAuthManager;
@@ -19,14 +20,16 @@ use codex_login::default_client::ResidencyRequirement;
 use codex_login::default_client::read_default_client_residency_requirement;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::cache::ModelsCache;
+use codex_models_manager::manager::ModelCatalogSettings;
 use codex_models_manager::manager::OpenAiModelsManager;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_models_manager::manager::StaticModelsManager;
 use codex_models_manager::provider_catalog_models::bundled_provider_model_infos;
 use codex_protocol::account::ProviderAccount;
+use codex_protocol::auth::RefreshTokenFailedError;
 use codex_protocol::error::CodexErr;
 use codex_protocol::openai_models::ModelsResponse;
-use http::HeaderValue;
+use codex_runtime_agent_instance::RuntimeAuthManager;
 
 use crate::ResolvedResponsesProvider;
 use crate::amazon_bedrock::AmazonBedrockModelProvider;
@@ -139,22 +142,43 @@ pub const DEFAULT_APPROVAL_REVIEW_PREFERRED_MODEL: &str = "codex-auto-review";
 
 const API_KEY_APPROVAL_REVIEW_PREFERRED_MODEL: &str = "gpt-5.6-luna";
 
+const FEDRAMP_API_BASE_URL: &str = "https://gov.api.openai.com/v1";
+
 /// Default model used for memory extraction when a provider does not require a
 /// backend-specific model ID.
-pub const DEFAULT_MEMORY_EXTRACTION_PREFERRED_MODEL: &str = "gpt-5.6-luna";
+pub const DEFAULT_MEMORY_EXTRACTION_PREFERRED_MODEL: &str = "gpt-6-luna";
 
 /// Default model used for memory consolidation when a provider does not require
 /// a backend-specific model ID.
-pub const DEFAULT_MEMORY_CONSOLIDATION_PREFERRED_MODEL: &str = "gpt-5.6-terra";
+pub const DEFAULT_MEMORY_CONSOLIDATION_PREFERRED_MODEL: &str = "gpt-6.1-terra";
 
 /// Runtime provider abstraction used by model execution.
 ///
 /// Implementations own provider-specific behavior for a model backend. The
 /// `ModelProviderInfo` returned by `info` is the serialized/configured provider
 /// metadata used by the default OpenAI-compatible implementation.
+///
+/// OpenAI-compatible catalog caches use header auth's account ID instead of auth
+/// headers when available. Missing IDs and explicit provider API key, bearer, or
+/// command auth retain credential-sensitive keys. Provider settings remain in the key.
+/// Hosts using header auth must isolate model managers and cache storage by user and
+/// catalog-varying request context, such as country: an account ID may identify a
+/// workspace shared by multiple users. Request authentication, credential refresh,
+/// and permission checks are unchanged.
 pub trait ModelProvider: fmt::Debug + Send + Sync {
     /// Returns the configured provider metadata.
     fn info(&self) -> &ModelProviderInfo;
+
+    /// Returns whether the resolved Responses provider may receive internal tool metadata.
+    fn include_internal_metadata(&self, provider: &Provider) -> bool {
+        self.info().include_internal_metadata
+            || url::Url::parse(&provider.base_url).ok().is_some_and(|url| {
+                url.scheme() == "https"
+                    && url.host_str().is_some_and(|host| {
+                        host == "api.openai.com" || codex_http_client::is_allowed_chatgpt_host(host)
+                    })
+            })
+    }
 
     /// Returns the provider-owned capability upper bounds.
     fn capabilities(&self) -> ProviderCapabilities {
@@ -239,11 +263,7 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
     fn api_provider(&self) -> ModelProviderFuture<'_, codex_protocol::error::Result<Provider>> {
         Box::pin(async move {
             let auth = self.auth().await;
-            let mut provider = self
-                .info()
-                .to_api_provider(auth.as_ref().map(CodexAuth::auth_mode))?;
-            enforce_managed_residency(&mut provider);
-            Ok(provider)
+            self.api_provider_for_auth(auth.as_ref())
         })
     }
 
@@ -312,6 +332,14 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         })
     }
 
+    /// Adds provider-owned credentials, such as gateway OAuth, to already selected primary auth.
+    fn compose_auth(
+        &self,
+        resolved: ResolvedProviderAuth,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ResolvedProviderAuth>> {
+        Box::pin(async move { Ok(resolved) })
+    }
+
     /// Returns request credentials, optionally scoped to a Codex session task.
     fn api_auth_for_scope(
         &self,
@@ -327,12 +355,41 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         })
     }
 
+    /// Resolve auth together with metadata needed to route and admit this request.
+    fn request_auth(
+        &self,
+        scope: Option<ProviderAuthScope>,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ResolvedProviderAuth>> {
+        match scope {
+            Some(scope) => self.api_auth_for_scope(scope),
+            None => Box::pin(async { self.api_auth().await.map(ResolvedProviderAuth::new) }),
+        }
+    }
+
+    /// Resolve the endpoint before headers for providers whose setup may refresh credentials.
+    fn request_provider_and_auth(
+        &self,
+        scope: Option<ProviderAuthScope>,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<(Provider, ResolvedProviderAuth)>>
+    {
+        Box::pin(async move { Ok((self.api_provider().await?, self.request_auth(scope).await?)) })
+    }
+
     /// Creates the model manager implementation appropriate for this provider.
     fn models_manager(
         &self,
         codex_home: PathBuf,
         config_model_catalog: Option<ModelsResponse>,
     ) -> SharedModelsManager;
+
+    /// Build a thread catalog with the same cache and live discovery policy as its harness.
+    fn models_manager_with_settings(
+        &self,
+        config_model_catalog: Option<ModelsResponse>,
+        _settings: ModelCatalogSettings,
+    ) -> SharedModelsManager {
+        self.models_manager_without_cache(config_model_catalog)
+    }
 
     /// Creates a model manager with caching disabled.
     ///
@@ -342,10 +399,19 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         &self,
         config_model_catalog: Option<ModelsResponse>,
     ) -> SharedModelsManager {
+        let origin = if config_model_catalog.is_some() {
+            codex_models_manager::ModelOrigin::ExplicitConfig
+        } else {
+            codex_models_manager::ModelOrigin::Bundled
+        };
         let model_catalog = config_model_catalog
             .or_else(|| codex_models_manager::bundled_models_response().ok())
             .unwrap_or_default();
-        Arc::new(StaticModelsManager::new(self.auth_manager(), model_catalog))
+        Arc::new(StaticModelsManager::new(
+            self.auth_manager(),
+            model_catalog,
+            origin,
+        ))
     }
 
     /// Creates a model manager that can use a caller-provided cache for remote catalogs.
@@ -369,7 +435,19 @@ pub type ModelProviderFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a
 /// Shared runtime model provider handle.
 pub type SharedModelProvider = Arc<dyn ModelProvider>;
 
-fn provider_uses_first_party_auth_path(provider: &ModelProviderInfo) -> bool {
+/// Resolve credential-dependent defaults without changing configured endpoints.
+pub fn resolve_api_provider(
+    info: &ModelProviderInfo,
+    auth: Option<&CodexAuth>,
+) -> codex_protocol::error::Result<Provider> {
+    let mut provider = info.to_api_provider(auth.map(CodexAuth::auth_mode))?;
+    if info.base_url.is_none() && uses_fedramp_api_key(auth, info)? {
+        provider.base_url = FEDRAMP_API_BASE_URL.to_string();
+    }
+    Ok(provider)
+}
+
+pub fn provider_uses_first_party_auth_path(provider: &ModelProviderInfo) -> bool {
     provider.requires_openai_auth
         && provider.env_key.is_none()
         && provider.experimental_bearer_token.is_none()
@@ -377,7 +455,8 @@ fn provider_uses_first_party_auth_path(provider: &ModelProviderInfo) -> bool {
         && provider.aws.is_none()
 }
 
-/// Creates the default runtime model provider for configured provider metadata.
+/// Creates the default model provider for configured provider metadata.
+/// Harnesses with runtime identity use [`crate::ProviderAuthContext::model_provider`].
 pub fn create_model_provider(
     provider_info: ModelProviderInfo,
     auth_manager: Option<Arc<AuthManager>>,
@@ -438,26 +517,45 @@ impl ConfiguredModelProvider {
             gateway_auth_manager,
         }
     }
+
+    async fn resolve_auth(
+        &self,
+        scope: Option<ProviderAuthScope>,
+    ) -> codex_protocol::error::Result<ResolvedProviderAuth> {
+        let resolved = resolve_request_auth(
+            self.info.clone(),
+            self.auth_manager.clone(),
+            self.runtime_auth.clone(),
+            scope,
+            self.info.base_url.clone(),
+        )
+        .await?;
+        self.compose_auth(resolved).await
+    }
 }
 
 impl ModelProvider for ConfiguredModelProvider {
+    fn is_recoverable_auth_error(&self, error: &TransportError) -> bool {
+        let TransportError::Http { status, body, .. } = error else {
+            return false;
+        };
+        *status == http::StatusCode::UNAUTHORIZED
+            && (self.runtime_auth.is_none()
+                || !codex_protocol::error::is_runtime_auth_denial(
+                    *status,
+                    body.as_deref().unwrap_or_default(),
+                    codex_response_debug_context::extract_response_debug_context(error)
+                        .auth_error_code
+                        .as_deref(),
+                ))
+    }
+
     fn info(&self) -> &ModelProviderInfo {
         &self.info
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
-        let remote_compaction = if self.info.is_openai()
-            || is_azure_responses_provider(&self.info.name, self.info.base_url.as_deref())
-        {
-            RemoteCompactionSupport::V2
-        } else {
-            RemoteCompactionSupport::Unsupported
-        };
-
-        ProviderCapabilities {
-            remote_compaction,
-            ..ProviderCapabilities::default()
-        }
+        ProviderCapabilities::from_config(&self.info)
     }
 
     fn approval_review_preferred_model(&self) -> &'static str {
@@ -598,25 +696,37 @@ impl ModelProvider for ConfiguredModelProvider {
         codex_home: PathBuf,
         config_model_catalog: Option<ModelsResponse>,
     ) -> SharedModelsManager {
-        match config_model_catalog {
-            Some(model_catalog) => Arc::new(StaticModelsManager::new(
+        self.models_manager_with_settings(
+            config_model_catalog,
+            ModelCatalogSettings::disk(codex_home),
+        )
+    }
+
+    fn models_manager_with_settings(
+        &self,
+        config_model_catalog: Option<ModelsResponse>,
+        settings: ModelCatalogSettings,
+    ) -> SharedModelsManager {
+        if let Some(model_catalog) = config_model_catalog {
+            return Arc::new(StaticModelsManager::new(
                 self.auth_manager.clone(),
                 model_catalog,
-            )),
-            None => {
-                let endpoint = Arc::new(OpenAiModelsEndpoint::new(
-                    self.info.clone(),
-                    self.auth_manager.clone(),
-                    self.gateway_auth_manager.clone(),
-                ));
-                Arc::new(OpenAiModelsManager::new_with_base_models_for_provider(
-                    codex_home,
-                    self.cache_provider_id.clone(),
-                    endpoint,
-                    self.auth_manager.clone(),
-                    bundled_provider_model_infos(&self.info),
-                ))
-            }
+                codex_models_manager::ModelOrigin::ExplicitConfig,
+            ));
+        }
+        let endpoint = Arc::new(
+            OpenAiModelsEndpoint::new(
+                self.info.clone(),
+                self.auth_manager.clone(),
+                self.gateway_auth_manager.clone(),
+            )
+            .with_runtime_auth(self.catalog_runtime_auth.clone()),
+        );
+        let auth_manager = self.auth_manager.clone();
+        let manager = OpenAiModelsManager::with_settings(settings, endpoint, auth_manager);
+        match &self.info.model_catalog_url {
+            Some(_) => Arc::new(manager.with_provider_catalog()),
+            None => Arc::new(manager),
         }
     }
     fn models_manager_without_cache(

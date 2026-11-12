@@ -2,7 +2,9 @@
 //! Model-authored framing is bounded; oversized identities use the previous plain-text format.
 
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 
 /// Identifies an answered question without repeating an unbounded model-authored prompt.
 pub struct AnsweredQuestion<'a> {

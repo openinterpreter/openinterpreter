@@ -5,7 +5,6 @@
 
 use super::ChatWidget;
 use super::status_surfaces::TERMINAL_TITLE_SPINNER_FRAMES;
-use crate::bottom_pane::StatusLineItem;
 use std::time::Instant;
 
 impl ChatWidget {
@@ -14,18 +13,6 @@ impl ChatWidget {
             self.status_state.thread_title_generation_pending = pending;
             self.refresh_status_surfaces();
             self.request_redraw();
-        }
-    }
-
-    pub(super) fn status_line_value_for_item(&mut self, item: StatusLineItem) -> Option<String> {
-        let value = self.status_line_value(item);
-        if matches!(
-            item,
-            StatusLineItem::ThreadName | StatusLineItem::ThreadTitle | StatusLineItem::SessionId
-        ) {
-            self.with_thread_title_progress(value, Instant::now())
-        } else {
-            value
         }
     }
 

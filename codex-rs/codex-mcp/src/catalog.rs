@@ -1,8 +1,12 @@
+//! Resolve server declarations without changing their identities. The exposure mode
+//! selects which servers are available and how they are presented to the model.
+
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
+use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use codex_config::McpServerConfig;
 use codex_config::McpServerDisabledReason;
 use codex_config::McpServerIdpOAuthConfig;
@@ -136,7 +140,7 @@ impl RegistrationPrecedence {
 /// One named MCP server declaration before source resolution.
 #[derive(Clone, Debug, PartialEq)]
 pub struct McpServerRegistration {
-    name: String,
+    key: McpServerKey,
     source: McpServerSource,
     config: McpServerConfig,
     protocol_mode: Option<McpProtocolMode>,
@@ -144,15 +148,36 @@ pub struct McpServerRegistration {
 }
 
 impl McpServerRegistration {
+    /// Registers host-owned configuration, which may resolve credentials on the host.
     pub fn from_config(name: String, config: McpServerConfig) -> Self {
         Self::new(
             name,
             McpServerSource::Config,
             config,
             RegistrationPrecedence::Config,
+            McpCredentialPolicy::HostFallbackAllowed,
         )
     }
 
+    /// Registers executor-discovered configuration without authority to read
+    /// host environment credentials.
+    pub fn from_executor_config(name: String, config: McpServerConfig) -> Self {
+        Self::new(
+            name,
+            McpServerSource::Config,
+            config,
+            RegistrationPrecedence::Config,
+            McpCredentialPolicy::ExecutorOnly,
+        )
+    }
+
+    /// Keeps this executor's server separate from same-named servers on other executors.
+    pub fn with_environment_scope(mut self) -> Self {
+        self.key = McpServerKey::in_environment(&self.config.environment_id, self.key.name());
+        self
+    }
+
+    /// Registers a plugin discovered by the host's process-wide plugin manager.
     pub fn from_plugin(
         name: String,
         attribution: McpPluginAttribution,
@@ -164,21 +189,34 @@ impl McpServerRegistration {
             McpServerSource::Plugin(attribution),
             config,
             RegistrationPrecedence::Plugin(Reverse(plugin_order)),
+            McpCredentialPolicy::HostFallbackAllowed,
         )
     }
 
     /// Registers a thread-selected plugin above discovered plugins and below config.
+    /// HTTP credential authority comes from the selected root, not the server's execution environment.
     pub fn from_selected_plugin(
         name: String,
         attribution: McpPluginAttribution,
         selection_order: usize,
+        source_environment_id: &str,
         config: McpServerConfig,
     ) -> Self {
+        let credential_policy = if source_environment_id != DEFAULT_MCP_SERVER_ENVIRONMENT_ID
+            && matches!(
+                &config.transport,
+                McpServerTransportConfig::StreamableHttp { .. }
+            ) {
+            McpCredentialPolicy::ExecutorOnly
+        } else {
+            McpCredentialPolicy::HostFallbackAllowed
+        };
         Self::new(
             name,
             McpServerSource::SelectedPlugin(attribution),
             config,
             RegistrationPrecedence::SelectedPlugin(Reverse(selection_order)),
+            credential_policy,
         )
     }
 
@@ -192,6 +230,7 @@ impl McpServerRegistration {
             McpServerSource::Compatibility { id: id.into() },
             config,
             RegistrationPrecedence::Compatibility,
+            McpCredentialPolicy::HostFallbackAllowed,
         )
     }
 
@@ -209,6 +248,7 @@ impl McpServerRegistration {
             },
             config,
             RegistrationPrecedence::Extension(contribution_order),
+            McpCredentialPolicy::HostFallbackAllowed,
         )
     }
 
@@ -233,6 +273,7 @@ impl McpServerRegistration {
             },
             config,
             RegistrationPrecedence::Extension(contribution_order),
+            McpCredentialPolicy::HostFallbackAllowed,
         )
     }
 
@@ -241,9 +282,21 @@ impl McpServerRegistration {
         source: McpServerSource,
         config: McpServerConfig,
         precedence: RegistrationPrecedence,
+        credential_policy: McpCredentialPolicy,
     ) -> Self {
+        let key = match &source {
+            McpServerSource::Plugin(_) | McpServerSource::SelectedPlugin(_) => {
+                McpServerKey::in_environment(&config.environment_id, name)
+            }
+            McpServerSource::Config if credential_policy == McpCredentialPolicy::ExecutorOnly => {
+                McpServerKey::in_environment(&config.environment_id, name)
+            }
+            McpServerSource::Config
+            | McpServerSource::Compatibility { .. }
+            | McpServerSource::Extension { .. } => McpServerKey::unscoped(name),
+        };
         Self {
-            name,
+            key,
             source,
             config,
             protocol_mode: None,
@@ -276,7 +329,7 @@ pub enum McpServerConflictAction {
 /// A same-tier name collision and the final outcome after all precedence is applied.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpServerConflict {
-    pub name: String,
+    pub server_key: McpServerKey,
     pub outcome: McpServerConflictAction,
     pub contenders: Vec<McpServerConflictAction>,
 }
@@ -292,9 +345,16 @@ enum CatalogAction {
 }
 
 impl CatalogAction {
+    fn key(&self) -> McpServerKey {
+        match self {
+            Self::Register(registration) => registration.key.clone(),
+            Self::Remove { name, .. } => McpServerKey::unscoped(name),
+        }
+    }
+
     fn name(&self) -> &str {
         match self {
-            Self::Register(registration) => &registration.name,
+            Self::Register(registration) => registration.key.name(),
             Self::Remove { name, .. } => name,
         }
     }
@@ -319,6 +379,7 @@ impl CatalogAction {
 /// Mutable inputs used to produce an immutable resolved catalog.
 #[derive(Clone, Debug, Default)]
 pub struct McpCatalogBuilder {
+    exposure: McpServerExposure,
     actions: Vec<CatalogAction>,
     disabled_server_names: BTreeSet<String>,
     ema_idp: Option<McpServerIdpOAuthConfig>,
@@ -378,7 +439,7 @@ impl McpCatalogBuilder {
             if !registration.config.enabled
                 || registration
                     .source
-                    .is_host_owned_apps(&registration.name, &registration.config)
+                    .is_host_owned_apps(registration.key.name(), &registration.config)
             {
                 continue;
             }
@@ -395,7 +456,7 @@ impl McpCatalogBuilder {
                     | McpServerSource::Extension { .. } => {
                         policy.servers.as_ref().is_none_or(|requirements| {
                             requirements
-                                .get(&registration.name)
+                                .get(registration.key.name())
                                 .is_some_and(|requirement| {
                                     registration.config.matches_requirement(requirement)
                                 })
@@ -416,7 +477,7 @@ impl McpCatalogBuilder {
                                         .get(attribution.plugin_id())
                                         .and_then(|plugin| plugin.mcp_servers.as_ref())
                                         .and_then(|requirements| {
-                                            requirements.get(&registration.name)
+                                            requirements.get(registration.key.name())
                                         })
                                         .is_some_and(|requirement| {
                                             registration.config.matches_requirement(requirement)
@@ -448,26 +509,76 @@ impl McpCatalogBuilder {
         // Stable sorting makes action order the tie-breaker when precedence is equal.
         self.actions.sort_by_key(CatalogAction::precedence);
 
-        let mut winners = BTreeMap::<String, CatalogAction>::new();
-        let mut actions_by_name_and_tier = BTreeMap::<(String, u8), Vec<&CatalogAction>>::new();
+        let mut winners = BTreeMap::<McpServerKey, CatalogAction>::new();
+        let mut actions_by_key_and_tier =
+            BTreeMap::<(McpServerKey, u8), Vec<&CatalogAction>>::new();
         for action in &self.actions {
-            winners.insert(action.name().to_string(), action.clone());
-            actions_by_name_and_tier
-                .entry((action.name().to_string(), action.precedence().tier()))
+            // Legacy clients see one winner per name. Group declarations together
+            // without changing the identity of the server that wins.
+            let key = match self.exposure {
+                McpServerExposure::Legacy => McpServerKey::unscoped(action.name()),
+                McpServerExposure::EnvironmentQualified => action.key(),
+            };
+            if self.exposure == McpServerExposure::Legacy
+                && let CatalogAction::Register(registration) = action
+                && matches!(registration.source, McpServerSource::Config)
+                && registration.key.scoped_environment_id().is_some()
+                && let Some(previous) = winners.get(&key)
+            {
+                // Preserve the first executor's server. Its config may replace
+                // a plugin in that same environment, but not another owner's server.
+                let replaces_plugin = matches!(previous,
+                    CatalogAction::Register(previous)
+                        if matches!(previous.source, McpServerSource::Plugin(_) | McpServerSource::SelectedPlugin(_))
+                            && previous.config.environment_id == registration.config.environment_id);
+                if !replaces_plugin {
+                    continue;
+                }
+            }
+            winners.insert(key.clone(), action.clone());
+            actions_by_key_and_tier
+                .entry((key, action.precedence().tier()))
                 .or_default()
                 .push(action);
         }
 
+        // Thread-wide overrides and removals apply to every environment, but use
+        // different keys. Remove any environment-specific server when a thread-wide
+        // entry with the same name has equal or higher priority.
+        let overridden = winners
+            .iter()
+            .filter_map(|(key, action)| match action {
+                CatalogAction::Register(registration)
+                    if key.scoped_environment_id().is_some()
+                        && winners
+                            .get(&McpServerKey::unscoped(registration.key.name()))
+                            .is_some_and(|unscoped| {
+                                unscoped.precedence() >= registration.precedence
+                            }) =>
+                {
+                    Some(key.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for key in overridden {
+            winners.remove(&key);
+        }
+
         let mut conflicts = Vec::new();
-        for ((name, _), actions) in actions_by_name_and_tier {
+        for ((key, _), actions) in actions_by_key_and_tier {
             if actions.len() < 2 {
                 continue;
             }
-            let Some(outcome) = winners.get(&name).map(CatalogAction::conflict_action) else {
+            let Some(outcome) = winners
+                .get(&key)
+                .or_else(|| winners.get(&McpServerKey::unscoped(actions[0].name())))
+                .map(CatalogAction::conflict_action)
+            else {
                 continue;
             };
             conflicts.push(McpServerConflict {
-                name,
+                server_key: key,
                 outcome,
                 contenders: actions
                     .into_iter()
@@ -480,7 +591,7 @@ impl McpCatalogBuilder {
         let ema_idp = self.ema_idp;
         let servers = winners
             .into_iter()
-            .filter_map(|(name, action)| match action {
+            .filter_map(|(key, action)| match action {
                 CatalogAction::Register(registration) => {
                     let mut registration = *registration;
                     let persist_disabled_name =
@@ -507,8 +618,9 @@ impl McpCatalogBuilder {
                         registration.config.enabled &= allowed;
                     }
                     Some((
-                        name,
+                        registration.key.clone(),
                         ResolvedMcpServer {
+                            key: registration.key,
                             source: registration.source,
                             config: registration.config,
                             protocol_mode: registration.protocol_mode,
@@ -520,6 +632,7 @@ impl McpCatalogBuilder {
             .collect();
 
         ResolvedMcpCatalog {
+            exposure: self.exposure,
             actions: self.actions,
             disabled_server_names,
             ema_idp,
@@ -532,12 +645,21 @@ impl McpCatalogBuilder {
 /// A single winning MCP registration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedMcpServer {
+    key: McpServerKey,
     source: McpServerSource,
     config: McpServerConfig,
     protocol_mode: Option<McpProtocolMode>,
 }
 
 impl ResolvedMcpServer {
+    pub fn name(&self) -> &str {
+        self.key.name()
+    }
+
+    pub fn key(&self) -> &McpServerKey {
+        &self.key
+    }
+
     pub fn source(&self) -> &McpServerSource {
         &self.source
     }
@@ -554,6 +676,7 @@ impl ResolvedMcpServer {
 /// Immutable result of MCP registration resolution.
 #[derive(Clone, Debug, Default)]
 pub struct ResolvedMcpCatalog {
+    exposure: McpServerExposure,
     actions: Vec<CatalogAction>,
     disabled_server_names: BTreeSet<String>,
     ema_idp: Option<McpServerIdpOAuthConfig>,
@@ -562,26 +685,64 @@ pub struct ResolvedMcpCatalog {
 }
 
 impl ResolvedMcpCatalog {
+    pub fn exposure(&self) -> McpServerExposure {
+        self.exposure
+    }
+
+    /// Projects an internal key onto the original name-only API, omitting shadowed peers.
+    pub(crate) fn legacy_server_name<'a>(&'a self, key: &'a McpServerKey) -> Option<&'a str> {
+        match self.resolve_server_name(key.name()) {
+            Some(resolved_key) => (resolved_key == key).then_some(resolved_key.name()),
+            None => key.scoped_environment_id().is_none().then_some(key.name()),
+        }
+    }
+
     pub fn builder() -> McpCatalogBuilder {
         McpCatalogBuilder::default()
     }
 
     pub fn to_builder(&self) -> McpCatalogBuilder {
         McpCatalogBuilder {
+            exposure: self.exposure,
             actions: self.actions.clone(),
             disabled_server_names: self.disabled_server_names.clone(),
             ema_idp: self.ema_idp.clone(),
         }
     }
 
-    pub fn server(&self, name: &str) -> Option<&ResolvedMcpServer> {
-        self.servers.get(name)
+    /// Looks up one exact registration without falling back to a same-named peer.
+    pub fn server(&self, key: &McpServerKey) -> Option<&ResolvedMcpServer> {
+        self.servers.get(key)
+    }
+
+    /// Resolves a legacy name-only request to its winning registration.
+    pub fn server_by_name(&self, name: &str) -> Option<&ResolvedMcpServer> {
+        self.server(self.resolve_server_name(name)?)
+    }
+
+    /// Resolves a legacy name-only request to its original first winning registration.
+    pub fn resolve_server_name(&self, name: &str) -> Option<&McpServerKey> {
+        if let Some((key, _)) = self.servers.get_key_value(&McpServerKey::unscoped(name)) {
+            return Some(key);
+        }
+        self.actions.iter().find_map(|action| {
+            (action.name() == name)
+                .then(|| self.servers.get_key_value(&action.key()))
+                .flatten()
+                .map(|(key, _)| key)
+        })
+    }
+
+    pub(crate) fn servers(&self) -> impl Iterator<Item = (&McpServerKey, &ResolvedMcpServer)> {
+        self.servers.iter()
     }
 
     pub fn configured_servers(&self) -> HashMap<String, McpServerConfig> {
-        self.servers
-            .iter()
-            .map(|(name, server)| (name.clone(), server.config.clone()))
+        self.servers()
+            .filter_map(|(key, server)| {
+                self.legacy_server_name(key)
+                    .map(|name| (name.to_owned(), server.config.clone()))
+            })
             .collect()
     }
 
@@ -592,7 +753,9 @@ impl ResolvedMcpCatalog {
 
     /// Replaces the resolved server set while preserving known sources and EMA policy.
     ///
-    /// Names not present in the existing catalog are treated as config-owned.
+    /// # Panics
+    ///
+    /// Panics if a materialized server is missing from the catalog.
     pub fn with_materialized_servers(&self, servers: HashMap<String, McpServerConfig>) -> Self {
         let mut builder = McpCatalogBuilder {
             ema_idp: self.ema_idp.clone(),
@@ -620,13 +783,13 @@ impl ResolvedMcpCatalog {
     }
 
     /// Returns package attribution for each winning plugin-owned server.
-    pub fn plugin_attributions_by_server_name(&self) -> HashMap<String, McpPluginAttribution> {
+    pub fn plugin_attributions_by_server(&self) -> HashMap<McpServerKey, McpPluginAttribution> {
         self.servers
             .iter()
-            .filter_map(|(name, server)| match server.source() {
+            .filter_map(|(key, server)| match server.source() {
                 McpServerSource::Plugin(attribution)
                 | McpServerSource::SelectedPlugin(attribution) => {
-                    Some((name.clone(), attribution.clone()))
+                    Some((key.clone(), attribution.clone()))
                 }
                 McpServerSource::Config
                 | McpServerSource::Compatibility { .. }
@@ -635,10 +798,10 @@ impl ResolvedMcpCatalog {
             .collect()
     }
 
-    /// Returns the names of winning servers supplied by thread-selected plugins.
-    pub(crate) fn selected_plugin_server_names(&self) -> impl Iterator<Item = &str> {
-        self.servers.iter().filter_map(|(name, server)| {
-            matches!(server.source(), McpServerSource::SelectedPlugin(_)).then_some(name.as_str())
+    /// Returns the keys of winning servers supplied by thread-selected plugins.
+    pub(crate) fn selected_plugin_server_keys(&self) -> impl Iterator<Item = &McpServerKey> {
+        self.servers.iter().filter_map(|(key, server)| {
+            matches!(server.source(), McpServerSource::SelectedPlugin(_)).then_some(key)
         })
     }
 

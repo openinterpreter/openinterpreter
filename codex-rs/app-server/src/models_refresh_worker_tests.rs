@@ -27,11 +27,44 @@ use tracing_subscriber::layer::SubscriberExt;
 
 use super::*;
 
+fn test_thread_manager(
+    config: &codex_core::config::Config,
+    models_manager: Option<SharedModelsManager>,
+    auth_manager: Arc<codex_login::AuthManager>,
+) -> Arc<codex_core::ThreadManager> {
+    let factory = match models_manager {
+        Some(models) => codex_core::test_support::fixed_model_catalog(models),
+        None => Arc::new(ModelCatalogSettings::disk(config.codex_home.to_path_buf())),
+    };
+    let startup = codex_core::build_startup_models(
+        config,
+        auth_manager,
+        uuid::Uuid::new_v4().to_string(),
+        factory,
+    );
+    Arc::new(codex_core::ThreadManager::new(
+        config,
+        startup,
+        codex_core::CodexAppsToolsCache::default(),
+        codex_protocol::protocol::SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        codex_extension_api::empty_extension_registry(),
+        Arc::new(codex_core::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        codex_core::passthrough_image_store(),
+        codex_core::ThreadStoreBuilder::from_config(config, /*state_db*/ None).build(),
+        /*agent_graph_store*/ None,
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    ))
+}
+
 #[derive(Debug)]
 struct TestModelsEndpoint {
     fetch_count: AtomicUsize,
     fetched: Notify,
     release_second_fetch: Notify,
+    originator_endpoint: Option<Arc<TestModelsEndpoint>>,
 }
 
 impl TestModelsEndpoint {
@@ -40,6 +73,7 @@ impl TestModelsEndpoint {
             fetch_count: AtomicUsize::new(0),
             fetched: Notify::new(),
             release_second_fetch: Notify::new(),
+            originator_endpoint: None,
         })
     }
 
@@ -128,6 +162,8 @@ async fn refreshes_immediately_periodically_and_stops_when_dropped() {
     endpoint.wait_for_fetch_count(/*expected*/ 2).await;
     drop(worker);
     endpoint.release_second_fetch.notify_one();
+    work_endpoint.wait_for_fetch_count(/*expected*/ 2).await;
+    work_updates.changed().await.unwrap();
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     assert_eq!(endpoint.fetch_count.load(Ordering::SeqCst), 2);

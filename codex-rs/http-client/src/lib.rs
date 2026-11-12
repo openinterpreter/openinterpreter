@@ -1,12 +1,21 @@
+use url::Host;
+use url::Url;
+
 mod chatgpt_cloudflare_cookies;
 mod chatgpt_hosts;
+mod chatgpt_routing_affinity;
 mod client;
 mod client_builder;
+mod client_tls;
 mod custom_ca;
 mod error;
 mod network_policy;
 mod outbound_proxy;
 mod request;
+mod request_builder;
+mod request_draft;
+mod response;
+mod retry_after;
 mod route_aware_client_pool;
 mod route_aware_redirect;
 mod tls_backend_fallback;
@@ -14,11 +23,11 @@ mod transport;
 
 pub use crate::chatgpt_cloudflare_cookies::with_chatgpt_cloudflare_cookie_store;
 pub use crate::chatgpt_hosts::is_allowed_chatgpt_host;
+pub use crate::chatgpt_routing_affinity::ChatGptRoutingAffinity;
 pub use crate::client::HttpClient;
 pub use crate::client::HttpError;
-pub use crate::client::HttpResponse;
-pub use crate::client::RequestBuilder;
 pub use crate::client_builder::HttpClientBuilder;
+pub use crate::client_tls::HttpClientTlsConfig;
 pub use crate::custom_ca::BuildCustomCaTransportError;
 /// Test-only subprocess hook for custom CA coverage.
 ///
@@ -56,9 +65,11 @@ pub use crate::request::Request;
 pub use crate::request::RequestBody;
 pub use crate::request::RequestCompression;
 pub use crate::request::Response;
+pub use crate::request_builder::RequestBuilder;
+pub use crate::response::HttpResponse;
+pub use crate::retry_after::RetryAfter;
 pub use crate::route_aware_client_pool::RouteAwareClientPool;
 pub use crate::route_aware_client_pool::RouteAwareClientPoolError;
-pub use crate::route_aware_client_pool::RouteAwareRequestBuilder;
 pub use crate::route_aware_client_pool::RouteAwareRequestError;
 pub use crate::transport::ByteStream;
 pub use crate::transport::HttpTransport;

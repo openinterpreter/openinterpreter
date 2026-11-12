@@ -1,5 +1,7 @@
 use super::*;
 use crate::model::ThreadGoalRow;
+use crate::sqlite::SqlitePoolWriteExt;
+use crate::sqlite::SqliteWriteQueryExt;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -538,7 +540,7 @@ ON CONFLICT(thread_id) DO UPDATE SET
         &self,
         goal: &crate::ThreadGoal,
     ) -> anyhow::Result<()> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_immediate().await?;
         sqlx::query(
             r#"
 INSERT INTO thread_goals (
@@ -622,7 +624,7 @@ SELECT EXISTS(
     ) -> anyhow::Result<()> {
         sqlx::query("DELETE FROM thread_goal_continuation_deferrals WHERE thread_id = ?")
             .bind(thread_id.to_string())
-            .execute(self.pool.as_ref())
+            .execute_with_busy_retry(self.pool.as_ref())
             .await?;
 
         Ok(())
@@ -685,7 +687,7 @@ RETURNING
         .bind(token_budget)
         .bind(now_ms)
         .bind(now_ms)
-        .fetch_one(self.pool.as_ref())
+        .fetch_one_write(self.pool.as_ref())
         .await?;
 
         thread_goal_from_row(&row)
@@ -749,7 +751,7 @@ RETURNING
         .bind(token_budget)
         .bind(now_ms)
         .bind(now_ms)
-        .fetch_optional(self.pool.as_ref())
+        .fetch_optional_write(self.pool.as_ref())
         .await?;
 
         row.map(|row| thread_goal_from_row(&row)).transpose()
@@ -804,7 +806,7 @@ WHERE thread_id = ?
                 .bind(thread_id.to_string())
                 .bind(expected_goal_id)
                 .bind(expected_goal_id)
-                .execute(self.pool.as_ref())
+                .execute_with_busy_retry(self.pool.as_ref())
                 .await?
             }
             (Some(status), None) => {
@@ -838,7 +840,7 @@ WHERE thread_id = ?
                 .bind(thread_id.to_string())
                 .bind(expected_goal_id)
                 .bind(expected_goal_id)
-                .execute(self.pool.as_ref())
+                .execute_with_busy_retry(self.pool.as_ref())
                 .await?
             }
             (None, Some(token_budget)) => {
@@ -868,7 +870,7 @@ WHERE thread_id = ?
                 .bind(thread_id.to_string())
                 .bind(expected_goal_id)
                 .bind(expected_goal_id)
-                .execute(self.pool.as_ref())
+                .execute_with_busy_retry(self.pool.as_ref())
                 .await?
             }
             (None, None) => {
@@ -890,7 +892,7 @@ WHERE thread_id = ?
                     .bind(thread_id.to_string())
                     .bind(expected_goal_id)
                     .bind(expected_goal_id)
-                    .execute(self.pool.as_ref())
+                    .execute_with_busy_retry(self.pool.as_ref())
                     .await?
                 } else {
                     let goal = self.get_thread_goal(thread_id).await?;
@@ -1091,7 +1093,7 @@ WHERE thread_id = ?
         .bind(now_ms)
         .bind(thread_id.to_string())
         .bind(status.as_str())
-        .execute(self.pool.as_ref())
+        .execute_with_busy_retry(self.pool.as_ref())
         .await?;
 
         if result.rows_affected() == 0 {
@@ -1243,7 +1245,10 @@ RETURNING
             "#,
         );
 
-        let row = builder.build().fetch_optional(self.pool.as_ref()).await?;
+        let row = builder
+            .build()
+            .fetch_optional_write(self.pool.as_ref())
+            .await?;
 
         let Some(row) = row else {
             return Ok(GoalAccountingOutcome::Unchanged(

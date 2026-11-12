@@ -5,6 +5,7 @@
 //! thread-local event methods here avoids repeatedly plumbing `thread_id`
 //! through session code.
 
+use codex_protocol::mcp::CallToolResult;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SessionSource;
@@ -21,6 +22,7 @@ use crate::CodeCellTraceContext;
 use crate::CodexTurnId;
 use crate::CompactionId;
 use crate::CompactionTraceContext;
+use crate::ExecutionStatus;
 use crate::InferenceTraceContext;
 use crate::McpCallTraceContext;
 use crate::RawPayloadKind;
@@ -98,23 +100,12 @@ impl ThreadTraceContext {
         }
     }
 
-    /// Starts a root thread trace from `CODEX_ROLLOUT_TRACE_ROOT`, or disables tracing.
-    ///
-    /// Trace startup is best-effort. A tracing failure must not make the Codex
-    /// session unusable, because traces are diagnostic and can be enabled while
-    /// debugging unrelated production failures.
-    pub fn start_root_or_disabled(metadata: ThreadStartedTraceMetadata) -> Self {
+    /// Starts tracing when configured; an enabled recorder must initialize successfully.
+    pub fn start_root(metadata: ThreadStartedTraceMetadata) -> anyhow::Result<Self> {
         let Some(root) = std::env::var_os(CODEX_ROLLOUT_TRACE_ROOT_ENV) else {
-            return Self::disabled();
+            return Ok(Self::disabled());
         };
-        let root = PathBuf::from(root);
-        match start_root_in_root(root.as_path(), metadata) {
-            Ok(context) => context,
-            Err(err) => {
-                warn!("failed to initialize rollout trace bundle: {err:#}");
-                Self::disabled()
-            }
-        }
+        start_root_in_root(&PathBuf::from(root), metadata)
     }
 
     /// Starts a root trace in a known directory.
@@ -133,16 +124,17 @@ impl ThreadTraceContext {
         writer: Arc<TraceWriter>,
         root_thread_id: AgentThreadId,
         metadata: ThreadStartedTraceMetadata,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let context = EnabledThreadTraceContext {
             writer,
             root_thread_id,
             thread_id: metadata.thread_id.clone(),
         };
         record_thread_started(&context, metadata);
-        Self {
+        context.writer.check()?;
+        Ok(Self {
             state: ThreadTraceContextState::Enabled(context),
-        }
+        })
     }
 
     /// Returns whether this handle will write trace events.
@@ -154,17 +146,13 @@ impl ThreadTraceContext {
         matches!(self.state, ThreadTraceContextState::Enabled(_))
     }
 
-    /// Starts a fresh child thread in this context's rollout tree.
-    ///
-    /// Callers should use [`ThreadTraceContext::disabled`] for resumed children:
-    /// reusing the parent trace would emit a duplicate `ThreadStarted` event
-    /// for an existing thread id and make the bundle unreplayable.
-    pub fn start_child_thread_trace_or_disabled(
+    /// Starts a new child thread in this context's rollout tree.
+    pub fn start_child_thread_trace(
         &self,
         metadata: ThreadStartedTraceMetadata,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         match &self.state {
-            ThreadTraceContextState::Disabled => Self::disabled(),
+            ThreadTraceContextState::Disabled => Ok(Self::disabled()),
             ThreadTraceContextState::Enabled(context) => Self::start(
                 Arc::clone(&context.writer),
                 context.root_thread_id.clone(),
@@ -173,11 +161,30 @@ impl ThreadTraceContext {
         }
     }
 
-    /// Emits terminal trace events for graceful thread shutdown.
+    /// Reattaches an evicted child to this rollout without starting a new thread.
+    pub fn resume_child_thread_trace(&self, thread_id: String) -> anyhow::Result<Self> {
+        let ThreadTraceContextState::Enabled(parent) = &self.state else {
+            return Ok(Self::disabled());
+        };
+        let context = EnabledThreadTraceContext {
+            writer: Arc::clone(&parent.writer),
+            root_thread_id: parent.root_thread_id.clone(),
+            thread_id: thread_id.clone(),
+        };
+        context
+            .writer
+            .append(RawTraceEventPayload::ThreadResumed { thread_id })?;
+        Ok(Self {
+            state: ThreadTraceContextState::Enabled(context),
+        })
+    }
+
+    /// Emits terminal trace events when the thread stops.
     ///
     /// Spawned child sessions share their root bundle, so only the root
-    /// thread end closes the rollout. Child thread ends update the child thread
-    /// execution state without marking the whole bundle complete.
+    /// thread end closes the rollout. This is not recording finalization: child
+    /// threads and detached producers may still hold the shared writer.
+    /// Recording errors stay with the writer and prevent the closing event.
     pub fn record_ended(&self, status: RolloutStatus) {
         let ThreadTraceContextState::Enabled(context) = &self.state else {
             return;
@@ -213,13 +220,15 @@ impl ThreadTraceContext {
         });
     }
 
-    /// Emits typed Codex turn lifecycle events from protocol lifecycle events.
+    /// Records turn lifecycle and history acceptance from existing protocol events.
     pub fn record_codex_turn_event(&self, default_turn_id: &str, event: &EventMsg) {
         let ThreadTraceContextState::Enabled(context) = &self.state else {
             return;
         };
         let Some(trace_event) =
-            codex_turn_trace_event(context.thread_id.clone(), default_turn_id, event)
+            codex_turn_trace_event(context.thread_id.clone(), default_turn_id, event, |item| {
+                context.write_json_payload_best_effort(RawPayloadKind::ProtocolEvent, item)
+            })
         else {
             return;
         };
@@ -245,6 +254,59 @@ impl ThreadTraceContext {
             return;
         };
         context.append_with_context_best_effort(codex_turn_id.into(), payload);
+    }
+
+    /// Records the full MCP backend result before callbacks, sanitization, or UI truncation.
+    /// The dispatch trace separately records the result returned to the caller.
+    pub fn record_mcp_tool_result(
+        &self,
+        codex_turn_id: &str,
+        tool_call_id: &str,
+        result: &Result<CallToolResult, String>,
+    ) {
+        let ThreadTraceContextState::Enabled(context) = &self.state else {
+            return;
+        };
+        #[derive(Serialize)]
+        struct Payload<'a> {
+            result: &'a Result<CallToolResult, String>,
+        }
+        let Some(runtime_payload) = context
+            .write_json_payload_best_effort(RawPayloadKind::ToolRuntimeEvent, &Payload { result })
+        else {
+            return;
+        };
+        context.append_with_context_best_effort(
+            codex_turn_id.to_owned(),
+            RawTraceEventPayload::ToolCallRuntimeEnded {
+                tool_call_id: tool_call_id.to_owned(),
+                status: if result.is_ok() {
+                    ExecutionStatus::Completed
+                } else {
+                    ExecutionStatus::Failed
+                },
+                runtime_payload,
+            },
+        );
+    }
+
+    /// Records the exec actually selected by stdin, since its process handle can be reused.
+    pub fn record_stdin_target(
+        &self,
+        codex_turn_id: &str,
+        tool_call_id: &str,
+        exec_tool_call_id: &str,
+    ) {
+        let ThreadTraceContextState::Enabled(context) = &self.state else {
+            return;
+        };
+        context.append_with_context_best_effort(
+            codex_turn_id.to_string(),
+            RawTraceEventPayload::StdinTargetResolved {
+                tool_call_id: tool_call_id.to_string(),
+                exec_tool_call_id: exec_tool_call_id.to_string(),
+            },
+        );
     }
 
     /// Emits the v2 child-to-parent completion message as an explicit graph edge.
@@ -432,15 +494,13 @@ fn start_root_in_root(
     )?;
     let writer = Arc::new(writer);
 
-    if let Err(err) = writer.append(RawTraceEventPayload::RolloutStarted {
+    writer.append(RawTraceEventPayload::RolloutStarted {
         trace_id,
         root_thread_id: thread_id.clone(),
-    }) {
-        warn!("failed to append rollout trace event: {err:#}");
-    }
+    })?;
 
     debug!("recording rollout trace at {}", bundle_dir.display());
-    Ok(ThreadTraceContext::start(writer, thread_id, metadata))
+    ThreadTraceContext::start(writer, thread_id, metadata)
 }
 
 fn record_thread_started(
@@ -478,12 +538,14 @@ impl EnabledThreadTraceContext {
         match trace_event {
             crate::protocol_event::ToolRuntimeTraceEvent::Started {
                 tool_call_id,
+                kind,
                 payload,
             } => {
                 let runtime_payload = self
                     .write_json_payload_best_effort(RawPayloadKind::ToolRuntimeEvent, &payload)?;
                 Some(RawTraceEventPayload::ToolCallRuntimeStarted {
                     tool_call_id: tool_call_id.to_string(),
+                    kind,
                     runtime_payload,
                 })
             }

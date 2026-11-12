@@ -1,3 +1,7 @@
+mod standalone;
+
+pub use standalone::StaticNetworkProxyConfig;
+
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
@@ -116,8 +120,17 @@ pub struct NetworkUnixSocketPermissions {
     pub entries: BTreeMap<String, NetworkUnixSocketPermission>,
 }
 
+/// A caller-provided MITM CA for trusted proxy configuration, not sandbox `config.toml`.
+/// The private key file is readable only by the proxy process.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkMitmCaConfig {
+    pub certificate_file: String,
+    pub private_key_file: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
 pub struct NetworkProxyConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -137,6 +150,10 @@ pub struct NetworkProxyConfig {
     pub mode: NetworkMode,
     #[serde(default)]
     pub domains: Option<NetworkDomainPermissions>,
+    /// Managed host selectors routed through the existing approval flow before ordinary allows.
+    /// Direct proxy configuration cannot change these requirements-only selectors.
+    #[serde(skip)]
+    pub review_domains: Vec<String>,
     #[serde(default)]
     pub unix_sockets: Option<NetworkUnixSocketPermissions>,
     /// Omission is resolved for the selected sandbox; ordinary proxy execution defaults to false.
@@ -144,6 +161,8 @@ pub struct NetworkProxyConfig {
     pub allow_local_binding: Option<bool>,
     #[serde(default)]
     pub mitm: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mitm_ca: Option<NetworkMitmCaConfig>,
     #[serde(default)]
     pub credential_broker: bool,
     /// Whether brokerage enabled MITM rather than inheriting an explicit setting.
@@ -176,9 +195,11 @@ impl Default for NetworkProxyConfig {
             dangerously_allow_all_unix_sockets: None,
             mode: NetworkMode::default(),
             domains: None,
+            review_domains: Vec::new(),
             unix_sockets: None,
             allow_local_binding: None,
             mitm: false,
+            mitm_ca: None,
             credential_broker: false,
             credential_broker_enabled_mitm: false,
             credential_providers: BTreeMap::new(),
@@ -300,6 +321,30 @@ impl NetworkProxyConfig {
 
     pub fn set_denied_domains(&mut self, denied_domains: Vec<String>) {
         self.set_domain_entries(denied_domains, NetworkDomainPermission::Deny);
+    }
+
+    /// Applies valid saved denials even when a malformed batch invalidates its grants.
+    pub fn apply_saved_domain_rules(&mut self, allowed: Vec<String>, denied: &[String]) {
+        let valid_denials = crate::policy::compile_denylist(denied).is_ok();
+        if valid_denials && crate::policy::compile_allowlist(&allowed).is_ok() {
+            for host in allowed {
+                self.upsert_domain_permission(host, NetworkDomainPermission::Allow, normalize_host);
+            }
+        }
+        for host in denied {
+            if !valid_denials
+                && crate::policy::compile_denylist(std::slice::from_ref(host)).is_err()
+            {
+                continue;
+            }
+            // Managed constraints compare raw selectors case-insensitively. Preserve other aliases;
+            // the native and MCP domain matchers give this denial precedence over all of them.
+            self.upsert_domain_permission(
+                host.clone(),
+                NetworkDomainPermission::Deny,
+                str::to_ascii_lowercase,
+            );
+        }
     }
 
     pub fn upsert_domain_permission(
@@ -715,9 +760,11 @@ mod tests {
                 dangerously_allow_all_unix_sockets: None,
                 mode: NetworkMode::Full,
                 domains: None,
+                review_domains: Vec::new(),
                 unix_sockets: None,
                 allow_local_binding: None,
                 mitm: false,
+                mitm_ca: None,
                 credential_broker: false,
                 credential_broker_enabled_mitm: false,
                 credential_providers: BTreeMap::new(),
@@ -871,6 +918,32 @@ mod tests {
         };
 
         assert_eq!(config, expected);
+    }
+
+    #[test]
+    fn network_proxy_config_supports_external_mitm_ca() {
+        let config: NetworkProxyConfig = serde_json::from_str(
+            r#"{
+                "mitm": true,
+                "mitm_ca": {
+                    "certificate_file": "/run/proxy/ca.pem",
+                    "private_key_file": "/run/proxy/key.pem"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config,
+            NetworkProxyConfig {
+                mitm: true,
+                mitm_ca: Some(NetworkMitmCaConfig {
+                    certificate_file: "/run/proxy/ca.pem".to_string(),
+                    private_key_file: "/run/proxy/key.pem".to_string(),
+                }),
+                ..NetworkProxyConfig::default()
+            }
+        );
     }
 
     #[test]

@@ -1,0 +1,57 @@
+name: Issue Labeler
+
+on:
+  issues:
+    types:
+      - opened
+      - labeled
+
+jobs:
+  gather-labels:
+    name: Generate label suggestions
+    # Prevent runs on forks (requires OpenAI API key, wastes Actions minutes)
+    if: github.repository == 'openai/codex' && (github.event.action == 'opened' || (github.event.action == 'labeled' && github.event.label.name == 'codex-label'))
+    runs-on: ubuntu-latest
+    environment: issue-triage
+    permissions:
+      contents: read
+    outputs:
+      labels: ${{ steps.suggest.outputs.labels }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts/issue_labeler.py
+          sparse-checkout-cone-mode: false
+
+      - name: Suggest issue labels
+        id: suggest
+        timeout-minutes: 7
+        env:
+          OPENAI_API_KEY: ${{ secrets.CODEX_OPENAI_API_KEY }}
+        run: python3 .github/scripts/issue_labeler.py >> "$GITHUB_OUTPUT"
+
+  apply-labels:
+    name: Apply labels from Codex output
+    needs: gather-labels
+    if: ${{ !cancelled() && needs.gather-labels.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+    steps:
+      - name: Apply labels
+        if: needs.gather-labels.outputs.labels != ''
+        env:
+          LABELS: ${{ needs.gather-labels.outputs.labels }}
+        run: gh issue edit "$ISSUE_NUMBER" --add-label "$LABELS"
+
+      - name: Remove codex-label trigger
+        if: ${{ always() && github.event.action == 'labeled' && github.event.label.name == 'codex-label' }}
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --remove-label codex-label || true
+          echo "Attempted to remove label: codex-label"

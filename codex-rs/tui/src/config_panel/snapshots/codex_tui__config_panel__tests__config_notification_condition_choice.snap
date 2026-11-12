@@ -1,0 +1,13 @@
+---
+source: tui/src/config_panel/config_panel_tests.rs
+expression: "render(&picker, 100)"
+---
+
+  Notify when
+  Notify only while you are away or while this terminal is focused too
+
+
+› 1. Unfocused (current)
+  2. Always
+
+  enter select · esc back

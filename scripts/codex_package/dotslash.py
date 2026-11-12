@@ -1,5 +1,6 @@
 """Fetch executable artifacts from checked-in DotSlash manifests."""
 
+import gzip
 import hashlib
 import json
 import shutil
@@ -10,7 +11,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from .targets import TargetSpec
 
@@ -167,7 +168,8 @@ def download_archive(url: str, archive_path: Path) -> None:
     temp_path = archive_path.with_suffix(f"{archive_path.suffix}.tmp")
     temp_path.unlink(missing_ok=True)
     try:
-        with urlopen(url, timeout=DOWNLOAD_TIMEOUT_SECS) as response:
+        request = Request(url, headers={"User-Agent": "codex-package"})
+        with urlopen(request, timeout=DOWNLOAD_TIMEOUT_SECS) as response:
             with open(temp_path, "wb") as out:
                 shutil.copyfileobj(response, out)
         temp_path.replace(archive_path)
@@ -183,6 +185,11 @@ def extract_archive_member(
 ) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.unlink(missing_ok=True)
+
+    if artifact.archive_format == "gz":
+        with gzip.open(archive_path, "rb") as extracted, open(dest, "wb") as out:
+            shutil.copyfileobj(extracted, out)
+        return
 
     if artifact.archive_format == "tar.gz":
         with tarfile.open(archive_path, "r:gz") as archive:
@@ -218,5 +225,5 @@ def extract_archive_member(
 
     raise RuntimeError(
         f"Unsupported {artifact_label} archive format {artifact.archive_format!r}; "
-        "expected tar.gz or zip"
+        "expected gz, tar.gz or zip"
     )

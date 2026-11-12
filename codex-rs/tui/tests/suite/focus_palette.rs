@@ -274,6 +274,7 @@ fn fullscreen_transcript_defaults_to_terminal_scrollback() -> Result<()> {
 
 pub(super) struct PtyCodex {
     master: File,
+    slave: File,
     child: Child,
     parser: vt100::Parser,
     output: Vec<u8>,
@@ -357,12 +358,13 @@ impl PtyCodex {
             .env("CODEX_HOME", codex_home.path())
             .stdin(stdin)
             .stdout(stdout)
-            .stderr(slave)
+            .stderr(slave.try_clone()?)
             .spawn()
             .context("start Codex in focus-test pseudo-terminal")?;
 
         Ok(Self {
             master,
+            slave,
             child,
             parser: vt100::Parser::new(
                 /*rows*/ 32, /*cols*/ 120, /*scrollback_len*/ 0,

@@ -26,13 +26,12 @@ pub(crate) fn spawn_approval_decision(
     let request: ReviewAction = request.into();
     let (tx, rx) = oneshot::channel();
     let runtime = session.services.runtime_handle.clone();
+    let decision = decide_approval(session, context, review_id, request, reasons, options);
     let spawn_result = std::thread::Builder::new()
         .name("codex-approval-review".to_string())
         .stack_size(THREAD_STACK_SIZE_BYTES)
         .spawn(move || {
-            let decision = runtime.block_on(decide_approval(
-                session, context, review_id, request, reasons, options,
-            ));
+            let decision = runtime.block_on(decision);
             let _ = tx.send(decision);
         });
     if let Err(err) = spawn_result {
@@ -42,7 +41,8 @@ pub(crate) fn spawn_approval_decision(
 }
 
 /// `None` requests the existing user flow. No contributor is never an implicit allow.
-pub(crate) async fn decide_approval(
+/// Both metric sinks use the originating turn retained by the review context.
+pub(crate) fn decide_approval(
     session: Arc<Session>,
     context: impl Into<GuardianReviewContext>,
     review_id: String,

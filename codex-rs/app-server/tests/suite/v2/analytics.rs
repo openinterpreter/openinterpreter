@@ -11,6 +11,7 @@ use app_test_support::write_mock_responses_config_toml_with_chatgpt_base_url;
 use codex_app_server_protocol::ApprovalsReviewer;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SandboxPolicy;
@@ -25,6 +26,7 @@ use codex_app_server_protocol::TurnSettingsUpdateResponse;
 use codex_app_server_protocol::TurnSettingsUpdateStatus;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
+use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_config::types::OtelExporterKind;
@@ -41,6 +43,8 @@ use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_remote;
 use core_test_support::skip_if_wine_exec;
+use core_test_support::startup::STARTUP_TIMEOUT;
+use core_test_support::startup::expect_startup;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -59,6 +63,188 @@ use wiremock::matchers::path_regex;
 
 const SERVICE_VERSION: &str = "0.0.0-test";
 
+// Completion metadata follows its source message without entering later model requests.
+#[test_case::test_case(ModeKind::Default; "normal")]
+#[test_case::test_case(ModeKind::Plan; "plan")]
+#[tokio::test]
+async fn native_counts_follow_completed_messages_without_request_replay(
+    mode: ModeKind,
+) -> Result<()> {
+    #[cfg(windows)]
+    const READ_TIMEOUT: Duration = Duration::from_secs(25);
+    #[cfg(not(windows))]
+    const READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+    let server = responses::start_mock_server().await;
+    let mut events = vec![responses::ev_response_created("response-1")];
+    for (id, text, phase, count) in [
+        ("partial", "Partial.", "partial_answer", 0),
+        ("final", "Done.", "final_answer", 23),
+    ] {
+        let mut added = responses::ev_message_item_added(id, "");
+        added["item"]["phase"] = json!(phase);
+        let mut done = responses::ev_assistant_message(id, text);
+        done["item"]["phase"] = json!(phase);
+        done["item"]["internal_chat_message_metadata_passthrough"] =
+            json!({"content_token_count": count});
+        events.extend([added, responses::ev_output_text_delta(text), done]);
+    }
+    events.push(responses::ev_completed("response-1"));
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    let mut app = expect_startup(
+        TestAppServer::builder()
+            .with_codex_home(codex_home.path())
+            .build_initialized_with_timeout(STARTUP_TIMEOUT),
+    )
+    .await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(events),
+            responses::sse(vec![
+                responses::ev_response_created("response-2"),
+                responses::ev_assistant_message("next", "Next."),
+                responses::ev_completed("response-2"),
+            ]),
+        ],
+    )
+    .await;
+    let thread = app
+        .start_thread(ThreadStartParams {
+            model: Some("mock-model".into()),
+            ..Default::default()
+        })
+        .await?
+        .thread;
+    timeout(READ_TIMEOUT, async {
+        for prompt in ["First turn", "Next turn"] {
+            let completed = app
+                .start_turn_and_wait_for_completion(TurnStartParams {
+                    thread_id: thread.id.clone(),
+                    input: vec![UserInput::Text {
+                        text: prompt.into(),
+                        text_elements: Vec::new(),
+                    }],
+                    collaboration_mode: Some(CollaborationMode {
+                        mode,
+                        settings: Settings {
+                            model: "mock-model".into(),
+                            reasoning_effort: None,
+                            developer_instructions: None,
+                        },
+                    }),
+                    ..Default::default()
+                })
+                .await?;
+            assert_eq!(completed.turn.status, TurnStatus::Completed);
+        }
+        let mut counts = Vec::new();
+        while counts.len() < 2 {
+            let completed: ItemCompletedNotification =
+                app.read_notification("item/completed").await?;
+            if let ThreadItemPayload::AgentMessage { id, phase, .. } = completed.item.payload {
+                counts.push((id, phase, completed.content_token_count));
+            }
+        }
+        assert_eq!(
+            counts,
+            vec![
+                ("partial".into(), Some(MessagePhase::PartialAnswer), Some(0)),
+                ("final".into(), Some(MessagePhase::FinalAnswer), Some(23)),
+            ]
+        );
+        app.shutdown_gracefully().await?;
+        anyhow::Ok(())
+    })
+    .await??;
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    let assistant_input: Vec<_> = requests[1]
+        .inputs_of_type("message")
+        .into_iter()
+        .filter(|item| item["role"] == "assistant")
+        .map(|item| {
+            (
+                item["content"][0]["text"].clone(),
+                item["internal_chat_message_metadata_passthrough"]
+                    .get("content_token_count")
+                    .cloned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        assistant_input,
+        vec![(json!("Partial."), None), (json!("Done."), None)]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn usage_limit_window_reaches_turn_analytics() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    Mock::given(method("POST"))
+        .and(path_regex(".*/responses$"))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+            "error": {
+                "type": "usage_limit_reached",
+                "message": "usage limit reached",
+                "plan_type": "pro",
+                "limit_window_minutes": 300
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri())
+        .with_root_config(&format!("chatgpt_base_url = \"{}\"", server.uri()))
+        .with_provider_config("supports_websockets = false")
+        .write(codex_home.path())?;
+    mount_analytics_capture(&server, codex_home.path()).await?;
+
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_managed_config()
+        .build_initialized()
+        .await?;
+    let thread = app_server
+        .start_thread(ThreadStartParams::default())
+        .await?
+        .thread;
+    let completed = app_server
+        .start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: thread.id,
+            input: vec![UserInput::Text {
+                text: "Hello".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+
+    let event = wait_for_matching_analytics_event(&server, Duration::from_secs(30), |event| {
+        event["event_type"] == "codex_turn_event"
+            && event["event_params"]["turn_id"] == completed.turn.id
+    })
+    .await?;
+    let params = &event["event_params"];
+    assert_eq!(
+        json!([
+            params["status"],
+            params["turn_error"],
+            params["codex_error_kind"],
+            params["usage_limit_window_minutes"],
+        ]),
+        json!(["failed", "usageLimitExceeded", "usage_limit_reached", 300])
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn guardian_review_turns_and_tools_reach_analytics() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -67,8 +253,17 @@ async fn guardian_review_turns_and_tools_reach_analytics() -> Result<()> {
     let server = responses::start_mock_server().await;
     let codex_home = TempDir::new()?;
     mount_analytics_capture(&server, codex_home.path()).await?;
+    let catalog_path = codex_home.path().join("guardian-models.json");
+    std::fs::write(
+        &catalog_path,
+        serde_json::to_vec(&bundled_models_response()?)?,
+    )?;
     MockResponsesConfig::new(&server.uri())
-        .with_root_config(&format!("chatgpt_base_url = \"{}\"", server.uri()))
+        .with_root_config(&format!(
+            "chatgpt_base_url = \"{}\"\nmodel_catalog_json = {}",
+            server.uri(),
+            serde_json::to_string(&catalog_path)?
+        ))
         .with_provider_config("supports_websockets = false")
         .enable_feature(Feature::GuardianApproval)
         .disable_feature(Feature::Apps)
@@ -374,8 +569,8 @@ async fn multi_agent_v2_tools_emit_collaborator_analytics() -> Result<()> {
         .items;
     let child_thread_id = items
         .iter()
-        .find_map(|item| match item {
-            ThreadItem::SubAgentActivity {
+        .find_map(|item| match &item.payload {
+            ThreadItemPayload::SubAgentActivity {
                 id,
                 agent_thread_id,
                 ..
@@ -386,12 +581,14 @@ async fn multi_agent_v2_tools_emit_collaborator_analytics() -> Result<()> {
     assert!(
         !items
             .iter()
-            .any(|item| matches!(item, ThreadItem::CollabAgentToolCall { .. }))
+            .any(|item| matches!(&item.payload, ThreadItemPayload::CollabAgentToolCall { .. }))
     );
     let activity_ids = items
         .iter()
-        .filter_map(|item| match item {
-            ThreadItem::SubAgentActivity { id, .. } if id.starts_with("call-") => Some(id.as_str()),
+        .filter_map(|item| match &item.payload {
+            ThreadItemPayload::SubAgentActivity { id, .. } if id.starts_with("call-") => {
+                Some(id.as_str())
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -453,61 +650,74 @@ async fn multi_agent_v2_tools_emit_collaborator_analytics() -> Result<()> {
     Ok(())
 }
 
-fn set_metrics_exporter(config: &mut codex_core::config::Config) {
-    config.otel.metrics_exporter = OtelExporterKind::OtlpHttp {
-        endpoint: "http://localhost:4318".to_string(),
-        headers: HashMap::new(),
-        protocol: OtelHttpProtocol::Json,
-        tls: None,
-    };
-}
-
 #[tokio::test]
-async fn app_server_default_analytics_disabled_without_flag() -> Result<()> {
+async fn metrics_exporters_respect_analytics_preferences() -> Result<()> {
     let codex_home = TempDir::new()?;
     let mut config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
         .build()
         .await?;
-    set_metrics_exporter(&mut config);
-    config.analytics_enabled = None;
+    for exporter in [
+        OtelExporterKind::None,
+        OtelExporterKind::Statsig,
+        OtelExporterKind::OtlpHttp {
+            endpoint: "http://localhost:4318".to_string(),
+            headers: HashMap::new(),
+            protocol: OtelHttpProtocol::Json,
+            tls: None,
+        },
+        OtelExporterKind::OtlpGrpc {
+            endpoint: "http://localhost:4317".to_string(),
+            headers: HashMap::new(),
+            tls: None,
+        },
+    ] {
+        config.otel.metrics_exporter = exporter;
+        for analytics_enabled in [None, Some(false), Some(true)] {
+            config.analytics_enabled = analytics_enabled;
+            for default_analytics_enabled in [false, true] {
+                let expected_metrics = match config.otel.metrics_exporter {
+                    OtelExporterKind::None => false,
+                    // The built-in exporter is disabled in debug builds even with consent.
+                    OtelExporterKind::Statsig => {
+                        !cfg!(debug_assertions)
+                            && analytics_enabled.unwrap_or(default_analytics_enabled)
+                    }
+                    OtelExporterKind::OtlpHttp { .. } | OtelExporterKind::OtlpGrpc { .. } => true,
+                };
+                let provider = codex_core::otel_init::build_provider(
+                    &config,
+                    SERVICE_VERSION,
+                    Some("codex-app-server"),
+                    default_analytics_enabled,
+                )
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                let metrics = provider.as_ref().and_then(|otel| otel.metrics());
+                let metrics_enabled = metrics.is_some();
+                // Exercise the nonempty export path that concurrent tests can
+                // trigger through process-global metrics.
+                let record_result = metrics
+                    .map(|metrics| {
+                        metrics.counter("codex.test.analytics_preferences", /*inc*/ 1, &[])
+                    })
+                    .transpose();
+                if let Some(provider) = provider {
+                    // Keep Tokio running while the gRPC exporter flushes; a
+                    // synchronous drop can deadlock this current-thread runtime.
+                    provider
+                        .shutdown_with_timeout(Duration::from_secs(/*secs*/ 5))
+                        .await?;
+                }
+                record_result?;
+                assert_eq!(
+                    metrics_enabled, expected_metrics,
+                    "exporter={:?}, analytics={analytics_enabled:?}, default={default_analytics_enabled}",
+                    config.otel.metrics_exporter,
+                );
+            }
+        }
+    }
 
-    let provider = codex_core::otel_init::build_provider(
-        &config,
-        SERVICE_VERSION,
-        Some("codex-app-server"),
-        /*default_analytics_enabled*/ false,
-    )
-    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-
-    // With analytics unset in the config and the default flag is false, metrics are disabled.
-    // A provider may still exist for non-metrics telemetry, so check metrics specifically.
-    let has_metrics = provider.as_ref().and_then(|otel| otel.metrics()).is_some();
-    assert_eq!(has_metrics, false);
-    Ok(())
-}
-
-#[tokio::test]
-async fn app_server_default_analytics_enabled_with_flag() -> Result<()> {
-    let codex_home = TempDir::new()?;
-    let mut config = ConfigBuilder::default()
-        .codex_home(codex_home.path().to_path_buf())
-        .build()
-        .await?;
-    set_metrics_exporter(&mut config);
-    config.analytics_enabled = None;
-
-    let provider = codex_core::otel_init::build_provider(
-        &config,
-        SERVICE_VERSION,
-        Some("codex-app-server"),
-        /*default_analytics_enabled*/ true,
-    )
-    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-
-    // With analytics unset in the config and the default flag is true, metrics are enabled.
-    let has_metrics = provider.as_ref().and_then(|otel| otel.metrics()).is_some();
-    assert_eq!(has_metrics, true);
     Ok(())
 }
 
@@ -842,8 +1052,6 @@ default_mode_request_user_input = true
 plugins = true
 remote_plugin = false
 unified_exec = true
-shell_zsh_fork = false
-unified_exec_zsh_fork = false
 
 [plugins."{METRICS_PLUGIN_ID}"]
 enabled = true

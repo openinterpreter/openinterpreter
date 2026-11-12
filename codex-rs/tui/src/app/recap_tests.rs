@@ -45,6 +45,7 @@ use uuid::Uuid;
 fn turn(status: TurnStatus) -> Turn {
     Turn {
         id: "turn".to_string(),
+        root_turn_id: None,
         items: Vec::new(),
         items_view: Default::default(),
         status,
@@ -698,6 +699,141 @@ fn recap_history_cell_wraps_in_narrow_terminals() {
     ");
 }
 
+#[tokio::test]
+async fn recap_history_uses_one_separator_before_following_message() {
+    let mut app = make_test_app().await;
+    app.transcript_cells = vec![
+        Arc::new(
+            ThreadRecapHistoryCell::new("The draft is ready.".into())
+                .with_next_action(Some("Review the changes.".into())),
+        ),
+        Arc::new(AgentMessageCell::new(
+            vec!["Follow-up response.".into()],
+            /*is_first_line*/ true,
+        )),
+    ];
+    let rendered = app
+        .render_transcript_lines_for_reflow(/*width*/ 80)
+        .lines
+        .iter()
+        .map(|line| line.line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!(rendered, @r"
+      ↳ Recap: The draft is ready.
+               Next: Review the changes.
+
+    • Follow-up response.
+    ");
+}
+
+#[test]
+fn recap_history_cell_preserves_unicode_and_url_tokens() {
+    let cell = ThreadRecapHistoryCell::new(
+        "Résumé ready. See https://example.com/review/42 日本語 details.".to_string(),
+    );
+    let rendered = cell
+        .display_lines(/*width*/ 48)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    insta::assert_snapshot!(rendered, @r"
+      ↳ Recap: Résumé ready. See
+               https://example.com/review/42
+               日本語 details.
+    ");
+}
+
+#[test]
+fn recap_history_cell_wraps_long_urls_in_narrow_terminals() {
+    let cell = ThreadRecapHistoryCell::new(
+        "The café review is paused with the draft ready at https://example.com/review/42. 日本語"
+            .to_string(),
+    );
+    let lines = cell.display_lines(/*width*/ 32);
+    assert!(lines.iter().all(|line| line_width(line) <= 30));
+    assert!(
+        lines
+            .iter()
+            .skip(/*n*/ 1)
+            .all(|line| line.to_string().starts_with("           "))
+    );
+    assert!(lines.iter().all(|line| {
+        line.style
+            .add_modifier
+            .contains(Modifier::ITALIC | Modifier::DIM)
+    }));
+    let rendered = lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    insta::assert_snapshot!(rendered, @"
+    ↳ Recap: The café review is
+             paused with the
+             draft ready at
+             https://example.com
+             /review/42. 日本語
+    ");
+}
+
+#[test]
+fn recap_history_cell_splits_only_urls_wider_than_the_text_column() {
+    for (url, expected) in [
+        (
+            "https://example.com",
+            vec!["  ↳ Recap: https://example.com"],
+        ),
+        (
+            "https://example.com/",
+            vec!["  ↳ Recap: https://example.com", "           /"],
+        ),
+        (
+            "https://a.co/ｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞ",
+            vec!["  ↳ Recap: https://a.co/ｶﾞｶﾞｶﾞ", "           ｶﾞｶﾞｶﾞ"],
+        ),
+    ] {
+        let cell = ThreadRecapHistoryCell::new(url.to_string());
+        let lines = cell.display_lines(/*width*/ 32);
+        assert!(lines.iter().all(|line| line_width(line) <= 30));
+        assert_eq!(
+            lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            expected
+        );
+        let displayed_url = lines
+            .iter()
+            .map(|line| line.to_string().chars().skip(/*n*/ 11).collect::<String>())
+            .collect::<String>();
+        assert_eq!(displayed_url, url);
+    }
+}
+
+#[test]
+fn recap_history_cell_uses_available_space_below_indent_width() {
+    let cell = ThreadRecapHistoryCell::new(
+        "Resume this task.\nhttps://example.com/review/42.".to_string(),
+    );
+    let rendered = cell
+        .display_lines(/*width*/ 12)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    insta::assert_snapshot!(rendered, @r"
+    ↳ Recap:
+    Resume
+    this task.
+    https://ex
+    ample.com/
+    review/42.
+    ");
+    assert_eq!(cell.display_lines(/*width*/ 0), Vec::new());
+}
+
 #[test]
 fn recap_history_cell_preserves_unicode_and_url_tokens() {
     let cell = ThreadRecapHistoryCell::new(
@@ -923,7 +1059,7 @@ fn track_in_flight_recap(app: &mut App, thread_id: ThreadId) -> (RecapRequest, T
     (request, temporary_thread_id)
 }
 
-async fn app_with_visible_thread(thread_id: ThreadId) -> App {
+async fn app_with_visible_thread(thread_id: ThreadId) -> Box<App> {
     let mut app = make_test_app().await;
     app.active_thread_id = Some(thread_id);
     app

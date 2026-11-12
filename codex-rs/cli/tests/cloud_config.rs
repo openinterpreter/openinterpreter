@@ -46,7 +46,7 @@ struct CloudManagedConfigFixture {
 }
 
 impl CloudManagedConfigFixture {
-    async fn new() -> Result<Option<Self>> {
+    async fn for_backend() -> Result<Option<Self>> {
         let server = MockServer::start().await;
         let chatgpt_base_url = format!("{}/backend-api", server.uri());
         let codex_home = TempDir::new()?;
@@ -84,6 +84,19 @@ impl CloudManagedConfigFixture {
         )?;
 
         let mcp_url = format!("{}/mcp", server.uri());
+        Ok(Some(Self {
+            server,
+            codex_home,
+            user_config,
+            mcp_url,
+        }))
+    }
+
+    async fn new() -> Result<Option<Self>> {
+        let Some(fixture) = Self::for_backend().await? else {
+            return Ok(None);
+        };
+        let mcp_url = &fixture.mcp_url;
         let managed_config = format!(
             "mcp_oauth_credentials_store = \"file\"\n\n\
              [mcp_servers.{MANAGED_SERVER_NAME}]\n\
@@ -110,15 +123,10 @@ impl CloudManagedConfigFixture {
                 },
             })))
             .expect(1)
-            .mount(&server)
+            .mount(&fixture.server)
             .await;
 
-        Ok(Some(Self {
-            server,
-            codex_home,
-            user_config,
-            mcp_url,
-        }))
+        Ok(Some(fixture))
     }
 
     fn command(&self, args: &[&str]) -> Result<Command> {
@@ -132,6 +140,9 @@ impl CloudManagedConfigFixture {
             .env_remove("CODEX_ACCESS_TOKEN")
             .env_remove("CODEX_API_KEY")
             .env_remove("OPENAI_API_KEY")
+            .env_remove("OPENAI_FEDERATION_RULE_ID")
+            .env_remove("OPENAI_IDENTITY_TOKEN_FILE")
+            .env_remove("OPENAI_WORKLOAD_IDENTITY_CONTEXT")
             .args(args);
         Ok(command)
     }
@@ -247,9 +258,17 @@ async fn login_and_logout_persist_only_cloud_managed_mcp_oauth_credentials() -> 
         .mount(&fixture.server)
         .await;
 
-    let mut command = fixture.command(&["mcp", "login", MANAGED_SERVER_NAME])?;
-    command.stdout(Stdio::piped()).stderr(Stdio::inherit());
+    let mut command = fixture.command(&["mcp", "login", MANAGED_SERVER_NAME, "--no-browser"])?;
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
     let mut child = command.spawn()?;
+    // Keep input open through child.wait() so the HTTP callback cannot race EOF.
+    let _stdin = child
+        .stdin
+        .take()
+        .context("MCP login did not provide stdin")?;
     let stdout = child
         .stdout
         .take()
@@ -440,5 +459,272 @@ async fn add_and_remove_preserve_cloud_managed_resources() -> Result<()> {
         .await?;
     fixture.server.verify().await;
 
+    Ok(())
+}
+
+async fn mock_startup_bundle(server: &MockServer, status: u16, config: &str, requirements: &str) {
+    server.reset().await;
+    let layer = |contents: &str| {
+        json!({
+            "enterprise_managed": [{"id": "startup", "name": "Startup policy", "contents": contents}]
+        })
+    };
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/config/bundle"))
+        .and(header("authorization", "Bearer chatgpt-token"))
+        .respond_with(ResponseTemplate::new(status).set_body_json(json!({
+            "config_toml": layer(config), "requirements_toml": layer(requirements),
+        })))
+        .expect(1..)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn tcp_tunnel_ssh_enforces_cloud_requirements_before_gateway_connection() -> Result<()> {
+    for (config, requirements, expected_error) in [
+        (
+            "",
+            "[application.network.domains]\n'example.com' = 'allow'",
+            "destination denied by application network policy",
+        ),
+        (
+            "forced_login_method = 'api'",
+            "",
+            "ChatGPT OAuth login required for SSH",
+        ),
+        (
+            "forced_chatgpt_workspace_id = 'different-workspace'",
+            "",
+            "ChatGPT OAuth login required for SSH",
+        ),
+    ] {
+        let Some(fixture) = CloudManagedConfigFixture::for_backend().await? else {
+            return Ok(());
+        };
+        mock_startup_bundle(&fixture.server, /*status*/ 200, config, requirements).await;
+        let output = fixture
+            .command(&[
+                "tcp-tunnel",
+                "--environment-id",
+                "ccarenv_fixture",
+                "--port",
+                "22",
+            ])?
+            .output()
+            .await?;
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr)?;
+        assert!(stderr.contains(expected_error), "{stderr}");
+        fixture.server.verify().await;
+    }
+    Ok(())
+}
+
+async fn successful_json(command: &mut Command) -> Result<Value> {
+    let output = command.output().await?;
+    ensure!(output.status.success(), "{output:?}");
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+#[tokio::test]
+async fn startup_config_loads_managed_policy_or_reports_cloud_failure() -> Result<()> {
+    for status in [200, 401, 503] {
+        let Some(fixture) = CloudManagedConfigFixture::new().await? else {
+            return Ok(());
+        };
+        mock_startup_bundle(
+            &fixture.server,
+            status,
+            "forced_login_method = 'api'\n",
+            "[application.network.domains]\n'127.0.0.1' = 'allow'\n'example.com' = 'allow'\n",
+        )
+        .await;
+        let sqlite_home = TempDir::new()?;
+        let history_path = sqlite_home.path().join("state_5.sqlite");
+        std::fs::write(&history_path, b"history must not be repaired")?;
+        let output = fixture
+            .command(&["app-server", "--print-startup-config"])?
+            .env("CODEX_SQLITE_HOME", sqlite_home.path())
+            .env(
+                "CODEX_REFRESH_TOKEN_URL_OVERRIDE",
+                format!("{}/refresh", fixture.server.uri()),
+            )
+            .output()
+            .await?;
+        let value: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(output.status.success(), status == 200, "{value}");
+        if status == 200 {
+            let requirements = &value["configRequirements"]["requirements"];
+            assert_eq!(requirements["allowedLoginMethods"], json!(["api"]));
+            assert_eq!(
+                requirements["application"]["network"]["domains"]["example.com"],
+                "allow"
+            );
+        } else {
+            assert_eq!(value["error"]["data"]["reason"], "cloudConfigBundle");
+            assert!(value.get("configRequirements").is_none());
+        }
+        assert_eq!(
+            std::fs::read(&history_path)?,
+            b"history must not be repaired"
+        );
+        assert_eq!(std::fs::read_dir(sqlite_home.path())?.count(), 1);
+        fixture.server.verify().await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn startup_config_sign_out_reloads_policy_without_starting_runtime() -> Result<()> {
+    for (status, provider) in [(200, None), (503, None), (503, Some("amazon-bedrock"))] {
+        let Some(mut fixture) = CloudManagedConfigFixture::new().await? else {
+            return Ok(());
+        };
+        if let Some(provider) = provider {
+            fixture
+                .user_config
+                .push_str(&format!("model_provider = \"{provider}\"\n"));
+        }
+        std::fs::write(
+            fixture.codex_home.path().join("config.toml"),
+            &fixture.user_config,
+        )?;
+        mock_startup_bundle(
+            &fixture.server, status, "forced_login_method = 'api'\n",
+            "cli_auth_credentials_store = 'ephemeral'\nenforce_residency = 'us'\n[application.network.domains]\n'127.0.0.1' = 'allow'\n[windows]\nrequire_mxc = true\n",
+        ).await;
+        let mut revoke = Mock::given(method("POST")).and(path("/revoke"));
+        if status == 200 {
+            revoke = revoke.and(header("x-openai-internal-codex-residency", "us"));
+        }
+        revoke
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&fixture.server)
+            .await;
+        let signed_out_home = TempDir::new()?;
+        std::fs::write(
+            signed_out_home.path().join("config.toml"),
+            &fixture.user_config,
+        )?;
+        let baseline = successful_json(
+            fixture
+                .command(&["app-server", "--print-startup-config"])?
+                .env("CODEX_HOME", signed_out_home.path()),
+        )
+        .await?;
+        let sqlite_home = TempDir::new()?;
+        let value = successful_json(
+            fixture
+                .command(&["app-server", "--print-startup-config", "--startup-sign-out"])?
+                .env("CODEX_SQLITE_HOME", sqlite_home.path())
+                .env(
+                    "CODEX_REVOKE_TOKEN_URL_OVERRIDE",
+                    format!("{}/revoke", fixture.server.uri()),
+                ),
+        )
+        .await?;
+        assert_eq!(value["configRequirements"], baseline["configRequirements"]);
+        assert_eq!(std::fs::read_dir(sqlite_home.path())?.count(), 0);
+        let user_config: toml::Value = toml::from_str(&std::fs::read_to_string(
+            fixture.codex_home.path().join("config.toml"),
+        )?)?;
+        assert!(user_config.get("model_provider").is_none());
+        let status = fixture.command(&["login", "status"])?.output().await?;
+        assert!(!status.status.success());
+        fixture.server.verify().await;
+    }
+    Ok(())
+}
+
+const BUNDLE: &str = "/backend-api/wham/config/bundle";
+const REGISTER: &str = "/cloud/environment/test/register";
+const REGISTRATION_REACHED: &str = "registration reached";
+
+#[tokio::test]
+async fn remote_exec_server_loads_cloud_provider_with_chatgpt_auth() -> Result<()> {
+    check_registration(
+        "forced_login_method = 'chatgpt'\nmodel_provider = 'cloud-provider'",
+        Some((
+            "[model_providers.cloud-provider]\nname = 'Cloud provider'\nwire_api = 'responses'",
+            "",
+        )),
+        "Bearer chatgpt-token",
+        REGISTRATION_REACHED,
+        &[BUNDLE, REGISTER],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn remote_exec_server_api_key_skips_chatgpt_cloud_config() -> Result<()> {
+    check_registration(
+        "",
+        /*bundle*/ None,
+        "Bearer test-api-key",
+        REGISTRATION_REACHED,
+        &[REGISTER],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn remote_exec_server_cloud_policy_denies_registration() -> Result<()> {
+    check_registration(
+        "forced_login_method = 'chatgpt'",
+        Some(("", "[application.network]\nenabled = true\n[application.network.domains]\n'gateway.example.com' = 'allow'")),
+        "Bearer chatgpt-token",
+        "destination denied by application network policy",
+        &[BUNDLE],
+    )
+    .await
+}
+
+async fn check_registration(
+    config: &str,
+    bundle: Option<(&str, &str)>,
+    registration_auth: &str,
+    expected_error: &str,
+    expected_paths: &[&str],
+) -> Result<()> {
+    let fixture = CloudManagedConfigFixture::for_backend()
+        .await?
+        .context("remote registration test requires isolated mock credentials")?;
+    let server = &fixture.server;
+    if let Some((config, requirements)) = bundle {
+        mock_startup_bundle(server, /*status*/ 200, config, requirements).await;
+    }
+    Mock::given(method("POST"))
+        .and(path(REGISTER))
+        .and(header("authorization", registration_auth))
+        .respond_with(ResponseTemplate::new(400).set_body_string(REGISTRATION_REACHED))
+        .mount(server)
+        .await;
+    std::fs::write(
+        fixture.codex_home.path().join("config.toml"),
+        format!("{}{config}\n", fixture.user_config),
+    )?;
+    let mut command = fixture.command(&[
+        "exec-server",
+        "--remote",
+        &server.uri(),
+        "--environment-id",
+        "test",
+    ])?;
+    command.env("CODEX_API_KEY", "test-api-key");
+    let output = timeout(Duration::from_secs(30), command.output()).await??;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success() && stderr.contains(expected_error),
+        "{stderr}"
+    );
+    let requests = server
+        .received_requests()
+        .await
+        .context("mock request log")?;
+    let paths: Vec<_> = requests.iter().map(|request| request.url.path()).collect();
+    assert_eq!(paths, expected_paths);
     Ok(())
 }

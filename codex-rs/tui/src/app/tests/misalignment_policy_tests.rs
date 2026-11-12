@@ -1,8 +1,12 @@
+use super::session_lifecycle_requests::HistoryCapabilities;
 use super::session_lifecycle_requests::recorded_params;
 use super::session_lifecycle_requests::start_recording_app_server;
+use super::session_lifecycle_requests::start_recording_app_server_with_history;
 use super::*;
 use codex_app_server_protocol::MisalignmentErrorDetails;
 use codex_app_server_protocol::MisalignmentSteer;
+use codex_protocol::openai_models::ModelAccessPrograms;
+use codex_protocol::turn_input::CyberAccessProgram;
 use pretty_assertions::assert_eq;
 
 fn policy_error() -> AppServerTurnError {
@@ -11,6 +15,7 @@ fn policy_error() -> AppServerTurnError {
         codex_error_info: Some(AppServerCodexErrorInfo::MisalignmentPolicyViolation),
         additional_details: None,
         misalignment: Some(MisalignmentErrorDetails {
+            review_target: Some("RB".to_string()),
             error_type: None,
             detailed_explanation: Some(
                 "The proposed action exceeded the request.\n\n".repeat(1_500),
@@ -37,14 +42,41 @@ fn error_notification(
 
 #[tokio::test]
 async fn misalignment_continuation_requires_current_review_and_submits_once() -> Result<()> {
-    for reject in [false, true] {
+    for (reject, preserve, daybreak, rollout_enabled, has_chatgpt_account, server_owned) in [
+        (false, false, false, true, true, false),
+        (false, true, true, true, true, false),
+        (true, false, false, true, true, false),
+        (false, false, false, false, true, false),
+        (false, true, true, false, true, false),
+        // Continuations submit directly rather than via the normal turn-start path.
+        (false, false, false, true, false, false),
+        (false, true, true, true, false, false),
+        // Server-owned continuations preserve the acknowledgement without local overrides.
+        (false, false, false, true, true, true),
+    ] {
         let (mut app, mut rx, _) = make_test_app_with_channels().await;
-        let (mut server, requests, proxy) = start_recording_app_server(
-            &app.config,
-            /*blocked_thread_list*/ None,
-            /*failed_thread_name*/ None,
-        )
-        .await?;
+        app.chat_widget
+            .set_feature_enabled(Feature::CliDaybreak, rollout_enabled);
+        app.chat_widget
+            .set_feature_enabled(Feature::ApiKeyCyberAccessPrograms, !has_chatgpt_account);
+        let (mut server, requests, proxy) = if server_owned {
+            start_recording_app_server_with_history(
+                &app.config,
+                HistoryCapabilities::Current,
+                /*blocked_thread_list*/ None,
+                /*failed_thread_name*/ None,
+                crate::app_server_session::ThreadParamsMode::Cloud,
+                codex_config::LoaderOverrides::without_managed_config_for_tests(),
+            )
+            .await?
+        } else {
+            start_recording_app_server(
+                &app.config,
+                /*blocked_thread_list*/ None,
+                /*failed_thread_name*/ None,
+            )
+            .await?
+        };
         let mut session = if reject {
             test_thread_session(ThreadId::new(), app.config.cwd.to_path_buf())
         } else {
@@ -57,9 +89,40 @@ async fn misalignment_continuation_requires_current_review_and_submits_once() ->
         session.active_permission_profile = None;
         app.active_thread_id = Some(thread_id);
         app.chat_widget.handle_thread_session(session);
-        app.runtime_permission_profile_override = Some(
-            RuntimePermissionProfileOverride::from_config(app.chat_widget.config_ref()),
-        );
+        if !reject {
+            app.chat_widget.update_account_state(
+                (!has_chatgpt_account).then_some(crate::status::StatusAccountDisplay::ApiKey),
+                /*plan_type*/ None,
+                has_chatgpt_account,
+                /*has_codex_backend_auth*/ has_chatgpt_account,
+            );
+            app.chat_widget.open_model_popup();
+            let request_id = std::iter::from_fn(|| rx.try_recv().ok())
+                .filter_map(|event| match event {
+                    AppEvent::FetchModels { request_id } => Some(request_id),
+                    _ => None,
+                })
+                .last()
+                .expect("model catalog request");
+            let mut model = crate::test_support::TEST_MODEL_PRESETS[0].clone();
+            model.model = app.chat_widget.current_model().to_string();
+            model.available_access_programs = Some(ModelAccessPrograms {
+                cyber: vec![
+                    CyberAccessProgram::Standard,
+                    CyberAccessProgram::DaybreakBlue,
+                ],
+            });
+            app.chat_widget
+                .on_models_loaded(request_id, Ok(vec![model]));
+            app.chat_widget
+                .handle_key_event(KeyEvent::from(KeyCode::Esc));
+            app.chat_widget.set_daybreak_enabled(daybreak);
+        }
+        app.runtime_permission_profile_override = Some(if preserve {
+            RuntimePermissionProfileOverride::from_restored_config(app.chat_widget.config_ref())
+        } else {
+            RuntimePermissionProfileOverride::from_config(app.chat_widget.config_ref())
+        });
         app.chat_widget.handle_server_notification(
             error_notification(thread_id, "failed-turn", policy_error()),
             /*replay_kind*/ None,
@@ -185,14 +248,17 @@ async fn misalignment_continuation_requires_current_review_and_submits_once() ->
             params,
             codex_app_server_protocol::TurnStartParams {
                 thread_id: thread_id.to_string(),
-                cwd: Some(config.cwd.to_path_buf()),
-                runtime_workspace_roots: Some(
-                    config.permissions.user_visible_workspace_roots().to_vec()
-                ),
-                approval_policy: Some(AskForApproval::OnRequest),
-                approvals_reviewer: Some(config.approvals_reviewer.into()),
-                sandbox_policy: Some(codex_app_server_protocol::SandboxPolicy::ReadOnly {
-                    network_access: false
+                cwd: (!server_owned).then(|| config.cwd.to_path_buf()),
+                runtime_workspace_roots: (!server_owned)
+                    .then(|| config.permissions.user_visible_workspace_roots().to_vec()),
+                approval_policy: (!server_owned).then_some(AskForApproval::OnRequest),
+                approvals_reviewer: None,
+                sandbox_policy: (!server_owned && !preserve)
+                    .then(|| config.legacy_sandbox_policy().into()),
+                cyber_access_program: rollout_enabled.then_some(if daybreak {
+                    CyberAccessProgram::DaybreakBlue.into()
+                } else {
+                    CyberAccessProgram::Standard.into()
                 }),
                 input: vec![codex_app_server_protocol::UserInput::Text {
                     text: "Continue **only** within the requested scope.\nDo not edit files."

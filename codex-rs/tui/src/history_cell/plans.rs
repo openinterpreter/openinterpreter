@@ -1,4 +1,4 @@
-//! Proposed-plan and plan-update history cells.
+//! Proposed-plan and plan-update history cells, including foreground contrast on the plan fill.
 
 use super::markdown_render_cache::MarkdownRenderCache;
 use super::*;
@@ -141,7 +141,11 @@ impl ProposedPlanCell {
             plan_lines.extend(prefix_hyperlink_lines(body, "  ".into(), "  ".into()));
             plan_lines.push(HyperlinkLine::new(Line::from(" ")));
 
-            lines.extend(plan_lines.into_iter().map(|line| line.style(plan_style)));
+            lines.extend(
+                plan_lines
+                    .into_iter()
+                    .map(|line| style_proposed_plan_line(line, plan_style)),
+            );
             lines
         })
     }

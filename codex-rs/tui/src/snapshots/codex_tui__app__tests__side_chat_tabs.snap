@@ -1,0 +1,5 @@
+---
+source: tui/src/app/tests.rs
+expression: header.trim_end()
+---
+ Investig…×  Fix cache×                                             +

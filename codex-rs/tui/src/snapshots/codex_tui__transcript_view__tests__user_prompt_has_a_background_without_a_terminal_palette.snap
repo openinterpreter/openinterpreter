@@ -1,0 +1,26 @@
+---
+source: tui/src/transcript_view_tests.rs
+expression: "format!(\"{buffer:?}\")"
+---
+Buffer {
+    area: Rect { x: 0, y: 0, width: 32, height: 8 },
+    content: [
+        "                                ",
+        "  [Image #1]                    ",
+        "                                ",
+        "› First steering message        ",
+        "                                ",
+        "                                ",
+        "                                ",
+        "                                ",
+    ],
+    styles: [
+        x: 0, y: 0, fg: Rgb(238, 238, 238), bg: Rgb(68, 68, 68), underline: Reset, modifier: NONE,
+        x: 0, y: 1, fg: Rgb(121, 180, 249), bg: Rgb(68, 68, 68), underline: Reset, modifier: NONE,
+        x: 0, y: 2, fg: Rgb(238, 238, 238), bg: Rgb(68, 68, 68), underline: Reset, modifier: NONE,
+        x: 0, y: 3, fg: Rgb(238, 238, 238), bg: Rgb(68, 68, 68), underline: Reset, modifier: BOLD | DIM,
+        x: 2, y: 3, fg: Rgb(121, 180, 249), bg: Rgb(68, 68, 68), underline: Reset, modifier: NONE,
+        x: 7, y: 3, fg: Rgb(238, 238, 238), bg: Rgb(68, 68, 68), underline: Reset, modifier: NONE,
+        x: 0, y: 5, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+    ]
+}

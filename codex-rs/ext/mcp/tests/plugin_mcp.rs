@@ -15,14 +15,17 @@ use codex_core_plugins::PluginProvider;
 use codex_core_plugins::PluginProviderError;
 use codex_core_plugins::PluginProviderFuture;
 use codex_core_plugins::PluginSourceLocation;
+use codex_exec_server::CapabilityRootDiscovery;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecutorCapabilityDiscoveryCache;
+use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
+use codex_exec_server::FileSystemSandboxContext;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ExtensionRegistryBuilder;
-use codex_extension_api::McpServerContribution;
 use codex_extension_api::McpServerContributionContext;
+use codex_extension_api::SelectedPluginContribution;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_mcp_extension::PluginProviders;
@@ -60,6 +63,7 @@ struct ContributionSummary {
     name: String,
     plugin_id: String,
     plugin_display_name: String,
+    source_environment_id: String,
     selection_order: usize,
     enabled: bool,
 }
@@ -68,6 +72,7 @@ struct ContributionSummary {
 struct PackageSummary {
     plugin_id: String,
     plugin_display_name: String,
+    source_environment_id: String,
     connector_ids: Vec<String>,
 }
 
@@ -120,6 +125,7 @@ command = "expected-command"
                 name: "allowed".to_string(),
                 plugin_id: "selected-root".to_string(),
                 plugin_display_name: "Selected Demo".to_string(),
+                source_environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
                 selection_order: 0,
                 enabled: true,
             },
@@ -127,6 +133,7 @@ command = "expected-command"
                 name: "mismatched".to_string(),
                 plugin_id: "selected-root".to_string(),
                 plugin_display_name: "Selected Demo".to_string(),
+                source_environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
                 selection_order: 0,
                 enabled: false,
             },
@@ -134,6 +141,7 @@ command = "expected-command"
                 name: "unlisted".to_string(),
                 plugin_id: "selected-root".to_string(),
                 plugin_display_name: "Selected Demo".to_string(),
+                source_environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
                 selection_order: 0,
                 enabled: false,
             },
@@ -163,31 +171,246 @@ async fn selected_plugin_package_is_contributed_without_servers_or_connectors() 
         .await?;
 
     let contributions = raw_selected_plugin_contributions(&config, plugin_root.path()).await?;
-    let package = contributions.into_iter().find_map(|contribution| {
-        let McpServerContribution::SelectedPluginPackage {
+    let package = contributions
+        .into_iter()
+        .next()
+        .map(|(_, plugin_id, contribution)| PackageSummary {
             plugin_id,
-            plugin_display_name,
-            connector_ids,
-            ..
-        } = contribution
-        else {
-            return None;
-        };
-        Some(PackageSummary {
-            plugin_id,
-            plugin_display_name,
-            connector_ids,
-        })
-    });
+            plugin_display_name: contribution.plugin_display_name,
+            source_environment_id: contribution.source_environment_id,
+            connector_ids: contribution.connector_ids,
+        });
 
     assert_eq!(
         package,
         Some(PackageSummary {
             plugin_id: "selected-root".to_string(),
             plugin_display_name: "Skill Only".to_string(),
+            source_environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
             connector_ids: Vec::new(),
         })
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn denied_malformed_plugin_retains_identity_without_capabilities() -> TestResult {
+    let default_off = "[plugins._default]\nenabled = false\n";
+    for (manifest, discovery_enabled, expected_denied) in [
+        (Some(b"{".as_slice()), false, true),
+        (None, false, false),
+        (None, true, false),
+        (
+            Some(br#"{"name":"denied","mcpServers":{"unexpected":{"command":"unexpected-command"}}}"#.as_slice()),
+            true,
+            true,
+        ),
+        (Some(b"{".as_slice()), true, true),
+        (Some(b"\xff".as_slice()), true, true),
+    ] {
+        let codex_home = tempfile::tempdir()?;
+        let plugin_root = tempfile::tempdir()?;
+        let skills_root = plugin_root.path().join("skills");
+        fs::create_dir_all(&skills_root)?;
+        if let Some(manifest) = manifest {
+            fs::create_dir_all(plugin_root.path().join(".codex-plugin"))?;
+            fs::write(plugin_root.path().join(".codex-plugin/plugin.json"), manifest)?;
+        } else {
+            // A nested package does not own its containing skill root.
+            fs::create_dir_all(plugin_root.path().join("nested/.codex-plugin"))?;
+            fs::write(
+                plugin_root.path().join("nested/.codex-plugin/plugin.json"),
+                r#"{"name":"nested"}"#,
+            )?;
+        }
+        fs::write(codex_home.path().join("config.toml"), default_off)?;
+        let mut config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .fallback_cwd(Some(codex_home.path().to_path_buf()))
+            .build()
+            .await?;
+        config.features.set_enabled(Feature::ExecutorCapabilityDiscovery, discovery_enabled)?;
+
+        let expected = if expected_denied {
+            vec![(
+                ("selected-root".to_string(), "selected-root".to_string()),
+                Vec::new(),
+                Vec::new(),
+            )]
+        } else {
+            Vec::new()
+        };
+        for selected_root in [plugin_root.path(), skills_root.as_path()] {
+            let contributions = raw_selected_plugin_contributions(&config, selected_root).await?;
+            assert_eq!(
+                contributions
+                    .into_iter()
+                    .map(|(root_id, plugin_id, contribution)| (
+                        (root_id, plugin_id),
+                        contribution.servers,
+                        contribution.connector_ids,
+                    ))
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn selected_root_ownership_retries_errors_and_caches_success() -> TestResult {
+    let codex_home = tempfile::tempdir()?;
+    let plugin_root = tempfile::tempdir()?;
+    let standalone_root = tempfile::tempdir()?;
+    let skills_root = plugin_root.path().join("skills");
+    fs::create_dir_all(&skills_root)?;
+    fs::create_dir_all(plugin_root.path().join(".codex-plugin"))?;
+    let manifest = plugin_root.path().join(".codex-plugin/plugin.json");
+    fs::write(&manifest, r#"{"name":"example"}"#)?;
+    fs::write(plugin_root.path().join(".mcp.json"), "{")?;
+    let selected_roots = [
+        ("selected-root", plugin_root.path()),
+        ("owned-subfolder", skills_root.as_path()),
+        ("standalone", standalone_root.path()),
+    ]
+    .into_iter()
+    .map(|(id, path)| {
+        Ok(SelectedCapabilityRoot {
+            id: id.to_string(),
+            location: CapabilityRootLocation::Environment {
+                environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+                path: PathUri::from_host_native_path(path)?,
+            },
+        })
+    })
+    .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut builder = ExtensionRegistryBuilder::new();
+    codex_mcp_extension::install_plugins(
+        &mut builder,
+        Arc::new(EnvironmentManager::default_for_tests()),
+    );
+    let registry = builder.build();
+    let thread_init = ExtensionDataInit::new();
+    let thread_store = ExtensionData::new_with_init("test-thread", thread_init.clone());
+    let default_off = "[plugins._default]\nenabled = false\n";
+    let standalone = &selected_roots[2];
+    let CapabilityRootLocation::Environment { path, .. } = &standalone.location;
+    let sandbox_contexts = HashMap::from([(
+        LOCAL_ENVIRONMENT_ID.to_string(),
+        FileSystemSandboxContext::from_permission_profile(Default::default(), path.clone()),
+    )]);
+
+    for (phase, enabled_root, expected) in [
+        (0, None, vec![("standalone", vec![])]),
+        (1, None, vec![("standalone", vec![])]),
+        (2, Some("owned-subfolder"), vec![("selected-root", vec![])]),
+        (
+            3,
+            None,
+            vec![("selected-root", vec![]), ("owned-subfolder", vec![])],
+        ),
+        (
+            4,
+            None,
+            vec![("selected-root", vec![]), ("owned-subfolder", vec![])],
+        ),
+        (
+            5,
+            Some("selected-root"),
+            vec![
+                ("selected-root", vec!["probe"]),
+                ("owned-subfolder", vec![]),
+            ],
+        ),
+    ] {
+        if phase == 4 {
+            // Stable ownership must survive refresh without probing these files again.
+            fs::remove_file(&manifest)?;
+            fs::create_dir_all(standalone_root.path().join(".codex-plugin"))?;
+            fs::write(
+                standalone_root.path().join(".codex-plugin/plugin.json"),
+                "{",
+            )?;
+        } else if phase == 5 {
+            fs::write(&manifest, r#"{"name":"example"}"#)?;
+            fs::write(
+                plugin_root.path().join(".mcp.json"),
+                r#"{"mcpServers":{"probe":{"command":"probe-command"}}}"#,
+            )?;
+            fs::remove_file(standalone_root.path().join(".codex-plugin/plugin.json"))?;
+        }
+        let policy = enabled_root.map_or_else(
+            || default_off.to_string(),
+            |id| format!("{default_off}[plugins.{id}]\nenabled = true\n"),
+        );
+        fs::write(codex_home.path().join("config.toml"), policy)?;
+        let config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .fallback_cwd(Some(codex_home.path().to_path_buf()))
+            .build()
+            .await?;
+        // Neither incomplete nor legacy complete discovery proves that a marker is absent.
+        // The scoped metadata probe fails here; later readable roots must retry ownership.
+        let discovery = (phase < 2).then(|| {
+            ExecutorCapabilityDiscoverySnapshot::new(
+                std::slice::from_ref(standalone),
+                vec![Ok(Arc::new(CapabilityRootDiscovery {
+                    id: standalone.id.clone(),
+                    path: path.clone(),
+                    plugin: None,
+                    skills: Vec::new(),
+                    namespace_manifests: Vec::new(),
+                    warnings: if phase == 0 {
+                        vec!["ownership metadata unavailable".to_string()]
+                    } else {
+                        Vec::new()
+                    },
+                    error: None,
+                }))],
+                sandbox_contexts.clone(),
+            )
+        });
+        let selected = registry.mcp_server_contributors()[0]
+            .selected_plugins(
+                McpServerContributionContext::for_step(
+                    &config,
+                    &thread_init,
+                    &thread_store,
+                    "test_originator",
+                    &selected_roots,
+                    discovery.as_ref(),
+                    /*executor_capability_discovery_v2*/ None,
+                ),
+                &config.plugins,
+            )
+            .await;
+        let mut actual = Vec::new();
+        for plugin in selected {
+            let contribution = plugin.mcp.await;
+            actual.push((
+                plugin.selected_root_id,
+                contribution
+                    .servers
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>(),
+                contribution.connector_ids,
+            ));
+        }
+        assert_eq!(
+            actual,
+            expected
+                .into_iter()
+                .map(|(id, servers)| (
+                    id.to_string(),
+                    servers.into_iter().map(str::to_string).collect::<Vec<_>>(),
+                    Vec::new(),
+                ))
+                .collect::<Vec<_>>(),
+            "phase {phase}",
+        );
+    }
     Ok(())
 }
 
@@ -223,8 +446,10 @@ plugins = false
     assert!(
         matches!(
             direct.as_slice(),
-            [McpServerContribution::SelectedPluginPackage { selected_root_id, .. }]
+            [(selected_root_id, _, contribution)]
                 if selected_root_id == "selected-root"
+                    && contribution.source_environment_id == LOCAL_ENVIRONMENT_ID
+                    && contribution.servers.is_empty()
         ),
         "managed Plugins disable should preserve only the direct selected-root identity"
     );
@@ -237,8 +462,10 @@ plugins = false
     assert!(
         matches!(
             discovered.as_slice(),
-            [McpServerContribution::SelectedPluginPackage { selected_root_id, .. }]
+            [(selected_root_id, _, contribution)]
                 if selected_root_id == "selected-root"
+                    && contribution.source_environment_id == LOCAL_ENVIRONMENT_ID
+                    && contribution.servers.is_empty()
         ),
         "managed Plugins disable should preserve only the discovered selected-root identity"
     );
@@ -310,10 +537,7 @@ default_tools_approval_mode = "auto"
     let mut servers = raw_selected_plugin_contributions(&config, plugin_root.path())
         .await?
         .into_iter()
-        .filter_map(|contribution| match contribution {
-            McpServerContribution::SelectedPlugin { name, config, .. } => Some((name, config)),
-            _ => None,
-        })
+        .flat_map(|(_, _, contribution)| contribution.servers)
         .collect::<HashMap<_, _>>();
     let server = servers
         .remove("first")
@@ -373,6 +597,13 @@ default_tools_approval_mode = "auto"
         .expect("test config should allow feature update");
     let high_level = selected_plugin_contributions(&config, plugin_root.path()).await?;
 
+    assert_eq!(
+        existing
+            .iter()
+            .map(|contribution| contribution.source_environment_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![LOCAL_ENVIRONMENT_ID, LOCAL_ENVIRONMENT_ID]
+    );
     assert_eq!(high_level, existing);
     Ok(())
 }
@@ -384,27 +615,19 @@ async fn selected_plugin_contributions(
     Ok(raw_selected_plugin_contributions(config, plugin_root)
         .await?
         .into_iter()
-        .filter_map(|contribution| match contribution {
-            McpServerContribution::SelectedPlugin {
-                name,
-                plugin_id,
-                plugin_display_name,
-                selection_order,
-                config,
-            } => Some(ContributionSummary {
-                name,
-                plugin_id,
-                plugin_display_name,
-                selection_order,
-                enabled: config.enabled,
-            }),
-            McpServerContribution::SelectedPluginPackage { .. } => None,
-            McpServerContribution::Set { .. }
-            | McpServerContribution::SetWithProtocolMode { .. }
-            | McpServerContribution::HostedApps { .. }
-            | McpServerContribution::Remove { .. } => {
-                panic!("expected selected plugin contribution")
-            }
+        .enumerate()
+        .flat_map(|(selection_order, (_, plugin_id, contribution))| {
+            contribution
+                .servers
+                .into_iter()
+                .map(move |(name, config)| ContributionSummary {
+                    name,
+                    plugin_id: plugin_id.clone(),
+                    plugin_display_name: contribution.plugin_display_name.clone(),
+                    source_environment_id: contribution.source_environment_id.clone(),
+                    selection_order,
+                    enabled: config.enabled,
+                })
         })
         .collect())
 }
@@ -412,7 +635,7 @@ async fn selected_plugin_contributions(
 async fn raw_selected_plugin_contributions(
     config: &Config,
     plugin_root: &std::path::Path,
-) -> Result<Vec<McpServerContribution>, Box<dyn std::error::Error>> {
+) -> Result<Vec<(String, String, SelectedPluginContribution)>, Box<dyn std::error::Error>> {
     let mut builder = ExtensionRegistryBuilder::new();
     let environment_manager = Arc::new(EnvironmentManager::default_for_tests());
     codex_mcp_extension::install_plugins(&mut builder, Arc::clone(&environment_manager));
@@ -430,25 +653,42 @@ async fn raw_selected_plugin_contributions(
         .features
         .enabled(Feature::ExecutorCapabilityDiscovery)
     {
+        let resolved_roots = environment_manager
+            .resolve_selected_capability_roots(
+                &selected_capability_roots,
+                &HashMap::from([(
+                    LOCAL_ENVIRONMENT_ID.to_string(),
+                    environment_manager.get_environment(LOCAL_ENVIRONMENT_ID),
+                )]),
+            )
+            .await;
         Some(
-            ExecutorCapabilityDiscoveryCache::new(environment_manager)
-                .snapshot(&selected_capability_roots, &Default::default())
+            ExecutorCapabilityDiscoveryCache::default()
+                .snapshot(&resolved_roots, &Default::default())
                 .await,
         )
     } else {
         None
     };
 
-    let contributions = registry.mcp_server_contributors()[0]
-        .contribute(McpServerContributionContext::for_step(
-            config,
-            &thread_init,
-            &thread_store,
-            "test_originator",
-            &selected_capability_roots,
-            executor_capability_discovery.as_ref(),
-        ))
+    let selected = registry.mcp_server_contributors()[0]
+        .selected_plugins(
+            McpServerContributionContext::for_step(
+                config,
+                &thread_init,
+                &thread_store,
+                "test_originator",
+                &selected_capability_roots,
+                executor_capability_discovery.as_ref(),
+                /*executor_capability_discovery_v2*/ None,
+            ),
+            &config.plugins,
+        )
         .await;
+    let mut contributions = Vec::new();
+    for plugin in selected {
+        contributions.push((plugin.selected_root_id, plugin.plugin_id, plugin.mcp.await));
+    }
     Ok(contributions)
 }
 
@@ -517,19 +757,20 @@ async fn run_cloud_plugin_projection_scenarios() -> anyhow::Result<()> {
             } else if cloud_available {
                 Ok(PluginCatalog {
                     entries: vec![PluginCatalogEntry {
+                        enabled: true,
                         id: PluginIdentity::Remote {
                             remote_plugin_id: "plugin_notes".into(),
                         },
                         display_name: "Cloud Notes".into(),
-                        version: Some("1".into()),
-                        mcp_servers: [("notes".into(), declaration.to_string())].into(),
+                        version: "1".into(),
+                        mcp_servers: [("notes".into(), declaration.clone())].into(),
                         connector_ids: vec!["calendar".into()],
                         locations: vec![PluginSourceLocation::Cloud {
                             resource_uri: "plugin://plugin_notes".into(),
                             bundle_uri: None,
                         }],
                     }],
-                    warnings: Vec::new(),
+                    ..Default::default()
                 })
             } else {
                 Err("plugin-service unavailable".into())
@@ -583,6 +824,7 @@ async fn run_cloud_plugin_projection_scenarios() -> anyhow::Result<()> {
                 .environment_ready(
                     &selection,
                     EnvironmentConfig {
+                        environment_hooks: Default::default(),
                         allow_login_shell: false,
                         workspace_roots: selection.workspace_roots.clone(),
                         permission_profile: PermissionProfileSnapshot::legacy(
@@ -667,6 +909,7 @@ async fn run_cloud_plugin_projection_scenarios() -> anyhow::Result<()> {
             initialized, installed,
             "{case}: cloud-only declarations must not start MCPs"
         );
+        // Failed discovery stays in cooldown across both model steps.
         assert_eq!(
             cloud.calls.load(Ordering::SeqCst),
             usize::from(cloud_enabled),

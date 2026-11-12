@@ -41,9 +41,13 @@ fn assistant_output_text(text: &str) -> ResponseItem {
 
 fn assistant_output_text_with_phase(text: &str, phase: Option<MessagePhase>) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: Some(ResponseItemId::with_suffix("msg", "1")),
         role: "assistant".to_string(),
         content: vec![ContentItem::OutputText {
+            annotations: None,
+            logprobs: None,
             text: text.to_string(),
         }],
         phase,
@@ -55,12 +59,14 @@ fn assistant_output_text_with_phase(text: &str, phase: Option<MessagePhase>) -> 
 fn external_context_pollution_items_include_web_search_and_tool_search() {
     let polluting_items = [
         ResponseItem::WebSearchCall {
+            encrypted_content: None,
             id: None,
             status: Some("completed".to_string()),
             action: None,
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::ToolSearchCall {
+            encrypted_content: None,
             id: None,
             call_id: Some("search-1".to_string()),
             status: None,
@@ -97,6 +103,7 @@ fn external_context_pollution_items_include_web_search_and_tool_search() {
 fn external_context_pollution_items_exclude_local_tool_calls() {
     let non_polluting_items = [
         ResponseItem::LocalShellCall {
+            encrypted_content: None,
             id: None,
             call_id: Some("shell-1".to_string()),
             status: LocalShellStatus::Completed,
@@ -110,6 +117,8 @@ fn external_context_pollution_items_exclude_local_tool_calls() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::FunctionCall {
+            status: None,
+            encrypted_content: None,
             id: None,
             name: "shell".to_string(),
             namespace: None,
@@ -127,6 +136,7 @@ fn external_context_pollution_items_exclude_local_tool_calls() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::CustomToolCall {
+            encrypted_content: None,
             id: None,
             status: None,
             call_id: "custom-1".to_string(),
@@ -285,9 +295,10 @@ async fn handle_non_tool_response_item_runs_turn_item_contributors_only_when_req
     assert_eq!(text, "hello world");
 }
 
-fn output_context(session: Arc<Session>, turn_context: Arc<TurnContext>) -> HandleOutputCtx {
+async fn output_context(session: Arc<Session>, turn_context: Arc<TurnContext>) -> HandleOutputCtx {
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
-    let (registry, hosted_specs) = tool_registry_for_test_step(step_context.as_ref());
+    let (registry, hosted_specs) =
+        tool_registry_for_test_step(&session, step_context.as_ref()).await;
     let router = Arc::new(ToolRouter::from_registry(
         step_context.turn.as_ref(),
         step_context.turn.model_info(),
@@ -304,6 +315,7 @@ fn output_context(session: Arc<Session>, turn_context: Arc<TurnContext>) -> Hand
         step_context,
         turn_store: Arc::new(ExtensionData::new(turn_context.sub_id.clone())),
         tool_runtime,
+        defer_tool_dispatch: false,
         cancellation_token: CancellationToken::new(),
     }
 }
@@ -314,12 +326,14 @@ async fn handle_output_item_done_returns_contributed_last_agent_message() {
     let mut builder = codex_extension_api::ExtensionRegistryBuilder::new();
     builder.turn_item_contributor(Arc::new(RewriteAgentMessageContributor));
     session.services.extensions = Arc::new(builder.build());
-    let mut ctx = output_context(Arc::new(session), Arc::new(turn_context));
+    let mut ctx = output_context(Arc::new(session), Arc::new(turn_context)).await;
     let item = assistant_output_text("original assistant text");
 
-    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
-        .await
-        .expect("assistant message should complete");
+    let output = handle_output_item_done(
+        &mut ctx, item, /*previously_active_item*/ None, /*moderation*/ None,
+    )
+    .await
+    .expect("assistant message should complete");
 
     assert_eq!(
         output.last_agent_message.as_deref(),
@@ -341,7 +355,7 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
         },
     )
     .await;
-    let mut ctx = output_context(Arc::clone(&session), turn_context);
+    let mut ctx = output_context(Arc::clone(&session), turn_context).await;
     let mut pending = Vec::new();
     for step in ["read", "write"] {
         let arguments = json!({"plan": [{"step": step, "status": "in_progress"}]});
@@ -350,9 +364,11 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
             "arguments": arguments.to_string(),
         }))
         .expect("direct input");
-        let result = handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None)
-            .await
-            .expect("direct call should be handled");
+        let result = handle_output_item_done(
+            &mut ctx, call, /*previously_active_item*/ None, /*moderation*/ None,
+        )
+        .await
+        .expect("direct call should be handled");
         assert!(result.needs_follow_up);
         pending.push((
             arguments,
@@ -361,9 +377,12 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
     }
 
     // Reapplying an enabled config keeps the same recording lifetime.
-    session
-        .refresh_runtime_config((*session.get_config().await).clone())
-        .await;
+    let current_config = session.get_config().await;
+    let config = current_config.as_ref().clone();
+    assert_eq!(
+        session.refresh_runtime_config(current_config, config).await,
+        crate::ConfigRefreshOutcome::Published
+    );
     // Await in reverse order: each result must already own its record before history attachment.
     let mut outputs = Vec::new();
     for (arguments, future) in pending.into_iter().rev() {
@@ -406,19 +425,24 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
         }))
         .expect("direct input");
         pending.push(
-            handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None)
-                .await
-                .expect("direct call should be handled")
-                .tool_future
-                .expect("dispatched direct call"),
+            handle_output_item_done(
+                &mut ctx, call, /*previously_active_item*/ None, /*moderation*/ None,
+            )
+            .await
+            .expect("direct call should be handled")
+            .tool_future
+            .expect("dispatched direct call"),
         );
     }
-    let mut config = (*session.get_config().await).clone();
+    let current_config = session.get_config().await;
+    let mut config = current_config.as_ref().clone();
     config
         .features
         .disable(Feature::ExecutedToolCallMetadata)
         .expect("disable metadata");
-    session.refresh_runtime_config(config.clone()).await;
+    let _ = session
+        .refresh_runtime_config(current_config, config.clone())
+        .await;
     let result = pending
         .remove(0)
         .await
@@ -438,7 +462,8 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
         .features
         .enable(Feature::ExecutedToolCallMetadata)
         .expect("re-enable metadata");
-    session.refresh_runtime_config(config).await;
+    let current_config = session.get_config().await;
+    let _ = session.refresh_runtime_config(current_config, config).await;
     let result = pending
         .pop()
         .expect("call prepared before disable")
@@ -447,20 +472,32 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
     assert!(result.item.executed_tool_call_metadata().is_none());
 }
 
+#[test_case::test_case(false; "default_mode")]
+#[test_case::test_case(true; "plan_mode")]
 #[tokio::test]
-async fn finalized_turn_item_defers_mailbox_for_contributed_visible_text() {
+async fn finalized_turn_item_defers_mailbox_for_contributed_visible_text(plan_mode: bool) {
     let (mut session, turn_context) = make_session_and_context().await;
     let mut builder = codex_extension_api::ExtensionRegistryBuilder::new();
     builder.turn_item_contributor(Arc::new(RewriteAgentMessageContributor));
     session.services.extensions = Arc::new(builder.build());
     let turn_store = ExtensionData::new(turn_context.sub_id.clone());
-    let item = assistant_output_text("<oai-mem-citation>hidden only</oai-mem-citation>");
+    let mut item = assistant_output_text("<oai-mem-citation>hidden only</oai-mem-citation>");
+    let ResponseItem::Message {
+        internal_chat_message_metadata_passthrough,
+        ..
+    } = &mut item
+    else {
+        panic!("expected assistant message");
+    };
+    internal_chat_message_metadata_passthrough
+        .get_or_insert_default()
+        .content_token_count = Some(23);
 
     let finalized = finalize_non_tool_response_item(
         &session,
         TurnItemContributorPolicy::Run(&turn_store),
         &item,
-        /*plan_mode*/ false,
+        plan_mode,
     )
     .await
     .expect("assistant message should parse");
@@ -470,16 +507,19 @@ async fn finalized_turn_item_defers_mailbox_for_contributed_visible_text() {
         Some("contributed assistant text")
     );
     assert!(finalized.facts.defers_mailbox_delivery_to_next_turn);
+    assert_eq!(finalized.content_token_count, Some(23));
 }
 
+#[test_case::test_case(MessagePhase::Commentary; "commentary")]
+#[test_case::test_case(MessagePhase::PartialAnswer; "partial_answer")]
 #[tokio::test]
-async fn finalized_turn_item_keeps_mailbox_open_for_commentary_text() {
+async fn finalized_turn_item_keeps_mailbox_open_for_nonterminal_text(phase: MessagePhase) {
     let (mut session, turn_context) = make_session_and_context().await;
     let mut builder = codex_extension_api::ExtensionRegistryBuilder::new();
     builder.turn_item_contributor(Arc::new(RewriteAgentMessageContributor));
     session.services.extensions = Arc::new(builder.build());
     let turn_store = ExtensionData::new(turn_context.sub_id.clone());
-    let item = assistant_output_text_with_phase("still working", Some(MessagePhase::Commentary));
+    let item = assistant_output_text_with_phase("still working", Some(phase));
 
     let finalized = finalize_non_tool_response_item(
         &session,
@@ -529,18 +569,26 @@ fn last_assistant_message_from_item_returns_none_for_plan_only_hidden_message() 
     );
 }
 
-#[test]
-fn completed_item_defers_mailbox_delivery_for_unknown_phase_messages() {
-    let item = assistant_output_text("final answer");
+#[test_case::test_case(Some(MessagePhase::FinalAnswer), "", true; "explicit_empty_final")]
+#[test_case::test_case(None, "final answer", true; "untagged_visible_answer")]
+#[test_case::test_case(None, "", false; "untagged_empty_message")]
+fn completed_item_defers_mailbox_delivery_for_final_answers(
+    phase: Option<MessagePhase>,
+    text: &str,
+    expected: bool,
+) {
+    let item = assistant_output_text_with_phase(text, phase);
 
-    assert!(completed_item_defers_mailbox_delivery_to_next_turn(
-        &item, /*plan_mode*/ false,
-    ));
+    assert_eq!(
+        completed_item_defers_mailbox_delivery_to_next_turn(&item, /*plan_mode*/ false),
+        expected
+    );
 }
 
-#[test]
-fn completed_item_keeps_mailbox_delivery_open_for_commentary_messages() {
-    let item = assistant_output_text_with_phase("still working", Some(MessagePhase::Commentary));
+#[test_case::test_case(MessagePhase::Commentary; "commentary")]
+#[test_case::test_case(MessagePhase::PartialAnswer; "partial_answer")]
+fn completed_item_keeps_mailbox_delivery_open_for_nonterminal_messages(phase: MessagePhase) {
+    let item = assistant_output_text_with_phase("still working", Some(phase));
 
     assert!(!completed_item_defers_mailbox_delivery_to_next_turn(
         &item, /*plan_mode*/ false,

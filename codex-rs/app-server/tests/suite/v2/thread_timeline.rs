@@ -4,7 +4,7 @@ use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::SortDirection;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadItemsListParams;
 use codex_app_server_protocol::ThreadItemsListResponse;
 use codex_app_server_protocol::ThreadRealtimeItemContent;
@@ -37,7 +37,6 @@ use codex_thread_store::ThreadStore;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
-use uuid::Uuid;
 
 #[tokio::test]
 async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() -> Result<()> {
@@ -59,6 +58,9 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() -> 
     );
     store
         .create_thread(CreateThreadParams {
+            attached_thread: false,
+            creator_user_id: None,
+            creator_account_id: None,
             session_id: thread_id.into(),
             thread_id,
             extra_config: None,
@@ -96,6 +98,7 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() -> 
                     content: RealtimeItemContent::RealtimeSessionStarted,
                 }),
                 RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                    turn_attribution: None,
                     turn_id: "turn-1".to_string(),
                     root_turn_id: None,
                     trace_id: None,
@@ -104,6 +107,7 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() -> 
                     collaboration_mode_kind: Default::default(),
                 })),
                 RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+                    content_token_count: None,
                     thread_id,
                     turn_id: "turn-1".to_string(),
                     item: TurnItem::UserMessage(UserMessageItem {
@@ -126,6 +130,7 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() -> 
                     },
                 }),
                 RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                    root_turn_id: None,
                     turn_id: "turn-1".to_string(),
                     last_agent_message: None,
                     error: None,
@@ -159,7 +164,9 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() -> 
         &page.data[0],
         ThreadTimelineEntry::Item { turn_id, item, .. }
             if turn_id == "turn-1"
-                && matches!(item.as_ref(), ThreadItem::UserMessage { .. })
+                && matches!(&item.payload, ThreadItemPayload::UserMessage { .. })
+                && item.started_at_ms == Some(0)
+                && item.completed_at_ms == Some(1)
     ));
     assert!(matches!(
         &page.data[1],
@@ -216,6 +223,7 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() -> 
                 cursor: None,
                 limit: Some(10),
                 sort_direction: Some(SortDirection::Asc),
+                defer_output: None,
             },
         })
         .await?;

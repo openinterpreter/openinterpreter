@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+pub(crate) use codex_code_mode_protocol::FunctionCallOutputContentItem as OutputItem;
 use opentelemetry::context::FutureExt;
 use serde_json::Value as JsonValue;
 use tokio::sync::Mutex;
@@ -17,10 +18,9 @@ pub(crate) use self::types::CellEvent;
 pub(crate) use self::types::CellId;
 pub(crate) use self::types::CreateCellRequest;
 pub(crate) use self::types::Error;
-pub(crate) use self::types::ImageDetail;
 pub(crate) use self::types::NestedToolCall;
+pub(crate) use self::types::Observation;
 pub(crate) use self::types::ObserveMode;
-pub(crate) use self::types::OutputItem;
 pub(crate) use self::types::SessionRuntimeDelegate;
 pub(crate) use self::types::ToolDefinition;
 pub(crate) use self::types::ToolKind;
@@ -103,7 +103,7 @@ impl SessionRuntime {
     pub(crate) async fn begin_observe(
         &self,
         cell_id: &CellId,
-        mode: ObserveMode,
+        observation: impl Into<Observation> + Send,
     ) -> Result<PendingEvent, Error> {
         let handle = self
             .inner
@@ -114,7 +114,7 @@ impl SessionRuntime {
             .cloned()
             .ok_or_else(|| Error::MissingCell(cell_id.clone()))?;
         Ok(PendingEvent {
-            event: map_actor_event(cell_id.clone(), handle.observe(mode)),
+            event: map_actor_event(cell_id.clone(), handle.observe(observation)),
         })
     }
 
@@ -180,7 +180,7 @@ impl SessionRuntime {
             request,
             stored_values,
             host,
-            initial_observe_mode,
+            initial_observation,
             cell_state,
             self.inner.task_failure_handler.clone(),
         )
@@ -288,12 +288,13 @@ impl<D: SessionRuntimeDelegate> CellHost for RuntimeCellHost<D> {
         let mut stored_values = tokio::select! {
             biased;
             _ = cancellation_token.cancelled() => {
-                return CompletionCommit::Rejected(event);
+                return CompletionCommit::Rejected;
             }
             stored_values = self.inner.stored_values.lock() => stored_values,
         };
-        cell_state.commit_completion(event, pending_initial_yield_items, || {
+        cell_state.commit_completion(event, || {
             stored_values.extend(stored_value_writes);
+            drop(stored_values);
         })
     }
 

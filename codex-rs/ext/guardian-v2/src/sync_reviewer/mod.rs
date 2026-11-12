@@ -33,6 +33,8 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadSource;
 
 mod reviewer_config;
+#[cfg(test)]
+mod reviewer_config_tests;
 
 /// Owns reviewer agents through the same thread manager as the parent conversation.
 #[derive(Debug)]

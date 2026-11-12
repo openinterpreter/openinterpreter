@@ -36,7 +36,7 @@ impl FsmonitorProbeRunner for WorkspaceFsmonitorProbeRunner<'_> {
         let argv = ["git", "-c", codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG]
             .into_iter()
             .chain(args.iter().copied());
-        let command = WorkspaceCommand::new(argv).cwd(self.cwd.to_path_buf());
+        let command = WorkspaceCommand::new(argv, self.cwd.to_path_buf());
         match self.runner.run(command).await {
             Ok(output) if output.success() => Some(output.stdout.into_bytes()),
             _ => None,
@@ -242,8 +242,7 @@ async fn run_git_command(
     ]
     .into_iter()
     .chain(args.iter().copied());
-    let mut command = WorkspaceCommand::new(argv)
-        .cwd(cwd.to_path_buf())
+    let mut command = WorkspaceCommand::new(argv, cwd.to_path_buf())
         .timeout(DIFF_COMMAND_TIMEOUT)
         .disable_output_cap();
     if !config_overrides.is_empty() {
@@ -267,8 +266,6 @@ mod tests {
     #[cfg(unix)]
     use std::fs;
     use std::future::Future;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::pin::Pin;
     #[cfg(unix)]
@@ -823,25 +820,22 @@ mod tests {
 
     #[cfg(unix)]
     fn write_marker_helper(path: &Path) {
-        fs::write(path, "#!/bin/sh\nprintf ran >> \"$0.ran\"\nexit 1\n")
-            .expect("write helper script");
-        let mut permissions = fs::metadata(path)
-            .expect("read helper metadata")
-            .permissions();
-        permissions.set_mode(/*mode*/ 0o755);
-        fs::set_permissions(path, permissions).expect("make helper executable");
+        codex_utils_cargo_bin::write_executable(
+            path,
+            "#!/bin/sh\nprintf ran >> \"$0.ran\"\nexit 1\n",
+        )
+        .expect("write helper script");
     }
 
     fn assert_command_metadata(commands: &[WorkspaceCommand], cwd: &Path) {
         for command in commands {
-            assert_eq!(command.cwd.as_deref(), Some(cwd));
+            assert_eq!(command.cwd.as_path(), cwd);
             if matches!(
                 command.argv.get(3).map(String::as_str),
                 Some("config" | "version")
             ) {
                 assert_eq!(command.env, HashMap::new());
                 assert_eq!(command.timeout, Duration::from_secs(/*secs*/ 5));
-                assert_eq!(command.output_bytes_cap, 64 * 1024);
                 assert_eq!(command.disable_output_cap, false);
             } else {
                 assert_eq!(command.timeout, DIFF_COMMAND_TIMEOUT);
@@ -916,9 +910,7 @@ mod tests {
         > {
             Box::pin(async move {
                 let mut process = ProcessCommand::new(&command.argv[0]);
-                process
-                    .args(&command.argv[1..])
-                    .current_dir(command.cwd.expect("test command cwd"));
+                process.args(&command.argv[1..]).current_dir(command.cwd);
                 for (key, value) in command.env {
                     match value {
                         Some(value) => {

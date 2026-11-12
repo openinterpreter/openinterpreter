@@ -16,6 +16,7 @@ use rmcp::model::ReadResourceResult;
 
 use crate::CODEX_APPS_MCP_SERVER_NAME;
 use crate::McpBinding;
+use crate::McpServerKey;
 
 const MAX_ORIGINS: usize = 64;
 const MAX_ORIGIN_BYTES: usize = 1024;
@@ -249,9 +250,9 @@ impl ResourceOrigin {
         &self,
         binding: &McpBinding,
         thread_id: ThreadId,
-        uri: &str,
+        mut params: ReadResourceRequestParams,
     ) -> anyhow::Result<ReadResourceResult> {
-        if self.uri != uri {
+        if self.uri != params.uri {
             anyhow::bail!("originating MCP tool call does not match the requested resource");
         }
         if self.ambiguous_account {
@@ -259,7 +260,10 @@ impl ResourceOrigin {
         }
 
         let tool_info = binding
-            .tool_info(CODEX_APPS_MCP_SERVER_NAME, &self.tool)
+            .tool_info(
+                &McpServerKey::unscoped(CODEX_APPS_MCP_SERVER_NAME),
+                &self.tool,
+            )
             .context("originating MCP tool is unavailable")?;
         if tool_info.connector_id.as_deref() != Some(self.connector_id.as_str()) {
             anyhow::bail!("originating MCP tool connector does not match its app context");
@@ -297,20 +301,19 @@ impl ResourceOrigin {
             anyhow::bail!("originating MCP tool is disabled by app configuration");
         }
 
-        let meta = serde_json::from_value(serde_json::json!({
-            "threadId": thread_id,
-            "x-codex-turn-metadata": {
+        let meta = params.meta.get_or_insert_default();
+        meta.insert("threadId".into(), serde_json::json!(thread_id));
+        meta.insert(
+            "x-codex-turn-metadata".into(),
+            serde_json::json!({
                 "mcp_request_meta": {
                     "selected_connector_ids": [&self.connector_id],
                     "link_id": &self.link_id,
                 }
-            },
-        }))?;
+            }),
+        );
         binding
-            .read_resource(
-                CODEX_APPS_MCP_SERVER_NAME,
-                ReadResourceRequestParams::new(uri).with_meta(meta),
-            )
+            .read_resource(&McpServerKey::unscoped(CODEX_APPS_MCP_SERVER_NAME), params)
             .await
     }
 }

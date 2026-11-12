@@ -4,6 +4,7 @@
 //! newest thread state; exact model steps remain the correctness path.
 
 use super::*;
+use crate::McpRefreshReason;
 
 impl Session {
     pub(crate) fn request_mcp_runtime_refresh(&self) {
@@ -47,7 +48,7 @@ impl Session {
                     break;
                 };
                 if auth_changed {
-                    session.mark_mcp_runtime_dirty();
+                    session.mark_mcp_runtime_dirty(McpRefreshReason::AuthChangeNotification);
                 }
                 tokio::select! {
                     biased;

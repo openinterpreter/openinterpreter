@@ -6,6 +6,7 @@ use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use codex_app_server_protocol::ConfigReadParams;
 use codex_app_server_protocol::ConfigReadResponse;
+use codex_app_server_protocol::ConfigRequirementsReadResponse;
 use codex_app_server_protocol::ExperimentalFeature;
 use codex_app_server_protocol::ExperimentalFeatureEnablementSetParams;
 use codex_app_server_protocol::ExperimentalFeatureEnablementSetResponse;
@@ -35,6 +36,10 @@ async fn experimental_feature_list_returns_feature_metadata_with_stage() -> Resu
     let config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
         .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .cli_overrides(vec![
+            ("features.tool_suggest".to_string(), false.into()),
+            ("features.recommended_plugins".to_string(), false.into()),
+        ])
         .loader_overrides(LoaderOverrides::with_managed_config_path_for_tests(
             codex_home.path().join("managed_config.toml"),
         ))
@@ -94,16 +99,66 @@ async fn experimental_feature_list_returns_feature_metadata_with_stage() -> Resu
 }
 
 #[tokio::test]
+async fn experimental_feature_list_reports_managed_in_app_voice() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join("requirements.toml"),
+        "[features]\nin_app_voice = false\n",
+    )?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+
+    let request_id = mcp.send_config_requirements_read_request().await?;
+    let requirements =
+        read_response::<ConfigRequirementsReadResponse>(&mut mcp, request_id).await?;
+    let request_id = mcp
+        .send_experimental_feature_list_request(ExperimentalFeatureListParams::default())
+        .await?;
+    let features = read_response::<ExperimentalFeatureListResponse>(&mut mcp, request_id).await?;
+
+    assert_eq!(
+        (
+            requirements
+                .requirements
+                .and_then(|requirements| requirements.feature_requirements),
+            features
+                .data
+                .into_iter()
+                .find(|feature| feature.name == "in_app_voice"),
+        ),
+        (
+            Some(BTreeMap::from([("in_app_voice".to_string(), false)])),
+            Some(ExperimentalFeature {
+                name: "in_app_voice".to_string(),
+                stage: ExperimentalFeatureStage::Stable,
+                display_name: None,
+                description: None,
+                announcement: None,
+                enabled: false,
+                default_enabled: true,
+            }),
+        ),
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn experimental_feature_list_resolves_thread_project_config() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     let workspace = TempDir::new()?;
+    let codex_home_key = codex_home.path().to_string_lossy().replace('\\', "\\\\");
     let workspace_key = workspace.path().to_string_lossy().replace('\\', "\\\\");
     MockResponsesConfig::new(&server.uri())
         .with_extra_config(&format!(
-            "[projects.\"{workspace_key}\"]\ntrust_level = \"trusted\""
+            "[projects.\"{codex_home_key}\"]\ntrust_level = \"trusted\"\n\
+             [projects.\"{workspace_key}\"]\ntrust_level = \"trusted\""
         ))
         .write(codex_home.path())?;
+    #[cfg(unix)]
+    let config_toml = std::fs::read(codex_home.path().join("config.toml"))?;
     let project_config_dir = workspace.path().join(".codex");
     std::fs::create_dir_all(&project_config_dir)?;
     std::fs::write(
@@ -112,12 +167,42 @@ async fn experimental_feature_list_resolves_thread_project_config() -> Result<()
 memories = true
 "#,
     )?;
+    let launch_project_config_dir = codex_home.path().join(".codex");
+    std::fs::create_dir(&launch_project_config_dir)?;
+    std::fs::copy(
+        project_config_dir.join("config.toml"),
+        launch_project_config_dir.join("config.toml"),
+    )?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_managed_config()
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
+
+    #[cfg(unix)]
+    {
+        let deleted_launch_dir = workspace.path().join("deleted-launch");
+        std::fs::rename(codex_home.path(), &deleted_launch_dir)?;
+        std::fs::create_dir(codex_home.path())?;
+        std::fs::write(codex_home.path().join("config.toml"), config_toml)?;
+        std::fs::create_dir(&launch_project_config_dir)?;
+        std::fs::copy(
+            project_config_dir.join("config.toml"),
+            launch_project_config_dir.join("config.toml"),
+        )?;
+        std::fs::remove_dir_all(deleted_launch_dir)?;
+    }
+    let request_id = mcp
+        .send_experimental_feature_list_request(ExperimentalFeatureListParams::default())
+        .await?;
+    let global = read_response::<ExperimentalFeatureListResponse>(&mut mcp, request_id).await?;
+    let global_memories = global
+        .data
+        .iter()
+        .find(|feature| feature.name == "memories")
+        .expect("memories feature should be present");
+    assert!(!global_memories.enabled);
 
     let thread_start_id = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
@@ -194,28 +279,25 @@ async fn experimental_feature_enablement_set_applies_to_global_and_thread_config
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
 
-    let actual = set_experimental_feature_enablement(
-        &mut mcp,
-        BTreeMap::from([("auth_elicitation".to_string(), true)]),
-    )
-    .await?;
-    assert_eq!(
-        actual,
-        ExperimentalFeatureEnablementSetResponse {
-            enablement: BTreeMap::from([("auth_elicitation".to_string(), true)]),
-        }
-    );
+    let enablement = BTreeMap::from([
+        ("auth_elicitation".to_string(), true),
+        ("mcp_lazy_stdio_startup".to_string(), true),
+        ("daybreak_program_propagation".to_string(), true),
+    ]);
+    let actual = set_experimental_feature_enablement(&mut mcp, enablement.clone()).await?;
+    assert_eq!(actual.enablement, enablement);
 
     for cwd in [None, Some(project_cwd.display().to_string())] {
         let ConfigReadResponse { config, .. } = read_config(&mut mcp, cwd).await?;
-
-        assert_eq!(
-            config
-                .additional
-                .get("features")
-                .and_then(|features| features.get("auth_elicitation")),
-            Some(&json!(true))
-        );
+        for key in enablement.keys() {
+            assert_eq!(
+                config
+                    .additional
+                    .get("features")
+                    .and_then(|features| features.get(key)),
+                Some(&json!(true))
+            );
+        }
     }
 
     Ok(())

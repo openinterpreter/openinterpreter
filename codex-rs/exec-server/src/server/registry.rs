@@ -26,6 +26,7 @@ use crate::protocol::FS_READ_DIRECTORY_METHOD;
 use crate::protocol::FS_READ_FILE_METHOD;
 use crate::protocol::FS_REMOVE_METHOD;
 use crate::protocol::FS_WALK_METHOD;
+use crate::protocol::FS_WRITE_BLOCK_METHOD;
 use crate::protocol::FS_WRITE_FILE_METHOD;
 use crate::protocol::FsCloseParams;
 use crate::protocol::FsReadBlockParams;
@@ -108,6 +109,12 @@ pub(crate) fn build_router() -> RpcRouter<ExecServerHandler> {
         },
     );
     router.request(
+        CAPABILITIES_DISCOVER_V2_METHOD,
+        |handler: Arc<ExecServerHandler>, params: DiscoverV2CapabilitiesRequest| async move {
+            handler.discover_capabilities_v2(params).await
+        },
+    );
+    router.request(
         EXEC_READ_METHOD,
         |handler: Arc<ExecServerHandler>, params: ReadParams| async move {
             handler.exec_read(params).await
@@ -152,6 +159,12 @@ pub(crate) fn build_router() -> RpcRouter<ExecServerHandler> {
         },
     );
     router.request(
+        FS_WRITE_BLOCK_METHOD,
+        |handler: Arc<ExecServerHandler>, params: FsWriteBlockParams| async move {
+            handler.fs_write_block(params).await
+        },
+    );
+    router.request(
         FS_CLOSE_METHOD,
         |handler: Arc<ExecServerHandler>, params: FsCloseParams| async move {
             handler.fs_close(params).await
@@ -169,6 +182,12 @@ pub(crate) fn build_router() -> RpcRouter<ExecServerHandler> {
         |handler: Arc<ExecServerHandler>, params: WireFsCreateDirectoryParams| async move {
             let params = params.try_into_request(resolve_filesystem_sandbox)?;
             handler.fs_create_directory(params).await
+        },
+    );
+    router.request(
+        crate::protocol::FS_WATCH_MISSING_METHOD,
+        |handler: Arc<ExecServerHandler>, params: crate::protocol::FsWatchMissingParams| async move {
+            handler.fs_watch_missing(params).await
         },
     );
     router.request(

@@ -725,18 +725,26 @@ async fn runtime_trust_reload_refreshes_project_instructions() -> Result<()> {
         vec![global_agents.clone(), project_agents.clone()]
     );
 
-    let mut untrusted_config = (*test.codex.config().await).clone();
+    let current_config = test.codex.config().await;
+    let mut untrusted_config = current_config.as_ref().clone();
     untrusted_config.active_project.trust_level = Some(TrustLevel::Untrusted);
-    test.codex.refresh_runtime_config(untrusted_config).await;
+    let _ = test
+        .codex
+        .refresh_runtime_config(current_config, untrusted_config)
+        .await;
     test.submit_turn("untrusted project").await?;
     assert_eq!(
         test.codex.instruction_sources().await,
         vec![global_agents.clone()]
     );
 
-    let mut trusted_config = (*test.codex.config().await).clone();
+    let current_config = test.codex.config().await;
+    let mut trusted_config = current_config.as_ref().clone();
     trusted_config.active_project.trust_level = Some(TrustLevel::Trusted);
-    test.codex.refresh_runtime_config(trusted_config).await;
+    let _ = test
+        .codex
+        .refresh_runtime_config(current_config, trusted_config)
+        .await;
     test.submit_turn("trusted again").await?;
     assert_eq!(
         test.codex.instruction_sources().await,
@@ -1876,13 +1884,13 @@ async fn multi_environment_project_instructions_share_one_byte_budget() -> Resul
         .thread_manager
         .start_thread(StartThreadOptions {
             environments: Some(vec![
-                TurnEnvironmentSelection {
+                TurnEnvironmentRequest {
                     environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
                     cwd: test.executor_environment().selection().cwd.clone(),
                     workspace_roots: vec![test.executor_environment().selection().cwd.clone()],
                     config: EnvironmentConfigState::FromThread,
                 },
-                TurnEnvironmentSelection {
+                TurnEnvironmentRequest {
                     environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
                     cwd: PathUri::from_host_native_path(local_root.path())?,
                     workspace_roots: vec![PathUri::from_host_native_path(local_root.path())?],
@@ -1960,13 +1968,13 @@ async fn multi_environment_thread_refreshes_global_and_keeps_repository_snapshot
         .thread_manager
         .start_thread(StartThreadOptions {
             environments: Some(vec![
-                TurnEnvironmentSelection {
+                TurnEnvironmentRequest {
                     environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
                     cwd: test.executor_environment().selection().cwd.clone(),
                     workspace_roots: vec![test.executor_environment().selection().cwd.clone()],
                     config: EnvironmentConfigState::FromThread,
                 },
-                TurnEnvironmentSelection {
+                TurnEnvironmentRequest {
                     environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
                     cwd: PathUri::from_host_native_path(local_root.path())?,
                     workspace_roots: vec![PathUri::from_host_native_path(local_root.path())?],
@@ -2324,7 +2332,7 @@ async fn fork_injects_changed_agents_md_once() -> Result<()> {
         .expect("test config should allow ContentItemKinds override");
     let forked = parent
         .thread_manager
-        .fork_thread(
+        .fork_legacy_thread(
             ForkSnapshot::Interrupted,
             codex_core::StartThreadOptions::new(fork_config),
             rollout_path,
@@ -2351,7 +2359,9 @@ async fn fork_injects_changed_agents_md_once() -> Result<()> {
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 4);
     let parent_input = requests[0].input();
-    let fork_input = requests[1].input();
+    let mut fork_input = requests[1].input();
+    // The request prefix has a thread-scoped ID; retained history IDs stay unchanged.
+    fork_input[0]["id"] = parent_input[0]["id"].clone();
     assert_eq!(
         fork_input.get(..parent_input.len()),
         Some(parent_input.as_slice()),
@@ -2537,7 +2547,9 @@ async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()> 
     );
     if fork_context {
         let seed_input = seed_request.input();
-        let child_input = child_request.input();
+        let mut child_input = child_request.input();
+        // The request prefix has a thread-scoped ID; retained history IDs stay unchanged.
+        child_input[0]["id"] = seed_input[0]["id"].clone();
         assert_eq!(
             child_input.get(..seed_input.len()),
             Some(seed_input.as_slice()),

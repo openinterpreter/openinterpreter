@@ -1,4 +1,5 @@
 use super::WebLinkDisplay;
+use crate::markdown_render::MarkdownStyles;
 use crate::markdown_render::render_markdown_lines_with_width_cwd_and_hidden_link_destinations;
 use crate::markdown_render::render_streaming_markdown_lines_with_width_and_cwd;
 use crate::style::accent_color;
@@ -13,6 +14,7 @@ use pretty_assertions::assert_eq;
 use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
+use ratatui::text::Span;
 use ratatui::text::Text;
 use std::collections::BTreeSet;
 
@@ -68,6 +70,7 @@ fn bare_urls_keep_link_style_when_wrapped_in_tables() {
 
 fn terminal(name: TerminalName) -> TerminalInfo {
     TerminalInfo {
+        backend: None,
         name,
         term_program: None,
         version: None,
@@ -91,6 +94,7 @@ fn supporting_terminals_render_only_the_styled_label_and_keep_its_target() {
         TerminalName::Ghostty,
         TerminalName::Iterm2,
         TerminalName::WezTerm,
+        TerminalName::Rex,
         TerminalName::Kitty,
         TerminalName::VsCode,
         TerminalName::Alacritty,

@@ -34,7 +34,7 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::RolloutItem;
-use codex_rollout::is_persisted_rollout_item;
+use codex_rollout::into_persisted_rollout_items;
 use codex_thread_store::AppendThreadItemsParams;
 use codex_thread_store::CreateThreadParams;
 use codex_thread_store::PersistContext;
@@ -405,7 +405,6 @@ impl ExternalAgentSessionImporter {
                 ConfigOverrides {
                     cwd: Some(cwd),
                     codex_linux_sandbox_exe: self.arg0_paths.codex_linux_sandbox_exe.clone(),
-                    main_execve_wrapper_exe: self.arg0_paths.main_execve_wrapper_exe.clone(),
                     ..Default::default()
                 },
             )
@@ -456,6 +455,9 @@ impl ExternalAgentSessionImporter {
         };
         let now = Utc::now();
         let create_params = CreateThreadParams {
+            attached_thread: false,
+            creator_user_id: None,
+            creator_account_id: None,
             session_id: thread_id.into(),
             thread_id,
             extra_config: None,
@@ -488,14 +490,14 @@ impl ExternalAgentSessionImporter {
             history_mode: ThreadHistoryMode::Legacy,
             history_base: None,
             subagent_history_start_ordinal: None,
-            initial_window_id: uuid::Uuid::now_v7().to_string(),
+            initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(cwd.clone()),
                 model_provider: model_provider.clone(),
                 memory_mode,
             },
         };
-        rollout_items.retain(|item| is_persisted_rollout_item(item, ThreadHistoryMode::Legacy));
+        rollout_items = into_persisted_rollout_items(rollout_items, ThreadHistoryMode::Legacy);
         let (created_at, updated_at) = rollout_items
             .iter()
             .filter_map(|item| match item {

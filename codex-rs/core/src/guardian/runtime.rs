@@ -1,6 +1,7 @@
 //! Captures one approval action for the extension-owned synchronous reviewer.
 
 use codex_protocol::protocol::ReviewDecision;
+use codex_utils_path_uri::PathConvention;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -10,6 +11,8 @@ use super::GuardianReviewContext;
 use super::GuardianReviewOptions;
 use super::approval_request::guardian_approval_request_to_json;
 use crate::session::session::Session;
+use crate::tools::sandboxing::ApprovalAction;
+pub(crate) use codex_guardian_reviewer::ReviewAction;
 
 /// Carries the original action even when the legacy synchronous renderer cannot handle its paths.
 /// This lets the extension return AskUser before invoking that renderer.
@@ -79,6 +82,31 @@ impl ReviewAction {
         }
         Ok(request)
     }
+}
+
+/// Preserve the checks previously made before entering Guardian from tool approvals.
+pub(super) fn validate<'a>(
+    action: &'a ReviewAction,
+    context: &GuardianReviewContext,
+) -> Result<&'a GuardianApprovalRequest, ReviewDecision> {
+    let request = action.request.as_ref().map_err(|error| {
+        tracing::error!(%error, "failed to build automatic approval action");
+        ReviewDecision::denied("automatic approval review could not prepare the action")
+    })?;
+    if let Some(environment_id) = request.target_environment_id()
+        && !context
+            .environments()
+            .turn_environments()
+            .any(|environment| environment.selection.environment_id == environment_id)
+    {
+        let message = if matches!(request, GuardianApprovalRequest::WriteStdin { .. }) {
+            "automatic approval review cannot access the terminal's environment; select it before retrying"
+        } else {
+            "automatic approval review cannot access the request's environment"
+        };
+        return Err(ReviewDecision::denied(message));
+    }
+    Ok(request)
 }
 
 #[derive(Clone)]

@@ -354,6 +354,20 @@ mod tests {
     }
 
     #[test]
+    fn directory_change_consent_can_keep_current_directory() {
+        let mut widget = widget(/*error*/ None);
+        widget.cancel = TrustCancelAction::CurrentTask;
+        let mut terminal =
+            Terminal::new(VT100Backend::new(/*width*/ 70, /*height*/ 18)).expect("terminal");
+        terminal
+            .draw(|f| (&widget).render_ref(f.area(), f.buffer_mut()))
+            .expect("draw");
+        insta::assert_snapshot!(terminal.backend());
+        widget.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(widget.should_quit());
+    }
+
+    #[test]
     fn renders_snapshot_for_remote_git_subdirectory() {
         let widget = TrustDirectoryWidget {
             restricted: false,

@@ -8,7 +8,10 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
+use codex_config::McpEmaTokenEndpointAuthMethod;
+use codex_config::McpServerOAuthConfig;
 use codex_exec_server::HttpClient;
+use codex_otel::auth_storage::AuthStorageOriginator;
 use rmcp::transport::AuthorizationManager;
 use rmcp::transport::AuthorizationSession;
 use rmcp::transport::auth::AuthorizationMetadata;
@@ -36,6 +39,7 @@ use crate::oauth_callback::callback_id_from_server_url;
 use crate::oauth_callback::callback_mode;
 use crate::oauth_callback::resolve_mcp_oauth_callback_url;
 use crate::oauth_callback::validate_callback_redirect;
+use crate::oauth_client_credentials::OAuthClientCredentials;
 use crate::oauth_client_registration::McpOAuthClientRegistration;
 use crate::oauth_client_registration::PreparedOAuthLogin;
 use crate::oauth_client_registration::start_authorization as start_client_registration;
@@ -111,7 +115,7 @@ pub async fn perform_oauth_login(
     http_headers: Option<HashMap<String, String>>,
     env_http_headers: Option<HashMap<String, String>>,
     scopes: &[String],
-    oauth_client_id: Option<&str>,
+    oauth_config: Option<&McpServerOAuthConfig>,
     client_registration: McpOAuthClientRegistration,
     oauth_resource: Option<&str>,
     callback_port: Option<u16>,
@@ -127,7 +131,7 @@ pub async fn perform_oauth_login(
         http_headers,
         env_http_headers,
         scopes,
-        oauth_client_id,
+        oauth_config,
         client_registration,
         oauth_resource,
         callback_port,
@@ -149,7 +153,7 @@ pub async fn perform_oauth_login_silent(
     http_headers: Option<HashMap<String, String>>,
     env_http_headers: Option<HashMap<String, String>>,
     scopes: &[String],
-    oauth_client_id: Option<&str>,
+    oauth_config: Option<&McpServerOAuthConfig>,
     client_registration: McpOAuthClientRegistration,
     oauth_resource: Option<&str>,
     callback_port: Option<u16>,
@@ -166,7 +170,7 @@ pub async fn perform_oauth_login_silent(
         http_headers,
         env_http_headers,
         scopes,
-        oauth_client_id,
+        oauth_config,
         client_registration,
         oauth_resource,
         callback_port,
@@ -188,7 +192,7 @@ async fn perform_oauth_login_with_browser_output(
     http_headers: Option<HashMap<String, String>>,
     env_http_headers: Option<HashMap<String, String>>,
     scopes: &[String],
-    oauth_client_id: Option<&str>,
+    oauth_config: Option<&McpServerOAuthConfig>,
     client_registration: McpOAuthClientRegistration,
     oauth_resource: Option<&str>,
     callback_port: Option<u16>,
@@ -235,7 +239,7 @@ pub async fn perform_oauth_login_return_url(
     http_headers: Option<HashMap<String, String>>,
     env_http_headers: Option<HashMap<String, String>>,
     scopes: &[String],
-    oauth_client_id: Option<&str>,
+    oauth_config: Option<&McpServerOAuthConfig>,
     client_registration: McpOAuthClientRegistration,
     oauth_resource: Option<&str>,
     timeout_secs: Option<i64>,
@@ -280,9 +284,13 @@ fn spawn_callback_server(
     server: Arc<Server>,
     tx: oneshot::Sender<CallbackResult>,
     expected_callback_path: String,
+    closed: tokio_util::sync::CancellationToken,
 ) {
     tokio::task::spawn_blocking(move || {
-        while let Ok(request) = server.recv() {
+        // Drop the listener before publishing closure, including if this task unwinds.
+        let _closed = closed.drop_guard();
+        let listener = server;
+        while let Ok(request) = listener.recv() {
             let path = request.url().to_string();
             match parse_oauth_callback(&path, &expected_callback_path) {
                 CallbackOutcome::Success(OauthCallbackResult {
@@ -440,6 +448,7 @@ pub(crate) struct OauthLoginFlow {
     authorization_server_issuer: Option<String>,
     rx: oneshot::Receiver<CallbackResult>,
     guard: CallbackServerGuard,
+    callback_closed: tokio_util::sync::CancellationToken,
     server_name: String,
     server_url: String,
     store_mode: OAuthCredentialsStoreMode,
@@ -550,6 +559,8 @@ impl OauthLoginFlow {
     ) -> Result<Self> {
         const DEFAULT_OAUTH_TIMEOUT_SECS: i64 = 300;
 
+        let credentials = OAuthClientCredentials::resolve(oauth_config)?;
+        let oauth_client_id = credentials.client_id.as_deref();
         let callback_port = resolve_callback_port(callback_port)?;
         let is_enterprise_idp = matches!(purpose, OAuthLoginPurpose::EnterpriseIdp);
         let (enterprise_bind_ip, callback_port) = if is_enterprise_idp {
@@ -564,7 +575,6 @@ impl OauthLoginFlow {
             (None, callback_port)
         };
         let callback_id = callback_id_from_server_url(server_url)?;
-        let oauth_client_id = oauth_client_id.filter(|client_id| !client_id.trim().is_empty());
         let configured_callback = if oauth_client_id.is_some() {
             callback_url
                 .map(|callback_url| {
@@ -697,8 +707,6 @@ impl OauthLoginFlow {
             .await?
         };
         let callback_path = callback_path_from_redirect_uri(&redirect_uri)?;
-        let (tx, rx) = oneshot::channel();
-        spawn_callback_server(server, tx, callback_path);
         let auth_url = append_query_param(
             &oauth_state.get_authorization_url().await?,
             "resource",
@@ -706,6 +714,11 @@ impl OauthLoginFlow {
         );
         let timeout_secs = timeout_secs.unwrap_or(DEFAULT_OAUTH_TIMEOUT_SECS).max(1);
         let timeout = Duration::from_secs(timeout_secs as u64);
+        // No fallible work or suspension after spawning: every callback worker
+        // must be owned by a returned flow, including during constructor cancellation.
+        let (tx, rx) = oneshot::channel();
+        let callback_closed = tokio_util::sync::CancellationToken::new();
+        spawn_callback_server(server, tx, callback_path, callback_closed.clone());
 
         Ok(Self {
             auth_url,
@@ -714,6 +727,7 @@ impl OauthLoginFlow {
             authorization_server_issuer,
             rx,
             guard,
+            callback_closed,
             server_name: server_name.to_string(),
             server_url: server_url.to_string(),
             store_mode,
@@ -810,14 +824,15 @@ impl OauthLoginFlow {
         let server_name = self.server_name.clone();
         let (tx, rx) = oneshot::channel();
 
-        tokio::spawn(async move {
+        let task = async move {
             let result = self.finish(/*emit_browser_url*/ false).await;
             if let Err(err) = &result {
                 eprintln!("Failed to complete OAuth login for '{server_name}': {err:#}");
             }
 
             let _ = tx.send(result);
-        });
+        };
+        tokio::spawn(AuthStorageOriginator::current().scope(task));
 
         rx
     }
@@ -839,6 +854,7 @@ async fn resolve_authorization_manager(
     Ok((auth_manager, metadata))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_authorization(
     mut auth_manager: AuthorizationManager,
     metadata: AuthorizationMetadata,
@@ -904,6 +920,7 @@ mod tests {
     use axum::Router;
     use axum::routing::get;
     use axum::routing::post;
+    use codex_config::McpServerOAuthConfig;
     use codex_config::types::AuthKeyringBackendKind;
     use codex_config::types::OAuthCredentialsStoreMode;
     use codex_exec_server::ExecServerError;
@@ -1311,7 +1328,7 @@ mod tests {
             /*http_headers*/ None,
             /*env_http_headers*/ None,
             &[],
-            /*oauth_client_id*/ None,
+            /*oauth_config*/ None,
             McpOAuthClientRegistration::Auto,
             /*oauth_resource*/ None,
             /*callback_port*/ None,
@@ -1336,7 +1353,7 @@ mod tests {
             /*http_headers*/ None,
             /*env_http_headers*/ None,
             &[],
-            /*oauth_client_id*/ None,
+            /*oauth_config*/ None,
             McpOAuthClientRegistration::Auto,
             /*oauth_resource*/ None,
             /*callback_port*/ None,

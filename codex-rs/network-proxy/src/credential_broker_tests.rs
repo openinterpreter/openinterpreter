@@ -34,16 +34,69 @@ fn authorization(headers: &HeaderMap) -> Option<&str> {
 
 fn assert_credential_shape(real_value: &str, dummy_value: &str, prefix: &str) {
     assert_ne!(dummy_value, real_value);
-    assert_eq!(dummy_value.len(), real_value.len());
-    assert_eq!(&dummy_value[..prefix.len()], prefix);
-    let same_shape = real_value
-        .bytes()
-        .zip(dummy_value.bytes())
-        .skip(prefix.len())
-        .all(|(real, dummy)| {
-            real.is_ascii_alphanumeric() && dummy.is_ascii_alphanumeric() || real == dummy
+    assert!(dummy_value.len() >= real_value.len());
+    let marker = format!("{prefix}masked");
+    let suffix = dummy_value
+        .strip_prefix(&marker)
+        .expect("masked credential");
+    assert!(suffix.len() >= 22);
+    assert!(suffix.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+}
+
+#[test]
+fn unmasked_credentials_follow_the_selected_failure_mode() {
+    for (enabled, source, base_url, expected) in [
+        (true, "GH_TOKEN", None, true),
+        (true, "GH_ENTERPRISE_TOKEN", None, false),
+        (
+            true,
+            "OPENAI_API_KEY",
+            Some("https://localhost:1234/v1"),
+            false,
+        ),
+        (false, "GH_TOKEN", None, false),
+    ] {
+        let broker = CredentialBroker::new(enabled);
+        broker.configure(&NetworkProxyConfig {
+            credential_broker: enabled,
+            allow_local_binding: Some(true),
+            ..NetworkProxyConfig::default()
         });
-    assert!(same_shape);
+        let mut env = env_map([
+            (source, "opaque-executor-credential"),
+            ("AUTH_HEADER", "Bearer opaque-executor-credential"),
+        ]);
+        if let Some(base_url) = base_url {
+            env.insert("OPENAI_BASE_URL".to_string(), base_url.to_string());
+        }
+        broker.virtualize_child_env(&mut env);
+        for alias_only in [false, true] {
+            let mut input = env.clone();
+            if alias_only {
+                input.remove(source);
+            }
+            for mode in [
+                CredentialMaskingFailureMode::Warn,
+                CredentialMaskingFailureMode::Deny,
+                CredentialMaskingFailureMode::Error,
+            ] {
+                let mut output = input.clone();
+                assert_eq!(
+                    broker
+                        .handle_unmasked_credentials(&mut output, mode)
+                        .is_ok(),
+                    enabled && (expected || mode != CredentialMaskingFailureMode::Error),
+                    "{source} {mode:?} (alias_only={alias_only})"
+                );
+                let mut expected_env = input.clone();
+                if enabled && !expected && mode == CredentialMaskingFailureMode::Deny {
+                    expected_env.remove(source);
+                    expected_env.remove("AUTH_HEADER");
+                }
+                assert_eq!(output, expected_env);
+            }
+        }
+    }
 }
 
 #[test]
@@ -842,13 +895,42 @@ fn brokered_credential_value_env_keys_include_dummy_aliases() {
 
 #[test]
 fn virtualize_child_env_uses_fresh_dummy_capabilities() {
-    let mut first_env = env_map([("OPENAI_API_KEY", "sk-proj-abcdefghijklmnopqrstuvwxyz")]);
-    let mut second_env = first_env.clone();
+    for (source, real_value, prefix) in [
+        ("GH_TOKEN", "ghp_short", "ghp_"),
+        ("GH_TOKEN", "opaque:.credential/🦀", "ghp_"),
+        ("OPENAI_API_KEY", "sk-proj-short", "sk-proj-"),
+        ("OPENAI_API_KEY", "sk-svcacct-short", "sk-svcacct-"),
+        ("OPENAI_API_KEY", "opaque:.credential/🦀", "sk-"),
+    ] {
+        let mut first_env = env_map([(source, real_value)]);
+        let mut second_env = first_env.clone();
 
-    CredentialBroker::new(/*enabled*/ true).virtualize_child_env(&mut first_env);
-    CredentialBroker::new(/*enabled*/ true).virtualize_child_env(&mut second_env);
+        for env in [&mut first_env, &mut second_env] {
+            let broker = CredentialBroker::new(/*enabled*/ true);
+            broker.configure(&NetworkProxyConfig {
+                credential_broker: true,
+                credential_providers: BTreeMap::from([(
+                    "custom".to_string(),
+                    CredentialProviderConfig {
+                        env: vec!["CUSTOM_TOKEN".to_string()],
+                        patterns: vec![
+                            "^ghp_[A-Za-z0-9]+$".to_string(),
+                            "^sk-proj-[A-Za-z0-9]+$".to_string(),
+                            "^[a-z]{4}$".to_string(),
+                        ],
+                        url_prefixes: vec!["https://custom.example".to_string()],
+                        ..CredentialProviderConfig::default()
+                    },
+                )]),
+                ..NetworkProxyConfig::default()
+            });
+            broker.virtualize_child_env(env);
+        }
 
-    assert_ne!(first_env["OPENAI_API_KEY"], second_env["OPENAI_API_KEY"]);
+        assert_credential_shape(real_value, &first_env[source], prefix);
+        assert_credential_shape(real_value, &second_env[source], prefix);
+        assert_ne!(first_env[source], second_env[source]);
+    }
 }
 
 #[test]
@@ -1020,10 +1102,396 @@ fn inject_request_headers_requires_dummy_and_preserves_explicit_authorization() 
     broker.inject_request_headers("api.openai.com", &mut headers);
     assert_eq!(authorization(&headers), Some("Bearer sk-real"));
 
-    let mut explicit_headers = headers_with_bearer("sk-explicit");
-    broker.inject_request_headers("api.openai.com", &mut explicit_headers);
+    for explicit_value in [
+        "sk-explicit",
+        "sk-masked000000000000000000000000000000000000000000",
+    ] {
+        let mut explicit_headers = headers_with_bearer(explicit_value);
+        broker.inject_request_headers("api.openai.com", &mut explicit_headers);
+        assert_eq!(explicit_headers, headers_with_bearer(explicit_value));
+    }
+}
 
-    assert_eq!(authorization(&explicit_headers), Some("Bearer sk-explicit"));
+#[test]
+fn concurrent_commands_preserve_discovered_credential_destinations() {
+    for (key, host_key, token) in [
+        (
+            "GH_ENTERPRISE_TOKEN",
+            "GH_HOST",
+            "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+        ),
+        (
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        ),
+        (
+            "PROVIDER_TOKEN",
+            "PROVIDER_ENDPOINT",
+            "provider_abcdefghijklmnopqrstuvwx",
+        ),
+    ] {
+        let broker = CredentialBroker::new(/*enabled*/ true);
+        broker.configure(&NetworkProxyConfig {
+            credential_broker: true,
+            credential_providers: BTreeMap::from([(
+                "custom".to_string(),
+                CredentialProviderConfig {
+                    env: vec!["PROVIDER_TOKEN".to_string()],
+                    patterns: vec!["^provider_[a-z]{24}$".to_string()],
+                    url_prefix_from_env: Some("PROVIDER_ENDPOINT".to_string()),
+                    ..CredentialProviderConfig::default()
+                },
+            )]),
+            ..NetworkProxyConfig::default()
+        });
+        let mut commands = ["first.example", "second.example"].map(|host| {
+            let destination = if host_key == "GH_HOST" {
+                host.to_string()
+            } else {
+                format!("https://{host}/v1")
+            };
+            env_map([
+                (key, token),
+                (host_key, &destination),
+                ("AUTH_HEADER", &format!("Bearer {token}")),
+            ])
+        });
+        for env in &mut commands {
+            broker.virtualize_child_env_for_environment(env, Some("shared-environment"));
+        }
+        let dummy = commands[0][key].clone();
+        assert_ne!(dummy, token);
+        assert_eq!(commands[1][key], dummy);
+        let assert_destinations = || {
+            for (environment_id, host, injected) in [
+                ("shared-environment", "first.example", true),
+                ("shared-environment", "second.example", true),
+                ("shared-environment", "unrelated.example", false),
+                ("other-environment", "first.example", false),
+                ("other-environment", "second.example", false),
+            ] {
+                let mut headers = headers_with_bearer(&dummy);
+                broker.inject_request_headers_for_environment(
+                    &format!("https://{host}/v1/models"),
+                    &mut headers,
+                    Some(environment_id),
+                );
+                assert_eq!(
+                    headers,
+                    headers_with_bearer(if injected { token } else { &dummy }),
+                    "{key}, {environment_id}, {host}"
+                );
+                assert_eq!(
+                    broker
+                        .host_protocols_for_environment(
+                            host,
+                            /*port*/ 443,
+                            Some(environment_id),
+                        )
+                        .tls,
+                    injected,
+                    "{key}, {environment_id}, {host}"
+                );
+            }
+        };
+        assert_destinations();
+        for env in &mut commands {
+            env.remove(key);
+            broker.virtualize_child_env_for_environment(env, Some("shared-environment"));
+            assert_eq!(env["AUTH_HEADER"], format!("Bearer {dummy}"));
+            assert_destinations();
+        }
+
+        commands[0].insert(key.to_string(), token.to_string());
+        broker.virtualize_child_env_for_environment(&mut commands[0], Some("shared-environment"));
+        assert_eq!(commands[0][key], dummy);
+        assert_destinations();
+
+        let mut inherited = env_map([(key, token), (host_key, &commands[0][host_key])]);
+        broker.virtualize_child_env_for_environment(&mut inherited, Some("parent-environment"));
+        let parent_dummy = inherited[key].clone();
+        assert_ne!(parent_dummy, dummy);
+        broker.virtualize_child_env_for_environment(&mut inherited, Some("shared-environment"));
+        assert_eq!(inherited[key], dummy);
+        assert_destinations();
+        let mut headers = headers_with_bearer(&parent_dummy);
+        broker.inject_request_headers_for_environment(
+            "https://second.example/v1/models",
+            &mut headers,
+            Some("parent-environment"),
+        );
+        assert_eq!(headers, headers_with_bearer(&parent_dummy));
+    }
+}
+
+#[test]
+fn builtin_credentials_use_private_destination_context() {
+    let broker = CredentialBroker::new(/*enabled*/ true);
+    let mut config = NetworkProxyConfig::default();
+    config.set_credential_broker_enabled(/*enabled*/ true);
+    config.configure_credential_broker_environment(&env_map([
+        ("GH_HOST", "github.enterprise.example"),
+        ("OPENAI_BASE_URL", "https://gateway.example/v1"),
+    ]));
+    broker.configure(&config);
+    for (key, context_key, token, host) in [
+        (
+            "GH_ENTERPRISE_TOKEN",
+            "GH_HOST",
+            "ghp-real",
+            "github.enterprise.example",
+        ),
+        (
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "sk-real",
+            "gateway.example",
+        ),
+    ] {
+        let mut env = env_map([(key, token)]);
+        broker.virtualize_child_env(&mut env);
+        assert_ne!(env[key], token);
+        assert!(!env.contains_key("GH_HOST"));
+        assert!(!env.contains_key("OPENAI_BASE_URL"));
+        let mut headers = headers_with_bearer(&env[key]);
+        broker.inject_request_headers(host, &mut headers);
+        assert_eq!(
+            authorization(&headers),
+            Some(format!("Bearer {token}").as_str())
+        );
+
+        let snapshot_destination = if context_key == "GH_HOST" {
+            "snapshot.example"
+        } else {
+            "https://snapshot.example/v1"
+        };
+        env.insert(context_key.to_string(), snapshot_destination.to_string());
+        broker.virtualize_child_env(&mut env);
+        env.remove(context_key);
+        env.insert(
+            "NEW_AUTH_HEADER".to_string(),
+            format!("Bearer {}", env[key]),
+        );
+        env.insert("REAL_COPY".to_string(), token.to_string());
+        let dummy = env[key].clone();
+        broker.virtualize_child_env(&mut env);
+        assert_eq!((&env[key], &env["REAL_COPY"]), (&dummy, &dummy));
+        assert!(!env.contains_key(context_key));
+        for destination in ["snapshot.example", host] {
+            let mut headers = headers_with_bearer(&dummy);
+            broker.inject_request_headers(destination, &mut headers);
+            assert_eq!(
+                authorization(&headers),
+                Some(format!("Bearer {token}").as_str())
+            );
+        }
+        let mut inherited_env = env.clone();
+        broker.virtualize_child_env_for_environment(&mut inherited_env, Some("child"));
+        assert_eq!(inherited_env[key], dummy);
+        for (destination, injected) in [("snapshot.example", true), (host, false)] {
+            let mut headers = headers_with_bearer(&dummy);
+            broker.inject_request_headers_for_environment(destination, &mut headers, Some("child"));
+            assert_eq!(
+                headers,
+                headers_with_bearer(if injected { token } else { &dummy }),
+            );
+        }
+        broker.restore_child_env(&mut env, &mut []);
+        assert_eq!(env["NEW_AUTH_HEADER"], format!("Bearer {token}"));
+    }
+}
+
+#[test]
+fn private_destination_updates_reconcile_registered_fallbacks() {
+    for ((key, context_key, token), previously_used_fallback) in [
+        ("GH_ENTERPRISE_TOKEN", "GH_HOST", "ghp-real"),
+        ("OPENAI_API_KEY", "OPENAI_BASE_URL", "sk-real"),
+        (
+            "VENDOR_TOKEN",
+            "VENDOR_HOST",
+            "vendor_abcdefghijklmnopqrstuvwx",
+        ),
+    ]
+    .into_iter()
+    .flat_map(|source| [(source, false), (source, true)])
+    {
+        let destination = |host: &str| {
+            if context_key == "GH_HOST" {
+                host.to_string()
+            } else {
+                format!("https://{host}")
+            }
+        };
+        let broker = CredentialBroker::new(/*enabled*/ true);
+        let mut config = NetworkProxyConfig {
+            credential_broker: true,
+            credential_providers: BTreeMap::from([(
+                "vendor".to_string(),
+                CredentialProviderConfig {
+                    env: vec!["VENDOR_TOKEN".to_string()],
+                    patterns: vec!["^vendor_[a-z]{24}$".to_string()],
+                    url_prefix_from_env: Some("VENDOR_HOST".to_string()),
+                    ..CredentialProviderConfig::default()
+                },
+            )]),
+            ..NetworkProxyConfig::default()
+        };
+        config.configure_credential_broker_environment(&env_map([(
+            context_key,
+            &destination("first.example"),
+        )]));
+        broker.configure(&config);
+        let mut env = env_map([(key, token)]);
+        broker.virtualize_child_env(&mut env);
+        let dummy = env[key].clone();
+        assert_ne!(dummy, token);
+
+        let mut explicit_env = env_map([(key, token)]);
+        if previously_used_fallback {
+            broker.virtualize_child_env_for_environment(&mut explicit_env, Some("explicit"));
+        }
+        explicit_env.insert(
+            context_key.to_string(),
+            destination("other-explicit.example"),
+        );
+        broker.virtualize_child_env_for_environment(&mut explicit_env, Some("explicit"));
+        explicit_env.insert(context_key.to_string(), destination("explicit.example"));
+        broker.virtualize_child_env_for_environment(&mut explicit_env, Some("explicit"));
+        explicit_env.remove(context_key);
+        let explicit_dummy = explicit_env[key].clone();
+        let assert_inherited_destination = |child: &str| {
+            let mut inherited_env = explicit_env.clone();
+            inherited_env.insert("CREDENTIAL_COPY".to_string(), token.to_string());
+            broker.virtualize_child_env_for_environment(&mut inherited_env, Some(child));
+            assert_eq!(
+                inherited_env["CREDENTIAL_COPY"], explicit_dummy,
+                "{key}: {child}"
+            );
+            for host in ["explicit.example", "first.example", "second.example"] {
+                let mut headers = headers_with_bearer(&explicit_dummy);
+                broker.inject_request_headers_for_environment(
+                    &format!("https://{host}/v1"),
+                    &mut headers,
+                    Some(child),
+                );
+                assert_eq!(
+                    headers,
+                    headers_with_bearer(if host == "explicit.example" {
+                        token
+                    } else {
+                        &explicit_dummy
+                    }),
+                    "{key}: {child}, {host}"
+                );
+            }
+        };
+        let unrelated_key = if context_key == "GH_HOST" {
+            "OPENAI_BASE_URL"
+        } else {
+            "GH_HOST"
+        };
+        config.configure_credential_broker_environment(&env_map([
+            (context_key, &destination("first.example")),
+            (unrelated_key, "https://unrelated.example"),
+        ]));
+        broker.configure(&config);
+        assert_inherited_destination("unchanged-fallback-child");
+
+        config.configure_credential_broker_environment(&env_map([(
+            context_key,
+            &destination("second.example"),
+        )]));
+        let revision = broker.config_revision();
+        broker.configure(&config);
+        assert_eq!(broker.config_revision(), revision + 1);
+        assert_inherited_destination("updated-fallback-child");
+        broker.virtualize_child_env(&mut env);
+        broker.virtualize_child_env_for_environment(&mut explicit_env, Some("explicit"));
+        assert_eq!(env[key], dummy);
+        for (destination, environment_id, value, injected) in [
+            ("first.example", None, &dummy, true),
+            ("second.example", None, &dummy, true),
+            ("explicit.example", Some("explicit"), &explicit_dummy, true),
+            (
+                "second.example",
+                Some("explicit"),
+                &explicit_dummy,
+                previously_used_fallback,
+            ),
+        ] {
+            let mut headers = headers_with_bearer(value);
+            broker.inject_request_headers_for_environment(
+                &format!("https://{destination}/v1"),
+                &mut headers,
+                environment_id,
+            );
+            assert_eq!(
+                headers,
+                headers_with_bearer(if injected { token } else { value }),
+                "{key}: {destination}, {environment_id:?}"
+            );
+        }
+
+        config.configure_credential_broker_environment(&env_map([(context_key, "")]));
+        broker.configure(&config);
+        for destination in ["first.example", "second.example"] {
+            for (environment, value) in [(None, &dummy), (Some("explicit"), &explicit_dummy)] {
+                let mut headers = headers_with_bearer(value);
+                broker.inject_request_headers_for_environment(
+                    &format!("https://{destination}/v1"),
+                    &mut headers,
+                    environment,
+                );
+                assert_eq!(headers, headers_with_bearer(value));
+            }
+        }
+        let mut headers = headers_with_bearer(&explicit_dummy);
+        broker.inject_request_headers_for_environment(
+            "https://explicit.example/v1",
+            &mut headers,
+            Some("explicit"),
+        );
+        assert_eq!(headers, headers_with_bearer(token));
+        let mut headers = headers_with_bearer(&explicit_dummy);
+        broker.inject_request_headers_for_environment(
+            "https://other-explicit.example/v1",
+            &mut headers,
+            Some("explicit"),
+        );
+        assert_eq!(headers, headers_with_bearer(token));
+
+        // A fallback can become primary again without erasing captured destinations.
+        config.configure_credential_broker_environment(&env_map([(
+            context_key,
+            &destination("third.example"),
+        )]));
+        broker.configure(&config);
+        explicit_env.insert(context_key.to_string(), destination("third.example"));
+        broker.virtualize_child_env_for_environment(&mut explicit_env, Some("explicit"));
+        config.configure_credential_broker_environment(&env_map([(context_key, "")]));
+        broker.configure(&config);
+        for host in [
+            "explicit.example",
+            "other-explicit.example",
+            "third.example",
+        ] {
+            let mut headers = headers_with_bearer(&explicit_dummy);
+            broker.inject_request_headers_for_environment(
+                &format!("https://{host}/v1"),
+                &mut headers,
+                Some("explicit"),
+            );
+            assert_eq!(
+                headers,
+                headers_with_bearer(if host == "third.example" {
+                    &explicit_dummy
+                } else {
+                    token
+                })
+            );
+        }
+    }
 }
 
 #[test]
@@ -1435,6 +1903,15 @@ fn openai_credentials_bind_only_to_default_and_configured_trusted_hosts() {
         ("attacker.example", dummy.as_str()),
     ] {
         let mut headers = headers_with_bearer(dummy);
+        assert_eq!(
+            broker.request_matches_hooked_host_alias(
+                host,
+                &headers,
+                &["api.openai.com".to_string()],
+                /*environment_id*/ None,
+            ),
+            host != "api.openai.com" && expected_credential == "sk-real",
+        );
         broker.inject_request_headers(host, &mut headers);
         let expected = format!("Bearer {expected_credential}");
         assert_eq!(authorization(&headers), Some(expected.as_str()), "{host}");
@@ -1455,6 +1932,69 @@ fn openai_credentials_bind_only_to_default_and_configured_trusted_hosts() {
         authorization(&openai_headers),
         Some(format!("Bearer {dummy}").as_str())
     );
+}
+
+#[test]
+fn selected_openai_credential_matches_ipv6_alias_with_plaintext_fallback() {
+    let broker = CredentialBroker::new(/*enabled*/ true);
+    let mut env = env_map([
+        ("OPENAI_API_KEY", "sk-real"),
+        ("OPENAI_BASE_URL", "https://[fd00::1]/v1"),
+    ]);
+    broker.virtualize_child_env(&mut env);
+    for destination in ["https://[fd00::1]/v1/models", "fd00::1"] {
+        assert!(broker.request_matches_hooked_host_alias(
+            destination,
+            &headers_with_bearer(&env["OPENAI_API_KEY"]),
+            &["api.openai.com".to_string()],
+            /*environment_id*/ None,
+        ));
+    }
+}
+
+#[test]
+fn selected_alias_checks_equivalent_and_merged_credential_bindings() {
+    let broker = CredentialBroker::new(/*enabled*/ true);
+    let register = |env_var: &str, token: &str, host: &str| {
+        let mut env = env_map([("GH_HOST", host), (env_var, token)]);
+        broker.virtualize_child_env_for_environment(&mut env, Some("selected"));
+        env.insert("GH_HOST".to_string(), "alias.example".to_string());
+        broker.virtualize_child_env_for_environment(&mut env, Some("selected"));
+        env[env_var].clone()
+    };
+    let first = register("GH_ENTERPRISE_TOKEN", "ghp-first-real", "alias.example");
+    let equivalent = register(
+        "GITHUB_ENTERPRISE_TOKEN",
+        "ghp-first-real",
+        "hooked.example",
+    );
+    let second = register(
+        "GITHUB_ENTERPRISE_TOKEN",
+        "ghp-second-real",
+        "second-hooked.example",
+    );
+    assert_ne!(first, equivalent);
+
+    assert!(broker.request_matches_hooked_host_alias(
+        "alias.example",
+        &headers_with_bearer(&equivalent),
+        &["hooked.example".to_string()],
+        Some("selected"),
+    ));
+    let basic = STANDARD.encode(format!("{first}:{second}"));
+    let headers = headers_with_authorization(&format!("Basic {basic}"));
+    assert!(broker.request_matches_hooked_host_alias(
+        "alias.example",
+        &headers,
+        &["second-hooked.example".to_string()],
+        Some("selected"),
+    ));
+    assert!(!broker.request_matches_hooked_host_alias(
+        "alias.example",
+        &headers,
+        &["second-hooked.example".to_string()],
+        Some("other"),
+    ));
 }
 
 #[test]

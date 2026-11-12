@@ -218,7 +218,6 @@ impl App {
         };
         let can_continue = !self.reconnect.offline
             && !self.chat_widget.has_misalignment_policy_violation()
-            && self.config.features.enabled(Feature::Worktrees)
             && !crate::uses_remote_workspace_or_environment(
                 &self.app_server_target,
                 self.environment_manager.as_ref(),

@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 
-use futures::future::join_all;
+use futures::StreamExt;
+use futures::stream;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -39,6 +40,7 @@ pub fn get_git_repo_root(base_dir: &Path) -> Option<PathBuf> {
 /// Timeout for git commands to prevent freezing on large repositories
 const GIT_COMMAND_TIMEOUT: TokioDuration = TokioDuration::from_secs(5);
 const DISABLED_HOOKS_PATH: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+const MAX_CONCURRENT_UNTRACKED_DIFFS: usize = 8;
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, TS)]
 pub struct GitInfo {
@@ -59,6 +61,17 @@ pub struct GitDiffToRemote {
     pub diff: String,
 }
 
+/// Return the sanitized URL for the `origin` remote, if available.
+pub async fn get_git_origin_url(cwd: &Path) -> Option<SanitizedGitUrl> {
+    let output = run_git_command_with_timeout(&["remote", "get-url", "origin"], cwd).await?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let url = String::from_utf8(output.stdout).ok()?;
+    SanitizedGitUrl::try_from(url.trim()).ok()
+}
+
 /// Collect git repository information from the given working directory using command-line git.
 /// Returns None if no git repository is found or if git operations fail.
 /// Uses timeouts to prevent freezing on large repositories.
@@ -75,16 +88,16 @@ pub async fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
     }
 
     // Run all git info collection commands in parallel
-    let (commit_result, branch_result, url_result) = tokio::join!(
+    let (commit_result, branch_result, repository_url) = tokio::join!(
         run_git_command_with_timeout(&["rev-parse", "HEAD"], cwd),
         run_git_command_with_timeout(&["rev-parse", "--abbrev-ref", "HEAD"], cwd),
-        run_git_command_with_timeout(&["remote", "get-url", "origin"], cwd)
+        get_git_origin_url(cwd)
     );
 
     let mut git_info = GitInfo {
         commit_hash: None,
         branch: None,
-        repository_url: None,
+        repository_url,
     };
 
     // Process commit hash
@@ -104,14 +117,6 @@ pub async fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
         if branch != "HEAD" {
             git_info.branch = Some(branch.to_string());
         }
-    }
-
-    // Process repository URL
-    if let Some(output) = url_result
-        && output.status.success()
-        && let Ok(url) = String::from_utf8(output.stdout)
-    {
-        git_info.repository_url = SanitizedGitUrl::try_from(url.trim()).ok();
     }
 
     Some(git_info)
@@ -356,7 +361,7 @@ pub async fn git_diff_to_remote(cwd: &Path) -> Option<GitDiffToRemote> {
     let remotes = get_git_remotes(cwd).await?;
     let branches = branch_ancestry(cwd).await?;
     let base_sha = find_closest_sha(cwd, &branches, &remotes).await?;
-    let diff = diff_against_sha(cwd, &base_sha).await?;
+    let diff = diff_against_sha(Path::new("git"), cwd, &base_sha).await?;
 
     Some(GitDiffToRemote {
         sha: base_sha,
@@ -690,6 +695,9 @@ async fn find_closest_sha(cwd: &Path, branches: &[String], remotes: &[String]) -
             // Preserve existing behavior: skip branches that are not present on a remote.
             continue;
         };
+        if distance == 0 {
+            return Some(remote_sha);
+        }
         match &closest_sha {
             None => closest_sha = Some((remote_sha, distance)),
             Some((_, best_distance)) if distance < *best_distance => {
@@ -701,8 +709,7 @@ async fn find_closest_sha(cwd: &Path, branches: &[String], remotes: &[String]) -
     closest_sha.map(|(sha, _)| sha)
 }
 
-async fn diff_against_sha(cwd: &Path, sha: &GitSha) -> Option<String> {
-    let git = Path::new("git");
+async fn diff_against_sha(git: &Path, cwd: &Path, sha: &GitSha) -> Option<String> {
     let fsmonitor = detect_local_fsmonitor_override(git, cwd).await;
     let output = run_git_command_with_timeout_from(
         git,
@@ -753,9 +760,12 @@ async fn diff_against_sha(cwd: &Path, sha: &GitSha) -> Option<String> {
                 ];
                 run_git_command_with_timeout_from(git, &args_vec, cwd, fsmonitor).await
             });
-            let results = join_all(futures_iter).await;
-            for extra in results.into_iter().flatten() {
-                if extra.status.code().is_some_and(|c| c == 0 || c == 1)
+            // Keep earlier children reading and finishing while more paths remain.
+            let results = stream::iter(futures_iter).buffered(MAX_CONCURRENT_UNTRACKED_DIFFS);
+            futures::pin_mut!(results);
+            while let Some(extra) = results.next().await {
+                if let Some(extra) = extra
+                    && extra.status.code().is_some_and(|c| c == 0 || c == 1)
                     && let Ok(s) = String::from_utf8(extra.stdout)
                 {
                     diff.push_str(&s);
@@ -766,6 +776,10 @@ async fn diff_against_sha(cwd: &Path, sha: &GitSha) -> Option<String> {
 
     Some(diff)
 }
+
+#[cfg(test)]
+#[path = "diff_tests.rs"]
+mod diff_tests;
 
 fn find_ancestor_git_entry(base_dir: &Path) -> Option<(PathBuf, PathBuf)> {
     let mut dir = base_dir.to_path_buf();
@@ -833,8 +847,6 @@ pub async fn current_branch_name(cwd: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
     use std::process::Stdio;
 
     #[tokio::test]
@@ -1068,7 +1080,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let git = temp_dir.path().join("git");
         let log = temp_dir.path().join("git.log");
-        std::fs::write(
+        codex_utils_cargo_bin::write_executable(
             &git,
             "#!/bin/sh\n\
              if [ \"$1\" = \"-c\" ] && [ \"$2\" = \"safe.bareRepository=explicit\" ]; then shift 2; fi\n\
@@ -1079,11 +1091,6 @@ mod tests {
              esac\n",
         )
         .expect("write fake Git");
-        let mut permissions = std::fs::metadata(&git)
-            .expect("read fake Git metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&git, permissions).expect("mark fake Git executable");
 
         // The config response mirrors:
         // git -c core.fsmonitor=/tmp/fsmonitor-helper \
@@ -1134,7 +1141,7 @@ mod tests {
         let git = temp_dir.path().join("git");
         let global_config = temp_dir.path().join("git.global");
         let log = temp_dir.path().join("git.log");
-        std::fs::write(
+        codex_utils_cargo_bin::write_executable(
             &git,
             "#!/bin/sh\n\
              if [ \"$1\" = \"-c\" ] && [ \"$2\" = \"safe.bareRepository=explicit\" ]; then shift 2; fi\n\
@@ -1148,11 +1155,6 @@ mod tests {
              esac\n",
         )
         .expect("write layered-config Git");
-        let mut permissions = std::fs::metadata(&git)
-            .expect("read layered-config Git metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&git, permissions).expect("mark layered-config Git executable");
 
         let global_status = std::process::Command::new("git")
             .args([

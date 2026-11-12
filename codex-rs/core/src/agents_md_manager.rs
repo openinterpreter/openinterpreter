@@ -41,6 +41,7 @@ struct AgentsMdState {
 #[derive(Default)]
 struct AgentsMdCache {
     selections: Option<Vec<TurnEnvironmentSelection>>,
+    project_doc_max_bytes: usize,
     active_project_trust_level: Option<TrustLevel>,
     loaded: Option<Arc<LoadedAgentsMd>>,
 }

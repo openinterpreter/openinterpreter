@@ -10,7 +10,9 @@ use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol_test_support::ContentItemTestExt;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::test_support::test_path_buf;
 use pretty_assertions::assert_eq;
@@ -36,14 +38,35 @@ fn builds_permissions_from_profile() {
     let cwd = test_path_buf("/tmp");
     let writable_root =
         AbsolutePathBuf::from_absolute_path(cwd.join("repo")).expect("absolute path");
+    let denied_root =
+        AbsolutePathBuf::from_absolute_path(cwd.join("blocked")).expect("absolute path");
+    let denied_glob = cwd
+        .join("blocked")
+        .join("**")
+        .to_string_lossy()
+        .into_owned();
     let permission_profile = PermissionProfile::from_runtime_permissions(
-        &FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
-            path: FileSystemPath::Path {
-                path: writable_root.clone().into(),
+        &FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: writable_root.clone().into(),
+                },
+                access: FileSystemAccessMode::Write,
+                missing_path_behavior: None,
             },
-            access: FileSystemAccessMode::Write,
-            missing_path_behavior: None,
-        }]),
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: denied_root.clone().into(),
+                },
+                FileSystemAccessMode::Deny,
+            ),
+            FileSystemSandboxEntry::new(
+                FileSystemPath::GlobPattern {
+                    pattern: denied_glob.clone(),
+                },
+                FileSystemAccessMode::Deny,
+            ),
+        ]),
         NetworkSandboxPolicy::Enabled,
     );
 
@@ -53,40 +76,58 @@ fn builds_permissions_from_profile() {
         user_approval_context(),
         &Policy::empty(),
         &cwd,
+        /*paths*/ None,
         /*exec_permission_approvals_enabled*/ false,
         /*request_permissions_tool_enabled*/ false,
     );
-    let text = instructions.body();
+    let text = instructions.body().expect_text();
     assert!(text.contains("`sandbox_mode` is `workspace-write`"));
     assert!(text.contains("Network access is enabled."));
     assert!(text.contains(writable_root.to_string_lossy().as_ref()));
+    assert!(text.contains("Do not request escalation or additional permissions"));
+    assert!(text.contains(&format!("path `{}`", denied_root.display())));
+    assert!(text.contains(&format!("glob `{denied_glob}`")));
 }
 
 #[test]
-fn builds_permissions_from_profile_with_denied_reads() {
-    let cwd = test_path_buf("/tmp");
-    let denied_root =
-        AbsolutePathBuf::from_absolute_path(cwd.join("blocked")).expect("absolute path");
-    let denied_glob = cwd.join("blocked").join("**");
+fn builds_permissions_from_profile_with_executor_denied_reads() {
+    let paths = FileSystemSandboxPolicyContext {
+        cwd: &"file:///C:/workspace".parse().unwrap(),
+        workspace_roots: &[],
+        user_home_dir: None,
+        temporary_directories: None,
+    };
+    let denied_root = paths.cwd.join("blocked").unwrap();
+    let denied_glob = r"C:\workspace\blocked\**";
     let permission_profile = PermissionProfile::from_runtime_permissions(
         &FileSystemSandboxPolicy::restricted(vec![
             FileSystemSandboxEntry {
                 path: FileSystemPath::Special {
-                    value: codex_protocol::permissions::FileSystemSpecialPath::Root,
+                    value: FileSystemSpecialPath::Root,
                 },
                 access: FileSystemAccessMode::Read,
                 missing_path_behavior: None,
             },
-            FileSystemSandboxEntry {
-                path: FileSystemPath::Path {
-                    path: denied_root.clone().into(),
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Tmpdir,
                 },
+                FileSystemAccessMode::Deny,
+            ),
+            FileSystemSandboxEntry::new(
+                FileSystemPath::GlobPattern {
+                    pattern: "~/private/**".into(),
+                },
+                FileSystemAccessMode::Deny,
+            ),
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Path { path: denied_root },
                 access: FileSystemAccessMode::Deny,
                 missing_path_behavior: None,
             },
             FileSystemSandboxEntry {
                 path: FileSystemPath::GlobPattern {
-                    pattern: denied_glob.to_string_lossy().into_owned(),
+                    pattern: denied_glob.into(),
                 },
                 access: FileSystemAccessMode::Deny,
                 missing_path_behavior: None,
@@ -103,15 +144,198 @@ fn builds_permissions_from_profile_with_denied_reads() {
             ResolvedModelMessages::bundled(),
         ),
         &Policy::empty(),
-        &cwd,
+        &test_path_buf("/unused-local-cwd"),
+        Some(&paths),
         /*exec_permission_approvals_enabled*/ false,
         /*request_permissions_tool_enabled*/ false,
     );
-    let text = instructions.body();
+    let text = instructions.body().expect_text();
     assert!(text.contains("## Denied filesystem reads"));
     assert!(text.contains("Do not request escalation or additional permissions"));
-    assert!(text.contains(denied_root.to_string_lossy().as_ref()));
-    assert!(text.contains(&format!("glob `{}`", denied_glob.to_string_lossy())));
+    assert!(text.contains(r"path `C:\workspace\blocked`"));
+    assert!(text.contains(&format!("glob `{denied_glob}`")));
+}
+
+#[test]
+fn renders_sandbox_mode_text() {
+    assert_eq!(
+        sandbox_text(
+            SandboxMode::WorkspaceWrite,
+            NetworkAccess::Restricted,
+            ResolvedPermissionMessages::new(/*messages*/ None),
+        ),
+        "Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `workspace-write`: The sandbox permits reading files, and editing files in `cwd` and `writable_roots`. Editing files in other directories requires approval. Network access is restricted."
+    );
+
+    assert_eq!(
+        sandbox_text(
+            SandboxMode::ReadOnly,
+            NetworkAccess::Restricted,
+            ResolvedPermissionMessages::new(/*messages*/ None),
+        ),
+        "Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted."
+    );
+
+    assert_eq!(
+        sandbox_text(
+            SandboxMode::DangerFullAccess,
+            NetworkAccess::Enabled,
+            ResolvedPermissionMessages::new(/*messages*/ None),
+        ),
+        "Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `danger-full-access`: No filesystem sandboxing - all commands are permitted. Network access is enabled."
+    );
+}
+
+#[test]
+fn catalog_permission_messages_select_sandbox_mode_and_render_network_access() {
+    let messages = PermissionMessages {
+        danger_full_access: Some("catalog danger".to_string()),
+        workspace_write: Some("catalog workspace {{ network_access }}".to_string()),
+        read_only: Some("catalog read only {{ network_access }}".to_string()),
+        approved_prefixes: None,
+        ..PermissionMessages::default()
+    };
+
+    for (mode, expected) in [
+        (SandboxMode::DangerFullAccess, "catalog danger"),
+        (SandboxMode::WorkspaceWrite, "catalog workspace enabled"),
+        (SandboxMode::ReadOnly, "catalog read only enabled"),
+    ] {
+        assert_eq!(
+            sandbox_text(
+                mode,
+                NetworkAccess::Enabled,
+                ResolvedPermissionMessages::new(Some(&messages))
+            ),
+            expected
+        );
+    }
+}
+
+#[test]
+fn catalog_permission_text_equal_to_bundled_template_preserves_literal_whitespace() {
+    let messages = PermissionMessages {
+        danger_full_access: None,
+        workspace_write: Some(WORKSPACE_WRITE_TEMPLATE.to_string()),
+        read_only: None,
+        approved_prefixes: None,
+        ..PermissionMessages::default()
+    };
+    let catalog_text = sandbox_text(
+        SandboxMode::WorkspaceWrite,
+        NetworkAccess::Restricted,
+        ResolvedPermissionMessages::new(Some(&messages)),
+    );
+    let bundled_text = sandbox_text(
+        SandboxMode::WorkspaceWrite,
+        NetworkAccess::Restricted,
+        ResolvedPermissionMessages::new(/*messages*/ None),
+    );
+
+    // Identical source bytes still take distinct paths: only bundled templates are trimmed.
+    assert_eq!(
+        catalog_text,
+        WORKSPACE_WRITE_TEMPLATE.replace("{{ network_access }}", "restricted")
+    );
+    assert_eq!(bundled_text, catalog_text.trim_end());
+}
+
+#[test]
+fn missing_catalog_permission_message_uses_legacy_sandbox_text() {
+    let legacy = sandbox_text(
+        SandboxMode::WorkspaceWrite,
+        NetworkAccess::Restricted,
+        ResolvedPermissionMessages::new(/*messages*/ None),
+    );
+    let messages = PermissionMessages {
+        danger_full_access: None,
+        workspace_write: None,
+        read_only: Some("unused".to_string()),
+        approved_prefixes: None,
+        ..PermissionMessages::default()
+    };
+
+    assert_eq!(
+        sandbox_text(
+            SandboxMode::WorkspaceWrite,
+            NetworkAccess::Restricted,
+            ResolvedPermissionMessages::new(Some(&messages)),
+        ),
+        legacy
+    );
+}
+
+#[test]
+fn invalid_catalog_permission_message_is_preserved_verbatim() {
+    for workspace_write in ["{{ unterminated", "{{ unsupported }}"] {
+        let messages = PermissionMessages {
+            danger_full_access: None,
+            workspace_write: Some(workspace_write.to_string()),
+            read_only: None,
+            approved_prefixes: None,
+            ..PermissionMessages::default()
+        };
+        assert_eq!(
+            sandbox_text(
+                SandboxMode::WorkspaceWrite,
+                NetworkAccess::Restricted,
+                ResolvedPermissionMessages::new(Some(&messages)),
+            ),
+            workspace_write
+        );
+    }
+}
+
+#[test]
+fn catalog_permission_message_renders_network_access_and_preserves_other_placeholders() {
+    let source = "network={{ network_access }} compact={{network_access}} other={{ other }}";
+    let messages = PermissionMessages {
+        danger_full_access: None,
+        workspace_write: Some(source.to_string()),
+        read_only: None,
+        approved_prefixes: None,
+        ..PermissionMessages::default()
+    };
+
+    assert_eq!(
+        sandbox_text(
+            SandboxMode::WorkspaceWrite,
+            NetworkAccess::Restricted,
+            ResolvedPermissionMessages::new(Some(&messages)),
+        ),
+        "network=restricted compact={{network_access}} other={{ other }}"
+    );
+}
+
+#[test]
+fn empty_catalog_permission_message_preserves_non_sandbox_sections() {
+    let messages = PermissionMessages {
+        danger_full_access: None,
+        workspace_write: Some(String::new()),
+        read_only: None,
+        approved_prefixes: None,
+        ..PermissionMessages::default()
+    };
+    let writable_root = "/tmp/repo".to_string();
+    let text = PermissionsInstructions::from_resolved(
+        PermissionsRenderContext {
+            network_access: NetworkAccess::Restricted,
+            approval_policy: AskForApproval::Never,
+            writable_roots: std::slice::from_ref(&writable_root),
+            ..WORKSPACE_CONTEXT
+        },
+        ApprovalPromptContext {
+            reviewer: ApprovalsReviewer::User,
+            messages: ResolvedApprovalMessages::new(/*messages*/ None),
+            permission_messages: ResolvedPermissionMessages::new(Some(&messages)),
+        },
+    )
+    .body()
+    .expect_text();
+
+    assert!(!text.contains("Filesystem sandboxing defines"));
+    assert!(text.contains("Approval policy is currently never"));
+    assert!(text.contains(&writable_root));
 }
 
 #[test]
@@ -366,6 +590,8 @@ fn catalog_approval_messages_select_reviewer_variant() {
         on_request_auto_review: Some("auto-review catalog approvals".to_string()),
         never: Some("never catalog approvals".to_string()),
         unless_trusted: Some("unless-trusted catalog approvals".to_string()),
+        granular: None,
+        ..Default::default()
     };
 
     for (approval_policy, reviewer, expected) in [
@@ -411,6 +637,8 @@ fn empty_catalog_approval_message_suppresses_legacy_approval_section() {
         on_request_auto_review: None,
         never: None,
         unless_trusted: None,
+        granular: None,
+        ..Default::default()
     };
     let approved_command_prefixes = vec![vec!["git".to_string(), "pull".to_string()]];
     let writable_root = "/tmp/repo".to_string();
@@ -500,6 +728,8 @@ fn empty_catalog_non_on_request_approval_messages_suppress_legacy_approval_text(
         on_request_auto_review: None,
         never: Some(String::new()),
         unless_trusted: Some(String::new()),
+        granular: None,
+        ..Default::default()
     };
 
     for approval_policy in [AskForApproval::Never, AskForApproval::UnlessTrusted] {

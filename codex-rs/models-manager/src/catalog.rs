@@ -1,0 +1,81 @@
+//! Tracks the source of model metadata without changing the catalog wire or cache formats.
+
+use std::borrow::Cow;
+use std::collections::HashSet;
+
+use codex_protocol::openai_models::ModelInfo;
+
+use crate::cache::ModelsCacheEntry;
+
+pub use codex_protocol::openai_models::CatalogModel;
+pub use codex_protocol::openai_models::ModelOrigin;
+
+/// Catalog authority is independent of whether its model metadata is borrowed or owned.
+pub(crate) enum SelectedCatalog<'a> {
+    CurrentSnapshot(Cow<'a, [ModelInfo]>),
+    Fallback(Cow<'a, [ModelInfo]>),
+}
+
+impl<'a> SelectedCatalog<'a> {
+    pub fn into_models(self) -> Cow<'a, [ModelInfo]> {
+        match self {
+            Self::CurrentSnapshot(models) | Self::Fallback(models) => models,
+        }
+    }
+}
+
+/// The effective catalog and the IDs in the unmerged provider response share one lock.
+#[derive(Debug)]
+pub(crate) struct CatalogState {
+    pub entry: ModelsCacheEntry,
+    pub provider_model_ids: HashSet<String>,
+    // Distinguishes a successfully loaded empty catalog from the initial bundled seed.
+    pub initialized: bool,
+}
+
+impl CatalogState {
+    pub fn bundled(entry: ModelsCacheEntry) -> Self {
+        Self {
+            entry,
+            provider_model_ids: HashSet::new(),
+            initialized: false,
+        }
+    }
+
+    pub fn provider(entry: ModelsCacheEntry) -> Self {
+        // Capture raw response IDs before merging, including when loading from disk cache.
+        let provider_model_ids = entry
+            .models
+            .iter()
+            .map(|model| model.slug.clone())
+            .collect();
+        Self {
+            entry,
+            provider_model_ids,
+            initialized: true,
+        }
+    }
+
+    pub fn model_origin(&self, selected: &SelectedCatalog<'_>, slug: &str) -> ModelOrigin {
+        if matches!(selected, SelectedCatalog::CurrentSnapshot(_))
+            && self.provider_model_ids.contains(slug)
+        {
+            ModelOrigin::Provider
+        } else {
+            ModelOrigin::Bundled
+        }
+    }
+
+    pub fn model_catalog(&self, selected: SelectedCatalog<'_>) -> Vec<CatalogModel> {
+        let models = match &selected {
+            SelectedCatalog::CurrentSnapshot(models) | SelectedCatalog::Fallback(models) => models,
+        };
+        models
+            .iter()
+            .map(|model| CatalogModel {
+                origin: self.model_origin(&selected, &model.slug),
+                model: model.clone().into(),
+            })
+            .collect()
+    }
+}

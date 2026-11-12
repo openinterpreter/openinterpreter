@@ -13,7 +13,8 @@ doctest = false
 workspace = true
 
 [dependencies]
-anyhow = { workspace = true }
+codex-http-client = { workspace = true }
+codex-websocket-client = { workspace = true }
 axum = { workspace = true, default-features = false, features = [
     "http1",
     "json",
@@ -21,10 +22,10 @@ axum = { workspace = true, default-features = false, features = [
     "ws",
 ] }
 base64 = { workspace = true }
-clap = { workspace = true, features = ["derive"] }
 codex-api = { workspace = true }
 codex-app-server-protocol = { workspace = true }
 codex-core = { workspace = true }
+codex-features = { workspace = true }
 codex-login = { workspace = true }
 codex-model-provider = { workspace = true }
 codex-protocol = { workspace = true }
@@ -32,12 +33,10 @@ codex-state = { workspace = true }
 codex-uds = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-rustls-provider = { workspace = true }
-constant_time_eq = { workspace = true }
+codex-websocket-auth = { workspace = true }
 futures = { workspace = true }
 gethostname = { workspace = true }
-hmac = { workspace = true }
 httpdate = { workspace = true }
-jsonwebtoken = { workspace = true }
 owo-colors = { workspace = true, features = ["supports-colors"] }
 rand = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -55,12 +54,16 @@ tokio-util = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 url = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v7"] }
+zstd = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 signal-hook = { workspace = true }
 
 [dev-dependencies]
+anyhow = { workspace = true }
+core_test_support = { workspace = true }
+wiremock = { workspace = true }
 chrono = { workspace = true }
 codex-config = { workspace = true }
 pretty_assertions = { workspace = true }

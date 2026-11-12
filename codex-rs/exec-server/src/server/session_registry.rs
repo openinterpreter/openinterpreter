@@ -7,17 +7,25 @@ use codex_exec_server_protocol::JSONRPCErrorError;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::ExecServerRuntimePaths;
+use crate::ExecServerRuntimeOptions;
 use crate::rpc::RpcNotificationSender;
 use crate::rpc::invalid_request;
 use crate::rpc::session_already_attached;
 use crate::server::process_handler::ProcessHandler;
 use crate::telemetry::ExecServerTelemetry;
+use crate::telemetry::record_recovery_retention_expired;
 
+// Allow the 50s client window, up to 25s of disconnect detection skew, and 5s of margin.
+#[cfg(not(test))]
+const RECOVERY_RETENTION: Duration = Duration::from_secs(80);
 #[cfg(test)]
 const DETACHED_SESSION_TTL: Duration = Duration::from_millis(200);
 #[cfg(not(test))]
-const DETACHED_SESSION_TTL: Duration = Duration::from_secs(30);
+const DETACHED_SESSION_TTL: Duration = RECOVERY_RETENTION;
+#[cfg(test)]
+const RPC_OUTPUT_RETENTION: Duration = Duration::from_millis(25);
+#[cfg(not(test))]
+const RPC_OUTPUT_RETENTION: Duration = RECOVERY_RETENTION;
 
 pub(crate) struct SessionRegistry {
     sessions: Mutex<HashMap<String, Arc<SessionEntry>>>,
@@ -30,10 +38,14 @@ struct SessionEntry {
     attachment: StdMutex<AttachmentState>,
 }
 
-struct AttachmentState {
-    current_connection_id: Option<ConnectionId>,
-    detached_connection_id: Option<ConnectionId>,
-    detached_expires_at: Option<tokio::time::Instant>,
+enum AttachmentState {
+    Attached {
+        connection_id: ConnectionId,
+    },
+    Detached {
+        connection_id: ConnectionId,
+        expires_at: tokio::time::Instant,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,7 +76,7 @@ impl SessionRegistry {
         self: &Arc<Self>,
         resume_session_id: Option<String>,
         notifications: RpcNotificationSender,
-        runtime_paths: ExecServerRuntimePaths,
+        runtime_paths: ExecServerRuntimeOptions,
     ) -> Result<SessionHandle, JSONRPCErrorError> {
         enum AttachOutcome {
             Attached(Arc<SessionEntry>),
@@ -100,7 +112,12 @@ impl SessionRegistry {
                 let session_id = Uuid::new_v4().to_string();
                 let entry = Arc::new(SessionEntry::new(
                     session_id.clone(),
-                    ProcessHandler::new(notifications, self.telemetry.clone(), runtime_paths),
+                    ProcessHandler::new(
+                        notifications,
+                        self.telemetry.clone(),
+                        runtime_paths,
+                        RPC_OUTPUT_RETENTION,
+                    ),
                     connection_id,
                 ));
                 sessions.insert(session_id, Arc::clone(&entry));
@@ -110,6 +127,7 @@ impl SessionRegistry {
         let entry = match outcome? {
             AttachOutcome::Attached(entry) => entry,
             AttachOutcome::Expired { session_id, entry } => {
+                record_recovery_retention_expired("detached_session_resume", DETACHED_SESSION_TTL);
                 entry.process.shutdown().await;
                 return Err(invalid_request(format!("unknown session id {session_id}")));
             }
@@ -144,6 +162,7 @@ impl SessionRegistry {
         };
 
         if let Some(entry) = removed {
+            record_recovery_retention_expired("detached_session_timer", DETACHED_SESSION_TTL);
             entry.process.shutdown().await;
         }
     }
@@ -163,11 +182,7 @@ impl SessionEntry {
         Self {
             session_id,
             process,
-            attachment: StdMutex::new(AttachmentState {
-                current_connection_id: Some(connection_id),
-                detached_connection_id: None,
-                detached_expires_at: None,
-            }),
+            attachment: StdMutex::new(AttachmentState::Attached { connection_id }),
         }
     }
 
@@ -176,9 +191,7 @@ impl SessionEntry {
             .attachment
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        attachment.current_connection_id = Some(connection_id);
-        attachment.detached_connection_id = None;
-        attachment.detached_expires_at = None;
+        *attachment = AttachmentState::Attached { connection_id };
     }
 
     fn detach(&self, connection_id: ConnectionId) -> bool {
@@ -186,39 +199,39 @@ impl SessionEntry {
             .attachment
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if attachment.current_connection_id != Some(connection_id) {
+        if !matches!(*attachment, AttachmentState::Attached { connection_id: current } if current == connection_id)
+        {
             return false;
         }
 
         self.process.set_notification_sender(/*notifications*/ None);
-        attachment.current_connection_id = None;
-        attachment.detached_connection_id = Some(connection_id);
-        attachment.detached_expires_at = Some(tokio::time::Instant::now() + DETACHED_SESSION_TTL);
+        *attachment = AttachmentState::Detached {
+            connection_id,
+            expires_at: tokio::time::Instant::now() + DETACHED_SESSION_TTL,
+        };
         true
     }
 
     fn has_active_connection(&self) -> bool {
-        self.attachment
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .current_connection_id
-            .is_some()
+        matches!(
+            *self
+                .attachment
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            AttachmentState::Attached { .. }
+        )
     }
 
     fn is_attached_to(&self, connection_id: ConnectionId) -> bool {
-        self.attachment
+        matches!(*self.attachment
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .current_connection_id
-            == Some(connection_id)
+            .unwrap_or_else(std::sync::PoisonError::into_inner), AttachmentState::Attached { connection_id: current } if current == connection_id)
     }
 
     fn is_expired(&self, now: tokio::time::Instant) -> bool {
-        self.attachment
+        matches!(*self.attachment
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .detached_expires_at
-            .is_some_and(|deadline| now >= deadline)
+            .unwrap_or_else(std::sync::PoisonError::into_inner), AttachmentState::Detached { expires_at, .. } if now >= expires_at)
     }
 
     fn is_detached_connection_expired(
@@ -230,11 +243,7 @@ impl SessionEntry {
             .attachment
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        attachment.current_connection_id.is_none()
-            && attachment.detached_connection_id == Some(connection_id)
-            && attachment
-                .detached_expires_at
-                .is_some_and(|deadline| now >= deadline)
+        matches!(*attachment, AttachmentState::Detached { connection_id: detached, expires_at } if detached == connection_id && now >= expires_at)
     }
 }
 

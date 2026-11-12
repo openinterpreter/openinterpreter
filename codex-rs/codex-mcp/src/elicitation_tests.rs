@@ -1,4 +1,6 @@
 use super::*;
+use crate::McpServerKey;
+use crate::McpServerPermissions;
 use crate::mcp::tests::test_elicitation_config;
 use async_channel::Receiver;
 use codex_protocol::models::PermissionProfile;
@@ -13,6 +15,309 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
 
 type ReviewerResponse = std::result::Result<Option<ElicitationResponse>, &'static str>;
+
+#[tokio::test]
+async fn abandonment_is_ordered_and_exactly_once_when_the_native_waiter_is_dropped() {
+    let (manager, _, _) = verification_fixture(AskForApproval::OnRequest, /*reviewer*/ None);
+    let router = manager.router.clone();
+    let authority = manager.authority.lock().unwrap().clone().unwrap();
+    let (tx, events) = async_channel::unbounded();
+    let (replacement_tx, replacement_events) = async_channel::unbounded();
+    let request = ElicitationRequest::Form {
+        meta: None,
+        message: "Continue".into(),
+        requested_schema: json!({"type": "object"}),
+    };
+    let mut first = Box::pin(router.request_user_interaction(
+        Some(tx),
+        &authority,
+        "server".into(),
+        request.clone(),
+    ));
+    let mut sibling = Box::pin(router.request_user_interaction(
+        Some(replacement_tx),
+        &authority,
+        "server".into(),
+        request,
+    ));
+    assert!(futures::poll!(&mut first).is_pending());
+    let EventMsg::ElicitationRequest(first_request) = events.recv().await.unwrap().msg else {
+        panic!("request must precede abandonment");
+    };
+    assert!(futures::poll!(&mut sibling).is_pending());
+    let EventMsg::ElicitationRequest(sibling_request) =
+        replacement_events.recv().await.unwrap().msg
+    else {
+        panic!("expected sibling request");
+    };
+    drop(first);
+    let EventMsg::ElicitationAbandoned(abandoned) = events.recv().await.unwrap().msg else {
+        panic!("expected abandonment");
+    };
+    assert_eq!(
+        abandoned,
+        ElicitationAbandonedEvent {
+            server_name: first_request.server_name,
+            id: first_request.id.clone()
+        }
+    );
+    assert_eq!(router.requests.lock().unwrap().pending.len(), 1);
+    let ProtocolRequestId::String(id) = first_request.id else {
+        panic!("generated token")
+    };
+    assert!(
+        router
+            .resolve(
+                "server".into(),
+                RequestId::String(id.into()),
+                approved_response()
+            )
+            .await
+            .is_err()
+    );
+    let ProtocolRequestId::String(id) = sibling_request.id else {
+        panic!("generated token")
+    };
+    router
+        .resolve(
+            "server".into(),
+            RequestId::String(id.into()),
+            approved_response(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sibling.await.unwrap(), approved_response());
+    assert!(events.try_recv().is_err());
+    assert!(replacement_events.try_recv().is_err());
+    assert!(router.requests.lock().unwrap().pending.is_empty());
+}
+
+#[tokio::test]
+async fn bounded_sources_preserve_backpressure_across_close() {
+    let (manager, _, _) = verification_fixture(AskForApproval::OnRequest, /*reviewer*/ None);
+    let authority = manager.authority.lock().unwrap().clone().unwrap();
+    let router = manager.router.clone();
+    let (tx, events) = async_channel::bounded(1);
+    tx.send(Event {
+        id: "queued".into(),
+        msg: EventMsg::ShutdownComplete,
+    })
+    .await
+    .unwrap();
+    let mut pending = Box::pin(router.request_user_interaction(
+        Some(tx),
+        &authority,
+        "server".into(),
+        ElicitationRequest::Form {
+            meta: None,
+            message: "Continue".into(),
+            requested_schema: json!({"type": "object"}),
+        },
+    ));
+    assert!(futures::poll!(&mut pending).is_pending());
+    router.close().await;
+    assert_eq!(router.requests.lock().unwrap().pending.len(), 1);
+    assert_eq!(events.recv().await.unwrap().id, "queued");
+    assert!(futures::poll!(&mut pending).is_pending());
+    let EventMsg::ElicitationRequest(request) = events.recv().await.unwrap().msg else {
+        panic!("bounded request must publish after capacity becomes available");
+    };
+    let ProtocolRequestId::String(id) = request.id else {
+        panic!("expected generated token");
+    };
+    router
+        .resolve(
+            "server".into(),
+            RequestId::String(id.into()),
+            approved_response(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending.await.unwrap(), approved_response());
+    assert!(events.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn abandonment_closed_receiver_cleans_up_without_delivery_or_replay() {
+    let (manager, _, _) = verification_fixture(AskForApproval::OnRequest, /*reviewer*/ None);
+    let authority = manager.authority.lock().unwrap().clone().unwrap();
+    let router = manager.router.clone();
+    for close_before_publication in [true, false] {
+        let (tx, events) = async_channel::unbounded();
+        if close_before_publication {
+            events.close();
+        }
+        let mut pending = Box::pin(router.request_user_interaction(
+            Some(tx),
+            &authority,
+            "server".into(),
+            ElicitationRequest::Form {
+                meta: None,
+                message: "Continue".into(),
+                requested_schema: json!({"type": "object"}),
+            },
+        ));
+        if close_before_publication {
+            assert!(pending.await.is_err());
+        } else {
+            assert!(futures::poll!(&mut pending).is_pending());
+            assert!(matches!(
+                events.recv().await.unwrap().msg,
+                EventMsg::ElicitationRequest(_)
+            ));
+            events.close();
+            drop(pending);
+        }
+        assert!(router.requests.lock().unwrap().pending.is_empty());
+        assert!(events.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn abandonment_close_joins_elected_actions_and_rejects_retained_router_admission() {
+    let (manager, _, _) = verification_fixture(AskForApproval::OnRequest, /*reviewer*/ None);
+    let authority = manager.authority.lock().unwrap().clone().unwrap();
+    let router = manager.router.clone();
+    let retained_router = router.clone();
+    let (tx, events) = async_channel::unbounded();
+    let request = ElicitationRequest::Form {
+        meta: None,
+        message: "Continue".into(),
+        requested_schema: json!({"type": "object"}),
+    };
+    let mut pending = Box::pin(router.request_user_interaction(
+        Some(tx.clone()),
+        &authority,
+        "server".into(),
+        request.clone(),
+    ));
+    assert!(futures::poll!(&mut pending).is_pending());
+    let EventMsg::ElicitationRequest(published) = events.recv().await.unwrap().msg else {
+        panic!("expected published request");
+    };
+    let ProtocolRequestId::String(id) = &published.id else {
+        panic!("expected generated token");
+    };
+    let key = (
+        published.server_name.clone(),
+        RequestId::String(id.clone().into()),
+    );
+    let (responder, terminal_action) = router.take_responder(&key).unwrap().unwrap();
+    let mut close = Box::pin(router.close());
+    assert!(futures::poll!(&mut close).is_pending());
+    drop(close);
+    let mut repeated_close = Box::pin(retained_router.close());
+    assert!(futures::poll!(&mut repeated_close).is_pending());
+    assert!(
+        retained_router
+            .request_user_interaction(
+                Some(tx.clone()),
+                &authority,
+                "server".into(),
+                request.clone(),
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("router closed")
+    );
+    assert!(events.try_recv().is_err());
+    emit_abandonment(&key, responder.abandonment_events.as_ref());
+    drop(responder);
+    drop(terminal_action);
+    repeated_close.await;
+    assert!(pending.await.is_err());
+    let EventMsg::ElicitationAbandoned(abandoned) = events.recv().await.unwrap().msg else {
+        panic!("close must wait for the winning remover to enqueue abandonment");
+    };
+    assert_eq!(
+        abandoned,
+        ElicitationAbandonedEvent {
+            server_name: published.server_name,
+            id: published.id,
+        }
+    );
+    router.close().await;
+    assert!(
+        retained_router
+            .request_user_interaction(Some(tx), &authority, "server".into(), request,)
+            .await
+            .is_err()
+    );
+    assert!(events.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn abandonment_close_invalidates_a_published_responder_before_returning() {
+    let (manager, _, _) = verification_fixture(AskForApproval::OnRequest, /*reviewer*/ None);
+    let authority = manager.authority.lock().unwrap().clone().unwrap();
+    let router = manager.router.clone();
+    let (tx, events) = async_channel::unbounded();
+    let mut pending = Box::pin(router.request_user_interaction(
+        Some(tx),
+        &authority,
+        "server".into(),
+        ElicitationRequest::Form {
+            meta: None,
+            message: "Continue".into(),
+            requested_schema: json!({"type": "object"}),
+        },
+    ));
+    assert!(futures::poll!(&mut pending).is_pending());
+    let EventMsg::ElicitationRequest(published) = events.recv().await.unwrap().msg else {
+        panic!("expected request");
+    };
+    router.close().await;
+    assert!(pending.await.is_err());
+    let EventMsg::ElicitationAbandoned(abandoned) = events.try_recv().unwrap().msg else {
+        panic!("close must enqueue abandonment before returning");
+    };
+    assert_eq!(
+        abandoned,
+        ElicitationAbandonedEvent {
+            server_name: published.server_name,
+            id: published.id,
+        }
+    );
+    assert!(events.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn abandonment_resolve_reports_failed_response_delivery_once() {
+    let router = ElicitationRequestRouter::default();
+    let (tx, events) = async_channel::unbounded();
+    let (response, receiver) = tokio::sync::oneshot::channel();
+    let key = (
+        "server".to_string(),
+        RequestId::String("published-token".into()),
+    );
+    router.requests.lock().unwrap().pending.insert(
+        key.clone(),
+        ElicitationResponder {
+            response,
+            abandonment_events: Some(tx),
+        },
+    );
+    drop(receiver);
+    assert!(
+        router
+            .resolve(key.0, key.1, approved_response())
+            .await
+            .is_err()
+    );
+    router.close().await;
+    let EventMsg::ElicitationAbandoned(abandoned) = events.try_recv().unwrap().msg else {
+        panic!("failed oneshot delivery must abandon the published request");
+    };
+    assert_eq!(
+        abandoned,
+        ElicitationAbandonedEvent {
+            server_name: "server".into(),
+            id: ProtocolRequestId::String("published-token".into()),
+        }
+    );
+    assert!(events.try_recv().is_err());
+}
 
 struct RecordingReviewer {
     calls: AtomicUsize,
@@ -83,14 +388,12 @@ fn elicitation_fixture(
             LifecycleRegistration(active_elicitations.clone())
         })
     });
-    let mut config = test_elicitation_config(
-        "independent-mcp",
-        approval_policy,
-        permission_profile.clone(),
+    let mut config =
+        test_elicitation_config("independent-mcp", approval_policy, permission_profile);
+    Arc::make_mut(&mut config).server_permissions.insert(
+        McpServerKey::unscoped("another-independent-mcp"),
+        McpServerPermissions::Thread,
     );
-    Arc::make_mut(&mut config)
-        .server_permission_profiles
-        .insert("another-independent-mcp".to_string(), permission_profile);
     let manager = ElicitationRequestManager::new(
         config,
         reviewer.map(|reviewer| reviewer as Arc<dyn ElicitationReviewer>),
@@ -99,6 +402,7 @@ fn elicitation_fixture(
     );
     let (tx_event, events) = async_channel::bounded(1);
     let sender = manager.make_sender(
+        McpServerKey::unscoped("independent-mcp"),
         "independent-mcp".to_string(),
         Some(tx_event),
         &ClientMcpExtensions::default(),
@@ -320,6 +624,7 @@ fn closed_event_channel_immediately_cleans_up_pending_elicitation() {
             .requests
             .lock()
             .expect("pending request router should be available")
+            .pending
             .is_empty()
     );
     assert_eq!(active_elicitations.load(Relaxed), 0);
@@ -360,6 +665,7 @@ async fn strict_auto_review_respects_explicit_elicitation_denials() {
                 ("another-independent-mcp", None),
             ] {
                 let sender = manager.make_sender(
+                    McpServerKey::unscoped(server_name),
                     server_name.into(),
                     /*tx_event*/ None,
                     &ClientMcpExtensions::default(),
@@ -373,14 +679,6 @@ async fn strict_auto_review_respects_explicit_elicitation_denials() {
                 );
             }
         }
-        manager.router.set_auto_deny(/*auto_deny*/ true);
-        assert_eq!(
-            send_elicitation(&sender, Some(json!(true))).await,
-            ElicitationResponse {
-                meta: None,
-                ..strict_auto_review_decline()
-            },
-        );
         assert_eq!(
             (
                 reviewer.calls.load(Relaxed),
@@ -476,10 +774,22 @@ async fn reused_elicitation_senders_follow_each_servers_latest_permission_author
     ));
     config.mcp_server_catalog = catalog.build();
     let servers = crate::effective_mcp_servers(&config, Some(&auth));
-    config.set_server_permission_profiles(
-        &servers,
-        [("attached".to_string(), PermissionProfile::read_only())],
-    );
+    let attachment = |permissions| {
+        let sandbox = codex_exec_server::FileSystemSandboxContext::from_permission_profile(
+            permissions,
+            codex_utils_path_uri::PathUri::from_host_native_path(std::env::temp_dir()).unwrap(),
+        );
+        let sandbox = Arc::new(sandbox);
+        // Hosted Apps must still use thread permissions when a local environment is attached.
+        [
+            ("attached".to_string(), Arc::clone(&sandbox)),
+            (
+                codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
+                sandbox,
+            ),
+        ]
+    };
+    config.set_server_permissions(&servers, attachment(PermissionProfile::read_only()));
 
     let manager = ElicitationRequestManager::new(
         Arc::new(config.clone()),
@@ -488,11 +798,13 @@ async fn reused_elicitation_senders_follow_each_servers_latest_permission_author
         ElicitationRequestRouter::default(),
     );
     let attached = manager.make_sender(
+        McpServerKey::unscoped("attached"),
         "attached".to_string(),
         /*tx_event*/ None,
         &ClientMcpExtensions::default(),
     );
     let hosted = manager.make_sender(
+        McpServerKey::unscoped(crate::CODEX_APPS_MCP_SERVER_NAME),
         crate::CODEX_APPS_MCP_SERVER_NAME.to_string(),
         /*tx_event*/ None,
         &ClientMcpExtensions::default(),
@@ -507,10 +819,7 @@ async fn reused_elicitation_senders_follow_each_servers_latest_permission_author
         ElicitationAction::Accept
     );
 
-    config.set_server_permission_profiles(
-        &servers,
-        [("attached".to_string(), PermissionProfile::Disabled)],
-    );
+    config.set_server_permissions(&servers, attachment(PermissionProfile::Disabled));
     assert!(manager.update(
         Arc::new(config.clone()),
         /*reviewer*/ None,
@@ -530,10 +839,7 @@ async fn reused_elicitation_senders_follow_each_servers_latest_permission_author
         .mcp_server_catalog
         .with_materialized_servers(configured_servers);
     let servers = crate::effective_mcp_servers(&config, Some(&auth));
-    config.set_server_permission_profiles(
-        &servers,
-        [("attached".to_string(), PermissionProfile::Disabled)],
-    );
+    config.set_server_permissions(&servers, attachment(PermissionProfile::Disabled));
     assert!(manager.update(
         Arc::new(config.clone()),
         /*reviewer*/ None,
@@ -545,7 +851,7 @@ async fn reused_elicitation_senders_follow_each_servers_latest_permission_author
     );
 
     let servers = crate::effective_mcp_servers(&config, /*auth*/ None);
-    config.set_server_permission_profiles(&servers, std::iter::empty());
+    config.set_server_permissions(&servers, std::iter::empty());
     assert!(manager.update(
         Arc::new(config.clone()),
         /*reviewer*/ None,
@@ -585,6 +891,7 @@ fn verification_fixture(
     );
     let (tx, events) = async_channel::bounded(1);
     let sender = manager.make_sender(
+        McpServerKey::unscoped(crate::CODEX_APPS_MCP_SERVER_NAME),
         crate::CODEX_APPS_MCP_SERVER_NAME.into(),
         Some(tx),
         &ClientMcpExtensions::new([(
@@ -656,6 +963,7 @@ async fn user_verification_requires_the_app_even_when_policy_would_approve_or_de
 async fn user_verification_cancels_when_no_app_can_receive_the_request() {
     let (manager, _, _) = verification_fixture(AskForApproval::OnRequest, /*reviewer*/ None);
     let sender = manager.make_sender(
+        McpServerKey::unscoped(crate::CODEX_APPS_MCP_SERVER_NAME),
         crate::CODEX_APPS_MCP_SERVER_NAME.into(),
         /*tx_event*/ None,
         &ClientMcpExtensions::new([(
@@ -678,7 +986,7 @@ async fn user_verification_cancels_when_no_app_can_receive_the_request() {
         ElicitationResponse {
             action: ElicitationAction::Cancel,
             content: None,
-            meta: None
+            meta: Some(json!({"openai/userVerificationReason": "approvalUnavailable"}))
         },
     );
 }
@@ -688,6 +996,7 @@ async fn user_verification_cancels_for_an_event_receiver_without_host_activation
     let (manager, _, _) = verification_fixture(AskForApproval::OnRequest, /*reviewer*/ None);
     let (tx, events) = async_channel::bounded(1);
     let sender = manager.make_sender(
+        McpServerKey::unscoped(crate::CODEX_APPS_MCP_SERVER_NAME),
         crate::CODEX_APPS_MCP_SERVER_NAME.into(),
         Some(tx),
         &ClientMcpExtensions::default(),
@@ -712,11 +1021,11 @@ async fn user_verification_cancels_for_an_event_receiver_without_host_activation
         ElicitationResponse {
             action: ElicitationAction::Cancel,
             content: None,
-            meta: None,
+            meta: Some(json!({"openai/userVerificationReason": "approvalUnavailable"})),
         },
     );
     assert!(events.try_recv().is_err());
-    assert!(manager.router.requests.lock().unwrap().is_empty());
+    assert!(manager.router.requests.lock().unwrap().pending.is_empty());
 }
 
 #[tokio::test]

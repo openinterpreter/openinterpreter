@@ -12,6 +12,7 @@ use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::MockExperimentalMethodParams;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ThreadItemsReadParams;
 use codex_app_server_protocol::ThreadMemoryMode;
 use codex_app_server_protocol::ThreadMemoryModeSetParams;
 use codex_app_server_protocol::ThreadRealtimeStartParams;
@@ -40,6 +41,8 @@ async fn mock_experimental_method_requires_experimental_api_capability() -> Resu
         .initialize_with_capabilities(
             default_client_info(),
             Some(InitializeCapabilities {
+                required_human_approval: false,
+                explicit_gateway_oauth: false,
                 experimental_api: false,
                 request_attestation: false,
                 opt_out_notification_methods: None,
@@ -65,6 +68,44 @@ async fn mock_experimental_method_requires_experimental_api_capability() -> Resu
 }
 
 #[tokio::test]
+async fn thread_items_read_requires_experimental_api_capability() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
+
+    let init = mcp
+        .initialize_with_capabilities(
+            default_client_info(),
+            Some(InitializeCapabilities {
+                experimental_api: false,
+                ..Default::default()
+            }),
+        )
+        .await?;
+    let JSONRPCMessage::Response(_) = init else {
+        anyhow::bail!("expected initialize response, got {init:?}");
+    };
+
+    let request_id = mcp
+        .send_thread_items_read_request(ThreadItemsReadParams {
+            thread_id: "thr_123".to_string(),
+            turn_id: "turn_456".to_string(),
+            item_ids: vec!["item_789".to_string()],
+        })
+        .await?;
+    let error = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_experimental_capability_error(error, "thread/items/read");
+    Ok(())
+}
+
+#[tokio::test]
 async fn realtime_conversation_start_requires_experimental_api_capability() -> Result<()> {
     let codex_home = TempDir::new()?;
     let mut mcp = TestAppServer::builder()
@@ -77,6 +118,8 @@ async fn realtime_conversation_start_requires_experimental_api_capability() -> R
         .initialize_with_capabilities(
             default_client_info(),
             Some(InitializeCapabilities {
+                required_human_approval: false,
+                explicit_gateway_oauth: false,
                 experimental_api: false,
                 request_attestation: false,
                 opt_out_notification_methods: None,
@@ -97,6 +140,7 @@ async fn realtime_conversation_start_requires_experimental_api_capability() -> R
             codex_responses_as_items: None,
             codex_response_item_prefix: None,
             codex_response_handoff_mode: None,
+            backend_reasoning_status: false,
             codex_response_handoff_channel_prefixes: None,
             thread_id: "thr_123".to_string(),
             model: None,
@@ -107,6 +151,7 @@ async fn realtime_conversation_start_requires_experimental_api_capability() -> R
             realtime_end_instructions: None,
             prompt: Some(Some("hello".to_string())),
             realtime_session_id: None,
+            voice_session_id: None,
             transport: None,
             version: None,
             voice: None,
@@ -134,6 +179,8 @@ async fn thread_memory_mode_set_requires_experimental_api_capability() -> Result
         .initialize_with_capabilities(
             default_client_info(),
             Some(InitializeCapabilities {
+                required_human_approval: false,
+                explicit_gateway_oauth: false,
                 experimental_api: false,
                 request_attestation: false,
                 opt_out_notification_methods: None,
@@ -176,6 +223,8 @@ async fn settings_update_requires_experimental_api_capability(method: &str) -> R
         .initialize_with_capabilities(
             default_client_info(),
             Some(InitializeCapabilities {
+                required_human_approval: false,
+                explicit_gateway_oauth: false,
                 experimental_api: false,
                 request_attestation: false,
                 opt_out_notification_methods: None,
@@ -215,6 +264,8 @@ async fn realtime_webrtc_start_requires_experimental_api_capability() -> Result<
         .initialize_with_capabilities(
             default_client_info(),
             Some(InitializeCapabilities {
+                required_human_approval: false,
+                explicit_gateway_oauth: false,
                 experimental_api: false,
                 request_attestation: false,
                 opt_out_notification_methods: None,
@@ -235,6 +286,7 @@ async fn realtime_webrtc_start_requires_experimental_api_capability() -> Result<
             codex_responses_as_items: None,
             codex_response_item_prefix: None,
             codex_response_handoff_mode: None,
+            backend_reasoning_status: false,
             codex_response_handoff_channel_prefixes: None,
             thread_id: "thr_123".to_string(),
             model: None,
@@ -245,6 +297,7 @@ async fn realtime_webrtc_start_requires_experimental_api_capability() -> Result<
             realtime_end_instructions: None,
             prompt: Some(Some("hello".to_string())),
             realtime_session_id: None,
+            voice_session_id: None,
             transport: Some(ThreadRealtimeStartTransport::Webrtc {
                 sdp: "v=offer\r\n".to_string(),
             }),
@@ -275,6 +328,8 @@ async fn thread_start_mock_field_requires_experimental_api_capability() -> Resul
         .initialize_with_capabilities(
             default_client_info(),
             Some(InitializeCapabilities {
+                required_human_approval: false,
+                explicit_gateway_oauth: false,
                 experimental_api: false,
                 request_attestation: false,
                 opt_out_notification_methods: None,
@@ -318,6 +373,8 @@ async fn thread_start_without_dynamic_tools_allows_without_experimental_api_capa
         .initialize_with_capabilities(
             default_client_info(),
             Some(InitializeCapabilities {
+                required_human_approval: false,
+                explicit_gateway_oauth: false,
                 experimental_api: false,
                 request_attestation: false,
                 opt_out_notification_methods: None,
@@ -360,6 +417,8 @@ async fn thread_start_granular_approval_policy_requires_experimental_api_capabil
         .initialize_with_capabilities(
             default_client_info(),
             Some(InitializeCapabilities {
+                required_human_approval: false,
+                explicit_gateway_oauth: false,
                 experimental_api: false,
                 request_attestation: false,
                 opt_out_notification_methods: None,

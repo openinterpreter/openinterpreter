@@ -1,6 +1,6 @@
 //! Folder-entry consent and configuration for command-center dispatch and resume.
 //! Keeps CLI/runtime cwd precedence, remote-workspace checks, and interactive prompts aligned.
-//! Carries local preferences alongside the resolved configuration for session replacement.
+//! Stored-backend settings stay with the candidate; active-backend resume refreshes preferences.
 
 use super::*;
 use crate::onboarding::onboarding_screen::check_directory_trust;
@@ -10,15 +10,74 @@ use crate::startup_hooks_review::load_startup_hooks_review_entry;
 use crate::startup_hooks_review::maybe_run_startup_hooks_review;
 use codex_config::types::ResumeCwdMode;
 
+/// Marks "Current directory" unavailable for remote sessions without a local cwd override.
+pub(super) fn resume_current_directory_availability(
+    app_server_target: &AppServerTarget,
+    environment_manager: &EnvironmentManager,
+    cwd_override: Option<&Path>,
+) -> crate::config_panel::ResumeCurrentAvailability {
+    if crate::uses_remote_workspace_or_environment(app_server_target, environment_manager)
+        && cwd_override.is_none()
+    {
+        crate::config_panel::ResumeCurrentAvailability::RequiresCwdOverride
+    } else {
+        crate::config_panel::ResumeCurrentAvailability::Available
+    }
+}
+
 impl App {
     pub(super) async fn resume_config_for_target(
         &mut self,
         tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
         target_session: &SessionTarget,
+        source: super::resume_preparation::ResumeSource<'_>,
     ) -> std::result::Result<(Config, crate::local_settings::LocalSettings), AppRunControl> {
-        self.refresh_in_memory_config_from_disk_best_effort("resuming a thread")
-            .await;
+        if let Err(error) = target_session.ensure_backend(app_server.backend_id()) {
+            self.add_session_picker_error(error.to_string());
+            return Err(AppRunControl::Continue);
+        }
+        // Active-backend resume keeps its existing eager settings refresh. A stored backend must
+        // not replace the displayed conversation's settings before attachment succeeds.
+        let (target, current_config, local_settings) = match source {
+            super::resume_preparation::ResumeSource::Active => {
+                self.refresh_in_memory_config_from_disk_best_effort("resuming a thread")
+                    .await;
+                (
+                    self.app_server_target.clone(),
+                    self.config.clone(),
+                    self.local_settings.clone(),
+                )
+            }
+            super::resume_preparation::ResumeSource::Backend(settings) => {
+                let refreshed = async {
+                    let mut config = self
+                        .rebuild_config_for_cwd_from(
+                            &settings.config,
+                            settings.config.cwd.to_path_buf(),
+                        )
+                        .await?;
+                    self.apply_runtime_policy_overrides_with_reviewer(
+                        &mut config,
+                        RuntimePolicyOverrideScope::All,
+                        settings.config.approvals_reviewer,
+                    )?;
+                    Ok::<_, color_eyre::Report>(config)
+                }
+                .await;
+                let (config, local_settings) = match refreshed {
+                    Ok(config) => {
+                        let local_settings = settings.local_settings.reloaded(&config);
+                        (config, local_settings)
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to refresh resume settings; using stored backend configuration");
+                        (settings.config.clone(), settings.local_settings.clone())
+                    }
+                };
+                (settings.target.clone(), config, local_settings)
+            }
+        };
         let cwd_override = self
             .runtime_working_directory_override
             .as_deref()
@@ -27,20 +86,19 @@ impl App {
             .map(Path::to_path_buf);
         let cwd_override = cwd_override.as_deref();
         let resume_cwd_mode = crate::session_resume::effective_resume_cwd_mode(
-            self.local_settings.tui.resume_cwd,
+            local_settings.tui.resume_cwd,
             cwd_override,
         );
         let remembered_current_cwd = cwd_override.unwrap_or(self.launch_cwd.as_path());
         let current_cwd = if matches!(resume_cwd_mode, Some(ResumeCwdMode::Current)) {
             remembered_current_cwd.to_path_buf()
         } else {
-            self.config.cwd.to_path_buf()
+            current_config.cwd.to_path_buf()
         };
-        let uses_remote_workspace_or_environment = crate::uses_remote_workspace_or_environment(
-            &self.app_server_target,
-            &self.environment_manager,
-        );
+        let uses_remote_workspace_or_environment =
+            crate::uses_remote_workspace_or_environment(&target, &self.environment_manager);
         if uses_remote_workspace_or_environment
+            && !matches!(target, AppServerTarget::Cloud)
             && self.harness_overrides.cwd.is_none()
             && app_server.remote_cwd_override().is_none()
             && matches!(resume_cwd_mode, Some(ResumeCwdMode::Current))
@@ -51,7 +109,7 @@ impl App {
             );
             return Err(AppRunControl::Continue);
         }
-        let resume_cwd = if self.app_server_target.uses_remote_workspace() {
+        let resume_cwd = if target.uses_remote_workspace() {
             current_cwd.clone()
         } else {
             let history_cwd = if matches!(resume_cwd_mode, Some(ResumeCwdMode::Current)) {
@@ -63,7 +121,7 @@ impl App {
             };
             let outcome = crate::session_resume::resolve_cwd_for_resume_or_fork(
                 tui,
-                &self.config,
+                &current_config,
                 history_cwd,
                 CwdPromptAction::Resume,
                 crate::session_resume::ResumeCwdContext {
@@ -86,7 +144,8 @@ impl App {
                 | Ok(crate::session_resume::ResolveCwdOutcome::ContinueAfterPrompt(cwd)) => cwd,
                 Ok(crate::session_resume::ResolveCwdOutcome::Continue(None)) => current_cwd.clone(),
                 Ok(crate::session_resume::ResolveCwdOutcome::Exit) => {
-                    return Err(AppRunControl::Exit(ExitReason::UserRequested));
+                    self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate));
+                    return Err(AppRunControl::Continue);
                 }
             }
         };

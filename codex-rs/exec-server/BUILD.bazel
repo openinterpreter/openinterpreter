@@ -40,12 +40,13 @@ exec_server_compat_test(
     current_binary = "//codex-rs/cli:codex",
 )
 
+# Preparation selects both releases; the normal Bazel test invocation runs them.
 exec_server_compat_test(
     name = "exec-server-stable-release-test",
-    release = "@codex_release_0.153.1_linux_x86_64",
+    release = "@codex_release_latest_stable",
 )
 
 exec_server_compat_test(
-    name = "exec-server-minimum-release-test",
-    release = "@codex_release_0.145.0_linux_x86_64",
+    name = "exec-server-historical-release-test",
+    release = "@codex_release_historical_stable",
 )

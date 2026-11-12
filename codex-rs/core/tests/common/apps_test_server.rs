@@ -1,12 +1,20 @@
+use crate::PathExt;
 use crate::test_codex::TestCodexBuilder;
 use crate::test_codex::test_codex;
 use anyhow::Result;
+use codex_config::types::AppToolApproval;
 use codex_core::config::Config;
+use codex_extension_api::ExtensionFuture;
+use codex_extension_api::McpServerContribution;
+use codex_extension_api::McpServerContributionContext;
+use codex_extension_api::McpServerContributor;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_models_manager::bundled_models_response;
+use codex_protocol::config_types::ApprovalsReviewer;
 use serde_json::Value;
 use serde_json::json;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -29,8 +37,8 @@ const DISCOVERABLE_CALENDAR_ID: &str = "connector_2128aebfecb84f64a069897515042a
 const DISCOVERABLE_GMAIL_ID: &str = "connector_68df038e0ba48191908c8434991bbac2";
 const CONNECTOR_DESCRIPTION: &str = "Plan events and manage your calendar.";
 const CODEX_APPS_META_KEY: &str = "_codex_apps";
-const CODEX_APPS_MCP_PATH_REGEX: &str = "^/api/codex/ps/mcp/?$";
-const HOSTED_PLUGIN_RUNTIME_MCP_PATH_REGEX: &str = "^/api/codex/ps/mcp/?$";
+const CODEX_APPS_MCP_PATH_REGEX: &str = "^/(?:api/codex|backend-api)/ps/mcp/?$";
+const HOSTED_PLUGIN_RUNTIME_MCP_PATH_REGEX: &str = "^/(?:api/codex|backend-api)/ps/mcp/?$";
 const PROTOCOL_VERSION: &str = "2025-11-25";
 const SERVER_NAME: &str = "codex-apps-test";
 const SERVER_VERSION: &str = "1.0.0";
@@ -56,7 +64,34 @@ const CALENDAR_LIST_EVENTS_RESOURCE_URI: &str = "connector://calendar/tools/cale
 pub const DOCUMENT_EXTRACT_TEXT_RESOURCE_URI: &str =
     "connector://calendar/tools/calendar_extract_text";
 
-type AppsStartupInitializeGate = Arc<Mutex<Option<mpsc::Receiver<()>>>>;
+type AppsStartupInitializeGate = Arc<Mutex<VecDeque<mpsc::Receiver<()>>>>;
+
+pub struct HostedMessagingServer(pub String);
+
+impl McpServerContributor<Config> for HostedMessagingServer {
+    fn id(&self) -> &'static str {
+        "hosted_user_messaging_fixture"
+    }
+
+    fn contribute<'a>(
+        &'a self,
+        _context: McpServerContributionContext<'a, Config>,
+    ) -> ExtensionFuture<'a, Vec<McpServerContribution>> {
+        Box::pin(async move {
+            vec![McpServerContribution::HostedApps {
+                config: Box::new(
+                    serde_json::from_value(json!({
+                        "url": self.0,
+                        "default_tools_approval_mode": "approve",
+                        "supports_parallel_tool_calls": true
+                    }))
+                    .expect("host-owned messaging MCP config"),
+                ),
+                protocol_mode: None,
+            }]
+        })
+    }
+}
 
 #[derive(Clone)]
 pub struct AppsTestServer {
@@ -81,12 +116,13 @@ impl AppsTestServerStartupControl {
     }
 
     /// Holds one successful startup without turning recovery into a fresh runtime refresh.
+    /// Multiple holds are consumed in order, so tests can gate startup and recovery in advance.
     pub fn hold_next_successful_initialize(&self) -> mpsc::Sender<()> {
         let (release, gate) = mpsc::channel();
-        *self
-            .successful_initialize_gate
+        self.successful_initialize_gate
             .lock()
-            .expect("Apps initialization gate lock should not be poisoned") = Some(gate);
+            .expect("Apps initialization gate lock should not be poisoned")
+            .push_back(gate);
         release
     }
 }
@@ -193,7 +229,7 @@ impl AppsTestServer {
         let control = AppsTestServerStartupControl {
             initialize_attempts: Arc::new(AtomicUsize::new(0)),
             remaining_initialize_failures: Arc::new(AtomicUsize::new(0)),
-            successful_initialize_gate: Arc::new(Mutex::new(None)),
+            successful_initialize_gate: Arc::new(Mutex::new(VecDeque::new())),
         };
         mount_streamable_http_json_rpc_with_startup_control(
             server,
@@ -290,6 +326,25 @@ pub fn apps_enabled_builder(apps_base_url: impl Into<String>) -> TestCodexBuilde
     test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(move |config| configure_apps(config, apps_base_url.as_str()))
+}
+
+pub fn set_default_app_approval_mode_and_reviewer(
+    config: &mut Config,
+    approval_mode: AppToolApproval,
+    reviewer: ApprovalsReviewer,
+) {
+    let path = config.codex_home.join("config.toml").abs();
+    let user_config = serde_json::from_value(json!({
+        "apps": { "_default": {
+            "approvals_reviewer": reviewer,
+            "default_tools_approval_mode": approval_mode,
+        } }
+    }))
+    .expect("apps config should parse");
+    config.config_layer_stack = config
+        .config_layer_stack
+        .with_user_config(&path, user_config)
+        .expect("apps user config should be valid");
 }
 
 pub fn search_capable_apps_builder(apps_base_url: impl Into<String>) -> TestCodexBuilder {
@@ -523,7 +578,7 @@ impl Respond for CodexAppsJsonRpcResponder {
                 let gate = self.successful_initialize_gate.as_ref().and_then(|gate| {
                     gate.lock()
                         .expect("Apps initialization gate lock should not be poisoned")
-                        .take()
+                        .pop_front()
                 });
                 // This responder's dedicated mock server stays paused while the test controls
                 // when this existing client's background retry may finish.

@@ -17,6 +17,7 @@ codex-api = { workspace = true }
 codex-core = { workspace = true }
 codex-extension-api = { workspace = true }
 codex-extension-items = { workspace = true }
+codex-http-client = { workspace = true }
 codex-login = { workspace = true }
 codex-model-provider = { workspace = true }
 codex-model-provider-info = { workspace = true }
@@ -30,3 +31,5 @@ url = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }

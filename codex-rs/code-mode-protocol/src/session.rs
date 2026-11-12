@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::CodeModeNestedToolCall;
 use crate::ExecuteRequest;
 use crate::RuntimeResponse;
+use crate::TerminateRequest;
 use crate::WaitOutcome;
 use crate::WaitRequest;
 
@@ -28,6 +29,34 @@ pub type NotificationFuture<'a> = Pin<Box<dyn Future<Output = Result<(), String>
 pub struct CodeModeSessionCellExecutionLimits {
     pub max_yield_time_ms: Option<u64>,
     pub max_heap_size_bytes: Option<usize>,
+}
+
+/// The owner of the output budget for each exec or wait observation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CodeModeOutputTruncation {
+    /// Return raw output; the caller applies its own budget and formatting.
+    #[default]
+    Client,
+    /// The host applies the exec, wait, or terminate observation's budget before
+    /// transmitting output (10,000 tokens by default). Clients must not truncate
+    /// it again or append the script error: status and error metadata remain separate.
+    ///
+    /// A complete observation keeps up to [`crate::host::BOUNDED_OUTPUT_MAX_BYTES`]
+    /// of text, [`crate::host::BOUNDED_OUTPUT_MAX_IMAGE_BYTES`] of inline image URLs,
+    /// and [`crate::host::BOUNDED_OUTPUT_MAX_AUDIO_BYTES`] of audio URLs, subject
+    /// to a separate item limit. While these limits hold, formatting matches
+    /// Core's client policy. On text overflow the collector keeps a prefix and a
+    /// rolling tail. Each image or audio clip is admitted if it fits its remaining
+    /// byte allowance. Eviction at the item limit can free space for later media.
+    /// Media are indivisible. Bounded loss notices survive even a zero-token budget.
+    Server,
+}
+
+/// Settings shared by every cell in one code-mode session.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CodeModeSessionOptions {
+    pub cell_execution_limits: CodeModeSessionCellExecutionLimits,
+    pub output_truncation: CodeModeOutputTruncation,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -152,15 +181,34 @@ impl CodeModeSessionDelegate for NoopCodeModeSessionDelegate {
 /// must keep those values isolated. Implementations may execute cells
 /// in-process or remotely.
 pub trait CodeModeSession: Send + Sync {
+    /// Identifies who applies output truncation for this session's responses.
+    /// Providers must not change modes when reconnecting to a new host.
+    fn output_truncation(&self) -> CodeModeOutputTruncation {
+        CodeModeOutputTruncation::Client
+    }
+
+    /// Executes a cell, yielding its foreground observation if `preempt` is signaled.
+    /// The cell continues running after its observation yields.
     fn execute<'a>(
         &'a self,
         request: ExecuteRequest,
         delegate: Arc<dyn CodeModeSessionDelegate>,
     ) -> CodeModeSessionResultFuture<'a, StartedCell>;
 
-    fn wait<'a>(&'a self, request: WaitRequest) -> CodeModeSessionResultFuture<'a, WaitOutcome>;
+    /// Waits for a cell, yielding the observation if `preempt` is signaled while the cell continues.
+    /// Server mode applies the request's output limit; Client mode ignores it.
+    fn wait<'a>(
+        &'a self,
+        request: WaitRequest,
+        preempt: Option<CancellationToken>,
+    ) -> CodeModeSessionResultFuture<'a, WaitOutcome>;
 
-    fn terminate<'a>(&'a self, cell_id: CellId) -> CodeModeSessionResultFuture<'a, WaitOutcome>;
+    /// Terminates a cell, applying the request's limit to its final observation
+    /// in Server mode; Client mode ignores the limit.
+    fn terminate<'a>(
+        &'a self,
+        request: TerminateRequest,
+    ) -> CodeModeSessionResultFuture<'a, WaitOutcome>;
 
     fn shutdown<'a>(&'a self) -> CodeModeSessionResultFuture<'a, ()>;
 }
@@ -191,6 +239,25 @@ pub trait CodeModeSessionProvider: Send + Sync {
             Box::pin(async {
                 Err("code-mode session provider does not support resource limits".to_string())
             })
+        }
+    }
+
+    /// Requests output handling for one session, without changing other sessions
+    /// created by this provider. Server mode requires host support.
+    fn create_session_with_options<'a>(
+        &'a self,
+        options: CodeModeSessionOptions,
+    ) -> CodeModeSessionProviderFuture<'a> {
+        match options.output_truncation {
+            CodeModeOutputTruncation::Client => {
+                self.create_session_with_limits(options.cell_execution_limits)
+            }
+            CodeModeOutputTruncation::Server => Box::pin(async {
+                Err(
+                    "code-mode session provider does not support server output truncation"
+                        .to_string(),
+                )
+            }),
         }
     }
 }

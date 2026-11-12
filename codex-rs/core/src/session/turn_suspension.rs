@@ -24,19 +24,6 @@ pub(super) async fn suspend_turn_and_shutdown(
         }
     }
 
-    // This is a snapshot of currently loaded descendants, not a spawn-admission seal.
-    // Previously closed descendants and concurrent future spawns remain best effort.
-    if session
-        .services
-        .agent_control
-        .list_live_agent_subtree_thread_ids(session.thread_id)
-        .await?
-        .len()
-        > 1
-    {
-        return Ok(SuspendTurnOutcome::HasLiveDescendants);
-    }
-
     let live_thread = session
         .live_thread_for_persistence("suspend an unfinished root turn")
         .map_err(|error| CodexErr::Fatal(error.to_string()))?;
@@ -67,6 +54,8 @@ pub(super) async fn suspend_turn_and_shutdown(
         CodexErr::Fatal("accepted root turn suspension had no running task".to_string())
     })?;
     let turn_id = task.turn_context.sub_id.clone();
+    // A suspended task emits no terminal outcome.
+    drop(task.outcome_handoff);
     // Normal shutdown records a terminal turn event, preventing another worker from
     // recovering this turn under its original ID. Cancel the task without that event.
     task.cancellation_token.cancel();
@@ -93,9 +82,22 @@ pub(super) async fn suspend_turn_and_shutdown(
             let _ = task_handle.await;
         }
     }
-    // Pending accepted input and interactive waiters live only in this process. Handoff
-    // intentionally drops that state; persisting or replaying it needs a separate protocol.
+    // Save any initial input the task had not claimed so a new worker can recover the turn.
+    let recorded = session
+        .record_pending_initial_input(
+            &task.turn_context,
+            &turn.turn_state,
+            task.pending_initial_input,
+            /*abort_reason*/ None,
+        )
+        .await;
+    // Other pending input and interactive waiters remain best effort across handoff.
     session.input_queue.clear_pending(&turn).await;
+
+    // The root task has stopped without a terminal event. Fence new starts and stop every
+    // other local session, even if the suspension caller disconnects during cleanup.
+    // The host owns the separate tree-cleanup wait and any persistence-writer fencing.
+    session.services.local_agent_runtime.request_shutdown();
 
     // Stop all producers before flushing their final history and closing its writer.
     // If either persistence step fails, do not report success: the current worker

@@ -59,7 +59,11 @@ impl ExternalAgentConfigService {
         if params.include_home
             && params.include_memory
             && self.source.supports_memory()
-            && let Some(item) = memory::detect(&self.codex_home, &self.external_agent_home)?
+            && let Some(item) = memory::detect(
+                &self.codex_home,
+                &self.external_agent_home,
+                self.memory_version,
+            )?
         {
             items.push(item);
             emit_migration_metric(
@@ -208,6 +212,11 @@ impl ExternalAgentConfigService {
                 &target_skills,
             )?);
         }
+        skill_names.retain(|name| {
+            !self
+                .source
+                .is_reserved_skill_directory(scope, name.as_ref(), self.skill_import_mode)
+        });
         skill_names.sort();
         skill_names.dedup();
         let skills_count = skill_names.len();

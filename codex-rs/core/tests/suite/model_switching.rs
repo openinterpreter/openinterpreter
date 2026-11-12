@@ -52,7 +52,7 @@ use core_test_support::responses::sse_completed;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
-use core_test_support::test_codex::local_selections;
+use core_test_support::test_codex::local_requests;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
@@ -68,7 +68,7 @@ fn read_only_user_turn(test: &TestCodex, items: Vec<UserInput>, model: String) -
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(PermissionProfile::read_only(), test.cwd_path());
     TurnInputRequest::user_input(items).with_thread_settings(ThreadSettingsOverrides {
-        environments: Some(local_selections(test.config.cwd.clone())),
+        environments: Some(local_requests(test.config.cwd.clone())),
         approval_policy: Some(AskForApproval::Never),
         sandbox_policy: Some(sandbox_policy),
         permission_profile,
@@ -124,7 +124,6 @@ fn test_model_info(
         visibility: ModelVisibility::List,
         supported_in_api: true,
         input_modalities,
-        used_fallback_model_metadata: false,
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
@@ -154,6 +153,7 @@ fn test_model_info(
         availability_nux: None,
         apply_patch_tool_type: None,
         web_search_tool_type: Default::default(),
+        web_search_provider: None,
         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
         supports_image_detail_original: false,
         context_window: Some(272_000),
@@ -268,7 +268,7 @@ async fn first_turn_after_empty_prefix_fork_preserves_inherited_base_instruction
     fork_config.base_instructions = None;
     let fork = test
         .thread_manager
-        .fork_thread(
+        .fork_legacy_thread(
             ForkSnapshot::TruncateBeforeNthUserMessage(0),
             codex_core::StartThreadOptions::new(fork_config),
             source_rollout_path,
@@ -387,6 +387,9 @@ async fn model_change_appends_model_instructions_developer_message() -> Result<(
     Ok(())
 }
 
+#[test_case(None; "omitted personality keeps opt-out")]
+#[test_case(Some(Personality::Friendly); "friendly clears opt-out")]
+#[test_case(Some(Personality::Pragmatic); "pragmatic clears opt-out")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_change_with_legacy_personality_override_only_appends_model_instructions()
 -> Result<()> {
@@ -402,52 +405,55 @@ async fn model_change_with_legacy_personality_override_only_appends_model_instru
     let mut builder = test_codex().with_model("gpt-5.5");
     let test = builder.build(&server).await?;
     let next_model = "exp-codex-personality";
+    let mut builder = test_codex()
+        .with_model_info_override(next_model, |model| {
+            configure_model_switching_fixture(model);
+            model
+                .model_messages
+                .as_mut()
+                .expect("test model should have instruction metadata")
+                .instructions_template = Some(
+                "Catalog instructions.\n# Personality\nCatalog style.\n# Rules\nKeep the rules."
+                    .to_string(),
+            );
+        })
+        .with_model("gpt-5.5")
+        .with_config(|config| config.personality = Some(Personality::None));
+    let test = builder.build_with_auto_env(&server).await?;
 
-    test.codex
-        .start_or_steer_turn(read_only_user_turn(
-            &test,
-            vec![UserInput::Text {
-                text: "hello".into(),
-                text_elements: Vec::new(),
-            }],
-            test.session_configured.model.clone(),
-        ))
-        .await?;
-    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    submit_model_turn(
+        &test.codex,
+        &test.session_configured.model,
+        ThreadSettingsOverrides::default(),
+    )
+    .await?;
 
     core_test_support::submit_thread_settings(
         &test.codex,
         ThreadSettingsOverrides {
-            model: Some(next_model.to_string()),
-            personality: Some(Personality::Pragmatic),
+            personality,
             ..Default::default()
         },
     )
     .await?;
 
-    test.codex
-        .start_or_steer_turn(read_only_user_turn(
-            &test,
-            vec![UserInput::Text {
-                text: "switch model and personality".into(),
-                text_elements: Vec::new(),
-            }],
-            next_model.to_string(),
-        ))
-        .await?;
-    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    submit_model_turn(&test.codex, next_model, ThreadSettingsOverrides::default()).await?;
 
     let requests = resp_mock.requests();
     assert_eq!(requests.len(), 2, "expected two model requests");
 
     let second_request = requests.last().expect("expected second request");
     let developer_texts = second_request.message_input_texts("developer");
-    assert!(
-        developer_texts
-            .iter()
-            .any(|text| text.contains("<model_switch>")),
-        "expected model switch message when model changes"
-    );
+    let model_switch = developer_texts
+        .iter()
+        .find(|text| text.contains("<model_switch>"))
+        .expect("expected model switch message when model changes");
+    let expected_instructions = if personality.is_some() {
+        "Catalog instructions.\n# Personality\nCatalog style.\n# Rules\nKeep the rules."
+    } else {
+        "Catalog instructions.\n# Rules\nKeep the rules."
+    };
+    assert!(model_switch.contains(expected_instructions));
     assert!(
         !developer_texts
             .iter()
@@ -906,7 +912,9 @@ async fn model_change_projects_media_without_changing_live_or_replayed_history(
                     detail: None,
                 },
                 UserInput::Audio {
-                    audio_url: "data:audio/wav;base64,YXVkaW8=".to_string(),
+                    audio: AudioReference::File {
+                        file_id: "file_model_switch_audio".to_string(),
+                    },
                 },
                 UserInput::Text {
                     text: "first turn".to_string(),
@@ -939,9 +947,16 @@ async fn model_change_projects_media_without_changing_live_or_replayed_history(
         !first_request.message_input_image_urls("user").is_empty(),
         "first request should include the uploaded image"
     );
+    let first_audio = first_request.body_json()["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .find(|part| part["type"] == "input_audio")
+        .cloned();
     assert_eq!(
-        first_request.message_input_audio_urls("user"),
-        vec!["data:audio/wav;base64,YXVkaW8=".to_string()]
+        first_audio,
+        Some(json!({"type": "input_audio", "file_id": "file_model_switch_audio"}))
     );
 
     let second_request = requests.last().expect("expected second request");
@@ -955,7 +970,12 @@ async fn model_change_projects_media_without_changing_live_or_replayed_history(
         "second request should strip unsupported image content"
     );
     assert!(
-        second_request.message_input_audio_urls("user").is_empty(),
+        second_request.body_json()["input"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|item| item["content"].as_array().into_iter().flatten())
+            .all(|part| part["type"] != "input_audio"),
         "second request should strip unsupported audio content"
     );
     let second_user_texts = second_request.message_input_texts("user");
@@ -1254,7 +1274,6 @@ async fn model_switch_to_smaller_model_updates_token_context_window() -> Result<
         visibility: ModelVisibility::List,
         supported_in_api: true,
         input_modalities: default_input_modalities(),
-        used_fallback_model_metadata: false,
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
@@ -1284,6 +1303,7 @@ async fn model_switch_to_smaller_model_updates_token_context_window() -> Result<
         availability_nux: None,
         apply_patch_tool_type: None,
         web_search_tool_type: Default::default(),
+        web_search_provider: None,
         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
         supports_image_detail_original: false,
         context_window: Some(large_context_window),

@@ -1,15 +1,20 @@
 use super::*;
+use crate::agent::api::AgentInput;
+use crate::agent::api::SpawnRequest;
 use crate::agent::child_config::SpawnConfigOptions;
 use crate::agent::child_config::SpawnConfigVersion;
 use crate::agent::child_config::prepare_agent_spawn_config;
 use crate::agent::control::render_input_preview;
 use crate::agent::exceeds_thread_spawn_depth_limit;
+use crate::agent::helper_daybreak::turn::explicit_program_for_spawn;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::types::SpawnAgentForkMode;
 use crate::agent::types::SpawnAgentOptions;
+use crate::agent::types::SpawnProgramSource;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v1;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::ToolSpec;
 
 #[derive(Default)]
@@ -106,68 +111,61 @@ async fn handle_spawn_agent(
     .await
     .map_err(FunctionCallError::RespondToModel)?;
     let config = prepared.config;
-    let result = Box::pin(session.services.agent_control.spawn_agent_with_metadata(
-        config,
-        input_items,
-        Some(thread_spawn_source(
-            session.thread_id,
-            &turn.session_source,
-            child_depth,
-            prepared.role_name.as_deref(),
-            /*task_name*/ None,
-        )?),
-        SpawnAgentOptions {
-            fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
-            fork_mode: args.fork_context.then_some(SpawnAgentForkMode::FullHistory),
-            parent_thread_id: Some(session.thread_id),
-            parent_turn_id: Some(turn.sub_id.clone()),
-            root_turn_id: turn.turn_metadata_state.root_turn_id(),
-            turn_trigger: turn.turn_metadata_state.current_turn_trigger(),
-            environments: Some(step_context.environments.to_selections()),
-            multi_agent_v2_usage_hints: None,
-            cyber_access_program: turn.cyber_access_program,
-        },
-    ))
-    .await
-    .map_err(collab_spawn_error);
-    let (new_thread_id, new_agent_metadata, status) = match &result {
-        Ok(spawned_agent) => (
-            Some(spawned_agent.thread_id),
-            Some(spawned_agent.metadata.clone()),
-            spawned_agent.status.clone(),
-        ),
-        Err(_) => (None, None, AgentStatus::NotFound),
+    let fork_mode = args.fork_context.then_some(SpawnAgentForkMode::FullHistory);
+    let result = session
+        .services
+        .agent_control
+        .spawn(SpawnRequest {
+            caller: session.thread_id,
+            config,
+            input: AgentInput::UserInput(input_items),
+            source: thread_spawn_source(
+                session.thread_id,
+                &turn.session_source,
+                child_depth,
+                prepared.role_name.as_deref(),
+                /*task_name*/ None,
+            )?,
+            options: SpawnAgentOptions {
+                fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
+                fork_mode: fork_mode.clone(),
+                parent_thread_id: Some(session.thread_id),
+                parent_turn_id: Some(turn.sub_id.clone()),
+                root_turn_id: turn.turn_metadata_state.root_turn_id(),
+                turn_trigger: turn.turn_metadata_state.current_turn_trigger(),
+                environments: Some(step_context.inherited_environments.clone()),
+                disabled_plugin_ids: Some(turn.disabled_plugin_ids.clone()),
+                multi_agent_v2_usage_hints: None,
+                cyber_access_program: explicit_program_for_spawn(turn),
+                cyber_access_program_source: SpawnProgramSource::ParentTurn,
+            },
+        })
+        .await
+        .map_err(|err| {
+            record_collab_spawn_failure(
+                &turn.session_telemetry,
+                turn.config.apps_mcp_product_sku.as_deref(),
+                &err,
+                &call_id,
+                &turn.sub_id,
+                fork_mode.as_ref(),
+                MultiAgentVersion::V1,
+            );
+            collab_spawn_error(err)
+        });
+    let (new_thread_id, status) = match &result {
+        Ok((spawned_agent, _)) => (Some(spawned_agent.thread_id), spawned_agent.status.clone()),
+        Err(_) => (None, AgentStatus::NotFound),
     };
-    let agent_snapshot = match new_thread_id {
-        Some(thread_id) => {
-            session
-                .services
-                .agent_control
-                .get_agent_config_snapshot(thread_id)
-                .await
-        }
-        None => None,
-    };
-    let (_new_agent_path, new_agent_nickname, new_agent_role) =
-        match (&agent_snapshot, new_agent_metadata) {
-            (Some(snapshot), _) => (
-                snapshot.session_source.get_agent_path().map(String::from),
-                snapshot.session_source.get_nickname(),
-                snapshot.session_source.get_agent_role(),
-            ),
-            (None, Some(metadata)) => (
-                metadata.agent_path.map(String::from),
-                metadata.agent_nickname,
-                metadata.agent_role,
-            ),
-            (None, None) => (None, None, None),
-        };
+    let agent_snapshot = result.as_ref().ok().map(|(_, config)| config);
+    let new_agent_nickname =
+        agent_snapshot.and_then(|snapshot| snapshot.session_source.get_nickname());
+    let new_agent_role =
+        agent_snapshot.and_then(|snapshot| snapshot.session_source.get_agent_role());
     let effective_model = agent_snapshot
-        .as_ref()
         .map(|snapshot| snapshot.model.clone())
         .unwrap_or_else(|| args.model.clone().unwrap_or_default());
     let effective_reasoning_effort = agent_snapshot
-        .as_ref()
         .and_then(|snapshot| snapshot.reasoning_effort.clone())
         .unwrap_or(args.reasoning_effort.unwrap_or_default());
     let nickname = new_agent_nickname.clone();
@@ -200,7 +198,8 @@ async fn handle_spawn_agent(
             }),
         )
         .await;
-    let new_thread_id = result?.thread_id;
+    let (spawned_agent, _) = result?;
+    let new_thread_id = spawned_agent.thread_id;
     let role_tag = role_name.unwrap_or(DEFAULT_ROLE_NAME);
     turn.session_telemetry.counter(
         "codex.multi_agent.spawn",

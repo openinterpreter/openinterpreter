@@ -1,0 +1,17 @@
+---
+source: tui/src/onboarding/gcp_tests.rs
+expression: terminal.backend().to_string()
+---
+  Sign in another way
+
+> 1. Use an OpenAI API key
+     Pay for what you use
+
+  2. Use Amazon Bedrock
+     Connect using your AWS credentials
+
+  3. Use Google Cloud Vertex AI
+     Connect using your Google Cloud credentials
+
+  Press enter to continue
+  Press esc to go back

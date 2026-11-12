@@ -14,6 +14,7 @@ use crate::history_cell::ThreadRecapHistoryCell;
 use crate::history_cell::ThreadRecapLoadingCell;
 use crate::pager_overlay::Overlay;
 use crate::temporary_structured_request::TemporaryStructuredThreadOptions;
+use crate::temporary_structured_request::TemporaryThreadKind;
 use crate::temporary_structured_request::run_temporary_structured_turn;
 use crate::temporary_structured_request::start_temporary_thread;
 use crate::temporary_structured_request::unsubscribe_temporary_thread;
@@ -181,6 +182,13 @@ impl App {
         thread_id: ThreadId,
         trigger: RecapTrigger,
     ) {
+        if app_server.thread_params_mode().settings_owner() == ThreadSettingsOwner::Server {
+            if matches!(trigger, RecapTrigger::Manual) {
+                self.chat_widget
+                    .add_error_message(CLOUD_RECAP_UNAVAILABLE_MESSAGE.to_string());
+            }
+            return;
+        }
         if !self.recap_trigger_enabled(trigger) {
             return;
         }
@@ -232,7 +240,6 @@ impl App {
                 .permissions
                 .active_permission_profile()
                 .map(|profile| profile.id),
-            mcp_server_names: config.mcp_servers.get().keys().cloned().collect(),
         };
         let event_sender = self.app_event_tx.clone();
         let task = tokio::spawn(async move {
@@ -325,17 +332,19 @@ impl App {
 
         let (sender, receiver) = mpsc::unbounded_channel();
         self.temporary_structured_requests
-            .insert(temporary_thread_id, sender);
+            .insert(temporary_thread_id, (TemporaryThreadKind::Recap, sender));
 
         let request_handle = app_server.request_handle();
         let event_sender = self.app_event_tx.clone();
         let task = tokio::spawn(async move {
             let result = run_temporary_structured_turn(
                 request_handle,
-                temporary_thread_id_text,
-                recap_prompt(&history),
-                recap_output_schema(),
-                /*effort*/ None,
+                TemporaryThreadKind::Recap.turn_params(
+                    temporary_thread_id_text,
+                    recap_prompt(&history),
+                    recap_output_schema(),
+                    /*effort*/ None,
+                ),
                 receiver,
                 CancellationToken::new(),
             )

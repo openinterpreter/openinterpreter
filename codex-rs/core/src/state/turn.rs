@@ -2,10 +2,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as SyncMutex;
+use std::sync::PoisonError;
+use std::sync::Weak;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 
 use codex_diagnostics::GaugeGuard;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
@@ -13,7 +17,6 @@ use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_rmcp_client::ElicitationResponse;
-use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use rmcp::model::RequestId;
 use tokio::sync::oneshot;
 
@@ -31,6 +34,9 @@ use codex_protocol::protocol::TokenUsage;
 /// Metadata about the currently running turn.
 pub(crate) struct ActiveTurn {
     pub(crate) task: Option<RunningTask>,
+    /// Present when input admission is closed; cancelled when the final batch is recorded.
+    /// Reservations that have not started still accept inputs.
+    pub(crate) finishing: Option<CancellationToken>,
     pub(crate) turn_state: Arc<Mutex<TurnState>>,
 }
 
@@ -39,9 +45,8 @@ pub(crate) struct ActiveTurn {
 /// State machine:
 /// - A turn starts in `CurrentTurn`, so queued child mail can join the next
 ///   model request for that turn.
-/// - After user-visible terminal output is recorded, we switch to `NextTurn`
-///   to leave late child mail queued instead of extending an already shown
-///   answer.
+/// - After a terminal answer is recorded, even an empty one, we switch to
+///   `NextTurn` to leave late child mail queued instead of extending the answer.
 /// - If the same task later gets explicit same-turn work again (a steered user
 ///   prompt or a tool call after an untagged preamble), we reopen `CurrentTurn`
 ///   so that pending child mail is drained into that follow-up request.
@@ -50,7 +55,7 @@ pub(crate) enum MailboxDeliveryPhase {
     /// Incoming mailbox messages can still be consumed by the current turn.
     #[default]
     CurrentTurn,
-    /// The current turn already emitted visible final answer text; mailbox
+    /// The current turn already emitted a terminal answer; mailbox
     /// messages should remain queued for a later turn.
     NextTurn,
 }
@@ -59,6 +64,7 @@ impl Default for ActiveTurn {
     fn default() -> Self {
         Self {
             task: None,
+            finishing: None,
             turn_state: Arc::new(Mutex::new(TurnState::default())),
         }
     }
@@ -79,6 +85,10 @@ pub(crate) struct RunningTask {
     pub(crate) handle: AbortOnDropHandle<()>,
     pub(crate) turn_context: Arc<TurnContext>,
     pub(crate) _agent_execution_guard: Option<AgentExecutionGuard>,
+    /// Follows the task into whichever finalizer claims its terminal event.
+    pub(crate) outcome_handoff: Option<TaskTrackerToken>,
+    /// Unrecorded input retained during host admission or preparation that can wait on the roster.
+    pub(crate) pending_initial_input: Option<Vec<TurnInput>>,
     pub(crate) _diagnostics_guard: GaugeGuard,
     // Timer recorded when the task drops to capture the full turn duration.
     pub(crate) _timer: Option<codex_otel::Timer>,
@@ -87,15 +97,13 @@ pub(crate) struct RunningTask {
 /// Mutable state for a single turn.
 #[derive(Default)]
 pub(crate) struct TurnState {
-    pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
+    pending_approvals: Arc<PendingApprovals>,
     pending_request_permissions: HashMap<String, PendingRequestPermissions>,
     pending_user_input: HashMap<String, oneshot::Sender<AcceptedUserInputResponse>>,
     pending_elicitations: HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>,
     pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
     pub(crate) pending_input: TurnInputQueue,
     mailbox_delivery_phase: MailboxDeliveryPhase,
-    granted_permissions_by_environment_id: HashMap<String, AdditionalPermissionProfile>,
-    strict_auto_review_enabled: bool,
     pub(crate) tool_calls: u64,
     pub(crate) has_memory_citation: bool,
     pub(crate) token_usage_at_turn_start: TokenUsage,
@@ -105,37 +113,128 @@ pub(crate) struct TurnState {
     pub(crate) last_known_step_context: Option<Arc<StepContext>>,
 }
 
+pub(crate) struct PendingApproval {
+    pub(crate) sender: oneshot::Sender<ReviewDecision>,
+    pub(crate) kind: codex_protocol::approvals::ExecApprovalKind,
+    // A yielded cell can emit a prompt for its original turn while a later turn services it.
+    pub(crate) turn_id: String,
+}
+
+impl PendingApproval {
+    pub(crate) fn validate(&self, decision: ReviewDecision) -> ReviewDecision {
+        if self.kind == codex_protocol::approvals::ExecApprovalKind::HumanCommand
+            && !matches!(
+                decision,
+                ReviewDecision::Approved | ReviewDecision::Denied { .. } | ReviewDecision::Abort
+            )
+        {
+            ReviewDecision::denied("Managed command policy requires a one-time human approval.")
+        } else {
+            decision
+        }
+    }
+}
+
 /// Host receipt metadata follows the response through the asynchronous tool waiter.
 pub(crate) struct AcceptedUserInputResponse {
     pub(crate) response: RequestUserInputResponse,
-    /// Absent in legacy mode, which does not reserve or persist acceptance order.
-    pub(crate) acceptance_order: Option<u64>,
+    /// Order reserved when the host accepts this response.
+    pub(crate) acceptance_order: u64,
 }
 
 pub(crate) struct PendingRequestPermissions {
     pub(crate) tx_response: oneshot::Sender<RequestPermissionsResponse>,
     pub(crate) requested_permissions: RequestPermissionProfile,
     pub(crate) environment: TurnEnvironment,
+    /// Background cells can request permissions after a different turn becomes active.
+    pub(crate) turn_context: Arc<TurnContext>,
+}
+
+type PendingApprovals = SyncMutex<HashMap<String, PendingApproval>>;
+
+/// The originating turn and its unique prompt ID stay valid even if the active turn changes.
+pub(crate) struct NetworkApprovalPrompt<'a> {
+    approvals: Weak<PendingApprovals>,
+    events: &'a async_channel::Sender<Event>,
+    turn_id: &'a str,
+    approval_id: &'a str,
+}
+
+impl Drop for NetworkApprovalPrompt<'_> {
+    fn drop(&mut self) {
+        if let Some(approvals) = self.approvals.upgrade() {
+            approvals
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(self.approval_id);
+        }
+        // The session channel is unbounded. Enqueue resolution before a same-host waiter can prompt.
+        let _ = self.events.try_send(Event {
+            id: self.turn_id.to_owned(),
+            msg: EventMsg::NetworkApprovalResolved {
+                approval_id: self.approval_id.to_owned(),
+            },
+        });
+    }
 }
 
 impl TurnState {
+    pub(crate) fn track_network_prompt<'a>(
+        &self,
+        events: &'a async_channel::Sender<Event>,
+        turn_id: &'a str,
+        approval_id: &'a str,
+    ) -> NetworkApprovalPrompt<'a> {
+        NetworkApprovalPrompt {
+            approvals: Arc::downgrade(&self.pending_approvals),
+            events,
+            turn_id,
+            approval_id,
+        }
+    }
+
     pub(crate) fn insert_pending_approval(
         &mut self,
         key: String,
         tx: oneshot::Sender<ReviewDecision>,
-    ) -> Option<oneshot::Sender<ReviewDecision>> {
-        self.pending_approvals.insert(key, tx)
+        kind: codex_protocol::approvals::ExecApprovalKind,
+        turn_id: String,
+    ) -> Option<PendingApproval> {
+        self.pending_approvals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                key,
+                PendingApproval {
+                    sender: tx,
+                    kind,
+                    turn_id,
+                },
+            )
     }
 
     pub(crate) fn remove_pending_approval(
         &mut self,
         key: &str,
-    ) -> Option<oneshot::Sender<ReviewDecision>> {
-        self.pending_approvals.remove(key)
+        expected_turn_id: Option<&str>,
+    ) -> Option<PendingApproval> {
+        let mut approvals = self
+            .pending_approvals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(expected) = expected_turn_id
+            && approvals.get(key)?.turn_id != expected
+        {
+            return None;
+        }
+        approvals.remove(key)
     }
 
     pub(crate) fn clear_pending_waiters(&mut self) {
-        self.pending_approvals.clear();
+        self.pending_approvals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         self.pending_request_permissions.clear();
         self.pending_user_input.clear();
         self.pending_elicitations.clear();
@@ -217,38 +316,5 @@ impl TurnState {
 
     pub(crate) fn set_mailbox_delivery_phase(&mut self, phase: MailboxDeliveryPhase) {
         self.mailbox_delivery_phase = phase;
-    }
-
-    pub(crate) fn record_granted_permissions(
-        &mut self,
-        environment_id: &str,
-        permissions: AdditionalPermissionProfile,
-    ) {
-        let granted_permissions = merge_permission_profiles(
-            self.granted_permissions_by_environment_id
-                .get(environment_id),
-            Some(&permissions),
-        );
-        if let Some(granted_permissions) = granted_permissions {
-            self.granted_permissions_by_environment_id
-                .insert(environment_id.to_string(), granted_permissions);
-        }
-    }
-
-    pub(crate) fn granted_permissions(
-        &self,
-        environment_id: &str,
-    ) -> Option<AdditionalPermissionProfile> {
-        self.granted_permissions_by_environment_id
-            .get(environment_id)
-            .cloned()
-    }
-
-    pub(crate) fn enable_strict_auto_review(&mut self) {
-        self.strict_auto_review_enabled = true;
-    }
-
-    pub(crate) fn strict_auto_review_enabled(&self) -> bool {
-        self.strict_auto_review_enabled
     }
 }

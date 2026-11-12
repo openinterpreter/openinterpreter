@@ -5,7 +5,6 @@
 
 use super::DecodedTextMerge;
 use super::Event;
-use super::FileCitations;
 use super::HyperlinkLine;
 use super::ListSpacing;
 use super::Options;

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use codex_app_server_client::TypedRequestError;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::Turn;
 use codex_protocol::ThreadId;
 use codex_protocol::models::local_image_label_text;
@@ -31,6 +31,7 @@ use crate::thread_transcript::thread_items_to_transcript_cells;
 impl App {
     pub(super) async fn export_transcript(
         &mut self,
+        tui: &mut crate::tui::Tui,
         app_server: &mut AppServerSession,
         destination: TranscriptExportDestination,
     ) -> Result<(), String> {
@@ -54,7 +55,11 @@ impl App {
         let markdown = render_markdown_transcript(&cells)?;
         match destination {
             TranscriptExportDestination::Clipboard => {
-                self.chat_widget.copy_transcript_to_clipboard(&markdown);
+                let result = tui.copy_transcript_selection(
+                    &markdown,
+                    crate::clipboard_copy::CopyFormat::PlainText,
+                );
+                self.chat_widget.show_copy_result("conversation", result);
             }
             TranscriptExportDestination::File(path) => {
                 let cwd = if self.app_server_target.uses_remote_workspace() {
@@ -131,9 +136,9 @@ pub(super) async fn load_export_transcript(
     Ok(cells)
 }
 
-fn export_activity_cell(item: &ThreadItem) -> Option<PlainHistoryCell> {
+fn export_activity_cell(item: &ThreadItemPayload) -> Option<PlainHistoryCell> {
     let lines = match item {
-        ThreadItem::FileChange {
+        ThreadItemPayload::FileChange {
             changes, status, ..
         } => {
             let mut lines =
@@ -144,7 +149,7 @@ fn export_activity_cell(item: &ThreadItem) -> Option<PlainHistoryCell> {
             }
             lines
         }
-        ThreadItem::McpToolCall {
+        ThreadItemPayload::McpToolCall {
             server,
             tool,
             status,
@@ -194,7 +199,7 @@ fn export_activity_cell(item: &ThreadItem) -> Option<PlainHistoryCell> {
     Some(PlainHistoryCell::new(lines))
 }
 
-fn visible_export_items(turns: Vec<Turn>) -> Vec<ThreadItem> {
+fn visible_export_items(turns: Vec<Turn>) -> Vec<ThreadItemPayload> {
     let mut visible = Vec::new();
     let mut review_mode = false;
     let mut previous_turn = None;
@@ -203,13 +208,15 @@ fn visible_export_items(turns: Vec<Turn>) -> Vec<ThreadItem> {
         let hidden_nested_review_turn = previous_turn.as_ref().is_some_and(|previous| {
             crate::app_backtrack::is_hidden_nested_review_turn(previous, &turn)
         });
-        for item in turn.items.iter().cloned() {
+        for item in turn.item_payloads().cloned() {
             match item {
-                ThreadItem::EnteredReviewMode { .. } | ThreadItem::ExitedReviewMode { .. } => {
-                    review_mode = matches!(item, ThreadItem::EnteredReviewMode { .. });
+                ThreadItemPayload::EnteredReviewMode { .. }
+                | ThreadItemPayload::ExitedReviewMode { .. } => {
+                    review_mode = matches!(item, ThreadItemPayload::EnteredReviewMode { .. });
                     visible.push(item);
                 }
-                ThreadItem::UserMessage { .. } if review_mode || hidden_nested_review_turn => {}
+                ThreadItemPayload::UserMessage { .. }
+                    if review_mode || hidden_nested_review_turn => {}
                 _ => visible.push(item),
             }
         }
@@ -224,7 +231,7 @@ fn render_markdown_transcript(cells: &[Arc<dyn HistoryCell>]) -> Result<String, 
     for cell in cells {
         let lines = if let Some(user) = cell.as_any().downcast_ref::<UserHistoryCell>() {
             let (message, _) =
-                crate::ide_context::extract_prompt_request_with_offset(&user.message);
+                crate::user_prompt::extract_prompt_request_with_offset(&user.message);
             let message = crate::history_cell::sanitize_user_text(message.into());
             let mut lines = raw_lines_from_source(&message);
             let image_count = user.local_image_paths.len() + user.remote_image_urls.len();

@@ -17,9 +17,20 @@ const THREAD_ID: &str = "123e4567-e89b-12d3-a456-426614174000";
 
 enum QueueResponse {
     Success,
+    ResumeRejected,
     MethodNotFound,
     #[cfg(unix)]
     UnknownMethodVariant,
+}
+
+#[cfg(unix)]
+fn socket_test_home() -> Result<TempDir> {
+    // macOS temporary paths can exceed the Unix socket path limit.
+    #[cfg(target_os = "macos")]
+    let home = tempfile::tempdir_in("/tmp")?;
+    #[cfg(not(target_os = "macos"))]
+    let home = TempDir::new()?;
+    Ok(home)
 }
 
 async fn respond_to_queue_request<S>(
@@ -62,9 +73,10 @@ where
     let request = websocket.next().await.context("missing queue request")??;
     let request: Value = serde_json::from_str(request.to_text()?)?;
     assert_eq!(request["method"], "thread/queue/add");
+    assert_eq!(request["params"]["threadId"], THREAD_ID);
 
     let result = match response {
-        QueueResponse::Success => json!({
+        QueueResponse::Success | QueueResponse::ResumeRejected => json!({
             "id": request["id"],
             "result": {
                 "queuedSubmission": {
@@ -90,6 +102,27 @@ where
     websocket
         .send(Message::Text(result.to_string().into()))
         .await?;
+    if matches!(response, QueueResponse::ResumeRejected) {
+        for (method, mut reply) in [
+            (
+                "thread/read",
+                json!({"result": {"thread": {"status": {"type": "notLoaded"}, "cwd": r"C:\workspace"}}}),
+            ),
+            (
+                "thread/resume",
+                json!({"error": {"code": -32603, "message": "thread already has an active writer"}}),
+            ),
+        ] {
+            let rpc = websocket.next().await.context("missing resume request")??;
+            let rpc: Value = serde_json::from_str(rpc.to_text()?)?;
+            assert_eq!(rpc["method"], method);
+            assert_eq!(rpc["params"]["threadId"], THREAD_ID);
+            reply["id"] = rpc["id"].clone();
+            websocket
+                .send(Message::Text(reply.to_string().into()))
+                .await?;
+        }
+    }
     Ok(request)
 }
 
@@ -108,6 +141,22 @@ async fn queue_submits_message_to_remote_app_server() -> Result<()> {
         String::from_utf8(output.stdout)?,
         format!("Queued message queued-submission-id for thread {THREAD_ID}.\n")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn queue_succeeds_when_another_server_owns_the_thread() -> Result<()> {
+    let (output, _) = run_remote_queue_command(QueueResponse::ResumeRejected).await?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        format!("Queued message queued-submission-id for thread {THREAD_ID}.\n")
+    );
+    assert!(String::from_utf8(output.stderr)?.contains("thread already has an active writer"));
     Ok(())
 }
 
@@ -133,20 +182,39 @@ fn queue_rejects_empty_message() -> Result<()> {
 }
 
 #[test]
-fn queue_rejects_image_attachments() -> Result<()> {
-    let output = std::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?)
-        .args([
-            "queue",
-            "--thread",
-            THREAD_ID,
-            "--message",
-            "do the thing",
-            "--image",
-            "screenshot.png",
-        ])
-        .output()?;
-    assert!(!output.status.success());
-    assert!(String::from_utf8(output.stderr)?.contains("does not support image attachments"));
+fn queue_rejects_unsupported_options() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    for (args, expected) in [
+        ("queue --image screenshot.png", "image attachments"),
+        ("queue --model other-model", "`--model`"),
+        ("--oss queue", "`--oss`"),
+        ("queue --local-provider ollama", "`--local-provider`"),
+        (
+            "queue --dangerously-bypass-hook-trust",
+            "`--dangerously-bypass-hook-trust`",
+        ),
+        (
+            "-c model=other queue -c analytics.enabled=false",
+            "`model` config override",
+        ),
+        ("queue -s read-only", "`--sandbox`"),
+        ("--approve-for-me queue", "`--approve-for-me`"),
+        ("prompt queue", "positional prompt; use `--message`"),
+        ("-C . queue --remote unix://", "`--cd` with `--remote`"),
+        ("--remote unix:// queue -C .", "`--cd` with `--remote`"),
+    ] {
+        let output = std::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?)
+            .env("CODEX_HOME", codex_home.path())
+            .args(args.split_whitespace())
+            .args(["--thread", THREAD_ID, "--message", "do the thing"])
+            .output()?;
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr)?;
+        assert!(
+            stderr.contains("`codex queue`") && stderr.contains(expected),
+            "{args:?}: {stderr}"
+        );
+    }
     Ok(())
 }
 
@@ -155,6 +223,7 @@ async fn run_remote_queue_command(response: QueueResponse) -> Result<(Output, Va
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("ws://{}", listener.local_addr()?);
     let remote_first = matches!(response, QueueResponse::MethodNotFound);
+    let resume = matches!(response, QueueResponse::ResumeRejected);
     let server_home = codex_home.path().to_path_buf();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
@@ -182,6 +251,7 @@ async fn run_remote_queue_command(response: QueueResponse) -> Result<(Output, Va
         .env("CODEX_HOME", codex_home.path())
         .env("CODEX_REMOTE_TOKEN", "test-token")
         .args(remote_args)
+        .args(resume.then_some("--resume"))
         .args(["--thread", THREAD_ID, "--message", "do the thing"])
         .output()
         .await?;
@@ -190,8 +260,370 @@ async fn run_remote_queue_command(response: QueueResponse) -> Result<(Output, Va
 
 #[cfg(unix)]
 #[tokio::test]
+async fn remote_session_commands_with_workload_identity_use_server_auth() -> Result<()> {
+    use std::time::Duration;
+
+    use app_test_support::MockResponsesConfig;
+    use app_test_support::TestAppServer;
+    use app_test_support::create_final_assistant_message_sse_response;
+    use codex_app_server_client::AppServerEvent;
+    use codex_app_server_client::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY;
+    use codex_app_server_client::RemoteAppServerClient;
+    use codex_app_server_client::RemoteAppServerConnectArgs;
+    use codex_app_server_client::RemoteAppServerEndpoint;
+    use codex_app_server_protocol::ClientRequest;
+    use codex_app_server_protocol::RequestId;
+    use codex_app_server_protocol::ServerNotification;
+    use codex_app_server_protocol::ThreadListParams;
+    use codex_app_server_protocol::ThreadListResponse;
+    use codex_app_server_protocol::ThreadQueueListParams;
+    use codex_app_server_protocol::ThreadQueueListResponse;
+    use codex_app_server_protocol::ThreadReadParams;
+    use codex_app_server_protocol::ThreadReadResponse;
+    use codex_app_server_protocol::ThreadSetNameParams;
+    use codex_app_server_protocol::ThreadSetNameResponse;
+    use codex_app_server_protocol::ThreadStartParams;
+    use codex_app_server_protocol::ThreadStartResponse;
+    use codex_app_server_protocol::ThreadStatus;
+    use codex_app_server_protocol::TurnStatus;
+    use codex_protocol::shell_environment::OPENAI_FEDERATION_RULE_ID_ENV_VAR;
+    use codex_protocol::shell_environment::OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR;
+    use core_test_support::responses;
+    use tokio::process::Command;
+    use tokio::time::timeout;
+    use wiremock::Mock;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
+
+    let codex_home = socket_test_home()?;
+    let codex = codex_utils_cargo_bin::cargo_bin("codex")?;
+    let model = responses::start_mock_server().await;
+    let model_requests = Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(responses::sse_response(
+            create_final_assistant_message_sse_response("queued message consumed")?,
+        ))
+        .expect(2)
+        .mount_as_scoped(&model)
+        .await;
+    MockResponsesConfig::new(&model.uri())
+        .with_root_config("features.plugins = false\nanalytics.enabled = false")
+        .with_provider_config("env_key = \"CODEX_QUEUE_SERVER_API_KEY\"")
+        .write(codex_home.path())?;
+    let _server = TestAppServer::builder()
+        .with_program(&codex)
+        .with_codex_home(codex_home.path())
+        .with_plugin_startup_tasks()
+        .without_managed_config()
+        .with_args(&["app-server", "--listen", "unix://"])
+        .with_env_overrides(&[
+            ("OPENAI_API_KEY", None),
+            ("CODEX_API_KEY", None),
+            ("CODEX_ACCESS_TOKEN", None),
+            (OPENAI_FEDERATION_RULE_ID_ENV_VAR, None),
+            (OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR, None),
+            ("CODEX_QUEUE_SERVER_API_KEY", Some("server-only-test-key")),
+        ])
+        .build()
+        .await?;
+    let socket_path = codex_app_server::app_server_control_socket_path(codex_home.path())?;
+    timeout(Duration::from_secs(30), async {
+        while !socket_path.as_path().try_exists()? {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+
+    let endpoint = format!("unix://{}", socket_path.as_path().display());
+    let mut app = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
+        required_human_approval: false,
+        endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
+        client_name: "queue-e2e-test".to_string(),
+        client_version: "0.1.0".to_string(),
+        experimental_api: true,
+        mcp_server_openai_form_elicitation: false,
+        opt_out_notification_methods: Vec::new(),
+        channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+    })
+    .await?;
+    let started: ThreadStartResponse = app
+        .request_typed(ClientRequest::ThreadStart {
+            request_id: RequestId::Integer(1),
+            params: ThreadStartParams::default(),
+        })
+        .await?;
+    let thread_id = started.thread.id;
+    let message = "synthetic WIF queue end-to-end message";
+    let output = timeout(
+        Duration::from_secs(30),
+        Command::new(&codex)
+            .env("CODEX_HOME", codex_home.path())
+            .env(OPENAI_FEDERATION_RULE_ID_ENV_VAR, "rule-test")
+            .env(
+                OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR,
+                codex_home.path().join("missing-identity-token"),
+            )
+            .env_remove("CODEX_QUEUE_SERVER_API_KEY")
+            .kill_on_drop(true)
+            .args(["queue", "--resume", "--remote", "unix://"])
+            .args(["--thread", &thread_id, "--message", message])
+            .output(),
+    )
+    .await??;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let completed = timeout(Duration::from_secs(30), async {
+        while let Some(event) = app.next_event().await {
+            if let AppServerEvent::ServerNotification(notification) = event
+                && let ServerNotification::TurnCompleted(completed) = *notification
+            {
+                return Ok::<_, anyhow::Error>(completed);
+            }
+        }
+        anyhow::bail!("app server disconnected before the queued turn completed")
+    })
+    .await??;
+    assert_eq!(completed.thread_id, thread_id);
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
+    let queue: ThreadQueueListResponse = app
+        .request_typed(ClientRequest::ThreadQueueList {
+            request_id: RequestId::Integer(2),
+            params: ThreadQueueListParams {
+                thread_id: thread_id.clone(),
+                cursor: None,
+                limit: None,
+            },
+        })
+        .await?;
+    assert!(queue.data.is_empty());
+
+    let requests = model_requests.received_requests().await;
+    let request = requests
+        .first()
+        .context("queued message did not reach the model")?;
+    assert!(
+        request.body_json::<Value>()?["input"]
+            .to_string()
+            .contains(message)
+    );
+    assert_eq!(
+        request.headers["authorization"].to_str()?,
+        "Bearer server-only-test-key"
+    );
+    let metadata: Value = serde_json::from_str(request.headers["x-codex-turn-metadata"].to_str()?)?;
+    assert_eq!(metadata["turn_trigger"], "queue");
+
+    let name = "remote-session-lifecycle";
+    let _: ThreadSetNameResponse = app
+        .request_typed(ClientRequest::ThreadSetName {
+            request_id: RequestId::Integer(3),
+            params: ThreadSetNameParams {
+                thread_id: thread_id.clone(),
+                name: name.to_string(),
+            },
+        })
+        .await?;
+    // A separate caller home makes name resolution rely on the selected server.
+    let caller_home = TempDir::new()?;
+    let remote_command = || {
+        let mut command = Command::new(&codex);
+        command
+            .env("CODEX_HOME", caller_home.path())
+            .current_dir(caller_home.path())
+            .env(OPENAI_FEDERATION_RULE_ID_ENV_VAR, "rule-test")
+            .env(
+                OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR,
+                caller_home.path().join("missing-identity-token"),
+            )
+            .env_remove("CODEX_QUEUE_SERVER_API_KEY")
+            .kill_on_drop(true)
+            .args(["--remote", &endpoint]);
+        command
+    };
+    let output = timeout(
+        Duration::from_secs(30),
+        remote_command().args(["delete", &thread_id]).output(),
+    )
+    .await??;
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)?.contains("cannot confirm session deletion"));
+
+    let cold_message = "Continue after the thread was unloaded";
+    let cases: &[(&[&str], Option<bool>)] = &[
+        (&["archive", name], Some(true)),
+        (&["unarchive", name], Some(false)),
+        (&["delete", "--force", &thread_id], None),
+    ];
+    for &(args, expected_archived) in cases {
+        let output = timeout(
+            Duration::from_secs(30),
+            remote_command().args(args).output(),
+        )
+        .await??;
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for archived in [false, true] {
+            let threads: ThreadListResponse = app
+                .request_typed(ClientRequest::ThreadList {
+                    request_id: RequestId::Integer(4),
+                    params: ThreadListParams {
+                        include_attached_threads: false,
+                        current_account_only: false,
+                        excluded_thread_ids: None,
+                        attached_to_thread_id: None,
+                        cursor: None,
+                        limit: None,
+                        sort_key: None,
+                        sort_direction: None,
+                        model_providers: None,
+                        source_kinds: None,
+                        originators: None,
+                        archived: Some(archived),
+                        section_id: None,
+                        project_id: None,
+                        cwd: None,
+                        use_state_db_only: false,
+                        search_term: None,
+                        parent_thread_id: None,
+                        ancestor_thread_id: None,
+                    },
+                })
+                .await?;
+            let thread = threads.data.iter().find(|thread| thread.id == thread_id);
+            assert_eq!(
+                thread.is_some(),
+                expected_archived == Some(archived),
+                "{args:?}: archived={archived}"
+            );
+            if expected_archived == Some(false)
+                && let Some(thread) = thread
+            {
+                assert_eq!(thread.status, ThreadStatus::NotLoaded);
+            }
+        }
+        let Some(archived) = expected_archived else {
+            continue;
+        };
+        // Archived threads are reachable by ID; active threads can also be targeted by name.
+        let (target, text) = if archived {
+            (thread_id.as_str(), "still archived")
+        } else {
+            (name, cold_message)
+        };
+        let output = remote_command()
+            .args(["queue", "--resume", "--thread", target, "--message", text])
+            .output()
+            .await?;
+        if archived {
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8(output.stderr)?
+                    .contains(&format!("session {thread_id} is archived"))
+            );
+        } else {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            timeout(
+                Duration::from_secs(30),
+                model_requests.wait_until_satisfied(),
+            )
+            .await?;
+            let requests = model_requests.received_requests().await;
+            assert!(
+                requests[1].body_json::<Value>()?["input"]
+                    .to_string()
+                    .contains(cold_message)
+            );
+            // The mock receives the request before the resumed turn finishes. Deletion
+            // requires an idle thread, and archiving removed our original subscription.
+            timeout(Duration::from_secs(30), async {
+                loop {
+                    let read: ThreadReadResponse = app
+                        .request_typed(ClientRequest::ThreadRead {
+                            request_id: RequestId::Integer(5),
+                            params: ThreadReadParams {
+                                thread_id: thread_id.clone(),
+                                include_turns: true,
+                            },
+                        })
+                        .await?;
+                    if let Some(last) = read.thread.turns.last()
+                        && last.id != completed.turn.id
+                        && last.status == TurnStatus::Completed
+                        && matches!(
+                            read.thread.status,
+                            ThreadStatus::Idle | ThreadStatus::NotLoaded
+                        )
+                    {
+                        return anyhow::Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .context("resumed queued turn did not finish before deletion")??;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn remote_session_commands_validate_config() -> Result<()> {
+    let cases: &[(&[&str], &str, &str)] = &[
+        (
+            &["--strict-config"],
+            "config.toml",
+            "unknown_queue_option = true\n",
+        ),
+        (&["--profile", "queue"], "queue.config.toml", "model = 42\n"),
+        (
+            &[],
+            "config.toml",
+            "experimental_thread_store_endpoint = \"https://example.com\"\n",
+        ),
+    ];
+    let commands: &[&[&str]] = &[
+        &["queue", "--thread", THREAD_ID, "--message", "do the thing"],
+        &["archive", THREAD_ID],
+        &["unarchive", THREAD_ID],
+        &["delete", "--force", THREAD_ID],
+    ];
+    for &command in commands {
+        for &(args, config_file, config) in cases {
+            let codex_home = TempDir::new()?;
+            std::fs::write(codex_home.path().join(config_file), config)?;
+            let output = std::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?)
+                .env("CODEX_HOME", codex_home.path())
+                .current_dir(codex_home.path())
+                .args(args)
+                .args(["--remote", "ws://127.0.0.1:1"])
+                .args(command)
+                .output()?;
+            let stderr = String::from_utf8(output.stderr)?;
+            assert!(!output.status.success());
+            assert!(
+                stderr.contains("failed to load config.toml"),
+                "{command:?}, {config:?}: {stderr}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn queue_rejects_local_daemon_that_does_not_support_queueing() -> Result<()> {
-    let codex_home = tempfile::tempdir_in("/tmp")?;
+    let codex_home = socket_test_home()?;
     let socket_path = codex_app_server::app_server_control_socket_path(codex_home.path())?;
     std::fs::create_dir_all(
         socket_path
@@ -232,7 +664,7 @@ async fn queue_rejects_local_daemon_that_does_not_support_queueing() -> Result<(
 #[cfg(unix)]
 #[tokio::test]
 async fn queue_rejects_overrides_that_bypass_local_daemon() -> Result<()> {
-    let codex_home = tempfile::tempdir_in("/tmp")?;
+    let codex_home = socket_test_home()?;
     let socket_path = codex_app_server::app_server_control_socket_path(codex_home.path())?;
     std::fs::create_dir_all(
         socket_path
@@ -251,8 +683,10 @@ async fn queue_rejects_overrides_that_bypass_local_daemon() -> Result<()> {
         .env("CODEX_HOME", codex_home.path())
         .args([
             "queue",
+            "-C",
+            ".",
             "-c",
-            "model=\"test-model\"",
+            "analytics.enabled=false",
             "--thread",
             THREAD_ID,
             "--message",
@@ -260,12 +694,11 @@ async fn queue_rejects_overrides_that_bypass_local_daemon() -> Result<()> {
         ])
         .output()
         .await?;
-    server.await??;
-
     assert!(!output.status.success());
     assert!(
         String::from_utf8(output.stderr)?
             .contains("embedded app server while a local app-server daemon is running")
     );
+    server.await??;
     Ok(())
 }

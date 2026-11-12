@@ -1,4 +1,5 @@
 use super::*;
+use codex_mcp::McpServerKey;
 use codex_tools::LoadableToolSpec;
 use codex_tools::ToolSearchSourceInfo;
 use pretty_assertions::assert_eq;
@@ -17,6 +18,21 @@ fn search_info_uses_mcp_tool_metadata_and_parameter_names() {
         search_info.source_info,
         Some(ToolSearchSourceInfo {
             name: "Calendar".to_string(),
+            description: Some("Plan events.".to_string()),
+        })
+    );
+
+    let mut scoped = tool_info();
+    scoped.server_key = McpServerKey::in_environment("env-b", scoped.server_name());
+    scoped.callable_namespace = "mcp__123456789abc__calendar".to_string();
+    let handler = McpHandler::new(scoped).expect("scoped MCP tool spec should build");
+    assert_eq!(
+        handler
+            .search_info()
+            .expect("scoped MCP search info")
+            .source_info,
+        Some(ToolSearchSourceInfo {
+            name: "mcp__123456789abc__calendar".to_string(),
             description: Some("Plan events.".to_string()),
         })
     );
@@ -62,7 +78,7 @@ fn mcp_namespace_descriptions_preserve_complete_metadata() {
     };
     assert_eq!(namespace.description, full_description);
     assert_eq!(
-        handler.tool_info.namespace_description,
+        handler.tool_info().namespace_description,
         Some(full_description)
     );
 }
@@ -92,8 +108,9 @@ fn mcp_namespace_descriptions_are_bounded_at_512_kib() {
 #[test]
 fn agent_plugin_namespace_descriptions_use_the_stricter_bound() {
     let expected_description = "é".repeat(MAX_AGENT_PLUGIN_MCP_NAMESPACE_DESCRIPTION_BYTES / 2);
+    let full_description = format!("{expected_description}overflow");
     let mut info = tool_info();
-    info.namespace_description = Some(format!("{expected_description}overflow"));
+    info.namespace_description = Some(full_description.clone());
     let handler = McpHandler::new_agent_plugin(info).expect("MCP tool spec should build");
     let search_info = handler.search_info().expect("MCP search info");
 
@@ -108,11 +125,15 @@ fn agent_plugin_namespace_descriptions_use_the_stricter_bound() {
         panic!("expected namespace search output");
     };
     assert_eq!(namespace.description, expected_description);
+    assert_eq!(
+        handler.tool_info().namespace_description.as_deref(),
+        Some(full_description.as_str())
+    );
 }
 
 fn tool_info() -> ToolInfo {
     ToolInfo {
-        server_name: "codex-apps".to_string(),
+        server_key: McpServerKey::unscoped("codex-apps"),
         supports_parallel_tool_calls: false,
         server_origin: None,
         callable_name: "_create_event".to_string(),

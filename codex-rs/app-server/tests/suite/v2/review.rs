@@ -6,31 +6,23 @@ use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence;
 use codex_app_server_protocol::ClientRequest;
-use codex_app_server_protocol::DeprecationNoticeNotification;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCError;
-use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewDelivery;
 use codex_app_server_protocol::ReviewStartParams;
 use codex_app_server_protocol::ReviewStartResponse;
 use codex_app_server_protocol::ReviewTarget;
 use codex_app_server_protocol::ServerRequest;
-use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
-use codex_app_server_protocol::ThreadStartedNotification;
-use codex_app_server_protocol::ThreadStatusChangedNotification;
 use codex_app_server_protocol::TurnItemsView;
-use codex_app_server_protocol::TurnStartParams;
-use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_features::Feature;
-use codex_skills::system_cache_root_dir;
-use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
@@ -39,57 +31,6 @@ use tokio::time::timeout;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
-const COLLIDING_REVIEW_SKILL_MARKER: &str = "COLLIDING_REVIEW_SKILL_MARKER";
-
-#[tokio::test]
-async fn review_start_rejects_detached_delivery_for_paginated_parent() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_auto_env()
-        .build_initialized()
-        .await?;
-    let ThreadStartResponse { thread, .. } = mcp
-        .request(|request_id| ClientRequest::ThreadStart {
-            request_id,
-            params: ThreadStartParams {
-                history_mode: Some(ThreadHistoryMode::Paginated),
-                ..Default::default()
-            },
-        })
-        .await?;
-
-    let review_id = mcp
-        .send_review_start_request(ReviewStartParams {
-            thread_id: thread.id,
-            delivery: Some(ReviewDelivery::Detached),
-            target: ReviewTarget::Custom {
-                instructions: "detached review".to_string(),
-            },
-        })
-        .await?;
-    let review_err: JSONRPCError = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(review_id)),
-    )
-    .await??;
-    assert_eq!(review_err.error.code, -32600);
-    assert_eq!(
-        review_err.error.message,
-        "paginated threads do not support detached review"
-    );
-    assert!(
-        mcp.pending_notification_methods()
-            .iter()
-            .any(|method| method == "deprecationNotice"),
-        "rejected detached requests should still emit a deprecation notice"
-    );
-
-    Ok(())
-}
 
 #[test_case(None; "omitted_delivery")]
 #[test_case(Some(json!(null)); "null_delivery")]
@@ -148,14 +89,14 @@ async fn review_start_runs_review_turn_and_emits_code_review_item(
     assert_eq!(turn.items_view, TurnItemsView::NotLoaded);
     assert_eq!(
         turn.items,
-        vec![ThreadItem::UserMessage {
+        [ThreadItem::untimed(ThreadItemPayload::UserMessage {
             id: turn_id.clone(),
             client_id: None,
             content: vec![V2UserInput::Text {
                 text: "commit 1234567: Tidy UI colors".to_string(),
                 text_elements: Vec::new(),
             }],
-        }]
+        })]
     );
 
     // Confirm we see the EnteredReviewMode marker on the main thread.
@@ -163,8 +104,8 @@ async fn review_start_runs_review_turn_and_emits_code_review_item(
     for _ in 0..10 {
         let started: ItemStartedNotification =
             timeout(DEFAULT_READ_TIMEOUT, mcp.read_notification("item/started")).await??;
-        match started.item {
-            ThreadItem::EnteredReviewMode { review, .. } => {
+        match started.item.payload {
+            ThreadItemPayload::EnteredReviewMode { review, .. } => {
                 assert_eq!(started.turn_id, turn_id);
                 assert_eq!(review, "commit 1234567: Tidy UI colors");
                 saw_entered_review_mode = true;
@@ -187,8 +128,8 @@ async fn review_start_runs_review_turn_and_emits_code_review_item(
             mcp.read_notification("item/completed"),
         )
         .await??;
-        match completed.item {
-            ThreadItem::ExitedReviewMode { review, .. } => {
+        match completed.item.payload {
+            ThreadItemPayload::ExitedReviewMode { review, .. } => {
                 assert_eq!(completed.turn_id, turn_id);
                 review_body = Some(review);
                 break;
@@ -257,14 +198,14 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
     assert_eq!(turn.items_view, TurnItemsView::NotLoaded);
     assert_eq!(
         turn.items,
-        vec![ThreadItem::UserMessage {
+        [ThreadItem::untimed(ThreadItemPayload::UserMessage {
             id: turn_id.clone(),
             client_id: None,
             content: vec![V2UserInput::Text {
                 text: "commit 1234567: Check review approvals".to_string(),
                 text_elements: Vec::new(),
             }],
-        }]
+        })]
     );
 
     let server_req = timeout(
@@ -282,7 +223,7 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
     for _ in 0..10 {
         let started: ItemStartedNotification =
             timeout(DEFAULT_READ_TIMEOUT, mcp.read_notification("item/started")).await??;
-        if let ThreadItem::CommandExecution { id, .. } = started.item {
+        if let ThreadItemPayload::CommandExecution { id, .. } = started.item.payload {
             command_item_id = Some(id);
             break;
         }
@@ -589,29 +530,6 @@ async fn start_default_thread(mcp: &mut TestAppServer) -> Result<String> {
     )
     .await??;
     Ok(thread.id)
-}
-
-async fn materialize_thread_rollout(mcp: &mut TestAppServer, thread_id: &str) -> Result<()> {
-    let _: TurnStartResponse = mcp
-        .request(|request_id| ClientRequest::TurnStart {
-            request_id,
-            params: TurnStartParams {
-                thread_id: thread_id.to_string(),
-                client_user_message_id: None,
-                input: vec![V2UserInput::Text {
-                    text: "materialize rollout".to_string(),
-                    text_elements: Vec::new(),
-                }],
-                ..Default::default()
-            },
-        })
-        .await?;
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("turn/completed"),
-    )
-    .await??;
-    Ok(())
 }
 
 fn create_config_toml(codex_home: &std::path::Path, server_uri: &str) -> std::io::Result<()> {

@@ -1,5 +1,6 @@
 use super::PluginMcpConfigParseOutcome;
 use super::PluginMcpServerParseError;
+use super::normalize_executor_plugin_mcp_declarations;
 use super::parse_agent_plugin_mcp_config;
 use super::parse_executor_plugin_mcp_config;
 use super::parse_plugin_mcp_config;
@@ -535,7 +536,9 @@ fn stdio_server(
         environment_id: environment_id.to_string(),
         enabled: true,
         required: false,
+        startup_readiness: Default::default(),
         supports_parallel_tool_calls: false,
+        tool_input_schema_max_bytes: None,
         omit_tools_from: None,
         disabled_reason: None,
         startup_timeout_sec: None,
@@ -571,7 +574,9 @@ fn declared_placement_preserves_local_plugin_normalization() {
         environment_id: DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
         enabled: true,
         required: false,
+        startup_readiness: Default::default(),
         supports_parallel_tool_calls: false,
+        tool_input_schema_max_bytes: None,
         omit_tools_from: None,
         disabled_reason: None,
         startup_timeout_sec: None,
@@ -582,6 +587,7 @@ fn declared_placement_preserves_local_plugin_normalization() {
         scopes: None,
         oauth: Some(McpServerOAuthConfig {
             client_id: Some("client-id".to_string()),
+            client_secret: Some("plugin-client-secret".into()),
             callback_url: Some("http://127.0.0.1/callback/registered".to_string()),
             callback_port: Some(9876),
             ..Default::default()
@@ -613,7 +619,7 @@ fn declared_placement_preserves_local_plugin_normalization() {
             "hosted": {
                 "type": "http",
                 "url": "https://example.com/mcp",
-                "oauth": {"clientId": "client-id", "callbackUrl": "http://127.0.0.1/callback/registered", "callbackPort": 9876}
+                "oauth": {"clientId": "client-id", "clientSecret": "plugin-client-secret", "callbackUrl": "http://127.0.0.1/callback/registered", "callbackPort": 9876}
             },
             "helper": {"type":"http","url":"https://example.com/mcp","http_headers_helper":"./auth.sh"}
         }"#,
@@ -745,6 +751,18 @@ fn executor_environment_placement_resolves_foreign_uri_cwd() {
         "executor-1",
     )
     .expect("parse plugin MCP config");
+
+    assert_eq!(
+        normalize_executor_plugin_mcp_declarations(
+            &plugin_root,
+            BTreeMap::from([(
+                "demo".to_string(),
+                serde_json::json!({"command": "demo-mcp", "cwd": "scripts"}),
+            )]),
+            "executor-1",
+        ),
+        outcome
+    );
 
     assert_eq!(
         outcome,
@@ -890,7 +908,9 @@ fn local_environment_placement_preserves_http_env_references() {
                     environment_id: DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
                     enabled: true,
                     required: false,
+                    startup_readiness: Default::default(),
                     supports_parallel_tool_calls: false,
+                    tool_input_schema_max_bytes: None,
                     omit_tools_from: None,
                     disabled_reason: None,
                     startup_timeout_sec: None,

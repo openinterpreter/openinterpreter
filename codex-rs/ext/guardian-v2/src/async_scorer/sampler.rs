@@ -4,12 +4,14 @@
 mod connection_pool;
 mod execution;
 
+pub(super) use telemetry::SampledScore;
+
+use super::request::PreparedRequest;
+use super::score::PendingScore;
+use codex_login::AuthOwner;
 use connection_pool::ConnectionPool;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 
 use codex_api::ApiError;
 use codex_api::Reasoning;
@@ -17,10 +19,11 @@ use codex_api::ReasoningContext;
 use codex_api::ResponsesApiRequest;
 use codex_context_fragments::RenderedFragment;
 use codex_extension_api::ExtensionMetrics;
+use codex_history::ResponseItemEnvelope;
 use codex_http_client::HttpClientFactory;
 use codex_login::AgentIdentityAuthPolicy;
 use codex_model_provider::SharedModelProvider;
-use codex_protocol::ResponseItemId;
+use codex_model_provider::WorkspaceRoutingContext;
 use codex_protocol::error::CodexErr;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
@@ -41,6 +44,12 @@ const MAX_CONCURRENT_REQUESTS: usize = 16;
 pub struct LunaSamplerConfig {
     /// Provider and credentials selected for the owning thread.
     pub provider: SharedModelProvider,
+    /// Provider and feature policy shared with ordinary model requests.
+    pub api_key_cyber_access_programs: ApiKeyCyberAccessPrograms,
+    /// False when the parent host confines its explicit program to that thread.
+    pub inherit_parent_cyber_access_program: bool,
+    /// Routing scope and retained configuration layers for the owning thread.
+    pub workspace_routing: WorkspaceRoutingContext,
     /// Effective proxy, custom-CA, and cookie configuration.
     pub http_client_factory: HttpClientFactory,
     /// Agent-identity policy selected for the owning thread.
@@ -65,6 +74,10 @@ pub struct LunaSamplerConfig {
 
 /// One tool-less Luna classification request.
 pub struct LunaSamplingRequest {
+    /// Generator selected by the owning session for response items.
+    pub item_id_generator: codex_protocol::ItemIdGenerator,
+    /// Cyber selection captured from the owning turn; Daybreak reviews use Blue.
+    pub cyber_access_program: Option<CyberAccessProgram>,
     /// ID of the response handling the classified tool.
     pub parent_response_id: Option<String>,
     /// Trusted classifier instructions with their role and content attribution.
@@ -73,14 +86,20 @@ pub struct LunaSamplingRequest {
     pub input: Vec<ResponseItem>,
     /// Opaque parent compaction to reuse only for compatible model configurations.
     pub parent_compaction: Option<ResponseItem>,
-    /// Host-selected compatibility hash for the supplied parent checkpoint.
-    pub parent_compaction_hash: Option<String>,
     /// Reasoning budget explicitly selected for this request.
     pub reasoning_effort: ReasoningEffort,
     /// Owning turn that initiated this classification, not the classifier turn.
     pub parent_turn_id: String,
     /// Trusted causal root of the owning turn, absent when unknown or ambiguous.
     pub root_turn_id: Option<String>,
+    /// Sampling expiry remains active until its response finishes draining.
+    pub(super) pending_score: Option<PendingScore>,
+}
+
+/// Admitted retained input and Luna settings consumed together at execution.
+pub(super) struct ConversationSample {
+    pub(super) input: PreparedRequest,
+    pub(super) sampling: LunaSamplingRequest,
 }
 
 /// Failures returned while connecting or sampling the Luna model.
@@ -101,7 +120,7 @@ pub enum LunaSamplerError {
     /// The response exceeded the bounded output limit.
     #[error("Luna response exceeded the output limit")]
     OutputTooLarge,
-    /// A newer classification replaced this request when the pool was full.
+    /// The classification expired, lost its owning generation, or was replaced at capacity.
     #[error("Luna request was superseded by a newer classification")]
     Superseded,
     /// The supplied parent checkpoint cannot be consumed by this Luna configuration.
@@ -121,7 +140,6 @@ struct ActiveRequest {
 pub struct LunaSampler {
     config: Arc<LunaSamplerConfig>,
     connections: Arc<ConnectionPool>,
-    active_requests: Mutex<VecDeque<ActiveRequest>>,
 }
 
 impl LunaSampler {
@@ -139,13 +157,19 @@ impl LunaSampler {
         Self {
             connections: ConnectionPool::new(Arc::clone(&config)),
             config,
-            active_requests: Mutex::new(VecDeque::with_capacity(MAX_CONCURRENT_REQUESTS)),
         }
     }
 
     pub(super) async fn prewarm(&self) {
-        if let Some(refill) = self.connections.replenish() {
-            let _ = refill.await;
+        self.connections.prewarm().await;
+    }
+
+    fn auth_owner(&self) -> Option<AuthOwner> {
+        let provider = &self.config.provider;
+        if provider.info().auth.is_none() {
+            codex_model_provider::request_auth_owner(provider.as_ref())
+        } else {
+            None
         }
     }
 
@@ -188,7 +212,7 @@ impl LunaSampler {
             if item.id().is_none()
                 && let Some(prefix) = item.id_prefix()
             {
-                item.set_id(Some(ResponseItemId::new(prefix)));
+                item.set_id(Some((request.item_id_generator)(prefix)));
             }
         }
         let total_tokens = input
@@ -215,13 +239,12 @@ impl LunaSampler {
         }
         let request = ResponsesApiRequest {
             model: MODEL.to_owned(),
-            instructions: String::new(),
             input,
             tools: None,
             tool_choice: "none".to_owned(),
             parallel_tool_calls: false,
             reasoning: Some(Reasoning {
-                effort: Some(request.reasoning_effort),
+                effort: Some(request.reasoning_effort.clone()),
                 summary: None,
                 context: Some(ReasoningContext::AllTurns),
             }),
@@ -231,6 +254,7 @@ impl LunaSampler {
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: Some(format!("guardian-v2:{}", self.config.thread_id)),
+            prompt_cache_options: None,
             text: None,
             client_metadata: None,
             access_programs: None,

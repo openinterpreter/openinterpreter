@@ -35,6 +35,9 @@ jobs:
             '
 
   sdks:
+    # This job builds its CLI with Bazel. Keep it advisory while the BuildBuddy
+    # key is revoked; restore blocking behavior once it can run without BuildBuddy.
+    continue-on-error: true
     runs-on:
       group: ${{ github.event.repository.name }}-runners
       labels: ${{ github.event.repository.name }}-linux-x64
@@ -63,7 +66,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
 
       - name: Prepare Bazel CI

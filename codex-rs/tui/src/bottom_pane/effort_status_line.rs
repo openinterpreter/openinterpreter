@@ -13,17 +13,18 @@
 
 use std::cell::Cell;
 use std::time::Duration;
-use std::time::Instant;
 
 use ratatui::style::Color;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
+use tokio::time::Instant;
 
 use crate::color::blend;
 use crate::color::is_light;
 use crate::line_truncation::truncate_line_to_width;
+use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_palette::best_color;
 use crate::terminal_palette::default_bg;
 use crate::terminal_palette::default_fg;
@@ -61,48 +62,58 @@ impl EffortTier {
 
 pub(crate) struct EffortStatusLineTransition {
     tier: EffortTier,
-    previous: Line<'static>,
-    started_at: Cell<Option<Instant>>,
+    previous: HyperlinkLine,
+    phase: Cell<TransitionPhase>,
+}
+
+#[derive(Clone, Copy)]
+enum TransitionPhase {
+    Pending,
+    Running(Instant),
+    Finished,
 }
 
 impl EffortStatusLineTransition {
-    pub(crate) fn new(tier: EffortTier, previous: Line<'static>) -> Self {
+    pub(crate) fn new(tier: EffortTier, previous: HyperlinkLine) -> Self {
         Self {
             tier,
             previous,
-            started_at: Cell::new(None),
+            phase: Cell::new(TransitionPhase::Pending),
         }
     }
 
     pub(crate) fn is_finished(&self) -> bool {
-        self.started_at
-            .get()
-            .is_some_and(|started| started.elapsed() >= TOTAL)
+        matches!(self.phase.get(), TransitionPhase::Finished)
     }
 
     pub(crate) fn render_line(
         &self,
-        current: Option<&Line<'static>>,
+        current: Option<HyperlinkLine>,
         width: u16,
-    ) -> Option<Line<'static>> {
-        let elapsed = match self.started_at.get() {
-            Some(started) => started.elapsed(),
-            None => {
-                self.started_at.set(Some(Instant::now()));
+    ) -> Option<HyperlinkLine> {
+        let elapsed = match self.phase.get() {
+            TransitionPhase::Pending => {
+                self.phase.set(TransitionPhase::Running(Instant::now()));
                 Duration::ZERO
             }
+            TransitionPhase::Running(started) => started.elapsed(),
+            TransitionPhase::Finished => return current,
         };
-        transition_line_at(self.tier, Some(&self.previous), current, elapsed, width)
+        // Paint the last single-row frame before the next layout restores wrapping.
+        if elapsed >= TOTAL {
+            self.phase.set(TransitionPhase::Finished);
+        }
+        transition_line_at(self.tier, &self.previous, current, elapsed, width)
     }
 }
 
 fn transition_line_at(
     tier: EffortTier,
-    previous: Option<&Line<'static>>,
-    current: Option<&Line<'static>>,
+    previous: &HyperlinkLine,
+    current: Option<HyperlinkLine>,
     elapsed: Duration,
     width: u16,
-) -> Option<Line<'static>> {
+) -> Option<HyperlinkLine> {
     let width = usize::from(width);
     if width == 0 {
         return None;
@@ -111,17 +122,22 @@ fn transition_line_at(
     if elapsed < SCROLL_OUT {
         let progress = elapsed.as_secs_f32() / SCROLL_OUT.as_secs_f32();
         let offset = (width as f32 * ease_in_cubic(progress)).round() as usize;
-        let mut line = previous.cloned()?;
+        let mut frame = previous.clone();
         let tint = 0.12 + 0.88 * progress;
         style_line(
-            &mut line,
+            &mut frame.line,
             tier,
             /*opacity*/ 1.0 - progress * progress,
             tint,
         );
-        line.spans
+        frame
+            .line
+            .spans
             .insert(/*index*/ 0, Span::raw(" ".repeat(offset)));
-        return Some(truncate_line_to_width(line, width));
+        for link in &mut frame.hyperlinks {
+            link.columns = link.columns.start + offset..link.columns.end + offset;
+        }
+        return Some(clip_frame(frame, width));
     }
 
     let after_scroll = elapsed.saturating_sub(SCROLL_OUT);
@@ -138,14 +154,23 @@ fn transition_line_at(
             let fade = after_scroll.saturating_sub(LABEL_ASSEMBLE.saturating_add(LABEL_HOLD));
             (1.0, 1.0 - fade.as_secs_f32() / LABEL_FADE_OUT.as_secs_f32())
         };
-        return Some(tier_label_line(tier, width, assemble, opacity));
+        return Some(tier_label_line(tier, width, assemble, opacity).into());
     }
 
     let fade_elapsed = after_scroll.saturating_sub(label_duration);
     let opacity = (fade_elapsed.as_secs_f32() / STATUS_FADE_IN.as_secs_f32()).clamp(0.0, 1.0);
-    let mut line = current.cloned()?;
-    style_line(&mut line, tier, opacity, /*tint*/ 0.0);
-    Some(truncate_line_to_width(line, width))
+    let mut frame = current?;
+    style_line(&mut frame.line, tier, opacity, /*tint*/ 0.0);
+    Some(clip_frame(frame, width))
+}
+
+fn clip_frame(mut frame: HyperlinkLine, width: usize) -> HyperlinkLine {
+    frame.line = truncate_line_to_width(frame.line, width);
+    if !frame.hyperlinks.is_empty() {
+        frame.clip_hyperlinks_to_width(frame.width());
+    }
+    frame.source = None;
+    frame
 }
 
 fn ease_in_cubic(progress: f32) -> f32 {

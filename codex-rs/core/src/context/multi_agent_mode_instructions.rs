@@ -1,7 +1,9 @@
 use super::ContextualUserFragment;
 use codex_prompts::ResolvedModelMessages;
 use codex_protocol::config_types::MultiAgentMode;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 use codex_protocol::protocol::MULTI_AGENT_MODE_CLOSE_TAG;
 use codex_protocol::protocol::MULTI_AGENT_MODE_OPEN_TAG;
 

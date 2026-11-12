@@ -1,6 +1,9 @@
 use super::*;
+use crate::status::StatusAccountDisplay;
 use assert_matches::assert_matches;
 use codex_config::types::ModelAvailabilityNuxConfig;
+use codex_model_provider::create_model_provider;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::openai_models::ModelAvailabilityNux;
 use pretty_assertions::assert_eq;
@@ -8,6 +11,60 @@ use tokio::sync::mpsc::unbounded_channel;
 
 fn all_model_presets() -> Vec<ModelPreset> {
     crate::test_support::TEST_MODEL_PRESETS.clone()
+}
+
+fn bedrock_model_presets() -> Vec<ModelPreset> {
+    create_model_provider(
+        ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
+        /*auth_manager*/ None,
+    )
+    .models_manager_without_cache(/*config_model_catalog*/ None)
+    .try_list_models()
+    .expect("Bedrock model catalog")
+}
+
+#[tokio::test]
+async fn queued_model_choice_expires_when_the_default_provider_changes() -> Result<()> {
+    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+    let (mut server, requests, proxy) =
+        Box::pin(session_lifecycle_requests::start_recording_app_server(
+            &app.config,
+            /*blocked_thread_list*/ None,
+            /*failed_thread_name*/ None,
+        ))
+        .await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let started = server.start_thread(&app.config).await?;
+    let thread_id = started.session.thread_id;
+    app.enqueue_primary_thread_session(started.session, started.turns)
+        .await?;
+    let original = app.chat_widget.current_model().to_string();
+    while events.try_recv().is_ok() {}
+    // An old row may arrive after a local switch, or after a different chat became active.
+    for (origin, switched) in [(thread_id, true), (ThreadId::new(), false)] {
+        *app.model_catalog.provider_write.lock().await = switched;
+        let queued = AppEvent::ScopedModelPicker {
+            backend: server.backend_id(),
+            thread_id: Some(origin),
+            event: Box::new(AppEvent::SelectSessionModel {
+                model: "foreign-only".into(),
+                effort: None,
+                service_tier: None,
+            }),
+        };
+        Box::pin(app.handle_event(&mut tui, &mut server, queued)).await?;
+        assert_eq!(app.chat_widget.current_model(), original);
+        assert!(
+            !std::iter::from_fn(|| events.try_recv().ok())
+                .any(|event| matches!(event, AppEvent::InsertHistoryCell(_)))
+        );
+    }
+    assert!(
+        session_lifecycle_requests::recorded_params(&requests, "thread/settings/update").is_empty()
+    );
+    server.shutdown().await?;
+    proxy.await??;
+    Ok(())
 }
 
 #[tokio::test]
@@ -76,6 +133,10 @@ async fn model_picker_refresh_updates_app_catalog_from_app_server() -> Result<()
         model.default_service_tier = model
             .is_default
             .then(|| ServiceTier::Fast.request_value().to_string());
+        model.available_access_programs =
+            Some(codex_protocol::openai_models::ModelAccessPrograms {
+                cyber: vec![codex_protocol::turn_input::CyberAccessProgram::Standard],
+            });
     }
     let expected = models.clone();
     Box::pin(app.handle_event(&mut tui, &mut app_server, loaded)).await?;
@@ -108,6 +169,30 @@ async fn model_picker_refresh_updates_app_catalog_from_app_server() -> Result<()
         ),
         (expected.clone(), expected)
     );
+    app.chat_widget.update_account_state(
+        Some(StatusAccountDisplay::ApiKey),
+        /*plan_type*/ None,
+        /*has_chatgpt_account*/ false,
+        /*has_codex_backend_auth*/ false,
+    );
+    let request_id = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::FetchModels { request_id } => Some(request_id),
+            _ => None,
+        })
+        .last()
+        .expect("account-scoped model refresh");
+    let stripped = app.chat_widget.model_catalog().try_list_models()?;
+    Box::pin(app.handle_event(
+        &mut tui,
+        &mut app_server,
+        AppEvent::ApiKeyCompatModelsLoaded {
+            request_id,
+            result: Ok(stripped.clone()),
+        },
+    ))
+    .await?;
+    assert_eq!(app.model_catalog.try_list_models()?, stripped);
     let mut config = app.config.clone();
     config.service_tier = None;
     config.features.enable(Feature::FastMode)?;
@@ -175,7 +260,7 @@ async fn model_migration_prompt_only_shows_for_deprecated_models() {
     let seen = BTreeMap::new();
     let presets = model_presets_with_test_upgrades();
     assert!(should_show_model_migration_prompt(
-        "gpt-5.2", "gpt-5.5", &seen, &presets
+        "openai", "gpt-5.2", "gpt-5.5", &seen, &presets
     ));
     assert!(should_show_model_migration_prompt(
         "gpt-5.4",
@@ -184,7 +269,7 @@ async fn model_migration_prompt_only_shows_for_deprecated_models() {
         &presets
     ));
     assert!(!should_show_model_migration_prompt(
-        "gpt-5.4", "gpt-5.4", &seen, &presets
+        "openai", "gpt-5.4", "gpt-5.4", &seen, &presets
     ));
 }
 
@@ -564,6 +649,7 @@ async fn model_migration_prompt_shows_for_hidden_model() {
         .show_in_picker = true;
     assert!(
         should_show_model_migration_prompt(
+            "openai",
             &current.model,
             &upgrade.id,
             &config.notices.model_migrations,

@@ -11,11 +11,15 @@ use codex_features::Feature;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
+use codex_login::CodexAuth;
+use codex_protocol::AgentPath;
+use codex_protocol::TranscriptFormat;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::ImageReference;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadRolledBackEvent;
@@ -110,6 +114,7 @@ async fn guardian_history_survives_restart_and_user_fork(
     let items: Vec<RolloutItem> =
         serde_json::from_value(serde_json::to_value(model_context.items)?)?;
     let history = InitialHistory::Resumed(ResumedHistory {
+        history_revision: None,
         conversation_id: thread_id,
         history: Arc::new(items),
         rollout_path: None,

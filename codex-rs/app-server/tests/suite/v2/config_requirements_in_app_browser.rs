@@ -63,7 +63,10 @@ async fn config_requirements_read_preserves_import_policy() -> Result<()> {
         if let Some(requirements) = wire["requirements"].as_object() {
             assert_eq!(requirements.get("inAppBrowser"), Some(&expected_wire));
         } else {
-            assert_eq!(wire, json!({ "requirements": null }));
+            assert_eq!(
+                wire,
+                json!({ "requirements": null, "supportsIndependentSpeedModes": true })
+            );
         }
         let response: ConfigRequirementsReadResponse = serde_json::from_value(wire)?;
         let actual = response
@@ -106,6 +109,7 @@ async fn import_policy_is_separate_from_browser_feature_and_agent_policy() -> Re
                 allow_external_browser_settings_import: Some(false),
             }),
             Some(BrowserUseRequirements {
+                extension: None,
                 allow_webmcp: None,
                 allow_history_access: None,
                 disable_auto_review: Some(true),

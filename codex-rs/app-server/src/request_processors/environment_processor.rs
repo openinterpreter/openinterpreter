@@ -1,4 +1,6 @@
 use super::*;
+use codex_config::ScopedSkillsConfig;
+use codex_exec_server::RemoteEnvironmentOptions;
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -17,12 +19,33 @@ impl EnvironmentRequestProcessor {
         &self,
         params: EnvironmentAddParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let skills = ScopedSkillsConfig {
+            required: params
+                .skills
+                .and_then(|skills| skills.required)
+                .unwrap_or_default(),
+        };
+        let options = RemoteEnvironmentOptions {
+            exec_server_url: params.exec_server_url,
+            connect_timeout: params.connect_timeout_ms.map(Duration::from_millis),
+            http_headers: params
+                .auth_bearer_token
+                .into_iter()
+                .map(|token| {
+                    (
+                        "Authorization".to_string(),
+                        format!("Bearer {}", token.into_inner()),
+                    )
+                })
+                .chain(
+                    params
+                        .websocket_request_id
+                        .map(|request_id| ("X-Request-ID".to_string(), request_id)),
+                )
+                .collect(),
+        };
         self.environment_manager
-            .upsert_environment(
-                params.environment_id,
-                params.exec_server_url,
-                params.connect_timeout_ms.map(Duration::from_millis),
-            )
+            .upsert_environment_with_options(params.environment_id, options, skills)
             .map_err(|err| invalid_request(err.to_string()))?;
         Ok(Some(EnvironmentAddResponse {}.into()))
     }

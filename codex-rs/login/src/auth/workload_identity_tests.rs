@@ -3,14 +3,18 @@ use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use base64::Engine as _;
+use codex_config::types::AuthCredentialsStoreMode;
 use codex_http_client::OutboundProxyPolicy;
+use codex_protocol::config_types::ForcedLoginMethod;
 use pretty_assertions::assert_eq;
+use serial_test::serial;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 
 use super::*;
+use crate::AuthManager;
 use crate::auth::ExternalAuthRefreshReason;
 
 fn auth_route_config(policy: OutboundProxyPolicy) -> AuthRouteConfig {
@@ -21,19 +25,193 @@ fn complete_environment() -> ProcessEnvironment {
     ProcessEnvironment {
         federation_rule_id: Some("rule-one".into()),
         identity_token_file: Some(std::env::temp_dir().join("identity-token").into_os_string()),
-        workload_identity_context: None,
+        ..ProcessEnvironment::default()
+    }
+}
+
+fn api_response(access_token: &str) -> serde_json::Value {
+    serde_json::json!({
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        "expires_in": 600,
+        "wif_product": "api",
+        "api_organization_id": "org-one",
+        "api_project_id": "proj-one",
+        "user_id": "service-account-one"
+    })
+}
+
+fn api_access_token(assertion: &str) -> String {
+    let claims = serde_json::json!({
+        "iss": "https://auth.api.openai.org",
+        "sub": "service-account-one",
+        "session_id": "family-one",
+        "jti": assertion,
+        "https://api.openai.com/auth": {
+            "user_id": "service-account-one",
+            "wif_product": "api",
+            "wif_identity_provider_id": "provider-one",
+            "wif_federation_rule_id": "rule-one",
+            "wif_runtime_authorization_version": 1,
+            "wif_provider_revision": "provider-revision-one",
+            "wif_mapping_revision": "mapping-revision-one"
+        }
+    });
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&claims).expect("serialize API WIF claims"));
+    format!("e30.{payload}.sig")
+}
+
+#[tokio::test]
+async fn api_platform_auth_refreshes_with_a_rotated_assertion() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let assertion_file = temp_dir.path().join("identity-token");
+    std::fs::write(&assertion_file, "assertion-one").expect("write assertion");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(|request: &wiremock::Request| {
+            let assertion = url::form_urlencoded::parse(&request.body)
+                .find(|(name, _)| name == "assertion")
+                .expect("assertion")
+                .1;
+            ResponseTemplate::new(200).set_body_json(api_response(&api_access_token(&assertion)))
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    let config = session_config(temp_dir.path(), &server);
+    let registry = WorkloadIdentitySessionRegistry::default();
+    let adapter = WorkloadIdentityExternalAuth::from_config_with_registry(config, &registry)
+        .expect("adapter");
+    let manager = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("unused-fallback"),
+        temp_dir.path().to_path_buf(),
+    );
+    manager
+        .set_external_auth(Arc::new(adapter))
+        .await
+        .expect("install WIF");
+    assert_eq!(
+        manager
+            .auth()
+            .await
+            .expect("initial auth")
+            .get_token()
+            .expect("token"),
+        api_access_token("assertion-one")
+    );
+    let before = *manager.auth_change_state_receiver().borrow();
+    std::fs::write(&assertion_file, "assertion-two").expect("rotate assertion");
+    let mut recovery = manager.unauthorized_recovery();
+    assert!(
+        recovery.has_next(),
+        "API WIF supports unauthorized recovery"
+    );
+    recovery.next().await.expect("refresh WIF token");
+    assert_eq!(
+        manager
+            .auth()
+            .await
+            .expect("renewed auth")
+            .get_token()
+            .expect("token"),
+        api_access_token("assertion-two")
+    );
+    assert_eq!(
+        *manager.auth_change_state_receiver().borrow(),
+        crate::AuthChangeState {
+            generation: before.generation + 1,
+            ..before
+        }
+    );
+    assert!(!temp_dir.path().join("auth.json").exists());
+
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(requests.len(), 2);
+    for (request, assertion) in requests.iter().zip(["assertion-one", "assertion-two"]) {
+        assert_eq!(request.url.path(), "/oauth/token");
+        assert_eq!(
+            url::form_urlencoded::parse(&request.body)
+                .into_owned()
+                .collect::<std::collections::BTreeMap<_, _>>(),
+            std::collections::BTreeMap::from([
+                (
+                    "grant_type".into(),
+                    "urn:ietf:params:oauth:grant-type:jwt-bearer".into()
+                ),
+                ("assertion".into(), assertion.into()),
+                ("federation_rule_id".into(), "rule-one".into()),
+            ]),
+        );
+    }
+}
+
+#[tokio::test]
+async fn api_platform_auth_requires_a_runtime_family() {
+    for family in [None, Some(""), Some(" ")] {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let mut claims: serde_json::Value =
+            crate::token_data::decode_jwt_payload(&api_access_token("unsupported"))
+                .expect("valid API WIF claims");
+        if let Some(family) = family {
+            claims["session_id"] = family.into();
+        } else {
+            claims
+                .as_object_mut()
+                .expect("claims object")
+                .remove("session_id");
+        }
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).expect("serialize API WIF claims"));
+        let invalid = format!("e30.{payload}.sig");
+        let server = MockServer::start().await;
+        let count = AtomicUsize::new(0);
+        Mock::given(method("POST"))
+            .respond_with(move |_request: &wiremock::Request| {
+                let token = if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    invalid.clone()
+                } else {
+                    api_access_token("supported")
+                };
+                ResponseTemplate::new(200).set_body_json(api_response(&token))
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        let registry = WorkloadIdentitySessionRegistry::default();
+        let adapter = WorkloadIdentityExternalAuth::from_config_with_registry(
+            session_config(temp_dir.path(), &server),
+            &registry,
+        )
+        .expect("adapter");
+        let error = adapter
+            .resolve()
+            .await
+            .expect_err("Platform WIF requires a nonempty runtime family");
+        assert!(matches!(
+            adapter.classify_error(error),
+            RefreshTokenError::Permanent(_)
+        ));
+        assert_eq!(
+            adapter
+                .resolve()
+                .await
+                .expect("unsupported credentials are evicted and re-exchanged")
+                .get_token()
+                .expect("token"),
+            api_access_token("supported")
+        );
     }
 }
 
 fn resolve_for_test(
     environment: ProcessEnvironment,
-    chatgpt_login_allowed: bool,
     chatgpt_base_url: &str,
 ) -> Result<Option<WorkloadIdentitySessionConfig>, WorkloadIdentitySessionError> {
     resolve_config(
         chatgpt_base_url,
         environment,
-        chatgpt_login_allowed,
         auth_route_config(OutboundProxyPolicy::ReqwestDefault),
     )
 }
@@ -43,7 +221,6 @@ fn markers_select_wif_and_partial_configuration_fails_closed() {
     assert!(
         resolve_for_test(
             ProcessEnvironment::default(),
-            /*chatgpt_login_allowed*/ true,
             "https://chatgpt.com/backend-api",
         )
         .expect("no markers")
@@ -55,7 +232,6 @@ fn markers_select_wif_and_partial_configuration_fails_closed() {
                 workload_identity_context: Some(r#"{"instance_id":"box-one"}"#.into()),
                 ..ProcessEnvironment::default()
             },
-            /*chatgpt_login_allowed*/ true,
             "https://chatgpt.com/backend-api",
         )
         .expect("context alone is not a WIF marker")
@@ -77,12 +253,8 @@ fn markers_select_wif_and_partial_configuration_fails_closed() {
             OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR,
         ),
     ] {
-        let error = resolve_for_test(
-            environment,
-            /*chatgpt_login_allowed*/ true,
-            "https://chatgpt.com/backend-api",
-        )
-        .expect_err("partial WIF must not fall back");
+        let error = resolve_for_test(environment, "https://chatgpt.com/backend-api")
+            .expect_err("partial WIF must not fall back");
         assert!(error.to_string().contains(missing), "{error}");
     }
 
@@ -91,27 +263,15 @@ fn markers_select_wif_and_partial_configuration_fails_closed() {
         ..complete_environment()
     };
     assert!(
-        resolve_for_test(
-            relative,
-            /*chatgpt_login_allowed*/ true,
-            "https://chatgpt.com/backend-api",
-        )
-        .expect_err("relative assertion path")
-        .to_string()
-        .contains("absolute path")
+        resolve_for_test(relative, "https://chatgpt.com/backend-api",)
+            .expect_err("relative assertion path")
+            .to_string()
+            .contains("absolute path")
     );
 }
 
 #[test]
-fn auth_policy_and_app_environment_are_enforced() {
-    let policy_error = resolve_for_test(
-        complete_environment(),
-        /*chatgpt_login_allowed*/ false,
-        "https://chatgpt.com/backend-api",
-    )
-    .expect_err("ChatGPT-disallowing policy");
-    assert!(policy_error.to_string().contains("login policy"));
-
+fn app_environment_is_enforced() {
     for (chatgpt_base_url, expected_environment, expected_token_url) in [
         (
             "https://chatgpt.com/backend-api/",
@@ -124,20 +284,15 @@ fn auth_policy_and_app_environment_are_enforced() {
             STAGING_TOKEN_URL,
         ),
     ] {
-        let config = resolve_for_test(
-            complete_environment(),
-            /*chatgpt_login_allowed*/ true,
-            chatgpt_base_url,
-        )
-        .expect("trusted app routing")
-        .expect("WIF selected");
+        let config = resolve_for_test(complete_environment(), chatgpt_base_url)
+            .expect("trusted app routing")
+            .expect("WIF selected");
         assert_eq!(config.environment, expected_environment);
         assert_eq!(config.token_url.as_str(), expected_token_url);
     }
 
     let error = resolve_for_test(
         complete_environment(),
-        /*chatgpt_login_allowed*/ true,
         "https://example.invalid/backend-api",
     )
     .expect_err("untrusted auth environment");
@@ -152,13 +307,11 @@ fn workload_context_is_preserved_without_logging_its_value() {
             workload_identity_context: Some(context.into()),
             ..complete_environment()
         },
-        /*chatgpt_login_allowed*/ true,
         "https://chatgpt.com/backend-api",
     )
     .expect("valid configuration")
     .expect("WIF selected");
 
-    assert_eq!(config.workload_identity_context.as_deref(), Some(context));
     assert!(!format!("{config:?}").contains(context));
 }
 
@@ -344,6 +497,147 @@ async fn refresh_preserves_identity_and_invalid_tokens_are_reexchanged() {
         jwt("access-three", "user-one")
     );
     assert_eq!(request_count.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn api_refresh_preserves_product_and_identity() {
+    for changed_field in [
+        Some("api_organization_id"),
+        Some("api_project_id"),
+        Some("user_id"),
+        None,
+    ] {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let server = MockServer::start().await;
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let response_count = Arc::clone(&request_count);
+        Mock::given(method("POST"))
+            .respond_with(move |_request: &wiremock::Request| {
+                match response_count.fetch_add(1, Ordering::SeqCst) {
+                    0 => ResponseTemplate::new(200)
+                        .set_body_json(api_response(&api_access_token("access-one"))),
+                    1 => match changed_field {
+                        Some(field) => {
+                            let mut body = api_response(&api_access_token("access-two"));
+                            body[field] = "another-identity".into();
+                            ResponseTemplate::new(200).set_body_json(body)
+                        }
+                        None => success_response("access-two", "account-user-one", "user-one"),
+                    },
+                    _ => ResponseTemplate::new(200)
+                        .set_body_json(api_response(&api_access_token("access-three"))),
+                }
+            })
+            .mount(&server)
+            .await;
+        let registry = WorkloadIdentitySessionRegistry::default();
+        let adapter = WorkloadIdentityExternalAuth::from_config_with_registry(
+            session_config(temp_dir.path(), &server),
+            &registry,
+        )
+        .expect("adapter");
+        assert_eq!(
+            adapter.resolve().await.expect("initial API auth"),
+            CodexAuth::from_api_key(&api_access_token("access-one"))
+        );
+        let error = adapter
+            .refresh(ExternalAuthRefreshContext {
+                reason: ExternalAuthRefreshReason::Unauthorized,
+                previous_account_id: None,
+            })
+            .await
+            .expect_err("product or identity change must be rejected");
+        assert!(matches!(
+            adapter.classify_error(error),
+            RefreshTokenError::Permanent(_)
+        ));
+        assert_eq!(
+            adapter
+                .resolve()
+                .await
+                .expect("corrected token is re-exchanged"),
+            CodexAuth::from_api_key(&api_access_token("access-three"))
+        );
+        assert_eq!(request_count.load(Ordering::SeqCst), 3);
+    }
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn resolved_product_obeys_login_and_workspace_restrictions() {
+    for (product, login_method, workspace, allowed) in [
+        ("api", ForcedLoginMethod::Api, None, true),
+        ("api", ForcedLoginMethod::Chatgpt, None, false),
+        ("chatgpt", ForcedLoginMethod::Chatgpt, None, true),
+        ("chatgpt", ForcedLoginMethod::Api, None, false),
+        (
+            "chatgpt",
+            ForcedLoginMethod::Chatgpt,
+            Some("account-one"),
+            true,
+        ),
+        (
+            "chatgpt",
+            ForcedLoginMethod::Chatgpt,
+            Some("another-account"),
+            false,
+        ),
+        (
+            "api",
+            ForcedLoginMethod::Chatgpt,
+            Some("account-one"),
+            false,
+        ),
+    ] {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let server = MockServer::start().await;
+        let response = if product == "api" {
+            ResponseTemplate::new(200).set_body_json(api_response(&api_access_token("api-access")))
+        } else {
+            success_response("chatgpt-access", "account-user-one", "user-one")
+        };
+        Mock::given(method("POST"))
+            .respond_with(response)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let registry = WorkloadIdentitySessionRegistry::default();
+        let adapter = WorkloadIdentityExternalAuth::from_config_with_registry(
+            session_config(temp_dir.path(), &server),
+            &registry,
+        )
+        .expect("adapter");
+        let manager = AuthManager::shared_from_auth_config(
+            AuthConfig {
+                codex_home: temp_dir.path().to_path_buf(),
+                auth_credentials_store_mode: AuthCredentialsStoreMode::Ephemeral,
+                keyring_backend_kind: Default::default(),
+                forced_login_method: Some(login_method),
+                chatgpt_base_url: None,
+                forced_chatgpt_workspace_id: workspace.map(|id| vec![id.to_string()]),
+                managed_auth_policy: Default::default(),
+                auth_route_config: auth_route_config(OutboundProxyPolicy::ReqwestDefault),
+            },
+            /*enable_codex_api_key_env*/ false,
+        )
+        .await
+        .expect("valid auth policy");
+        let result = manager.set_external_auth(Arc::new(adapter)).await;
+        assert_eq!(
+            result.is_ok(),
+            allowed,
+            "{product} with {login_method:?} and {workspace:?}"
+        );
+        if allowed {
+            let auth = manager.auth().await.expect("accepted WIF auth");
+            assert_eq!(auth.is_api_key_auth(), product == "api");
+        } else {
+            assert!(
+                manager.auth().await.is_none(),
+                "rejected WIF must not install credentials"
+            );
+        }
+    }
 }
 
 #[tokio::test]

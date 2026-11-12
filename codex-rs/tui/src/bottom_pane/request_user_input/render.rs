@@ -276,7 +276,6 @@ impl RequestUserInputOverlay {
         Paragraph::new(progress_line).render(sections.progress_area, buf);
 
         // Question prompt text.
-        let question_y = sections.question_area.y;
         let answered =
             self.is_question_answered(self.current_index(), &self.composer.current_text());
         for (offset, line) in sections.question_lines.iter().enumerate() {

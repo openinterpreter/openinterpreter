@@ -44,7 +44,6 @@ pub struct ModelProviderCapabilitiesReadParams {}
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ModelProviderCapabilitiesReadResponse {
-    pub namespace_tools: bool,
     pub image_generation: bool,
     pub web_search: bool,
 }
@@ -53,6 +52,9 @@ pub struct ModelProviderCapabilitiesReadResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ModelListParams {
+    /// List models for this configured provider instead of the app-server default.
+    #[ts(optional = nullable)]
+    pub model_provider: Option<String>,
     /// Opaque pagination cursor returned by a previous call.
     #[ts(optional = nullable)]
     pub cursor: Option<String>,

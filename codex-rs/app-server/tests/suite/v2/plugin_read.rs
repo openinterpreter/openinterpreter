@@ -1606,9 +1606,9 @@ async fn plugin_read_agent_plugin_excludes_nested_skills() -> Result<()> {
             description: "Direct skill".to_string(),
             short_description: None,
             interface: None,
-            path: Some(AbsolutePathBuf::try_from(std::fs::canonicalize(
-                direct_skill_path
-            )?)?),
+            path: Some(
+                AbsolutePathBuf::try_from(std::fs::canonicalize(direct_skill_path)?)?.into()
+            ),
             enabled: true,
         }]
     );

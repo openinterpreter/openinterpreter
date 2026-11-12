@@ -21,9 +21,9 @@ use codex_model_provider::ModelProvider;
 use codex_protocol::MemoryVersion;
 use codex_protocol::ThreadId;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::user_input::UserInput;
 use codex_state::MemoryStore;
@@ -62,6 +62,20 @@ pub async fn run(
         .join(config.memories.version.directory_name());
     let max_raw_memories = config.memories.max_raw_memories_for_consolidation;
     let max_unused_days = config.memories.max_unused_days;
+
+    let workspace_lock = match MemoryWorkspaceLock::try_acquire(&root) {
+        Ok(lock) => Arc::new(lock),
+        Err(err) => {
+            let status = if err.kind() == std::io::ErrorKind::WouldBlock {
+                "skipped_workspace_busy"
+            } else {
+                tracing::error!("failed locking memory workspace: {err}");
+                "failed_workspace_lock"
+            };
+            context.counter(MEMORY_PHASE_TWO_JOBS, /*inc*/ 1, &[("status", status)]);
+            return;
+        }
+    };
 
     // 1. Claim the global Phase 2 lock before touching the memory workspace.
     let claim = match job::claim(context.as_ref(), &db).await {
@@ -161,7 +175,7 @@ pub async fn run(
     // 8. Spawn the consolidation agent.
     let prompt = agent::get_prompt(&root, config.memories.version);
     let agent = match context
-        .spawn_consolidation_agent(agent_config, prompt)
+        .spawn_consolidation_agent(agent_config, prompt, Arc::clone(&workspace_lock))
         .await
     {
         Ok(agent) => agent,
@@ -181,6 +195,7 @@ pub async fn run(
         root,
         config.memories.version,
         agent,
+        workspace_lock,
         phase_two_e2e_timer,
     );
 
@@ -322,24 +337,28 @@ mod agent {
             .disable(Feature::SkillMcpDependencyInstall);
 
         // Preserve the parent's explicit choice to skip Codex-managed sandboxing.
-        match parent_permission_profile {
-            PermissionProfile::Disabled => agent_config
-                .permissions
-                .set_permission_profile(PermissionProfile::Disabled),
-            PermissionProfile::External { network } => agent_config
-                .permissions
-                .set_permission_profile(PermissionProfile::External { network }),
+        let permission_profile = match parent_permission_profile {
             PermissionProfile::Managed { .. } => {
                 // The consolidation agent only needs local memory-root write access and no network.
-                agent_config.set_legacy_sandbox_policy(SandboxPolicy::WorkspaceWrite {
-                    writable_roots: vec![root],
-                    network_access: false,
-                    exclude_tmpdir_env_var: true,
-                    exclude_slash_tmp: true,
-                })
+                let permission_profile = PermissionProfile::workspace_write_with(
+                    std::slice::from_ref(&root),
+                    NetworkSandboxPolicy::Restricted,
+                    /*exclude_tmpdir_env_var*/ true,
+                    /*exclude_slash_tmp*/ true,
+                );
+                agent_config.workspace_roots = vec![root];
+                agent_config.workspace_roots_explicit = true;
+                agent_config
+                    .permissions
+                    .set_workspace_roots(agent_config.workspace_roots.clone());
+                permission_profile
             }
-        }
-        .ok()?;
+            permission_profile => permission_profile,
+        };
+        agent_config
+            .permissions
+            .set_permission_profile(permission_profile)
+            .ok()?;
 
         agent_config.model = Some(
             config
@@ -349,6 +368,7 @@ mod agent {
                 .unwrap_or_else(|| provider.memory_consolidation_preferred_model().to_string()),
         );
         agent_config.model_reasoning_effort = Some(crate::stage_two::REASONING_EFFORT);
+        agent_config.service_tier = Some(config.memories.consolidation_service_tier.clone());
 
         Some(agent_config)
     }
@@ -371,6 +391,7 @@ mod agent {
         memory_root: codex_utils_absolute_path::AbsolutePathBuf,
         version: MemoryVersion,
         agent: SpawnedConsolidationAgent,
+        workspace_lock: Arc<MemoryWorkspaceLock>,
         phase_two_e2e_timer: Option<codex_otel::Timer>,
     ) {
         tokio::spawn(async move {

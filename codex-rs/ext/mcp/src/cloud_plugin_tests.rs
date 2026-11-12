@@ -1,4 +1,4 @@
-//! Tests cloud plugin lifecycle, tool calls, scheduling, and plugin policy.
+//! Tests per-turn cloud plugin discovery, auth recovery, tool calls, and plugin policy.
 
 use super::*;
 use crate::PluginProvider;
@@ -8,6 +8,7 @@ use crate::PluginProviders;
 use crate::PluginsThreadState;
 use crate::install_plugin_providers;
 use anyhow::Context;
+use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core_plugins::ExecutorPluginProvider;
 use codex_core_plugins::PluginCatalog;
 use codex_core_plugins::PluginCatalogEntry;
@@ -15,12 +16,17 @@ use codex_core_plugins::PluginIdentity;
 use codex_exec_server::EnvironmentManager;
 use codex_extension_api::ContextContributor;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::McpServerContributionContext;
+use codex_extension_api::McpServerContributor;
 use codex_extension_api::SelectedPluginSnapshot;
 use codex_extension_api::WorldStateContributionInput;
 use codex_extension_api::WorldStateSectionContribution;
+use codex_protocol::capabilities::CapabilityRootLocation;
+use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
+use codex_utils_path_uri::PathUri;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::apps_test_server::recorded_apps_tool_calls;
 use core_test_support::responses;
@@ -125,6 +131,7 @@ async fn disabling_plugins_clears_cloud_catalog_and_skips_discovery() -> anyhow:
             true,
             Err("discovery unavailable".to_string()),
         ),
+        ("failed-plugins-off", false, Ok(cloud_catalog())),
         ("re-enabled", true, Ok(cloud_catalog())),
     ] {
         let expected_catalog = if plugins_enabled {
@@ -164,6 +171,7 @@ async fn disabling_plugins_clears_cloud_catalog_and_skips_discovery() -> anyhow:
                 "test",
                 &[],
                 /*executor_capability_discovery*/ None,
+                /*executor_capability_discovery_v2*/ None,
             ))
             .await;
         if let Some(state) = thread.get::<PluginsThreadState>() {
@@ -178,6 +186,168 @@ async fn disabling_plugins_clears_cloud_catalog_and_skips_discovery() -> anyhow:
     Ok(())
 }
 
+#[tokio::test]
+async fn account_change_clears_hosted_plugins_before_waiting_for_executor() -> anyhow::Result<()> {
+    struct UnreadyExecutor;
+    impl codex_exec_server::NoiseRendezvousConnectProvider for UnreadyExecutor {
+        fn connect_bundle(
+            &self,
+            _: codex_exec_server::NoiseChannelPublicKey,
+        ) -> futures::future::BoxFuture<
+            '_,
+            Result<
+                codex_exec_server::NoiseRendezvousConnectBundle,
+                codex_exec_server::ExecServerError,
+            >,
+        > {
+            Box::pin(futures::future::pending())
+        }
+    }
+
+    let home = tempfile::tempdir()?;
+    let mut config = codex_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .fallback_cwd(Some(home.path().to_path_buf()))
+        .build()
+        .await?;
+    config.features.enable(Feature::Plugins)?;
+    let manager = Arc::new(EnvironmentManager::default_for_tests());
+    manager
+        .materialize_pending_noise_environment("unready".to_string(), Arc::new(UnreadyExecutor))?;
+    let contributor = PluginContributor {
+        providers: PluginProviders::new(Arc::new(ExecutorPluginProvider::new(manager)))
+            .with_cloud_provider(Arc::new(CloudProvider::default())),
+    };
+    let thread = ExtensionData::new("thread");
+    let state = thread.get_or_init(PluginsThreadState::default);
+    let old_auth = state
+        .contributor_state()
+        .prepare_cloud_generation(/*mcp_resources*/ None);
+    assert!(
+        state
+            .contributor_state()
+            .publish_cloud_catalog(old_auth.as_ref(), cloud_catalog())
+    );
+    let roots = [SelectedCapabilityRoot {
+        id: "plugin".to_string(),
+        location: CapabilityRootLocation::Environment {
+            environment_id: "unready".to_string(),
+            path: PathUri::parse("file:///plugins/demo")?,
+        },
+    }];
+    let init = codex_extension_api::ExtensionDataInit::default();
+    let context = McpServerContributionContext::for_step(
+        &config, &init, &thread, "test", &roots, /*executor_capability_discovery*/ None,
+        /*executor_capability_discovery_v2*/ None,
+    )
+    .with_auth_changed(/*auth_changed*/ true);
+    let mut loading = std::pin::pin!(contributor.selected_plugins(context, &config.plugins));
+    assert!(futures::poll!(&mut loading).is_pending());
+    assert_eq!(state.cloud_catalog(), None);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn cloud_refresh_serializes_waiters_and_retries() {
+    let new_catalog = PluginCatalog::default();
+    for (reply, cancelled) in [
+        (Ok(cloud_catalog()), false),
+        (Err("discovery failed".to_string()), false),
+        (Ok(cloud_catalog()), true),
+    ] {
+        let succeeded = reply.is_ok() && !cancelled;
+        let expected_catalog = if succeeded {
+            cloud_catalog()
+        } else {
+            new_catalog.clone()
+        };
+        let provider = Arc::new(CloudProvider::default());
+        provider.set_reply(reply);
+        let contributor = PluginContributor {
+            providers: PluginProviders::new(Arc::new(ExecutorPluginProvider::new(Arc::new(
+                EnvironmentManager::default_for_tests(),
+            ))))
+            .with_cloud_provider(provider.clone()),
+        };
+        let session = ExtensionData::new("session");
+        let thread = ExtensionData::new("thread");
+        let turn = ExtensionData::new("turn");
+        let prewarm_turn = ExtensionData::new("prewarm");
+        let input = CatalogRefreshInput {
+            turn_id: "turn",
+            session_store: &session,
+            thread_store: &thread,
+            turn_store: &turn,
+        };
+        let state = thread.get_or_init(PluginsThreadState::default);
+        state.contributor_state().plugins_enabled = true;
+
+        // A delayed prewarm waits without superseding the real turn's request.
+        provider.pause_discovery.store(true, Ordering::SeqCst);
+        let mut turn_start = contributor.refresh_catalog_for_step(input);
+        assert!(futures::poll!(&mut turn_start).is_pending());
+        let prewarm_input = CatalogRefreshInput {
+            turn_id: "prewarm",
+            turn_store: &prewarm_turn,
+            ..input
+        };
+        let mut prewarm = contributor.refresh_catalog_for_step(prewarm_input);
+        assert!(futures::poll!(&mut prewarm).is_pending());
+        let mut cancelled_waiter = contributor.refresh_catalog_for_step(prewarm_input);
+        assert!(futures::poll!(&mut cancelled_waiter).is_pending());
+        drop(cancelled_waiter);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+
+        provider.set_reply(Ok(new_catalog.clone()));
+        if cancelled {
+            drop(turn_start);
+        } else {
+            provider.resume_discovery.notify_one();
+            assert_eq!(turn_start.await, succeeded);
+        }
+        // Waiting turns share failure cooldowns; cancellation still allows immediate retry.
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), prewarm)
+                .await
+                .expect("waiting discovery should complete after its predecessor stops"),
+            cancelled,
+        );
+        if !succeeded && !cancelled {
+            assert_eq!(state.cloud_catalog(), None);
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+            tokio::time::advance(Duration::from_secs(30)).await;
+            assert!(contributor.refresh_catalog_for_step(prewarm_input).await);
+        }
+        assert_eq!(state.cloud_catalog(), Some(expected_catalog.clone()));
+        assert!(!contributor.refresh_catalog_for_step(prewarm_input).await);
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            1 + usize::from(!succeeded),
+        );
+
+        // Retained catalogs do not need MCP rebuilding after failed retries.
+        prewarm_turn.remove::<LatestCloudPluginAuth>();
+        provider.set_reply(Err("discovery failed".to_string()));
+        let previous_calls = provider.calls.load(Ordering::SeqCst);
+        for _ in 0..2 {
+            assert!(!contributor.refresh_catalog_for_step(prewarm_input).await);
+            assert_eq!(state.cloud_catalog(), Some(expected_catalog.clone()));
+        }
+        assert_eq!(provider.calls.load(Ordering::SeqCst), previous_calls + 1);
+
+        // Clearing an old auth scope still requires rebuilding, even on failure.
+        session.insert(McpResourceClient::new(Arc::new(
+            codex_mcp::McpRuntime::empty(/*prefix_mcp_tool_names*/ false),
+        )));
+        assert!(contributor.refresh_catalog_for_step(prewarm_input).await);
+        assert_eq!(state.cloud_catalog(), None);
+        assert!(!contributor.refresh_catalog_for_step(prewarm_input).await);
+        provider.set_reply(Ok(new_catalog.clone()));
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert!(contributor.refresh_catalog_for_step(prewarm_input).await);
+    }
+}
+
 struct CloudProvider {
     reply: Mutex<Result<PluginCatalog, String>>,
     calls: AtomicUsize,
@@ -187,8 +357,10 @@ struct CloudProvider {
     resume_discovery: Notify,
 }
 
+type ObservedPackages = Vec<(String, Option<String>)>;
+
 #[derive(Default)]
-struct StepPackages(Mutex<Option<Vec<String>>>);
+struct StepPackages(Mutex<Option<ObservedPackages>>);
 
 impl ContextContributor for StepPackages {
     fn contribute_world_state<'a>(
@@ -206,7 +378,12 @@ impl ContextContributor for StepPackages {
                     snapshot
                         .plugins
                         .iter()
-                        .map(|plugin| plugin.selected_root_id.clone())
+                        .map(|plugin| {
+                            (
+                                plugin.plugin_id.as_str().to_string(),
+                                plugin.selected_root_id.clone(),
+                            )
+                        })
                         .collect()
                 });
             Vec::new()
@@ -262,11 +439,12 @@ impl PluginProvider for CloudProvider {
 fn cloud_catalog() -> PluginCatalog {
     PluginCatalog {
         entries: vec![PluginCatalogEntry {
+            enabled: true,
             id: PluginIdentity::Remote {
                 remote_plugin_id: "plugin_remote".to_string(),
             },
             display_name: "Cloud Demo".to_string(),
-            version: Some("1.0.0".to_string()),
+            version: "1.0.0".to_string(),
             mcp_servers: Default::default(),
             connector_ids: vec!["calendar".to_string()],
             locations: vec![codex_core_plugins::PluginSourceLocation::Cloud {
@@ -274,7 +452,7 @@ fn cloud_catalog() -> PluginCatalog {
                 bundle_uri: None,
             }],
         }],
-        warnings: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -305,6 +483,8 @@ fn cloud_catalog_refreshes_per_turn_and_invalidates_on_auth_change() -> anyhow::
 }
 
 async fn run_cloud_catalog_refresh_lifecycle() -> anyhow::Result<()> {
+    core_test_support::skip_if_no_network!(Ok(()));
+
     let server = responses::start_mock_server().await;
     // Each account has a fixed inventory; only the auth switch changes the server's tools.
     let apps_tools = Arc::new(Mutex::new(vec![app_tool("calendar", "list_events")]));
@@ -315,9 +495,19 @@ async fn run_cloud_catalog_refresh_lifecycle() -> anyhow::Result<()> {
     };
     gmail_catalog.entries[0].display_name = "Gmail Demo".to_string();
     gmail_catalog.entries[0].connector_ids = vec!["gmail".to_string()];
+    let mut disabled_catalog = cloud_catalog();
+    disabled_catalog.entries[0].enabled = false;
+    let mut partial_catalog = gmail_catalog.clone();
+    partial_catalog.is_partial = true;
+    let partial_empty_catalog = PluginCatalog {
+        is_partial: true,
+        warnings: vec!["resource listing was truncated".to_string()],
+        ..Default::default()
+    };
     let provider = Arc::new(CloudProvider::default());
     let step_packages = Arc::new(StepPackages::default());
     let mut extensions = ExtensionRegistryBuilder::new();
+    crate::install(&mut extensions);
     extensions.prompt_contributor(step_packages.clone());
     install_plugin_providers(
         &mut extensions,
@@ -327,6 +517,13 @@ async fn run_cloud_catalog_refresh_lifecycle() -> anyhow::Result<()> {
         .with_cloud_provider(provider.clone()),
     );
     let mut builder = test_codex()
+        .with_cloud_config_bundle(
+            CloudConfigBundleFixture::enterprise_config(
+                "[mcp_servers.codex_apps]\nurl = 'https://example.com/custom'",
+            )
+            .add_enterprise_requirement("[mcp_servers]")
+            .into_loader(),
+        )
         .with_exec_server_url("none")
         .with_extensions(Arc::new(extensions.build()))
         .with_auth(codex_login::CodexAuth::from_external_chatgpt_tokens(
@@ -349,9 +546,34 @@ async fn run_cloud_catalog_refresh_lifecycle() -> anyhow::Result<()> {
             config.chatgpt_base_url = apps_server.chatgpt_base_url;
         });
     let test = builder.build_with_auto_env(&server).await?;
+    assert!(!test.config.mcp_servers.get()[codex_mcp::CODEX_APPS_MCP_SERVER_NAME].enabled);
     let calendar = ("calendar", "list_events", "Cloud Demo");
     let gmail = ("gmail", "search_email", "Gmail Demo");
     for (turn, reply, expected_plugin, new_account, tool_call) in [
+        (
+            "initial-partial",
+            Ok(partial_catalog.clone()),
+            Some("plugin_gmail"),
+            None,
+            None,
+        ),
+        (
+            "partial-replaces-partial",
+            Ok(PluginCatalog {
+                is_partial: true,
+                ..cloud_catalog()
+            }),
+            Some("plugin_remote"),
+            None,
+            Some(calendar),
+        ),
+        (
+            "partial-empty-replaces-partial",
+            Ok(partial_empty_catalog.clone()),
+            None,
+            None,
+            None,
+        ),
         (
             "empty",
             Ok(PluginCatalog::default()),
@@ -360,16 +582,61 @@ async fn run_cloud_catalog_refresh_lifecycle() -> anyhow::Result<()> {
             Some(calendar),
         ),
         (
+            "partial-after-complete-empty",
+            Ok(partial_catalog.clone()),
+            None,
+            None,
+            None,
+        ),
+        (
             "discovered",
             Ok(cloud_catalog()),
-            Some("cloud:plugin_remote"),
+            Some("plugin_remote"),
             None,
             Some(calendar),
         ),
         (
+            "partial-refresh",
+            Ok(partial_catalog.clone()),
+            Some("plugin_remote"),
+            None,
+            Some(calendar),
+        ),
+        (
+            "partial-empty-refresh",
+            Ok(partial_empty_catalog),
+            None,
+            None,
+            None,
+        ),
+        (
             "same-account-failure",
             Err("temporarily unavailable".to_string()),
-            Some("cloud:plugin_remote"),
+            None,
+            None,
+            None,
+        ),
+        (
+            "complete-with-warning-disables-plugin",
+            Ok(PluginCatalog {
+                warnings: vec!["optional bundle hint ignored".to_string()],
+                ..disabled_catalog
+            }),
+            None,
+            None,
+            None,
+        ),
+        (
+            "partial-after-disable",
+            Ok(partial_catalog.clone()),
+            None,
+            None,
+            None,
+        ),
+        (
+            "re-enabled",
+            Ok(cloud_catalog()),
+            Some("plugin_remote"),
             None,
             None,
         ),
@@ -377,7 +644,7 @@ async fn run_cloud_catalog_refresh_lifecycle() -> anyhow::Result<()> {
         (
             "restored",
             Ok(cloud_catalog()),
-            Some("cloud:plugin_remote"),
+            Some("plugin_remote"),
             None,
             None,
         ),
@@ -389,9 +656,16 @@ async fn run_cloud_catalog_refresh_lifecycle() -> anyhow::Result<()> {
             None,
         ),
         (
+            "new-account-partial",
+            Ok(partial_catalog),
+            Some("plugin_gmail"),
+            None,
+            Some(gmail),
+        ),
+        (
             "new-account-discovered",
             Ok(gmail_catalog),
-            Some("cloud:plugin_gmail"),
+            Some("plugin_gmail"),
             None,
             Some(gmail),
         ),
@@ -404,6 +678,7 @@ async fn run_cloud_catalog_refresh_lifecycle() -> anyhow::Result<()> {
         ),
     ] {
         let previous_discoveries = provider.calls.load(Ordering::SeqCst);
+        let retry_discovery = turn == "in-flight-auth-change";
         if let Some(account) = new_account {
             // Do not manually refresh MCP: the auth transition must pick up this new inventory.
             *apps_tools
@@ -442,6 +717,15 @@ async fn run_cloud_catalog_refresh_lifecycle() -> anyhow::Result<()> {
             })
             .await?;
             assert_eq!(provider.calls.load(Ordering::SeqCst), previous_discoveries);
+        }
+        if matches!(
+            turn,
+            "complete-with-warning-disables-plugin" | "new-account-partial"
+        ) {
+            // Reconnecting permits recovery before the thread's cooldown expires.
+            test.codex
+                .submit(codex_protocol::protocol::Op::RefreshMcpServers)
+                .await?;
         }
         provider.set_reply(reply);
         let previous_calls = recorded_apps_tool_calls(&server).await.len();
@@ -491,19 +775,21 @@ async fn run_cloud_catalog_refresh_lifecycle() -> anyhow::Result<()> {
                             /*chatgpt_plan_type*/ None,
                         )?;
                         test.thread_manager.auth_manager().reload().await;
+                        // Auth must be published while cloud discovery remains paused.
                         while resources
                             .auth_cache_key_for_server(codex_mcp::CODEX_APPS_MCP_SERVER_NAME)
                             == previous_auth
                         {
                             tokio::task::yield_now().await;
                         }
+                        provider.set_reply(Err("new-scope discovery failed".to_string()));
                         provider.resume_discovery.notify_one();
                         anyhow::Ok(())
                     }
                 )
             })
             .await??;
-            // The old request must not republish its catalog after credentials change.
+            // Refresh under the new auth without retaining the old catalog.
             let state = test
                 .codex
                 .thread_extension_data()
@@ -570,12 +856,17 @@ async fn run_cloud_catalog_refresh_lifecycle() -> anyhow::Result<()> {
                 .0
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
-            Some(expected_plugin.into_iter().map(str::to_string).collect()),
+            Some(
+                expected_plugin
+                    .into_iter()
+                    .map(|id| (id.to_owned(), None))
+                    .collect()
+            ),
             "turn {turn}"
         );
         assert_eq!(
             provider.calls.load(Ordering::SeqCst),
-            previous_discoveries + 1,
+            previous_discoveries + 1 + if retry_discovery { requests.len() } else { 0 },
             "turn {turn}"
         );
     }

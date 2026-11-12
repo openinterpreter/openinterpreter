@@ -9,12 +9,14 @@ use super::*;
 use crate::mcp::McpRuntimeProjection;
 use codex_config::McpServerDisabledReason;
 use codex_config::McpServerTransportConfig;
+use codex_file_system::WindowsSandboxSelection;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::ElicitationReviewerHandle;
 use codex_mcp::McpServerRegistration;
-use codex_mcp::McpServerSource;
 use codex_mcp::McpStartupPolicy;
 use codex_mcp::PreparedMcpCall;
+use codex_mcp::ToolInfo;
+use codex_otel::auth_storage::AuthStorageOriginator;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use std::collections::HashSet;
 
@@ -36,6 +38,7 @@ impl Session {
         next: &SessionConfiguration,
     ) -> bool {
         current.cwd() != next.cwd()
+            || current.runtime_workspace_roots != next.runtime_workspace_roots
             || current.step_settings.approval_policy.value()
                 != next.step_settings.approval_policy.value()
             || current.step_settings.approvals_reviewer != next.step_settings.approvals_reviewer
@@ -44,7 +47,7 @@ impl Session {
     }
 
     /// Waits on this session's refreshed server before tool execution is admitted.
-    pub(crate) async fn wait_for_mcp_server(self: &Arc<Self>, server: &str) {
+    pub(crate) async fn wait_for_mcp_server(self: &Arc<Self>, server: &McpServerKey) {
         self.refresh_mcp_if_dirty().await;
         self.services
             .mcp_runtime
@@ -55,15 +58,18 @@ impl Session {
     /// Captures this session's current MCP client and catalog for one tool call.
     pub(crate) async fn prepare_mcp_call(
         self: &Arc<Self>,
-        server: &str,
-        tool: &str,
-    ) -> Option<PreparedMcpCall> {
+        advertised_tool: &ToolInfo,
+    ) -> anyhow::Result<PreparedMcpCall> {
         self.refresh_mcp_if_dirty().await;
+        // Apps refreshes fetch tools outside the MCP runtime lock. Wait for any
+        // in-flight refresh before capturing the catalog for this call.
+        if advertised_tool.server_name() == CODEX_APPS_MCP_SERVER_NAME {
+            self.wait_for_apps_tool_refresh().await;
+        }
         self.services
             .mcp_runtime
-            .current_binding_for_call(server)
-            .await?
-            .prepare_call(server, tool)
+            .prepare_call(advertised_tool)
+            .await
     }
 
     pub(super) async fn latest_mcp_desired_state(
@@ -110,7 +116,6 @@ impl Session {
         auth: Option<CodexAuth>,
         mcp_projection: McpRuntimeProjection,
         resolved_environments: &TurnEnvironmentSnapshot,
-        mcp_runtime_cwd: PathBuf,
     ) -> anyhow::Result<()> {
         let cwd = AbsolutePathBuf::from_absolute_path(mcp_runtime_cwd)
             .unwrap_or_else(|_| session_configuration.cwd().clone());
@@ -161,9 +166,8 @@ impl Session {
             }
 
             let mut catalog = None;
-            let mut registered = HashSet::new();
             for selected in environments.turn_environments() {
-                let environment = &selected.environment;
+                let environment = selected.environment();
                 if !environment.is_remote() {
                     continue;
                 }
@@ -206,22 +210,7 @@ impl Session {
                         /*inc*/ 1,
                         &[("server_name", name.as_str()), ("outcome", outcome)],
                     );
-                    if name == CODEX_APPS_MCP_SERVER_NAME
-                        || !server.is_local_environment()
-                        || projection
-                            .config
-                            .mcp_server_catalog
-                            .server(&name)
-                            .is_some_and(|existing| {
-                                existing.config().environment_id != *environment_id
-                                    || !matches!(
-                                        existing.source(),
-                                        McpServerSource::Plugin(_)
-                                            | McpServerSource::SelectedPlugin(_)
-                                    )
-                            })
-                        || registered.contains(&name)
-                    {
+                    if name == CODEX_APPS_MCP_SERVER_NAME || !server.is_local_environment() {
                         continue;
                     }
                     let McpServerTransportConfig::StreamableHttp {
@@ -260,10 +249,10 @@ impl Session {
                             source: requirements.source.clone(),
                         });
                     }
-                    registered.insert(name.clone());
+                    let registration = McpServerRegistration::from_executor_config(name, server);
                     catalog
                         .get_or_insert_with(|| projection.config.mcp_server_catalog.to_builder())
-                        .register(McpServerRegistration::from_config(name, server));
+                        .register(registration);
                 }
             }
 
@@ -301,7 +290,9 @@ impl Session {
             ready_selected_capability_roots,
             elicitation_reviewer,
         );
-        self.services.mcp_runtime.replace(input).await;
+        AuthStorageOriginator::from_client_name(&desired.originator)
+            .scope(self.services.mcp_runtime.replace(input))
+            .await;
         self.services.thread_extension_data.insert(selected_plugins);
     }
 
@@ -320,6 +311,7 @@ impl Session {
         } = mcp_projection;
         config.approval_policy = desired.config.permissions.approval_policy.clone();
         config.permission_profile = desired.config.permissions.effective_permission_profile();
+        config.host_cwd = desired.config.cwd.clone();
         config.approvals_reviewer = desired.config.approvals_reviewer;
         config.environment_cwds = desired
             .environments
@@ -335,13 +327,37 @@ impl Session {
             .environment_cwds
             .entry(codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string())
             .or_insert_with(|| PathUri::from_abs_path(&desired.config.cwd));
-        let mcp_servers = effective_mcp_servers(&config, auth.as_ref());
-        config.set_server_permission_profiles(
-            &mcp_servers,
-            desired.environments.turn_environments().map(|environment| {
+        config.environment_use_mxc = desired
+            .environments
+            .turn_environments()
+            .map(|environment| {
                 (
                     environment.selection.environment_id.clone(),
-                    environment.permission_profile_with_workspace_roots(),
+                    environment.windows_sandbox_selection_for_turn_metadata()
+                        == WindowsSandboxSelection::Mxc,
+                )
+            })
+            .collect();
+        config
+            .environment_use_mxc
+            .entry(codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string())
+            .or_insert(
+                cfg!(windows)
+                    && desired.config.effective_local_windows_sandbox_type()
+                        == SandboxType::WindowsMxc,
+            );
+        let mcp_servers = effective_mcp_servers(&config, auth.as_ref());
+        config.set_server_permissions(
+            &mcp_servers,
+            desired.environments.turn_environments().map(|environment| {
+                // Freeze the executor paths used to interpret this profile with the MCP call.
+                let mut sandbox = environment.sandbox_context(/*additional_permissions*/ None);
+                sandbox.permissions = sandbox
+                    .permissions
+                    .materialize_project_roots_with_path_uris(&sandbox.workspace_roots);
+                (
+                    environment.selection.environment_id.clone(),
+                    Arc::new(sandbox),
                 )
             }),
         );
@@ -355,8 +371,25 @@ impl Session {
             desired.environments.ready_environment_handles(),
         );
         McpRuntimeInput {
+            network_policy_metadata: None,
+            runtime_auth: desired
+                .config
+                .features
+                .enabled(Feature::RuntimeAgentInstances)
+                .then(|| {
+                    (
+                        Arc::clone(&self.services.runtime_auth),
+                        desired.config.runtime_auth_mode,
+                    )
+                }),
             startup_policy: if matches!(desired.session_source, SessionSource::SubAgent(_)) {
-                McpStartupPolicy::LazyWhenCached
+                McpStartupPolicy::DeferCachedServers
+            } else if desired
+                .config
+                .features
+                .enabled(Feature::McpLazyStdioStartup)
+            {
+                McpStartupPolicy::DeferCachedStdio
             } else {
                 McpStartupPolicy::Eager
             },

@@ -21,6 +21,7 @@ import type { ExternalAgentConfigImportProgressNotification } from "./v2/Externa
 import type { FileChangeOutputDeltaNotification } from "./v2/FileChangeOutputDeltaNotification";
 import type { FileChangePatchUpdatedNotification } from "./v2/FileChangePatchUpdatedNotification";
 import type { FsChangedNotification } from "./v2/FsChangedNotification";
+import type { GatewayOAuthChangedNotification } from "./v2/GatewayOAuthChangedNotification";
 import type { GuardianWarningNotification } from "./v2/GuardianWarningNotification";
 import type { HookCompletedNotification } from "./v2/HookCompletedNotification";
 import type { HookStartedNotification } from "./v2/HookStartedNotification";
@@ -56,8 +57,10 @@ import type { ThreadDeletedNotification } from "./v2/ThreadDeletedNotification";
 import type { ThreadGoalClearedNotification } from "./v2/ThreadGoalClearedNotification";
 import type { ThreadGoalUpdatedNotification } from "./v2/ThreadGoalUpdatedNotification";
 import type { ThreadNameUpdatedNotification } from "./v2/ThreadNameUpdatedNotification";
+import type { ThreadPredictionUpdatedNotification } from "./v2/ThreadPredictionUpdatedNotification";
 import type { ThreadProjectUpdatedNotification } from "./v2/ThreadProjectUpdatedNotification";
 import type { ThreadQueueChangedNotification } from "./v2/ThreadQueueChangedNotification";
+import type { ThreadReadStateChangedNotification } from "./v2/ThreadReadStateChangedNotification";
 import type { ThreadRealtimeClosedNotification } from "./v2/ThreadRealtimeClosedNotification";
 import type { ThreadRealtimeErrorNotification } from "./v2/ThreadRealtimeErrorNotification";
 import type { ThreadRealtimeItemAddedNotification } from "./v2/ThreadRealtimeItemAddedNotification";
@@ -70,6 +73,7 @@ import type { ThreadRealtimeStartedNotification } from "./v2/ThreadRealtimeStart
 import type { ThreadRealtimeTranscriptDeltaNotification } from "./v2/ThreadRealtimeTranscriptDeltaNotification";
 import type { ThreadRealtimeTranscriptDoneNotification } from "./v2/ThreadRealtimeTranscriptDoneNotification";
 import type { ThreadRevertedNotification } from "./v2/ThreadRevertedNotification";
+import type { ThreadSectionChangedNotification } from "./v2/ThreadSectionChangedNotification";
 import type { ThreadSettingsUpdatedNotification } from "./v2/ThreadSettingsUpdatedNotification";
 import type { ThreadStartedNotification } from "./v2/ThreadStartedNotification";
 import type { ThreadStatusChangedNotification } from "./v2/ThreadStatusChangedNotification";

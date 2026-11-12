@@ -14,9 +14,11 @@ use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::FileSystemSandboxPolicyContext;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_cargo_bin::cargo_bin;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 use std::io::Read;
@@ -26,7 +28,6 @@ use std::net::Shutdown;
 use std::net::TcpListener;
 use std::net::TcpStream;
 use std::os::unix::fs::MetadataExt;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Output;
 use std::process::Stdio;
@@ -180,7 +181,8 @@ fn linux_sandbox_command(
     args.push("--".to_string());
     args.extend(command.iter().map(|entry| (*entry).to_string()));
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_codex-linux-sandbox"));
+    let mut cmd =
+        Command::new(cargo_bin("codex-linux-sandbox").expect("sandbox helper should exist"));
     cmd.args(args)
         .current_dir(cwd)
         .env_clear()
@@ -309,6 +311,149 @@ async fn namespace_reaper_collects_orphaned_descendants() {
 }
 
 #[tokio::test]
+async fn proc_mount_denial_preserves_legacy_fallback_and_explicit_pid_inheritance() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bubblewrap is unavailable");
+        return;
+    }
+
+    let Some(system_bwrap) = codex_sandboxing::find_system_bwrap_in_path(
+        &PermissionProfile::read_only().file_system_sandbox_policy(),
+        &std::env::current_dir().expect("current directory"),
+    ) else {
+        eprintln!("skipping PID namespace test: no system bubblewrap is available");
+        return;
+    };
+    let tempdir = tempfile::tempdir().expect("create PID namespace fixture");
+    let wrapper = tempdir.path().join("bwrap");
+    codex_utils_cargo_bin::write_executable(
+        &wrapper,
+        r#"#!/bin/sh
+for arg in "$@"; do
+    [ "$arg" = "--" ] && break
+    if [ "$arg" = "--proc" ]; then
+        printf '%s\n' "bwrap: Can't mount proc on /newroot/proc: Operation not permitted" >&2
+        exit 1
+    fi
+done
+exec "$CODEX_TEST_REAL_BWRAP" "$@"
+"#,
+    )
+    .expect("write proc-denying bubblewrap wrapper");
+    let protected_file = tempdir.path().join("protected");
+    std::fs::write(&protected_file, "original").expect("write protected file");
+    let pid_namespace = std::fs::read_link("/proc/self/ns/pid").expect("read caller PID namespace");
+    let probe = r#"
+set -eu
+printf 'command started\n'
+IFS=' ' read -r proc_pid rest < /proc/self/stat
+test "$$" = "$proc_pid"
+test "$(readlink /proc/self/ns/pid)" = "$CODEX_TEST_PID_NAMESPACE"
+sleep 30 &
+child=$!
+trap 'kill "$child"; wait "$child" || :' EXIT
+IFS=' ' read -r proc_pid rest < "/proc/$child/stat"
+test "$child" = "$proc_pid"
+if (printf changed > "$CODEX_TEST_PROTECTED_FILE") 2>/dev/null; then exit 1; fi
+test "$(readlink /proc/self/ns/user)" != "$CODEX_TEST_USER_NAMESPACE"
+test "$(readlink /proc/self/ns/ipc)" != "$CODEX_TEST_IPC_NAMESPACE"
+test "$(readlink /proc/self/ns/net)" != "$CODEX_TEST_NET_NAMESPACE"
+while read -r key value rest; do
+    case "$key" in
+        CapEff:) test "$value" = 0000000000000000 ;;
+        NoNewPrivs:) test "$value" = 1 ;;
+        Seccomp:) test "$value" = 2 ;;
+    esac
+done < /proc/self/status
+printf 'consistent PIDs; restrictions preserved\n'
+"#;
+
+    let legacy_probe = r#"
+set -eu
+printf 'command started\n'
+IFS=' ' read -r proc_pid rest < /proc/self/stat
+test "$$" != "$proc_pid"
+printf 'legacy proc fallback\n'
+"#;
+
+    // Both modes still run when proc mounts are denied. Only explicit inheritance
+    // makes process IDs match the inherited proc view.
+    for inherit_pid_namespace in [false, true] {
+        let mut env = create_env_from_core_vars();
+        strip_proxy_env(&mut env);
+        let original_path = env.get("PATH").cloned().unwrap_or_default();
+        env.insert(
+            "PATH".to_string(),
+            format!("{}:{original_path}", tempdir.path().display()),
+        );
+        env.insert(
+            "CODEX_TEST_REAL_BWRAP".to_string(),
+            system_bwrap.display().to_string(),
+        );
+        env.insert(
+            "CODEX_TEST_PID_NAMESPACE".to_string(),
+            pid_namespace.display().to_string(),
+        );
+        env.insert(
+            "CODEX_TEST_PROTECTED_FILE".to_string(),
+            protected_file.display().to_string(),
+        );
+        let mut command =
+            Command::new(cargo_bin("codex-linux-sandbox").expect("sandbox helper should exist"));
+        command
+            .arg("--sandbox-policy-cwd")
+            .arg(std::env::current_dir().expect("current directory should exist"))
+            .arg("--permission-profile")
+            .arg(serde_json::to_string(&PermissionProfile::read_only()).unwrap());
+        for namespace in ["user", "ipc", "net"] {
+            env.insert(
+                format!("CODEX_TEST_{}_NAMESPACE", namespace.to_uppercase()),
+                std::fs::read_link(format!("/proc/self/ns/{namespace}"))
+                    .unwrap()
+                    .display()
+                    .to_string(),
+            );
+        }
+        if inherit_pid_namespace {
+            command.arg("--inherit-pid-namespace");
+        }
+        let probe = if inherit_pid_namespace {
+            probe
+        } else {
+            legacy_probe
+        };
+        command
+            .args(["--", "/bin/sh", "-c", probe])
+            .env_clear()
+            .envs(env)
+            .kill_on_drop(true);
+        let output =
+            tokio::time::timeout(Duration::from_millis(NETWORK_TIMEOUT_MS), command.output())
+                .await
+                .expect("proc probe should not time out")
+                .expect("proc probe should execute");
+        assert!(
+            output.status.success(),
+            "stdout={}; stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert_eq!(
+            output.stdout,
+            if inherit_pid_namespace {
+                b"command started\nconsistent PIDs; restrictions preserved\n".as_slice()
+            } else {
+                b"command started\nlegacy proc fallback\n".as_slice()
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(&protected_file).unwrap(),
+            "original"
+        );
+    }
+}
+
+#[tokio::test]
 async fn unsupported_system_bwrap_falls_back_to_bundled_bwrap() {
     if option_env!("CODEX_BWRAP_SHA256")
         .is_some_and(|digest| digest.chars().any(|character| character != '0'))
@@ -322,16 +467,21 @@ async fn unsupported_system_bwrap_falls_back_to_bundled_bwrap() {
         return;
     }
 
-    let Some(system_bwrap) = codex_sandboxing::find_system_bwrap_in_path() else {
+    let Some(system_bwrap) = codex_sandboxing::find_system_bwrap_in_path(
+        &PermissionProfile::read_only().file_system_sandbox_policy(),
+        &std::env::current_dir().expect("current directory"),
+    ) else {
         eprintln!("skipping system bwrap fallback test: no system bubblewrap is available");
         return;
     };
 
     let tempdir = tempfile::tempdir().expect("create isolated sandbox installation");
     let sandbox_executable = tempdir.path().join("codex-linux-sandbox");
-    let original_executable = env!("CARGO_BIN_EXE_codex-linux-sandbox");
-    if std::fs::hard_link(original_executable, &sandbox_executable).is_err() {
-        std::fs::copy(original_executable, &sandbox_executable).expect("copy sandbox executable");
+    let original_executable =
+        cargo_bin("codex-linux-sandbox").expect("sandbox helper should exist");
+    if std::fs::hard_link(&original_executable, &sandbox_executable).is_err() {
+        codex_utils_cargo_bin::copy_executable(&original_executable, &sandbox_executable)
+            .expect("copy sandbox executable");
     }
 
     let resources_dir = tempdir.path().join("codex-resources");
@@ -342,13 +492,11 @@ async fn unsupported_system_bwrap_falls_back_to_bundled_bwrap() {
     let system_dir = tempdir.path().join("system");
     std::fs::create_dir(&system_dir).expect("create fake system binary directory");
     let unsupported_bwrap = system_dir.join("bwrap");
-    std::fs::write(
+    codex_utils_cargo_bin::write_executable(
         &unsupported_bwrap,
         "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then printf '%s\\n' '--perms'; exit 0; fi\nexit 91\n",
     )
     .expect("write unsupported system bubblewrap");
-    std::fs::set_permissions(&unsupported_bwrap, std::fs::Permissions::from_mode(0o755))
-        .expect("make unsupported system bubblewrap executable");
 
     let mut env = create_env_from_core_vars();
     strip_proxy_env(&mut env);
@@ -493,6 +641,62 @@ async fn managed_proxy_bridges_release_command_output_after_exit() {
 }
 
 #[tokio::test]
+async fn approved_command_with_denied_reads_preserves_standard_devices() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bubblewrap is unavailable");
+        return;
+    }
+    let files = tempfile::tempdir().unwrap();
+    let denied = files.path().join("secret");
+    let output_file = files.path().join("output");
+    std::fs::write(&denied, "secret").unwrap();
+    let mut filesystem = FileSystemSandboxPolicy::read_only();
+    filesystem.entries.push(FileSystemSandboxEntry::new(
+        AbsolutePathBuf::try_from(denied.clone()).unwrap().into(),
+        FileSystemAccessMode::Deny,
+    ));
+    let cwd = AbsolutePathBuf::try_from(std::env::current_dir().unwrap())
+        .unwrap()
+        .into();
+    let context = FileSystemSandboxPolicyContext {
+        cwd: &cwd,
+        workspace_roots: std::slice::from_ref(&cwd),
+        user_home_dir: None,
+        temporary_directories: Some(&[]),
+    };
+    let profile = PermissionProfile::from_runtime_permissions(
+        &filesystem.for_approved_command(&context),
+        NetworkSandboxPolicy::Restricted,
+    );
+    let mut env = create_env_from_core_vars();
+    strip_proxy_env(&mut env);
+    env.insert(
+        "CODEX_TEST_DENIED".into(),
+        denied.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "CODEX_TEST_OUTPUT".into(),
+        output_file.to_string_lossy().into_owned(),
+    );
+    let output = run_linux_sandbox_direct(
+        &["bash", "-c", concat!(
+            "set -e; printf test >/dev/null; ",
+            "head -c 1 /dev/zero >/dev/null; head -c 1 /dev/urandom >/dev/null; ",
+            "printf sink >\"$CODEX_TEST_OUTPUT\"; test \"$(cat \"$CODEX_TEST_OUTPUT\")\" = sink; ",
+            "if cat \"$CODEX_TEST_DENIED\" >\"$CODEX_TEST_OUTPUT\" 2>&1; then exit 1; fi; ",
+            "grep -q 'Permission denied' \"$CODEX_TEST_OUTPUT\"",
+        )],
+        &profile, /*allow_network_for_proxy*/ false, env, NETWORK_TIMEOUT_MS,
+    ).await;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
 async fn managed_proxy_readiness_survives_closed_standard_descriptors() {
     if let Some(skip_reason) = managed_proxy_skip_reason().await {
         eprintln!("skipping managed proxy test: {skip_reason}");
@@ -595,7 +799,12 @@ async fn managed_proxy_mode_routes_through_bridge_and_blocks_direct_egress() {
         format!("http://127.0.0.1:{proxy_port}"),
     );
 
-    let sandbox_helper_dir = std::path::Path::new(env!("CARGO_BIN_EXE_codex-linux-sandbox"))
+    // Bubblewrap re-executes the canonical binary, outside its Bazel runfiles alias.
+    let sandbox_helper = cargo_bin("codex-linux-sandbox")
+        .expect("sandbox helper should exist")
+        .canonicalize()
+        .expect("sandbox helper should resolve");
+    let sandbox_helper_dir = sandbox_helper
         .parent()
         .expect("sandbox helper should have a parent");
     let file_system_sandbox_policy =

@@ -28,6 +28,7 @@ use codex_protocol::items::UserMessageItem;
 use codex_protocol::items::WebSearchItem;
 use codex_protocol::models::ImageReference;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::UserMessageAudioKind;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::protocol::UserMessageImageKind;
 use codex_protocol::user_input::UserInput;
@@ -110,12 +111,26 @@ pub(super) fn user_message_item(
             detail: event.local_image_details.get(index).copied().flatten(),
         });
     }
-    if let Some(audio) = event.audio {
-        content.extend(
-            audio
-                .into_iter()
-                .map(|audio_url| UserInput::Audio { audio_url }),
-        );
+    if has_audio_order {
+        let mut inline_audio = event.audio.unwrap_or_default().into_iter();
+        let mut file_audio = event.audio_references.unwrap_or_default().into_iter();
+        for audio_kind in event.audio_order {
+            let audio = match audio_kind {
+                UserMessageAudioKind::Inline => inline_audio
+                    .next()
+                    .map(|audio_url| AudioReference::Inline { audio_url }),
+                UserMessageAudioKind::File => file_audio.next(),
+            };
+            if let Some(audio) = audio {
+                content.push(UserInput::Audio { audio });
+            }
+        }
+    } else if let Some(audio) = event.audio_references {
+        content.extend(audio.into_iter().map(|audio| UserInput::Audio { audio }));
+    } else if let Some(audio) = event.audio {
+        content.extend(audio.into_iter().map(|audio_url| UserInput::Audio {
+            audio: AudioReference::Inline { audio_url },
+        }));
     }
     content.extend(
         event
@@ -141,7 +156,16 @@ pub(super) fn completed_item(
     let result = match event {
         EventMsg::AgentMessage(event) if !event.message.is_empty() => Some((
             TurnItem::AgentMessage(AgentMessageItem {
-                id: next_item_id()?,
+                moderation: event.moderation.as_ref().map(|decision| {
+                    codex_protocol::items::AgentMessageModeration {
+                        moderated: decision.moderated,
+                        display: decision.display.clone(),
+                    }
+                }),
+                id: event
+                    .moderation
+                    .as_ref()
+                    .map_or(next_item_id()?, |decision| decision.item_id.clone()),
                 content: vec![AgentMessageContent::Text {
                     text: event.message.clone(),
                 }],
@@ -217,10 +241,11 @@ pub(super) fn completed_item(
                 id: event.call_id.clone(),
                 status: event.status.clone(),
                 revised_prompt: event.revised_prompt.clone(),
-                result: event.result.clone(),
+                image: event.image.clone(),
                 transparent_background: event.transparent_background,
                 failure: event.failure.clone(),
                 saved_path: event.saved_path.clone(),
+                input_images: event.input_images.clone(),
                 imagegen_request_id: None,
                 generation_id: None,
             })),
@@ -258,6 +283,8 @@ pub(super) fn completed_item(
         )),
         EventMsg::SubAgentActivity(event) => Some((
             TurnItem::SubAgentActivity(SubAgentActivityItem {
+                model: event.model.clone(),
+                reasoning_effort: event.reasoning_effort.clone(),
                 id: event.event_id.clone(),
                 kind: event.kind,
                 agent_thread_id: event.agent_thread_id,
@@ -276,16 +303,12 @@ pub(super) fn completed_item(
                 cwd: event.cwd.clone(),
                 parsed_cmd: event.parsed_cmd.clone(),
                 source: event.source,
-                interaction_input: event.interaction_input.clone(),
+                interaction_input: None,
                 status: event.status.clone().into(),
-                stdout: (!event.stdout.is_empty()).then(|| event.stdout.clone()),
-                stderr: (!event.stderr.is_empty()).then(|| event.stderr.clone()),
                 aggregated_output: (!event.aggregated_output.is_empty())
                     .then(|| event.aggregated_output.clone()),
                 exit_code: Some(event.exit_code),
                 duration: Some(event.duration),
-                formatted_output: (!event.formatted_output.is_empty())
-                    .then(|| event.formatted_output.clone()),
             }),
             Some(event.turn_id.clone()),
         )),

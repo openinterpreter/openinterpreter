@@ -27,14 +27,45 @@ fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
 
 #[test]
 fn strict_config_rejects_unknown_config_override() -> Result<()> {
-    let codex_home = TempDir::new()?;
+    for (config_override, ignored_path) in [
+        ("foo=bar", "foo"),
+        ("tui.bogus_key_xyz=1", "tui.bogus_key_xyz"),
+    ] {
+        let codex_home = TempDir::new()?;
+        let mut cmd = codex_command(codex_home.path())?;
+        cmd.args(["--strict-config", "-c", config_override, "exec", "hello"])
+            .assert()
+            .failure()
+            .stderr(contains(format!(
+                "unknown configuration field `{ignored_path}`"
+            )));
+    }
 
-    let mut cmd = codex_command(codex_home.path())?;
-    cmd.args(["--strict-config", "-c", "foo=bar", "exec", "hello"])
-        .assert()
-        .failure()
-        .stderr(contains("unknown configuration field"));
+    Ok(())
+}
 
+#[test]
+fn mcp_list_reports_invalid_keybinding_reason() -> Result<()> {
+    for bindings in ["'backslash'", "['backslash']"] {
+        let codex_home = TempDir::new()?;
+        std::fs::write(
+            codex_home.path().join("config.toml"),
+            format!("[tui.keymap.editor]\ninsert_newline = {bindings}\n"),
+        )?;
+
+        let output = codex_command(codex_home.path())?
+            .current_dir(codex_home.path())
+            .args(["mcp", "list"])
+            .assert()
+            .failure()
+            .get_output()
+            .stderr
+            .clone();
+        let output = String::from_utf8(output)?;
+        insta::allow_duplicates! {
+            insta::assert_snapshot!(output);
+        }
+    }
     Ok(())
 }
 
@@ -47,6 +78,12 @@ fn interactive_validates_config_before_requiring_terminal() -> Result<()> {
             "config.toml",
             "unknown_key = true",
             "unknown configuration field",
+        ),
+        (
+            &["--strict-config"],
+            "config.toml",
+            "[tui]\nbogus_key_xyz = 1",
+            "unknown configuration field `tui.bogus_key_xyz`",
         ),
         (
             &["--strict-config", "-c", "foo=bar"],
@@ -218,7 +255,7 @@ async fn features_list_honors_cloud_managed_feature_requirements() -> Result<()>
     let chatgpt_base_url = format!("{}/backend-api", server.uri());
     let codex_home = TempDir::new()?;
     let user_config = format!(
-        "cli_auth_credentials_store = \"file\"\nchatgpt_base_url = \"{chatgpt_base_url}\"\n\n[features]\nfast_mode = true\n"
+        "cli_auth_credentials_store = \"file\"\nchatgpt_base_url = \"{chatgpt_base_url}\"\n\n[features]\nfast_mode = true\nin_app_voice = true\n"
     );
     std::fs::write(codex_home.path().join("config.toml"), &user_config)?;
 
@@ -258,7 +295,7 @@ async fn features_list_honors_cloud_managed_feature_requirements() -> Result<()>
                 "enterprise_managed": [{
                     "id": "managed-feature-requirements",
                     "name": "Managed feature requirements",
-                    "contents": "[features]\nfast_mode = false\n",
+                    "contents": "[features]\nfast_mode = false\nin_app_voice = false\n",
                 }],
             },
         })))
@@ -289,6 +326,14 @@ async fn features_list_honors_cloud_managed_feature_requirements() -> Result<()>
     assert_eq!(
         fast_mode.split_whitespace().collect::<Vec<_>>(),
         ["fast_mode", "stable", "false"]
+    );
+    let in_app_voice = stdout
+        .lines()
+        .find(|line| line.starts_with("in_app_voice "))
+        .context("feature list should include in_app_voice")?;
+    insta::assert_snapshot!(
+        in_app_voice.split_whitespace().collect::<Vec<_>>().join(" "),
+        @"in_app_voice stable false"
     );
     assert_eq!(
         std::fs::read_to_string(codex_home.path().join("config.toml"))?,

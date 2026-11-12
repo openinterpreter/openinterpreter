@@ -58,6 +58,13 @@ pub(super) fn mcp_startup_failure_reason(
     if !error.is_authentication_required() {
         return None;
     }
+    if let StartupOutcomeError::Failed {
+        is_ema_authentication_required: true,
+        ..
+    } = error
+    {
+        return Some(McpStartupFailureReason::ReauthenticationRequired);
+    }
     match auth_state {
         Some(
             McpAuthState::LoggedOut(McpLoginRequirement::Reauthentication) | McpAuthState::OAuth,
@@ -101,11 +108,14 @@ pub(super) fn mcp_init_error_display(
             "GitHub MCP does not support OAuth. Log in by adding a personal access token (https://github.com/settings/personal-access-tokens) to your environment and config.toml:\n[mcp_servers.{server_key}]\nbearer_token_env_var = CODEX_GITHUB_PERSONAL_ACCESS_TOKEN"
         )
     } else if error.is_authentication_required() {
-        let recovery_hint = if config.is_some_and(|config| !config.is_local_environment()) {
-            "Use your client's MCP OAuth sign-in flow.".to_string()
-        } else {
-            format!("Run `codex mcp login {server_name}`.")
-        };
+        let recovery_hint =
+            if config.is_some_and(|config| matches!(config.auth, McpServerAuth::EmaAuth)) {
+                "Sign in to your enterprise provider in Codex, then start a new thread.".to_string()
+            } else if config.is_some_and(|config| !config.is_local_environment()) {
+                "Use your client's MCP OAuth sign-in flow.".to_string()
+            } else {
+                format!("Run `codex mcp login {server_name}`.")
+            };
         let auth_status = match reason {
             Some(McpStartupFailureReason::ReauthenticationRequired) => {
                 "requires OAuth reauthentication"

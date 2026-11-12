@@ -152,6 +152,9 @@ pub struct UserVerificationVerifyParams {
 #[ts(export_to = "v2/")]
 pub struct UserVerificationVerifyResponse {
     pub proof: UserVerificationProof,
+    /// Native-reported authentication method for this signature. Older servers omit it.
+    /// This is approval context, not part of the signed proof.
+    pub biometric_type: Option<UserVerificationBiometricType>,
 }
 
 /// Cancels a native verification RPC issued on this connection, not an elicitation.

@@ -11,6 +11,7 @@ use crate::bundled_bwrap;
 use crate::bundled_bwrap::BundledBwrapLauncher;
 use crate::exec_util::argv_to_cstrings;
 use crate::exec_util::make_files_inheritable;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_sandboxing::find_system_bwrap_in_path;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
@@ -35,8 +36,16 @@ struct SystemBwrapCapabilities {
     supports_ro_bind_fd: bool,
 }
 
+static LAUNCHER: OnceLock<BubblewrapLauncher> = OnceLock::new();
+
 pub(crate) fn exec_bwrap(mut argv: Vec<String>, preserved_files: Vec<File>) -> ! {
-    argv.insert(1, "--as-pid-1".to_string());
+    if argv
+        .iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| arg == "--unshare-pid")
+    {
+        argv.insert(1, "--as-pid-1".to_string());
+    }
 
     match preferred_bwrap_launcher() {
         BubblewrapLauncher::System(launcher) => {
@@ -123,22 +132,28 @@ fn translate_legacy_bwrap_fd_mounts(argv: &mut Vec<String>) -> Result<(), String
     Ok(())
 }
 
-fn preferred_bwrap_launcher() -> BubblewrapLauncher {
-    static LAUNCHER: OnceLock<BubblewrapLauncher> = OnceLock::new();
-    LAUNCHER
-        .get_or_init(|| {
-            if let Some(path) = find_system_bwrap_in_path()
-                && let Some(launcher) = system_bwrap_launcher_for_path(&path)
-            {
-                return BubblewrapLauncher::System(launcher);
-            }
+pub(crate) fn initialize_bwrap_launcher(
+    file_system_policy: &FileSystemSandboxPolicy,
+    sandbox_policy_cwd: &Path,
+) {
+    LAUNCHER.get_or_init(|| {
+        if let Some(path) = find_system_bwrap_in_path(file_system_policy, sandbox_policy_cwd)
+            && let Some(launcher) = system_bwrap_launcher_for_path(&path)
+        {
+            return BubblewrapLauncher::System(launcher);
+        }
 
-            match bundled_bwrap::launcher() {
-                Some(launcher) => BubblewrapLauncher::Bundled(launcher),
-                None => BubblewrapLauncher::Unavailable,
-            }
-        })
-        .clone()
+        match bundled_bwrap::launcher() {
+            Some(launcher) => BubblewrapLauncher::Bundled(launcher),
+            None => BubblewrapLauncher::Unavailable,
+        }
+    });
+}
+
+fn preferred_bwrap_launcher() -> &'static BubblewrapLauncher {
+    LAUNCHER.get().unwrap_or_else(|| {
+        panic!("bubblewrap launcher must be initialized with the command's permissions")
+    })
 }
 
 fn system_bwrap_launcher_for_path(system_bwrap_path: &Path) -> Option<SystemBwrapLauncher> {
@@ -233,229 +248,5 @@ fn exec_system_bwrap(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use pretty_assertions::assert_eq;
-    use std::os::unix::fs::PermissionsExt;
-    use tempfile::NamedTempFile;
-
-    #[test]
-    fn prefers_system_bwrap_when_help_lists_argv0() {
-        let fake_bwrap = NamedTempFile::new().expect("temp file");
-        let fake_bwrap_path = fake_bwrap.path();
-        let expected = AbsolutePathBuf::from_absolute_path(fake_bwrap_path).expect("absolute");
-
-        assert_eq!(
-            system_bwrap_launcher_for_path_with_probe(fake_bwrap_path, |_| {
-                Some(SystemBwrapCapabilities {
-                    supports_argv0: true,
-                    supports_perms: true,
-                    supports_ro_bind_fd: true,
-                })
-            }),
-            Some(SystemBwrapLauncher {
-                program: expected,
-                supports_argv0: true,
-                supports_ro_bind_fd: true,
-            })
-        );
-    }
-
-    #[test]
-    fn prefers_system_bwrap_when_system_bwrap_lacks_argv0() {
-        let fake_bwrap = NamedTempFile::new().expect("temp file");
-        let fake_bwrap_path = fake_bwrap.path();
-
-        assert_eq!(
-            system_bwrap_launcher_for_path_with_probe(fake_bwrap_path, |_| {
-                Some(SystemBwrapCapabilities {
-                    supports_argv0: false,
-                    supports_perms: true,
-                    supports_ro_bind_fd: false,
-                })
-            }),
-            Some(SystemBwrapLauncher {
-                program: AbsolutePathBuf::from_absolute_path(fake_bwrap_path).expect("absolute"),
-                supports_argv0: false,
-                supports_ro_bind_fd: false,
-            })
-        );
-    }
-
-    #[test]
-    fn ignores_system_bwrap_when_system_bwrap_lacks_perms() {
-        let fake_bwrap = NamedTempFile::new().expect("temp file");
-
-        assert_eq!(
-            system_bwrap_launcher_for_path_with_probe(fake_bwrap.path(), |_| {
-                Some(SystemBwrapCapabilities {
-                    supports_argv0: false,
-                    supports_perms: false,
-                    supports_ro_bind_fd: false,
-                })
-            }),
-            None
-        );
-    }
-
-    #[test]
-    fn detects_fd_backed_read_only_mount_support_in_system_bwrap_help() {
-        let temp_dir = tempfile::tempdir().expect("temp directory");
-        let fake_bwrap_path = temp_dir.path().join("bwrap");
-        std::fs::write(
-            &fake_bwrap_path,
-            "#!/bin/sh\nprintf '%s\\n' '--as-pid-1' '--perms' '--argv0' '--ro-bind-fd'\n",
-        )
-        .expect("write fake bubblewrap");
-        std::fs::set_permissions(&fake_bwrap_path, std::fs::Permissions::from_mode(0o755))
-            .expect("make fake bubblewrap executable");
-
-        assert_eq!(
-            system_bwrap_capabilities(&fake_bwrap_path),
-            Some(SystemBwrapCapabilities {
-                supports_argv0: true,
-                supports_perms: true,
-                supports_ro_bind_fd: true,
-            })
-        );
-    }
-
-    #[test]
-    fn translates_fd_mounts_for_legacy_system_bubblewrap() {
-        let mut argv = vec![
-            "bwrap".to_string(),
-            "--ro-bind-fd".to_string(),
-            "7".to_string(),
-            "/tmp/socket-root".to_string(),
-            "--".to_string(),
-            "/usr/bin/codex-linux-sandbox".to_string(),
-            "--apply-seccomp-then-exec".to_string(),
-            "--".to_string(),
-            "echo".to_string(),
-            "--ro-bind-fd".to_string(),
-        ];
-
-        translate_legacy_bwrap_fd_mounts(&mut argv).expect("fd mount should translate");
-
-        assert_eq!(
-            argv,
-            vec![
-                "bwrap".to_string(),
-                "--ro-bind".to_string(),
-                "/proc/self/fd/7".to_string(),
-                "/tmp/socket-root".to_string(),
-                "--".to_string(),
-                "/usr/bin/codex-linux-sandbox".to_string(),
-                "--verify-fd-mount".to_string(),
-                "7:/tmp/socket-root".to_string(),
-                "--apply-seccomp-then-exec".to_string(),
-                "--".to_string(),
-                "echo".to_string(),
-                "--ro-bind-fd".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn translates_multiple_fd_mounts_for_legacy_system_bubblewrap() {
-        let mut argv = vec![
-            "bwrap".to_string(),
-            "--ro-bind-fd".to_string(),
-            "7".to_string(),
-            "/tmp/first".to_string(),
-            "--ro-bind-fd".to_string(),
-            "9".to_string(),
-            "/tmp/second:with-colon".to_string(),
-            "--".to_string(),
-            "codex-linux-sandbox".to_string(),
-            "--apply-seccomp-then-exec".to_string(),
-            "--".to_string(),
-            "true".to_string(),
-        ];
-
-        translate_legacy_bwrap_fd_mounts(&mut argv).expect("fd mounts should translate");
-
-        assert_eq!(
-            argv,
-            vec![
-                "bwrap".to_string(),
-                "--ro-bind".to_string(),
-                "/proc/self/fd/7".to_string(),
-                "/tmp/first".to_string(),
-                "--ro-bind".to_string(),
-                "/proc/self/fd/9".to_string(),
-                "/tmp/second:with-colon".to_string(),
-                "--".to_string(),
-                "codex-linux-sandbox".to_string(),
-                "--verify-fd-mount".to_string(),
-                "7:/tmp/first".to_string(),
-                "--verify-fd-mount".to_string(),
-                "9:/tmp/second:with-colon".to_string(),
-                "--apply-seccomp-then-exec".to_string(),
-                "--".to_string(),
-                "true".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn rejects_malformed_legacy_bubblewrap_fd_mounts() {
-        for (fd, destination) in [
-            ("invalid", "/tmp/socket-root"),
-            ("2", "/tmp/socket-root"),
-            ("7", "relative/socket-root"),
-        ] {
-            let mut argv = vec![
-                "bwrap".to_string(),
-                "--ro-bind-fd".to_string(),
-                fd.to_string(),
-                destination.to_string(),
-                "--".to_string(),
-                "codex-linux-sandbox".to_string(),
-            ];
-
-            assert!(translate_legacy_bwrap_fd_mounts(&mut argv).is_err());
-        }
-    }
-
-    #[test]
-    fn rejects_fd_mounts_without_the_trusted_inner_sandbox_stage() {
-        let mut argv = vec![
-            "bwrap".to_string(),
-            "--ro-bind-fd".to_string(),
-            "7".to_string(),
-            "/tmp/socket-root".to_string(),
-            "--".to_string(),
-            "/bin/true".to_string(),
-            "--".to_string(),
-            "--apply-seccomp-then-exec".to_string(),
-        ];
-
-        assert!(translate_legacy_bwrap_fd_mounts(&mut argv).is_err());
-    }
-
-    #[test]
-    fn rejects_duplicate_legacy_bubblewrap_fd_mounts() {
-        let mut argv = vec![
-            "bwrap".to_string(),
-            "--ro-bind-fd".to_string(),
-            "7".to_string(),
-            "/tmp/first".to_string(),
-            "--ro-bind-fd".to_string(),
-            "7".to_string(),
-            "/tmp/second".to_string(),
-            "--".to_string(),
-            "codex-linux-sandbox".to_string(),
-        ];
-
-        assert!(translate_legacy_bwrap_fd_mounts(&mut argv).is_err());
-    }
-
-    #[test]
-    fn ignores_system_bwrap_when_system_bwrap_is_missing() {
-        assert_eq!(
-            system_bwrap_launcher_for_path(Path::new("/definitely/not/a/bwrap")),
-            None
-        );
-    }
-}
+#[path = "launcher_tests.rs"]
+mod tests;

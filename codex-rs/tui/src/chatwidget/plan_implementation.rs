@@ -11,12 +11,6 @@ const PLAN_IMPLEMENTATION_YES: &str = "Yes, implement this plan";
 const PLAN_IMPLEMENTATION_CLEAR_CONTEXT: &str = "Yes, clear context and implement";
 const PLAN_IMPLEMENTATION_NO: &str = "No, stay in Plan mode";
 pub(super) const PLAN_IMPLEMENTATION_CODING_MESSAGE: &str = "Implement the plan.";
-pub(super) const PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX: &str = concat!(
-    "A previous agent produced the plan below to accomplish the user's task. ",
-    "Implement the plan in a fresh context. Treat the plan as the source of ",
-    "user intent, re-read files as needed, and carry the work through ",
-    "implementation and verification."
-);
 pub(super) const PLAN_IMPLEMENTATION_DEFAULT_UNAVAILABLE: &str = "Default mode unavailable";
 pub(super) const PLAN_IMPLEMENTATION_NO_APPROVED_PLAN: &str = "No approved plan available";
 
@@ -55,12 +49,9 @@ pub(super) fn selection_view_params(
             Some(PLAN_IMPLEMENTATION_DEFAULT_UNAVAILABLE.to_string()),
         ),
         (Some(_), Some(plan_markdown)) if !plan_markdown.trim().is_empty() => {
-            let user_text =
-                format!("{PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX}\n\n{plan_markdown}");
+            let plan = plan_markdown.to_owned();
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-                tx.send(AppEvent::ClearUiAndSubmitUserMessage {
-                    text: user_text.clone(),
-                });
+                tx.send(AppEvent::ImplementPlanInFreshSession { plan: plan.clone() });
             })];
             (actions, None)
         }
@@ -71,8 +62,8 @@ pub(super) fn selection_view_params(
     };
 
     let clear_context_description = clear_context_usage_label.map_or_else(
-        || "Fresh thread with this plan.".to_string(),
-        |label| format!("Fresh thread. Context: {label}."),
+        || "Fresh thread with this plan".to_string(),
+        |label| format!("Start a fresh thread (current context: {label})"),
     );
 
     SelectionViewParams {
@@ -82,7 +73,7 @@ pub(super) fn selection_view_params(
         items: vec![
             SelectionItem {
                 name: PLAN_IMPLEMENTATION_YES.to_string(),
-                description: Some("Switch to Default and start coding.".to_string()),
+                description: Some("Switch to Default and start coding".to_string()),
                 selected_description: None,
                 is_current: false,
                 actions: implement_actions,
@@ -102,7 +93,7 @@ pub(super) fn selection_view_params(
             },
             SelectionItem {
                 name: PLAN_IMPLEMENTATION_NO.to_string(),
-                description: Some("Continue planning with the model.".to_string()),
+                description: Some("Continue planning with the model".to_string()),
                 selected_description: None,
                 is_current: false,
                 actions: Vec::new(),

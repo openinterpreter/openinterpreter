@@ -35,11 +35,12 @@ const HARNESS_KEY_AUTHORIZATION: &str = "authorization-that-must-not-leak";
 struct StaticRegistryAuthProvider;
 
 impl AuthProvider for StaticRegistryAuthProvider {
-    fn add_auth_headers(&self, headers: &mut HeaderMap) {
+    fn add_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), codex_api::AuthError> {
         let _ = headers.insert(
             http::header::AUTHORIZATION,
             HeaderValue::from_static("Bearer registry-token"),
         );
+        Ok(())
     }
 }
 
@@ -116,7 +117,7 @@ async fn registry_requests_do_not_log_sensitive_urls_or_response_headers() -> Re
                     )
                     .set_body_json(response),
             )
-            .expect(1)
+            .expect(if operation == "validate" { 2 } else { 1 })
             .mount(&server)
             .await;
     }
@@ -134,13 +135,51 @@ async fn registry_requests_do_not_log_sensitive_urls_or_response_headers() -> Re
     client
         .connect_environment("environment-requested", harness_public_key.clone())
         .await?;
-    RegistryHarnessKeyValidator {
+    let validator = RegistryHarnessKeyValidator {
         client,
         environment_id: "environment-requested".to_string(),
         executor_registration_id: "registration-1".to_string(),
-    }
-    .validate_harness_key(&harness_public_key, HARNESS_KEY_AUTHORIZATION)
-    .await?;
+    };
+    let stream_id = uuid::Uuid::new_v4();
+    validator
+        .validate_harness_key(
+            &harness_public_key,
+            HARNESS_KEY_AUTHORIZATION,
+            Some(stream_id),
+        )
+        .await?;
+    validator
+        .validate_harness_key(
+            &harness_public_key,
+            HARNESS_KEY_AUTHORIZATION,
+            /*stream_id*/ None,
+        )
+        .await?;
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    let validation_requests: Vec<_> = requests
+        .iter()
+        .filter(|request| {
+            request
+                .url
+                .query_pairs()
+                .any(|(key, value)| key == "registry_token" && value.ends_with("/validate"))
+        })
+        .collect();
+    assert_eq!(validation_requests.len(), 2);
+    assert_eq!(
+        validation_requests[0]
+            .headers
+            .get("x-codex-noise-stream-id")
+            .map(|value| value.to_str().unwrap()),
+        Some(stream_id.to_string().as_str())
+    );
+    assert!(
+        validation_requests[1]
+            .headers
+            .get("x-codex-noise-stream-id")
+            .is_none()
+    );
 
     let logs = String::from_utf8(log_buffer.lock().expect("log buffer lock").clone())?;
     assert!(logs.contains("registry log capture sentinel"));
@@ -186,22 +225,32 @@ async fn reconnect_reuses_registration_until_url_is_rejected() -> Result<()> {
         static_registry_auth_provider(),
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
     )?;
-    let environment_task = tokio::spawn(run_remote_environment(
-        config,
-        ExecServerRuntimePaths::new(
-            std::env::current_exe()?,
-            /*codex_linux_sandbox_exe*/ None,
-        )?,
-    ));
+    let environment_task =
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(run_remote_environment(
+            config,
+            ExecServerRuntimeOptions::new(
+                std::env::current_exe()?,
+                /*codex_linux_sandbox_exe*/ None,
+            )?,
+        )));
 
     let (first_socket, _peer_addr) = timeout(Duration::from_secs(5), listener.accept()).await??;
     let mut first_websocket = accept_async(first_socket).await?;
     first_websocket.close(None).await?;
 
-    // An ordinary disconnect retries the same URL without registering again.
-    let (mut rejected_socket, _peer_addr) =
+    // An ordinary disconnect and a stalled upgrade both retry without registering again.
+    let (mut stalled_socket, _peer_addr) =
         timeout(Duration::from_secs(5), listener.accept()).await??;
     let mut request = [0u8; 4096];
+    assert!(stalled_socket.read(&mut request).await? > 0);
+    tokio::time::pause();
+    tokio::time::advance(DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT).await;
+    tokio::time::resume();
+
+    // Keep the stalled socket open until the executor starts its next attempt.
+    let (mut rejected_socket, _peer_addr) =
+        timeout(Duration::from_secs(5), listener.accept()).await??;
+    drop(stalled_socket);
     let _ = rejected_socket.read(&mut request).await?;
     rejected_socket
         .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
@@ -209,8 +258,8 @@ async fn reconnect_reuses_registration_until_url_is_rejected() -> Result<()> {
     rejected_socket.shutdown().await?;
 
     // The 4xx response discards the old registration before this attempt.
-    let (third_socket, _peer_addr) = timeout(Duration::from_secs(5), listener.accept()).await??;
-    let _third_websocket = accept_async(third_socket).await?;
+    let (final_socket, _peer_addr) = timeout(Duration::from_secs(5), listener.accept()).await??;
+    let _final_websocket = accept_async(final_socket).await?;
     registry.verify().await;
 
     environment_task.abort();
@@ -295,7 +344,11 @@ async fn validate_harness_key_requires_explicit_valid_response() {
         environment_id: "environment-requested".to_string(),
         executor_registration_id: "registration-1".to_string(),
     }
-    .validate_harness_key(&harness_public_key, HARNESS_KEY_AUTHORIZATION)
+    .validate_harness_key(
+        &harness_public_key,
+        HARNESS_KEY_AUTHORIZATION,
+        /*stream_id*/ None,
+    )
     .await
     .expect_err("a false validation response must fail closed");
 
@@ -325,7 +378,11 @@ async fn validate_harness_key_does_not_expose_error_body() {
         environment_id: "environment-requested".to_string(),
         executor_registration_id: "registration-1".to_string(),
     }
-    .validate_harness_key(&harness_public_key, HARNESS_KEY_AUTHORIZATION)
+    .validate_harness_key(
+        &harness_public_key,
+        HARNESS_KEY_AUTHORIZATION,
+        /*stream_id*/ None,
+    )
     .await
     .expect_err("validation HTTP error should fail closed");
 

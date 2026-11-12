@@ -1,4 +1,6 @@
 use codex_api::AuthProvider;
+use codex_http_client::CHATGPT_ACCOUNT_ID_HEADER;
+use codex_login::auth::is_fedramp_api_key;
 use http::HeaderMap;
 use http::HeaderValue;
 
@@ -14,6 +16,7 @@ pub struct BearerAuthProvider {
 
 impl BearerAuthProvider {
     pub fn new(token: String) -> Self {
+        let is_fedramp_account = is_fedramp_api_key(&token);
         Self {
             token: Some(token),
             account_id: None,
@@ -50,11 +53,12 @@ impl AuthProvider for BearerAuthProvider {
         if let Some(account_id) = self.account_id.as_ref()
             && let Ok(header) = HeaderValue::from_str(account_id)
         {
-            let _ = headers.insert("ChatGPT-Account-ID", header);
+            let _ = headers.insert(CHATGPT_ACCOUNT_ID_HEADER, header);
         }
         if self.is_fedramp_account {
             let _ = headers.insert("X-OpenAI-Fedramp", HeaderValue::from_static("true"));
         }
+        Ok(())
     }
 }
 

@@ -449,8 +449,12 @@ async fn turn_start_sends_nested_subagent_lineage_after_cold_thread_resume_v2() 
     Ok(())
 }
 
+#[test_case::test_case(false; "replacement")]
+#[test_case::test_case(true; "patch")]
 #[tokio::test]
-async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2() -> Result<()> {
+async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2(
+    patch_steer: bool,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let codex_home = TempDir::new()?;
@@ -489,7 +493,12 @@ async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2() 
 
     let start_metadata = HashMap::from([
         ("fiber_run_id".to_string(), "fiber-start-123".to_string()),
-        ("source".to_string(), "initial-source".to_string()),
+        ("source".to_string(), "snapshot-source".to_string()),
+        ("start_only".to_string(), "start-value".to_string()),
+        (
+            "misalignment_override".to_string(),
+            r#"{"review_target":"RB._~:-opaque"}"#.to_string(),
+        ),
     ]);
     let turn_req = mcp
         .send_turn_start_request(TurnStartParams {
@@ -500,7 +509,11 @@ async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2() 
                 text_elements: Vec::new(),
             }],
             turn_trigger: Some("user".to_string()),
-            responsesapi_client_metadata: Some(start_metadata.clone()),
+            responsesapi_client_metadata: Some(start_metadata),
+            responsesapi_client_metadata_patch: Some(HashMap::from([(
+                "source".to_string(),
+                "initial-source".to_string(),
+            )])),
             ..Default::default()
         })
         .await?;
@@ -519,7 +532,16 @@ async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2() 
         ("fiber_run_id".to_string(), "fiber-steer-456".to_string()),
         ("origin".to_string(), "gaas".to_string()),
         ("source".to_string(), "steer-source".to_string()),
+        (
+            "misalignment_override".to_string(),
+            r#"{"review_target":"RC"}"#.to_string(),
+        ),
     ]);
+    let (responsesapi_client_metadata, responsesapi_client_metadata_patch) = if patch_steer {
+        (None, Some(steer_metadata))
+    } else {
+        (Some(steer_metadata), None)
+    };
     let steer_req = mcp
         .send_turn_steer_request(TurnSteerParams {
             thread_id: thread.id.clone(),
@@ -528,7 +550,8 @@ async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2() 
                 text: "Focus on the failure".to_string(),
                 text_elements: Vec::new(),
             }],
-            responsesapi_client_metadata: Some(steer_metadata.clone()),
+            responsesapi_client_metadata,
+            responsesapi_client_metadata_patch,
             additional_context: None,
             expected_turn_id: turn_id.clone(),
         })
@@ -570,6 +593,14 @@ async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2() 
     assert_eq!(second_metadata["turn_id"].as_str(), Some(turn_id.as_str()));
     assert_eq!(second_metadata["turn_trigger"].as_str(), Some("user"));
     assert_eq!(second_metadata["source"].as_str(), Some("steer-source"));
+    assert_eq!(
+        second_metadata["start_only"].as_str(),
+        patch_steer.then_some("start-value")
+    );
+    assert_eq!(
+        second_metadata["misalignment_override"],
+        first_metadata["misalignment_override"],
+    );
 
     let event = wait_for_analytics_event(&server, DEFAULT_READ_TIMEOUT, "codex_turn_event").await?;
     assert_eq!(

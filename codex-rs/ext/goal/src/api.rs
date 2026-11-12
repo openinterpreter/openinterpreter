@@ -345,10 +345,14 @@ impl GoalService {
             .map_err(|err| GoalServiceError::Internal(format!("failed to read thread goal: {err}")))
     }
 
+    /// Records the user's instruction after validation and before changing goal state.
+    /// The recording future runs under the runtime's goal mutation permit; failure leaves
+    /// the goal unchanged. Recorded user intent remains valid if the database write fails.
     pub async fn set_thread_goal(
         &self,
         state_db: &codex_state::StateRuntime,
         request: GoalSetRequest<'_>,
+        record_user_instruction: impl Future<Output = Result<(), GoalServiceError>> + Send,
     ) -> Result<GoalSetOutcome, GoalServiceError> {
         self.set_thread_goal_inner(state_db, request, None).await
     }
@@ -438,13 +442,6 @@ impl GoalService {
         }
 
         let (goal, previous_goal) = if let Some(objective) = objective {
-            let existing_goal = state_db
-                .thread_goals()
-                .get_thread_goal(thread_id)
-                .await
-                .map_err(|err| {
-                    GoalServiceError::Internal(format!("failed to read thread goal: {err}"))
-                })?;
             if let Some(existing_goal) = existing_goal.as_ref() {
                 if state_db
                     .thread_goals()
@@ -520,18 +517,11 @@ impl GoalService {
                     .map(|goal| (goal, None))?
             }
         } else {
-            let existing_goal = state_db
-                .thread_goals()
-                .get_thread_goal(thread_id)
-                .await
-                .map_err(|err| {
-                    GoalServiceError::Internal(format!("failed to read thread goal: {err}"))
-                })?
-                .ok_or_else(|| {
-                    GoalServiceError::InvalidRequest(format!(
-                        "cannot update goal for thread {thread_id}: no goal exists"
-                    ))
-                })?;
+            let existing_goal = existing_goal.ok_or_else(|| {
+                GoalServiceError::InvalidRequest(format!(
+                    "cannot update goal for thread {thread_id}: no goal exists"
+                ))
+            })?;
             let previous_goal = PreviousGoalSnapshot::from(&existing_goal);
             let expected_goal_id = existing_goal.goal_id.clone();
             let updated = if let Some(expected) = expected.as_ref() {
@@ -1012,6 +1002,7 @@ impl GoalService {
         &self,
         state_db: &codex_state::StateRuntime,
         thread_id: ThreadId,
+        record_user_instruction: impl Future<Output = Result<(), GoalServiceError>> + Send,
     ) -> Result<bool, GoalServiceError> {
         let runtime = self.runtime_for_thread(thread_id);
         // Hold this through the prepare/write window so idle continuation cannot
@@ -1030,6 +1021,9 @@ impl GoalService {
         {
             tracing::warn!("failed to prepare external goal mutation: {err}");
         }
+
+        // A failed set can leave authorization in history without a goal row.
+        record_user_instruction.await?;
 
         let cleared_goal = state_db
             .thread_goals()

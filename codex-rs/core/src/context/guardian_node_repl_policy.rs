@@ -33,7 +33,7 @@ impl ContextualUserFragment for GuardianNodeReplPolicy {
         ("", "")
     }
 
-    fn body(&self) -> String {
-        self.policy.clone()
+    fn body(&self) -> ContentItem {
+        input_text(self.policy.clone())
     }
 }

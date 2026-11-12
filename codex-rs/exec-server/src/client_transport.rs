@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::AsyncBufReadExt;
+use tokio::io::AsyncReadExt;
 use tokio::io::BufReader;
 use tokio::process::Command;
 use tokio::sync::OwnedSemaphorePermit;
@@ -11,6 +12,7 @@ use tokio::time::sleep;
 use tokio::time::timeout;
 use tokio::time::timeout_at;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::debug;
 use tracing::warn;
 
@@ -30,6 +32,7 @@ use crate::ExecServerClient;
 use crate::ExecServerError;
 use crate::client::NoiseInitializeContext;
 use crate::client::accepted::AcceptedConnectionSource;
+use crate::client::is_environment_offline_error;
 use crate::client::is_retryable_registry_error;
 use crate::client::registry_recovery_retry_delay;
 use crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT;
@@ -43,17 +46,40 @@ use crate::client_api::RemoteExecServerConnectArgs;
 use crate::client_api::StdioExecServerCommand;
 use crate::client_api::StdioExecServerConnectArgs;
 use crate::connection::JsonRpcConnection;
+use crate::connection::JsonRpcConnectionEvent;
 use crate::noise_channel::NoiseChannelIdentity;
 use crate::noise_relay::NoiseHarnessConnectionArgs;
 use crate::noise_relay::noise_harness_connection_from_websocket_with_readiness;
 use crate::noise_relay::noise_relay_websocket_config;
+use crate::relay::HARNESS_KEY_VALIDATION_TIMEOUT;
 use crate::relay::harness_connection_from_websocket;
 use crate::trace_context::current_rendezvous_headers;
 
+const MAX_STDIO_STDERR_LOG_LINE_LEN: u64 = 8 * 1024;
 const ENVIRONMENT_CLIENT_NAME: &str = "codex-environment";
 const INITIAL_REGISTRY_MAX_RETRIES: u32 = 4;
-const INITIAL_REGISTRY_REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
+const REGISTRY_REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 const INITIAL_REGISTRY_OPERATION_TIMEOUT: Duration = Duration::from_secs(14);
+const PROVISIONED_ENVIRONMENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+// Leave time after executor validation for relay transit and RPC initialize.
+const NOISE_RECOVERY_INITIALIZE_TIMEOUT: Duration =
+    HARNESS_KEY_VALIDATION_TIMEOUT.saturating_add(Duration::from_secs(10));
+
+async fn connect_noise_bundle(
+    provider: &dyn NoiseRendezvousConnectProvider,
+    identity: &NoiseChannelIdentity,
+) -> Result<NoiseRendezvousConnectBundle, ExecServerError> {
+    timeout(
+        REGISTRY_REQUEST_TIMEOUT,
+        provider.connect_bundle(identity.public_key()),
+    )
+    .await
+    .map_err(|_| {
+        ExecServerError::EnvironmentRegistryRequest(
+            codex_http_client::RouteAwareRequestError::Timeout,
+        )
+    })?
+}
 
 pub(crate) async fn connect_websocket_request(
     request: http::Request<()>,
@@ -176,8 +202,9 @@ pub(crate) struct ReconnectAttempt {
 struct OpenNoiseRendezvousConnection {
     executor_registration_id: String,
     connection: JsonRpcConnection,
+    pending_tasks: Vec<AbortOnDropHandle<()>>,
     options: ExecServerClientConnectOptions,
-    handshake_ready: tokio::sync::oneshot::Receiver<()>,
+    handshake_ready: tokio::sync::oneshot::Receiver<Result<(), ExecServerError>>,
 }
 
 struct ReadyNoiseRendezvousConnection {
@@ -261,7 +288,6 @@ pub(crate) enum ExecServerReconnectStrategy {
         identity: NoiseChannelIdentity,
         client_name: String,
         connect_timeout: Duration,
-        initialize_timeout: Duration,
         http_client_factory: HttpClientFactory,
     },
 }
@@ -270,10 +296,12 @@ impl ExecServerReconnectStrategy {
     pub(crate) async fn resume(
         &self,
         session_id: &str,
+        stage: &mut &'static str,
     ) -> Result<ReconnectAttempt, ExecServerError> {
         match self {
             Self::Accepted(source) => source.next_connection(session_id).await,
             Self::WebSocket { args, http_headers } => {
+                *stage = "websocket_upgrade";
                 let mut args = args.clone();
                 args.resume_session_id = Some(session_id.to_string());
                 let connection =
@@ -286,7 +314,6 @@ impl ExecServerReconnectStrategy {
                 identity,
                 client_name,
                 connect_timeout,
-                initialize_timeout,
                 http_client_factory,
             } => {
                 let bundle = provider.connect_bundle(identity.public_key()).await?;
@@ -303,12 +330,13 @@ impl ExecServerReconnectStrategy {
                         harness_identity: identity.clone(),
                         client_name: client_name.clone(),
                         connect_timeout: *connect_timeout,
-                        initialize_timeout: *initialize_timeout,
+                        initialize_timeout: NOISE_RECOVERY_INITIALIZE_TIMEOUT,
                         resume_session_id: Some(session_id.to_string()),
                         http_client_factory: http_client_factory.clone(),
                     },
                 )
                 .await?;
+                *stage = "noise_handshake";
                 let ready = ExecServerClient::finish_noise_rendezvous_connection(opened).await?;
                 Ok(ReconnectAttempt::with_noise_context(
                     ready.connection,
@@ -327,6 +355,7 @@ impl ExecServerClient {
     pub(crate) async fn connect_for_transport(
         transport_params: ExecServerTransportParams,
         http_client_factory: HttpClientFactory,
+        started: &mut Option<Instant>,
     ) -> Result<Self, ExecServerError> {
         let (transport_params, deferred_readiness) = match transport_params {
             ExecServerTransportParams::Deferred(deferred) => {
@@ -335,7 +364,7 @@ impl ExecServerClient {
             transport_params => (transport_params, None),
         };
 
-        if let Some(mut readiness) = deferred_readiness {
+        let provisioning_deadline = if let Some(mut readiness) = deferred_readiness {
             let provisioning_result = readiness
                 .wait_for(Option::is_some)
                 .await
@@ -353,8 +382,12 @@ impl ExecServerClient {
                     )
                 })?;
             provisioning_result.map_err(ExecServerError::ProvisioningFailed)?;
-        }
+            Some(Instant::now() + PROVISIONED_ENVIRONMENT_CONNECT_TIMEOUT)
+        } else {
+            None
+        };
 
+        *started = Some(Instant::now());
         let websocket = match transport_params {
             ExecServerTransportParams::Deferred(_) => {
                 return Err(ExecServerError::Protocol(
@@ -377,6 +410,7 @@ impl ExecServerClient {
                     &provider,
                     &identity,
                     http_client_factory.clone(),
+                    provisioning_deadline,
                 )
                 .await?;
                 let reconnect_strategy = ExecServerReconnectStrategy::NoiseRendezvous {
@@ -385,7 +419,6 @@ impl ExecServerClient {
                     identity,
                     client_name: ENVIRONMENT_CLIENT_NAME.to_string(),
                     connect_timeout: DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT,
-                    initialize_timeout: DEFAULT_REMOTE_EXEC_SERVER_INITIALIZE_TIMEOUT,
                     http_client_factory,
                 };
                 return Self::connect_with_recovery_and_noise_context(
@@ -429,6 +462,7 @@ impl ExecServerClient {
         provider: &Arc<dyn NoiseRendezvousConnectProvider>,
         identity: &NoiseChannelIdentity,
         http_client_factory: HttpClientFactory,
+        provisioning_deadline: Option<Instant>,
     ) -> Result<(ReadyNoiseRendezvousConnection, crate::NoiseChannelPublicKey), ExecServerError>
     {
         let open_connection = |bundle: NoiseRendezvousConnectBundle| {
@@ -446,30 +480,27 @@ impl ExecServerClient {
         let retry_key = uuid::Uuid::new_v4().to_string();
         let mut retries = 0;
         let mut refreshed_unauthorized_bundle = false;
-        let connect_bundle = || async {
-            timeout(
-                INITIAL_REGISTRY_REQUEST_TIMEOUT,
-                provider.connect_bundle(identity.public_key()),
-            )
-            .await
-            .unwrap_or_else(|_| {
-                Err(ExecServerError::EnvironmentRegistryRequest(
-                    codex_http_client::RouteAwareRequestError::Timeout,
-                ))
-            })
-        };
+        let connect_bundle = || connect_noise_bundle(provider.as_ref(), identity);
         let mut result = connect_bundle().await;
         loop {
             let bundle = match result {
                 Ok(bundle) => bundle,
-                Err(error)
-                    if is_retryable_registry_error(&error)
-                        && retries < INITIAL_REGISTRY_MAX_RETRIES =>
-                {
+                Err(error) => {
+                    // A provisioned executor may be resuming after an earlier ready
+                    // report. Only offline responses get the longer, fixed deadline.
+                    let retry_deadline = match provisioning_deadline {
+                        Some(deadline) if is_environment_offline_error(&error) => deadline,
+                        _ if is_retryable_registry_error(&error)
+                            && retries < INITIAL_REGISTRY_MAX_RETRIES =>
+                        {
+                            deadline
+                        }
+                        _ => return Err(error),
+                    };
                     // Session resumption owns its separate recovery deadline.
                     let delay = registry_recovery_retry_delay(&retry_key, retries);
                     retries += 1;
-                    result = match timeout_at(deadline, async {
+                    result = match timeout_at(retry_deadline, async {
                         sleep(delay).await;
                         connect_bundle().await
                     })
@@ -480,7 +511,6 @@ impl ExecServerClient {
                     };
                     continue;
                 }
-                Err(error) => return Err(error),
             };
             let executor_public_key = bundle.executor_public_key.clone();
             match open_connection(bundle).await {
@@ -663,7 +693,7 @@ impl ExecServerClient {
         })?;
 
         let connection_label = format!("Noise exec-server rendezvous websocket {diagnostic_url}");
-        let connection = noise_harness_connection_from_websocket_with_readiness(
+        let mut connection = noise_harness_connection_from_websocket_with_readiness(
             stream,
             NoiseHarnessConnectionArgs {
                 connection_label,
@@ -674,9 +704,18 @@ impl ExecServerClient {
                 harness_key_authorization,
             },
         );
+        // Until RpcClient can take ownership, close the socket if the handshake
+        // fails or an enclosing deadline cancels the attempt.
+        let pending_tasks = connection
+            .connection
+            .task_handles
+            .drain(..)
+            .map(AbortOnDropHandle::new)
+            .collect();
         Ok(OpenNoiseRendezvousConnection {
             executor_registration_id,
             connection: connection.connection,
+            pending_tasks,
             options: ExecServerClientConnectOptions {
                 client_name,
                 initialize_timeout,
@@ -696,19 +735,36 @@ impl ExecServerClient {
         )
     )]
     async fn wait_for_noise_handshake(
-        handshake_ready: &mut tokio::sync::oneshot::Receiver<()>,
+        connection: &mut OpenNoiseRendezvousConnection,
         deadline: Instant,
         initialize_timeout: Duration,
         initialize_span: &tracing::Span,
     ) -> Result<(), ExecServerError> {
-        match timeout_at(deadline, handshake_ready).await {
-            Ok(Ok(())) => Ok(()),
+        match timeout_at(deadline, &mut connection.handshake_ready).await {
+            Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(ExecServerError::Disconnected(
                 "Noise harness handshake failed before connection became ready".to_string(),
             )),
-            Err(_) => Err(ExecServerError::InitializeTimedOut {
-                timeout: initialize_timeout,
-            }),
+            Err(_) => {
+                tracing::event!(
+                    name: "codex.exec_server.noise_handshake_failed",
+                    target: "codex_otel.trace_safe",
+                    tracing::Level::WARN,
+                    event.name = "codex.exec_server.noise_handshake_failed",
+                    noise_event = "handshake",
+                    noise_outcome = "failed",
+                    noise_side = "harness",
+                    noise_reason = "timeout",
+                    timeout_ms = initialize_timeout.as_millis() as u64,
+                    elapsed_ms = connection.handshake_started.elapsed().as_millis() as u64,
+                    environment_id = %connection.environment_id,
+                    executor_registration_id = %connection.executor_registration_id,
+                    stream_id = %connection.stream_id,
+                );
+                Err(ExecServerError::InitializeTimedOut {
+                    timeout: initialize_timeout,
+                })
+            }
         }
     }
 
@@ -730,22 +786,32 @@ impl ExecServerClient {
         };
         let deadline = Instant::now() + initialize_timeout;
         let readiness = Self::wait_for_noise_handshake(
-            &mut connection.handshake_ready,
+            &mut connection,
             deadline,
             initialize_timeout,
             &noise_context.span,
         )
         .await;
-        if let Err(error) = readiness {
-            // Unlike the normal connect path, the connection has not reached
-            // RpcClient yet, so its Drop implementation cannot abort the
-            // transport task for us.
-            connection.connection.transport.terminate();
-            for task in &connection.connection.task_handles {
-                task.abort();
+        if let Err(mut error) = readiness {
+            // Before readiness, the transport reports the reason through the
+            // connection event channel, but no RpcClient is reading it yet.
+            if matches!(error, ExecServerError::Disconnected(_))
+                && let Ok(JsonRpcConnectionEvent::Disconnected {
+                    reason: Some(reason),
+                }) = connection.connection.incoming_rx.try_recv()
+            {
+                error = ExecServerError::Disconnected(format!(
+                    "Noise harness handshake failed before connection became ready: {reason}"
+                ));
             }
             return Err(error);
         }
+        connection.connection.task_handles.extend(
+            connection
+                .pending_tasks
+                .into_iter()
+                .map(AbortOnDropHandle::detach),
+        );
         let mut options = connection.options;
         options.initialize_timeout = deadline.saturating_duration_since(Instant::now());
         Ok(ReadyNoiseRendezvousConnection {
@@ -773,11 +839,22 @@ impl ExecServerClient {
         })?;
         if let Some(stderr) = child.stderr.take() {
             tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
+                let mut reader = BufReader::new(stderr);
+                let mut line = Vec::new();
                 loop {
-                    match lines.next_line().await {
-                        Ok(Some(line)) => debug!("exec-server stdio stderr: {line}"),
-                        Ok(None) => break,
+                    line.clear();
+                    match (&mut reader)
+                        .take(MAX_STDIO_STDERR_LOG_LINE_LEN)
+                        .read_until(b'\n', &mut line)
+                        .await
+                    {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            let line = line.strip_suffix(b"\n").unwrap_or(&line);
+                            let line = line.strip_suffix(b"\r").unwrap_or(line);
+                            let line = String::from_utf8_lossy(line);
+                            debug!("exec-server stdio stderr: {line}");
+                        }
                         Err(err) => {
                             warn!("failed to read exec-server stdio stderr: {err}");
                             break;
@@ -788,8 +865,12 @@ impl ExecServerClient {
         }
 
         Self::connect(
-            JsonRpcConnection::from_stdio(stdout, stdin, "exec-server stdio command".to_string())
-                .with_child_process(child),
+            JsonRpcConnection::client_from_stdio(
+                stdout,
+                stdin,
+                "exec-server stdio command".to_string(),
+            )
+            .with_child_process(child),
             args.into(),
         )
         .await
@@ -807,7 +888,9 @@ fn is_rendezvous_harness_url(websocket_url: &str) -> bool {
 }
 
 fn stdio_command_process(stdio_command: &StdioExecServerCommand) -> Command {
-    let mut command = Command::new(&stdio_command.program);
+    let mut command = Command::from(codex_utils_process::background_command(
+        &stdio_command.program,
+    ));
     command.args(&stdio_command.args);
     command.envs(&stdio_command.env);
     scrub_non_inheritable_env_vars(command.as_std_mut());

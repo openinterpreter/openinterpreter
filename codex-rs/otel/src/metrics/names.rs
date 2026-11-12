@@ -1,6 +1,11 @@
+use std::sync::LazyLock;
+
 pub const TOOL_CALL_COUNT_METRIC: &str = "codex.tool.call";
 pub const TOOL_CALL_DURATION_METRIC: &str = "codex.tool.call.duration_ms";
 pub const TOOL_CALL_UNIFIED_EXEC_METRIC: &str = "codex.tool.unified_exec";
+pub const MULTI_AGENT_SPAWN_FAILURE_METRIC: &str = "codex.multi_agent.spawn.failure";
+pub const MULTI_AGENT_SPAWN_PHASE_DURATION_METRIC: &str =
+    "codex.multi_agent.spawn.phase.duration_ms";
 pub const ARTIFACT_OPERATION_STARTED_METRIC: &str = "codex.artifact.operation.started";
 pub const ARTIFACT_OPERATION_EXPECTED_OUTPUT_COUNT_METRIC: &str =
     "codex.artifact.operation.expected_output_count";
@@ -11,6 +16,8 @@ pub const API_CALL_COUNT_METRIC: &str = "codex.api_request";
 pub const API_CALL_DURATION_METRIC: &str = "codex.api_request.duration_ms";
 pub const SSE_EVENT_COUNT_METRIC: &str = "codex.sse_event";
 pub const SSE_EVENT_DURATION_METRIC: &str = "codex.sse_event.duration_ms";
+pub const WEBSOCKET_CONNECT_COUNT_METRIC: &str = "codex.websocket.connect";
+pub const WEBSOCKET_CONNECT_DURATION_METRIC: &str = "codex.websocket.connect.duration_ms";
 pub const WEBSOCKET_REQUEST_COUNT_METRIC: &str = "codex.websocket.request";
 pub const WEBSOCKET_CONTINUATION_COUNT_METRIC: &str = "codex.websocket.continuation";
 pub const WEBSOCKET_REQUEST_DURATION_METRIC: &str = "codex.websocket.request.duration_ms";
@@ -27,9 +34,15 @@ pub const RESPONSES_API_ENGINE_IAPI_TBT_DURATION_METRIC: &str =
     "codex.responses_api_engine_iapi_tbt.duration_ms";
 pub const RESPONSES_API_ENGINE_SERVICE_TBT_DURATION_METRIC: &str =
     "codex.responses_api_engine_service_tbt.duration_ms";
+pub const REASONING_REPLAY_COUNT_METRIC: &str = "codex.responses.reasoning_replay";
+/// Histogram of reported removals per sampling response and reason, including zeros.
+pub const REASONING_ITEMS_REMOVED_METRIC: &str = "codex.responses.reasoning_items_removed";
 pub const TURN_E2E_DURATION_METRIC: &str = "codex.turn.e2e_duration_ms";
 pub const TURN_TTFT_DURATION_METRIC: &str = "codex.turn.ttft.duration_ms";
 pub const TURN_TTFM_DURATION_METRIC: &str = "codex.turn.ttfm.duration_ms";
+pub const TURN_CRITICAL_PATH_CAPTURE_METRIC: &str = "codex.turn.critical_path.capture";
+pub const TURN_CRITICAL_PATH_DURATION_METRIC: &str = "codex.turn.critical_path.duration_ms";
+pub const TURN_CRITICAL_PATH_COMPONENT_METRIC: &str = "codex.turn.critical_path.component_ms";
 pub const TURN_NETWORK_PROXY_METRIC: &str = "codex.turn.network_proxy";
 pub const TURN_MEMORY_METRIC: &str = "codex.turn.memory";
 pub const TURN_TOOL_CALL_METRIC: &str = "codex.turn.tool.call";
@@ -41,6 +54,8 @@ pub const GUARDIAN_REVIEW_COUNT_METRIC: &str = "codex.guardian.review";
 pub const GUARDIAN_REVIEW_DURATION_METRIC: &str = "codex.guardian.review.duration_ms";
 pub const GUARDIAN_REVIEW_TTFT_DURATION_METRIC: &str = "codex.guardian.review.ttft.duration_ms";
 pub const GUARDIAN_REVIEW_TOKEN_USAGE_METRIC: &str = "codex.guardian.review.token_usage";
+pub const GUARDIAN_REVIEW_TRUNCATION_METRIC: &str = "codex.guardian.review.truncation";
+pub const GUARDIAN_REVIEW_TRUNCATION_BYTES_METRIC: &str = "codex.guardian.review.truncation.bytes";
 pub const GOAL_CREATED_METRIC: &str = "codex.goal.created";
 pub const GOAL_RESUMED_METRIC: &str = "codex.goal.resumed";
 pub const GOAL_COMPLETED_METRIC: &str = "codex.goal.completed";
@@ -63,8 +78,74 @@ pub const STARTUP_PREWARM_DURATION_METRIC: &str = "codex.startup_prewarm.duratio
 pub const STARTUP_PREWARM_AGE_AT_FIRST_TURN_METRIC: &str =
     "codex.startup_prewarm.age_at_first_turn_ms";
 pub const THREAD_STARTED_METRIC: &str = "codex.thread.started";
+/// Submitted additional-context entries, including unchanged entries, by kind and truncation status.
+/// The name tag is included only when explicitly supplied; opaque source keys are never tags.
+pub const ADDITIONAL_CONTEXT_COUNT_METRIC: &str = "codex.additional_context";
+/// UTF-8 value bytes before/after truncation, excluding message wrappers; after includes the marker.
+pub const ADDITIONAL_CONTEXT_VALUE_BYTES_METRIC: &str = "codex.additional_context.value_bytes";
+/// Logarithmic byte buckets through 4 MiB, with a 4 KiB boundary near the truncation cap.
+pub static ADDITIONAL_CONTEXT_VALUE_BYTES_BUCKETS: LazyLock<Vec<f64>> = LazyLock::new(|| {
+    let mut buckets = context_log_buckets(/*max_exponent*/ 22.0)
+        .into_iter()
+        .chain([4096.0])
+        .collect::<Vec<_>>();
+    buckets.sort_by(f64::total_cmp);
+    buckets.dedup();
+    buckets
+});
 pub const THREAD_SKILLS_ENABLED_TOTAL_METRIC: &str = "codex.thread.skills.enabled_total";
 pub const THREAD_SKILLS_KEPT_TOTAL_METRIC: &str = "codex.thread.skills.kept_total";
 pub const THREAD_SKILLS_DESCRIPTION_TRUNCATED_CHARS_METRIC: &str =
     "codex.thread.skills.description_truncated_chars";
 pub const THREAD_SKILLS_TRUNCATED_METRIC: &str = "codex.thread.skills.truncated";
+// Tools measure the rendered block; kind=snapshot|delta distinguishes full catalogs from updates.
+pub const THREAD_TOOLS_NAMESPACES_TOTAL_METRIC: &str = "codex.thread.tools.namespaces_total";
+pub const THREAD_TOOLS_FRAGMENT_BYTES_METRIC: &str = "codex.thread.tools.fragment_bytes";
+
+/// Finalized tool registrations per sampling request, tagged by exposure, tool_mode,
+/// and effective incremental_tools mode.
+pub const TOOL_REGISTRATIONS_METRIC: &str = "codex.tools.registered";
+pub const TOOL_REGISTRATIONS_METRIC_BUCKETS: &[f64] = &[
+    0.0, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 50.0, 75.0, 100.0, 150.0, 200.0, 300.0, 500.0, 750.0,
+    1_000.0, 2_000.0, 5_000.0, 10_000.0, 20_000.0,
+];
+
+/// Logarithmic boundaries up to 32,768 for tools bytes and namespace counts.
+pub static THREAD_TOOLS_METRIC_BUCKETS: LazyLock<[f64; 511]> =
+    LazyLock::new(|| context_log_buckets(/*max_exponent*/ 15.0));
+
+/// Rendered incremental tool deltas by action and qualified tool; excludes initial catalogs.
+/// schema_changed includes any definition change, such as description edits.
+pub const TOOL_INCREMENTAL_UPDATES_METRIC: &str = "codex.tools.incremental_updates";
+
+/// UTF-8 description bytes on replacement by qualified tool; skips missing descriptions.
+pub const TOOL_SPEC_DESCRIPTION_BYTES_METRIC: &str = "codex.tools.spec_description_bytes";
+/// Logarithmic boundaries up to 1 MiB.
+pub static TOOL_SPEC_DESCRIPTION_BYTES_METRIC_BUCKETS: LazyLock<[f64; 511]> =
+    LazyLock::new(|| context_log_buckets(/*max_exponent*/ 20.0));
+
+/// Rendered exec entry deltas (tools and namespace instructions), by action.
+/// Excludes full declarations; schema_changed includes any entry replacement.
+pub const EXEC_TOOL_ENTRY_UPDATES_METRIC: &str = "codex.tools.exec_entry_updates";
+/// UTF-8 bytes per rendered added/changed exec batch, including hint and framing.
+/// Excludes full declarations and removal notices.
+pub const EXEC_TOOL_UPDATE_BYTES_METRIC: &str = "codex.tools.exec_update_bytes";
+
+pub static THREAD_SKILLS_COUNT_METRIC_BUCKETS: LazyLock<[f64; 513]> =
+    LazyLock::new(|| std::array::from_fn(|index| index as f64));
+
+/// Logarithmic boundaries up to 131,072 removed description characters.
+pub static THREAD_SKILLS_DESCRIPTION_TRUNCATED_CHARS_BUCKETS: LazyLock<[f64; 511]> =
+    LazyLock::new(|| context_log_buckets(/*max_exponent*/ 17.0));
+
+pub const THREAD_SKILLS_TRUNCATED_BUCKETS: &[f64] = &[0.0, 1.0];
+
+fn context_log_buckets(max_exponent: f64) -> [f64; 511] {
+    std::array::from_fn(|index| {
+        if index == 0 {
+            0.0
+        } else {
+            2.0_f64.powf(max_exponent * (index - 1) as f64 / 509.0)
+        }
+    })
+}

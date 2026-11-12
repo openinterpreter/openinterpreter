@@ -1,5 +1,6 @@
 //! The textarea owns editable composer text, placeholder elements, cursor/wrap state, and a
-//! single-entry kill buffer.
+//! single-entry kill buffer, including atomic ranges; rich payloads remain composer-owned.
+//! Single-line inputs ignore line breaks and scroll horizontally.
 //!
 //! Whole-buffer replacement APIs intentionally rebuild only the visible draft state. They clear
 //! element ranges and derived cursor/wrapping caches, but they keep the kill buffer intact so a
@@ -50,12 +51,14 @@ use std::ops::Range;
 use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 
+mod editing;
 mod hyperlinks;
 mod mouse;
 mod vim;
 mod vim_commands;
 mod vim_search;
 mod wrapping;
+
 use self::vim::VimMode;
 use self::vim::VimMotion;
 use self::vim::VimOperator;
@@ -67,6 +70,7 @@ use self::vim_commands::VimCommandState;
 use self::vim_commands::VimEditTarget;
 use self::vim_commands::VimInsertPosition;
 pub(crate) use self::vim_commands::VimPersistentState;
+pub(crate) use editing::EditTarget;
 
 const WORD_SEPARATORS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
 
@@ -135,7 +139,9 @@ pub(crate) struct TextElementSnapshot {
 /// will appear to restore stale text from the user's perspective.
 #[derive(Debug)]
 pub(crate) struct TextArea {
+    prefix_insertion_revision: u64,
     text: String,
+    single_line: bool,
     cursor_pos: usize,
     mouse_selection: Option<mouse::MouseSelection>,
     last_click: Option<(std::time::Instant, u16, u16, u8)>,
@@ -146,6 +152,7 @@ pub(crate) struct TextArea {
     next_element_id: u64,
     kill_buffer: String,
     kill_buffer_kind: KillBufferKind,
+    register_elements: register::RegisterElements,
     vim_enabled: bool,
     vim_mode: VimMode,
     vim_pending: VimPending,
@@ -169,7 +176,15 @@ struct WrapCache {
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct TextAreaState {
     /// Index into wrapped lines of the first visible line.
-    scroll: u16,
+    pub(in crate::bottom_pane) scroll: usize,
+    /// Caret at the time of manual scrolling. A changed caret resumes following automatically.
+    manual_cursor: Option<usize>,
+}
+
+impl TextAreaState {
+    pub(crate) fn follow_cursor(&mut self) {
+        self.manual_cursor = None;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,6 +206,8 @@ impl TextArea {
         let defaults = RuntimeKeymap::defaults();
         Self {
             text: String::new(),
+            prefix_insertion_revision: 0,
+            single_line: false,
             cursor_pos: 0,
             mouse_selection: None,
             last_click: None,
@@ -201,6 +218,7 @@ impl TextArea {
             next_element_id: 1,
             kill_buffer: String::new(),
             kill_buffer_kind: KillBufferKind::Characterwise,
+            register_elements: register::RegisterElements::default(),
             vim_enabled: false,
             vim_mode: VimMode::Insert,
             vim_pending: VimPending::None,
@@ -455,6 +473,9 @@ impl TextArea {
         self.mouse_selection = None;
         self.clear_vim_replace_recovery();
         let pos = self.clamp_pos_for_insertion(pos);
+        if pos == 0 && !text.is_empty() {
+            self.prefix_insertion_revision = self.prefix_insertion_revision.wrapping_add(1);
+        }
         self.text.insert_str(pos, text);
         self.wrap_cache.replace(None);
         if pos <= self.cursor_pos {
@@ -487,6 +508,9 @@ impl TextArea {
         }
         let diff = inserted_len as isize - removed_len as isize;
 
+        if start == 0 && !text.is_empty() {
+            self.prefix_insertion_revision = self.prefix_insertion_revision.wrapping_add(1);
+        }
         self.text.replace_range(range, text);
         self.wrap_cache.replace(None);
         self.preferred_col = None;
@@ -521,7 +545,14 @@ impl TextArea {
     }
 
     pub fn desired_height(&self, width: u16) -> u16 {
-        self.wrapped_lines(width).len() as u16
+        u16::try_from(self.row_count(width)).unwrap_or(u16::MAX)
+    }
+
+    pub(super) fn row_count(&self, width: u16) -> usize {
+        if self.single_line {
+            return 1;
+        }
+        self.wrapped_lines(width).len()
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -531,20 +562,22 @@ impl TextArea {
 
     /// Returns an on-screen cursor position within `area`, accounting for wrapping and scrolling.
     ///
-    /// Returns `None` when the viewport has no visible cells.
+    /// Returns `None` when the viewport or caret is not visible.
     pub fn cursor_pos_with_state(&self, area: Rect, state: TextAreaState) -> Option<(u16, u16)> {
         if area.is_empty() {
             return None;
         }
 
+        if self.single_line {
+            let (_, col) = self.single_line_viewport(area.width);
+            return Some((area.x + col, area.y));
+        }
         let lines = self.wrapped_lines(area.width);
-        let effective_scroll = self.effective_scroll(area, &lines, state.scroll);
+        let effective_scroll = self.effective_scroll(area, &lines, state);
         let (i, col) = wrapping::cursor_position(&self.text, &lines, area.width, self.cursor_pos)?;
-        let screen_row = i
-            .saturating_sub(effective_scroll as usize)
-            .try_into()
-            .unwrap_or(0);
-        Some((area.x + col as u16, area.y + screen_row))
+        let screen_row = i.checked_sub(effective_scroll)?;
+        (screen_row < usize::from(area.height))
+            .then(|| (area.x + col as u16, area.y + screen_row as u16))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -677,7 +710,9 @@ impl TextArea {
             return;
         }
         if keymap.yank.is_pressed(event) {
-            self.yank();
+            self.apply_vim_insert_action(VimAction::Yank(std::sync::Arc::new(
+                self.register_snapshot(),
+            )));
             return;
         }
         if keymap.move_word_left.is_pressed(event) {
@@ -741,6 +776,8 @@ impl TextArea {
                 return;
             }
             self.insert_str(&c.to_string());
+        } else {
+            tracing::debug!(kind = ?event.kind, modifiers = ?event.modifiers, "Unhandled key event in TextArea");
         }
 
         tracing::debug!("Unhandled key event in TextArea: {:?}", event);
@@ -777,6 +814,10 @@ impl TextArea {
         }
         let keymap = self.editor_keymap.clone();
         self.input_with_keymap(event, &keymap);
+    }
+
+    pub(in crate::bottom_pane) fn is_delete_backward_key(&self, event: KeyEvent) -> bool {
+        self.editor_keymap.delete_backward.is_pressed(event)
     }
 
     fn leave_vim_insert_mode(&mut self) {
@@ -823,11 +864,15 @@ impl TextArea {
             return;
         }
         if self.vim_normal_keymap.open_line_below.is_pressed(event) {
-            self.start_vim_edit(VimAction::Insert(VimInsertPosition::OpenBelow));
+            if !self.single_line {
+                self.start_vim_edit(VimAction::Insert(VimInsertPosition::OpenBelow));
+            }
             return;
         }
         if self.vim_normal_keymap.open_line_above.is_pressed(event) {
-            self.start_vim_edit(VimAction::Insert(VimInsertPosition::OpenAbove));
+            if !self.single_line {
+                self.start_vim_edit(VimAction::Insert(VimInsertPosition::OpenAbove));
+            }
             return;
         }
         if self.vim_normal_keymap.move_left.is_pressed(event) {
@@ -1281,17 +1326,51 @@ impl TextArea {
         }
     }
 
-    /// Insert the most recently killed text at the cursor.
-    ///
-    /// This uses the textarea's single-entry kill buffer. Because whole-buffer replacement APIs do
-    /// not clear that buffer, `yank` can restore text after composer-level clears such as submit
-    /// and slash-command dispatch.
-    pub fn yank(&mut self) {
-        if self.kill_buffer.is_empty() {
+    pub(in crate::bottom_pane) fn take_register_event(
+        &mut self,
+    ) -> Option<register::RegisterEvent> {
+        self.register_elements.event.take()
+    }
+
+    fn register_snapshot(&self) -> register::RegisterSnapshot {
+        register::RegisterSnapshot {
+            text: self.kill_buffer.clone(),
+            elements: self.register_elements.elements.clone(),
+        }
+    }
+
+    /// Insert captured register contents without recording literal placeholder text.
+    fn yank_snapshot(&mut self, snapshot: &register::RegisterSnapshot) {
+        let text = &snapshot.text;
+        if text.is_empty() {
             return;
         }
-        let text = self.kill_buffer.clone();
-        self.insert_str(&text);
+        let start = self.edit_target().start();
+        let replaying = self.vim_commands.replaying;
+        self.vim_commands.replaying = true;
+        if snapshot.elements.is_empty() {
+            self.insert_str(text);
+        } else {
+            // Rich objects use the same insertion boundary as insert_element, including in R.
+            self.replace_range(self.mouse_selection_range().unwrap_or(start..start), text);
+        }
+        self.vim_commands.replaying = replaying;
+        register::paste_elements(self, start, snapshot.elements.clone());
+    }
+
+    pub(crate) fn take_kill_buffer_snapshot(&mut self) -> KillBufferSnapshot {
+        KillBufferSnapshot {
+            text: std::mem::take(&mut self.kill_buffer),
+            kind: self.kill_buffer_kind,
+            elements: std::mem::take(&mut self.register_elements.elements),
+        }
+    }
+
+    pub(crate) fn restore_kill_buffer_snapshot(&mut self, snapshot: KillBufferSnapshot) {
+        self.kill_buffer = snapshot.text;
+        self.kill_buffer_kind = snapshot.kind;
+        self.register_elements.elements = snapshot.elements;
+        self.register_elements.event = None;
     }
 
     pub(crate) fn take_kill_buffer_snapshot(&mut self) -> KillBufferSnapshot {
@@ -1320,12 +1399,7 @@ impl TextArea {
             return;
         }
 
-        let removed = self.text[range.clone()].to_string();
-        if removed.is_empty() {
-            return;
-        }
-
-        self.store_kill_buffer(removed, kind);
+        self.store_kill_buffer(range.clone(), kind);
         self.replace_range_raw(range, "");
     }
 
@@ -1342,15 +1416,12 @@ impl TextArea {
         if range.start >= range.end {
             return;
         }
-        let removed = self.text[range].to_string();
-        if removed.is_empty() {
-            return;
-        }
-        self.store_kill_buffer(removed, kind);
+        self.store_kill_buffer(range, kind);
     }
 
-    fn store_kill_buffer(&mut self, text: String, kind: KillBufferKind) {
-        self.kill_buffer = text;
+    fn store_kill_buffer(&mut self, range: Range<usize>, kind: KillBufferKind) {
+        register::copy(self, range.clone());
+        self.kill_buffer = self.text[range].to_string();
         self.kill_buffer_kind = kind;
     }
 
@@ -1358,14 +1429,19 @@ impl TextArea {
         if self.kill_buffer.is_empty() {
             return;
         }
-        if self.kill_buffer_kind == KillBufferKind::Linewise {
+        if self.kill_buffer_kind == KillBufferKind::Linewise && !self.single_line {
             self.paste_line_after_current_line();
             return;
         }
         let insert_at = self.next_atomic_boundary(self.cursor_pos);
         self.set_cursor(insert_at);
         let text = self.kill_buffer.clone();
+        let start = self.cursor_pos;
+        let replaying = self.vim_commands.replaying;
+        self.vim_commands.replaying = true;
         self.insert_str(&text);
+        self.vim_commands.replaying = replaying;
+        register::paste(self, start);
     }
 
     fn paste_line_after_current_line(&mut self) {
@@ -1386,6 +1462,7 @@ impl TextArea {
             format!("\n{}", self.kill_buffer.trim_end_matches('\n'))
         };
         self.insert_str_at(insert_at, &text);
+        register::paste(self, cursor);
         self.set_cursor(cursor.min(self.text.len()));
     }
 
@@ -1658,6 +1735,8 @@ impl TextArea {
     /// Use this when the element payload is an identifier (e.g. a placeholder) that must be
     /// updated without converting the element back into normal text.
     pub fn replace_element_payload(&mut self, old: &str, new: &str) -> bool {
+        let filtered = self.filter_line_breaks(new);
+        let new = filtered.as_ref();
         let Some(idx) = self
             .elements
             .iter()
@@ -1666,6 +1745,13 @@ impl TextArea {
             return false;
         };
 
+        self.replace_element_payload_by_id(self.elements[idx].id, new)
+    }
+
+    pub(crate) fn replace_element_payload_by_id(&mut self, id: u64, new: &str) -> bool {
+        let Some(idx) = self.elements.iter().position(|element| element.id == id) else {
+            return false;
+        };
         let range = self.elements[idx].range.clone();
         let start = range.start;
         let end = range.end;
@@ -1707,8 +1793,8 @@ impl TextArea {
             }
         }
 
-        // Update the cursor position to account for the edit.
-        self.cursor_pos = if self.cursor_pos < start {
+        // Relabeling preserves a cursor on the element's leading boundary.
+        self.cursor_pos = if self.cursor_pos <= start {
             self.cursor_pos
         } else if self.cursor_pos <= end {
             start + inserted_len
@@ -2111,33 +2197,50 @@ impl TextArea {
     /// Calculate the scroll offset that should be used to satisfy the
     /// invariants given the current area size and wrapped lines.
     ///
-    /// - Cursor is always on screen.
+    /// - Cursor is on screen unless the user scrolled away without moving it.
     /// - No scrolling if content fits in the area.
-    fn effective_scroll(&self, area: Rect, lines: &[Range<usize>], current_scroll: u16) -> u16 {
-        let total_lines = lines.len() as u16;
-        if area.height >= total_lines {
+    fn effective_scroll(&self, area: Rect, lines: &[Range<usize>], state: TextAreaState) -> usize {
+        let height = usize::from(area.height);
+        if height >= lines.len() {
             return 0;
         }
 
         let cursor_line_idx =
             wrapping::cursor_position(&self.text, lines, area.width, self.cursor_pos)
-                .map_or(0, |(row, _)| row) as u16;
+                .map_or(0, |(row, _)| row);
 
-        let max_scroll = total_lines.saturating_sub(area.height);
-        let mut scroll = current_scroll.min(max_scroll);
+        let max_scroll = lines.len() - height;
+        let mut scroll = state.scroll.min(max_scroll);
+        if state.manual_cursor == Some(self.cursor_pos) {
+            return scroll;
+        }
 
         // Ensure cursor is visible within [scroll, scroll + area_height)
         if cursor_line_idx < scroll {
             scroll = cursor_line_idx;
-        } else if cursor_line_idx >= scroll + area.height {
-            scroll = cursor_line_idx + 1 - area.height;
+        } else if cursor_line_idx >= scroll + height {
+            scroll = cursor_line_idx + 1 - height;
         }
         scroll
+    }
+
+    fn visible_rows(
+        &self,
+        area: Rect,
+        lines: &[Range<usize>],
+        state: &mut TextAreaState,
+    ) -> Range<usize> {
+        state.scroll = self.effective_scroll(area, lines, *state);
+        state.scroll..(state.scroll + usize::from(area.height)).min(lines.len())
     }
 }
 
 impl WidgetRef for &TextArea {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
+        if self.single_line {
+            StatefulWidgetRef::render_ref(self, area, buf, &mut TextAreaState::default());
+            return;
+        }
         let lines = self.wrapped_lines(area.width);
         self.render_lines(
             area,
@@ -2156,12 +2259,8 @@ impl StatefulWidgetRef for &TextArea {
     fn render_ref(&self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
         self.rendered_area.set(area);
         let lines = self.wrapped_lines(area.width);
-        let scroll = self.effective_scroll(area, &lines, state.scroll);
-        state.scroll = scroll;
-
-        let start = scroll as usize;
-        let end = (scroll + area.height).min(lines.len() as u16) as usize;
-        self.render_lines(area, buf, &lines, start..end, Style::default(), &[]);
+        let visible = self.visible_rows(area, &lines, state);
+        self.render_lines(area, buf, &lines, visible, Style::default(), &[]);
     }
 }
 
@@ -2175,12 +2274,8 @@ impl TextArea {
     ) {
         self.rendered_area.set(area);
         let lines = self.wrapped_lines(area.width);
-        let scroll = self.effective_scroll(area, &lines, state.scroll);
-        state.scroll = scroll;
-
-        let start = scroll as usize;
-        let end = (scroll + area.height).min(lines.len() as u16) as usize;
-        self.render_lines_masked(area, buf, &lines, start..end, mask_char);
+        let visible = self.visible_rows(area, &lines, state);
+        self.render_lines_masked(area, buf, &lines, visible, mask_char);
     }
 
     /// Render the textarea with `base_style` plus additional render-only highlight ranges.
@@ -2197,12 +2292,8 @@ impl TextArea {
     ) {
         self.rendered_area.set(area);
         let lines = self.wrapped_lines(area.width);
-        let scroll = self.effective_scroll(area, &lines, state.scroll);
-        state.scroll = scroll;
-
-        let start = scroll as usize;
-        let end = (scroll + area.height).min(lines.len() as u16) as usize;
-        self.render_lines(area, buf, &lines, start..end, base_style, highlights);
+        let visible = self.visible_rows(area, &lines, state);
+        self.render_lines(area, buf, &lines, visible, base_style, highlights);
     }
 
     /// Renders visible text and styled overlays without writing outside the textarea viewport.
@@ -3120,6 +3211,22 @@ mod tests {
     }
 
     #[test]
+    fn super_line_editing_defaults_follow_macos_conventions() {
+        let mut textarea = ta_with("first\nsecond third");
+        textarea.set_cursor("first\nsecond".len());
+
+        textarea.input(KeyEvent::new(KeyCode::Left, KeyModifiers::SUPER));
+        assert_eq!(textarea.cursor(), "first\n".len());
+
+        textarea.input(KeyEvent::new(KeyCode::Right, KeyModifiers::SUPER));
+        assert_eq!(textarea.cursor(), textarea.text().len());
+
+        textarea.input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::SUPER));
+        assert_eq!(textarea.text(), "first\n");
+        assert_eq!(textarea.cursor(), "first\n".len());
+    }
+
+    #[test]
     fn kill_current_line_removes_current_line_linewise() {
         let mut t = ta_with("abc\ndef\nghi");
         t.set_cursor(/*pos*/ 5);
@@ -3295,7 +3402,7 @@ mod tests {
         assert_eq!(t.text(), "");
         assert_eq!(t.cursor(), 0);
 
-        t.yank();
+        t.yank_snapshot(&t.register_snapshot());
         assert_eq!(t.text(), "hello");
         assert_eq!(t.cursor(), 5);
 
@@ -3305,7 +3412,7 @@ mod tests {
         assert_eq!(t.text(), "hello ");
         assert_eq!(t.cursor(), 6);
 
-        t.yank();
+        t.yank_snapshot(&t.register_snapshot());
         assert_eq!(t.text(), "hello world");
         assert_eq!(t.cursor(), 11);
 
@@ -3315,7 +3422,7 @@ mod tests {
         assert_eq!(t.text(), "");
         assert_eq!(t.cursor(), 0);
 
-        t.yank();
+        t.yank_snapshot(&t.register_snapshot());
         assert_eq!(t.text(), "hello");
         assert_eq!(t.cursor(), 5);
     }
@@ -3329,7 +3436,7 @@ mod tests {
 
         t.set_text_clearing_elements("/diff");
         t.set_text_clearing_elements("");
-        t.yank();
+        t.yank_snapshot(&t.register_snapshot());
 
         assert_eq!(t.text(), "restore me");
         assert_eq!(t.cursor(), "restore me".len());
@@ -3752,7 +3859,7 @@ mod tests {
         ratatui::widgets::StatefulWidgetRef::render_ref(&(&t), small_area, &mut buf, &mut state);
         // After render, state.scroll should be adjusted so cursor row fits
         let effective_lines = t.desired_height(small_area.width);
-        assert!(state.scroll < effective_lines);
+        assert!(state.scroll < usize::from(effective_lines));
     }
 
     #[test]
@@ -4256,6 +4363,28 @@ mod tests {
     }
 
     #[test]
+    fn tall_draft_height_saturates_at_the_terminal_limit() {
+        let text = "\n".repeat(usize::from(u16::MAX)) + "x";
+        let mut textarea = ta_with(&text);
+        textarea.set_cursor(text.len());
+        let area = Rect::new(
+            /*x*/ 0, /*y*/ 0, /*width*/ 32, /*height*/ 2,
+        );
+        let mut buf = Buffer::empty(area);
+        let mut state = TextAreaState::default();
+        textarea.render_ref_styled_with_highlights(
+            area,
+            &mut buf,
+            &mut state,
+            Style::default(),
+            &[],
+        );
+        assert_eq!(textarea.desired_height(area.width), u16::MAX);
+        assert_eq!(buf[(0, 1)].symbol(), "x");
+        assert_eq!(textarea.cursor_pos_with_state(area, state), Some((1, 1)));
+    }
+
+    #[test]
     fn cursor_pos_with_state_basic_and_scroll_behaviors() {
         // Case 1: No wrapping needed, height fits — scroll ignored, y maps directly.
         let mut t = ta_with("hello world");
@@ -4263,7 +4392,10 @@ mod tests {
         let area = Rect::new(2, 5, 20, 3);
         // Even if an absurd scroll is provided, when content fits the area the
         // effective scroll is 0 and the cursor position matches cursor_pos.
-        let bad_state = TextAreaState { scroll: 999 };
+        let bad_state = TextAreaState {
+            scroll: 999,
+            ..Default::default()
+        };
         let (x1, y1) = t.cursor_pos(area).unwrap();
         let (x2, y2) = t.cursor_pos_with_state(area, bad_state).unwrap();
         assert_eq!((x2, y2), (x1, y1));
@@ -4277,7 +4409,10 @@ mod tests {
         // Put cursor somewhere near the end so it's definitely below the first window.
         t.set_cursor(t.text().len().saturating_sub(2));
         let small_area = Rect::new(0, 0, wrap_width, 2);
-        let state = TextAreaState { scroll: 0 };
+        let state = TextAreaState {
+            scroll: 0,
+            ..Default::default()
+        };
         let (_x, y) = t.cursor_pos_with_state(small_area, state).unwrap();
         assert_eq!(y, small_area.y + small_area.height - 1);
 
@@ -4290,7 +4425,8 @@ mod tests {
         t.set_cursor(/*pos*/ 1);
         let area = Rect::new(0, 0, wrap_width, 3);
         let state = TextAreaState {
-            scroll: lines.saturating_mul(2),
+            scroll: usize::from(lines) * 2,
+            ..Default::default()
         };
         let (_x, y) = t.cursor_pos_with_state(area, state).unwrap();
         assert_eq!(y, area.y);

@@ -1,5 +1,5 @@
 use super::DELETE;
-use super::DaclInheritance;
+use super::DirectoryAcl;
 use super::FILE_GENERIC_EXECUTE;
 use super::FILE_GENERIC_READ;
 use super::FILE_GENERIC_WRITE;
@@ -15,11 +15,53 @@ use super::lock_sandbox_dir;
 use super::resolve_sid;
 use super::sid_bytes_to_psid;
 use crate::ensure_allow_write_aces;
+use crate::extract_setup_failure;
 use crate::path_mask_allows;
+use crate::read_setup_error_report;
 use crate::workspace_write_cap_sid_for_root;
+use crate::write_setup_error_report;
+use pretty_assertions::assert_eq;
 use std::fs;
+use windows_sys::Win32::Foundation::ERROR_PATH_NOT_FOUND;
 use windows_sys::Win32::Foundation::HLOCAL;
 use windows_sys::Win32::Foundation::LocalFree;
+
+#[test]
+fn bin_lock_report_retains_native_open_error() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut payload: Payload =
+        serde_json::from_value(super::tests::payload_json()).expect("fixture payload");
+    // The no-reparse open cannot create a bin whose parent does not exist.
+    // It fails before resolving account SIDs or changing any permissions.
+    payload.codex_home = temp.path().join("missing-home");
+    payload.mode = SetupMode::ProvisionOnly;
+    let bin = super::sandbox_bin_dir(&payload.codex_home);
+    let error = lock_sandbox_bin_dir(&payload, &[]).expect_err("missing bin parent");
+    let failure = extract_setup_failure(&error).expect("structured lock failure");
+    let expected = crate::SetupFailure::new(
+        crate::SetupErrorCode::HelperSandboxLockFailed,
+        format!(
+            "lock sandbox bin dir {0} failed: open directory {0}: NtCreateFile: {1}",
+            bin.display(),
+            std::io::Error::from_raw_os_error(ERROR_PATH_NOT_FOUND as i32),
+        ),
+    );
+    assert_eq!(failure, &expected);
+
+    write_setup_error_report(
+        temp.path(),
+        &crate::SetupErrorReport {
+            code: failure.code,
+            message: failure.message.clone(),
+        },
+    )
+    .expect("write structured failure");
+    let report = read_setup_error_report(temp.path())
+        .expect("read structured failure")
+        .expect("failure report");
+    assert_eq!(crate::SetupFailure::from_report(report), expected);
+    assert!(!payload.codex_home.exists());
+}
 
 #[test]
 fn provision_only_locks_plain_directory_via_handle() {
@@ -35,12 +77,45 @@ fn provision_only_locks_plain_directory_via_handle() {
         GRANT_ACCESS,
         FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
         FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE,
-        DaclInheritance::Protected,
+        DirectoryAcl::ApplyProtected,
         SetupMode::ProvisionOnly,
     )
     .expect("lock sandbox bin via no-reparse handle");
 
     assert!(sandbox_bin.is_dir());
+}
+
+#[test]
+fn repeated_registered_setup_keeps_existing_file_permissions() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let mut payload: Payload = serde_json::from_value(super::tests::payload_json())?;
+    payload.codex_home = home.path().to_owned();
+    payload.real_user = crate::runtime_ownership::current_setup_user()?;
+    payload.mode = SetupMode::ProvisionOnly;
+    payload.runtime = super::SetupRuntime::Registered;
+    let group = crate::winutil::sid_bytes_from_string("S-1-5-21-42-43-44-1000")?;
+    let configure = || super::lock_persistent_sandbox_dirs(&payload, &group);
+    configure()?;
+
+    let existing = home.path().join("existing");
+    fs::write(&existing, b"test")?;
+    let moved = home.path().join(".sandbox").join("existing");
+    fs::rename(existing, &moved)?;
+    let can_write = |file: &std::path::Path| {
+        path_mask_allows(
+            file,
+            &[group.as_ptr().cast_mut().cast()],
+            windows_sys::Win32::Storage::FileSystem::FILE_WRITE_DATA,
+            /*require_all_bits*/ true,
+        )
+    };
+    assert!(!can_write(&moved)?);
+    configure()?;
+    assert!(!can_write(&moved)?);
+    let new_file = home.path().join(".sandbox").join("new");
+    fs::write(&new_file, b"test")?;
+    assert!(can_write(&new_file)?);
+    Ok(())
 }
 
 #[test]
@@ -90,6 +165,7 @@ fn lock_sandbox_dir_blocks_inherited_write_for_runner_files() {
             allow_local_binding: false,
             otel: None,
             real_user,
+            user_profile: None,
             mode: setup_mode,
             runtime: SetupRuntime::Legacy,
             refresh_only: false,
@@ -115,10 +191,21 @@ fn lock_sandbox_dir_blocks_inherited_write_for_runner_files() {
             )
             .expect("sandbox cannot change the bin DACL")
         );
+        let system_sid = resolve_sid("SYSTEM").expect("resolve SYSTEM SID");
+        let system_psid = sid_bytes_to_psid(&system_sid).expect("convert SYSTEM SID");
         let new_runner = sandbox_bin.join("new-runner.exe");
         fs::write(&new_runner, b"new").expect("create new runner");
 
         for path in [&sandbox_bin, &existing_runner, &new_runner] {
+            assert!(
+                path_mask_allows(
+                    path,
+                    &[system_psid],
+                    WRITE_DAC,
+                    /*require_all_bits*/ true
+                )
+                .expect("SYSTEM can reapply the bin policy")
+            );
             assert!(
                 !path_mask_allows(
                     path,

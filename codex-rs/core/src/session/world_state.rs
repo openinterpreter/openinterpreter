@@ -2,6 +2,9 @@ use std::sync::Arc;
 
 use super::session::Session;
 use super::step_context::StepContext;
+use super::turn_context::TurnContext;
+use crate::agent::host::AgentRuntimeServices;
+use crate::agent::host::AgentSessionReader;
 use crate::connectors;
 use crate::context::TokenBudgetContext;
 use crate::context::world_state::AgentsMdState;
@@ -12,6 +15,7 @@ use crate::context::world_state::ContextWindowGuidanceState;
 use crate::context::world_state::EnvironmentsInstructionsState;
 use crate::context::world_state::EnvironmentsState;
 use crate::context::world_state::ManagedDeveloperInstructionsState;
+use crate::context::world_state::ModelCatalogState;
 use crate::context::world_state::ModelInstructionsState;
 use crate::context::world_state::MultiAgentModeState;
 use crate::context::world_state::MultiAgentUsageHintState;
@@ -20,7 +24,10 @@ use crate::context::world_state::PersistentModeState;
 use crate::context::world_state::PluginsInstructionsState;
 use crate::context::world_state::RealtimeState;
 use crate::context::world_state::ToolsState;
+use crate::context::world_state::TopLevelToolsState;
 use crate::context::world_state::WorldState;
+use crate::context::world_state::format_agent_paths;
+use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
 use codex_connectors::AppToolPolicyEvaluator;
 use codex_extension_api::WorldStateContributionInput;
 use codex_features::Feature;
@@ -29,19 +36,61 @@ use codex_prompts::ResolvedModelMessages;
 use codex_prompts::render_model_instructions;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::BaseInstructionsProvenance;
+use codex_protocol::models::ContentItemNamespace;
+use codex_protocol::protocol::MultiAgentVersion;
+use codex_tools::ToolName;
+use codex_tools::ToolSpec;
 
 impl Session {
+    pub(super) fn host_roster_reader(
+        &self,
+        turn_context: &TurnContext,
+    ) -> Option<&Arc<dyn AgentSessionReader>> {
+        if turn_context.config.include_environment_context
+            && turn_context.multi_agent_version == MultiAgentVersion::V2
+            && let AgentRuntimeServices::Host(services) = &self.agent_runtime
+        {
+            services.session_reader.as_ref()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) async fn current_window_uses_incremental_tools(
+        &self,
+        step_context: &StepContext,
+    ) -> bool {
+        if step_context.incremental_tools_feature().is_none() {
+            return false;
+        }
+        let state = self.state.lock().await;
+        if state.history.annotated_items().is_empty() {
+            return step_context.incremental_tools_enabled();
+        }
+        state.history.has_tool_declarations()
+    }
+
     #[tracing::instrument(name = "world_state.build", level = "info", skip_all)]
     pub(crate) async fn build_world_state_for_step(
         &self,
         step_context: &StepContext,
+        new_window: bool,
     ) -> CodexResult<WorldState> {
+        let incremental_tools = if new_window {
+            step_context.incremental_tools_enabled()
+        } else {
+            self.current_window_uses_incremental_tools(step_context)
+                .await
+        };
         let turn_context = step_context.turn.as_ref();
         let settings = &step_context.settings;
         let model_info = settings.model_info.as_ref();
         let model_messages = ResolvedModelMessages::from_model(model_info);
         tracing::trace!(
-            selected_capability_root_count = step_context.selected_capability_roots.len(),
+            selected_capability_root_count = step_context
+                .extension_data
+                .get::<Vec<codex_exec_server::ResolvedSelectedCapabilityRoot>>()
+                .map_or(0, |roots| roots.len()),
             "building step world state"
         );
         let model_instructions = render_model_instructions(model_info);
@@ -98,7 +147,7 @@ impl Session {
                 .resolved_context_window()
                 .is_some();
         if token_budget_enabled {
-            let window_ids = self.state.lock().await.auto_compact_window_ids();
+            let window_ids = self.state.lock().await.auto_compact_window_ids().clone();
             world_state.add_section(TokenBudgetContext::new(
                 turn_context
                     .session_source
@@ -107,7 +156,6 @@ impl Session {
                 window_ids.first_window_id,
                 window_ids.previous_window_id,
                 window_ids.window_id,
-                /*thread_hint*/ None,
             ));
         }
         let guidance = step_context
@@ -116,17 +164,19 @@ impl Session {
             .and_then(|config| config.guidance_message.as_deref())
             .filter(|_| token_budget_enabled);
         world_state.add_section(ContextWindowGuidanceState::new(guidance));
-        let realtime_mode_instructions = self.conversation.mode_instructions().await;
+        let realtime = &step_context.realtime;
         world_state.add_section(RealtimeState::new(
-            turn_context.realtime_active,
-            realtime_mode_instructions
+            realtime.active,
+            realtime
+                .mode_instructions
                 .as_ref()
                 .and_then(|instructions| instructions.start.as_deref())
                 .or(turn_context
                     .config
                     .experimental_realtime_start_instructions
                     .as_deref()),
-            realtime_mode_instructions
+            realtime
+                .mode_instructions
                 .as_ref()
                 .and_then(|instructions| instructions.end.as_deref()),
         ));
@@ -135,6 +185,8 @@ impl Session {
             .services
             .exec_policy
             .current_for_prefix_rules(turn_context.allow_prefix_rules());
+        let approval_context =
+            ApprovalPromptContext::new(settings.approvals_reviewer(), model_messages);
         if turn_context.config.include_permissions_instructions {
             let environment = step_context.environments.primary();
             let permission_profile =
@@ -149,6 +201,7 @@ impl Session {
                 ApprovalPromptContext::new(settings.approvals_reviewer(), model_messages),
                 exec_policy.as_ref(),
                 &cwd,
+                paths.as_ref(),
                 turn_context
                     .config
                     .features
@@ -159,7 +212,10 @@ impl Session {
                     .enabled(Feature::RequestPermissionsTool),
             ));
         } else {
-            world_state.add_section(CompactPermissionsState::new(exec_policy.as_ref()));
+            world_state.add_section(CompactPermissionsState::new(
+                exec_policy.as_ref(),
+                approval_context.approved_command_prefix_saved_heading(),
+            ));
         }
         if turn_context.config.include_collaboration_mode_instructions {
             world_state.add_section(CollaborationModeState::from_collaboration_mode(
@@ -239,6 +295,7 @@ impl Session {
         {
             world_state.add_section(ToolsState::new(
                 step_context.tool_router.deferred_tool_namespaces(),
+                Arc::clone(&extension_metrics),
             ));
         }
         let environments = step_context.environments.to_selections();
@@ -257,20 +314,25 @@ impl Session {
                     turn_id: turn_context.sub_id.as_str(),
                     model_info: &step_context.settings.model_info,
                     environments: &environments,
-                    ready_selected_capability_roots: &ready_selected_capability_roots,
-                    executor_capability_discovery: step_context
-                        .executor_capability_discovery
-                        .as_deref(),
                     extension_metrics: Some(Arc::clone(&extension_metrics)),
                     session_store: &self.services.session_extension_data,
                     thread_store: &self.services.thread_extension_data,
                     turn_store: turn_context.extension_data.as_ref(),
+                    step_store: &step_context.extension_data,
+                    previous_world_state: previous_world_state.as_ref().map(|state| &state.state),
                 })
                 .await
             {
                 world_state.add_extension_section(section);
             }
         }
+        let v2_namespace = turn_context
+            .config
+            .multi_agent_v2
+            .tool_namespace
+            .clone()
+            .map(ContentItemNamespace::from)
+            .unwrap_or(ContentItemNamespace::Functions);
         let mut multi_agent_mode = MultiAgentModeState::new(
             super::multi_agents::effective_multi_agent_mode(step_context),
         );
@@ -280,6 +342,45 @@ impl Session {
             world_state.add_section(usage_hint);
         }
         world_state.add_section(multi_agent_mode);
+        let spawn_tool = match turn_context.multi_agent_version {
+            MultiAgentVersion::Disabled => None,
+            MultiAgentVersion::V1 => Some(ToolName::new(
+                Some(MULTI_AGENT_V1_NAMESPACE.to_string()),
+                "spawn_agent",
+            )),
+            MultiAgentVersion::V2 => turn_context
+                .config
+                .multi_agent_v2
+                .expose_spawn_agent_model_overrides
+                .then(|| {
+                    ToolName::new(
+                        turn_context.config.multi_agent_v2.tool_namespace.clone(),
+                        "spawn_agent",
+                    )
+                }),
+        };
+        let model_overrides_available =
+            spawn_tool.is_some_and(|name| step_context.tool_router.exposes_tool(&name));
+        world_state.add_section(
+            if model_overrides_available
+                && turn_context
+                    .config
+                    .features
+                    .enabled(Feature::ModelCatalogInContext)
+            {
+                ModelCatalogState::new(
+                    &turn_context.available_models,
+                    turn_context.multi_agent_version,
+                )
+            } else {
+                ModelCatalogState::default()
+            }
+            .with_namespace(match turn_context.multi_agent_version {
+                MultiAgentVersion::Disabled => None,
+                MultiAgentVersion::V1 => Some(ContentItemNamespace::MultiAgentV1),
+                MultiAgentVersion::V2 => Some(v2_namespace),
+            }),
+        );
         if !crate::guardian::is_basic_session_source(&turn_context.session_source) {
             world_state.add_section(ManagedDeveloperInstructionsState::new(
                 turn_context

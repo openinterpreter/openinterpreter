@@ -18,7 +18,7 @@ expression: "render_lines(&view, 112)"
   Event     PreToolUse                                                                                          
   Matcher   Bash                                                                                                
   Source    User config - /tmp/hooks.json                                                                       
-  Command   /tmp/hook-8.sh                                                                                      
+  Command   /tmp/hook-9.sh                                                                                      
   Mode      Sync                                                                                                
   Timeout   30s                                                                                                 
   Trust     Trusted                                                                                             

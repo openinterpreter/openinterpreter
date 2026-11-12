@@ -1,13 +1,14 @@
 mod environment_accessor;
 mod exec_permission_profile_serde;
 mod find_up;
+mod local_logs;
+mod nfs;
 
 use bytes::Bytes;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::config_types::WindowsSandboxProxySettingsMode;
 use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
-use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
@@ -27,6 +28,9 @@ pub use find_up::FindUpErrorPolicy;
 pub use find_up::find_nearest_ancestor_with_markers;
 pub use find_up::find_nearest_native_ancestor_with_markers;
 use futures::Stream;
+use futures::stream::BoxStream;
+pub use local_logs::LocalLogsDir;
+pub use nfs::is_nfs;
 use serde::Deserialize;
 use serde::Serialize;
 use std::future::Future;
@@ -39,6 +43,8 @@ use std::task::Poll;
 
 /// Maximum chunk size returned by [`ExecutorFileSystem::read_file_stream`].
 pub const FILE_READ_CHUNK_SIZE: usize = 1024 * 1024;
+/// Maximum decoded chunk size accepted by a streamed filesystem write.
+pub const FILE_WRITE_CHUNK_SIZE: usize = 1024 * 1024;
 /// Maximum accepted directory depth for a filesystem walk.
 pub const MAX_WALK_DEPTH: usize = 64;
 /// Maximum accepted directory count, including the walk root.
@@ -625,6 +631,17 @@ impl Stream for FileSystemReadStream {
 /// Abstract filesystem access used by components that may operate locally or via
 /// a remote environment.
 pub trait ExecutorFileSystem: Send + Sync {
+    /// Watches an unsandboxed observation: every `missing` path is absent and `present`
+    /// (if supplied) exists. Change, disconnection or supersession completes the receiver.
+    /// Unsupported filesystems and observations that cannot be verified return `None`.
+    fn watch_missing(
+        &self,
+        _missing: Vec<PathUri>,
+        _present: Option<PathUri>,
+    ) -> ExecutorFileSystemFuture<'_, Option<tokio::sync::oneshot::Receiver<()>>> {
+        Box::pin(async { Ok(None) })
+    }
+
     /// Resolves a path within this filesystem.
     fn canonicalize<'a>(
         &'a self,
@@ -645,6 +662,36 @@ pub trait ExecutorFileSystem: Send + Sync {
         path: &'a PathUri,
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, FileSystemReadStream>;
+
+    /// Replaces a regular file from a stream of bounded chunks.
+    ///
+    /// Accepts any sendable byte stream, boxed to keep this trait object-safe.
+    /// Input chunks must be nonempty and no larger than [`FILE_WRITE_CHUNK_SIZE`].
+    /// Returns the number of bytes written after closing the target. Parents must already exist.
+    /// Failure or cancellation may leave a truncated or partial target.
+    ///
+    /// Cancellation is best effort: dropping the future stops consuming input and issuing new
+    /// blocks, but an in-flight open or write may still truncate or modify the target. Dropping
+    /// does not wait for that I/O or remote handle cleanup, so a subsequent replacement may overlap
+    /// with the abandoned operation.
+    ///
+    /// Local and streaming-capable remote filesystems write one chunk at a time. For compatibility,
+    /// a remote filesystem may buffer the entire input and send one write to an older executor.
+    /// The default implementation returns `Unsupported` without consuming the input.
+    fn write_file_stream<'a>(
+        &'a self,
+        path: &'a PathUri,
+        contents: BoxStream<'a, FileSystemResult<Bytes>>,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, u64> {
+        Box::pin(async move {
+            let _ = (path, contents, sandbox);
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "filesystem does not support streaming writes",
+            ))
+        })
+    }
 
     /// Reads a file and decodes it as UTF-8 text.
     fn read_file_text<'a>(

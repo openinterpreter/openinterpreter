@@ -1,5 +1,7 @@
 use super::PreviousSectionState;
+use super::SectionTransition;
 use super::WorldStateSection;
+use super::WorldStateUpdate;
 use crate::agents_md::LoadedAgentsMd;
 use crate::context::ContextualUserFragment;
 use crate::context::UserInstructions;
@@ -35,16 +37,6 @@ impl WorldStateSection for AgentsMdState {
     const ID: &'static str = "agents_md";
     type Snapshot = AgentsMdSnapshot;
 
-    fn snapshot(&self) -> Self::Snapshot {
-        match &self.instructions {
-            Some(instructions) => AgentsMdSnapshot {
-                directory: instructions.directory.clone(),
-                text: Some(instructions.text.clone()),
-            },
-            None => AgentsMdSnapshot::default(),
-        }
-    }
-
     fn matches_legacy_fragment(role: &str, text: &str) -> bool {
         role == "user" && UserInstructions::matches_text(text)
     }
@@ -52,10 +44,16 @@ impl WorldStateSection for AgentsMdState {
     fn render_diff(
         &self,
         previous: PreviousSectionState<'_, Self::Snapshot>,
-    ) -> Option<Box<dyn ContextualUserFragment>> {
-        let current = self.snapshot();
+    ) -> SectionTransition<Self::Snapshot> {
+        let current = match &self.instructions {
+            Some(instructions) => AgentsMdSnapshot {
+                directory: instructions.directory.clone(),
+                text: Some(instructions.text.clone()),
+            },
+            None => AgentsMdSnapshot::default(),
+        };
         if matches!(previous, PreviousSectionState::Known(previous) if previous == &current) {
-            return None;
+            return (None, Vec::new());
         }
 
         let previous_may_contain_instructions = match previous {
@@ -73,9 +71,12 @@ impl WorldStateSection for AgentsMdState {
                 directory: None,
                 text: REMOVAL_NOTICE.to_string(),
             },
-            (None, false) => return None,
+            (None, false) => return (Some(current), Vec::new()),
         };
-        Some(Box::new(instructions))
+        (
+            Some(current),
+            vec![WorldStateUpdate::fragment(instructions)],
+        )
     }
 }
 

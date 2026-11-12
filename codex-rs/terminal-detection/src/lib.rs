@@ -19,6 +19,18 @@ pub struct TerminalInfo {
     pub term: Option<String>,
     /// Multiplexer metadata when a terminal multiplexer is active.
     pub multiplexer: Option<Multiplexer>,
+    /// Backend metadata observed independently of the terminal application identity.
+    pub backend: Option<TerminalBackend>,
+}
+
+/// Known terminal rendering backends derived from environment metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerminalBackend {
+    /// VTE, used by GNOME Terminal and other terminal applications.
+    Vte {
+        /// Encoded as major * 10_000 + minor * 100 + micro; unknown if malformed.
+        version: Option<u32>,
+    },
 }
 
 /// Known terminal name categories derived from environment variables.
@@ -28,6 +40,8 @@ pub enum TerminalName {
     AppleTerminal,
     /// Ghostty terminal emulator.
     Ghostty,
+    /// Rex terminal emulator.
+    Rex,
     /// iTerm2 terminal emulator.
     Iterm2,
     /// Warp terminal emulator.
@@ -86,6 +100,7 @@ impl TerminalInfo {
             version,
             term,
             multiplexer,
+            backend: None,
         }
     }
 
@@ -125,6 +140,7 @@ impl TerminalInfo {
         let name = match term.as_str() {
             "dumb" => TerminalName::Dumb,
             "xterm-ghostty" => TerminalName::Ghostty,
+            "xterm-rex" => TerminalName::Rex,
             "wezterm" | "wezterm-mux" => TerminalName::WezTerm,
             _ => TerminalName::Unknown,
         };
@@ -163,6 +179,7 @@ impl TerminalInfo {
                     format_terminal_version("Apple_Terminal", &self.version)
                 }
                 TerminalName::Ghostty => format_terminal_version("Ghostty", &self.version),
+                TerminalName::Rex => format_terminal_version("rex", &self.version),
                 TerminalName::Iterm2 => format_terminal_version("iTerm.app", &self.version),
                 TerminalName::WarpTerminal => {
                     format_terminal_version("WarpTerminal", &self.version)
@@ -248,9 +265,28 @@ pub fn terminal_info() -> TerminalInfo {
 /// - `TERM_PROGRAM` (plus `TERM_PROGRAM_VERSION`) drives the detected terminal name,
 ///   except when it identifies tmux rather than the underlying terminal.
 ///   This means `TERM_PROGRAM` can mask later probes (for example `WT_SESSION`).
-/// - Next, terminal-specific variables (WEZTERM, iTerm2, Apple Terminal, kitty, etc.) are checked.
+/// - Next, terminal-specific variables (WEZTERM, iTerm2, kitty, etc.) are checked.
+///   `TERM_SESSION_ID` is not terminal-specific and cannot identify Apple Terminal.
 /// - Finally, `TERM` is used as the capability fallback.
 fn detect_terminal_info_from_env(env: &dyn Environment) -> TerminalInfo {
+    let mut terminal = detect_terminal_identity_from_env(env);
+    // Identity probes can return before VTE is considered. Keep its backend
+    // metadata even when GNOME or another TERM_PROGRAM identifies the application.
+    let vte_version = env.var("VTE_VERSION");
+    if vte_version.is_some() || terminal.name == TerminalName::Vte {
+        terminal.backend = Some(TerminalBackend::Vte {
+            // Choose the raw value before parsing so malformed values retain
+            // precedence over the terminal-version fallback.
+            version: vte_version
+                .as_deref()
+                .or(terminal.version.as_deref())
+                .and_then(|version| version.parse().ok()),
+        });
+    }
+    terminal
+}
+
+fn detect_terminal_identity_from_env(env: &dyn Environment) -> TerminalInfo {
     let multiplexer = detect_multiplexer(env);
 
     if let Some(term_program) = env.var_non_empty("TERM_PROGRAM")
@@ -272,14 +308,6 @@ fn detect_terminal_info_from_env(env: &dyn Environment) -> TerminalInfo {
 
     if env.has("ITERM_SESSION_ID") || env.has("ITERM_PROFILE") || env.has("ITERM_PROFILE_NAME") {
         return TerminalInfo::from_name(TerminalName::Iterm2, /*version*/ None, multiplexer);
-    }
-
-    if env.has("TERM_SESSION_ID") {
-        return TerminalInfo::from_name(
-            TerminalName::AppleTerminal,
-            /*version*/ None,
-            multiplexer,
-        );
     }
 
     if env.has("KITTY_WINDOW_ID")
@@ -392,6 +420,7 @@ fn terminal_name_from_term_program(value: &str) -> Option<TerminalName> {
     match normalized.as_str() {
         "appleterminal" => Some(TerminalName::AppleTerminal),
         "ghostty" => Some(TerminalName::Ghostty),
+        "rex" => Some(TerminalName::Rex),
         "iterm" | "iterm2" | "itermapp" => Some(TerminalName::Iterm2),
         "warp" | "warpterminal" => Some(TerminalName::WarpTerminal),
         "vscode" => Some(TerminalName::VsCode),

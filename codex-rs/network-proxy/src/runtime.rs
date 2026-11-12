@@ -1,8 +1,13 @@
+use crate::aws_sigv4::AwsSigV4Signer;
+use crate::aws_sigv4::mask_local_aws_env;
+use crate::aws_sigv4::mask_local_aws_text;
 use crate::config::NetworkDomainPermission;
 use crate::config::NetworkMode;
 use crate::config::NetworkProxyConfig;
 use crate::config::ValidatedUnixSocketPath;
 use crate::credential_broker::CredentialBroker;
+use crate::credential_broker::env_value;
+use crate::domain_matcher::DomainPatternSet;
 use crate::mitm::MitmState;
 use crate::mitm_hook::HookEvaluation;
 use crate::mitm_hook::MitmHooksByHost;
@@ -23,7 +28,6 @@ use crate::state::validate_policy_against_constraints;
 use anyhow::Context;
 use anyhow::Result;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use globset::GlobSet;
 use opentelemetry::trace::SpanContext;
 use serde::Deserialize;
 use serde::Serialize;
@@ -85,6 +89,12 @@ impl std::fmt::Display for HostBlockReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostAuthorization {
+    RequireAllowlist,
+    Approved,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,13 +182,27 @@ pub struct ConfigState {
     pub(crate) executor_os: crate::Platform,
     pub config: NetworkProxyConfig,
     pub(crate) brokerage_created_default_allowlist: bool,
-    pub allow_set: GlobSet,
-    pub deny_set: GlobSet,
+    pub allow_set: DomainPatternSet,
+    pub deny_set: DomainPatternSet,
+    pub review_set: DomainPatternSet,
     pub mitm: Option<Arc<MitmState>>,
     pub mitm_hooks: MitmHooksByHost,
     pub constraints: NetworkProxyConstraints,
     pub blocked: VecDeque<BlockedRequest>,
     pub blocked_total: u64,
+}
+
+impl ConfigState {
+    fn local_aws_signers(&self) -> Vec<Arc<AwsSigV4Signer>> {
+        if !self.config.enabled || !self.config.credential_broker || !self.config.mitm {
+            return Vec::new();
+        }
+        self.mitm_hooks
+            .values()
+            .flatten()
+            .filter_map(|hook| hook.actions.aws_sigv4.clone())
+            .collect()
+    }
 }
 
 pub trait ConfigReloader: Send + Sync {
@@ -267,7 +291,9 @@ pub struct NetworkProxyState {
     pub(crate) policy_audit_observer: Option<NetworkPolicyAuditObserver>,
     pub(crate) launch_span_context: Option<SpanContext>,
     pub(crate) process_log_metadata: crate::NetworkProxyProcessLogMetadata,
-    credential_broker: CredentialBroker,
+    /// Shared by this proxy's listeners; rebinding leaves other proxies' cached brokers intact.
+    credential_broker: Arc<std::sync::RwLock<CredentialBroker>>,
+    local_aws_signers: Arc<std::sync::RwLock<Vec<Arc<AwsSigV4Signer>>>>,
     audit_metadata: NetworkProxyAuditMetadata,
     execution_attributions: Arc<Mutex<HashMap<String, ExecutionAttribution>>>,
     environment_id: Option<Arc<str>>,
@@ -289,7 +315,7 @@ struct ExecutionAttribution {
 
 impl std::fmt::Debug for NetworkProxyState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Avoid logging internal state (config contents, derived globsets, etc.) which can be noisy
+        // Avoid logging internal state (config contents, compiled domain patterns, etc.) which can be noisy
         // and may contain sensitive paths.
         f.debug_struct("NetworkProxyState").finish_non_exhaustive()
     }
@@ -306,6 +332,7 @@ impl Clone for NetworkProxyState {
             launch_span_context: self.launch_span_context.clone(),
             process_log_metadata: self.process_log_metadata.clone(),
             credential_broker: self.credential_broker.clone(),
+            local_aws_signers: self.local_aws_signers.clone(),
             audit_metadata: self.audit_metadata.clone(),
             execution_attributions: self.execution_attributions.clone(),
             environment_id: self.environment_id.clone(),
@@ -315,11 +342,33 @@ impl Clone for NetworkProxyState {
 }
 
 impl NetworkProxyState {
+    /// Selects routing for permitted private IPs without changing destination policy.
+    /// Set by the execution host, independently of reloadable or remote policy.
+    pub fn set_proxy_private_ips_via_upstream(&mut self, enabled: bool) {
+        self.proxy_private_ips_via_upstream = enabled;
+    }
+
+    /// Require the trusted HTTP CONNECT endpoint for opaque SOCKS TCP connections.
+    pub fn set_tcp_upstream_proxy(&mut self, proxy: crate::TcpUpstreamProxy) {
+        self.tcp_upstream_proxy = Some(proxy);
+    }
+
+    /// A remote DNS answer cannot be checked at our direct socket boundary.
+    pub(crate) async fn permits_remote_tcp_dns(&self) -> Result<bool> {
+        self.reload_if_needed().await?;
+        let guard = self.state.read().await;
+        Ok(self.local_binding_policy.resolve(&guard.config)
+            && !guard.deny_set.may_restrict_ip()
+            && !guard.review_set.may_restrict_ip())
+    }
+
     /// Builds runtime state for one executor-local proxy launch.
     /// The launching executor supplies its own OS; the wire policy cannot override it.
     pub fn from_remote_launch_config(
         launch: crate::RemoteNetworkProxyLaunchConfig,
         executor_os: crate::Platform,
+        credential_brokers: &crate::RemoteCredentialBrokerCache,
+        environment: &HashMap<String, String>,
     ) -> Result<Self> {
         let crate::RemoteNetworkProxyLaunchConfig {
             proxy,
@@ -332,9 +381,15 @@ impl NetworkProxyState {
             proxy.enabled,
             "executor-local network proxy launch requires an enabled proxy"
         );
-        let config = proxy.into_network_proxy_config();
+        let mut config = proxy.into_network_proxy_config();
+        config.configure_credential_broker_environment(environment);
         let state = build_config_state(config, NetworkProxyConstraints::default(), executor_os)?;
-        Ok(Self {
+        let cached_broker = credential_brokers.broker_if_enabled(
+            environment_id.as_deref(),
+            audit_metadata.conversation_id.as_deref(),
+            &state.config,
+        );
+        let mut proxy_state = Self {
             environment_id: environment_id.map(Into::into),
             execution_id: execution_id.map(Into::into),
             ..Self::with_reloader_and_audit_metadata(
@@ -343,7 +398,11 @@ impl NetworkProxyState {
                 audit_metadata,
                 LocalBindingPolicy::DefaultFalse,
             )
-        })
+        };
+        if let Some(broker) = cached_broker {
+            proxy_state.credential_broker = Arc::new(std::sync::RwLock::new(broker));
+        }
+        Ok(proxy_state)
     }
 
     pub fn with_reloader(state: ConfigState, reloader: Arc<dyn ConfigReloader>) -> Self {
@@ -394,7 +453,8 @@ impl NetworkProxyState {
         let credential_broker = CredentialBroker::new(state.config.credential_broker);
         credential_broker.configure(&local_binding_policy.resolved_config(&state.config));
         Self {
-            credential_broker,
+            credential_broker: Arc::new(std::sync::RwLock::new(credential_broker)),
+            local_aws_signers: Arc::new(std::sync::RwLock::new(state.local_aws_signers())),
             state: Arc::new(RwLock::new(state)),
             local_binding_policy,
             reloader,
@@ -492,6 +552,66 @@ impl NetworkProxyState {
         &self.audit_metadata
     }
 
+    fn credential_broker(&self) -> CredentialBroker {
+        self.credential_broker
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) async fn bind_credential_broker_environment(
+        &self,
+        credential_brokers: &crate::RemoteCredentialBrokerCache,
+        environment: &HashMap<String, String>,
+    ) -> Result<()> {
+        self.reload_if_needed().await?;
+        let mut state = self.state.write().await;
+        let mut config = self.local_binding_policy.resolved_config(&state.config);
+        config.configure_credential_broker_environment(environment);
+        // Captures are complete environments: absent hints are removals, not launch fallbacks.
+        config.credential_broker_context = self
+            .credential_broker_environment(environment)
+            .provider_context_keys
+            .into_iter()
+            .filter_map(|key| env_value(environment, &key).map(|value| (key, value.to_string())))
+            .collect::<HashMap<_, _>>()
+            .into();
+        let broker = credential_brokers
+            .broker_if_enabled(
+                self.environment_id(),
+                self.audit_metadata.conversation_id.as_deref(),
+                &config,
+            )
+            .context("credential brokerage is disabled for the startup environment")?;
+        state.config.credential_broker_context = config.credential_broker_context;
+        *self
+            .credential_broker
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = broker;
+        Ok(())
+    }
+
+    fn install_config(&self, current: &mut ConfigState, next: ConfigState) {
+        let mut signers = self
+            .local_aws_signers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *signers = next.local_aws_signers();
+        *current = next;
+    }
+
+    pub(crate) fn mask_local_aws_credentials(
+        &self,
+        env: &mut HashMap<String, String>,
+        ca_path: Option<&Path>,
+    ) {
+        let signers = self
+            .local_aws_signers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        mask_local_aws_env(&signers, env, ca_path);
+    }
+
     pub fn virtualize_child_credentials(&self, env: &mut HashMap<String, String>) {
         self.virtualize_child_credentials_for_environment(env, self.environment_id());
     }
@@ -515,7 +635,36 @@ impl NetworkProxyState {
         env: &mut HashMap<String, String>,
         command: &mut [String],
     ) {
-        self.credential_broker.restore_child_env(env, command);
+        self.credential_broker().restore_child_env(env, command);
+    }
+
+    pub(crate) fn virtualize_snapshot_credentials(
+        &self,
+        env: &mut HashMap<String, String>,
+        environment_id: Option<&str>,
+    ) {
+        self.credential_broker()
+            .virtualize_snapshot_env(env, environment_id);
+    }
+
+    pub(crate) fn child_credential_alias_matches(
+        &self,
+        key: &str,
+        value: &str,
+        snapshot_value: &str,
+        environment_id: Option<&str>,
+    ) -> bool {
+        self.credential_broker()
+            .child_alias_matches(key, value, snapshot_value, environment_id)
+    }
+
+    pub(crate) fn restore_and_disable_child_credentials(
+        &self,
+        env: &mut HashMap<String, String>,
+        command: &mut [String],
+    ) {
+        self.credential_broker()
+            .restore_and_disable_child_env(env, command);
     }
 
     pub(crate) fn virtualize_snapshot_credentials(
@@ -552,7 +701,65 @@ impl NetworkProxyState {
         text: &mut String,
         env: &HashMap<String, String>,
     ) -> bool {
-        self.credential_broker.virtualize_text(text, env)
+        let signers = self
+            .local_aws_signers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        mask_local_aws_text(&signers, text);
+        self.credential_broker().virtualize_text(text, env)
+    }
+
+    pub(crate) fn handle_unmasked_credentials(
+        &self,
+        env: &mut HashMap<String, String>,
+        mode: crate::CredentialMaskingFailureMode,
+    ) -> anyhow::Result<()> {
+        self.credential_broker()
+            .handle_unmasked_credentials(env, mode)
+    }
+
+    pub(crate) fn credential_broker_environment(
+        &self,
+        env: &HashMap<String, String>,
+    ) -> crate::CredentialBrokerEnvironment {
+        self.credential_broker().environment(env)
+    }
+
+    pub(crate) fn credential_broker_environment_for_text(
+        &self,
+        text: &str,
+        env: &HashMap<String, String>,
+    ) -> crate::CredentialBrokerEnvironment {
+        self.credential_broker().environment_for_text(text, env)
+    }
+
+    pub(crate) fn credential_broker_source_matches_text(
+        &self,
+        source: &str,
+        source_value: &str,
+        text: &str,
+    ) -> bool {
+        self.credential_broker()
+            .source_matches_text(source, source_value, text)
+    }
+
+    pub(crate) fn credential_broker_sources_allowed(
+        &self,
+        value: &str,
+        virtualized: &str,
+        source_env: &HashMap<String, String>,
+        is_allowed: impl Fn(&str) -> bool,
+    ) -> bool {
+        self.credential_broker().provider_sources_allowed(
+            value,
+            virtualized,
+            source_env,
+            is_allowed,
+        )
+    }
+
+    pub(crate) fn restore_brokered_text(&self, text: &mut String) -> bool {
+        self.credential_broker().restore_text(text)
     }
 
     pub(crate) fn credential_broker_environment(
@@ -657,7 +864,7 @@ impl NetworkProxyState {
                     // Log policy diffs without dumping potentially sensitive config values.
                     log_policy_changes(&guard.config, &new_state.config);
                     new_state.blocked = guard.blocked.clone();
-                    *guard = new_state;
+                    self.install_config(&mut guard, new_state);
                 }
                 let source = self.reloader.source_label();
                 info!("reloaded config from {source}");
@@ -679,7 +886,7 @@ impl NetworkProxyState {
         log_policy_changes(&guard.config, &new_state.config);
         new_state.blocked = guard.blocked.clone();
         new_state.blocked_total = guard.blocked_total;
-        *guard = new_state;
+        self.install_config(&mut guard, new_state);
         info!("updated network proxy config state");
         Ok(())
     }
@@ -700,11 +907,12 @@ impl NetworkProxyState {
             Ok(host) => host,
             Err(_) => return Ok(HostBlockDecision::Blocked(HostBlockReason::NotAllowed)),
         };
-        let (deny_set, allow_set, allow_local_binding, allowed_domains) = {
+        let (deny_set, review_set, allow_set, allow_local_binding, allowed_domains) = {
             let guard = self.state.read().await;
             let allowed_domains = guard.config.allowed_domains();
             (
                 guard.deny_set.clone(),
+                guard.review_set.clone(),
                 guard.allow_set.clone(),
                 // Keep explicit controller restrictions even if the executor launched with true.
                 allow_local_binding
@@ -713,7 +921,6 @@ impl NetworkProxyState {
                 allowed_domains,
             )
         };
-        let allowed_domains_empty = allowed_domains.is_none();
         let allowed_domains = allowed_domains.unwrap_or_default();
 
         let host_str = host.as_str();
@@ -721,12 +928,19 @@ impl NetworkProxyState {
         // Decision order matters:
         //  1) explicit deny always wins
         //  2) local/private networking is opt-in (defense-in-depth)
-        //  3) allowlist is enforced when configured
-        if globset_matches_host_or_unscoped(&deny_set, host_str) {
+        //  3) managed review selectors precede every ordinary allow rule
+        //  4) DNS requires an allowlist match or an approval
+        let numeric_host = crate::policy::numeric_host_address(host_str);
+        if domains_match_host_or_unscoped(&deny_set, host_str)
+            || numeric_host.is_some_and(|ip| deny_set.restricts_ip(ip))
+        {
             return Ok(HostBlockDecision::Blocked(HostBlockReason::Denied));
         }
 
-        let is_allowlisted = globset_matches_host_or_unscoped(&allow_set, host_str);
+        let is_authorized = authorization == HostAuthorization::Approved
+            || (!domains_match_host_or_unscoped(&review_set, host_str)
+                && !numeric_host.is_some_and(|ip| review_set.restricts_ip(ip))
+                && domains_match_host_or_unscoped(&allow_set, host_str));
         if !allow_local_binding {
             // If the intent is "prevent access to local/internal networks", we must not rely solely
             // on string checks like `localhost` / `127.0.0.1`. Attackers can use DNS rebinding or
@@ -751,23 +965,14 @@ impl NetworkProxyState {
                 if !is_explicit_local_allowlisted(&allowed_domains, &host) {
                     return Ok(HostBlockDecision::Blocked(HostBlockReason::NotAllowedLocal));
                 }
-            } else if host_resolves_to_non_public_ip(
-                host_str,
-                port,
-                DNS_LOOKUP_TIMEOUT,
-                |host, port| async move {
-                    lookup_host((host.as_str(), port))
-                        .await
-                        .map(Iterator::collect)
-                },
-            )
-            .await
+            } else if is_authorized
+                && host_resolves_to_non_public_ip(host_str, port, DNS_LOOKUP_TIMEOUT, lookup).await
             {
                 return Ok(HostBlockDecision::Blocked(HostBlockReason::NotAllowedLocal));
             }
         }
 
-        if allowed_domains_empty || !is_allowlisted {
+        if !is_authorized {
             Ok(HostBlockDecision::Blocked(HostBlockReason::NotAllowed))
         } else {
             Ok(HostBlockDecision::Allowed)
@@ -896,6 +1101,32 @@ impl NetworkProxyState {
         Ok(guard.config.allow_upstream_proxy)
     }
 
+    /// The logical host has already passed policy. Fail closed if the actual
+    /// socket needs an IP-specific denial or review the hostname did not receive.
+    pub(crate) async fn resolved_target_blocked(
+        &self,
+        host: &str,
+        ip: IpAddr,
+        authorization: HostAuthorization,
+    ) -> Result<bool> {
+        self.reload_if_needed().await?;
+        let guard = self.state.read().await;
+        if guard.deny_set.restricts_ip(ip) {
+            return Ok(true);
+        }
+        if !guard.review_set.restricts_ip(ip) {
+            return Ok(false);
+        }
+        if authorization != HostAuthorization::Approved {
+            return Ok(true);
+        }
+        let host = Host::parse(host)?;
+        let host = host.as_str();
+        Ok(!domains_match_host_or_unscoped(&guard.review_set, host)
+            && crate::policy::numeric_host_address(host)
+                .is_none_or(|target| target.to_canonical() != ip.to_canonical()))
+    }
+
     pub async fn allow_local_binding(&self) -> Result<bool> {
         self.reload_if_needed().await?;
         let guard = self.state.read().await;
@@ -944,10 +1175,33 @@ impl NetworkProxyState {
         &self,
         host: &str,
         req: &rama_http::Request,
+        origin: &crate::mitm_hook::MitmHookOrigin,
+        credential_destinations: &[String],
     ) -> Result<HookEvaluation> {
         self.reload_if_needed().await?;
-        let guard = self.state.read().await;
-        Ok(evaluate_mitm_hooks(&guard.mitm_hooks, host, req))
+        let hooked_hosts = {
+            let guard = self.state.read().await;
+            match evaluate_mitm_hooks(&guard.mitm_hooks, host, req, origin) {
+                HookEvaluation::NoHooksForHost if !guard.mitm_hooks.is_empty() => {
+                    guard.mitm_hooks.keys().cloned().collect::<Vec<_>>()
+                }
+                evaluation => return Ok(evaluation),
+            }
+        };
+
+        let credential_broker = self.credential_broker();
+        if credential_destinations.iter().any(|destination| {
+            credential_broker.request_matches_hooked_host_alias(
+                destination,
+                req.headers(),
+                &hooked_hosts,
+                self.environment_id(),
+            )
+        }) {
+            Ok(HookEvaluation::HookedHostNoMatch)
+        } else {
+            Ok(HookEvaluation::NoHooksForHost)
+        }
     }
 
     pub(crate) async fn host_mitm_requirement(
@@ -1042,7 +1296,7 @@ impl NetworkProxyState {
             }
 
             log_policy_changes(&guard.config, &candidate);
-            *guard = new_state;
+            self.install_config(&mut guard, new_state);
             info!("updated network {list_name} with {normalized_host}");
             return Ok(());
         }
@@ -1206,7 +1460,7 @@ fn log_domain_list_changes(list_name: &str, previous: &[String], next: &[String]
     }
 }
 
-fn globset_matches_host_or_unscoped(set: &GlobSet, host: &str) -> bool {
+fn domains_match_host_or_unscoped(set: &DomainPatternSet, host: &str) -> bool {
     set.is_match(host) || unscoped_ip_literal(host).is_some_and(|ip| set.is_match(ip))
 }
 
@@ -1251,10 +1505,9 @@ pub(crate) fn network_proxy_state_for_policy(
         blocked_total: 0,
         brokerage_created_default_allowlist,
         constraints: NetworkProxyConstraints::default(),
-        deny_set: crate::policy::compile_denylist_globset(
-            &config.denied_domains().unwrap_or_default(),
-        )
-        .unwrap(),
+        deny_set: crate::policy::compile_denylist(&config.denied_domains().unwrap_or_default())
+            .unwrap(),
+        review_set: crate::policy::compile_allowlist(&config.review_domains).unwrap(),
         mitm: None,
         mitm_hooks: crate::mitm_hook::compile_mitm_hooks(&config).unwrap(),
         config,
@@ -1286,8 +1539,8 @@ mod tests {
     use super::*;
 
     use crate::config::NetworkProxyConfig;
-    use crate::policy::compile_allowlist_globset;
-    use crate::policy::compile_denylist_globset;
+    use crate::policy::compile_allowlist;
+    use crate::policy::compile_denylist;
     use crate::state::NetworkProxyConstraints;
     use crate::state::build_config_state;
     use crate::state::validate_policy_against_constraints;
@@ -1808,13 +2061,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_blocked_denies_scoped_ipv6_literal_before_local_binding() {
+    async fn host_blocked_denies_equivalent_ip_literals_before_local_binding() {
         let state = network_proxy_state_for_policy(NetworkProxyConfig {
             allow_local_binding: Some(true),
             ..network_settings(&["*"], &["fd00::1"])
         });
 
-        for host in ["fd00::1%eth0", "[fd00::1%eth0]", "[fd00::1%25eth0]"] {
+        for host in [
+            "fd00::1%eth0",
+            "[fd00::1%eth0]",
+            "[fd00::1%25eth0]",
+            "::ffff:127.0.0.1",
+            "127.1",
+            "2130706433",
+            "0177.0.0.1",
+            "0x7f000001",
+        ] {
             assert_eq!(
                 state.host_blocked(host, /*port*/ 80).await.unwrap(),
                 HostBlockDecision::Blocked(HostBlockReason::Denied),
@@ -2176,7 +2438,7 @@ mod tests {
     #[test]
     fn compile_globset_is_case_insensitive() {
         let patterns = vec!["ExAmPle.CoM".to_string()];
-        let set = compile_denylist_globset(&patterns).unwrap();
+        let set = compile_denylist(&patterns).unwrap();
         assert!(set.is_match("example.com"));
         assert!(set.is_match("EXAMPLE.COM"));
     }
@@ -2184,7 +2446,7 @@ mod tests {
     #[test]
     fn compile_globset_excludes_apex_for_subdomain_patterns() {
         let patterns = vec!["*.openai.com".to_string()];
-        let set = compile_denylist_globset(&patterns).unwrap();
+        let set = compile_denylist(&patterns).unwrap();
         assert!(set.is_match("api.openai.com"));
         assert!(!set.is_match("openai.com"));
         assert!(!set.is_match("evilopenai.com"));
@@ -2193,7 +2455,7 @@ mod tests {
     #[test]
     fn compile_globset_includes_apex_for_double_wildcard_patterns() {
         let patterns = vec!["**.openai.com".to_string()];
-        let set = compile_denylist_globset(&patterns).unwrap();
+        let set = compile_denylist(&patterns).unwrap();
         assert!(set.is_match("openai.com"));
         assert!(set.is_match("api.openai.com"));
         assert!(!set.is_match("evilopenai.com"));
@@ -2202,13 +2464,13 @@ mod tests {
     #[test]
     fn compile_globset_rejects_global_wildcard() {
         let patterns = vec!["*".to_string()];
-        assert!(compile_denylist_globset(&patterns).is_err());
+        assert!(compile_denylist(&patterns).is_err());
     }
 
     #[test]
     fn compile_globset_allows_global_wildcard_when_enabled() {
         let patterns = vec!["*".to_string()];
-        let set = compile_allowlist_globset(&patterns).unwrap();
+        let set = compile_allowlist(&patterns).unwrap();
         assert!(set.is_match("example.com"));
         assert!(set.is_match("api.openai.com"));
         assert!(set.is_match("localhost"));
@@ -2217,19 +2479,19 @@ mod tests {
     #[test]
     fn compile_globset_rejects_bracketed_global_wildcard() {
         let patterns = vec!["[*]".to_string()];
-        assert!(compile_denylist_globset(&patterns).is_err());
+        assert!(compile_denylist(&patterns).is_err());
     }
 
     #[test]
     fn compile_globset_rejects_double_wildcard_bracketed_global_wildcard() {
         let patterns = vec!["**.[*]".to_string()];
-        assert!(compile_denylist_globset(&patterns).is_err());
+        assert!(compile_denylist(&patterns).is_err());
     }
 
     #[test]
     fn compile_globset_dedupes_patterns_without_changing_behavior() {
         let patterns = vec!["example.com".to_string(), "example.com".to_string()];
-        let set = compile_denylist_globset(&patterns).unwrap();
+        let set = compile_denylist(&patterns).unwrap();
         assert!(set.is_match("example.com"));
         assert!(set.is_match("EXAMPLE.COM"));
         assert!(!set.is_match("not-example.com"));
@@ -2238,7 +2500,7 @@ mod tests {
     #[test]
     fn compile_globset_rejects_invalid_patterns() {
         let patterns = vec!["[".to_string()];
-        assert!(compile_denylist_globset(&patterns).is_err());
+        assert!(compile_denylist(&patterns).is_err());
     }
 
     #[test]
@@ -2379,3 +2641,7 @@ mod tests {
         assert!(!state.is_unix_socket_allowed(&socket_path).await.unwrap());
     }
 }
+
+#[cfg(test)]
+#[path = "host_policy_tests.rs"]
+mod host_policy_tests;

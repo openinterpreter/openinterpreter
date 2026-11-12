@@ -29,11 +29,10 @@ use std::sync::Arc;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
-use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::GuardianAssessmentOutcome;
 
+use crate::agents_md::LoadedAgentsMd;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::session::step_context::StepContext;
 use crate::session::step_settings::ResolvedStepSettings;
@@ -45,6 +44,8 @@ pub(crate) use approval_request::GuardianMcpAnnotations;
 pub(crate) use approval_request::GuardianNetworkAccessTrigger;
 #[cfg(test)]
 pub(crate) use approval_request::guardian_approval_request_to_json;
+pub(crate) use codex_guardian_reviewer::guardian_truncate_text;
+pub(crate) use codex_guardian_reviewer::is_basic_session_source;
 pub(crate) use decision::decide_approval;
 pub(crate) use decision::spawn_approval_decision;
 pub(crate) use prompt::guardian_truncate_text;
@@ -76,13 +77,15 @@ pub(crate) const GUARDIAN_MAX_NODE_REPL_TOOL_RESULT_TOKENS: usize = 6_000;
 /// Background network approvals and Unix interception use the active task's resolved settings.
 /// Startup reviewer prewarming intentionally uses turn-only inputs because it has no issuing step.
 ///
-/// MCP elicitation reviews continue to use turn-only inputs.
+/// MCP elicitations use their live invocation's issuing step when available, otherwise turn inputs.
 #[derive(Clone)]
 pub(crate) struct GuardianReviewContext {
     /// The latest response ID received in this turn when review was requested.
     pub(crate) parent_response_id: Option<String>,
     turn: Arc<TurnContext>,
+    review_execution: Option<codex_direct_tool_timing::ReviewExecution>,
     environments: TurnEnvironmentSnapshot,
+    project_instructions: Option<Arc<LoadedAgentsMd>>,
     // Model and reasoning inputs are carried for the follow-up Guardian and V2 migrations.
     pub(crate) model_info: Arc<ModelInfo>,
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
@@ -137,13 +140,12 @@ impl GuardianReviewContext {
 impl From<&Arc<StepContext>> for GuardianReviewContext {
     fn from(step: &Arc<StepContext>) -> Self {
         Self {
-            parent_response_id: step
-                .turn
-                .extension_data
-                .get::<codex_api::ResponseId>()
-                .map(|id| id.0.clone()),
+            serving_assessment: step.serving_assessment.clone(),
+            review_execution: None,
+            parent_response: step.turn.extension_data.get::<ParentResponse>(),
             turn: Arc::clone(&step.turn),
             environments: step.environments.clone(),
+            project_instructions: Some(step.loaded_agents_md.clone().unwrap_or_default()),
             model_info: Arc::clone(&step.settings.model_info),
             reasoning_effort: step.settings.reasoning_effort().cloned(),
             reasoning_summary: step.settings.reasoning_summary,
@@ -186,7 +188,7 @@ pub(crate) use approval_request::format_guardian_action_pretty;
 #[cfg(test)]
 use approval_request::guardian_assessment_action;
 #[cfg(test)]
-use approval_request::guardian_request_turn_id;
+use codex_guardian_reviewer::GuardianReviewOutcome;
 #[cfg(test)]
 use codex_guardian_reviewer::GuardianReviewOutcome;
 #[cfg(test)]
@@ -206,3 +208,7 @@ use review_session::build_guardian_review_session_config as build_guardian_revie
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "decision_timing_tests.rs"]
+mod decision_timing_tests;

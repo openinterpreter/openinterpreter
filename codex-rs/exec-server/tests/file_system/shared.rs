@@ -1145,17 +1145,17 @@ async fn sandboxed_file_operations_cannot_read_helper_siblings() -> Result<()> {
 
     let helper = runtime_dir.join("codex-test-helper");
     std::fs::hard_link(&helper_paths.codex_exe, &helper)
-        .or_else(|_| std::fs::copy(&helper_paths.codex_exe, &helper).map(|_| ()))?;
+        .or_else(|_| codex_utils_cargo_bin::copy_executable(&helper_paths.codex_exe, &helper))?;
     let linux_sandbox = if helper_paths.codex_linux_sandbox_exe.is_some() {
         let alias = runtime_dir.join("codex-linux-sandbox");
         std::fs::hard_link(&helper, &alias)
-            .or_else(|_| std::fs::copy(&helper, &alias).map(|_| ()))?;
+            .or_else(|_| codex_utils_cargo_bin::copy_executable(&helper, &alias))?;
         Some(alias)
     } else {
         None
     };
     let file_system =
-        LocalFileSystem::with_runtime_paths(ExecServerRuntimePaths::new(helper, linux_sandbox)?);
+        LocalFileSystem::with_runtime_paths(ExecServerRuntimeOptions::new(helper, linux_sandbox)?);
 
     let sibling = runtime_dir.join("credentials.json");
     std::fs::write(&sibling, "secret")?;

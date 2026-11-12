@@ -1588,6 +1588,7 @@ async fn try_create_creates_and_deletes_snapshot_file() -> Result<()> {
         &dir.path().abs(),
         ThreadId::new(),
         &dir.path().abs(),
+        &ShellEnvironmentPolicy::default(),
         &shell,
         /*state_db*/ None,
         /*credential_broker*/ None,
@@ -1619,6 +1620,7 @@ async fn try_create_uses_distinct_generation_paths() -> Result<()> {
         &dir.path().abs(),
         session_id,
         &dir.path().abs(),
+        &ShellEnvironmentPolicy::default(),
         &shell,
         /*state_db*/ None,
         /*credential_broker*/ None,
@@ -1630,6 +1632,7 @@ async fn try_create_uses_distinct_generation_paths() -> Result<()> {
         &dir.path().abs(),
         session_id,
         &dir.path().abs(),
+        &ShellEnvironmentPolicy::default(),
         &shell,
         /*state_db*/ None,
         /*credential_broker*/ None,
@@ -1905,5 +1908,34 @@ fn set_file_mtime(path: &Path, age: Duration) -> Result<()> {
     if result != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn snapshot_rejects_nul_script_before_execution() -> Result<()> {
+    let root = tempdir()?;
+    let shell = Shell {
+        shell_type: ShellType::Sh,
+        shell_path: PathBuf::from("/bin/sh"),
+    };
+    let error = run_script_with_timeout(
+        &shell,
+        "printf ran > ran\0",
+        Duration::from_secs(5),
+        SnapshotShellMode::NonLogin,
+        &root.path().abs(),
+        /*credential_broker*/ None,
+        /*sandbox*/ None,
+    )
+    .await
+    .expect_err("invalid snapshot script must fail to spawn");
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::InvalidInput)
+    );
+    assert!(!root.path().join("ran").exists());
     Ok(())
 }

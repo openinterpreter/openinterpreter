@@ -72,6 +72,44 @@ pub(crate) fn collab_spawn_error(err: CodexErr) -> FunctionCallError {
     }
 }
 
+pub(crate) fn record_collab_spawn_failure(
+    telemetry: &SessionTelemetry,
+    product_sku: Option<&str>,
+    err: &CodexErr,
+    call_id: &str,
+    turn_id: &str,
+    fork_mode: Option<&SpawnAgentForkMode>,
+    multi_agent_version: MultiAgentVersion,
+) {
+    let reason = match err.details() {
+        CodexErrorDetails::AgentLimitReached { .. } => "limit_reached",
+        CodexErrorDetails::InvalidRequest(_) => "invalid_request",
+        CodexErrorDetails::ThreadNotFound(_) => "thread_not_found",
+        CodexErrorDetails::UnsupportedOperation(_) => "unsupported_operation",
+        _ => "internal",
+    };
+    let fork_mode = match fork_mode {
+        None => "none",
+        Some(SpawnAgentForkMode::FullHistory) => "all",
+    };
+    let multi_agent_version = match multi_agent_version {
+        MultiAgentVersion::Disabled => "disabled",
+        MultiAgentVersion::V1 => "v1",
+        MultiAgentVersion::V2 => "v2",
+    };
+    telemetry
+        .clone()
+        .with_product_sku(product_sku)
+        .record_multi_agent_spawn_failure(
+            reason,
+            err,
+            call_id,
+            turn_id,
+            fork_mode,
+            multi_agent_version,
+        );
+}
+
 pub(crate) fn collab_agent_error(agent_id: ThreadId, err: CodexErr) -> FunctionCallError {
     match err.details() {
         CodexErrorDetails::ThreadNotFound(id) => {

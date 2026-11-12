@@ -1,28 +1,94 @@
-use codex_config::types::PluginMcpServerConfig;
+use codex_config::types::PluginsConfigToml;
 use codex_connectors_extension::PluginAppProvider;
 use codex_core::config::Config;
+use codex_core_plugins::ExecutorPluginProviderError;
+use codex_core_plugins::PluginIdentity;
+use codex_core_plugins::PluginRootOwnership;
+use codex_core_plugins::PluginSourceLocation;
+use codex_core_plugins::configured_plugins_from_stack;
 use codex_core_plugins::loader::apply_configured_plugin_mcp_server_policies;
-use codex_core_plugins::loader::configured_plugin_mcp_server_policies;
+use codex_core_plugins::merge_catalogs;
+use codex_exec_server::CapabilityRootDiscovery;
+use codex_exec_server::FileSystemSandboxContext;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::McpServerContribution;
 use codex_extension_api::McpServerContributionContext;
 use codex_extension_api::McpServerContributor;
+use codex_extension_api::SelectedPlugin;
+use codex_extension_api::SelectedPluginContribution;
 use codex_features::Feature;
+use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use std::collections::HashMap;
 
 use self::provider::PluginMcpProvider;
 use crate::PluginsThreadState;
-use crate::cloud_plugin::CloudPluginMetadata;
-use crate::cloud_plugin::catalog_to_metadata;
+use crate::cloud_plugin::hosted_plugin_connectors;
 use crate::plugin_contributor::PluginContributor;
+use crate::plugin_contributor_state::CachedPluginMetadata;
 use crate::plugin_contributor_state::CachedSelectedRoot;
-use crate::plugin_contributor_state::SelectedPluginMetadata;
 
 mod discovery;
 mod provider;
 
 impl PluginContributor {
+    async fn ownership_for_root(
+        &self,
+        state: &PluginsThreadState,
+        selected_root: &SelectedCapabilityRoot,
+        discovery: Option<&CapabilityRootDiscovery>,
+        sandbox: Option<&FileSystemSandboxContext>,
+    ) -> Result<PluginRootOwnership, ExecutorPluginProviderError> {
+        if let Some(ownership) = state
+            .contributor_state()
+            .executor_cache
+            .iter()
+            .find(|cached| {
+                cached.root == *selected_root && cached.ownership_sandbox.as_deref() == sandbox
+            })
+            .and_then(|cached| cached.ownership)
+        {
+            return Ok(ownership);
+        }
+        let ownership = self
+            .providers
+            .executor
+            .root_ownership(selected_root, discovery, sandbox)
+            .await
+            .inspect_err(|error| {
+                let CapabilityRootLocation::Environment { environment_id, .. } =
+                    &selected_root.location;
+                tracing::warn!(
+                    selected_root = selected_root.id,
+                    environment_id,
+                    error = %error,
+                    "failed to resolve selected root plugin ownership"
+                );
+            })?;
+        let mut state = state.contributor_state();
+        if let Some(cached) = state
+            .executor_cache
+            .iter_mut()
+            .find(|cached| cached.root == *selected_root)
+        {
+            if cached.ownership_sandbox.as_deref() == sandbox
+                && let Some(ownership) = cached.ownership
+            {
+                return Ok(ownership);
+            }
+            cached.ownership = Some(ownership);
+            cached.ownership_sandbox = sandbox.cloned().map(Box::new);
+        } else {
+            state.executor_cache.push(CachedSelectedRoot {
+                root: selected_root.clone(),
+                ownership: Some(ownership),
+                ownership_sandbox: sandbox.cloned().map(Box::new),
+                metadata: CachedPluginMetadata::Unloaded,
+            });
+        }
+        Ok(ownership)
+    }
+
     /// Returns metadata for one stable selected root.
     ///
     /// Successful resolution, including a root that is not a plugin or declares no capabilities,
@@ -33,14 +99,17 @@ impl PluginContributor {
         &self,
         state: &PluginsThreadState,
         selected_root: &SelectedCapabilityRoot,
-    ) -> Option<SelectedPluginMetadata> {
-        if let Some(cached) = state
+    ) -> Option<SelectedPluginContribution> {
+        if let Some(CachedSelectedRoot {
+            metadata: CachedPluginMetadata::Loaded(metadata),
+            ..
+        }) = state
             .contributor_state()
             .executor_cache
             .iter()
             .find(|cached| cached.root == *selected_root)
         {
-            return cached.metadata.clone();
+            return metadata.clone();
         }
 
         let plugin = match self.providers.executor.resolve_bound(selected_root).await {
@@ -83,9 +152,11 @@ impl PluginContributor {
                     .into_iter()
                     .map(|declaration| declaration.connector_id.0)
                     .collect();
-                Some(SelectedPluginMetadata {
-                    plugin_id: plugin.plugin().selected_root_id().to_string(),
+                let CapabilityRootLocation::Environment { environment_id, .. } =
+                    &selected_root.location;
+                Some(SelectedPluginContribution {
                     plugin_display_name: plugin.plugin().manifest().display_name().to_string(),
+                    source_environment_id: environment_id.clone(),
                     servers,
                     connector_ids,
                 })
@@ -94,13 +165,22 @@ impl PluginContributor {
         };
         let mut state = state.contributor_state();
         let cache = &mut state.executor_cache;
-        if let Some(cached) = cache.iter().find(|cached| cached.root == *selected_root) {
-            return cached.metadata.clone();
+        if let Some(cached) = cache
+            .iter_mut()
+            .find(|cached| cached.root == *selected_root)
+        {
+            if let CachedPluginMetadata::Loaded(metadata) = &cached.metadata {
+                return metadata.clone();
+            }
+            cached.metadata = CachedPluginMetadata::Loaded(metadata.clone());
+        } else {
+            cache.push(CachedSelectedRoot {
+                root: selected_root.clone(),
+                ownership: None,
+                ownership_sandbox: None,
+                metadata: CachedPluginMetadata::Loaded(metadata.clone()),
+            });
         }
-        cache.push(CachedSelectedRoot {
-            root: selected_root.clone(),
-            metadata: metadata.clone(),
-        });
         metadata
     }
 }
@@ -118,23 +198,139 @@ impl McpServerContributor<Config> for PluginContributor {
             let Some(thread_store) = context.thread_store() else {
                 return Vec::new();
             };
-            // Cloud projection is gated independently; executor projection remains unchanged.
             let cloud_plugins_enabled = self.providers.cloud.is_some()
                 && context.config().features.enabled(Feature::Plugins);
             let state = thread_store.get_or_init(PluginsThreadState::default);
-            if !cloud_plugins_enabled || context.auth_changed() {
-                // Clear stale cloud metadata before projecting a replacement runtime.
+            if !cloud_plugins_enabled {
+                state.contributor_state().cloud_generation = None;
+                return Vec::new();
+            }
+            // Core reads hosted connectors after finishing the executor registrations.
+            state
+                .cloud_catalog()
+                .as_ref()
+                .map(hosted_plugin_connectors)
+                .unwrap_or_default()
+        })
+    }
+
+    fn hosted_plugin_ids(&self, context: McpServerContributionContext<'_, Config>) -> Vec<String> {
+        if self.providers.cloud.is_none() || !context.config().features.enabled(Feature::Plugins) {
+            return Vec::new();
+        }
+        let Some(state) = context
+            .thread_store()
+            .and_then(codex_extension_api::ExtensionData::get::<PluginsThreadState>)
+        else {
+            return Vec::new();
+        };
+        state
+            .contributor_state()
+            .cloud_catalog()
+            .map(|catalog| {
+                hosted_plugin_connectors(catalog)
+                    .into_iter()
+                    .filter_map(|contribution| {
+                        if let McpServerContribution::HostedPluginConnectors { plugin_id, .. } =
+                            contribution
+                        {
+                            Some(plugin_id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn selected_plugins<'a>(
+        &'a self,
+        context: McpServerContributionContext<'a, Config>,
+        plugins_config: &'a PluginsConfigToml,
+    ) -> ExtensionFuture<'a, Vec<SelectedPlugin<'a>>> {
+        Box::pin(async move {
+            let Some(thread_store) = context.thread_store() else {
+                return Vec::new();
+            };
+            let state = thread_store.get_or_init(PluginsThreadState::default);
+            if context.auth_changed() {
+                // Clear the old account before executor loading can yield to other work.
                 state.contributor_state().cloud_generation = None;
             }
             let selected_roots = context
                 .ready_selected_capability_roots()
                 .unwrap_or_default();
-            let plugin_policies =
-                configured_plugin_mcp_server_policies(&context.config().config_layer_stack);
-            let mut contributions = Vec::new();
+            let mut plugins = Vec::new();
+            if let Some(snapshots) = context.executor_capability_discovery_v2() {
+                let merged = {
+                    let mut cache = state.contributor_state();
+                    cache.update_executor_catalog(snapshots);
+                    let cloud = (self.providers.cloud.is_some()
+                        && context.config().features.enabled(Feature::Plugins))
+                    .then(|| cache.cloud_catalog())
+                    .flatten();
+                    merge_catalogs(cache.executor_catalog.as_ref(), cloud)
+                };
+                for warning in &merged.warnings {
+                    tracing::warn!(%warning, "plugin catalog merge reported a warning");
+                }
+                let configured = configured_plugins_from_stack(
+                    &context.config().config_layer_stack,
+                    context.config().codex_home.as_path(),
+                );
+                for entry in merged.entries {
+                    for location in &entry.locations {
+                        let PluginSourceLocation::Executor {
+                            environment_id,
+                            plugin_id,
+                            ..
+                        } = location
+                        else {
+                            continue;
+                        };
+                        let selected_root_id = format!("{environment_id}:{plugin_id}");
+                        let root_id = selected_root_id.clone();
+                        let plugin_id = plugin_id.clone();
+                        let metadata_plugin_id = plugin_id.clone();
+                        let environment_id = environment_id.clone();
+                        let captured = entry.clone();
+                        plugins.push(SelectedPlugin {
+                            selected_root_id,
+                            plugin_id,
+                            identity: entry.id.clone(),
+                            enabled: entry.is_enabled(&configured),
+                            mcp: Box::pin(async move {
+                                let metadata = discovery::v2_metadata_from_catalog(
+                                    &captured,
+                                    &context.config().features,
+                                )
+                                .into_iter()
+                                .find(|(id, _)| id == &root_id)
+                                .map(|(_, metadata)| metadata)
+                                .unwrap_or_default();
+                                let contribution = SelectedPluginContribution {
+                                    plugin_display_name: metadata.plugin_display_name,
+                                    source_environment_id: environment_id,
+                                    servers: metadata.servers,
+                                    connector_ids: metadata.connector_ids,
+                                };
+                                project_metadata(
+                                    context.config(),
+                                    plugins_config,
+                                    &metadata_plugin_id,
+                                    contribution,
+                                )
+                            }),
+                        });
+                    }
+                }
+                return plugins;
+            }
+            state.contributor_state().clear_executor_catalog();
 
             if let Some(snapshot) = context.executor_capability_discovery() {
-                for (selection_order, root) in snapshot.roots().iter().enumerate() {
+                for root in snapshot.roots() {
                     let discovery = match &root.result {
                         Ok(discovery) => discovery.as_ref(),
                         Err(error) => {
@@ -146,91 +342,139 @@ impl McpServerContributor<Config> for PluginContributor {
                             continue;
                         }
                     };
-                    let Some(plugin) =
-                        discovery::metadata_from_discovery(&root.selected_root, discovery)
+                    let CapabilityRootLocation::Environment { environment_id, .. } =
+                        &root.selected_root.location;
+                    // Ownership survives capability parse failures; an unresolved root cannot
+                    // bypass a denying policy.
+                    if (!plugins_config.allows_plugin(&root.selected_root.id)
+                        || context
+                            .disabled_plugin_ids()
+                            .contains(&root.selected_root.id))
+                        && discovery.error.is_none()
+                        && !matches!(
+                            self.ownership_for_root(
+                                &state,
+                                &root.selected_root,
+                                Some(discovery),
+                                snapshot.sandbox_contexts().get(environment_id),
+                            )
+                            .await,
+                            Ok(PluginRootOwnership::Standalone)
+                        )
+                    {
+                        plugins.push(denied_plugin(&root.selected_root));
+                        continue;
+                    }
+                    let Some((manifest, plugin_files)) =
+                        discovery::manifest_from_discovery(&root.selected_root, discovery)
                     else {
                         continue;
                     };
-                    contributions.extend(project_metadata(
-                        context.config(),
-                        plugin_policies.get(&plugin.plugin_id),
-                        selection_order,
-                        &root.selected_root.id,
-                        plugin,
-                    ));
+                    plugins.push(SelectedPlugin {
+                        selected_root_id: root.selected_root.id.clone(),
+                        plugin_id: root.selected_root.id.clone(),
+                        identity: PluginIdentity::Local {
+                            plugin_id: root.selected_root.id.clone(),
+                        },
+                        enabled: true,
+                        mcp: Box::pin(async move {
+                            let metadata = discovery::metadata_from_discovery(
+                                &root.selected_root,
+                                discovery,
+                                plugin_files,
+                                manifest,
+                            );
+                            project_metadata(
+                                context.config(),
+                                plugins_config,
+                                &root.selected_root.id,
+                                metadata,
+                            )
+                        }),
+                    });
                 }
             } else {
-                for (selection_order, selected_root) in selected_roots.iter().enumerate() {
-                    let Some(plugin) = self.metadata_for_root(&state, selected_root).await else {
+                for selected_root in selected_roots {
+                    if !plugins_config.allows_plugin(&selected_root.id)
+                        || context.disabled_plugin_ids().contains(&selected_root.id)
+                    {
+                        if !matches!(
+                            self.ownership_for_root(
+                                &state,
+                                selected_root,
+                                /*discovery*/ None,
+                                /*sandbox*/ None
+                            )
+                            .await,
+                            Ok(PluginRootOwnership::Standalone)
+                        ) {
+                            plugins.push(denied_plugin(selected_root));
+                        }
+                        continue;
+                    }
+                    let Some(metadata) = self.metadata_for_root(&state, selected_root).await else {
                         continue;
                     };
-                    contributions.extend(project_metadata(
-                        context.config(),
-                        plugin_policies.get(&plugin.plugin_id),
-                        selection_order,
-                        &selected_root.id,
-                        plugin,
-                    ));
+                    plugins.push(SelectedPlugin {
+                        selected_root_id: selected_root.id.clone(),
+                        plugin_id: selected_root.id.clone(),
+                        identity: PluginIdentity::Local {
+                            plugin_id: selected_root.id.clone(),
+                        },
+                        enabled: true,
+                        mcp: Box::pin(async move {
+                            project_metadata(
+                                context.config(),
+                                plugins_config,
+                                &selected_root.id,
+                                metadata,
+                            )
+                        }),
+                    });
                 }
             }
-
-            // V1 has no remote plugin identities, so cloud packages are additive for now.
-            // Clone the current snapshot after executor loading and release the lock before projection.
-            if cloud_plugins_enabled && let Some(catalog) = state.cloud_catalog() {
-                for CloudPluginMetadata {
-                    selection_order,
-                    selected_root_id,
-                    metadata,
-                } in catalog_to_metadata(&catalog)
-                {
-                    contributions.extend(project_metadata(
-                        context.config(),
-                        /*plugin_policy*/ None,
-                        selection_order,
-                        &selected_root_id,
-                        metadata,
-                    ));
-                }
-            }
-            contributions
+            plugins
         })
+    }
+}
+
+fn denied_plugin(selected_root: &SelectedCapabilityRoot) -> SelectedPlugin<'static> {
+    let CapabilityRootLocation::Environment { environment_id, .. } = &selected_root.location;
+    let metadata = SelectedPluginContribution {
+        plugin_display_name: selected_root.id.clone(),
+        source_environment_id: environment_id.clone(),
+        servers: Vec::new(),
+        connector_ids: Vec::new(),
+    };
+    SelectedPlugin {
+        selected_root_id: selected_root.id.clone(),
+        plugin_id: selected_root.id.clone(),
+        identity: PluginIdentity::Local {
+            plugin_id: selected_root.id.clone(),
+        },
+        enabled: false,
+        mcp: Box::pin(async move { metadata }),
     }
 }
 
 fn project_metadata(
     config: &Config,
-    plugin_policy: Option<&HashMap<String, PluginMcpServerConfig>>,
-    selection_order: usize,
-    selected_root_id: &str,
-    plugin: SelectedPluginMetadata,
-) -> Vec<McpServerContribution> {
+    plugins_config: &PluginsConfigToml,
+    plugin_id: &str,
+    plugin: SelectedPluginContribution,
+) -> SelectedPluginContribution {
     let mut servers = if config.features.enabled(Feature::Plugins) {
-        plugin.servers.iter().cloned().collect::<HashMap<_, _>>()
+        plugin.servers.into_iter().collect::<HashMap<_, _>>()
     } else {
         HashMap::new()
     };
-    if let Some(plugin_policy) = plugin_policy {
-        apply_configured_plugin_mcp_server_policies(plugin_policy, &mut servers);
+    if !servers.is_empty() {
+        if let Some(plugin_policy) = plugins_config.plugins.get(plugin_id) {
+            apply_configured_plugin_mcp_server_policies(&plugin_policy.mcp_servers, &mut servers);
+        }
+        config.apply_plugin_mcp_server_requirements(plugin_id, &mut servers);
     }
-    config.apply_plugin_mcp_server_requirements(&plugin.plugin_id, &mut servers);
     let mut servers = servers.into_iter().collect::<Vec<_>>();
     servers.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    let mut contributions = servers
-        .into_iter()
-        .map(|(name, config)| McpServerContribution::SelectedPlugin {
-            name,
-            plugin_id: plugin.plugin_id.clone(),
-            plugin_display_name: plugin.plugin_display_name.clone(),
-            selection_order,
-            config: Box::new(config),
-        })
-        .collect::<Vec<_>>();
-    // Keep the package visible even when it contributes only skills.
-    contributions.push(McpServerContribution::SelectedPluginPackage {
-        selected_root_id: selected_root_id.to_owned(),
-        plugin_id: plugin.plugin_id,
-        plugin_display_name: plugin.plugin_display_name,
-        connector_ids: plugin.connector_ids,
-    });
-    contributions
+    SelectedPluginContribution { servers, ..plugin }
 }

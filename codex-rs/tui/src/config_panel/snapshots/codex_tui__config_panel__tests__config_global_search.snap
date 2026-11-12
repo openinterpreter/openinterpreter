@@ -1,0 +1,21 @@
+---
+source: tui/src/config_panel/config_panel_tests.rs
+assertion_line: 206
+expression: "render(&panel, 100)"
+---
+
+  Configuration
+  Changes save automatically
+
+   Appearance   Notifications   Input   Sessions   Text selection
+
+  Search › notify when
+
+› Notify when           Unfocused ›          Notifications · Notify only while you are away or whil…
+
+
+
+
+
+
+  enter open · esc clear search

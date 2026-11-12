@@ -1,4 +1,4 @@
-//! Shared UI constants for layout and alignment within the TUI.
+//! Shared layout constants and transcript navigation text for the TUI.
 
 /// Width (in terminal columns) reserved for the left gutter/prefix used by
 /// live cells and aligned widgets.

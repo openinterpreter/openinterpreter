@@ -3,8 +3,9 @@ use super::session::Session;
 use super::turn_context::TurnContext;
 use codex_analytics::ImagePreparationMetadata;
 use codex_features::Feature;
-use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
+use codex_protocol::error::CodexErr;
+use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 
@@ -19,10 +20,10 @@ impl Session {
         input: Vec<T>,
     ) -> Result<(), Vec<T>> {
         let mut active = self.active_turn.lock().await;
-        match active.as_mut() {
+        match active.as_mut().filter(|turn| turn.finishing.is_none()) {
             Some(active_turn) => {
                 self.input_queue
-                    .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
+                    .extend_pending_input_and_notify_for_turn_state(
                         active_turn.turn_state.as_ref(),
                         input
                             .into_iter()
@@ -54,7 +55,7 @@ impl Session {
             return Err(input);
         }
         self.input_queue
-            .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
+            .extend_pending_input_and_notify_for_turn_state(
                 active_turn.turn_state.as_ref(),
                 input
                     .into_iter()
@@ -78,12 +79,13 @@ impl Session {
     ) {
         let items = items
             .into_iter()
+            .map(ResponseItemEnvelope::new)
             .map(|item| self.annotate_client_response_item(item))
             .collect::<Vec<_>>();
         let mut active = self.active_turn.lock().await;
-        if let Some(active_turn) = active.as_mut() {
+        if let Some(active_turn) = active.as_mut().filter(|turn| turn.finishing.is_none()) {
             self.input_queue
-                .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
+                .extend_pending_input_and_notify_for_turn_state(
                     active_turn.turn_state.as_ref(),
                     items
                         .into_iter()
@@ -93,20 +95,22 @@ impl Session {
                 .await;
             return;
         }
+        let finishing = active.as_ref().and_then(|turn| turn.finishing.clone());
         drop(active);
         self.record_annotated_conversation_items(turn_context, turn_context.model_info(), items)
             .await;
     }
 
-    pub(crate) fn annotate_client_response_item(&self, item: ResponseItem) -> ResponseItemEnvelope {
-        let metadata = (self.enabled(Feature::RetainClientDeveloperMessages)
-            && matches!(&item, ResponseItem::Message { role, .. } if role == "developer"))
-        .then_some(CodexHarnessMetadata {
-            client_authored: true,
-            ..Default::default()
-        });
-
-        ResponseItemEnvelope { item, metadata }
+    pub(crate) fn annotate_client_response_item(
+        &self,
+        mut envelope: ResponseItemEnvelope,
+    ) -> ResponseItemEnvelope {
+        if self.enabled(Feature::RetainClientDeveloperMessages)
+            && matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "developer")
+        {
+            envelope.metadata.get_or_insert_default().client_authored = true;
+        }
+        envelope
     }
 
     pub(crate) async fn record_annotated_conversation_items(
@@ -156,11 +160,9 @@ impl Session {
             image_preparations.extend(prepared_images);
 
             let mut metadata = envelope.metadata;
-            annotated_items.extend(prepared_items.into_owned().into_iter().map(|item| {
-                ResponseItemEnvelope {
-                    item,
-                    metadata: metadata.take(),
-                }
+            annotated_items.extend(prepared_items.into_iter().map(|item| ResponseItemEnvelope {
+                item,
+                metadata: metadata.take(),
             }));
         }
         (annotated_items, image_preparations)
@@ -175,6 +177,15 @@ impl Session {
         let Err(items) = self.inject_if_running(items).await else {
             return;
         };
+        let finishing = self
+            .active_turn
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|turn| turn.finishing.clone());
+        if let Some(finishing) = finishing {
+            finishing.cancelled().await;
+        }
         let default_turn_context;
         let turn_context = match current_turn_context {
             Some(turn_context) => turn_context,

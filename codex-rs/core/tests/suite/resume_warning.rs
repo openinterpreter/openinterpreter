@@ -33,34 +33,30 @@ fn resume_history(
         root_turn_id: None,
         disabled_plugin_ids: None,
         cwd: config.cwd.clone(),
-        workspace_roots: None,
-        current_date: None,
-        timezone: None,
         approval_policy: config.permissions.approval_policy.value(),
         approvals_reviewer: None,
-        sandbox_policy: config.legacy_sandbox_policy(),
-        permission_profile: None,
+        permission_profile: config.permissions.effective_permission_profile(),
         active_permission_profile: None,
-        network: None,
-        file_system_sandbox_policy: None,
         model: previous_model.to_string(),
         comp_hash: None,
-        personality: None,
         collaboration_mode: None,
         multi_agent_version: None,
-        multi_agent_mode: None,
         realtime_active: None,
         cyber_access_program: None,
         effort: config.model_reasoning_effort.clone(),
-        summary: config
-            .model_reasoning_summary
-            .unwrap_or(ReasoningSummary::Auto),
+        summary: Some(
+            config
+                .model_reasoning_summary
+                .unwrap_or(ReasoningSummary::Auto),
+        ),
     };
 
     InitialHistory::Resumed(ResumedHistory {
+        history_revision: None,
         conversation_id: ThreadId::default(),
         history: Arc::new(vec![
             RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_attribution: None,
                 turn_id: turn_id.clone(),
                 root_turn_id: None,
                 trace_id: None,
@@ -78,6 +74,7 @@ fn resume_history(
             })),
             RolloutItem::TurnContext(turn_ctx),
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                root_turn_id: None,
                 turn_id,
                 last_agent_message: None,
                 error: None,

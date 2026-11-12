@@ -42,6 +42,7 @@ use codex_app_server_protocol::InterpreterProvider;
 use codex_app_server_protocol::MarketplaceAddResponse;
 use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::MarketplaceUpgradeResponse;
+use codex_app_server_protocol::McpServerOauthLoginResponse;
 use codex_app_server_protocol::McpServerStatus;
 use codex_app_server_protocol::McpServerStatusDetail;
 use codex_app_server_protocol::PluginInstallResponse;
@@ -63,6 +64,7 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_approval_presets::ApprovalPreset;
+use codex_utils_path_uri::PathUri;
 use strum_macros::IntoStaticStr;
 use uuid::Uuid;
 
@@ -259,11 +261,12 @@ pub(crate) enum KeymapEditIntent {
     ReplaceOne { old_key: String },
 }
 
-/// Number of key strokes recorded by one `/keymap` capture.
+/// Kind of shortcut recorded by one `/keymap` capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeymapCaptureMode {
     SingleKey,
     Chord,
+    LeaderChord,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,10 +292,74 @@ pub(crate) enum RecapTrigger {
 }
 
 #[derive(Debug)]
+pub(crate) enum SavedSideChatData {
+    Choices(Vec<crate::app_server_session::SideChat>),
+    LatestPrompts(std::collections::HashMap<ThreadId, String>),
+}
+
+#[derive(Debug)]
 pub(crate) struct AgentsOverviewThreadRefresh {
-    pub(crate) threads: std::collections::HashMap<ThreadId, Option<Thread>>,
+    pub(crate) cleared_unread: Vec<ThreadId>,
+    pub(crate) threads: std::collections::HashMap<ThreadId, Option<(Thread, bool, Option<String>)>>,
     pub(crate) last_messages: std::collections::HashMap<ThreadId, String>,
     pub(crate) recent_seed_complete: bool,
+    pub(crate) discovery: Option<crate::app::agents_overview_discovery::AgentsOverviewDiscovery>,
+    pub(crate) pinned_thread_ids: Option<Option<Vec<ThreadId>>>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct AgentPickerThreadRefresh {
+    pub(crate) threads: Vec<Thread>,
+    pub(crate) archived_thread_ids: std::collections::HashSet<ThreadId>,
+}
+
+/// Source-backed replacement for the outgoing widget's width-bound streaming rows.
+#[derive(Debug)]
+pub(crate) enum CapturedSideStream {
+    Answer {
+        cell: Arc<crate::history_cell::AgentMarkdownCell>,
+        item: Option<(String, String)>,
+    },
+    Plan(Arc<crate::history_cell::ProposedPlanCell>),
+}
+
+/// Presentation retained alongside the transcript while its composer is inactive.
+#[derive(Debug)]
+pub(crate) struct CapturedSideDisplay {
+    pub(crate) rendered_completion_turn_ids: std::collections::HashMap<String, bool>,
+    pub(crate) active: Option<Box<dyn HistoryCell>>,
+    pub(crate) auxiliary: Vec<crate::terminal_hyperlinks::HyperlinkLine>,
+    pub(crate) draft: Box<crate::bottom_pane::TextArea>,
+    pub(crate) status: Option<String>,
+    pub(crate) work: Option<CapturedSideWork>,
+    pub(crate) last_completed_agent_message: Option<(String, String)>,
+    pub(crate) cwd: AbsolutePathBuf,
+    pub(crate) visualizations: Option<crate::inline_visualization::InlineVisualizationContext>,
+}
+
+/// The inactive composer keeps counting from the time already spent in the active pane.
+#[derive(Debug)]
+pub(crate) struct CapturedSideWork {
+    pub(crate) turn_id: String,
+    pub(crate) row: Box<crate::status_indicator_widget::StatusIndicatorWidget>,
+    pub(crate) timer: crate::status_indicator_widget::StatusTimer,
+}
+
+impl CapturedSideWork {
+    pub(crate) fn new(
+        turn_id: String,
+        mut row: crate::status_indicator_widget::StatusIndicatorWidget,
+        elapsed: Duration,
+    ) -> Self {
+        let mut timer = crate::status_indicator_widget::StatusTimer::default();
+        timer.reset(elapsed);
+        row.set_interrupt_hint_visible(/*visible*/ false);
+        Self {
+            turn_id,
+            row: Box::new(row),
+            timer,
+        }
+    }
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -329,6 +396,18 @@ pub(crate) enum AppEvent {
         thread_id: ThreadId,
         name: String,
     },
+    /// Move a task into or out of the shared pinned section.
+    ToggleAgentsOverviewPin {
+        thread_id: ThreadId,
+        pinned: bool,
+    },
+    /// Finish moving a task into or out of the shared pinned section.
+    AgentsOverviewPinToggled {
+        request_id: Uuid,
+        thread_id: ThreadId,
+        pinned: bool,
+        result: Result<(), String>,
+    },
     /// Generate an editable title suggestion for the active rename prompt.
     SuggestThreadName {
         thread_id: ThreadId,
@@ -340,6 +419,7 @@ pub(crate) enum AppEvent {
         thread_id: ThreadId,
         destination: ThreadTitleDestination,
         prompt: String,
+        fallback_title: Option<String>,
         effort: Option<ReasoningEffort>,
         result: Result<String, String>,
     },
@@ -383,15 +463,52 @@ pub(crate) enum AppEvent {
     AgentPickerThreadsLoaded {
         primary_thread_id: ThreadId,
         request_id: Uuid,
-        result: Result<Vec<Thread>, String>,
+        result: Result<AgentPickerThreadRefresh, String>,
     },
     /// Switch the active thread to the selected agent.
     SelectAgentThread(ThreadId),
 
-    /// Fork the current thread into a transient side conversation.
+    /// Open a side conversation for the current thread.
     StartSide {
         parent_thread_id: ThreadId,
         user_message: Option<UserMessage>,
+        mode: SideStartMode,
+    },
+
+    SideCreated {
+        backend_id: crate::backend_id::BackendId,
+        parent: ThreadId,
+        request: uuid::Uuid,
+        result: Result<Box<crate::app_server_session::SidebarFork>, String>,
+    },
+
+    SideChatRemovalFinished {
+        backend_id: crate::backend_id::BackendId,
+        target: ThreadId,
+        request: uuid::Uuid,
+        action: SideChatRemoval,
+        result: Result<(), String>,
+    },
+    SideChatArchived {
+        backend_id: crate::backend_id::BackendId,
+        target: ThreadId,
+    },
+
+    SavedChatPrepared {
+        target: crate::app::sidebar_loading::Target,
+        request: uuid::Uuid,
+        result: Box<crate::app::thread_attachment::Prepared>,
+    },
+    SavedChatReleased {
+        target: crate::app::sidebar_loading::Target,
+        request: uuid::Uuid,
+    },
+    StartQueuedSavedChat,
+    SavedSideChatsLoaded {
+        backend_id: crate::backend_id::BackendId,
+        parent: ThreadId,
+        request: uuid::Uuid,
+        result: Result<SavedSideChatData, String>,
     },
 
     /// Submit an op to the specified thread, regardless of current focus.
@@ -433,6 +550,13 @@ pub(crate) enum AppEvent {
         prompt: UserMessage,
     },
 
+    /// Fork before a blocked turn and send the selected safer follow-up.
+    ContinueSafetyRecourse {
+        thread_id: ThreadId,
+        turn_id: String,
+        prompt: String,
+    },
+
     /// Deliver a synthetic history lookup response to a specific thread channel.
     ThreadHistoryEntryResponse {
         thread_id: ThreadId,
@@ -463,7 +587,15 @@ pub(crate) enum AppEvent {
         destination: TranscriptExportDestination,
     },
 
-    /// Copy a picker selection while retaining its clipboard lease in the chat widget.
+    /// Select a response or block directly in the owned transcript.
+    SelectTranscriptCopy {
+        guard: Arc<crate::copy_input_guard::CopyInputGuard>,
+    },
+
+    /// Retry queued input after the transcript copy owner is released.
+    TranscriptCopyClosed,
+
+    /// Copy text through the session clipboard worker.
     CopySelection {
         text: Arc<str>,
         label: String,
@@ -500,6 +632,24 @@ pub(crate) enum AppEvent {
     /// Start a new session, optionally assigning it a name.
     NewSession {
         name: Option<String>,
+    },
+
+    /// Resolve the /new host before offering choices about the displayed checkout.
+    ChooseNewSessionCheckout {
+        name: Option<String>,
+    },
+
+    /// Start on the current worktree's host, ignoring the saved new-thread host.
+    NewSessionInCurrentWorktree {
+        name: Option<String>,
+    },
+
+    /// Move an empty conversation to the next connected backend.
+    CycleNewConversationBackend,
+
+    /// Continue a provider-locked conversation in a fresh chat using its saved history.
+    ContinueProviderChat {
+        thread_id: ThreadId,
     },
 
     /// Create a managed checkout and start or fork a session into it.
@@ -544,6 +694,7 @@ pub(crate) enum AppEvent {
 
     /// Result of the fresh startup thread that is attached after the input UI is live.
     StartupThreadStarted {
+        backend_id: crate::backend_id::BackendId,
         result: color_eyre::Result<AppServerStartedThread>,
     },
 
@@ -579,12 +730,9 @@ pub(crate) enum AppEvent {
         enabled: bool,
     },
 
-    /// Clear the current context, start a fresh session, and submit an initial user message.
-    ///
-    /// This is the Plan Mode handoff path: the previous thread remains resumable, but the model
-    /// sees only the explicit prompt carried in `text` once the new session is configured.
-    ClearUiAndSubmitUserMessage {
-        text: String,
+    /// Start a fresh session with a reference to the approved plan file.
+    ImplementPlanInFreshSession {
+        plan: String,
     },
 
     /// Open the resume picker inside the running TUI session.
@@ -596,10 +744,13 @@ pub(crate) enum AppEvent {
     /// Resume a thread by UUID or thread name inside the running TUI session.
     ResumeSessionByIdOrName(String),
 
-    /// Archive the current active main thread and exit after it succeeds.
+    /// Attach a conversation through the registered backend that owns it.
+    ResumeBackendSession(crate::resume_picker::SessionTarget),
+
+    /// Archive the current active main thread and return to the command center.
     ArchiveCurrentThread,
 
-    /// Permanently delete the current active main thread and exit after it succeeds.
+    /// Permanently delete the current active main thread and return to the command center.
     DeleteCurrentThread,
 
     /// Fork the current session into a new thread, optionally assigning it a name.
@@ -625,6 +776,8 @@ pub(crate) enum AppEvent {
     /// escape hatch that skips shutdown and may drop in-flight work (e.g.,
     /// background tasks, rollout flush, or child process cleanup).
     Exit(ExitMode),
+    /// The user accepted stopping other sessions owned by this embedded server.
+    ConfirmedEmbeddedExit(ExitMode),
 
     /// Apply a choice from the running-task exit menu to its originating thread.
     RunningTaskExit {
@@ -861,6 +1014,7 @@ pub(crate) enum AppEvent {
 
     /// Result of restoring the configured ambient pet during startup.
     ConfiguredPetLoaded {
+        generation: ConfiguredPetLoadGeneration,
         pet_id: String,
         result: Result<Option<crate::pets::AmbientPet>, String>,
     },
@@ -887,9 +1041,9 @@ pub(crate) enum AppEvent {
         cwd: PathBuf,
     },
 
-    /// Fetch lifecycle hook inventory for the provided working directory.
+    /// Fetch lifecycle hook inventory for the current thread or working directory.
     FetchHooksList {
-        cwd: PathBuf,
+        target: crate::hooks_rpc::HooksListTarget,
     },
 
     /// Result of fetching plugin marketplace state.
@@ -913,8 +1067,8 @@ pub(crate) enum AppEvent {
 
     /// Result of fetching lifecycle hook inventory.
     HooksLoaded {
-        cwd: PathBuf,
-        result: Result<codex_app_server_protocol::HooksListResponse, String>,
+        target: crate::hooks_rpc::HooksListTarget,
+        result: Result<codex_app_server_protocol::HooksListEntry, String>,
     },
 
     /// Open the prompt for adding a marketplace source.
@@ -1078,6 +1232,16 @@ pub(crate) enum AppEvent {
         thread_id: Option<ThreadId>,
     },
 
+    StartMcpLogin {
+        name: String,
+        thread_id: ThreadId,
+    },
+
+    McpLoginStarted {
+        request_id: String,
+        result: Result<McpServerOauthLoginResponse, String>,
+    },
+
     /// Result of fetching MCP inventory via app-server RPCs.
     McpInventoryLoaded {
         result: Result<Vec<McpServerStatus>, String>,
@@ -1095,6 +1259,14 @@ pub(crate) enum AppEvent {
         result: Result<SkillsListResponse, String>,
     },
 
+    /// Result of the skills refresh issued while replaying a docked conversation.
+    SideReplaySkillsLoaded {
+        request_id: Uuid,
+        thread_id: ThreadId,
+        cwd: PathBuf,
+        result: Result<SkillsListResponse, String>,
+    },
+
     /// Begin buffering initial resume replay rows before they are written to scrollback.
     BeginInitialHistoryReplayBuffer,
 
@@ -1107,6 +1279,27 @@ pub(crate) enum AppEvent {
     FollowTranscript,
 
     InsertHistoryCell(Box<dyn HistoryCell>),
+    /// FIFO barrier after the completed turn's history insertions.
+    TurnTipReady {
+        thread_id: ThreadId,
+        turn_id: String,
+    },
+
+    /// Move visible completed voice captions into history in one app event.
+    CommitRealtimeTranscriptHistory,
+
+    VoiceControl {
+        thread_id: Option<ThreadId>,
+        control: VoiceControl,
+    },
+    RealtimeConversationStateChanged,
+    RealtimeSessionLockStopped {
+        thread_id: ThreadId,
+    },
+    BackgroundVoiceError {
+        thread_id: ThreadId,
+        message: String,
+    },
 
     /// Move visible completed voice captions into history in one app event.
     CommitRealtimeTranscriptHistory,
@@ -1127,11 +1320,20 @@ pub(crate) enum AppEvent {
     /// `deferred_history_cell` lets callers add the final stream tail to the
     /// transcript without first writing its provisional render to scrollback.
     ConsolidateAgentMessage {
+        phase: Option<codex_protocol::models::MessagePhase>,
+        interrupted_item: Option<(String, String)>,
         source: String,
+        copy_source: Option<String>,
         cwd: PathBuf,
         inline_visualization_context: Option<InlineVisualizationContext>,
         scrollback_reflow: ConsolidationScrollbackReflow,
         deferred_history_cell: Option<Box<dyn HistoryCell>>,
+    },
+
+    /// Update a message already committed before a tool started with its completed text.
+    CorrectFlushedAgentMessage {
+        item: (String, String),
+        cell: crate::history_cell::AgentMarkdownCell,
     },
 
     /// Replace the contiguous run of streaming `ProposedPlanStreamCell`s at the
@@ -1296,11 +1498,27 @@ pub(crate) enum AppEvent {
         service_tier: Option<String>,
     },
 
+    /// Persist the current thread's Daybreak preference and the new-thread default.
+    PersistDaybreakSelection {
+        thread_id: ThreadId,
+        enabled: bool,
+    },
+    /// Disable Daybreak after explicit account-scoped metadata excludes it for the selected model.
+    DisableUnavailableDaybreak {
+        thread_id: ThreadId,
+        model: String,
+    },
+
     /// Fetch the current catalog even when cached models produce no picker.
     FetchModels {
         request_id: uuid::Uuid,
     },
     ModelsLoaded {
+        request_id: uuid::Uuid,
+        result: Result<Vec<ModelPreset>, String>,
+    },
+    /// Finished the API-key compatibility check; do not check the same catalog again.
+    ApiKeyCompatModelsLoaded {
         request_id: uuid::Uuid,
         result: Result<Vec<ModelPreset>, String>,
     },
@@ -1470,7 +1688,7 @@ pub(crate) enum AppEvent {
 
     /// Enable or disable a skill by path.
     SetSkillEnabled {
-        path: AbsolutePathBuf,
+        path: PathUri,
         enabled: bool,
     },
 
@@ -1515,6 +1733,11 @@ pub(crate) enum AppEvent {
     /// Re-open the permissions presets popup.
     OpenPermissionsPopup,
 
+    /// Resolve an inline permission profile after any app-owned platform preflight.
+    ResolvePermissionProfile {
+        profile_id: String,
+    },
+
     /// Open the branch picker option from the review popup.
     OpenReviewBranchPicker(PathBuf),
 
@@ -1544,7 +1767,7 @@ pub(crate) enum AppEvent {
         include_logs: bool,
     },
 
-    /// Open the upload consent popup for feedback after selecting a category.
+    /// Open the attachment consent popup for feedback after selecting a category.
     OpenFeedbackConsent {
         category: FeedbackCategory,
     },
@@ -1556,14 +1779,15 @@ pub(crate) enum AppEvent {
         report_passcode: Option<SecretReportPasscode>,
         turn_id: Option<String>,
         include_logs: bool,
+        destination: FeedbackDestination,
     },
 
-    /// Result of a feedback upload request initiated by the TUI.
+    /// Delivery result for the thread that requested feedback.
     FeedbackSubmitted {
         origin_thread_id: Option<ThreadId>,
         category: FeedbackCategory,
         include_logs: bool,
-        result: Result<String, String>,
+        result: Result<FeedbackReceipt, String>,
     },
 
     /// The app-server, not the TUI environment, requires a report passcode.
@@ -1738,4 +1962,29 @@ pub(crate) enum FeedbackCategory {
     Bug,
     SafetyCheck,
     Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FeedbackDestination {
+    OpenAi,
+    LocalZip,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FeedbackReceipt {
+    Uploaded { thread_id: String },
+    Saved { path: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SideStartMode {
+    Reuse,
+    New,
+}
+
+/// Whether a sidebar action closes a live tab or also archives its saved conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SideChatRemoval {
+    CloseTab,
+    Archive,
 }

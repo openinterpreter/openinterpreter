@@ -1,4 +1,3 @@
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::Weak;
 
@@ -18,12 +17,11 @@ use codex_tools::TurnItemEmissionFuture;
 use codex_tools::TurnItemEmitter;
 use codex_utils_string::to_ascii_json_string;
 
-use crate::sandboxing::SandboxPermissions;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
+use crate::tools::context::ToolEnvironments;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
-use crate::tools::handlers::apply_granted_turn_permissions;
 use crate::tools::lifecycle::extension_tool_call_source;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
@@ -66,11 +64,74 @@ impl ToolExecutor<ToolInvocation> for ExtensionToolAdapter {
     where
         ToolInvocation: 'a,
     {
-        Box::pin(async move { self.0.handle(to_extension_call(&invocation).await).await })
+        Box::pin(async move {
+            let step = &invocation.step_context;
+            let _native_search = if invocation.tool_name.namespace.as_deref() == Some("web")
+                && invocation.tool_name.name == "run"
+            {
+                crate::model_search::SearchOwner::reserve_native_fallback(
+                    &step.extension_data,
+                    &invocation.session.services.thread_extension_data,
+                )
+                .map_err(|err| codex_tools::FunctionCallError::RespondToModel(err.to_string()))?
+            } else {
+                None
+            };
+            let selected: Vec<_> = match &invocation.environments {
+                ToolEnvironments::Arguments(environments) => {
+                    environments.iter().map(|(_, env)| env.as_ref()).collect()
+                }
+                _ => step.environments.turn_environments().collect(),
+            };
+            let accessors: Vec<_> = selected
+                .into_iter()
+                .map(|env| (env, step.fs_accessor(env)))
+                .collect();
+            let environments = accessors
+                .iter()
+                .map(|(environment, fs)| {
+                    ToolEnvironment::new(
+                        environment.selection.environment_id.clone(),
+                        environment.cwd().clone(),
+                        fs,
+                    )
+                })
+                .collect();
+            self.0
+                .handle(to_extension_call(&invocation, environments).await)
+                .await
+        })
     }
 }
 
 impl CoreToolRuntime for ExtensionToolAdapter {
+    fn environments_for_input(
+        &self,
+        invocation: &ToolInvocation,
+    ) -> Result<ToolEnvironments, codex_tools::FunctionCallError> {
+        let arguments = self.0.environment_arguments(&invocation.payload)?;
+        if arguments.is_empty() {
+            return Ok(ToolEnvironments::All);
+        }
+        arguments
+            .into_iter()
+            .map(|(field, id)| {
+                let env = invocation
+                    .step_context
+                    .environments
+                    .turn_environments()
+                    .find(|env| env.selection.environment_id == id)
+                    .ok_or_else(|| {
+                        codex_tools::FunctionCallError::RespondToModel(format!(
+                            "unknown or unavailable environment ID: {id}"
+                        ))
+                    })?;
+                Ok((field, Arc::new(env.clone())))
+            })
+            .collect::<Result<_, _>>()
+            .map(ToolEnvironments::Arguments)
+    }
+
     fn is_builtin_control_tool(&self) -> bool {
         let tool_name = self.0.tool_name();
         if tool_name.is_default_namespace() {
@@ -186,31 +247,6 @@ async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall<'_>
             &invocation.step_context.settings,
         ))
         .and_then(|metadata| to_ascii_json_string(&metadata).ok());
-    let mut environments = Vec::new();
-    for environment in invocation.step_context.environments.turn_environments() {
-        // TODO(anp): Migrate extension ToolEnvironment and granted-permission lookup to PathUri
-        // so extensions can receive foreign environment cwd values.
-        let Ok(native_cwd) = environment.cwd().to_abs_path() else {
-            continue;
-        };
-        let additional_permissions = apply_granted_turn_permissions(
-            invocation.session.as_ref(),
-            environment,
-            environment.cwd(),
-            SandboxPermissions::UseDefault,
-            /*additional_permissions*/ None,
-        )
-        .await
-        .additional_permissions;
-        let file_system_sandbox_context = environment.sandbox_context(additional_permissions);
-        environments.push(ToolEnvironment {
-            _lifetime: PhantomData,
-            environment_id: environment.selection.environment_id.clone(),
-            cwd: native_cwd,
-            file_system: environment.environment.get_filesystem(),
-            file_system_sandbox_context,
-        });
-    }
     ExtensionToolCall {
         turn_id: invocation.turn.sub_id.clone(),
         call_id: invocation.call_id.clone(),
@@ -224,6 +260,8 @@ async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall<'_>
             session: Arc::downgrade(&invocation.session),
             turn: Arc::downgrade(&invocation.turn),
         }),
+        attachment_store: Arc::clone(&invocation.session.services.image_store),
+        ephemeral: invocation.turn.config.ephemeral,
         environments,
         payload: invocation.payload.clone(),
     }
@@ -234,6 +272,7 @@ mod tests {
     use std::sync::Arc;
 
     use codex_extension_items::ExtensionItem;
+    use codex_extension_items::image_generation::GeneratedImageRef;
     use codex_extension_items::image_generation::ImageGenerationItem;
     use codex_extension_items::web_search::WebSearchItem;
     use codex_protocol::items::TurnItem;
@@ -363,7 +402,7 @@ mod tests {
             *self.captured_sandbox_cwds.lock().await = call
                 .environments
                 .iter()
-                .map(|environment| environment.file_system_sandbox_context.cwd.clone())
+                .map(|environment| environment.cwd.clone())
                 .collect();
             let call = codex_tools::ToolCall {
                 environments: Vec::new(),
@@ -403,6 +442,8 @@ mod tests {
             call_id: "call-extension".to_string(),
             tool_name: codex_tools::ToolName::plain("extension_echo"),
             source: ToolCallSource::Direct,
+            native_call: None,
+            environments: Default::default(),
             payload: ToolPayload::Function {
                 arguments: json!({ "message": "hello" }).to_string(),
             },
@@ -419,6 +460,7 @@ mod tests {
         assert_eq!(
             CoreToolRuntime::post_tool_use_payload(&handler, &invocation, &output),
             Some(PostToolUsePayload {
+                tool_cwd: None,
                 tool_name: HookToolName::new("extension_echo"),
                 tool_use_id: "call-extension".to_string(),
                 tool_input: json!({ "message": "hello" }),
@@ -447,6 +489,8 @@ mod tests {
             .map(|environment| environment.cwd().clone())
             .collect::<Vec<_>>();
         let history_item = ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -500,6 +544,8 @@ mod tests {
                 cell_id: "cell-1".to_string(),
                 runtime_tool_call_id: "nested-call-1".to_string(),
             },
+            native_call: None,
+            environments: Default::default(),
             payload: ToolPayload::Function {
                 arguments: json!({ "message": "hello" }).to_string(),
             },
@@ -577,10 +623,13 @@ mod tests {
             id: "call-image".to_string(),
             status: "in_progress".to_string(),
             revised_prompt: None,
-            result: String::new(),
+            image: GeneratedImageRef::Inline {
+                result: String::new(),
+            },
             transparent_background: None,
             failure: None,
             saved_path: None,
+            input_images: Vec::new(),
             imagegen_request_id: None,
             generation_id: None,
         });
@@ -588,10 +637,13 @@ mod tests {
             id: "call-image".to_string(),
             status: "completed".to_string(),
             revised_prompt: Some("A tiny blue square".to_string()),
-            result: "cG5n".to_string(),
+            image: GeneratedImageRef::Inline {
+                result: "cG5n".to_string(),
+            },
             transparent_background: Some(true),
             failure: None,
             saved_path: Some(expected_path.clone()),
+            input_images: Vec::new(),
             imagegen_request_id: None,
             generation_id: None,
         });
@@ -613,10 +665,14 @@ mod tests {
                     call_id: "call-image".to_string(),
                     status: "completed".to_string(),
                     revised_prompt: Some("A tiny blue square".to_string()),
-                    result: "cG5n".to_string(),
+                    image: GeneratedImageRef::Inline {
+                        result: "cG5n".to_string(),
+                    },
                     transparent_background: Some(true),
                     failure: None,
                     saved_path: Some(expected_path.clone()),
+                    input_images: Vec::new(),
+                    generation_id: None,
                 })],
             },
         )

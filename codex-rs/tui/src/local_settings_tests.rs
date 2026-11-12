@@ -2,7 +2,9 @@ use super::*;
 use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::edit::ConfigEditsBuilder;
 use codex_config::LoaderOverrides;
+use codex_config::types::RightClickPaste;
 use codex_config::types::SessionPickerViewMode;
+use codex_terminal_detection::Multiplexer;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -115,8 +117,58 @@ max_bytes = 4096
 fast_default_opt_out = true
 "#,
     ] {
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        tui.set_alt_screen_enabled(alternate_screen);
+        tui.set_owned_screen(owned)?;
+        let local = LocalSettings::for_tui(&config, &tui);
+        assert_eq!(
+            (local.transcript_mode, local.tui.alternate_screen),
+            (expected_mode, expected_alt),
+        );
+
+        let mut reloaded_config = config.clone();
+        reloaded_config.tui_fullscreen_transcript = false;
+        reloaded_config.tui_copy_on_select = CopyOnSelect::Never;
+        reloaded_config.tui_copy_on_select_clear_selection = false;
+        reloaded_config.tui_right_click_paste = RightClickPaste::Off;
+        reloaded_config.tui_alternate_screen = AltScreenMode::Never;
+        reloaded_config.tui_theme = Some("nord".into());
+        reloaded_config.animations = false;
+        reloaded_config.tui_auto_recap = false;
+        reloaded_config.tui_effects.starfield = false;
+        reloaded_config.disable_paste_burst = true;
+        reloaded_config.show_tooltips = false;
+        let mut expected_reload = LocalSettings::from(&reloaded_config);
+        expected_reload.transcript_mode = expected_mode;
+        expected_reload.tui.alternate_screen = expected_alt;
+        expected_reload.tui.animations = local.tui.animations;
+        expected_reload.tui.auto_recap = local.tui.auto_recap;
+        expected_reload.tui.effects.starfield = local.tui.effects.starfield;
+        expected_reload.tui.disable_paste_burst = local.tui.disable_paste_burst;
+        expected_reload.tui.show_tooltips = local.tui.show_tooltips;
+        assert_eq!(local.reloaded(&reloaded_config), expected_reload);
+
+        let mut expected_launch = LocalSettings::from(&reloaded_config);
+        expected_launch.transcript_mode = expected_mode;
+        expected_launch.tui.alternate_screen = expected_alt;
+        assert_eq!(
+            LocalSettings::for_tui(&reloaded_config, &tui),
+            expected_launch
+        );
+        tui.set_owned_screen(/*owned*/ false)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn system_motion_suppresses_animations_without_changing_saved_preferences()
+-> anyhow::Result<()> {
+    use crate::motion::MotionMode;
+
+    for configured in [true, false] {
         let home = tempfile::tempdir()?;
-        std::fs::write(home.path().join("config.toml"), config_text)?;
+        let config_text = format!("[tui]\nanimations = {configured}\n");
+        std::fs::write(home.path().join("config.toml"), &config_text)?;
         let config = ConfigBuilder::default()
             .codex_home(home.path().to_path_buf())
             .strict_config(true)
@@ -183,6 +235,10 @@ fast_default_opt_out = true
 #[tokio::test]
 async fn local_writes_preserve_selected_user_file_and_home_destinations() -> anyhow::Result<()> {
     let home = tempfile::tempdir()?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[tui]\nnotifications = [\"agent-turn-complete\"]\n",
+    )?;
     let selected = AbsolutePathBuf::from_absolute_path(home.path().join("work.config.toml"))?;
     std::fs::write(&selected, "[tui]\ntheme = \"dracula\"\n")?;
     let overrides = LoaderOverrides {
@@ -198,6 +254,7 @@ async fn local_writes_preserve_selected_user_file_and_home_destinations() -> any
         .await?;
     let local = LocalSettings::from(&config);
     assert_eq!(local.user_config_path, selected);
+    assert!(local.custom_notification_filters);
     ConfigEditsBuilder::for_config_path(local.user_config_path.as_path())
         .with_edits([crate::legacy_core::config::edit::syntax_theme_edit("nord")])
         .apply()

@@ -49,7 +49,7 @@ pub(super) struct FeedbackThreadEvent {
     pub(super) category: FeedbackCategory,
     pub(super) include_logs: bool,
     pub(super) feedback_audience: FeedbackAudience,
-    pub(super) result: Result<String, String>,
+    pub(super) result: Result<crate::app_event::FeedbackReceipt, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +64,7 @@ pub(super) struct ThreadEventStore {
     pub(super) session: Option<ThreadSessionState>,
     pub(super) turns: Vec<Turn>,
     pub(super) buffer: VecDeque<ThreadBufferedEvent>,
+    pub(super) attachment_prefix: Option<usize>,
     pub(super) pending_interactive_replay: PendingInteractiveReplayState,
     pub(super) active_turn_id: Option<String>,
     // Retain the active item even if its start falls out of the bounded replay buffer.
@@ -74,6 +75,8 @@ pub(super) struct ThreadEventStore {
     pub(super) input_state: Option<ThreadInputState>,
     pub(super) capacity: usize,
     pub(super) active: bool,
+    /// Output received since deactivation can change the transcript rebuilt on replay.
+    pub(super) replay_may_have_output: bool,
     pub(super) buffered_agent_message_delta_bytes: usize,
     delegated_turns: VecDeque<String>,
     recap_progress: recap::RecapProgress,
@@ -83,11 +86,11 @@ impl ThreadEventStore {
     pub(super) fn event_survives_session_refresh(event: &mut ThreadBufferedEvent) -> bool {
         if let ThreadBufferedEvent::Notification(notification) = event
             && let ServerNotification::ItemCompleted(notification) = notification.as_mut()
-            && let ThreadItem::AgentMessage {
+            && let ThreadItemPayload::AgentMessage {
                 questions: Some(_),
                 text,
                 ..
-            } = &mut notification.item
+            } = &mut notification.item.payload
         {
             // Refreshed turns contain the text; retain only the live question state.
             text.clear();
@@ -100,6 +103,7 @@ impl ThreadEventStore {
                 ServerNotification::HookStarted(_)
                     | ServerNotification::HookCompleted(_)
                     | ServerNotification::McpServerStatusUpdated(_)
+                    | ServerNotification::McpServerOauthLoginCompleted(_)
             ),
             ThreadBufferedEvent::HistoryEntryResponse(_) => false,
         }
@@ -110,6 +114,7 @@ impl ThreadEventStore {
             session: None,
             turns: Vec::new(),
             buffer: VecDeque::new(),
+            attachment_prefix: None,
             pending_interactive_replay: PendingInteractiveReplayState::default(),
             active_turn_id: None,
             active_reasoning_item: None,
@@ -118,6 +123,7 @@ impl ThreadEventStore {
             input_state: None,
             capacity,
             active: false,
+            replay_may_have_output: false,
             buffered_agent_message_delta_bytes: 0,
             delegated_turns: VecDeque::new(),
             recap_progress: recap::RecapProgress::default(),
@@ -142,8 +148,15 @@ impl ThreadEventStore {
     }
 
     pub(super) fn rebase_buffer_after_session_refresh(&mut self) {
+        let tail = self
+            .attachment_prefix
+            .take()
+            .map(|prefix| self.buffer.split_off(prefix.min(self.buffer.len())));
         self.buffer.retain_mut(Self::event_survives_session_refresh);
         self.buffered_agent_message_delta_bytes = 0;
+        for event in tail.into_iter().flatten() {
+            self.push_buffered_event(event);
+        }
     }
 
     pub(super) fn set_turns(&mut self, turns: Vec<Turn>) {
@@ -177,6 +190,17 @@ impl ThreadEventStore {
 
     pub(super) fn push_notification_ref(&mut self, notification: &ServerNotification) {
         self.push_notification_inner(Cow::Borrowed(notification));
+    }
+
+    pub(super) fn is_realtime_delegated_turn(&self, turn_id: &str) -> bool {
+        self.delegated_turns.iter().any(|id| id == turn_id)
+            || self.turns.iter().any(|turn| {
+                turn.id == turn_id
+                    && turn
+                        .items
+                        .iter()
+                        .any(|entry| is_voice_handoff_item(&entry.payload))
+            })
     }
 
     fn push_notification_inner(&mut self, notification: Cow<'_, ServerNotification>) {
@@ -220,7 +244,7 @@ impl ThreadEventStore {
                     self.recap_progress.completed_turns += 1;
                 }
                 if self.active_turn_id.as_deref() == Some(turn.turn.id.as_str()) {
-                    self.active_turn_id = None;
+                    self.clear_active_turn_id();
                 }
                 if self.pending_interrupt_turn_id.as_deref() == Some(turn.turn.id.as_str()) {
                     self.pending_interrupt_turn_id = None;
@@ -375,6 +399,12 @@ impl ThreadEventStore {
             active_reasoning_item: self.active_reasoning_item.clone(),
             input_state: self.input_state.clone(),
         };
+        if let Some(started) = self.evicted_active_turn.as_deref()
+            && self.active_turn_id() == Some(started.id.as_str())
+            && !snapshot.turns.iter().any(|turn| turn.id == started.id)
+        {
+            snapshot.turns.push(started.clone());
+        }
         if let Some(latest_turn_id) = &self.latest_turn_id {
             replay_filter::omit_resolved_misalignment_errors(&mut snapshot, latest_turn_id);
         }
@@ -527,6 +557,7 @@ impl ThreadEventStore {
 
     pub(super) fn clear_active_turn_id(&mut self) {
         self.active_turn_id = None;
+        self.evicted_active_turn = None;
     }
 }
 
@@ -546,10 +577,10 @@ pub(super) fn file_change_changes<'a>(
         };
         let (candidate_turn_id, item) = match notification.as_ref() {
             ServerNotification::ItemStarted(notification) => {
-                (&notification.turn_id, &notification.item)
+                (&notification.turn_id, &notification.item.payload)
             }
             ServerNotification::ItemCompleted(notification) => {
-                (&notification.turn_id, &notification.item)
+                (&notification.turn_id, &notification.item.payload)
             }
             _ => return None,
         };
@@ -561,26 +592,30 @@ pub(super) fn file_change_changes<'a>(
                 .iter()
                 .rev()
                 .filter(|turn| turn_id_matches(turn_id, &turn.id))
-                .flat_map(|turn| turn.items.iter().rev()),
+                .flat_map(|turn| turn.item_payloads().rev()),
         )
         .find_map(|item| file_change_item_changes(item, item_id))
 }
 
 fn file_change_item_changes(
-    item: &ThreadItem,
+    item: &ThreadItemPayload,
     item_id: &str,
 ) -> Option<Vec<codex_app_server_protocol::FileUpdateChange>> {
     match item {
-        ThreadItem::FileChange { id, changes, .. } if id == item_id => Some(changes.clone()),
+        ThreadItemPayload::FileChange { id, changes, .. } if id == item_id => Some(changes.clone()),
         _ => None,
     }
 }
 
 #[derive(Debug)]
 pub(super) struct ThreadEventChannel {
+    /// Set on backend handoff so a retained channel is detached through its owning session.
+    pub(super) backend_id: Option<crate::backend_id::BackendId>,
     pub(super) sender: mpsc::Sender<ThreadBufferedEvent>,
     pub(super) receiver: Option<mpsc::Receiver<ThreadBufferedEvent>>,
     pub(super) store: Arc<Mutex<ThreadEventStore>>,
+    /// Live Attach restored delivery without reading the history from the gap.
+    pub(super) history_may_be_incomplete: bool,
     attachment: ThreadEventAttachment,
 }
 
@@ -591,8 +626,14 @@ impl ThreadEventChannel {
             sender,
             receiver: Some(receiver),
             store: Arc::new(Mutex::new(ThreadEventStore::new(capacity))),
+            backend_id: None,
+            history_may_be_incomplete: false,
             attachment: ThreadEventAttachment::Live,
         }
+    }
+
+    pub(super) fn mark_live(&mut self) {
+        self.attachment = ThreadEventAttachment::Live;
     }
 
     pub(super) fn mark_replay_only(&mut self) {
@@ -620,6 +661,8 @@ impl ThreadEventChannel {
             store: Arc::new(Mutex::new(ThreadEventStore::new_with_session(
                 capacity, session, turns,
             ))),
+            backend_id: None,
+            history_may_be_incomplete: false,
             attachment: ThreadEventAttachment::Live,
         }
     }
@@ -678,18 +721,18 @@ mod tests {
             instruction_source_paths: Vec::new(),
             reasoning_effort: None,
             collaboration_mode: None,
-            personality: None,
             message_history: None,
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
         }
     }
 
-    fn test_turn(turn_id: &str, status: TurnStatus, items: Vec<ThreadItem>) -> Turn {
+    fn test_turn(turn_id: &str, status: TurnStatus, items: Vec<ThreadItemPayload>) -> Turn {
         Turn {
             id: turn_id.to_string(),
+            root_turn_id: None,
             items_view: codex_app_server_protocol::TurnItemsView::Full,
-            items,
+            items: items.into_iter().map(ThreadItem::untimed).collect(),
             status,
             error: None,
             started_at: None,
@@ -733,7 +776,7 @@ mod tests {
                 handler_type: AppServerHookHandlerType::Command,
                 execution_mode: AppServerHookExecutionMode::Sync,
                 scope: AppServerHookScope::Turn,
-                source_path: test_path_buf("/tmp/hooks.json").abs(),
+                source_path: test_path_buf("/tmp/hooks.json").abs().into(),
                 source: codex_app_server_protocol::HookSource::User,
                 display_order: 0,
                 status: AppServerHookRunStatus::Running,
@@ -756,7 +799,7 @@ mod tests {
                 handler_type: AppServerHookHandlerType::Command,
                 execution_mode: AppServerHookExecutionMode::Sync,
                 scope: AppServerHookScope::Turn,
-                source_path: test_path_buf("/tmp/hooks.json").abs(),
+                source_path: test_path_buf("/tmp/hooks.json").abs().into(),
                 source: codex_app_server_protocol::HookSource::User,
                 display_order: 0,
                 status: AppServerHookRunStatus::Stopped,
@@ -970,9 +1013,11 @@ mod tests {
     fn refresh_retains_live_questions_without_replaying_their_text() {
         let mut expected = serde_json::json!({
             "method": "item/completed", "params": {
-                "threadId": "thread", "turnId": "turn", "completedAtMs": 0,
+                "threadId": "thread", "turnId": "turn", "completedAtMs": 20,
+                "contentTokenCount": null,
                 "item": {
                     "type": "agentMessage", "id": "question", "text": "already in the snapshot",
+                    "startedAtMs": 10, "completedAtMs": 20,
                     "phase": null, "memoryCitation": null, "delivery": null,
                     "questions": [{"title": "Which way?", "options": null}]
                 }
@@ -982,6 +1027,7 @@ mod tests {
         store.push_notification(serde_json::from_value(expected.clone()).unwrap());
         store.rebase_buffer_after_session_refresh();
         expected["params"]["item"]["text"] = serde_json::json!("");
+        expected["params"]["item"]["moderation"] = serde_json::Value::Null;
         let ThreadBufferedEvent::Notification(actual) = &store.snapshot().events[0] else {
             panic!("missing live question");
         };

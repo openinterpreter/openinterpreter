@@ -4,6 +4,8 @@ mod common;
 
 use anyhow::Result;
 use codex_realtime_webrtc::AudioControls;
+use codex_realtime_webrtc::AudioDeviceKind;
+use codex_realtime_webrtc::AudioDeviceSelection;
 use codex_realtime_webrtc::RealtimeWebrtcSession;
 use futures::future::AbortHandle;
 use pretty_assertions::assert_eq;
@@ -24,7 +26,17 @@ fn startup_controls_meters_and_helper_loss() -> Result<()> {
         assert!(RealtimeWebrtcSession::is_supported());
     }
     let (_abort, registration) = AbortHandle::new_pair();
-    let started = RealtimeWebrtcSession::start(registration)?;
+    let started = RealtimeWebrtcSession::start(
+        registration,
+        AudioDeviceSelection {
+            microphone: Some("Zen Go Synergy Core Playback".into()),
+            speaker: Some("Headphones".into()),
+            channel: Some(vec![
+                std::num::NonZeroU16::new(/*n*/ 1).unwrap(),
+                std::num::NonZeroU16::new(/*n*/ 2).unwrap(),
+            ]),
+        },
+    )?;
     assert_eq!(started.offer_sdp, "synthetic-offer");
     let handle = started.handle;
     handle.set_microphone_muted(/*muted*/ true)?;
@@ -34,6 +46,10 @@ fn startup_controls_meters_and_helper_loss() -> Result<()> {
     handle.set_speaker_suppressed(/*suppressed*/ true);
     fs::write(root.join("release"), [])?;
     answer.join().expect("answer thread")?;
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(root.join("input-selection"))?)?,
+        serde_json::json!({"microphone": "Zen Go Synergy Core Playback", "speaker": "Headphones", "channel": [1, 2]})
+    );
     let initial: Vec<AudioControls> = serde_json::from_slice(&fs::read(root.join("controls"))?)?;
     assert_eq!(
         initial,
@@ -84,7 +100,10 @@ fn external_cancellation_interrupts_startup() -> Result<()> {
     let (abort, registration) = AbortHandle::new_pair();
     let (result, received) = std::sync::mpsc::sync_channel(/*bound*/ 1);
     let startup = thread::spawn(move || {
-        let _ = result.send(RealtimeWebrtcSession::start(registration));
+        let _ = result.send(RealtimeWebrtcSession::start(
+            registration,
+            AudioDeviceSelection::default(),
+        ));
     });
     common::wait_for(|| root.join("initializing").exists())?;
     abort.abort();
@@ -106,7 +125,7 @@ fn last_owner_drop_reaps_helper() -> Result<()> {
         return Ok(());
     };
     let (_abort, registration) = AbortHandle::new_pair();
-    let started = RealtimeWebrtcSession::start(registration)?;
+    let started = RealtimeWebrtcSession::start(registration, AudioDeviceSelection::default())?;
     drop(started);
     common::wait_for_helper_reaped(&root)
 }

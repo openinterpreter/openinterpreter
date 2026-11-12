@@ -15,9 +15,11 @@ use codex_goal_extension::GoalSetRequest;
 use codex_goal_extension::GoalTokenBudgetUpdate;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
-use codex_protocol::protocol::ThreadSettingsAppliedEvent;
-use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_rollout::RolloutRecorder;
+use codex_rollout::WriterLockCoordinator;
+
+#[path = "thread_goal_user_context.rs"]
+mod user_context;
 
 enum GoalAccess {
     Read,
@@ -45,6 +47,7 @@ impl ThreadGoalRequestProcessor {
         goal_service: Arc<GoalService>,
         config_manager: ConfigManager,
     ) -> Self {
+        let writer_locks = Arc::new(WriterLockCoordinator::new(&config.codex_home));
         Self {
             thread_manager,
             outgoing,
@@ -616,7 +619,7 @@ impl ThreadGoalRequestProcessor {
             thread_state.listener_command_tx()
         };
         let status = params.status.map(ThreadGoalStatus::to_core);
-        let objective = params.objective.as_deref();
+        let objective = params.objective.as_deref().map(str::trim);
 
         let goal_request = GoalSetRequest {
             thread_id,
@@ -649,8 +652,7 @@ impl ThreadGoalRequestProcessor {
         let persist_result = match self.thread_manager.get_thread(thread_id).await {
             Ok(thread) => match thread.rollout_path() {
                 Some(path) if codex_rollout::existing_rollout_path(&path).await.is_none() => {
-                    // Goal-first threads need their settings captured when the goal creates the
-                    // rollout. Once materialized, normal settings updates own this event.
+                    // The settings and Goal must be the first atomic append for Goal-first threads.
                     let persisted_settings = thread.thread_settings_snapshot().await;
                     let items = [
                         thread_settings_applied_item(thread_id, persisted_settings.clone()),
@@ -659,7 +661,7 @@ impl ThreadGoalRequestProcessor {
                     match thread.append_rollout_items(&items).await {
                         Err(err) => Err(err),
                         Ok(()) => {
-                            // Catch up a settings update queued while the rollout materialized.
+                            // Catch up a concurrent settings update after materialization.
                             let current_settings = thread.thread_settings_snapshot().await;
                             if current_settings == persisted_settings {
                                 Ok(())
@@ -991,18 +993,6 @@ impl ThreadGoalRequestProcessor {
             ))
             .await;
     }
-}
-
-fn thread_settings_applied_item(
-    thread_id: ThreadId,
-    thread_settings: ThreadSettingsSnapshot,
-) -> RolloutItem {
-    RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
-        ThreadSettingsAppliedEvent {
-            thread_id: Some(thread_id),
-            thread_settings,
-        },
-    ))
 }
 
 pub(super) fn api_thread_goal_from_state(goal: codex_state::ThreadGoal) -> ThreadGoal {

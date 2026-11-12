@@ -1,5 +1,6 @@
 use super::STRUCTURED_RESPONSE_MAX_BYTES;
 use super::TemporaryStructuredThreadOptions;
+use super::TemporaryThreadKind;
 use super::collect_structured_response;
 use super::start_temporary_thread;
 use crate::legacy_core::config::ConfigBuilder;
@@ -22,8 +23,11 @@ use tempfile::tempdir;
 use tokio::sync::mpsc::unbounded_channel;
 
 fn agent_message_notification(turn_id: &str, text: &str) -> ServerNotification {
-    ServerNotification::ItemCompleted(ItemCompletedNotification {
-        item: ThreadItem::AgentMessage {
+    ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+        "thread-1".to_string(),
+        turn_id.to_string(),
+        ThreadItemPayload::AgentMessage {
+            moderation: None,
             id: "message-1".to_string(),
             text: text.to_string(),
             phase: None,
@@ -31,10 +35,9 @@ fn agent_message_notification(turn_id: &str, text: &str) -> ServerNotification {
             delivery: None,
             questions: None,
         },
-        thread_id: "thread-1".to_string(),
-        turn_id: turn_id.to_string(),
-        completed_at_ms: 0,
-    })
+        /*started_at_ms*/ None,
+        /*completed_at_ms*/ 0,
+    ))
 }
 
 fn turn_completed_notification(turn_id: &str, status: TurnStatus) -> ServerNotification {
@@ -42,6 +45,7 @@ fn turn_completed_notification(turn_id: &str, status: TurnStatus) -> ServerNotif
         thread_id: "thread-1".to_string(),
         turn: Turn {
             id: turn_id.to_string(),
+            root_turn_id: None,
             items: Vec::new(),
             items_view: Default::default(),
             status,
@@ -166,7 +170,6 @@ async fn preserves_custom_permissions_and_disables_required_mcp_servers() -> col
             model_provider: config.model_provider_id.clone(),
             cwd: config.cwd.display().to_string(),
             active_permission_profile: Some("title-restricted".to_string()),
-            mcp_server_names: vec!["forbidden".to_string()],
         },
     )
     .await?;

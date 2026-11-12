@@ -25,7 +25,7 @@ class RustyV8BazelTest(unittest.TestCase):
             "aarch64_pc_windows_gnullvm",
             "aarch64_pc_windows_msvc",
             "aarch64_unknown_linux_gnu_bazel",
-            "aarch64_unknown_linux_musl_release_base",
+            "aarch64_unknown_linux_musl_release",
             "x86_64_apple_darwin_bazel",
             "x86_64_pc_windows_gnullvm",
             "x86_64_pc_windows_msvc",
@@ -50,7 +50,7 @@ class RustyV8BazelTest(unittest.TestCase):
             "x86_64_unknown_linux_musl",
         ]:
             self.assertIn(
-                f":src_binding_release_{selector}_{version_suffix}_release",
+                f":src_binding_{selector}_{version_suffix}_bazel",
                 build_bazel,
             )
 
@@ -72,44 +72,12 @@ class RustyV8BazelTest(unittest.TestCase):
             with patch.object(rusty_v8_bazel, "MODULE_BAZEL", module_bazel):
                 self.assertEqual("146.4.0", rusty_v8_bazel.command_version(None))
 
-    def test_artifact_bazel_configs_always_enable_upstream_libcxx(self) -> None:
-        self.assertEqual(
-            ["rusty-v8-upstream-libcxx"],
-            rusty_v8_bazel.artifact_bazel_configs(),
-        )
-        self.assertEqual(
-            ["rusty-v8-upstream-libcxx", "v8-release-compat"],
-            rusty_v8_bazel.artifact_bazel_configs(["v8-release-compat"]),
-        )
-        self.assertEqual(
-            ["rusty-v8-upstream-libcxx", "v8-release-compat"],
-            rusty_v8_bazel.artifact_bazel_configs(
-                ["rusty-v8-upstream-libcxx", "v8-release-compat"]
-            ),
-        )
-
-    def test_bazel_commands_use_shared_buildbuddy_remote_config_library(self) -> None:
+    def test_bazel_commands_use_shared_ci_options(self) -> None:
         with patch.dict(environ, {}, clear=True):
             self.assertEqual(
                 [
                     "bazel",
                     "build",
-                    "//third_party/v8:release",
-                ],
-                rusty_v8_bazel.bazel_command(
-                    "build",
-                    "--config=ci-v8",
-                    "//third_party/v8:release",
-                ),
-            )
-        with patch.dict(environ, {"BUILDBUDDY_API_KEY": "token"}, clear=True):
-            self.assertEqual(
-                [
-                    "bazel",
-                    "build",
-                    "--config=buildbuddy-generic-rbe",
-                    "--remote_header=x-buildbuddy-api-key=token",
-                    "--config=ci-v8",
                     "//third_party/v8:release",
                 ],
                 rusty_v8_bazel.bazel_command(
@@ -276,7 +244,7 @@ class RustyV8BazelTest(unittest.TestCase):
                         "macos_arm64",
                         ["//third_party/v8:pair"],
                         "opt",
-                        ["rusty-v8-upstream-libcxx"],
+                        ["ci-macos"],
                     ),
                 )
 
@@ -284,14 +252,14 @@ class RustyV8BazelTest(unittest.TestCase):
                 "macos_arm64",
                 ["//third_party/v8:pair"],
                 "opt",
-                ["rusty-v8-upstream-libcxx"],
+                ["ci-macos"],
                 download_toplevel=True,
             )
             bazel_output_files.assert_called_once_with(
                 "macos_arm64",
                 ["//third_party/v8:pair"],
                 "opt",
-                ["rusty-v8-upstream-libcxx"],
+                ["ci-macos"],
             )
 
     def test_update_module_bazel_replaces_and_inserts_sha256(self) -> None:

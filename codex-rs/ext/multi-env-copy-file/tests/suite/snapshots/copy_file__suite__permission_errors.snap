@@ -1,0 +1,8 @@
+---
+source: ext/multi-env-copy-file/tests/suite/mod.rs
+expression: "[read_error, write_error]"
+---
+[
+  "could not open copy source: entity not found",
+  "copy failed; target may be truncated or partially written: entity not found"
+]

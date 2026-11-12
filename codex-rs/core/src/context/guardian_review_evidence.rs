@@ -306,7 +306,7 @@ impl ContextualUserFragment for GuardianReviewEvidenceFragment {
         ("<guardian_sync_review>", "</guardian_sync_review>")
     }
 
-    fn body(&self) -> String {
-        self.body.clone()
+    fn body(&self) -> ContentItem {
+        input_text(self.body.clone())
     }
 }

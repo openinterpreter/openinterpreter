@@ -1,6 +1,7 @@
 use crate::ConfigPathContext;
 use crate::ConfigRequirementsToml;
 use crate::ManagedHooksRequirementsToml;
+use crate::OtelRequirementsToml;
 use crate::RequirementSource;
 use crate::RequirementsExecPolicyToml;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -143,6 +144,11 @@ impl ComposableRequirementsLayer {
         {
             table.insert("features".to_string(), features);
         }
+        if let Some(table) = regular_toml.as_table_mut()
+            && let Some(network) = table.remove("experimental_network")
+        {
+            table.insert("network_proxy".to_string(), network);
+        }
 
         // Hostname lookup is configuration-driven and may block on DNS, so only
         // resolve it when this layer contains hostname-based sandbox selectors.
@@ -163,6 +169,7 @@ impl ComposableRequirementsLayer {
                 hooks: requirements.hooks,
                 permissions: requirements.permissions,
                 auto_review: requirements.auto_review,
+                otel: requirements.otel,
             },
         })
     }
@@ -174,6 +181,7 @@ pub(super) struct DomainMergedRequirementsFields {
     pub(super) hooks: Option<ManagedHooksRequirementsToml>,
     pub(super) permissions: Option<crate::config_requirements::PermissionsRequirementsToml>,
     pub(super) auto_review: Option<crate::config_requirements::AutoReviewRequirementsToml>,
+    pub(super) otel: Option<Box<OtelRequirementsToml>>,
 }
 
 fn parse_layer_toml(
@@ -270,6 +278,7 @@ fn toml_value_from_serializable<T: serde::Serialize>(
 fn strip_special_fields(layer_toml: &mut TomlValue) {
     remove_top_level_field(layer_toml, "rules");
     remove_top_level_field(layer_toml, "hooks");
+    remove_top_level_field(layer_toml, "otel");
     remove_nested_field_and_prune_empty(layer_toml, &["permissions", "filesystem", "deny_read"]);
     remove_nested_field_and_prune_empty(layer_toml, &["auto_review", "required_on_models"]);
 }

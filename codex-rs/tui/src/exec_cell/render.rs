@@ -6,6 +6,7 @@ use super::model::CommandOutput;
 use super::model::ExecCall;
 use super::model::ExecCell;
 use crate::exec_command::strip_bash_lc_and_escape;
+use crate::history_cell::ActivityDisclosure;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::HistoryRenderMode;
 use crate::history_cell::plain_lines;
@@ -945,7 +946,7 @@ mod tests {
             .split_whitespace()
             .join(" ");
         assert!(
-            normalized.contains(TRANSCRIPT_HINT),
+            normalized.contains(&transcript_hint()),
             "expected truncated output to advertise transcript shortcut, got {normalized}"
         );
     }

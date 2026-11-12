@@ -9,6 +9,7 @@ pub use auth::WorkspaceRoutingResolver;
 pub use auth::WorkspaceRoutingSession;
 
 mod callback_params;
+mod credential_export;
 mod device_code_auth;
 mod gateway_auth;
 mod oauth;
@@ -33,6 +34,9 @@ pub use success_page::CODEX_OPEN_APP_URL;
 pub use success_page::LoginSuccessPage;
 pub use success_page::LoginSuccessPageBrand;
 
+pub use auth::AccountOAuthGrant;
+pub use auth::AccountOAuthGrantLease;
+pub use auth::AccountOAuthGrantRevision;
 pub use auth::AgentIdentityAuthPolicy;
 pub use auth::AuthChangeState;
 pub use auth::AuthConfig;
@@ -56,6 +60,7 @@ pub use auth::OPENAI_API_KEY_ENV_VAR;
 pub use auth::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 pub use auth::REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR;
 pub use auth::RefreshTokenError;
+pub use auth::RequestAuthChange;
 pub use auth::UnauthorizedRecovery;
 pub use auth::default_client;
 pub use auth::enforce_login_restrictions;

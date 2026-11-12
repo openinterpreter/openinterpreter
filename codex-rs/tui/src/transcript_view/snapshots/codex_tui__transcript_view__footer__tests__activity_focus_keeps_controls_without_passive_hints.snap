@@ -1,0 +1,60 @@
+---
+source: tui/src/transcript_view/footer_tests.rs
+expression: "hints.join(\"\\n\")"
+---
+collapsed
+Buffer {
+    area: Rect { x: 0, y: 0, width: 32, height: 3 },
+    content: [
+        "Activity summary                ",
+        "    + Show details              ",
+        "                                ",
+    ],
+    styles: [
+        x: 0, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 0, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+        x: 0, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+    ]
+}
+20 columns: <composer hints>
+32 columns: <composer hints>
+80 columns: <composer hints>
+focused
+Buffer {
+    area: Rect { x: 0, y: 0, width: 32, height: 3 },
+    content: [
+        "Activity summary                ",
+        "    + Show details              ",
+        "                                ",
+    ],
+    styles: [
+        x: 0, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: UNDERLINED,
+        x: 0, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+        x: 4, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 18, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+        x: 0, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+    ]
+}
+focused, 20 columns: esc back
+focused, 32 columns: ↓ next · enter expand · esc back
+focused, 80 columns: ↑ previous · ↓ next · enter expand · esc back
+expanded
+Buffer {
+    area: Rect { x: 0, y: 0, width: 32, height: 3 },
+    content: [
+        "Activity summary                ",
+        "Hidden details                  ",
+        "    − Hide details              ",
+    ],
+    styles: [
+        x: 0, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: UNDERLINED,
+        x: 0, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 0, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+        x: 4, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 18, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+    ]
+}
+expanded, 80 columns: ↑ previous · ↓ next · enter collapse · esc back
+"ctrl-x t": <composer hints>
+["ctrl-x t","f4"]: <composer hints>
+[]: <composer hints>

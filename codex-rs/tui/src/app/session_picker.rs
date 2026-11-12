@@ -4,41 +4,47 @@ use super::*;
 use crate::chatwidget::ThreadInputStateRestoreMode;
 
 impl App {
-    pub(super) async fn open_resume_picker(
+    pub(super) async fn capture_session_inputs(&mut self, owner: crate::backend_id::BackendId) {
+        for (id, channel) in &self.thread_event_channels {
+            if channel.backend_id.is_none_or(|backend| backend == owner)
+                && let Some(input_state) = channel.store.lock().await.input_state.clone()
+            {
+                self.agents_overview.input_states.insert(*id, input_state);
+            }
+        }
+        if let Some(current_thread_id) = self.current_displayed_thread_id()
+            && let Some(input_state) = self.chat_widget.capture_thread_input_state()
+        {
+            self.agents_overview
+                .input_states
+                .insert(current_thread_id, input_state);
+        }
+    }
+
+    pub(super) async fn reconcile_saved_session_input(
+        &self,
+        thread_id: ThreadId,
+        input: &mut ThreadInputState,
+    ) {
+        if (!input.pending_steers.is_empty() || input.has_unconfirmed_messages())
+            && let Some(channel) = self.thread_event_channels.get(&thread_id)
+        {
+            let store = channel.store.lock().await;
+            let confirmed =
+                super::thread_events::confirmed_user_message_ids(&store.turns, store.buffer.iter());
+            input.reconcile_confirmed_messages(&confirmed);
+        }
+    }
+
+    pub(super) async fn open_resume_picker_for_backends(
         &mut self,
         tui: &mut tui::Tui,
-        app_server: &mut AppServerSession,
+        backends: &mut super::backend_sessions::BackendSessions,
     ) -> Result<AppRunControl> {
-        // Keep embedded-server initialization on its own runtime task as well as opening the
-        // picker on a fresh event-loop iteration; its auth manager needs more stack headroom.
-        let picker_config = self.config.clone();
-        let picker_target = self.app_server_target.clone();
-        let picker_state_db = self.state_db.clone();
-        let picker_environment_manager = Arc::clone(&self.environment_manager);
-        let picker_app_server = tokio::spawn(async move {
-            crate::start_app_server_for_picker(
-                &picker_config,
-                &picker_target,
-                picker_state_db,
-                picker_environment_manager,
-            )
-            .await
-        })
-        .await;
-        let picker_app_server = match picker_app_server {
-            Ok(result) => result,
-            Err(err) => Err(err.into()),
-        };
-        let picker_app_server = match picker_app_server {
-            Ok(app_server) => app_server,
-            Err(err) => {
-                self.add_session_picker_error(format!("Failed to start TUI session picker: {err}"));
-                self.chat_widget.maybe_send_next_queued_input();
-                return Ok(AppRunControl::Continue);
-            }
-        };
+        let displayed_session = backends.displayed;
+        let displayed_owner = backends.displayed_owner();
         let selection =
-            crate::resume_picker::run_resume_picker_from_existing_session_with_app_server(
+            crate::resume_picker::run_resume_picker_from_existing_session_with_app_servers(
                 crate::uses_remote_workspace_or_environment(
                     &self.app_server_target,
                     &self.environment_manager,
@@ -48,16 +54,22 @@ impl App {
                 &self.local_settings,
                 /*show_all*/ false,
                 /*include_non_interactive*/ false,
-                picker_app_server,
-                app_server.request_handle(),
+                crate::resume_picker::ResumePickerAppServers::new(
+                    backends.picker_views(),
+                    displayed_owner,
+                ),
                 self.primary_thread_id
                     .or(self.current_displayed_thread_id()),
             )
             .await;
         match selection {
             Ok(selection) => {
-                self.apply_resume_picker_selection(tui, app_server, selection)
-                    .await
+                self.apply_resume_picker_selection(
+                    tui,
+                    backends.session_at_mut(displayed_session),
+                    selection,
+                )
+                .await
             }
             Err(err) => {
                 self.add_session_picker_error(format!("Failed to open session picker: {err}"));
@@ -75,21 +87,15 @@ impl App {
     ) -> Result<AppRunControl> {
         match selection {
             SessionSelection::Resume(target_session) => {
+                if target_session.backend_id != app_server.backend_id() {
+                    self.app_event_tx
+                        .send(AppEvent::ResumeBackendSession(target_session));
+                    return Ok(AppRunControl::Continue);
+                }
                 let thread_id = target_session.thread_id;
                 let switching_threads = self.current_displayed_thread_id() != Some(thread_id);
                 if switching_threads {
-                    for (id, channel) in &self.thread_event_channels {
-                        if let Some(input_state) = channel.store.lock().await.input_state.clone() {
-                            self.agents_overview.input_states.insert(*id, input_state);
-                        }
-                    }
-                    if let Some(current_thread_id) = self.current_displayed_thread_id()
-                        && let Some(input_state) = self.chat_widget.capture_thread_input_state()
-                    {
-                        self.agents_overview
-                            .input_states
-                            .insert(current_thread_id, input_state);
-                    }
+                    self.capture_session_inputs(app_server.backend_id()).await;
                 }
                 if let AppRunControl::Exit(reason) = self
                     .resume_target_session(tui, app_server, target_session)
@@ -99,8 +105,13 @@ impl App {
                 }
                 if switching_threads
                     && self.current_displayed_thread_id() == Some(thread_id)
-                    && let Some(input_state) = self.agents_overview.input_states.remove(&thread_id)
+                    && let Some(mut input_state) =
+                        self.agents_overview.input_states.remove(&thread_id)
                 {
+                    // The resumed widget already reflects the latest server result.
+                    input_state.provider_error = None;
+                    self.reconcile_saved_session_input(thread_id, &mut input_state)
+                        .await;
                     let preserve_in_flight_turn =
                         self.active_turn_id_for_thread(thread_id).await.is_some();
                     self.chat_widget.restore_thread_input_state(

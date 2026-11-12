@@ -22,7 +22,7 @@ use codex_exec_server::EnvironmentReadyInfo;
 use codex_exec_server::ExecParams;
 use codex_exec_server::ExecResponse;
 use codex_exec_server::ExecServerError;
-use codex_exec_server::ExecServerRuntimePaths;
+use codex_exec_server::ExecServerRuntimeOptions;
 use codex_exec_server::FsReadFileParams;
 use codex_exec_server::NoiseChannelPublicKey;
 use codex_exec_server::NoiseRendezvousConnectBundle;
@@ -162,7 +162,7 @@ async fn failed_noise_environment_recovers_and_reconnects_after_ready_report() -
         .await;
 
     let (codex_exe, codex_linux_sandbox_exe) = common::current_test_binary_helper_paths()?;
-    let runtime_paths = ExecServerRuntimePaths::new(codex_exe, codex_linux_sandbox_exe)?;
+    let runtime_paths = ExecServerRuntimeOptions::new(codex_exe, codex_linux_sandbox_exe)?;
     let http_client_factory = HttpClientFactory::new(OutboundProxyPolicy::RespectSystemProxy);
     let config = RemoteEnvironmentConfig::new(
         registry.uri(),
@@ -304,7 +304,7 @@ async fn failed_noise_environment_recovers_and_reconnects_after_ready_report() -
     let _ = first_relay.await;
     assert_eq!(
         next_connection_state(&mut connection_state).await?,
-        EnvironmentConnectionState::Disconnected
+        EnvironmentConnectionState::Recovering
     );
     let first_reconnected_websocket = accept_websocket(&listener, "reconnected peer").await?;
     let second_reconnected_websocket = accept_websocket(&listener, "reconnected peer").await?;
@@ -361,7 +361,7 @@ async fn next_connection_state(
 async fn remote_environment_routes_encrypted_exec_server_rpc() -> Result<()> {
     let relay = RelayTest::new().await?;
     let (codex_exe, codex_linux_sandbox_exe) = common::current_test_binary_helper_paths()?;
-    let runtime_paths = ExecServerRuntimePaths::new(codex_exe, codex_linux_sandbox_exe)?;
+    let runtime_paths = ExecServerRuntimeOptions::new(codex_exe, codex_linux_sandbox_exe)?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let remote_environment = AbortOnDropHandle::new(tokio::spawn(
         codex_exec_server::run_remote_environment_until_shutdown(

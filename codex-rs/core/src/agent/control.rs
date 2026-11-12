@@ -10,26 +10,24 @@ use crate::agent::types::AgentMetadata;
 use crate::agent::types::LiveAgent;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
-use crate::codex_thread::ThreadConfigSnapshot;
+use crate::agent_communication::MessageDelivery;
 use crate::config::Config;
 use crate::config::RolloutBudgetConfig;
+use crate::context::ContextualUserFragment;
 use crate::context::SubagentNotification;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::rollout_budget::RolloutBudget;
 use crate::session::emit_subagent_session_started;
 use crate::session_prefix::format_inter_agent_completion_message;
-use crate::session_prefix::format_subagent_context_line;
 use crate::thread_manager::ResumeThreadWithHistoryOptions;
 use crate::thread_manager::ThreadIdGenerator;
 use crate::thread_manager::ThreadManagerState;
 use crate::thread_manager::default_thread_id_generator;
-use crate::thread_rollout_truncation::truncate_rollout_to_last_n_fork_turns;
 use crate::turn_timing::now_unix_timestamp_ms;
 use arc_swap::ArcSwapOption;
 use codex_extension_api::ThreadInstructionsProvider;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
-use codex_history::RolloutItem;
 use codex_protocol::AgentPath;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
@@ -38,9 +36,8 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::SubAgentActivityItem;
 use codex_protocol::items::TurnItem;
-use codex_protocol::models::ContentItem;
-use codex_protocol::models::MessagePhase;
-use codex_protocol::models::ResponseItem;
+use codex_protocol::models::ContentItemMetadata;
+use codex_protocol::models::ContentItemNamespace;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HasLegacyEvent;
@@ -57,7 +54,6 @@ use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::turn_input::CyberAccessProgram;
 use codex_protocol::user_input::UserInput;
-use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::ReadThreadParams;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -65,7 +61,6 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::Weak;
-use tokio::sync::watch;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -79,12 +74,14 @@ mod execution;
 mod inspection;
 mod interrupt;
 mod legacy;
+mod mailbox;
 mod residency;
 mod sender_context;
 mod service_tier;
 mod spawn;
 mod target;
 mod user_authorization;
+mod watch;
 
 const MAX_ENVIRONMENT_SUBAGENTS: usize = 8;
 const MAX_ENVIRONMENT_SUBAGENT_BYTES: usize = 1_024;
@@ -133,7 +130,7 @@ impl LocalAgentControl {
         thread_id_generator: ThreadIdGenerator,
         rollout_budget: Option<RolloutBudgetConfig>,
     ) -> Self {
-        let control = Self {
+        Self {
             session_id: SessionId::default(),
             manager,
             thread_id_generator,
@@ -147,12 +144,11 @@ impl LocalAgentControl {
         if let Some(rollout_budget) = rollout_budget {
             control.rollout_budget.configure(rollout_budget);
         }
-        control
     }
 
     pub(crate) fn with_session_id(mut self, session_id: SessionId, max_threads: usize) -> Self {
         self.session_id = session_id;
-        self.agent_execution_limiter.initialize(max_threads);
+        self.runtime.agent_execution_limiter.initialize(max_threads);
         self
     }
 
@@ -191,13 +187,14 @@ impl LocalAgentControl {
         input: Vec<UserInput>,
         start_options: TurnStartOptions,
     ) -> CodexResult<String> {
-        let state = self.upgrade()?;
+        let state = self.runtime.upgrade()?;
         let thread = state.get_thread(agent_id).await?;
         let result = match thread
             .start_or_steer_turn(TurnInputRequest::user_input(input).on_start(start_options))
             .await
         {
-            Ok(TurnInputSubmission::Started { turn_id }) => Ok(turn_id),
+            Ok(TurnInputSubmission::Started { turn_id, .. }) => Ok(turn_id),
+            Ok(TurnInputSubmission::Accepted) => unreachable!("user input returns a turn outcome"),
             Ok(TurnInputSubmission::Steered { .. }) => {
                 // MAv1 exposes an opaque `submission_id` to the model. The legacy
                 // `Op::UserInput` path returned a fresh ID for every steer, while the
@@ -221,10 +218,11 @@ impl LocalAgentControl {
         agent_communication_context: AgentCommunicationContext,
         start_options: TurnStartOptions,
     ) -> CodexResult<String> {
-        let state = self.upgrade()?;
+        let state = self.runtime.upgrade()?;
         if communication.trigger_turn {
             let thread = state.get_thread(agent_id).await?;
-            self.ensure_execution_capacity_for_turn_start(&thread)
+            thread
+                .ensure_execution_capacity_for_turn_start(self)
                 .await?;
         }
         self.send_inter_agent_communication_after_capacity_check(
@@ -243,7 +241,7 @@ impl LocalAgentControl {
         turn_id: String,
         item: SubAgentActivityItem,
     ) -> CodexResult<()> {
-        let state = self.upgrade()?;
+        let state = self.runtime.upgrade()?;
         let thread = state.get_thread(thread_id).await?;
         let started_at_ms = now_unix_timestamp_ms();
         let item = TurnItem::SubAgentActivity(item);
@@ -261,6 +259,7 @@ impl LocalAgentControl {
             .await;
         let completed_at_ms = now_unix_timestamp_ms();
         let completed = ItemCompletedEvent {
+            content_token_count: None,
             thread_id,
             turn_id: turn_id.clone(),
             item,
@@ -312,49 +311,51 @@ impl LocalAgentControl {
         context: AgentCommunicationContext,
         start_options: TurnStartOptions,
     ) -> CodexResult<String> {
-        let communication_for_log =
-            crate::agent_communication::logging_enabled().then(|| communication.clone());
-        let (parent_turn_id, root_turn_id) = if communication.trigger_turn {
-            (
-                start_options.parent_turn_id.clone(),
-                start_options.root_turn_id.clone(),
-            )
-        } else {
-            (None, None)
-        };
-        let result = self
-            .handle_thread_request_result(
-                agent_id,
-                state,
-                state
-                    .send_op(
-                        agent_id,
-                        Op::InterAgentCommunication {
-                            communication,
-                            start_options,
-                        },
-                        parent_turn_id,
-                        root_turn_id,
-                    )
-                    .await,
-            )
-            .await;
-        if let (Some(communication), Ok(communication_id)) =
-            (communication_for_log, result.as_ref())
+        let observers = state.extensions.message_lifecycle_contributors();
+        let delivery = (!observers.is_empty())
+            .then(|| MessageDelivery::publish(context.sender_thread_id, observers));
+        let log_content = crate::agent_communication::send_log_content(&communication);
         {
-            crate::agent_communication::emit_agent_communication_send(
-                communication_id,
-                &context,
-                &communication,
-                agent_id,
-            );
+            // Keep unloaded delivery atomic with publication of a reloaded session.
+            let threads = state.threads.read().await;
+            if !communication.trigger_turn && !threads.contains_key(&agent_id) {
+                let _membership = self.runtime.admit_start()?;
+                self.runtime.ensure_agent_known(agent_id)?;
+                let submission_id = uuid::Uuid::now_v7().to_string();
+                self.runtime.mailboxes.enqueue(
+                    agent_id,
+                    Some(submission_id.clone()),
+                    vec![crate::PendingAgentMessage::new(communication, delivery)],
+                )?;
+                drop(threads);
+                crate::agent_communication::emit_agent_communication_send(
+                    &submission_id,
+                    &context,
+                    log_content.as_deref(),
+                    agent_id,
+                );
+                return Ok(submission_id);
+            }
         }
-        result
+        // Loaded recipients retain submission ordering with follow-ups and interrupts.
+        let result = submit_loaded_agent_communication(
+            agent_id,
+            communication,
+            context,
+            log_content.as_deref(),
+            start_options,
+            |op, parent_turn_id, root_turn_id| {
+                state.send_op(agent_id, op, parent_turn_id, root_turn_id, delivery)
+            },
+        )
+        .await;
+        self.handle_thread_request_result(agent_id, state, result)
+            .await
     }
 
     /// Interrupt the current task for an existing agent thread.
     pub(crate) async fn interrupt_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
-        let state = self.upgrade()?;
+        let state = self.runtime.upgrade()?;
         self.handle_thread_request_result(
             agent_id,
             &state,
@@ -364,6 +365,7 @@ impl LocalAgentControl {
                     Op::Interrupt,
                     /*parent_turn_id*/ None,
                     /*root_turn_id*/ None,
+                    /*message_delivery*/ None,
                 )
                 .await,
         )
@@ -382,14 +384,14 @@ impl LocalAgentControl {
         {
             let _ = state.remove_thread(&agent_id).await;
             self.forget_v2_residency(agent_id);
-            self.state.release_spawned_thread(agent_id);
+            self.runtime.registry.release_spawned_thread(agent_id);
         }
         result
     }
 
     /// Fetch the last known status for `agent_id`, returning `NotFound` when unavailable.
     pub(crate) async fn get_status(&self, agent_id: ThreadId) -> AgentStatus {
-        let Ok(state) = self.upgrade() else {
+        let Ok(state) = self.runtime.upgrade() else {
             // No agent available if upgrade fails.
             return AgentStatus::NotFound;
         };
@@ -397,16 +399,6 @@ impl LocalAgentControl {
             return AgentStatus::NotFound;
         };
         thread.agent_status().await
-    }
-
-    pub(crate) fn register_session_root(
-        &self,
-        current_thread_id: ThreadId,
-        current_parent_thread_id: Option<ThreadId>,
-    ) {
-        if current_parent_thread_id.is_none() {
-            self.state.register_root_thread(current_thread_id);
-        }
     }
 
     pub(crate) fn get_agent_metadata(&self, agent_id: ThreadId) -> Option<AgentMetadata> {
@@ -567,7 +559,7 @@ impl LocalAgentControl {
             })
             .transpose()?;
 
-        let mut live_agents = self.state.live_agents();
+        let mut live_agents = self.runtime.registry.live_agents();
         live_agents.sort_by(|left, right| {
             left.agent_path
                 .as_deref()
@@ -586,7 +578,7 @@ impl LocalAgentControl {
         if resolved_prefix
             .as_ref()
             .is_none_or(|prefix| agent_matches_prefix(Some(&root_path), prefix))
-            && let Some(root_thread_id) = self.state.agent_id_for_path(&root_path)
+            && let Some(root_thread_id) = self.runtime.registry.agent_id_for_path(&root_path)
             && let Ok(root_thread) = state.get_thread(root_thread_id).await
         {
             agents.push(LiveAgent {
@@ -641,27 +633,43 @@ impl LocalAgentControl {
         else {
             return;
         };
+        let Ok(membership) = self.runtime.admit_start() else {
+            return;
+        };
+        let teardown = membership.into_teardown_guard("completion_watcher", Some(child_thread_id));
         let control = self.clone();
-        tokio::spawn(async move {
+        let watcher = async move {
             let status = match control.subscribe_status(child_thread_id).await {
-                Ok(mut status_rx) => {
-                    let mut status = status_rx.borrow().clone();
-                    while !is_final(&status) {
-                        if status_rx.changed().await.is_err() {
-                            status = control.get_status(child_thread_id).await;
+                Ok(mut updates) => {
+                    let mut final_status = None;
+                    while let Some(Ok(snapshot)) = tokio::select! {
+                        biased;
+                        _ = control.runtime.shutdown.cancelled() => return,
+                        update = updates.next() => update,
+                    } {
+                        if let Some(status) = snapshot.status()
+                            && is_final(status)
+                        {
+                            final_status = Some(status.clone());
                             break;
                         }
-                        status = status_rx.borrow().clone();
                     }
-                    status
+                    match final_status {
+                        Some(status) => status,
+                        None => control.get_status(child_thread_id).await,
+                    }
                 }
                 Err(_) => control.get_status(child_thread_id).await,
             };
-            if !is_final(&status) {
+            // Tree shutdown is a lifecycle handoff, not a child result for the parent.
+            if !is_final(&status)
+                || (matches!(&status, AgentStatus::Shutdown)
+                    && control.runtime.shutdown.is_cancelled())
+            {
                 return;
             }
 
-            let Ok(state) = control.upgrade() else {
+            let Ok(state) = control.runtime.upgrade() else {
                 return;
             };
             let child_thread = state.get_thread(child_thread_id).await.ok();
@@ -711,12 +719,32 @@ impl LocalAgentControl {
             let Ok(parent_thread) = state.get_thread(parent_thread_id).await else {
                 return;
             };
+            let config = parent_thread.config().await;
+            let namespace = match parent_thread
+                .multi_agent_version()
+                .unwrap_or_else(|| config.multi_agent_version_from_features())
+            {
+                MultiAgentVersion::Disabled => None,
+                MultiAgentVersion::V1 => Some(ContentItemNamespace::MultiAgentV1),
+                MultiAgentVersion::V2 => Some(
+                    config
+                        .multi_agent_v2
+                        .tool_namespace
+                        .clone()
+                        .map(ContentItemNamespace::from)
+                        .unwrap_or(ContentItemNamespace::Functions),
+                ),
+            };
             parent_thread
-                .inject_fragment_without_turn(SubagentNotification::new(
-                    child_reference.as_str(),
-                    status,
-                ))
+                .inject_fragment_without_turn(
+                    SubagentNotification::new(child_reference.as_str(), status)
+                        .with_metadata(ContentItemMetadata::tool(namespace)),
+                )
                 .await;
+        };
+        tokio::spawn(async move {
+            watcher.await;
+            teardown.complete();
         });
     }
 
@@ -757,7 +785,7 @@ impl LocalAgentControl {
         preferred_agent_nickname: Option<String>,
     ) -> CodexResult<(SessionSource, AgentMetadata)> {
         if depth == 1 {
-            self.state.register_root_thread(parent_thread_id);
+            self.runtime.registry.register_root_thread(parent_thread_id);
         }
         let agent_metadata = self.prepare_agent_metadata(
             reservation,
@@ -776,120 +804,33 @@ impl LocalAgentControl {
         Ok((session_source, agent_metadata))
     }
 
-    fn upgrade(&self) -> CodexResult<Arc<ThreadManagerState>> {
-        self.manager
-            .upgrade()
-            .ok_or_else(|| CodexErr::UnsupportedOperation("thread manager dropped".to_string()))
-    }
-
     async fn inherited_environments_for_source(
         &self,
         state: &Arc<ThreadManagerState>,
         session_source: Option<&SessionSource>,
     ) -> Option<TurnEnvironmentSnapshot> {
-        let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id, ..
-        })) = session_source
-        else {
-            return None;
-        };
-
-        let parent_thread = state.get_thread(*parent_thread_id).await.ok()?;
-        Some(
-            parent_thread
-                .session
-                .services
-                .turn_environments
-                .snapshot()
-                .await,
-        )
+        let parent_thread_id = session_source?.parent_thread_id()?;
+        let parent_thread = state.get_thread(parent_thread_id).await.ok()?;
+        Some(parent_thread.session.inherited_environment_snapshot().await)
     }
 
-    async fn inherited_exec_policy_for_source(
-        &self,
-        state: &Arc<ThreadManagerState>,
-        session_source: Option<&SessionSource>,
-        child_config: &Config,
-    ) -> Option<Arc<crate::exec_policy::ExecPolicyManager>> {
-        let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id, ..
-        })) = session_source
-        else {
-            return None;
-        };
-
-        let parent_thread = state.get_thread(*parent_thread_id).await.ok()?;
-        let parent_config = parent_thread.session.get_config().await;
-        if !crate::exec_policy::child_uses_parent_exec_policy(&parent_config, child_config) {
-            return None;
-        }
-
-        Some(Arc::clone(&parent_thread.session.services.exec_policy))
-    }
-
-    async fn open_thread_spawn_children(
-        &self,
-        parent_thread_id: ThreadId,
-    ) -> CodexResult<Vec<(ThreadId, AgentMetadata)>> {
-        let mut children_by_parent = self.live_thread_spawn_children().await?;
-        Ok(children_by_parent
-            .remove(&parent_thread_id)
-            .unwrap_or_default())
-    }
-
-    async fn live_thread_spawn_children(
-        &self,
-    ) -> CodexResult<HashMap<ThreadId, Vec<(ThreadId, AgentMetadata)>>> {
-        let state = self.upgrade()?;
-        let mut children_by_parent = HashMap::<ThreadId, Vec<(ThreadId, AgentMetadata)>>::new();
-
-        for (parent_thread_id, child_thread_id) in state.list_live_thread_spawn_edges().await {
-            children_by_parent
-                .entry(parent_thread_id)
-                .or_default()
-                .push((
-                    child_thread_id,
-                    self.state
-                        .agent_metadata_for_thread(child_thread_id)
-                        .unwrap_or(AgentMetadata {
-                            agent_id: Some(child_thread_id),
-                            ..Default::default()
-                        }),
-                ));
-        }
-
-        for children in children_by_parent.values_mut() {
-            children.sort_by(|left, right| {
-                left.1
-                    .agent_path
-                    .as_deref()
-                    .unwrap_or_default()
-                    .cmp(right.1.agent_path.as_deref().unwrap_or_default())
-                    .then_with(|| left.0.to_string().cmp(&right.0.to_string()))
-            });
-        }
-
-        Ok(children_by_parent)
-    }
-
+    /// Returns true after publication, or false when the source or configuration skips it.
     async fn persist_thread_spawn_edge_for_source(
         &self,
-        child_thread: &crate::CodexThread,
+        ephemeral: bool,
         child_thread_id: ThreadId,
         session_source: Option<&SessionSource>,
-    ) {
+    ) -> CodexResult<bool> {
         let Some(parent_thread_id) = session_source.and_then(SessionSource::parent_thread_id)
         else {
-            return;
+            return Ok(false);
         };
-        if child_thread.config_snapshot().await.ephemeral {
-            return;
+        if ephemeral {
+            return Ok(false);
         }
-        let Ok(state) = self.upgrade() else {
-            return;
-        };
+        let state = self.runtime.upgrade()?;
         let Some(agent_graph_store) = state.agent_graph_store() else {
-            return;
+            return Ok(false);
         };
         if let Err(err) = agent_graph_store
             .upsert_thread_spawn_edge(
@@ -900,34 +841,34 @@ impl LocalAgentControl {
             .await
         {
             warn!("failed to persist thread-spawn edge: {err}");
+            return Err(CodexErr::Fatal(
+                "failed to persist spawned agent relationship".to_string(),
+            ));
         }
+        Ok(true)
+    }
+}
+
+async fn inherited_exec_policy_for_source(
+    state: &ThreadManagerState,
+    session_source: Option<&SessionSource>,
+    child_config: &Config,
+) -> Option<Arc<crate::exec_policy::ExecPolicyManager>> {
+    let parent_thread_id = session_source?.parent_thread_id()?;
+    let parent_thread = state.get_thread(parent_thread_id).await.ok()?;
+    inherited_exec_policy_for_parent(&parent_thread, child_config).await
+}
+
+pub(in crate::agent) async fn inherited_exec_policy_for_parent(
+    parent_thread: &crate::CodexThread,
+    child_config: &Config,
+) -> Option<Arc<crate::exec_policy::ExecPolicyManager>> {
+    let parent_config = parent_thread.session.get_config().await;
+    if !crate::exec_policy::child_uses_parent_exec_policy(&parent_config, child_config) {
+        return None;
     }
 
-    async fn live_thread_spawn_descendants(
-        &self,
-        root_thread_id: ThreadId,
-    ) -> CodexResult<Vec<ThreadId>> {
-        let mut children_by_parent = self.live_thread_spawn_children().await?;
-        let mut descendants = Vec::new();
-        let mut stack = children_by_parent
-            .remove(&root_thread_id)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(child_thread_id, _)| child_thread_id)
-            .rev()
-            .collect::<Vec<_>>();
-
-        while let Some(thread_id) = stack.pop() {
-            descendants.push(thread_id);
-            if let Some(children) = children_by_parent.remove(&thread_id) {
-                for (child_thread_id, _) in children.into_iter().rev() {
-                    stack.push(child_thread_id);
-                }
-            }
-        }
-
-        Ok(descendants)
-    }
+    Some(Arc::clone(&parent_thread.session.services.exec_policy))
 }
 
 fn agent_matches_prefix(agent_path: Option<&AgentPath>, prefix: &AgentPath) -> bool {
@@ -972,6 +913,44 @@ fn thread_spawn_depth(session_source: &SessionSource) -> Option<i32> {
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { depth, .. }) => Some(*depth),
         _ => None,
     }
+}
+
+/// Share loaded-recipient submission while callers retain residency and failure handling.
+async fn submit_loaded_agent_communication<F>(
+    agent_id: ThreadId,
+    communication: InterAgentCommunication,
+    context: AgentCommunicationContext,
+    log_content: Option<&str>,
+    start_options: TurnStartOptions,
+    submit: impl FnOnce(Op, Option<String>, Option<String>) -> F,
+) -> CodexResult<String>
+where
+    F: std::future::Future<Output = CodexResult<String>>,
+{
+    let (parent_turn_id, root_turn_id) = if communication.trigger_turn {
+        (
+            start_options.parent_turn_id.clone(),
+            start_options.root_turn_id.clone(),
+        )
+    } else {
+        (None, None)
+    };
+    let submission_id = submit(
+        Op::InterAgentCommunication {
+            communication,
+            start_options,
+        },
+        parent_turn_id,
+        root_turn_id,
+    )
+    .await?;
+    crate::agent_communication::emit_agent_communication_send(
+        &submission_id,
+        &context,
+        log_content,
+        agent_id,
+    );
+    Ok(submission_id)
 }
 #[cfg(test)]
 #[path = "control_tests.rs"]

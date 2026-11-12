@@ -5,6 +5,7 @@
 //! `schemars`) so they can be embedded in Codex's own protocol structures.
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
 use std::collections::HashMap;
 use ts_rs::TS;
@@ -33,10 +34,21 @@ pub const OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID: &str = "openai/standard-form-
 pub const MCP_APP_UI_EXTENSION_ID: &str = "io.modelcontextprotocol/ui";
 /// Host-supplied confirmation-policy documents for Node REPL-backed actor calls.
 pub const CONFIRMATION_POLICIES_META_KEY: &str = "openai/confirmation_policies";
+/// Extension ID for enterprise-managed MCP authorization via ID-JAG.
+pub const ENTERPRISE_MANAGED_AUTHORIZATION_EXTENSION_ID: &str =
+    "io.modelcontextprotocol/enterprise-managed-authorization";
 
 /// Returns whether a raw MCP server name identifies a Node REPL-backed server.
 pub fn is_node_repl_backed_server(server: &str) -> bool {
     matches!(server, "node_repl" | "cua_repl")
+}
+
+/// Returns whether an MCP server or registered connector is Node REPL-backed.
+/// Callers must supply connector identity from registered tool metadata, never
+/// from tool arguments or provider-supplied elicitation metadata.
+pub fn is_node_repl_backed_connector(server: &str, connector_id: Option<&str>) -> bool {
+    is_node_repl_backed_server(server)
+        || server == "codex_apps" && connector_id == Some("connector_openai_browser")
 }
 
 /// Recognizes Node REPL-backed tools in model-visible MCP namespaces or legacy
@@ -50,6 +62,80 @@ pub fn is_node_repl_backed_tool(name: &str, namespace: Option<&str>) -> bool {
     let name = name.strip_prefix("mcp__").unwrap_or(name);
     name.split_once("__")
         .is_some_and(|(server, _)| is_node_repl_backed_server(server))
+}
+
+/// Producer-reported completeness of the thread's MCP tools/call attribution.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpAttributionStatus {
+    #[default]
+    None,
+    Complete,
+    AttributionError,
+}
+
+/// Bounded diagnostics for an attribution error, never a policy decision.
+///
+/// Recorder reasons identify the first observed error and survive checkpoints.
+/// Payload reasons describe a request-serialization fallback and are not checkpointed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum McpAttributionErrorReason {
+    HistoryMissingCheckpoint,
+    CheckpointInvalid,
+    CheckpointSourceConflict,
+    SourceInvalid,
+    RecorderPoisoned,
+    /// An earlier error checkpoint did not retain its cause.
+    RestoredErrorUnknown,
+    PayloadTooLarge,
+    SerializationFailed,
+    #[serde(other)]
+    Unknown,
+}
+
+/// One source and the first runtime turn in which Codex recorded it.
+///
+/// Server and tool names are retained when no stable identifier is available;
+/// they are not guaranteed to be globally unique or independently authenticated.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct McpAttributionSource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+    pub server_name: String,
+    pub tool_name: String,
+    pub first_turn_id: String,
+}
+
+/// Cumulative, model-invisible attribution reported on Responses API requests.
+/// This is provenance data, not a training-eligibility decision or attestation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct McpAttribution {
+    pub status: McpAttributionStatus,
+    /// First observed attribution error, absent for non-error states.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_mcp_attribution_error_reason"
+    )]
+    pub error_reason: Option<McpAttributionErrorReason>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<McpAttributionSource>,
+}
+
+fn deserialize_mcp_attribution_error_reason<'de, D>(
+    deserializer: D,
+) -> Result<Option<McpAttributionErrorReason>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 /// Bounded app-resource provenance retained across a compaction checkpoint.
@@ -273,6 +359,21 @@ pub struct CallToolResult {
     #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub meta: Option<serde_json::Value>,
+}
+
+/// Returns display text from an unannotated MCP text block. Some tools encode
+/// sources and UI data as JSON or fenced text, which history must keep inline.
+pub fn plain_output_text(block: &serde_json::Value) -> Option<&str> {
+    let fields = block.as_object()?;
+    if fields.len() != 2 || fields.get("type")?.as_str()? != "text" {
+        return None;
+    }
+    let text = fields.get("text")?.as_str()?;
+    let trimmed = text.trim_start_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}');
+    if trimmed.starts_with(['{', '[']) || trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+        return None;
+    }
+    Some(text)
 }
 
 // === Adapter helpers ===

@@ -12,6 +12,9 @@ use codex_protocol::protocol::SkillScope;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
+use std::collections::HashSet;
+use std::fs;
+use std::path::Path;
 use tempfile::TempDir;
 
 #[cfg(unix)]
@@ -115,6 +118,7 @@ async fn nearest_valid_manifest_overrides_or_falls_back_to_outer_namespace() {
 #[cfg(unix)]
 #[tokio::test]
 async fn symlinked_external_directories_do_not_inherit_plugin_namespace() {
+    let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let root = TempDir::new().expect("root temp dir");
     let external = TempDir::new().expect("external temp dir");
     let plugin_root = root.path().join("outer");
@@ -128,7 +132,7 @@ async fn symlinked_external_directories_do_not_inherit_plugin_namespace() {
     let snapshot = load_host_skill_root(HostSkillRoot::host(
         AbsolutePathBuf::from_absolute_path(&skills_root).expect("absolute skills root"),
         SkillScope::User,
-        Arc::clone(&LOCAL_FS),
+        &access,
     ))
     .await;
 
@@ -146,6 +150,7 @@ async fn symlinked_external_directories_do_not_inherit_plugin_namespace() {
 #[cfg(unix)]
 #[tokio::test]
 async fn ancestor_symlink_roots_preserve_inherited_plugin_namespace() {
+    let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let root = TempDir::new().expect("root temp dir");
     let plugin_root = root.path().join("a/b/c/d/e/f/outer");
     let skills_root = plugin_root.join("skills");
@@ -157,7 +162,7 @@ async fn ancestor_symlink_roots_preserve_inherited_plugin_namespace() {
     let snapshot = load_host_skill_root(HostSkillRoot::host(
         AbsolutePathBuf::from_absolute_path(&skills_root).expect("absolute skills root"),
         SkillScope::User,
-        Arc::clone(&LOCAL_FS),
+        &access,
     ))
     .await;
 

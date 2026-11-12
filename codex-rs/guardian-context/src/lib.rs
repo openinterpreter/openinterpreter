@@ -30,6 +30,8 @@ pub use section::ContextSection;
 
 pub use entry::ConversationTranscriptEntry;
 pub use entry::ConversationTranscriptEntryKind;
+pub use entry::RetainedTranscriptSource;
+pub use entry::TranscriptContent;
 pub use history::TranscriptHistory;
 pub use transcript::ConversationTranscriptConfig;
 pub use transcript::ConversationTranscriptOptions;
@@ -37,10 +39,14 @@ pub use transcript::MANUAL_APPROVAL_DEVELOPER_PREFIX;
 pub use transcript::TranscriptEntryLimits;
 pub use transcript::TranscriptRetentionConfig;
 pub use transcript::collect_transcript;
+pub use transcript::is_inherited_manual_approval;
 pub use truncation::truncate_text;
 
 mod verified_answers;
 pub use verified_answers::RenderedVerifiedAnswers;
+pub use verified_answers::TrustedUserAnswer;
+pub use verified_answers::collect_verified_answer_candidates;
+pub use verified_answers::render_original_verified_answer;
 pub use verified_answers::render_verified_answer;
 pub use verified_answers::render_verified_answers;
 
@@ -100,6 +106,9 @@ pub use truncation::TruncationObservation;
 mod section;
 pub use permissions::PermissionContext;
 mod transcript;
+mod transcript_record;
+pub use transcript_record::TRANSCRIPT_JSON_INSTRUCTIONS;
+pub use transcript_record::TranscriptRecord;
 mod truncation;
 
 /// Consumer for which a Guardian context is composed.
@@ -133,6 +142,9 @@ impl SectionScope {
     }
 }
 
+/// Identifies exec outputs eligible for this review's configured section budget.
+pub type SelectedExecOutputPredicate<'a> = dyn Fn(&ResponseItem) -> bool + Sync + 'a;
+
 /// Borrowed host inputs available while one Guardian context section is built.
 #[derive(Clone, Copy)]
 pub struct SectionInput<'a> {
@@ -140,8 +152,10 @@ pub struct SectionInput<'a> {
     pub target: ContextTarget,
     /// Parent conversation history available to this contribution.
     pub history: &'a dyn SectionHistory,
-    /// Evidence sources and per-entry limits for this collection.
+    /// Evidence sources and request-time entry limits.
     pub transcript: &'a ConversationTranscriptConfig,
+    /// Supplied by the sync host when selected exec results have a configured budget.
+    pub is_selected_exec_output: Option<&'a SelectedExecOutputPredicate<'a>>,
     /// Bounded root evidence resolved by the host; empty when not applicable.
     pub root_conversation: &'a [GuardianRootMessage],
     /// Bounded, role-labeled answers selected from the host-owned context snapshot.
@@ -171,9 +185,39 @@ pub trait SectionHistory: Send + Sync {
     /// Returns borrowed response items in their original conversation order.
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_>;
 
+    /// Original source metadata stays attached to the exact unshortened history item.
+    /// Legacy providers cannot establish completeness from a message ID alone.
+    fn items_with_sources(
+        &self,
+    ) -> Box<dyn Iterator<Item = (&ResponseItem, Option<&codex_history::RetainedSource>)> + Send + '_>
+    {
+        Box::new(self.items().map(|item| (item, None)))
+    }
+
     /// Bounded host-owned facts from the same snapshot as the current items.
     fn retained_context(&self) -> Option<&codex_history::RetainedContext> {
         None
+    }
+
+    /// Renders an original complete assistant message without request-size selection.
+    /// Sync preparation applies admission after collection; hosts preserve their fragment boundary.
+    fn render_original_assistant(
+        &self,
+        message: &codex_history::RetainedUserMessage,
+    ) -> Option<GuardianRootMessage> {
+        message
+            .complete
+            .then(|| GuardianRootMessage::Assistant(message.text.clone()))
+    }
+
+    /// Renders one bounded retained assistant message through the host's
+    /// contextual-fragment boundary. Hosts with no fragment layer use the
+    /// shared role-labeled rendering while preserving the same size limit.
+    fn render_retained_assistant(
+        &self,
+        message: &codex_history::RetainedUserMessage,
+    ) -> Option<GuardianRootMessage> {
+        retained_assistant_message(message)
     }
 }
 
@@ -212,6 +256,10 @@ pub trait SectionContributor: Send + Sync {
 /// A section could not provide the evidence needed for a valid review context.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SectionError {
+    /// One native message or tool-call ID identifies different evidence.
+    ConflictingNativeMessage,
+    /// Configured reservations must neither overcommit nor underfill the nominal budget.
+    SectionMinimumTotalMismatch { total: u128 },
     /// Evidence required by this contributor for the current input is missing.
     MissingRequiredEvidence { section: &'static str },
     /// A section cannot be delivered by the requested consumer.
@@ -223,6 +271,13 @@ pub enum SectionError {
 impl std::fmt::Display for SectionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::SectionMinimumTotalMismatch { total } => write!(
+                formatter,
+                "elastic section minimums must sum to DEFAULT_MAX_INPUT_TOKENS ({DEFAULT_MAX_INPUT_TOKENS}), got {total}"
+            ),
+            Self::ConflictingNativeMessage => {
+                formatter.write_str("conflicting native messages or tool calls share an ID")
+            }
             Self::MissingRequiredEvidence { section } => {
                 write!(formatter, "missing required evidence for section {section}")
             }

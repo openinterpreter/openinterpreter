@@ -113,8 +113,17 @@ impl ChatWidget {
         self.request_redraw();
         self.app_event_tx.send(AppEvent::StartSide {
             parent_thread_id,
+            mode: if user_message.is_some() {
+                crate::app_event::SideStartMode::New
+            } else {
+                crate::app_event::SideStartMode::Reuse
+            },
             user_message,
         });
+    }
+
+    pub(crate) fn sidebar_chooser_available(&self) -> bool {
+        !self.review.is_review_mode && !self.is_external_writer_view()
     }
 
     fn request_empty_side_conversation(&mut self, cmd: SlashCommand) {
@@ -187,19 +196,48 @@ impl ChatWidget {
             return;
         }
 
+        if source == SlashCommandDispatchSource::Live && cmd.requires_dispatch_validation() {
+            self.bottom_pane
+                .set_composer_text(String::new(), Vec::new(), Vec::new());
+            self.bottom_pane.drain_pending_submission_state();
+        }
+
         match cmd {
-            SlashCommand::Feedback => {
-                if !self.config.feedback_enabled {
-                    let params = crate::bottom_pane::feedback_disabled_params();
-                    self.bottom_pane.show_selection_view(params);
-                    self.request_redraw();
+            SlashCommand::Daybreak => {
+                if !self.config.features.enabled(Feature::CliDaybreak) {
                     return;
                 }
-                // Step 1: pick a category (UI built in feedback_view)
-                let params =
-                    crate::bottom_pane::feedback_selection_params(self.app_event_tx.clone());
-                self.bottom_pane.show_selection_view(params);
-                self.request_redraw();
+                if !self.daybreak_enabled {
+                    if !self.daybreak_account_eligible() {
+                        self.add_error_message("Daybreak requires the OpenAI provider with either ChatGPT sign-in or an API key with Daybreak support enabled.".into());
+                        return;
+                    }
+                    if !crate::daybreak::available(&self.model_catalog.models) {
+                        if crate::daybreak::availability(&self.model_catalog.models) == Some(false)
+                        {
+                            self.add_info_message(
+                                "Daybreak is not available for this account. Apply at https://openai.com/form/enterprise-trusted-access-for-cyber/. Learn more at https://help.openai.com/en/articles/20001326.".into(),
+                                /*hint*/ None,
+                            );
+                        } else {
+                            self.add_error_message("Daybreak availability could not be determined from the connected host's model catalog.".into());
+                        }
+                        return;
+                    }
+                }
+                let Some(thread_id) = self.thread_id else {
+                    self.add_error_message(
+                        "Daybreak is unavailable until the thread starts.".into(),
+                    );
+                    return;
+                };
+                self.app_event_tx.send(AppEvent::PersistDaybreakSelection {
+                    thread_id,
+                    enabled: !self.daybreak_enabled,
+                });
+            }
+            SlashCommand::Feedback => {
+                self.app_event_tx.send(AppEvent::OpenFeedback);
             }
             SlashCommand::New => {
                 self.show_session_checkout_picker(ManagedWorktreeMode::New, /*name*/ None);
@@ -237,7 +275,8 @@ impl ChatWidget {
                 self.bottom_pane.show_selection_view(SelectionViewParams {
                     title: Some("Delete this session?".to_string()),
                     subtitle: Some(
-                        "Cannot be undone. Subagent threads will also be deleted.".to_string(),
+                        "Also deletes subagents and saved side chats. Cannot be undone."
+                            .to_string(),
                     ),
                     footer_hint: Some(standard_popup_hint_line()),
                     items: vec![
@@ -549,6 +588,9 @@ impl ChatWidget {
             SlashCommand::Statusline => {
                 self.open_status_line_setup();
             }
+            SlashCommand::Config => {
+                self.open_config_panel();
+            }
             SlashCommand::Theme => {
                 self.open_theme_picker();
             }
@@ -670,7 +712,7 @@ impl ChatWidget {
                     args,
                     text_elements,
                     pending_pastes: self.bottom_pane.composer_pending_pastes(),
-                    local_images: self.bottom_pane.composer_local_images(),
+                    local_images: self.bottom_pane.composer_local_images().to_vec(),
                     remote_image_urls: self.bottom_pane.remote_image_urls(),
                     mention_bindings: Vec::new(),
                     source: SlashCommandDispatchSource::Live,
@@ -764,8 +806,34 @@ impl ChatWidget {
             source,
         } = prepared;
         let trimmed = args.trim();
+        if trimmed.is_empty() {
+            self.dispatch_command_from_source(cmd, source);
+            return;
+        }
         match cmd {
-            SlashCommand::Export if trimmed.is_empty() => self.show_transcript_export_popup(),
+            SlashCommand::Model if !trimmed.is_empty() => {
+                self.handle_model_command_args(trimmed);
+                self.app_event_tx.send(AppEvent::SettingsSelectionClosed);
+            }
+            SlashCommand::Title => {
+                self.handle_terminal_title_command_args(trimmed);
+                self.app_event_tx.send(AppEvent::SettingsSelectionClosed);
+            }
+            SlashCommand::Statusline => {
+                self.handle_status_line_command_args(trimmed);
+                self.app_event_tx.send(AppEvent::SettingsSelectionClosed);
+            }
+            SlashCommand::Permissions
+                if self.windows_sandbox_local_server
+                    && self.windows_sandbox_host != WindowsSandboxHost::Remote
+                    && self.windows_sandbox_config.requirements.is_none() =>
+            {
+                self.set_queue_autosend_suppressed(/*suppressed*/ true);
+                self.app_event_tx.send(AppEvent::ResolvePermissionProfile {
+                    profile_id: trimmed.to_string(),
+                });
+            }
+            SlashCommand::Permissions => self.select_permission_profile(trimmed),
             SlashCommand::Export => {
                 self.set_queue_autosend_suppressed(/*suppressed*/ true);
                 self.app_event_tx.send(AppEvent::ExportTranscript {
@@ -799,15 +867,34 @@ impl ChatWidget {
             SlashCommand::Ide => {
                 self.handle_ide_command_args(trimmed);
             }
-            SlashCommand::Mcp => match trimmed.to_ascii_lowercase().as_str() {
-                "verbose" => self.add_mcp_output(McpServerStatusDetail::Full),
-                _ => self.add_error_message("Usage: /mcp [verbose]".to_string()),
-            },
+            SlashCommand::Mcp => {
+                if trimmed.eq_ignore_ascii_case("verbose") {
+                    self.add_mcp_output(McpServerStatusDetail::Full);
+                } else if let Some((command, name)) = trimmed.split_once(' ')
+                    && command.eq_ignore_ascii_case("login")
+                    && !name.trim().is_empty()
+                {
+                    if let Some(thread_id) = self.thread_id {
+                        self.app_event_tx.send(AppEvent::StartMcpLogin {
+                            name: name.trim().to_string(),
+                            thread_id,
+                        });
+                    } else {
+                        self.add_error_message(
+                            "MCP sign-in requires an active session.".to_string(),
+                        );
+                    }
+                } else {
+                    self.add_error_message("Usage: /mcp [verbose | login <name>]".to_string());
+                }
+            }
             SlashCommand::Keymap => match trimmed.to_ascii_lowercase().as_str() {
                 "" => self.open_keymap_picker(),
                 "debug" => {
-                    match crate::keymap::RuntimeKeymap::from_config(&self.local_settings.tui.keymap)
-                    {
+                    match crate::keymap::RuntimeKeymap::for_session(
+                        &self.local_settings.tui.keymap,
+                        self.local_settings.workspace_enabled(self.config_ref()),
+                    ) {
                         Ok(runtime_keymap) => self.open_keymap_debug(&runtime_keymap),
                         Err(err) => {
                             self.add_error_message(format!(
@@ -1221,6 +1308,7 @@ impl ChatWidget {
             | SlashCommand::Copy
             | SlashCommand::Raw
             | SlashCommand::Vim
+            | SlashCommand::Daybreak
             | SlashCommand::Diff
             | SlashCommand::App
             | SlashCommand::Rename
@@ -1273,6 +1361,7 @@ impl ChatWidget {
             | SlashCommand::Hooks
             | SlashCommand::Title
             | SlashCommand::Statusline
+            | SlashCommand::Config
             | SlashCommand::Theme
             | SlashCommand::Tui
             | SlashCommand::Pets => QueueDrain::Stop,
@@ -1312,7 +1401,9 @@ impl ChatWidget {
             "'/{}' is unavailable in side conversations. {SIDE_SLASH_COMMAND_UNAVAILABLE_HINT}",
             cmd.command()
         ));
-        self.bottom_pane.drain_pending_submission_state();
+        if !cmd.requires_dispatch_validation() {
+            self.bottom_pane.drain_pending_submission_state();
+        }
         false
     }
 

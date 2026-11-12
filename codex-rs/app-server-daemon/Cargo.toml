@@ -16,10 +16,12 @@ workspace = true
 anyhow = { workspace = true }
 codex-app-server-protocol = { workspace = true }
 codex-app-server-transport = { workspace = true }
+codex-features = { workspace = true }
 codex-http-client = { workspace = true }
 codex-install-context = { workspace = true }
 codex-product-info = { workspace = true }
 codex-utils-home-dir = { workspace = true }
+codex-utils-process = { workspace = true }
 codex-uds = { workspace = true }
 futures = { workspace = true }
 libc = { workspace = true }
@@ -39,9 +41,11 @@ tokio = { workspace = true, features = [
 tempfile = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tracing = { workspace = true }
+tracing-appender = { workspace = true }
 
 [dev-dependencies]
+codex-utils-cargo-bin = { workspace = true }
 pretty_assertions = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }

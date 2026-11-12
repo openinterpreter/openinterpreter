@@ -7,8 +7,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use self::http_client::StartupSyncHttpClient;
-use self::http_client::StartupSyncRequestBuilder;
 use codex_http_client::HttpClientFactory;
+use codex_http_client::RequestBuilder;
 use codex_login::default_client::default_headers;
 use codex_otel::CURATED_PLUGINS_STARTUP_SYNC_FINAL_METRIC;
 use codex_otel::CURATED_PLUGINS_STARTUP_SYNC_METRIC;
@@ -928,7 +928,10 @@ async fn fetch_github_text(
         .await
         .map_err(|err| format!("failed to {context} from {url}: {err}"))?;
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| format!("failed to {context} from {url}: {err}"))?;
     if !status.is_success() {
         return Err(format!(
             "{context} from {url} failed with status {status}: {body}"
@@ -971,7 +974,10 @@ async fn fetch_public_text(
         .await
         .map_err(|err| format!("failed to {context} from {url}: {err}"))?;
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| format!("failed to {context} from {url}: {err}"))?;
     if !status.is_success() {
         return Err(format!(
             "{context} from {url} failed with status {status}: {body}"
@@ -1004,17 +1010,14 @@ async fn fetch_public_bytes(
     Ok(body.to_vec())
 }
 
-fn github_request(http_clients: &StartupSyncHttpClient, url: &str) -> StartupSyncRequestBuilder {
+fn github_request(http_clients: &StartupSyncHttpClient, url: &str) -> RequestBuilder {
     startup_sync_request(http_clients, url)
         .timeout(CURATED_PLUGINS_HTTP_TIMEOUT)
         .header("accept", GITHUB_API_ACCEPT_HEADER)
         .header("x-github-api-version", GITHUB_API_VERSION_HEADER)
 }
 
-fn startup_sync_request(
-    http_clients: &StartupSyncHttpClient,
-    url: &str,
-) -> StartupSyncRequestBuilder {
+fn startup_sync_request(http_clients: &StartupSyncHttpClient, url: &str) -> RequestBuilder {
     http_clients
         .request(Method::GET, url)
         .headers(default_headers())
@@ -1044,9 +1047,11 @@ fn extract_zipball_to_dir(bytes: &[u8], destination: &Path) -> Result<(), String
             .by_index(index)
             .map_err(|err| format!("failed to read curated plugins zip entry: {err}"))?;
         let Some(relative_path) = entry.enclosed_name() else {
+            let name = entry
+                .name()
+                .map_err(|err| format!("invalid curated plugins zip entry {index}: {err}"))?;
             return Err(format!(
-                "curated plugins zip entry `{}` escapes extraction root",
-                entry.name()
+                "curated plugins zip entry `{name}` escapes extraction root"
             ));
         };
 
@@ -1096,32 +1101,22 @@ fn extract_zipball_to_dir(bytes: &[u8], destination: &Path) -> Result<(), String
                 output_path.display()
             )
         })?;
-        apply_zip_permissions(&entry, &output_path)?;
+        #[cfg(unix)]
+        if let Some(mode) = entry.unix_mode() {
+            use std::os::unix::fs::PermissionsExt;
+
+            // zip strips setuid, setgid, and sticky bits from the archive's Unix mode.
+            output
+                .set_permissions(std::fs::Permissions::from_mode(mode))
+                .map_err(|err| {
+                    format!(
+                        "failed to set permissions on curated plugins file {}: {err}",
+                        output_path.display()
+                    )
+                })?;
+        }
     }
 
-    Ok(())
-}
-
-#[cfg(unix)]
-fn apply_zip_permissions(entry: &zip::read::ZipFile<'_>, output_path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let Some(mode) = entry.unix_mode() else {
-        return Ok(());
-    };
-    std::fs::set_permissions(output_path, std::fs::Permissions::from_mode(mode)).map_err(|err| {
-        format!(
-            "failed to set permissions on curated plugins file {}: {err}",
-            output_path.display()
-        )
-    })
-}
-
-#[cfg(not(unix))]
-fn apply_zip_permissions(
-    _entry: &zip::read::ZipFile<'_>,
-    _output_path: &Path,
-) -> Result<(), String> {
     Ok(())
 }
 

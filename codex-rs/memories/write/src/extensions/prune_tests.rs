@@ -27,9 +27,9 @@ async fn prunes_only_old_resources_from_extensions_with_instructions() {
         .expect("parse now"),
         Utc,
     );
-    let old_file = chronicle_resources.join("2026-04-06T11-59-59-abcd-10min-old.md");
-    let exact_cutoff_file = chronicle_resources.join("2026-04-07T12-00-00-abcd-10min-cutoff.md");
-    let recent_file = chronicle_resources.join("2026-04-08T12-00-00-abcd-10min-recent.md");
+    let old_file = chronicle_resources.join("2026-03-30T11-59-59-abcd-10min-old.md");
+    let exact_cutoff_file = chronicle_resources.join("2026-03-31T12-00-00-abcd-10min-cutoff.md");
+    let recent_file = chronicle_resources.join("2026-04-01T12-00-00-abcd-10min-recent.md");
     let invalid_file = chronicle_resources.join("not-a-timestamp.md");
     for file in [&old_file, &exact_cutoff_file, &recent_file, &invalid_file] {
         tokio::fs::write(file, "resource")
@@ -41,7 +41,7 @@ async fn prunes_only_old_resources_from_extensions_with_instructions() {
     tokio::fs::create_dir_all(&ignored_resources)
         .await
         .expect("create ignored resources");
-    let ignored_old_file = ignored_resources.join("2026-04-06T11-59-59-abcd-10min-old.md");
+    let ignored_old_file = ignored_resources.join("2026-03-30T11-59-59-abcd-10min-old.md");
     tokio::fs::write(&ignored_old_file, "ignored")
         .await
         .expect("write ignored resource");

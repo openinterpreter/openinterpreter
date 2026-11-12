@@ -22,6 +22,7 @@ use codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
 use codex_core::windows_sandbox::local_binding_policy_for_sandbox;
 use codex_core::windows_sandbox::managed_proxy_routing_for_windows_sandbox;
 use codex_protocol::config_types::SandboxMode;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::permissions::NetworkSandboxPolicy;
@@ -33,6 +34,7 @@ use codex_sandboxing::seatbelt::create_seatbelt_command_args;
 use codex_sandboxing::with_managed_mitm_ca_readable_root;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cli::CliConfigOverrides;
+use codex_utils_path_uri::PathUri;
 use tokio::process::Child;
 use tokio::process::Command as TokioCommand;
 use toml::Value as TomlValue;
@@ -207,7 +209,10 @@ async fn run_command_under_sandbox(
     codex_linux_sandbox_exe: Option<PathBuf>,
     sandbox_type: SandboxType,
     log_denials: bool,
-    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "macos")),
+        allow(unused_variables)
+    )]
     allow_unix_sockets: &[AbsolutePathBuf],
 ) -> anyhow::Result<()> {
     let sandbox_state = config_options
@@ -259,7 +264,7 @@ async fn run_command_under_sandbox(
         &config.permissions.shell_environment_policy,
         /*thread_id*/ None,
     );
-    let mut permission_profile = match sandbox_state.as_ref() {
+    let base_profile = match sandbox_state.as_ref() {
         Some(state) => match &state.permission_profile {
             PermissionProfile::External { .. } => {
                 // `External` only says that the producer relies on an outer sandbox; it does not
@@ -270,30 +275,40 @@ async fn run_command_under_sandbox(
             }
             permission_profile => permission_profile.clone(),
         },
-        None => config.permissions.effective_permission_profile(),
+        None => config.permissions.permission_profile().clone(),
     };
-    if matches!(permission_profile, PermissionProfile::Disabled) && sandbox_state_disable_network {
+    if matches!(base_profile, PermissionProfile::Disabled) && sandbox_state_disable_network {
         anyhow::bail!(
             "--sandbox-state-disable-network cannot be applied to a disabled permission profile"
         );
     }
-    if !matches!(permission_profile, PermissionProfile::Disabled)
+    let permission_profile = if !matches!(base_profile, PermissionProfile::Disabled)
         && (!sandbox_state_readable_root.is_empty() || sandbox_state_disable_network)
     {
-        let file_system = permission_profile
+        let file_system = base_profile
             .file_system_sandbox_policy()
-            .with_additional_readable_roots(&cwd, &sandbox_state_readable_root);
+            .with_additional_readable_roots(cwd, &sandbox_state_readable_root);
         let network = if sandbox_state_disable_network {
             NetworkSandboxPolicy::Restricted
         } else {
-            permission_profile.network_sandbox_policy()
+            base_profile.network_sandbox_policy()
         };
-        permission_profile = PermissionProfile::from_runtime_permissions(&file_system, network);
-    }
+        PermissionProfile::from_runtime_permissions(&file_system, network)
+    } else {
+        base_profile
+    };
     let use_legacy_landlock = sandbox_state.as_ref().map_or_else(
         || config.features.use_legacy_landlock(),
         |state| state.use_legacy_landlock,
     );
+    // The parent can select MXC through a CLI override absent from the child's
+    // disk config. Preserve that backend rather than weakening enforcement.
+    // An explicit MXC launch fails closed if the native implementation is unavailable.
+    let windows_sandbox_type = if sandbox_state.as_ref().is_some_and(|state| state.use_mxc) {
+        WindowsMxc
+    } else {
+        config.effective_local_windows_sandbox_type()
+    };
 
     match permission_profile.enforcement() {
         SandboxEnforcement::Managed => {}
@@ -345,15 +360,17 @@ async fn run_command_under_sandbox(
     }
 
     #[cfg(target_os = "macos")]
-    let mut denial_logger = log_denials.then(DenialLogger::new).flatten();
+    let mut denial_logger = (log_denials && sandbox == SandboxBackend::MacosSeatbelt)
+        .then(DenialLogger::new)
+        .flatten();
     #[cfg(not(target_os = "macos"))]
     let _ = log_denials;
 
-    let managed_network_requirements_enabled = config.managed_network_requirements_enabled();
-
-    // This proxy should only live for the lifetime of the child process.
-    let network_proxy = match config.permissions.network.as_ref() {
-        Some(spec) => Some(
+    // Keep the proxy alive until the child exits.
+    let network_proxy = if sandbox != SandboxBackend::None
+        && let Some(spec) = &config.permissions.network
+    {
+        Some(
             spec.start_proxy(
                 &permission_profile,
                 managed_proxy_routing_for_windows_sandbox(config.permissions.windows_sandbox_type),
@@ -363,13 +380,14 @@ async fn run_command_under_sandbox(
                 ),
                 /*policy_decider*/ None,
                 /*blocked_request_observer*/ None,
-                managed_network_requirements_enabled,
+                config.managed_network_requirements_enabled(),
                 NetworkProxyAuditMetadata::default(),
             )
             .await
             .map_err(|err| anyhow::anyhow!("failed to start managed network proxy: {err}"))?,
-        ),
-        None => None,
+        )
+    } else {
+        None
     };
     let network = network_proxy
         .as_ref()
@@ -382,11 +400,52 @@ async fn run_command_under_sandbox(
         Some(network) => network.managed_mitm_ca_trust_bundle_path(),
         None => None,
     };
-    let runtime_permission_profile = with_managed_mitm_ca_readable_root(
-        permission_profile,
-        managed_mitm_ca_trust_bundle_path.as_ref(),
-        sandbox_policy_cwd.as_path(),
-    );
+    let mut command = command.into_iter();
+    let program = command
+        .next()
+        .context("sandbox command must not be empty")?;
+    let cwd = PathUri::from_abs_path(cwd);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let manager = SandboxManager::for_inherited_terminal(allow_unix_sockets);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let manager = SandboxManager::new();
+    let workspace_roots = sandbox_state.is_none().then(|| {
+        config
+            .permissions
+            .workspace_roots()
+            .iter()
+            .map(PathUri::from_abs_path)
+            .collect::<Vec<_>>()
+    });
+    #[cfg(target_os = "macos")]
+    let env = {
+        let mut env_map = env;
+        if sandbox == SandboxBackend::MacosSeatbelt {
+            env_map.insert(CODEX_SANDBOX_ENV_VAR.to_string(), "seatbelt".to_string());
+        }
+        env_map
+    };
+    let wrapped = manager.transform(SandboxTransformRequest {
+        command: SandboxCommand {
+            program: program.into(),
+            args: command.collect(),
+            cwd: cwd.clone(),
+            env,
+            managed_network: None,
+            additional_permissions: None,
+        },
+        permissions: &permission_profile,
+        workspace_roots: workspace_roots.as_deref(),
+        runtime_readable_paths: &[],
+        selection: SandboxSelection::Explicit(sandbox),
+        enforce_managed_network: network.is_some(),
+        network: network.as_ref(),
+        environment_id: None,
+        sandbox_policy_cwd: &cwd,
+        sandbox_exe: sandbox_exe.as_deref(),
+        use_legacy_landlock,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    })?;
 
     let mut child = match sandbox_type {
         #[cfg(target_os = "macos")]
@@ -602,25 +661,10 @@ async fn run_command_under_windows_session(
 }
 
 async fn spawn_debug_sandbox_child(
-    program: PathBuf,
-    args: Vec<String>,
-    arg0: Option<&str>,
-    cwd: PathBuf,
+    command: std::process::Command,
     network_sandbox_policy: NetworkSandboxPolicy,
-    mut env: std::collections::HashMap<String, String>,
-    apply_env: impl FnOnce(&mut std::collections::HashMap<String, String>),
 ) -> std::io::Result<Child> {
-    let mut cmd = TokioCommand::new(&program);
-    #[cfg(unix)]
-    cmd.arg0(arg0.map_or_else(|| program.to_string_lossy().to_string(), String::from));
-    #[cfg(not(unix))]
-    let _ = arg0;
-    cmd.args(args);
-    cmd.current_dir(cwd);
-    apply_env(&mut env);
-    cmd.env_clear();
-    cmd.envs(env);
-
+    let mut cmd = TokioCommand::from(command);
     if !network_sandbox_policy.is_enabled() {
         cmd.env(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR, "1");
     }
@@ -746,7 +790,9 @@ async fn build_debug_sandbox_config_with_loader_overrides(
             .codex_home(codex_home.clone())
             .fallback_cwd(Some(codex_home));
     }
-    builder.build().await
+    let config = builder.build().await?;
+    config.validate_windows_mxc_requirement()?;
+    Ok(config)
 }
 
 fn config_uses_permission_profiles(config: &Config) -> bool {

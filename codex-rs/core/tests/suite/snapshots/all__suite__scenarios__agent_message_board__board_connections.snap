@@ -1,0 +1,123 @@
+---
+source: core/tests/suite/scenarios_agent_message_board.rs
+expression: "context_snapshot::format_context_snapshot(\"Independent Codex runtimes share a local board: a writer publishes, an isolated Guardian reads and cannot publish.\",\n&bodies.iter().map(SnapshotEntry::body).collect::<Vec<_>>(),\n&ContextSnapshotOptions::default().rewrite_known_segments(),)"
+---
+Scenario: Independent Codex runtimes share a local board: a writer publishes, an isolated Guardian reads and cannot publish.
+
+## Window 1
+-- request 1 (request) --
+00:message/developer:
+    <MODEL_INSTRUCTIONS>
+01:message/developer:
+    <PERMISSIONS_INSTRUCTIONS>
+02:message/user:
+    <ENVIRONMENT_CONTEXT>
+03:message/user:
+    Use the shared policy board.
+-- request 2 (request) --
+04:function_call/collaboration.post:{"new_channel_name":"policy","text":"A shared policy"}
+05:function_call_output:{"author":"/root/00000000000040008000000000000000","channel_name":"policy","created_at":"2026-09-18T12:00:00Z","message_id":"<UUID 1>","thread_id":"<UUID 1>"}
+
+## Window 2 (after request 2: input truncated at item 04, settings changed (prompt_cache_key))
+-- request 3 (request) --
+00:message/developer:
+    <MODEL_INSTRUCTIONS>
+01:message/developer:
+    <PERMISSIONS_INSTRUCTIONS>
+02:message/user:
+    <ENVIRONMENT_CONTEXT>
+03:message/user:
+    Use the shared policy board.
+-- request 4 (request) --
+04:function_call/collaboration.get_channels:{}
+05:function_call_output:{"board_permissions":{"create_channel":false,"edit_metadata":false,"manage_permissions":false},"has_more...ata":false,"post":false,"read":true,"reply":false}}]} [hash=eac4eff4c4aa3c0d]
+-- request 5 (request) --
+06:function_call/collaboration.search_posts:{}
+07:function_call_output:{"has_more":false,"n_returned":1,"next_cursor":null,"results":[{"author":"/root/000000000000400080000000...d policy","thread_id":"<UUID 1>","truncated":false}]} [hash=dba74b349a2e49af]
+-- request 6 (request) --
+08:function_call/collaboration.post:{"channel_name":"policy","text":"Cannot publish"}
+09:function_call_output:{"error":{"action":"channel.post","code":"permission_denied","message":"This board connection is read-only.","resource":"board:<UUID 2>"}}
+-- request 7 (request) --
+10:function_call/collaboration.create_channel:{"channel_name":"denied"}
+11:function_call_output:{"error":{"action":"board.create_channel","code":"permission_denied","message":"This board connection is read-only.","resource":"board:<UUID 2>"}}
+-- request 8 (request) --
+12:function_call/collaboration.post:{"new_channel_name":"denied","text":"Cannot publish"}
+13:function_call_output:{"error":{"action":"channel.post","code":"permission_denied","message":"This board connection is read-only.","resource":"board:<UUID 2>"}}
+-- request 9 (request) --
+14:function_call/collaboration.post:{"text":"Cannot reply","thread_id":"<UUID 3>"}
+15:function_call_output:{"error":{"action":"channel.reply","code":"permission_denied","message":"This board connection is read-only.","resource":"board:<UUID 2>"}}
+-- request 10 (request) --
+16:function_call/collaboration.subscribe:{"channel_name":"policy","target_agent":"/root/00000000000040008000000000000000"}
+17:function_call_output:{"error":{"action":"board.manage_subscriptions","code":"permission_denied","message":"This board connection is read-only.","resource":"board:<UUID 2>"}}
+-- request 11 (request) --
+18:message/assistant:
+    Done.
+19:message/user:
+    Watch for updates.
+-- request 12 (request) --
+20:function_call/collaboration.subscribe:{"channel_name":"policy"}
+21:function_call_output:{"channel_name":"policy","enabled":true,"last_message_id":"<UUID 1>","target_agent":"/root/00000000000040008000000000000001","thread_id":null}
+
+## Window 3 (after request 12: input diverged at item 04, settings changed (prompt_cache_key))
+-- request 13 (request) --
+00:message/developer:
+    <MODEL_INSTRUCTIONS>
+01:message/developer:
+    <PERMISSIONS_INSTRUCTIONS>
+02:message/user:
+    <ENVIRONMENT_CONTEXT>
+03:message/user:
+    Use the shared policy board.
+04:function_call/collaboration.post:{"new_channel_name":"policy","text":"A shared policy"}
+05:function_call_output:{"author":"/root/00000000000040008000000000000000","channel_name":"policy","created_at":"2026-09-18T12:00:00Z","message_id":"<UUID 1>","thread_id":"<UUID 1>"}
+06:message/assistant:
+    Done.
+07:message/user:
+    Publish an update.
+-- request 14 (request) --
+08:function_call/collaboration.post:{"agents_to_notify":["/root/00000000000040008000000000000002"],"channel_name":"policy","text":"Must not publish"}
+09:function_call_output:no thread with id: <UUID 4>
+-- request 15 (request) --
+10:function_call/collaboration.post:{"channel_name":"policy","text":"A new policy"}
+11:function_call_output:{"author":"/root/00000000000040008000000000000000","channel_name":"policy","created_at":"2026-09-18T12:00:00Z","message_id":"<UUID 5>","thread_id":"<UUID 5>"}
+-- request 16 (request) --
+12:function_call/collaboration.post:{"agents_to_notify":["/root/00000000000040008000000000000001"],"channel_name":"policy","text":"An explicit update"}
+13:function_call_output:{"author":"/root/00000000000040008000000000000000","channel_name":"policy","created_at":"2026-09-18T12:00:00Z","message_id":"<UUID 6>","thread_id":"<UUID 6>"}
+
+## Window 4 (after request 16: input diverged at item 04, settings changed (prompt_cache_key))
+-- request 17 (request) --
+00:message/developer:
+    <MODEL_INSTRUCTIONS>
+01:message/developer:
+    <PERMISSIONS_INSTRUCTIONS>
+02:message/user:
+    <ENVIRONMENT_CONTEXT>
+03:message/user:
+    Use the shared policy board.
+04:function_call/collaboration.get_channels:{}
+05:function_call_output:{"board_permissions":{"create_channel":false,"edit_metadata":false,"manage_permissions":false},"has_more...ata":false,"post":false,"read":true,"reply":false}}]} [hash=eac4eff4c4aa3c0d]
+06:function_call/collaboration.search_posts:{}
+07:function_call_output:{"has_more":false,"n_returned":1,"next_cursor":null,"results":[{"author":"/root/000000000000400080000000...d policy","thread_id":"<UUID 1>","truncated":false}]} [hash=dba74b349a2e49af]
+08:function_call/collaboration.post:{"channel_name":"policy","text":"Cannot publish"}
+09:function_call_output:{"error":{"action":"channel.post","code":"permission_denied","message":"This board connection is read-only.","resource":"board:<UUID 2>"}}
+10:function_call/collaboration.create_channel:{"channel_name":"denied"}
+11:function_call_output:{"error":{"action":"board.create_channel","code":"permission_denied","message":"This board connection is read-only.","resource":"board:<UUID 2>"}}
+12:function_call/collaboration.post:{"new_channel_name":"denied","text":"Cannot publish"}
+13:function_call_output:{"error":{"action":"channel.post","code":"permission_denied","message":"This board connection is read-only.","resource":"board:<UUID 2>"}}
+14:function_call/collaboration.post:{"text":"Cannot reply","thread_id":"<UUID 3>"}
+15:function_call_output:{"error":{"action":"channel.reply","code":"permission_denied","message":"This board connection is read-only.","resource":"board:<UUID 2>"}}
+16:function_call/collaboration.subscribe:{"channel_name":"policy","target_agent":"/root/00000000000040008000000000000000"}
+17:function_call_output:{"error":{"action":"board.manage_subscriptions","code":"permission_denied","message":"This board connection is read-only.","resource":"board:<UUID 2>"}}
+18:message/assistant:
+    Done.
+19:message/user:
+    Watch for updates.
+20:function_call/collaboration.subscribe:{"channel_name":"policy"}
+21:function_call_output:{"channel_name":"policy","enabled":true,"last_message_id":"<UUID 1>","target_agent":"/root/00000000000040008000000000000001","thread_id":null}
+22:message/assistant:
+    Watching the policy board.
+23:agent_message
+24:agent_message
+-- request 18 (request) --
+25:function_call/collaboration.get_channels:{}
+26:function_call_output:{"board_permissions":{"create_channel":false,"edit_metadata":false,"manage_permissions":false},"has_more...ata":false,"post":false,"read":true,"reply":false}}]} [hash=7cc8dc25fc1c52b2]

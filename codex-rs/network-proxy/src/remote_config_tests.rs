@@ -5,6 +5,7 @@ use super::RemoteNetworkProxyLaunchConfig;
 use crate::LocalBindingPolicy::DefaultFalse;
 use crate::LocalBindingPolicy::RequireTrue;
 use crate::MitmHookConfig;
+use crate::NetworkMitmCaConfig;
 use crate::NetworkMode;
 use crate::NetworkProxy;
 use crate::NetworkProxyAuditMetadata;
@@ -167,6 +168,26 @@ fn accepts_unsupported_configuration_when_proxy_is_disabled() {
 }
 
 #[test]
+fn rejects_external_ca_even_when_proxy_is_disabled() {
+    for (enabled, mitm_enabled) in [(false, false), (false, true), (true, false), (true, true)] {
+        let config = NetworkProxyConfig {
+            enabled,
+            mitm: mitm_enabled,
+            mitm_ca: Some(NetworkMitmCaConfig {
+                certificate_file: "/run/proxy/ca.pem".to_string(),
+                private_key_file: "/run/proxy/key.pem".to_string(),
+            }),
+            ..NetworkProxyConfig::default()
+        };
+
+        assert!(
+            RemoteNetworkProxyConfig::from_effective_config(&config).is_err(),
+            "external CA configuration must not cross the remote executor boundary (proxy enabled={enabled}, MITM enabled={mitm_enabled})"
+        );
+    }
+}
+
+#[test]
 fn launch_config_materializes_audit_and_execution_attribution() {
     let proxy = RemoteNetworkProxyConfig::from_effective_config(&NetworkProxyConfig {
         enabled: true,
@@ -195,6 +216,111 @@ fn launch_config_materializes_audit_and_execution_attribution() {
     assert_eq!(state.audit_metadata(), &audit_metadata);
     assert_eq!(state.environment_id(), Some("remote"));
     assert_eq!(state.execution_id().as_deref(), Some("execution-1"));
+}
+
+#[tokio::test]
+async fn remote_credential_mappings_follow_the_environment_and_broker_config() {
+    const TOKEN: &str = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let brokers = crate::RemoteCredentialBrokerCache::default();
+    let launch = |environment_id: &str,
+                  conversation_id: &str,
+                  mode,
+                  allow_local_binding,
+                  env: &std::collections::HashMap<String, String>| {
+        let mut proxy = RemoteNetworkProxyConfig::from_effective_config(&NetworkProxyConfig {
+            enabled: true,
+            allow_local_binding: Some(allow_local_binding),
+            mode,
+            ..NetworkProxyConfig::default()
+        })
+        .unwrap();
+        proxy.enable_credential_masking(Default::default());
+        NetworkProxyState::from_remote_launch_config(
+            RemoteNetworkProxyLaunchConfig::new(proxy)
+                .for_execution(environment_id.to_string(), "execution".to_string())
+                .with_audit_metadata(NetworkProxyAuditMetadata {
+                    conversation_id: Some(conversation_id.to_string()),
+                    ..NetworkProxyAuditMetadata::default()
+                }),
+            Platform::Linux,
+            &brokers,
+            env,
+        )
+        .unwrap()
+    };
+    let mut env = std::collections::HashMap::from([
+        ("GH_ENTERPRISE_TOKEN".to_string(), TOKEN.to_string()),
+        (
+            "GH_HOST".to_string(),
+            "github.enterprise.example".to_string(),
+        ),
+    ]);
+    let first = launch(
+        "remote",
+        "thread",
+        NetworkMode::Full,
+        /*allow_local_binding*/ false,
+        &env,
+    );
+    first.virtualize_child_credentials(&mut env);
+    let placeholder = env["GH_ENTERPRISE_TOKEN"].clone();
+    assert_ne!(placeholder, TOKEN);
+
+    let mut next_env = std::collections::HashMap::from([
+        ("GH_ENTERPRISE_TOKEN".to_string(), TOKEN.to_string()),
+        ("GH_HOST".to_string(), String::new()),
+    ]);
+    let next = launch(
+        "remote",
+        "thread",
+        NetworkMode::Full,
+        /*allow_local_binding*/ false,
+        &env,
+    );
+    let listener = next.clone();
+    next.bind_credential_broker_environment(&brokers, &next_env)
+        .await
+        .expect("bind startup credential context");
+    next.virtualize_child_credentials(&mut next_env);
+    let mut headers = rama_http::HeaderMap::from_iter([(
+        rama_http::header::AUTHORIZATION,
+        rama_http::HeaderValue::from_str(&format!("Bearer {placeholder}")).unwrap(),
+    )]);
+    let mut listener_headers = headers.clone();
+    listener.inject_request_credentials("github.enterprise.example", &mut listener_headers);
+    assert_eq!(listener_headers, headers);
+    first.inject_request_credentials("github.enterprise.example", &mut headers);
+    assert_eq!(
+        headers[rama_http::header::AUTHORIZATION].to_str().unwrap(),
+        format!("Bearer {TOKEN}")
+    );
+    drop(first);
+
+    for (environment_id, conversation_id, allow_local_binding, expected) in [
+        ("remote", "thread", false, TOKEN),
+        ("other", "thread", false, placeholder.as_str()),
+        ("remote", "other", false, placeholder.as_str()),
+        ("remote", "thread", true, placeholder.as_str()),
+    ] {
+        // A different network mode must not discard mappings for the same scope.
+        let state = launch(
+            environment_id,
+            conversation_id,
+            NetworkMode::Limited,
+            allow_local_binding,
+            &env,
+        );
+        let mut headers = rama_http::HeaderMap::new();
+        headers.insert(
+            rama_http::header::AUTHORIZATION,
+            rama_http::HeaderValue::from_str(&format!("Bearer {placeholder}")).unwrap(),
+        );
+        state.inject_request_credentials("github.enterprise.example", &mut headers);
+        assert_eq!(
+            headers[rama_http::header::AUTHORIZATION].to_str().unwrap(),
+            format!("Bearer {expected}")
+        );
+    }
 }
 
 #[test]

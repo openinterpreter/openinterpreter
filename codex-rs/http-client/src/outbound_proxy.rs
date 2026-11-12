@@ -265,7 +265,8 @@ impl HttpClientFactory {
     /// WebSocket schemes are resolved through their HTTP equivalents so platform PAC and system
     /// proxy APIs apply the same policy to `ws`/`wss` and `http`/`https` destinations. When system
     /// resolution is unavailable, explicit environment settings are resolved before falling back
-    /// to a direct route.
+    /// to a direct route. Ordered PAC candidates are collapsed to one route on Windows and macOS;
+    /// later proxy or `DIRECT` candidates are not retried after a connection failure.
     pub fn resolve_proxy_route(&self, request_url: &str) -> OutboundProxyRoute {
         resolve_proxy_route(
             &ProcessEnv,
@@ -320,31 +321,6 @@ impl HttpClientFactory {
         }
         cached_system_proxy_decision(&request_url)
             .map(|decision| route_from_system_decision(&ProcessEnv, env_proxy_kind, decision))
-    }
-
-    /// Builds a reqwest client for a concrete outbound route.
-    pub fn build_reqwest_client(
-        &self,
-        builder: reqwest::ClientBuilder,
-        request_url: &str,
-        route_class: ClientRouteClass,
-    ) -> Result<reqwest::Client, BuildRouteAwareHttpClientError> {
-        build_reqwest_client_for_route(
-            builder,
-            request_url,
-            route_class,
-            self.outbound_proxy_policy,
-        )
-    }
-
-    pub(crate) fn build_reqwest_client_for_resolved_route(
-        &self,
-        builder: reqwest::ClientBuilder,
-        route_class: ClientRouteClass,
-        route: &OutboundProxyRoute,
-    ) -> Result<reqwest::Client, BuildRouteAwareHttpClientError> {
-        let builder = configure_builder_for_resolved_route(builder, route_class, route)?;
-        build_reqwest_client_with_custom_ca(builder).map_err(Into::into)
     }
 }
 
@@ -450,6 +426,9 @@ pub enum BuildRouteAwareHttpClientError {
     #[error(transparent)]
     CustomCa(#[from] BuildCustomCaTransportError),
 
+    #[error("Failed to build HTTP client with explicit TLS configuration: {0}")]
+    ExplicitTls(reqwest::Error),
+
     #[error("Failed to configure outbound proxy selected for {route_class}")]
     InvalidProxyConfig { route_class: ClientRouteClass },
 }
@@ -458,34 +437,23 @@ impl From<BuildRouteAwareHttpClientError> for io::Error {
     fn from(error: BuildRouteAwareHttpClientError) -> Self {
         match error {
             BuildRouteAwareHttpClientError::CustomCa(error) => error.into(),
-            BuildRouteAwareHttpClientError::InvalidProxyConfig { .. } => io::Error::other(error),
+            BuildRouteAwareHttpClientError::InvalidProxyConfig { .. }
+            | BuildRouteAwareHttpClientError::ExplicitTls(_) => io::Error::other(error),
         }
     }
 }
 
-/// Builds a reqwest client with conservative route selection and shared CA handling.
-///
-/// Unavailable platform resolution falls back to environment proxies and then direct. Errors after
-/// a route is selected are returned without trying another route. Ordered PAC candidates are
-/// currently collapsed to one route on both Windows and macOS; later proxy or `DIRECT` candidates
-/// are not retried after a connection failure.
-fn build_reqwest_client_for_route(
+/// Builds a reqwest client with the resolved route and shared CA handling.
+pub(crate) fn build_reqwest_client_for_route(
     builder: reqwest::ClientBuilder,
-    request_url: &str,
     route_class: ClientRouteClass,
-    outbound_proxy_policy: OutboundProxyPolicy,
+    route: &OutboundProxyRoute,
 ) -> Result<reqwest::Client, BuildRouteAwareHttpClientError> {
-    let builder = configure_proxy_for_route(
-        &ProcessEnv,
-        builder,
-        request_url,
-        route_class,
-        outbound_proxy_policy,
-        resolve_system_proxy,
-    )?;
+    let builder = configure_builder_for_resolved_route(builder, route_class, route)?;
     build_reqwest_client_with_custom_ca(builder).map_err(Into::into)
 }
 
+#[cfg(test)]
 fn configure_proxy_for_route(
     env: &dyn EnvSource,
     builder: reqwest::ClientBuilder,
@@ -503,7 +471,7 @@ fn configure_proxy_for_route(
     configure_builder_for_resolved_route(builder, route_class, &route)
 }
 
-fn configure_builder_for_resolved_route(
+pub(crate) fn configure_builder_for_resolved_route(
     builder: reqwest::ClientBuilder,
     route_class: ClientRouteClass,
     route: &OutboundProxyRoute,
@@ -630,7 +598,9 @@ static SYSTEM_PROXY_CACHE: OnceLock<Mutex<HashMap<String, CachedSystemProxyDecis
 
 fn cached_system_proxy_decision(request_url: &str) -> Option<SystemProxyDecision> {
     let cache = SYSTEM_PROXY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache.lock().ok()?;
+    // Platform resolution holds this mutex. Let contended async callers wait in the resolver
+    // lane instead of blocking their executor while checking the cache.
+    let mut cache = cache.try_lock().ok()?;
     let key = system_proxy_cache_key(request_url);
     cached_system_proxy_decision_from_cache(&mut cache, &key, Instant::now())
 }

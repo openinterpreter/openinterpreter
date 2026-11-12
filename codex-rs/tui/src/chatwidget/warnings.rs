@@ -17,9 +17,23 @@ pub(super) struct WarningDisplayState {
     /// Initialization config warnings may also arrive as ordinary thread warnings.
     pub(super) startup_config_warnings: HashSet<String>,
     fallback_model_metadata_slugs: HashSet<String>,
+    /// Only hide an unchanged diagnostic: an identity can acquire more details later.
+    pub(crate) dismissed: BTreeMap<WarningId, String>,
+    /// Identity of the current transcript; queued decisions must not survive its reset.
+    pub(crate) transcript: Arc<()>,
+    /// Warning-bearing history cells are immutable. Avoid rebuilding diagnostic text until
+    /// the transcript's cell identities or the user's dismissal decisions change.
+    pub(crate) synced_cells: Option<Vec<Arc<dyn HistoryCell>>>,
 }
 
 impl WarningDisplayState {
+    fn visible_entries(&self, cells: &[Arc<dyn HistoryCell>]) -> Vec<WarningEntry> {
+        crate::history_cell::warning_entries(cells)
+            .into_iter()
+            .filter(|entry| self.dismissed.get(&entry.id) != Some(&entry.details))
+            .collect()
+    }
+
     pub(super) fn should_display(&mut self, message: &str) -> bool {
         !self.startup_config_warnings.contains(message)
             && fallback_model_metadata_warning_slug(message)

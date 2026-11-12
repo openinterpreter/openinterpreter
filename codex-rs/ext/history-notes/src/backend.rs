@@ -1,9 +1,10 @@
 use std::time::Duration;
 
-use codex_api::ReqwestTransport;
 use codex_client::HttpTransport;
 use codex_client::RequestBody;
-use codex_login::default_client::create_client;
+use codex_http_client::ClientRouteClass;
+use codex_http_client::HttpClientFactory;
+use codex_login::default_client::create_transport_for_routes_async;
 use codex_model_provider::SharedModelProvider;
 use codex_utils_output_truncation::TruncationPolicy;
 use http::HeaderValue;
@@ -19,11 +20,18 @@ const OPERATION_ERROR_PREFIX: &str = "Unable to perform operation:";
 #[derive(Clone)]
 pub(crate) struct HistoryNotesBackend {
     provider: SharedModelProvider,
+    http_client_factory: HttpClientFactory,
 }
 
 impl HistoryNotesBackend {
-    pub(crate) fn new(provider: SharedModelProvider) -> Self {
-        Self { provider }
+    pub(crate) fn new(
+        provider: SharedModelProvider,
+        http_client_factory: HttpClientFactory,
+    ) -> Self {
+        Self {
+            provider,
+            http_client_factory,
+        }
     }
 
     pub(crate) async fn call(
@@ -45,14 +53,16 @@ impl HistoryNotesBackend {
             }),
         );
 
-        let provider = self.provider.api_provider().await.map_err(|_| {
-            format!("{OPERATION_ERROR_PREFIX} Could not resolve the backend provider.")
-        })?;
-        let auth = self.provider.api_auth().await.map_err(|_| {
-            format!("{OPERATION_ERROR_PREFIX} Could not resolve backend authentication.")
-        })?;
+        let setup = codex_model_provider::resolve_request(
+            self.provider.as_ref(),
+            /*scope*/ None,
+            /*routing*/ None,
+            self.http_client_factory.clone(),
+        )
+        .await
+        .map_err(|_| format!("{OPERATION_ERROR_PREFIX} Could not prepare the backend request."))?;
 
-        let mut request = provider.build_request(Method::POST, path);
+        let mut request = setup.api_provider.build_request(Method::POST, path);
         let encoded_truncation_policy =
             serde_json::to_string(&truncation_policy).map_err(|_| {
                 format!("{OPERATION_ERROR_PREFIX} Could not encode the output truncation policy.")
@@ -79,10 +89,17 @@ impl HistoryNotesBackend {
         }
         request.body = Some(RequestBody::Json(arguments));
         request.timeout = Some(HISTORY_NOTES_BACKEND_TIMEOUT);
-        let request = auth.apply_auth(request).await.map_err(|_| {
+        let request = setup.api_auth.apply_auth(request).await.map_err(|_| {
             format!("{OPERATION_ERROR_PREFIX} Could not apply backend authentication.")
         })?;
-        let response = ReqwestTransport::from_http_client(create_client())
+        let transport = create_transport_for_routes_async(
+            setup.http_client_factory,
+            ClientRouteClass::Api,
+            setup.redirect_policy,
+        )
+        .await
+        .map_err(|_| format!("{OPERATION_ERROR_PREFIX} The backend request failed."))?;
+        let response = transport
             .execute(request)
             .await
             .map_err(|_| format!("{OPERATION_ERROR_PREFIX} The backend request failed."))?;

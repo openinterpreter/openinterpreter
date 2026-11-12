@@ -27,8 +27,7 @@ thiserror = { workspace = true }
 wxc_common = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-appcontainer_common = { workspace = true }
-learning_mode_windows = { workspace = true }
+flatbuffers = { workspace = true }
 # 1.2.4 imports OneCore_apiset, which the GNU Windows toolchain does not ship.
 tracelogging = "=1.2.3"
 windows-sys = { version = "0.61", features = [

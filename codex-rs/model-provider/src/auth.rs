@@ -10,6 +10,10 @@ use codex_api::AuthError;
 use codex_api::AuthHeadersFuture;
 use codex_api::AuthProvider;
 use codex_api::SharedAuthProvider;
+use codex_features::RuntimeAuthMode;
+use codex_http_client::CHATGPT_ACCOUNT_ID_HEADER;
+use codex_http_client::HttpClientFactory;
+use codex_http_client::RouteAwareClientPool;
 use codex_login::AuthHeaders;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
@@ -22,6 +26,9 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::bundled_provider_catalog_entry_for_base_url;
 use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::SessionSource;
+use codex_runtime_agent_instance::RuntimeAuth;
+use codex_runtime_agent_instance::RuntimeAuthError;
+use codex_runtime_agent_instance::RuntimeAuthManager;
 use http::HeaderMap;
 use http::HeaderValue;
 
@@ -29,6 +36,24 @@ use crate::bearer_auth_provider::BearerAuthProvider;
 
 const BEDROCK_API_KEY_UNSUPPORTED_MESSAGE: &str =
     "Bedrock API key auth is only supported by the Amazon Bedrock model provider";
+
+/// Credential ownership and optional OpenAI runtime auth for one harness/thread context.
+/// Publish these together so auxiliary clients cannot select another thread's credentials.
+#[derive(Clone, Debug)]
+pub struct ProviderAuthContext {
+    pub credentials: Arc<AuthManager>,
+    pub runtime_auth: Option<(Arc<RuntimeAuthManager>, RuntimeAuthMode)>,
+}
+
+impl ProviderAuthContext {
+    pub fn model_provider(&self, info: ModelProviderInfo) -> crate::SharedModelProvider {
+        crate::provider::create_model_provider_with_runtime(
+            info,
+            Some(Arc::clone(&self.credentials)),
+            self.runtime_auth.clone(),
+        )
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ProviderAuthScope {
@@ -55,23 +80,76 @@ impl AgentIdentitySessionFallback {
 /// Provider auth resolved for a request, plus metadata describing the effective auth.
 #[derive(Clone)]
 pub struct ResolvedProviderAuth {
+    /// Login selected with these headers; routing must use the same credential.
+    pub credential: Option<CodexAuth>,
     pub auth: SharedAuthProvider,
     pub agent_identity_telemetry: Option<AgentIdentityTelemetry>,
+    pub runtime: Option<RuntimeAuth>,
 }
 
 impl ResolvedProviderAuth {
     pub(crate) fn new(auth: SharedAuthProvider) -> Self {
         Self {
+            credential: None,
             auth,
             agent_identity_telemetry: None,
+            runtime: None,
         }
+    }
+
+    pub(crate) fn for_runtime(selected: RuntimeAuth, mode: RuntimeAuthMode) -> Self {
+        Self {
+            credential: Some(selected.auth().clone()),
+            auth: selected.clone().into_auth_provider(mode),
+            agent_identity_telemetry: None,
+            runtime: Some(selected),
+        }
+    }
+
+    /// Preserve the caller's transport configuration and bind it to the selected login.
+    pub fn bind_http_client_factory(
+        &self,
+        factory: HttpClientFactory,
+    ) -> Result<HttpClientFactory, AuthError> {
+        match &self.runtime {
+            Some(runtime) => runtime.bind_http_client_factory(factory),
+            None => Ok(factory),
+        }
+    }
+
+    /// Preserve the caller's connection pool and bind it to the selected login.
+    pub fn bind_http_client_pool(
+        &self,
+        pool: &RouteAwareClientPool,
+    ) -> Result<RouteAwareClientPool, AuthError> {
+        match &self.runtime {
+            Some(runtime) => pool
+                .with_account_binding(runtime.http_client_factory().network_policy())
+                .ok_or_else(|| {
+                    AuthError::Build(
+                        "runtime credentials and transport must share the application network policy"
+                            .to_string(),
+                    )
+                }),
+            None => Ok(pool.clone()),
+        }
+    }
+
+    /// Reject account selectors that disagree with the selected runtime.
+    pub fn validate_headers(&self, headers: &HeaderMap) -> codex_protocol::error::Result<()> {
+        if let Some(runtime) = &self.runtime {
+            crate::validate_runtime_selectors(headers, runtime.runtime().actor().info())?;
+        }
+        Ok(())
     }
 
     fn for_agent_identity(auth: AgentIdentityAuth) -> Self {
         let agent_identity_telemetry = agent_identity_telemetry(&auth);
         Self {
+            credential: None,
             auth: Arc::new(AgentIdentityAuthProvider { auth }),
             agent_identity_telemetry: Some(agent_identity_telemetry),
+            runtime: None,
         }
     }
 }
@@ -89,7 +167,7 @@ struct AgentIdentityAuthProvider {
 }
 
 impl AuthProvider for AgentIdentityAuthProvider {
-    fn add_auth_headers(&self, headers: &mut HeaderMap) {
+    fn add_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), AuthError> {
         let record = self.auth.record();
         let header_value = authorization_header_for_agent_task(
             AgentIdentityKey {
@@ -107,12 +185,13 @@ impl AuthProvider for AgentIdentityAuthProvider {
         }
 
         if let Ok(header) = HeaderValue::from_str(self.auth.account_id()) {
-            let _ = headers.insert("ChatGPT-Account-ID", header);
+            let _ = headers.insert(CHATGPT_ACCOUNT_ID_HEADER, header);
         }
 
         if self.auth.is_fedramp_account() {
             let _ = headers.insert("X-OpenAI-Fedramp", HeaderValue::from_static("true"));
         }
+        Ok(())
     }
 }
 
@@ -122,8 +201,9 @@ struct HeaderAuthProvider {
 }
 
 impl AuthProvider for HeaderAuthProvider {
-    fn add_auth_headers(&self, headers: &mut HeaderMap) {
+    fn add_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), AuthError> {
         headers.extend(self.auth.headers().clone());
+        Ok(())
     }
 }
 
@@ -150,14 +230,14 @@ impl AuthManagerAuthProvider {
 }
 
 impl AuthProvider for AuthManagerAuthProvider {
-    fn add_auth_headers(&self, headers: &mut HeaderMap) {
-        let Some(auth) = self.current_auth() else {
-            return;
-        };
-        auth_provider_from_auth(&auth).add_auth_headers(headers);
+    fn add_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), AuthError> {
+        let auth = self.current_auth().ok_or_else(|| {
+            AuthError::Transient("managed authentication is unavailable".to_string())
+        })?;
+        auth_provider_from_auth(&auth).add_auth_headers(headers)
     }
 
-    fn resolve_auth_headers(&self) -> AuthHeadersFuture<'_> {
+    fn apply_auth_headers(&self, mut headers: HeaderMap) -> AuthHeadersFuture<'_> {
         Box::pin(async move {
             let auth = self
                 .auth_manager
@@ -167,7 +247,53 @@ impl AuthProvider for AuthManagerAuthProvider {
                 .ok_or_else(|| {
                     AuthError::Transient("managed authentication is unavailable".to_string())
                 })?;
-            Ok(auth_provider_from_auth(&auth).to_auth_headers())
+            headers.extend(auth_provider_from_auth(&auth).to_auth_headers()?);
+            Ok(headers)
+        })
+    }
+
+    fn refresh_after_unauthorized(
+        &self,
+        rejected_headers: HeaderMap,
+    ) -> codex_api::AuthRefreshFuture<'_> {
+        Box::pin(async move {
+            let Some(auth) = self.current_auth() else {
+                return false;
+            };
+            let Ok(headers) = auth_provider_from_auth(&auth).to_auth_headers() else {
+                return false;
+            };
+            if headers.is_empty() {
+                return false;
+            }
+            if headers
+                .iter()
+                .any(|(name, value)| rejected_headers.get(name) != Some(value))
+                && self.auth_manager.refresh_failure_for_auth(&auth).is_none()
+            {
+                return true;
+            }
+            if !self.auth_manager.unauthorized_recovery().has_next() {
+                return false;
+            }
+            let result = self.auth_manager.refresh_token_if_unchanged(&auth).await;
+            let Some(refreshed_auth) = self.current_auth() else {
+                return false;
+            };
+            if self
+                .auth_manager
+                .refresh_failure_for_auth(&refreshed_auth)
+                .is_some()
+            {
+                return false;
+            }
+            let Ok(refreshed_headers) = auth_provider_from_auth(&refreshed_auth).to_auth_headers()
+            else {
+                return false;
+            };
+            !refreshed_headers.is_empty()
+                && refreshed_headers != headers
+                && !matches!(result, Err(codex_login::RefreshTokenError::Policy(_)))
         })
     }
 }
@@ -178,7 +304,9 @@ impl AuthProvider for AuthManagerAuthProvider {
 struct UnauthenticatedAuthProvider;
 
 impl AuthProvider for UnauthenticatedAuthProvider {
-    fn add_auth_headers(&self, _headers: &mut HeaderMap) {}
+    fn add_auth_headers(&self, _headers: &mut HeaderMap) -> Result<(), AuthError> {
+        Ok(())
+    }
 }
 
 pub fn unauthenticated_auth_provider() -> SharedAuthProvider {
@@ -193,7 +321,24 @@ pub(crate) fn auth_manager_for_provider(
     provider: &ModelProviderInfo,
 ) -> Option<Arc<AuthManager>> {
     match provider.auth.clone() {
-        Some(config) => Some(AuthManager::external_bearer_only(config)),
+        Some(config) => {
+            if provider.is_gcp() {
+                let mut env = HashMap::new();
+                if let Some(credential_file) = &provider.credential_file {
+                    env.insert(
+                        "GOOGLE_APPLICATION_CREDENTIALS".to_string(),
+                        credential_file.as_os_str().to_os_string(),
+                    );
+                }
+                Some(AuthManager::external_bearer_only_with_env(config, env))
+            } else {
+                Some(match auth_manager {
+                    Some(manager) => crate::shared_state::process_shared_state()
+                        .command_credentials(&config, &manager.runtime_config()),
+                    None => AuthManager::external_bearer_only(config),
+                })
+            }
+        }
         None => auth_manager,
     }
 }
@@ -357,7 +502,7 @@ fn is_kimi_code_provider(provider: &ModelProviderInfo) -> bool {
     })
 }
 
-fn bearer_auth_for_provider(
+pub(crate) fn bearer_auth_for_provider(
     provider: &ModelProviderInfo,
 ) -> codex_protocol::error::Result<Option<BearerAuthProvider>> {
     if let Some(api_key) = provider.api_key()? {
@@ -420,32 +565,11 @@ pub fn auth_provider_from_auth_manager(
 }
 
 #[cfg(test)]
-mod tests {
-    use codex_agent_identity::generate_agent_key_material;
-    use codex_login::AuthCredentialsStoreMode;
-    use codex_login::AuthKeyringBackendKind;
-    use codex_login::auth::AgentIdentityAuthRecord;
-    use codex_login::auth::BedrockApiKeyAuth;
-    use codex_login::auth::login_with_chatgpt_auth_tokens;
-    use codex_model_provider_info::WireApi;
-    use codex_model_provider_info::create_oss_provider_with_base_url;
-    use codex_protocol::account::PlanType;
-    use codex_protocol::config_types::ModelProviderAuthInfo;
-    use codex_protocol::error::CodexErrorDetails;
-    use http::header::AUTHORIZATION;
-    use pretty_assertions::assert_eq;
-    use serde_json::json;
-    use std::num::NonZeroU64;
-    use std::path::Path;
-    use std::path::PathBuf;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
-    use wiremock::Mock;
-    use wiremock::MockServer;
-    use wiremock::ResponseTemplate;
-    use wiremock::matchers::method;
-    use wiremock::matchers::path;
+#[path = "auth_refresh_tests.rs"]
+mod auth_refresh_tests;
 
+#[cfg(test)]
+mod legacy_auth_tests {
     use super::*;
 
     static NEXT_CODEX_HOME_ID: AtomicUsize = AtomicUsize::new(0);

@@ -26,15 +26,22 @@ use windows_sys::Win32::Foundation::ERROR_NO_DATA;
 use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
 use windows_sys::Win32::Foundation::ERROR_PIPE_NOT_CONNECTED;
 use windows_sys::Win32::Foundation::ERROR_SEM_TIMEOUT;
+use windows_sys::Win32::Foundation::ERROR_SERVICE_ALREADY_RUNNING;
+use windows_sys::Win32::Foundation::ERROR_SERVICE_DOES_NOT_EXIST;
+use windows_sys::Win32::Foundation::ERROR_SERVICE_MARKED_FOR_DELETE;
 use windows_sys::Win32::Foundation::HANDLE;
-use windows_sys::Win32::Security::SC_HANDLE;
 use windows_sys::Win32::Storage::FileSystem::SECURITY_IMPERSONATION;
 use windows_sys::Win32::Storage::FileSystem::SECURITY_SQOS_PRESENT;
 use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
 use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
 use windows_sys::Win32::System::Services;
+use windows_sys::Win32::System::Services::SC_HANDLE;
 
 const PROVISIONING_TIMEOUT: Duration = Duration::from_secs(120);
+const SERVICE_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+mod group_change;
+mod refresh_retry;
 
 mod group_change;
 mod refresh_retry;
@@ -158,7 +165,7 @@ fn provision(
         version: crate::PROVISIONING_PROTOCOL_VERSION,
         message: crate::ProvisioningMessage::ProvisionSandboxRequest {
             payload: crate::SandboxProvisioningRequest {
-                codex_home: codex_home
+                codex_home: crate::path_normalization::canonicalize_path(codex_home)
                     .to_str()
                     .context("sandbox provisioning home is not valid UTF-8")?
                     .to_owned(),
@@ -297,6 +304,31 @@ fn connect(deadline: Instant) -> anyhow::Result<Option<File>> {
 
     let pipe_name = crate::to_wide(&pipe_name);
     loop {
+        match query_service_status() {
+            Ok(status) if status.dwCurrentState == Services::SERVICE_START_PENDING => {
+                let remaining = startup_deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Ok(None);
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(25)));
+                continue;
+            }
+            Ok(status) if status.dwCurrentState == Services::SERVICE_RUNNING => {}
+            Ok(_) => return Ok(None),
+            Err(error)
+                if error.downcast_ref::<io::Error>().is_some_and(|error| {
+                    matches!(
+                        error.raw_os_error(),
+                        Some(code)
+                            if code == ERROR_SERVICE_DOES_NOT_EXIST as i32
+                                || code == ERROR_SERVICE_MARKED_FOR_DELETE as i32
+                    )
+                }) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
         match open_pipe() {
             Ok(pipe) => return Ok(Some(pipe)),
             Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
@@ -312,12 +344,10 @@ fn connect(deadline: Instant) -> anyhow::Result<Option<File>> {
                     .max(1);
                 if unsafe { WaitNamedPipeW(pipe_name.as_ptr(), wait_ms) } == 0 {
                     let error = io::Error::last_os_error();
-                    if matches!(
-                        error.raw_os_error(),
-                        Some(code)
-                            if code == ERROR_FILE_NOT_FOUND as i32
-                                || code == ERROR_SEM_TIMEOUT as i32
-                    ) {
+                    if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) {
+                        continue;
+                    }
+                    if error.raw_os_error() == Some(ERROR_SEM_TIMEOUT as i32) {
                         return Ok(None);
                     }
                     return Err(error).context("wait for sandbox provisioning pipe");
@@ -349,26 +379,7 @@ fn verify_server(pipe: HANDLE) -> anyhow::Result<u32> {
 }
 
 fn query_service_status() -> anyhow::Result<Services::SERVICE_STATUS_PROCESS> {
-    let manager =
-        unsafe { Services::OpenSCManagerW(ptr::null(), ptr::null(), Services::SC_MANAGER_CONNECT) };
-    if manager == 0 {
-        return Err(io::Error::last_os_error()).context("open service control manager");
-    }
-    let manager = ServiceHandle(manager);
-
-    let service_name = crate::to_wide(crate::windows_sandbox_service_name()?);
-    let service = unsafe {
-        Services::OpenServiceW(
-            manager.0,
-            service_name.as_ptr(),
-            Services::SERVICE_QUERY_STATUS,
-        )
-    };
-    if service == 0 {
-        return Err(io::Error::last_os_error()).context("open sandbox provisioning service");
-    }
-    let service = ServiceHandle(service);
-
+    let service = open_service(Services::SERVICE_QUERY_STATUS)?;
     let mut status: Services::SERVICE_STATUS_PROCESS = unsafe { std::mem::zeroed() };
     let mut bytes_needed = 0;
     if unsafe {
@@ -390,7 +401,7 @@ struct ServiceHandle(SC_HANDLE);
 
 impl Drop for ServiceHandle {
     fn drop(&mut self) {
-        if self.0 != 0 {
+        if !self.0.is_null() {
             unsafe { Services::CloseServiceHandle(self.0) };
         }
     }

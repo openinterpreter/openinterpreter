@@ -18,6 +18,8 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+aws-credential-types = { workspace = true }
+aws-sigv4 = { workspace = true }
 base64 = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 chrono = { workspace = true }
@@ -55,8 +57,10 @@ sha2 = { workspace = true }
 [dev-dependencies]
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(target_family = "unix")'.dependencies]
+libc = { workspace = true }
 rama-unix = { version = "=0.3.0-alpha.4" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -65,7 +69,7 @@ security-framework = "3"
 
 [target.'cfg(windows)'.dependencies]
 schannel = "0.1"
-windows-sys = { version = "0.52", features = [
+windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
     "Win32_Networking_WinSock",

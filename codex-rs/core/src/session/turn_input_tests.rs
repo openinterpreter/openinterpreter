@@ -7,6 +7,7 @@ use crate::session::turn_context::TurnContext;
 use crate::state::TaskKind;
 use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskResult;
+use codex_features::Feature;
 use codex_protocol::AgentPath;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
@@ -64,6 +65,8 @@ impl SessionTask for NeverEndingTask {
 
 fn user_message(text: &str) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputText {
@@ -159,6 +162,7 @@ async fn steering_does_not_wait_for_realtime_history() {
         assert_eq!(
             submission,
             TurnInputSubmission::Steered {
+                root_turn_id: turn_context.sub_id.clone(),
                 turn_id: turn_context.sub_id.clone()
             }
         );
@@ -178,7 +182,7 @@ async fn accepted_input_applies_thread_settings() {
             text_elements: Vec::new(),
         }])
         .with_thread_settings(ThreadSettingsOverrides {
-            environments: Some(local_selections(config.cwd.clone())),
+            environments: Some(local_selections(config.cwd.clone()).into_requests()),
             approval_policy: Some(config.permissions.approval_policy.value()),
             approvals_reviewer: Some(codex_config::types::ApprovalsReviewer::AutoReview),
             sandbox_policy: Some(config.legacy_sandbox_policy()),
@@ -416,10 +420,13 @@ async fn prepared_user_updates_merge_with_settings_at_turn_start() {
             },
         };
         session
-            .update_settings(thread_settings::prepare_update(ThreadSettingsOverrides {
-                collaboration_mode: Some(initial.clone()),
-                ..Default::default()
-            }))
+            .update_settings(thread_settings::prepare_update(
+                ThreadSettingsOverrides {
+                    collaboration_mode: Some(initial.clone()),
+                    ..Default::default()
+                },
+                &session.services.selected_capability_roots,
+            ))
             .await
             .expect("set initial model and effort");
         let prepared =
@@ -427,7 +434,10 @@ async fn prepared_user_updates_merge_with_settings_at_turn_start() {
                 .await
                 .expect("prepare partial protocol update");
         session
-            .update_settings(thread_settings::prepare_update(intervening))
+            .update_settings(thread_settings::prepare_update(
+                intervening,
+                &session.services.selected_capability_roots,
+            ))
             .await
             .expect("commit intervening settings");
 
@@ -465,10 +475,13 @@ async fn automatic_admission_uses_current_candidate_after_plan_preview() {
     let mut plan_mode = default_mode.clone();
     plan_mode.mode = ModeKind::Plan;
     session
-        .update_settings(thread_settings::prepare_update(ThreadSettingsOverrides {
-            collaboration_mode: Some(plan_mode),
-            ..Default::default()
-        }))
+        .update_settings(thread_settings::prepare_update(
+            ThreadSettingsOverrides {
+                collaboration_mode: Some(plan_mode),
+                ..Default::default()
+            },
+            &session.services.selected_capability_roots,
+        ))
         .await
         .expect("enter Plan after the initial admission check");
     let prepared = PreparedTurnInputSettings::prepare(
@@ -482,10 +495,13 @@ async fn automatic_admission_uses_current_candidate_after_plan_preview() {
     .await
     .expect("validate the patch while the preview is Plan");
     session
-        .update_settings(thread_settings::prepare_update(ThreadSettingsOverrides {
-            collaboration_mode: Some(default_mode.clone()),
-            ..Default::default()
-        }))
+        .update_settings(thread_settings::prepare_update(
+            ThreadSettingsOverrides {
+                collaboration_mode: Some(default_mode.clone()),
+                ..Default::default()
+            },
+            &session.services.selected_capability_roots,
+        ))
         .await
         .expect("leave Plan before atomic admission");
 
@@ -555,7 +571,7 @@ async fn automatic_admission_rechecks_plan_mode_without_committing_sparse_settin
     let overrides = ThreadSettingsOverrides {
         model: Some("automatic-model-must-not-be-applied".to_string()),
         service_tier: Some(Some(ServiceTier::Fast.request_value().to_string())),
-        environments: Some(proposed_environments.clone()),
+        environments: Some(proposed_environments.clone().into_requests()),
         approval_policy: Some(AskForApproval::Never),
         approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
         ..Default::default()
@@ -600,7 +616,7 @@ async fn automatic_admission_rechecks_plan_mode_without_committing_sparse_settin
         .acquire()
         .await
         .expect("acquire MCP refresh gate");
-    session.mcp_refresh.claim();
+    session.mcp_refresh.take_pending();
     assert!(!session.mcp_refresh.is_pending());
 
     for (submission_id, prepared) in [
@@ -641,7 +657,10 @@ async fn automatic_admission_rechecks_plan_mode_without_committing_sparse_settin
     // The rejected candidate is valid and would have real runtime effects if
     // accepted by an ordinary settings update.
     session
-        .update_settings(thread_settings::prepare_update(overrides))
+        .update_settings(thread_settings::prepare_update(
+            overrides,
+            &session.services.selected_capability_roots,
+        ))
         .await
         .expect("explicit settings update accepts the same patch");
     assert_eq!(
@@ -715,6 +734,7 @@ async fn admission_revalidates_constraints_before_committing(kind: TurnStartKind
             misalignment: None,
             message: expected_message,
             codex_error_info: Some(CodexErrorInfo::BadRequest),
+            rejected_audio_file_ids: Vec::new(),
         }]
     );
     assert_eq!(session.thread_settings_snapshot().await, desired_settings);
@@ -812,7 +832,8 @@ async fn start_only_rejects_pending_trigger_turn_without_injecting() {
                 Vec::new(),
                 "pending trigger".to_string(),
                 /*trigger_turn*/ true,
-            ),
+            )
+            .into(),
             Default::default(),
         )
         .await;
@@ -832,6 +853,51 @@ async fn start_only_rejects_pending_trigger_turn_without_injecting() {
     assert!(session.active_turn.lock().await.is_none());
     assert!(session.input_queue.has_trigger_turn_mailbox_items().await);
     assert_eq!(session.collaboration_mode().await.mode, ModeKind::Plan);
+}
+
+/// Queue-only agent mail respects stop, Plan mode, and inherited child configuration.
+#[test_case(SessionSource::Exec, true, ModeKind::Default; "interrupted_root")]
+#[test_case(SessionSource::Exec, false, ModeKind::Plan; "plan_root")]
+#[test_case(SessionSource::SubAgent(SubAgentSource::Review), false, ModeKind::Default; "inherited_child_flag")]
+#[tokio::test]
+async fn agent_message_wake_reservation_preserves_existing_boundaries(
+    source: SessionSource,
+    interrupted: bool,
+    mode: ModeKind,
+) {
+    let (mut session, _turn_context) = make_session_and_context().await;
+    session
+        .features
+        .enable(Feature::WakeOnAgentMessages)
+        .expect("enable agent-message wakes");
+    {
+        let mut state = session.state.lock().await;
+        state.session_configuration.session_source = source;
+        Arc::make_mut(&mut state.session_configuration.step_settings)
+            .collaboration_mode
+            .mode = mode;
+    }
+    if interrupted {
+        session.mark_interrupted();
+    }
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/worker").expect("valid worker path"),
+        AgentPath::root(),
+        Vec::new(),
+        "late worker update".to_string(),
+        /*trigger_turn*/ false,
+    );
+    session
+        .input_queue
+        .enqueue_mailbox_communication(communication.clone().into(), Default::default())
+        .await;
+
+    assert!(session.reserve_pending_work_turn().await.is_none());
+    assert!(session.active_turn.lock().await.is_none());
+    assert_eq!(
+        session.input_queue.drain_mailbox_input_items().await.0,
+        vec![TurnInput::InterAgentCommunication(communication.into())]
+    );
 }
 
 #[tokio::test]
@@ -865,7 +931,7 @@ async fn steer_only_enforces_expected_turn_id() {
         .spawn_task(
             Arc::clone(&turn_context),
             vec![TurnInput::UserInput {
-                acceptance_order: None,
+                metadata: Default::default(),
                 content: vec![UserInput::Text {
                     text: "hello".to_string(),
                     text_elements: Vec::new(),
@@ -922,6 +988,7 @@ async fn steer_only_enforces_expected_turn_id() {
     assert_eq!(
         submission,
         TurnInputSubmission::Steered {
+            root_turn_id: turn_context.sub_id.clone(),
             turn_id: turn_context.sub_id.clone()
         }
     );
@@ -967,7 +1034,7 @@ async fn rejects_non_regular_turns() {
             .spawn_task(
                 Arc::clone(&turn_context),
                 vec![TurnInput::UserInput {
-                    acceptance_order: None,
+                    metadata: Default::default(),
                     content: vec![UserInput::Text {
                         text: "hello".to_string(),
                         text_elements: Vec::new(),
@@ -1013,4 +1080,162 @@ async fn rejects_non_regular_turns() {
 
         session.abort_all_tasks(TurnAbortReason::Interrupted).await;
     }
+}
+
+#[test_case("automation_heartbeat_scheduled", None, UserInputOrigin::User; "human")]
+#[test_case("composer", Some("automation_heartbeat_scheduled"), UserInputOrigin::Heartbeat; "scheduled")]
+#[tokio::test]
+async fn steer_preserves_request_origin(
+    active_trigger: &str,
+    request_trigger: Option<&str>,
+    origin: UserInputOrigin,
+) {
+    let (session, turn_context, _rx) = make_session_and_context_with_rx().await;
+    turn_context
+        .turn_metadata_state
+        .set_turn_trigger(active_trigger.to_owned());
+    session
+        .spawn_task(
+            Arc::clone(&turn_context),
+            Vec::new(),
+            NeverEndingTask {
+                kind: TaskKind::Regular,
+                listen_to_cancellation_token: false,
+            },
+        )
+        .await;
+    let content = vec![UserInput::Text {
+        text: "Create the worktree now.".to_owned(),
+        text_elements: Vec::new(),
+    }];
+    handle(
+        &session,
+        TurnInputRequest::user_input(content.clone()).on_start(TurnStartOptions {
+            turn_trigger: request_trigger.map(str::to_owned),
+            ..Default::default()
+        }),
+        TurnInputMode::Steer {
+            expected_turn_id: turn_context.sub_id.clone(),
+        },
+        "steer-submission".to_owned(),
+    )
+    .await
+    .unwrap();
+    let pending = session
+        .input_queue
+        .get_pending_input(&session.active_turn)
+        .await
+        .0;
+    assert_eq!(
+        pending,
+        vec![TurnInput::UserInput {
+            content,
+            client_id: None,
+            metadata: crate::session::UserInputMetadata {
+                acceptance_order: Some(0),
+                origin,
+                ..Default::default()
+            },
+        }]
+    );
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+}
+
+#[tokio::test]
+async fn scored_prompt_keeps_its_submission_item_id() {
+    let (session, turn, events) = make_session_and_context_with_rx().await;
+    session
+        .spawn_task(
+            Arc::clone(&turn),
+            Vec::new(),
+            NeverEndingTask {
+                kind: TaskKind::Regular,
+                listen_to_cancellation_token: false,
+            },
+        )
+        .await;
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    // A legacy steer can present the same UI client ID as an admitted steer.
+    for id in [Some(first), None, Some(second)] {
+        let mut request = TurnInputRequest::new(SubmittedTurnInput::UserInput {
+            content: vec![UserInput::Text {
+                text: "identical input".into(),
+                text_elements: vec![],
+            }],
+            client_id: Some("same-client-id".into()),
+        });
+        request.user_item_uuid = id;
+        handle(
+            &session,
+            request,
+            TurnInputMode::Steer {
+                expected_turn_id: turn.sub_id.clone(),
+            },
+            Uuid::now_v7().to_string(),
+        )
+        .await
+        .unwrap();
+    }
+    let (pending, _) = session
+        .input_queue
+        .get_pending_input(&session.active_turn)
+        .await;
+    for input in pending {
+        let TurnInput::UserInput {
+            content,
+            client_id,
+            metadata,
+        } = input
+        else {
+            panic!("expected admitted user input");
+        };
+        session
+            .record_user_prompt_and_emit_turn_item(
+                &turn,
+                turn.model_info(),
+                &content,
+                client_id,
+                metadata,
+                codex_thread_store::PersistContext::Standard,
+            )
+            .await;
+    }
+    let history = session.clone_history().await;
+    let ids: Vec<_> = history
+        .raw_items()
+        .filter_map(|item| {
+            if let ResponseItem::Message { role, id, .. } = item
+                && role == "user"
+            {
+                id.as_ref().map(ToString::to_string)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(ids.len(), 3);
+    assert_eq!(ids[0], format!("msg_input_{first}"));
+    assert!(!ids[1].starts_with("msg_input_"));
+    assert_eq!(ids[2], format!("msg_input_{second}"));
+    let ui_ids = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event.msg {
+            codex_protocol::protocol::EventMsg::ItemCompleted(event) => {
+                let item = codex_app_server_protocol::ThreadItemPayload::from(event.item);
+                if let codex_app_server_protocol::ThreadItemPayload::UserMessage {
+                    id,
+                    client_id,
+                    ..
+                } = item
+                {
+                    assert_eq!(client_id.as_deref(), Some("same-client-id"));
+                    return Some(id);
+                }
+                None
+            }
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(ui_ids.len(), 3);
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
 }

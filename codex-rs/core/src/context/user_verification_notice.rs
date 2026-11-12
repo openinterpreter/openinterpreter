@@ -1,7 +1,9 @@
 //! A bounded realtime notice that never includes verification challenge or display text.
 
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 
 pub(crate) struct UserVerificationNotice;
 
@@ -22,7 +24,7 @@ impl ContextualUserFragment for UserVerificationNotice {
         ("<user_verification_notice>", "</user_verification_notice>")
     }
 
-    fn body(&self) -> String {
-        "User verification is required. Please respond in the app.".to_string()
+    fn body(&self) -> ContentItem {
+        input_text("User verification is required. Please respond in the app.".to_string())
     }
 }

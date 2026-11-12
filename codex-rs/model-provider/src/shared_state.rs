@@ -9,6 +9,8 @@ use codex_login::GatewayAuthConfig;
 use codex_login::GatewayAuthManager;
 use codex_model_provider_info::GatewayOAuthConfig;
 use codex_model_provider_info::ModelProviderAwsAuthInfo;
+use codex_model_provider_info::ModelProviderInfo;
+use codex_protocol::config_types::ModelProviderAuthInfo;
 
 use crate::amazon_bedrock::AwsAuthRecovery;
 use crate::amazon_bedrock::AwsCredentialExport;

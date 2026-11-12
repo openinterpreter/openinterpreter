@@ -3,15 +3,16 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use tokio::time::Instant;
 
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+use super::send_cell_event;
 use crate::session_runtime::CellEvent;
-use crate::session_runtime::ObserveMode;
-use crate::session_runtime::OutputItem;
+use crate::session_runtime::Observation;
 use crate::session_runtime::ToolKind;
 use crate::session_runtime::ToolName;
 
@@ -76,14 +77,17 @@ impl CellHandle {
         Self { command_tx, state }
     }
 
-    pub(crate) fn observe(&self, mode: ObserveMode) -> CellEventFuture {
+    pub(crate) fn observe(&self, observation: impl Into<Observation>) -> CellEventFuture {
         if !self.state.accepting_observations() {
             return closed_event();
         }
         let (response_tx, response_rx) = oneshot::channel();
         if self
             .command_tx
-            .send(CellCommand::Observe { mode, response_tx })
+            .send(CellCommand::Observe {
+                observation: observation.into(),
+                response_tx,
+            })
             .is_err()
         {
             return closed_event();
@@ -116,9 +120,8 @@ enum CellPhase {
         response_tx: oneshot::Sender<Result<CellEvent, CellError>>,
     },
     Completed {
-        // Set only when `yield_control()` races the create-to-first-observe handoff.
-        pending_initial_yield_items: Option<Vec<OutputItem>>,
         event: CellEvent,
+        completed_at: Instant,
     },
     CompletionClaimed(CellEvent),
     Tombstone,
@@ -134,7 +137,7 @@ pub(crate) enum CompletionDelivery {
 #[derive(Debug, PartialEq)]
 pub(crate) enum CompletionCommit {
     Committed,
-    Rejected(CellEvent),
+    Rejected,
 }
 
 pub(crate) enum ObservationDelivery {
@@ -180,10 +183,10 @@ impl CellState {
                 Box::pin(async { Err(CellError::AlreadyTerminating) })
             }
             CellPhase::Completed {
-                pending_initial_yield_items,
                 event,
+                completed_at,
             } => {
-                let event = prepend_initial_yield(event, pending_initial_yield_items);
+                let event = buffered_completion(event, completed_at);
                 *phase = CellPhase::CompletionClaimed(event.clone());
                 self.cancellation_token.cancel();
                 ready_event(event)
@@ -198,8 +201,7 @@ impl CellState {
 
     pub(crate) fn commit_completion(
         &self,
-        event: CellEvent,
-        pending_initial_yield_items: Option<Vec<OutputItem>>,
+        event: impl FnOnce() -> CellEvent,
         commit: impl FnOnce(),
     ) -> CompletionCommit {
         let mut phase = self
@@ -207,12 +209,14 @@ impl CellState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !matches!(*phase, CellPhase::Running) || self.cancellation_token.is_cancelled() {
-            return CompletionCommit::Rejected(event);
+            return CompletionCommit::Rejected;
         }
         commit();
         *phase = CellPhase::Completed {
-            pending_initial_yield_items,
-            event,
+            // Construct terminal output only after completion wins. In bounded
+            // mode, an error may evict user output; termination must not see it.
+            event: event(),
+            completed_at: Instant::now(),
         };
         CompletionCommit::Committed
     }
@@ -225,45 +229,40 @@ impl CellState {
             .phase
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (pending_initial_yield_items, event) =
-            match std::mem::replace(&mut *phase, CellPhase::Tombstone) {
-                CellPhase::Completed {
-                    pending_initial_yield_items,
-                    event,
-                } => (pending_initial_yield_items, event),
-                previous => {
-                    *phase = previous;
-                    return CompletionDelivery::Rejected(response_tx);
-                }
-            };
+        let (event, completed_at) = match std::mem::replace(&mut *phase, CellPhase::Tombstone) {
+            CellPhase::Completed {
+                event,
+                completed_at,
+            } => (event, completed_at),
+            previous => {
+                *phase = previous;
+                return CompletionDelivery::Rejected(response_tx);
+            }
+        };
         let Some(response_tx) = response_tx else {
             *phase = CellPhase::Completed {
-                pending_initial_yield_items,
                 event,
+                completed_at,
             };
             return CompletionDelivery::Buffered;
         };
-        match response_tx.send(Ok(event)) {
+        match send_cell_event(response_tx, event) {
             Ok(()) => {
                 self.cancellation_token.cancel();
                 CompletionDelivery::Delivered
             }
-            Err(Ok(event)) => {
+            Err(event) => {
                 *phase = CellPhase::Completed {
-                    pending_initial_yield_items,
                     event,
+                    completed_at,
                 };
                 CompletionDelivery::Buffered
-            }
-            Err(Err(error)) => {
-                panic!("completion delivery unexpectedly carried an actor error: {error:?}")
             }
         }
     }
 
     pub(crate) fn route_observation(
         &self,
-        mode: ObserveMode,
         response_tx: oneshot::Sender<Result<CellEvent, CellError>>,
     ) -> ObservationDelivery {
         let mut phase = self
@@ -276,55 +275,21 @@ impl CellState {
                 ObservationDelivery::Running(response_tx)
             }
             CellPhase::Completed {
-                pending_initial_yield_items: Some(content_items),
                 event,
-            } if matches!(mode, ObserveMode::YieldAfter(_)) => {
-                match response_tx.send(Ok(CellEvent::Yielded { content_items })) {
-                    Ok(()) => {
-                        *phase = CellPhase::Completed {
-                            pending_initial_yield_items: None,
-                            event,
-                        };
-                        ObservationDelivery::Buffered
-                    }
-                    Err(Ok(CellEvent::Yielded { content_items })) => {
-                        *phase = CellPhase::Completed {
-                            pending_initial_yield_items: Some(content_items),
-                            event,
-                        };
-                        ObservationDelivery::Buffered
-                    }
-                    Err(Ok(event)) => {
-                        panic!("initial yield delivery returned an unexpected event: {event:?}")
-                    }
-                    Err(Err(error)) => {
-                        panic!("initial yield delivery returned an actor error: {error:?}")
-                    }
+                completed_at,
+            } => match send_cell_event(response_tx, buffered_completion(event, completed_at)) {
+                Ok(()) => {
+                    self.cancellation_token.cancel();
+                    ObservationDelivery::Delivered
                 }
-            }
-            CellPhase::Completed {
-                pending_initial_yield_items,
-                event,
-            } => {
-                let delivered_event =
-                    prepend_initial_yield(event.clone(), pending_initial_yield_items.clone());
-                match response_tx.send(Ok(delivered_event)) {
-                    Ok(()) => {
-                        self.cancellation_token.cancel();
-                        ObservationDelivery::Delivered
-                    }
-                    Err(Ok(_)) => {
-                        *phase = CellPhase::Completed {
-                            pending_initial_yield_items,
-                            event,
-                        };
-                        ObservationDelivery::Buffered
-                    }
-                    Err(Err(error)) => {
-                        panic!("completion delivery unexpectedly carried an actor error: {error:?}")
-                    }
+                Err(event) => {
+                    *phase = CellPhase::Completed {
+                        event,
+                        completed_at,
+                    };
+                    ObservationDelivery::Buffered
                 }
-            }
+            },
             CellPhase::Terminating {
                 response_tx: termination_tx,
             } => {
@@ -358,9 +323,9 @@ impl CellState {
                 Some(event)
             }
             CellPhase::Completed {
-                pending_initial_yield_items,
                 event,
-            } => Some(prepend_initial_yield(event, pending_initial_yield_items)),
+                completed_at,
+            } => Some(buffered_completion(event, completed_at)),
             CellPhase::CompletionClaimed(completed_event) => Some(completed_event),
             CellPhase::Tombstone => None,
         };
@@ -381,52 +346,20 @@ impl CellState {
     }
 }
 
-fn prepend_initial_yield(
-    event: CellEvent,
-    pending_initial_yield_items: Option<Vec<OutputItem>>,
-) -> CellEvent {
-    let Some(mut pending_initial_yield_items) = pending_initial_yield_items else {
-        return event;
-    };
-    match event {
-        CellEvent::Yielded { mut content_items } => {
-            pending_initial_yield_items.append(&mut content_items);
-            CellEvent::Yielded {
-                content_items: pending_initial_yield_items,
-            }
-        }
-        CellEvent::Pending {
-            mut content_items,
-            pending_tool_call_ids,
-        } => {
-            pending_initial_yield_items.append(&mut content_items);
-            CellEvent::Pending {
-                content_items: pending_initial_yield_items,
-                pending_tool_call_ids,
-            }
-        }
-        CellEvent::Completed {
-            mut content_items,
-            error_text,
-        } => {
-            pending_initial_yield_items.append(&mut content_items);
-            CellEvent::Completed {
-                content_items: pending_initial_yield_items,
-                error_text,
-            }
-        }
-        CellEvent::Terminated { mut content_items } => {
-            pending_initial_yield_items.append(&mut content_items);
-            CellEvent::Terminated {
-                content_items: pending_initial_yield_items,
-            }
-        }
+fn buffered_completion(mut event: CellEvent, completed_at: Instant) -> CellEvent {
+    if let CellEvent::Completed {
+        result_buffered_for,
+        ..
+    } = &mut event
+    {
+        *result_buffered_for = completed_at.elapsed();
     }
+    event
 }
 
 pub(super) enum CellCommand {
     Observe {
-        mode: ObserveMode,
+        observation: Observation,
         response_tx: oneshot::Sender<Result<CellEvent, CellError>>,
     },
 }

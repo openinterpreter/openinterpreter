@@ -162,6 +162,195 @@ async fn remote_installed_plugins_paginate_across_all_scopes_without_download_ur
     );
 }
 
+// Skipping display assets must survive pagination without requesting bundle downloads.
+#[tokio::test]
+async fn installed_plugins_skip_display_resolution_on_every_page() {
+    let server = MockServer::start().await;
+    for (cursor, next_cursor) in [(None, Some("next page/+")), (Some("next page/+"), None)] {
+        let mock = Mock::given(method("GET"))
+            .and(path("/backend-api/ps/plugins/installed"))
+            .and(query_param("includeDisplayAssets", "false"))
+            .and(query_param_is_missing("includeDownloadUrls"));
+        let mock = match cursor {
+            Some(cursor) => mock.and(query_param("pageToken", cursor)),
+            None => mock.and(query_param_is_missing("pageToken")),
+        };
+        mock.respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "plugins": [],
+            "pagination": {"next_page_token": next_cursor},
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    }
+    let (config, selected_urls) =
+        recording_remote_plugin_service_config(format!("{}/backend-api", server.uri()));
+    let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
+
+    let plugins = fetch_remote_installed_plugins_with_display_assets(
+        &config,
+        Some(&auth),
+        InstalledPluginDisplayAssets::Skip,
+    )
+    .await
+    .expect("runtime metadata request succeeds");
+
+    assert_eq!(plugins, Vec::new());
+    assert_eq!(
+        recorded_http_client_urls(&selected_urls),
+        vec![
+            format!(
+                "{}/backend-api/ps/plugins/installed?limit=200&includeDisplayAssets=false",
+                server.uri()
+            ),
+            format!(
+                "{}/backend-api/ps/plugins/installed?limit=200&includeDisplayAssets=false&pageToken=next+page%2F%2B",
+                server.uri()
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn remote_installed_plugins_reject_cyclic_cursors() {
+    let server = MockServer::start().await;
+    for (cursor, next_cursor) in [
+        (None, "cursor-a"),
+        (Some("cursor-a"), "cursor-b"),
+        (Some("cursor-b"), "cursor-a"),
+    ] {
+        let mock = Mock::given(method("GET")).and(path("/backend-api/ps/plugins/installed"));
+        let mock = match cursor {
+            Some(cursor) => mock.and(query_param("pageToken", cursor)),
+            None => mock.and(query_param_is_missing("pageToken")),
+        };
+        mock.respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "plugins": [],
+            "pagination": {"next_page_token": next_cursor},
+        })))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    }
+    let (config, _) =
+        recording_remote_plugin_service_config(format!("{}/backend-api", server.uri()));
+    let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
+
+    let error = fetch_remote_installed_plugins(&config, Some(&auth))
+        .await
+        .expect_err("a cursor cycle must not produce an installed inventory");
+
+    assert!(matches!(
+        error,
+        RemotePluginCatalogError::UnexpectedResponse(_)
+    ));
+}
+
+#[tokio::test]
+async fn remote_installed_plugins_require_a_complete_inventory_within_the_page_limit() {
+    for complete in [false, true] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/backend-api/ps/plugins/installed"))
+            .respond_with(move |request: &wiremock::Request| {
+                let page = request
+                    .url
+                    .query_pairs()
+                    .find(|(name, _)| name == "pageToken")
+                    .map_or(0, |(_, value)| value.parse::<usize>().unwrap());
+                let next_cursor = (!complete || page + 1 < MAX_REMOTE_INSTALLED_PLUGIN_PAGES)
+                    .then(|| (page + 1).to_string());
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "plugins": [],
+                    "pagination": {"next_page_token": next_cursor},
+                }))
+            })
+            .up_to_n_times(MAX_REMOTE_INSTALLED_PLUGIN_PAGES as u64)
+            .expect(MAX_REMOTE_INSTALLED_PLUGIN_PAGES as u64)
+            .mount(&server)
+            .await;
+        let (config, _) =
+            recording_remote_plugin_service_config(format!("{}/backend-api", server.uri()));
+        let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
+
+        let result = fetch_remote_installed_plugins(&config, Some(&auth)).await;
+
+        if complete {
+            assert_eq!(
+                result.expect("the last permitted page can complete the inventory"),
+                Vec::new()
+            );
+        } else {
+            assert!(matches!(
+                result,
+                Err(RemotePluginCatalogError::UnexpectedResponse(_))
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn remote_installed_plugins_timeout_cancels_a_late_page_after_successful_pages() {
+    let server = MockServer::start().await;
+    let request_started = Arc::new(tokio::sync::Notify::new());
+    let started = Arc::clone(&request_started);
+    let (release_response, released) = std::sync::mpsc::channel();
+    let released = std::sync::Mutex::new(released);
+    Mock::given(method("GET"))
+        .and(path("/backend-api/ps/plugins/installed"))
+        .respond_with(move |request: &wiremock::Request| {
+            let page = request
+                .url
+                .query_pairs()
+                .find(|(name, _)| name == "pageToken")
+                .map_or(0, |(_, value)| value.parse::<usize>().unwrap());
+            started.notify_one();
+            // Wiremock serves requests on its own runtime. Dropping the sender also releases it.
+            let _ = released.lock().unwrap().recv();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "plugins": [],
+                "pagination": {"next_page_token": (page + 1).to_string()},
+            }))
+        })
+        .up_to_n_times(3)
+        .expect(3)
+        .mount(&server)
+        .await;
+    let (config, _) =
+        recording_remote_plugin_service_config(format!("{}/backend-api", server.uri()));
+    let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
+    let fetch = fetch_remote_installed_plugins(&config, Some(&auth));
+    tokio::pin!(fetch);
+
+    // Each page stays below the individual request timeout, but together exceeds the fetch budget.
+    // Keep time running during socket I/O so Tokio cannot auto-advance past a response in flight.
+    for _ in 0..2 {
+        tokio::select! {
+            _ = request_started.notified() => {}
+            result = fetch.as_mut() => panic!("inventory fetch finished before its next page: {result:?}"),
+        }
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(21)).await;
+        tokio::time::resume();
+        release_response.send(()).unwrap();
+    }
+    tokio::select! {
+        _ = request_started.notified() => {}
+        result = fetch.as_mut() => panic!("inventory fetch finished before its late page: {result:?}"),
+    }
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(21)).await;
+    let result = fetch.await;
+    tokio::time::resume();
+    drop(release_response);
+
+    assert!(matches!(
+        result,
+        Err(RemotePluginCatalogError::InstalledPluginsFetchTimeout)
+    ));
+}
+
 #[tokio::test]
 async fn remote_catalog_cache_modes_control_refresh_and_persist_fetched_results() {
     let server = MockServer::start().await;
@@ -276,9 +465,11 @@ fn catalog_cache_invalidation_clears_global_collections_and_preserves_other_scop
     let config = RemotePluginServiceConfig::new(
         "https://chatgpt.com/backend-api".to_string(),
         crate::test_support::test_http_client_factory(),
+        /*product_sku*/ None,
     );
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
-    for scope in [RemotePluginScope::Global, RemotePluginScope::Workspace] {
+    let scopes = [RemotePluginScope::Global, RemotePluginScope::Workspace];
+    for scope in scopes {
         catalog_cache::write_cached_directory_plugins(
             codex_home.path(),
             &config,
@@ -289,10 +480,10 @@ fn catalog_cache_invalidation_clears_global_collections_and_preserves_other_scop
         );
     }
 
-    assert_eq!(
-        cached_remote_plugin_catalog_scopes(codex_home.path(), &config, Some(&auth)),
-        BTreeSet::from([RemotePluginScope::Global, RemotePluginScope::Workspace])
-    );
+    let has_cached_scope = |scope| {
+        has_fresh_cached_remote_plugin_catalog(codex_home.path(), &config, Some(&auth), scope)
+    };
+    assert!(scopes.into_iter().all(has_cached_scope));
     catalog_cache::write_cached_directory_plugins(
         codex_home.path(),
         &config,
@@ -309,17 +500,16 @@ fn catalog_cache_invalidation_clears_global_collections_and_preserves_other_scop
         &[RemotePluginScope::Global],
     );
 
-    assert_eq!(
-        cached_remote_plugin_catalog_scopes(codex_home.path(), &config, Some(&auth)),
-        BTreeSet::from([RemotePluginScope::Workspace]),
-    );
+    assert!(!has_cached_scope(RemotePluginScope::Global));
+    assert!(has_cached_scope(RemotePluginScope::Workspace));
     assert!(
-        catalog_cache::load_cached_directory_plugins(
+        catalog_cache::load_cached_directory_plugins::<RemotePluginDirectoryItem>(
             codex_home.path(),
             &config,
             &auth,
             RemotePluginScope::Global,
             Some(OPENAI_CURATED_REMOTE_COLLECTION_KEY),
+            RemotePluginCatalogCacheMode::PreferCache,
         )
         .is_none()
     );

@@ -8,25 +8,344 @@ use super::RealtimeSessionKind;
 use super::RealtimeStreamedItem;
 use super::classify_realtime_input_error;
 use super::classify_realtime_input_error_with_pending;
+use super::prepare_realtime_start;
 use super::realtime_delegation_from_handoff;
 use super::realtime_request_headers;
 use super::realtime_text_from_handoff_request;
 use super::wrap_realtime_delegation_input;
 use crate::context::RealtimeDelegationSource;
 use async_channel::bounded;
+use base64::Engine;
 use codex_api::ApiError;
 use codex_api::RealtimeEventParser;
+use codex_features::Feature;
+use codex_features::RuntimeAuthMode;
+use codex_login::CodexAuth;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::protocol::CodexResponseHandoffMode;
+use codex_protocol::protocol::ConversationStartParams;
 use codex_protocol::protocol::ConversationTextParams;
 use codex_protocol::protocol::ConversationTextRole;
+use codex_protocol::protocol::RealtimeConversationVersion;
 use codex_protocol::protocol::RealtimeHandoffRequested;
+use codex_protocol::protocol::RealtimeOutputModality;
 use codex_protocol::protocol::RealtimeTranscriptEntry;
+use codex_runtime_agent_instance::AgentHostAuthorization;
+use codex_runtime_agent_instance::RuntimeAuthManager;
+use codex_runtime_agent_instance::RuntimeRegistrationMetadata;
+use codex_runtime_agent_instance::RuntimeRole;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
+use test_case::test_case;
 use tokio::sync::Mutex;
+
+fn websocket_start_params() -> ConversationStartParams {
+    ConversationStartParams {
+        client_managed_handoffs: false,
+        delegation_ack_filler: None,
+        flush_transcript_tail_on_session_end: false,
+        codex_responses_as_items: false,
+        codex_response_item_prefix: None,
+        codex_response_handoff_mode: CodexResponseHandoffMode::Thinking,
+        backend_reasoning_status: false,
+        codex_response_handoff_channel_prefixes: None,
+        model: None,
+        output_modality: RealtimeOutputModality::Audio,
+        include_startup_context: false,
+        initial_items: Vec::new(),
+        realtime_start_instructions: None,
+        realtime_end_instructions: None,
+        prompt: None,
+        realtime_session_id: None,
+        voice_session_id: None,
+        transport: None,
+        version: Some(RealtimeConversationVersion::V1),
+        voice: None,
+    }
+}
+
+#[tokio::test]
+async fn prepared_realtime_routing_follows_selected_api_key_and_explicit_overrides() {
+    for (api_key, base_url, realtime_base_url, expected_url, expected_fedramp_header) in [
+        ("legacy-key", None, None, "https://api.openai.com/v1", None),
+        (
+            "sk-proj-fedramp-synthetic-test-key",
+            None,
+            None,
+            "https://gov.api.openai.com/v1",
+            Some("true"),
+        ),
+        (
+            "sk-svcacct-fedramp-synthetic-test-key",
+            None,
+            None,
+            "https://gov.api.openai.com/v1",
+            Some("true"),
+        ),
+        (
+            "sk-proj-fedramp-synthetic-test-key",
+            Some("https://proxy.example/v1"),
+            None,
+            "https://proxy.example/v1",
+            Some("true"),
+        ),
+        (
+            "sk-svcacct-fedramp-synthetic-test-key",
+            Some("https://proxy.example/v1"),
+            Some("wss://realtime.example/v1"),
+            "wss://realtime.example/v1",
+            Some("true"),
+        ),
+    ] {
+        let (sess, _turn, _events) =
+            crate::session::tests::make_session_and_context_with_auth_and_config_and_rx(
+                CodexAuth::from_api_key("sk-proj-fedramp-ambient-test-key"),
+                Vec::new(),
+                |config| {
+                    config.model_provider = ModelProviderInfo {
+                        experimental_bearer_token: Some(api_key.into()),
+                        ..ModelProviderInfo::create_openai_provider(base_url.map(str::to_string))
+                    };
+                    config.experimental_realtime_ws_base_url =
+                        realtime_base_url.map(str::to_string);
+                },
+            )
+            .await;
+        let prepared = prepare_realtime_start(&sess, websocket_start_params())
+            .await
+            .expect("realtime startup should prepare without connecting");
+        assert_eq!(prepared.api_provider.base_url, expected_url);
+        let headers = prepared.extra_headers.expect("realtime request headers");
+        assert_eq!(
+            headers[http::header::AUTHORIZATION]
+                .to_str()
+                .expect("authorization should be ASCII"),
+            format!("Bearer {api_key}")
+        );
+        assert_eq!(
+            headers
+                .get("X-OpenAI-Fedramp")
+                .and_then(|value| value.to_str().ok()),
+            expected_fedramp_header
+        );
+    }
+}
+
+#[test_case(false; "saved_login")]
+#[test_case(true; "explicit_key")]
+#[tokio::test]
+async fn realtime_reuses_only_the_selected_credential_source(explicit_key: bool) {
+    let registration = wiremock::MockServer::start().await;
+    let registrations = AtomicUsize::new(0);
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/register"))
+        .respond_with(move |_: &wiremock::Request| {
+            let id = registrations.fetch_add(1, Ordering::Relaxed);
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "runtime_agent_instance_id": format!("runtime-{id}"),
+                "agent_host_id": "host-a",
+                "actor": {
+                    "kind": "platform",
+                    "user_id": "user-a",
+                    "organization_id": "org-a",
+                    "project_id": null
+                }
+            }))
+        })
+        .expect(if explicit_key { 2 } else { 1 })
+        .mount(&registration)
+        .await;
+    let home = tempfile::tempdir().unwrap();
+    let (sess, _turn, _events) =
+        crate::session::tests::make_session_and_context_with_auth_config_home_and_rx(
+            CodexAuth::from_api_key("same-key"),
+            Vec::new(),
+            home.path(),
+            |config| {
+                config
+                    .features
+                    .enable(Feature::RuntimeAgentInstances)
+                    .unwrap();
+                config.runtime_auth_mode = RuntimeAuthMode::AssertionOnly;
+                config.model_provider = ModelProviderInfo {
+                    experimental_bearer_token: explicit_key.then(|| "same-key".into()),
+                    env_http_headers: None,
+                    ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+                };
+            },
+        )
+        .await;
+    let runtime = Arc::new(RuntimeAuthManager::new(
+        Arc::clone(&sess.services.auth_manager),
+        AgentHostAuthorization::InstallationId {
+            installation_id: uuid::Uuid::nil(),
+        },
+        RuntimeRegistrationMetadata {
+            harness: None,
+            harness_version: None,
+            role: RuntimeRole::Orchestrator,
+        },
+        format!("{}/register", registration.uri()).parse().unwrap(),
+    ));
+    sess.services
+        .runtime_auth
+        .set(Arc::clone(&runtime))
+        .unwrap();
+    let login = runtime.auth().await.unwrap();
+    let prepared = prepare_realtime_start(&sess, websocket_start_params())
+        .await
+        .unwrap();
+    let headers = prepared
+        .websocket_auth
+        .expect("runtime auth selected")
+        .apply_auth_headers(http::HeaderMap::new())
+        .await
+        .unwrap();
+    let assertion = headers[http::header::AUTHORIZATION]
+        .to_str()
+        .unwrap()
+        .strip_prefix("AgentAssertion ")
+        .unwrap();
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(assertion.split('.').nth(2).unwrap())
+        .unwrap();
+    let claims: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    let selected_runtime = claims["runtime_agent_instance"].as_str().unwrap();
+    if explicit_key {
+        assert_ne!(selected_runtime, login.runtime().id());
+    } else {
+        assert_eq!(selected_runtime, login.runtime().id());
+    }
+    registration.verify().await;
+}
+
+/// Hold old input cleanup open while a successor tries to claim the connection.
+#[tokio::test]
+async fn natural_close_finishes_before_successor_and_ignores_old_identity() {
+    use super::ConversationState;
+    use super::RealtimeConversationEnd;
+    use super::RealtimeHandoffAdmission;
+    use codex_protocol::protocol::Event;
+    use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::RealtimeConversationStartedEvent;
+    use codex_protocol::protocol::RealtimeConversationVersion;
+    use std::sync::atomic::AtomicBool;
+    use tokio::sync::oneshot;
+    use tokio_util::sync::CancellationToken;
+
+    let (sess, _turn, events) = crate::session::tests::make_session_and_context_with_rx().await;
+    let old_identity = Arc::new(AtomicBool::new(true));
+    let stop_token = CancellationToken::new();
+    let input_stop = stop_token.clone();
+    let (entered, cleaning_up) = oneshot::channel();
+    let (release, released) = oneshot::channel();
+    let input_task = tokio::spawn(async move {
+        input_stop.cancelled().await;
+        entered.send(()).unwrap();
+        released.await.unwrap();
+    });
+    let handoff = RealtimeHandoffState {
+        output_tx: bounded(1).0,
+        last_output: Arc::new(Mutex::new(None)),
+        stream: Arc::new(Mutex::new(Default::default())),
+        client_managed_handoffs: false,
+        codex_responses_as_items: false,
+        codex_response_item_prefix: None,
+        backend_reasoning_status: false,
+        codex_response_handoff_mode: CodexResponseHandoffMode::Thinking,
+        codex_response_handoff_channel_prefixes: Arc::new(BTreeMap::new()),
+        session_kind: RealtimeSessionKind::V1,
+        event_parser: RealtimeEventParser::V1,
+    };
+    let connection = |identity, input_task, stop_token, session: &str| ConversationState {
+        session_id: Some(session.to_owned()),
+        sub_id: session.to_owned(),
+        audio_tx: bounded(1).0,
+        text_tx: bounded(1).0,
+        session_kind: RealtimeSessionKind::V1,
+        handoff: handoff.clone(),
+        input_task,
+        fanout_task: None,
+        realtime_active: identity,
+        route_handoffs: Arc::new(RealtimeHandoffAdmission::new()),
+        stop_token,
+    };
+    sess.conversation.state.lock().await.conversation = Some(connection(
+        Arc::clone(&old_identity),
+        input_task,
+        stop_token,
+        "A",
+    ));
+    let close = sess.conversation.finish_if_active(
+        &sess,
+        &old_identity,
+        "A".to_owned(),
+        RealtimeConversationEnd::TransportClosed,
+    );
+    tokio::pin!(close);
+    assert!(futures::poll!(&mut close).is_pending());
+    cleaning_up.await.unwrap();
+
+    // This is the same state publication boundary used by start_inner.
+    let successor = async {
+        sess.conversation.state.lock().await.conversation = Some(connection(
+            Arc::new(AtomicBool::new(true)),
+            tokio::spawn(async {}),
+            CancellationToken::new(),
+            "B",
+        ));
+        sess.send_event_raw(Event {
+            id: "B".to_owned(),
+            msg: EventMsg::RealtimeConversationStarted(RealtimeConversationStartedEvent {
+                realtime_session_id: Some("B".to_owned()),
+                version: RealtimeConversationVersion::V3,
+            }),
+        })
+        .await;
+    };
+    tokio::pin!(successor);
+    assert!(futures::poll!(&mut successor).is_pending());
+    release.send(()).unwrap();
+    close.await;
+    successor.await;
+    sess.conversation
+        .finish_if_active(
+            &sess,
+            &old_identity,
+            "A".to_owned(),
+            RealtimeConversationEnd::TransportClosed,
+        )
+        .await;
+    let observed = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event.msg {
+            EventMsg::RealtimeConversationClosed(_) => Some((event.id, "closed")),
+            EventMsg::RealtimeConversationStarted(_) => Some((event.id, "started")),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed,
+        vec![("A".to_owned(), "closed"), ("B".to_owned(), "started")]
+    );
+    assert_eq!(
+        sess.conversation
+            .state
+            .lock()
+            .await
+            .conversation
+            .as_ref()
+            .unwrap()
+            .session_id
+            .as_deref(),
+        Some("B")
+    );
+    sess.conversation.shutdown().await.unwrap();
+}
 
 #[test]
 fn prefers_handoff_input_transcript_over_active_transcript() {
@@ -86,7 +405,7 @@ fn wraps_handoff_with_transcript_delta() {
         ],
     };
     assert_eq!(
-        realtime_delegation_from_handoff(&handoff),
+        realtime_delegation_from_handoff(&handoff, /*preserve_transcript*/ false),
         Some(
             "<realtime_delegation>\n  <input>delegate this</input>\n  <transcript_delta>user: hello\nassistant: hi there</transcript_delta>\n</realtime_delegation>"
                 .to_string()
@@ -126,6 +445,7 @@ fn wraps_realtime_delegation_input() {
             "hello",
             /*transcript_delta*/ None,
             RealtimeDelegationSource::Handoff,
+            /*preserve_transcript*/ false,
         ),
         "<realtime_delegation>\n  <input>hello</input>\n</realtime_delegation>"
     );
@@ -138,6 +458,7 @@ fn wraps_realtime_delegation_input_with_xml_escaping() {
             "use a < b && c > d",
             Some("saw <that>"),
             RealtimeDelegationSource::Handoff,
+            /*preserve_transcript*/ false,
         ),
         "<realtime_delegation>\n  <input>use a &lt; b &amp;&amp; c &gt; d</input>\n  <transcript_delta>saw &lt;that&gt;</transcript_delta>\n</realtime_delegation>"
     );
@@ -150,6 +471,7 @@ fn wraps_realtime_delegation_input_with_xml_escaping_without_transcript() {
             "use a < b && c > d",
             /*transcript_delta*/ None,
             RealtimeDelegationSource::Handoff,
+            /*preserve_transcript*/ false,
         ),
         "<realtime_delegation>\n  <input>use a &lt; b &amp;&amp; c &gt; d</input>\n</realtime_delegation>"
     );
@@ -163,6 +485,7 @@ fn bounds_realtime_delegation_fields_and_keeps_latest_transcript() {
         &input,
         Some(&transcript),
         RealtimeDelegationSource::Handoff,
+        /*preserve_transcript*/ false,
     );
 
     assert!(rendered.len() < 9 * 1024);
@@ -214,6 +537,7 @@ async fn clears_active_handoff_explicitly() {
         client_managed_handoffs: false,
         codex_responses_as_items: false,
         codex_response_item_prefix: None,
+        backend_reasoning_status: false,
         codex_response_handoff_mode: CodexResponseHandoffMode::Thinking,
         codex_response_handoff_channel_prefixes: Arc::new(BTreeMap::new()),
         session_kind: RealtimeSessionKind::V1,
@@ -230,11 +554,17 @@ async fn clears_active_handoff_explicitly() {
     assert_eq!(state.stream.lock().await.active_handoff.clone(), None);
 }
 
-#[test]
-fn streamed_handoff_preserves_a_bounded_final_tail() {
+#[test_case(None, true; "legacy")]
+#[test_case(Some(MessagePhase::FinalAnswer), true; "final_answer")]
+#[test_case(Some(MessagePhase::Commentary), false; "commentary")]
+#[test_case(Some(MessagePhase::PartialAnswer), false; "partial_answer")]
+fn streamed_handoff_preserves_a_bounded_final_tail(
+    phase: Option<MessagePhase>,
+    expect_final_prefix: bool,
+) {
     let mut item = RealtimeStreamedItem {
         handoff_id: "handoff_1".to_string(),
-        phase: Some(MessagePhase::FinalAnswer),
+        phase,
         bem_channel_parser: None,
         prefix_final_message: true,
         sent_bytes: 0,
@@ -255,7 +585,12 @@ fn streamed_handoff_preserves_a_bounded_final_tail() {
     let output = format!("{first}{final_chunk}");
 
     assert!(output.len() <= 4_000);
-    assert!(output.starts_with(&format!("{AGENT_FINAL_MESSAGE_PREFIX}HEAD")));
+    let prefix = if expect_final_prefix {
+        AGENT_FINAL_MESSAGE_PREFIX
+    } else {
+        ""
+    };
+    assert!(output.starts_with(&format!("{prefix}HEAD")));
     assert!(output.contains(HANDOFF_STREAM_TRUNCATION_MARKER));
     assert!(output.ends_with("TAIL"));
 }
@@ -283,6 +618,7 @@ fn streamed_v3_handoff_omits_the_final_message_prefix() {
 fn uses_quicksilver_alpha_header_for_realtime_v1() {
     let headers = realtime_request_headers(
         Some("session_1"),
+        /*voice_session_id*/ None,
         Some("sk-test"),
         RealtimeEventParser::V1,
         "codex_work_desktop",
@@ -302,6 +638,7 @@ fn uses_quicksilver_alpha_header_for_realtime_v1() {
 fn omits_quicksilver_alpha_header_for_realtime_v2() {
     let headers = realtime_request_headers(
         Some("session_1"),
+        /*voice_session_id*/ None,
         Some("sk-test"),
         RealtimeEventParser::RealtimeV2,
         "codex_work_desktop",
@@ -316,6 +653,7 @@ fn omits_quicksilver_alpha_header_for_realtime_v2() {
 fn uses_frameless_alpha_header_for_realtime_v3() {
     let headers = realtime_request_headers(
         Some("session_1"),
+        /*voice_session_id*/ None,
         Some("sk-test"),
         RealtimeEventParser::FramelessBidi,
         "codex_work_desktop",
@@ -340,6 +678,7 @@ fn realtime_headers_include_only_non_default_originator() {
     ] {
         let headers = realtime_request_headers(
             Some("session_1"),
+            /*voice_session_id*/ None,
             Some("sk-test"),
             RealtimeEventParser::RealtimeV2,
             originator,
@@ -354,4 +693,32 @@ fn realtime_headers_include_only_non_default_originator() {
             expected_header
         );
     }
+}
+
+#[test]
+fn realtime_headers_keep_realtime_and_voice_session_ids_distinct() {
+    let headers = realtime_request_headers(
+        Some("realtime_session_1"),
+        Some("voice_session_1"),
+        /*api_key*/ None,
+        RealtimeEventParser::RealtimeV2,
+        "codex_work_desktop",
+    )
+    .expect("headers")
+    .expect("headers");
+
+    assert!(!headers.contains_key(http::header::AUTHORIZATION));
+    assert!(!headers.contains_key("X-OpenAI-Fedramp"));
+    assert_eq!(
+        headers
+            .get("x-session-id")
+            .and_then(|value| value.to_str().ok()),
+        Some("realtime_session_1")
+    );
+    assert_eq!(
+        headers
+            .get("voice-session-id")
+            .and_then(|value| value.to_str().ok()),
+        Some("voice_session_1")
+    );
 }

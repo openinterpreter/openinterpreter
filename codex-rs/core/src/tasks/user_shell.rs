@@ -21,7 +21,6 @@ use crate::session::TurnInput;
 use crate::session::turn_context::TurnContext;
 use crate::shell::Shell;
 use crate::state::TaskKind;
-use crate::tools::format_exec_output_str;
 use crate::tools::runtimes::RuntimePathPrepends;
 #[cfg(unix)]
 use crate::tools::runtimes::apply_package_path_prepend;
@@ -168,7 +167,7 @@ pub(crate) async fn execute_user_shell_command(
     let shell_environment_policy = turn_environment.shell_environment_policy();
     let mut exec_env_map = create_env(shell_environment_policy, Some(session.thread_id));
     inject_session_env(&mut exec_env_map, session.session_id());
-    inject_apply_patch_env(&mut exec_env_map, &turn_context.config.features);
+    inject_apply_patch_env(&mut exec_env_map);
     if exec_env_map.contains_key(PROXY_ACTIVE_ENV_KEY) {
         strip_managed_proxy_env(&mut exec_env_map);
     }
@@ -199,12 +198,9 @@ pub(crate) async fn execute_user_shell_command(
                 source: ExecCommandSource::UserShell,
                 interaction_input: None,
                 status: CommandExecutionStatus::InProgress,
-                stdout: None,
-                stderr: None,
                 aggregated_output: None,
                 exit_code: None,
                 duration: None,
-                formatted_output: None,
             }),
         )
         .await;
@@ -279,12 +275,9 @@ pub(crate) async fn execute_user_shell_command(
                         source: ExecCommandSource::UserShell,
                         interaction_input: None,
                         status: CommandExecutionStatus::Failed,
-                        stdout: Some(String::new()),
-                        stderr: Some(aborted_message.clone()),
                         aggregated_output: Some(aborted_message.clone()),
                         exit_code: Some(-1),
                         duration: Some(Duration::ZERO),
-                        formatted_output: Some(aborted_message),
                     }),
                 )
                 .await;
@@ -309,15 +302,9 @@ pub(crate) async fn execute_user_shell_command(
                         } else {
                             CommandExecutionStatus::Failed
                         },
-                        stdout: Some(output.stdout.text.clone()),
-                        stderr: Some(output.stderr.text.clone()),
                         aggregated_output: Some(output.aggregated_output.text.clone()),
                         exit_code: Some(output.exit_code),
                         duration: Some(output.duration),
-                        formatted_output: Some(format_exec_output_str(
-                            &output,
-                            turn_context.model_info().truncation_policy.into(),
-                        )),
                     }),
                 )
                 .await;
@@ -351,15 +338,9 @@ pub(crate) async fn execute_user_shell_command(
                         source: ExecCommandSource::UserShell,
                         interaction_input: None,
                         status: CommandExecutionStatus::Failed,
-                        stdout: Some(exec_output.stdout.text.clone()),
-                        stderr: Some(exec_output.stderr.text.clone()),
                         aggregated_output: Some(exec_output.aggregated_output.text.clone()),
                         exit_code: Some(exec_output.exit_code),
                         duration: Some(exec_output.duration),
-                        formatted_output: Some(format_exec_output_str(
-                            &exec_output,
-                            turn_context.model_info().truncation_policy.into(),
-                        )),
                     }),
                 )
                 .await;
@@ -383,6 +364,7 @@ async fn send_user_shell_error(session: &Session, turn_context: &TurnContext, me
                 misalignment: None,
                 message: message.to_string(),
                 codex_error_info: None,
+                rejected_audio_file_ids: Vec::new(),
             }),
         )
         .await;

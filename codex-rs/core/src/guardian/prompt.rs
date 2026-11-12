@@ -17,6 +17,8 @@ pub(crate) use codex_guardian_context::TranscriptCursor as GuardianTranscriptCur
 pub(crate) use codex_guardian_context::TranscriptMode as GuardianPromptMode;
 use codex_guardian_context::TranscriptSelection;
 use codex_guardian_context::default_registry;
+#[cfg(test)]
+use codex_guardian_reviewer::GuardianPromptItems;
 use codex_protocol::models::ResponseItem;
 
 use crate::context::ContextualUserFragment;
@@ -24,8 +26,8 @@ use crate::context::GuardianReviewEvidence;
 use crate::context::GuardianToolDescriptions;
 use crate::context::NodeReplReviewEvidence;
 use crate::context::NodeReplReviewEvidenceMode;
+use crate::context::is_guardian_context_message;
 use crate::context::node_repl_review_evidence_mode;
-use crate::event_mapping::is_contextual_user_message_content;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnEnvironment;
 use codex_utils_output_truncation::TruncationPolicy;
@@ -37,7 +39,6 @@ use super::GUARDIAN_MAX_NODE_REPL_TOOL_RESULT_TOKENS;
 use super::GUARDIAN_MAX_TOOL_ENTRY_TOKENS;
 use super::GuardianApprovalRequest;
 use super::GuardianReviewContext;
-use super::approval_request::format_guardian_action_pretty;
 
 const GUARDIAN_MAX_APPROVAL_REASON_TOKENS: usize = 512;
 pub(super) const GUARDIAN_TRANSCRIPT_START: &str = ">>> TRANSCRIPT START\n";
@@ -63,30 +64,52 @@ pub(crate) async fn build_guardian_prompt_items(
     request: GuardianApprovalRequest,
     mode: GuardianPromptMode,
 ) -> anyhow::Result<GuardianPromptItems> {
-    build_guardian_prompt_items_with_parent_turn(
+    let collected = collect_guardian_prompt_items_with_parent_turn(
         session,
-        session.conversation_history_snapshot().await.as_ref(),
+        GuardianTranscriptHistory::Retained(session.conversation_history_snapshot().await.as_ref()),
         /*parent_context*/ None,
         ApprovalRequestReasons {
             approval: None,
             retry: retry_reason,
         },
         request,
-        mode,
+        /*is_selected_exec_output*/ None,
         /*reviewed_node_repl_evidence_sequence*/ 0,
     )
-    .await
+    .await?;
+    codex_guardian_reviewer::compose_guardian_prompt(
+        collected.sections,
+        &collected.profile,
+        mode,
+        collected.history_version,
+        &collected.session_id,
+        collected.node_repl_evidence_sequence,
+    )
 }
 
-pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
+/// Captured request sources and host cursor facts, before request-size preparation.
+pub(super) struct CollectedGuardianPrompt {
+    pub(super) sections: CollectedContext,
+    pub(super) profile: ContextProfile,
+    pub(super) history_version: u64,
+    pub(super) session_id: String,
+    pub(super) node_repl_evidence_sequence: u64,
+}
+
+pub(super) async fn collect_guardian_prompt_items_with_parent_turn(
     session: &Session,
-    history: &dyn ConversationHistorySnapshot,
+    transcript_history: GuardianTranscriptHistory<'_>,
     parent_context: Option<&GuardianReviewContext>,
     reasons: ApprovalRequestReasons,
     request: GuardianApprovalRequest,
-    mode: GuardianPromptMode,
+    is_selected_exec_output: Option<&SelectedExecOutputPredicate<'_>>,
     reviewed_node_repl_evidence_sequence: u64,
-) -> anyhow::Result<GuardianPromptItems> {
+) -> anyhow::Result<CollectedGuardianPrompt> {
+    let (history, use_parent_checkpoint) = match transcript_history {
+        GuardianTranscriptHistory::Retained(history) => (history, false),
+        GuardianTranscriptHistory::LoadedParentCheckpoint(history) => (history, true),
+    };
+    super::permissions::check_environment_id(request.target_environment_id())?;
     let evidence_mode = parent_context
         .map(|context| node_repl_review_evidence_mode(context.turn()))
         .unwrap_or(NodeReplReviewEvidenceMode::Disabled);
@@ -96,10 +119,11 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
     } else {
         GUARDIAN_MAX_TOOL_ENTRY_TOKENS
     };
+    let config = session.get_config().await;
     let root_authorization = session
         .services
         .agent_control
-        .root_user_authorization(session.thread_id)
+        .get_guardian_package(session.thread_id)
         .await
         .map(|snapshot| snapshot.messages);
     let trusted_user_inputs = session
@@ -298,8 +322,8 @@ pub(crate) fn render_guardian_transcript_entries(
 /// Keep both tool calls and tool results here. The reviewer often needs the
 /// agent's exact queried path / arguments as well as the returned evidence to
 /// decide whether the pending approval is justified.
-/// Per-entry truncation happens during collection, using the current review's
-/// Node REPL cap; the cursor still counts every non-empty evidence entry.
+/// Per-entry truncation happens in sync preparation after cursor selection.
+/// The cursor counts every non-empty evidence entry.
 pub(super) fn collect_guardian_context(
     history: &dyn SectionHistory,
     node_repl_result_token_limit: usize,
@@ -327,33 +351,84 @@ pub(super) fn collect_guardian_context(
     })
 }
 
-struct GuardianReviewHistory<'a>(&'a dyn ConversationHistorySnapshot);
+struct GuardianReviewHistory<'a> {
+    history: &'a dyn ConversationHistorySnapshot,
+    use_parent_checkpoint: bool,
+}
 
 impl SectionHistory for GuardianReviewHistory<'_> {
     fn retained_context(&self) -> Option<&codex_history::RetainedContext> {
-        self.0.retained_context()
+        self.history.retained_context()
     }
 
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
-        self.0.review_items()
+        Box::new(self.items_with_sources().map(|(item, _)| item))
+    }
+
+    fn items_with_sources(
+        &self,
+    ) -> Box<dyn Iterator<Item = (&ResponseItem, Option<&codex_history::RetainedSource>)> + Send + '_>
+    {
+        if self.use_parent_checkpoint && !self.history.uses_parent_context_for_review() {
+            // The checkpoint replaces the legacy backup. Preserve the current
+            // parent window without claiming complete legacy source metadata.
+            Box::new(self.history.items().map(|item| (item, None)))
+        } else {
+            self.history.review_items_with_sources()
+        }
+    }
+
+    fn render_original_assistant(
+        &self,
+        message: &codex_history::RetainedUserMessage,
+    ) -> Option<GuardianRootMessage> {
+        crate::context::render_original_assistant_context(message)
+            .map(GuardianRootMessage::Assistant)
+    }
+
+    fn render_retained_assistant(
+        &self,
+        message: &codex_history::RetainedUserMessage,
+    ) -> Option<GuardianRootMessage> {
+        crate::context::render_retained_assistant_context(message)
+            .map(GuardianRootMessage::Assistant)
     }
 }
 
 struct FilteredGuardianHistory<'a>(&'a dyn SectionHistory);
 
 impl SectionHistory for FilteredGuardianHistory<'_> {
+    fn items_with_sources(
+        &self,
+    ) -> Box<dyn Iterator<Item = (&ResponseItem, Option<&codex_history::RetainedSource>)> + Send + '_>
+    {
+        Box::new(
+            self.0
+                .items_with_sources()
+                .filter(|(item, _)| !is_guardian_context_message(item)),
+        )
+    }
+
     fn retained_context(&self) -> Option<&codex_history::RetainedContext> {
         self.0.retained_context()
     }
 
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
-        Box::new(self.0.items().filter(|item| {
-            !matches!(
-                item,
-                ResponseItem::Message { role, content, .. }
-                    if role == "user" && is_contextual_user_message_content(content)
-            )
-        }))
+        Box::new(self.items_with_sources().map(|(item, _)| item))
+    }
+
+    fn render_original_assistant(
+        &self,
+        message: &codex_history::RetainedUserMessage,
+    ) -> Option<GuardianRootMessage> {
+        self.0.render_original_assistant(message)
+    }
+
+    fn render_retained_assistant(
+        &self,
+        message: &codex_history::RetainedUserMessage,
+    ) -> Option<GuardianRootMessage> {
+        self.0.render_retained_assistant(message)
     }
 }
 

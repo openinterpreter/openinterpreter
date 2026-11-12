@@ -19,6 +19,16 @@ pub enum ImageGenerationFailure {
     },
 }
 
+/// A local image file successfully read for this exact image-generation request.
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct ImageGenerationInputImage {
+    pub path: AbsolutePathBuf,
+    /// Lowercase SHA-256 of the file bytes read before image normalization.
+    pub sha256: String,
+}
+
 // Standalone image-generation item owned by the image extension. This is also
 // the field-level representation exposed by app-server; core and rollout
 // persistence only carry it inside an ExtensionItem envelope.
@@ -29,7 +39,8 @@ pub struct ImageGenerationItem {
     pub id: String,
     pub status: String,
     pub revised_prompt: Option<String>,
-    pub result: String,
+    #[serde(flatten)]
+    pub image: GeneratedImageRef,
     #[serde(default)]
     #[ts(optional)]
     pub transparent_background: Option<bool>,
@@ -38,6 +49,10 @@ pub struct ImageGenerationItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub saved_path: Option<AbsolutePathBuf>,
+    /// Observed local inputs for a completed generation, absent on older items.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<_>", optional)]
+    pub input_images: Vec<ImageGenerationInputImage>,
     /// Exact nested ImageGen request ID retained only for in-process analytics.
     ///
     /// This is deliberately excluded from the extension/app-server wire shape

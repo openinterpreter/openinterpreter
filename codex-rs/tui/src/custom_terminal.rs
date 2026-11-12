@@ -81,6 +81,9 @@ pub struct Frame<'a> {
 
     /// The buffer that is used to draw the current frame
     pub(crate) buffer: &'a mut Buffer,
+
+    /// Frame graphics to send after text, before the synchronized frame is committed.
+    pub(crate) image_placements: Vec<crate::transcript_image::ImagePlacement>,
 }
 
 impl Frame<'_> {
@@ -136,6 +139,7 @@ where
 {
     /// The backend used to interface with the terminal
     backend: B,
+    pub(crate) tmux_kitty_image_base: Option<u32>,
     /// Holds the results of the current and previous draw calls. The two are compared at the end
     /// of each draw pass to output the necessary updates to the terminal
     buffers: [Buffer; 2],
@@ -221,6 +225,7 @@ where
     ) -> Self {
         Self {
             backend,
+            tmux_kitty_image_base: None,
             buffers: [Buffer::empty(Rect::ZERO), Buffer::empty(Rect::ZERO)],
             current: 0,
             hidden_cursor: false,
@@ -254,6 +259,7 @@ where
     /// Get a Frame object which provides a consistent view into the terminal state for rendering.
     pub fn get_frame(&mut self) -> Frame<'_> {
         Frame {
+            image_placements: Vec::new(),
             cursor_position: None,
             cursor_style: SetCursorStyle::DefaultUserShape,
             viewport_area: self.viewport_area,
@@ -272,7 +278,7 @@ where
     }
 
     /// Gets the previous buffer as a reference.
-    fn previous_buffer(&self) -> &Buffer {
+    pub(crate) fn previous_buffer(&self) -> &Buffer {
         &self.buffers[1 - self.current]
     }
 
@@ -326,25 +332,8 @@ where
         self.visible_history_rows = self.visible_history_rows.min(area.top());
     }
 
-    /// Queries the backend for size and resizes if it doesn't match the previous size.
-    pub fn autoresize(&mut self) -> io::Result<()> {
-        let screen_size = self.size()?;
-        if screen_size != self.last_known_screen_size {
-            self.resize(screen_size)?;
-        }
-        Ok(())
-    }
-
     /// Draws a single frame to the terminal.
-    ///
-    /// Returns a [`CompletedFrame`] if successful, otherwise a [`std::io::Error`].
-    ///
-    /// If the render callback passed to this method can fail, use [`try_draw`] instead.
-    ///
-    /// Applications should call `draw` or [`try_draw`] in a loop to continuously render the
-    /// terminal. These methods are the main entry points for drawing to the terminal.
-    ///
-    /// [`try_draw`]: Terminal::try_draw
+    /// Applications should call `draw` in a loop to continuously render the terminal.
     ///
     /// This method will:
     ///
@@ -363,81 +352,79 @@ where
         F: FnOnce(&mut Frame),
     {
         let screen_size = self.size()?;
-        self.draw_with_size(screen_size, render_callback)
+        self.draw_with_size(screen_size, &mut Vec::new(), render_callback)
     }
 
-    /// Draws a single frame using a screen size already obtained by the caller.
-    pub(crate) fn draw_with_size<F>(&mut self, screen_size: Size, render: F) -> io::Result<()>
-    where
-        F: FnOnce(&mut Frame),
-    {
-        self.try_draw_with_size(screen_size, |frame| {
-            render(frame);
-            io::Result::Ok(())
+    /// Remove graphics on the screen that owns them before switching buffers or yielding the terminal.
+    pub(crate) fn clear_frame_images(
+        &mut self,
+        images: &mut Vec<crate::transcript_image::ImagePlacement>,
+    ) -> io::Result<()> {
+        if images.is_empty() {
+            return Ok(());
+        }
+        let text = self.previous_buffer().clone();
+        let cursor = (!self.hidden_cursor).then_some(self.last_known_cursor_pos);
+        let style = self
+            .last_cursor_style
+            .unwrap_or(SetCursorStyle::DefaultUserShape);
+        self.draw_with_size(self.last_known_screen_size, images, |frame| {
+            *frame.buffer = text;
+            if let Some(cursor) = cursor {
+                frame.set_cursor_position(cursor);
+                frame.set_cursor_style(style);
+            }
         })
     }
 
-    /// Tries to draw a single frame to the terminal.
-    ///
-    /// Returns [`Result::Ok`] containing a [`CompletedFrame`] if successful, otherwise
-    /// [`Result::Err`] containing the [`std::io::Error`] that caused the failure.
-    ///
-    /// This is the equivalent of [`Terminal::draw`] but the render callback is a function or
-    /// closure that returns a `Result` instead of nothing.
-    ///
-    /// Applications should call `try_draw` or [`draw`] in a loop to continuously render the
-    /// terminal. These methods are the main entry points for drawing to the terminal.
-    ///
-    /// [`draw`]: Terminal::draw
-    ///
-    /// This method will:
-    ///
-    /// - autoresize the terminal if necessary
-    /// - call the render callback, passing it a [`Frame`] reference to render to
-    /// - flush the current internal state by copying the current buffer to the backend
-    /// - move the cursor to the last known position if it was set during the rendering closure
-    /// - return a [`CompletedFrame`] with the current buffer and the area of the terminal
-    ///
-    /// The render callback passed to `try_draw` can return any [`Result`] with an error type that
-    /// can be converted into an [`std::io::Error`] using the [`Into`] trait. This makes it possible
-    /// to use the `?` operator to propagate errors that occur during rendering. If the render
-    /// callback returns an error, the error will be returned from `try_draw` as an
-    /// [`std::io::Error`] and the terminal will not be updated.
-    ///
-    /// The [`CompletedFrame`] returned by this method can be useful for debugging or testing
-    /// purposes, but it is often not used in regular applicationss.
-    ///
-    /// The render callback should fully render the entire frame when called, including areas that
-    /// are unchanged from the previous frame. This is because each frame is compared to the
-    /// previous frame to determine what has changed, and only the changes are written to the
-    /// terminal. If the render function does not fully render the frame, the terminal will not be
-    /// in a consistent state.
-    pub fn try_draw<F, E>(&mut self, render_callback: F) -> io::Result<()>
+    /// Draws a single frame using a screen size already obtained by the caller.
+    pub(crate) fn draw_with_size<F>(
+        &mut self,
+        screen_size: Size,
+        retained_images: &mut Vec<crate::transcript_image::ImagePlacement>,
+        render_callback: F,
+    ) -> io::Result<()>
     where
-        F: FnOnce(&mut Frame) -> Result<(), E>,
-        E: Into<io::Error>,
-    {
-        let screen_size = self.size()?;
-        self.try_draw_with_size(screen_size, render_callback)
-    }
-
-    fn try_draw_with_size<F, E>(&mut self, screen_size: Size, render_callback: F) -> io::Result<()>
-    where
-        F: FnOnce(&mut Frame) -> Result<(), E>,
-        E: Into<io::Error>,
+        F: FnOnce(&mut Frame),
     {
         if screen_size != self.last_known_screen_size {
             self.resize(screen_size)?;
         }
         let mut frame = self.get_frame();
 
-        render_callback(&mut frame).map_err(Into::into)?;
+        render_callback(&mut frame);
 
         // We can't change the cursor position right away because we have to flush the frame to
         // stdout first. But we also can't keep the frame around, since it holds a &mut to
         // Buffer. Thus, we're taking the important data out of the Frame and dropping it.
         let cursor_position = frame.cursor_position;
         let cursor_style = frame.cursor_style;
+        let mut images = std::mem::take(&mut frame.image_placements);
+        let first_id = if let Some(base) = self.tmux_kitty_image_base {
+            images.truncate(254); // The last two pane IDs belong to the pet and picker.
+            base
+        } else {
+            crate::transcript_image::FIRST_IMAGE_ID
+        };
+        let changed = *retained_images != images;
+        if changed {
+            if self.tmux_kitty_image_base.is_some() && !retained_images.is_empty() {
+                // tmux retains placeholder text after Ghostty deletes the associated pixels.
+                self.invalidate_viewport();
+            }
+            // Remove old graphics before text painting, including when switching to overlays.
+            for (index, placement) in retained_images.iter().enumerate() {
+                match placement.image.protocol {
+                    crate::pets::ImageProtocol::Kitty
+                    | crate::pets::ImageProtocol::KittyLocalFile => {
+                        let id = first_id + index as u32;
+                        self.backend
+                            .write_all(crate::pets::kitty_delete_image(id).as_bytes())?;
+                    }
+                    crate::pets::ImageProtocol::Sixel => self.invalidate_viewport(),
+                }
+            }
+        }
 
         // Not every terminal or multiplexer hides intermediate cursor moves inside a
         // synchronized update, especially when the frame spans multiple writes.
@@ -519,8 +506,20 @@ where
         self.backend.set_cursor_position(position)?;
         self.backend.clear_region(ClearType::AfterCursor)?;
         // Reset the back buffer to make sure the next update will redraw everything.
-        self.previous_buffer_mut().reset();
+        self.invalidate_viewport();
         Ok(())
+    }
+
+    // The pet draws after the text frame. Mark its placeholder cells so the next diff
+    // restores the underlying text when the sprite moves or disappears.
+    pub(crate) fn mark_pet_placeholders(&mut self, request: Option<&crate::pets::AmbientPetDraw>) {
+        if self.tmux_kitty_image_base.is_some()
+            && let Some(sprite) = request
+        {
+            for pos in sprite.area().intersection(self.viewport_area).positions() {
+                self.previous_buffer_mut()[pos].set_diff_option(CellDiffOption::AlwaysUpdate);
+            }
+        }
     }
 
     /// Force the next draw pass to repaint the entire viewport after raw terminal
@@ -546,7 +545,7 @@ where
         self.set_cursor_position(home)?;
         std::io::Write::flush(&mut self.backend)?;
         self.visible_history_rows = 0;
-        self.previous_buffer_mut().reset();
+        self.invalidate_viewport();
         Ok(())
     }
 
@@ -565,7 +564,7 @@ where
         std::io::Write::flush(&mut self.backend)?;
         self.last_known_cursor_pos = Position { x: 0, y: 0 };
         self.visible_history_rows = 0;
-        self.previous_buffer_mut().reset();
+        self.invalidate_viewport();
         Ok(())
     }
 
@@ -798,32 +797,30 @@ where
 /// The `ModifierDiff` struct is used to calculate the difference between two `Modifier`
 /// values. This is useful when updating the terminal display, as it allows for more
 /// efficient updates by only sending the necessary changes.
-struct ModifierDiff {
+pub(crate) struct ModifierDiff {
     pub from: Modifier,
     pub to: Modifier,
 }
 
 impl ModifierDiff {
-    fn queue<W: io::Write>(self, w: &mut W) -> io::Result<()> {
+    pub(crate) fn queue<W: io::Write>(self, w: &mut W) -> io::Result<()> {
         use crossterm::style::Attribute as CAttribute;
         let removed = self.from - self.to;
         if removed.contains(Modifier::REVERSED) {
             queue!(w, SetAttribute(CAttribute::NoReverse))?;
         }
-        if removed.contains(Modifier::BOLD) {
+        let intensity = Modifier::BOLD | Modifier::DIM;
+        let mut added = self.to - self.from;
+        if removed.intersects(intensity) {
+            // SGR 22 clears both intensities, including one the next cell may retain.
             queue!(w, SetAttribute(CAttribute::NormalIntensity))?;
-            if self.to.contains(Modifier::DIM) {
-                queue!(w, SetAttribute(CAttribute::Dim))?;
-            }
+            added |= self.to & intensity;
         }
         if removed.contains(Modifier::ITALIC) {
             queue!(w, SetAttribute(CAttribute::NoItalic))?;
         }
         if removed.contains(Modifier::UNDERLINED) {
             queue!(w, SetAttribute(CAttribute::NoUnderline))?;
-        }
-        if removed.contains(Modifier::DIM) {
-            queue!(w, SetAttribute(CAttribute::NormalIntensity))?;
         }
         if removed.contains(Modifier::CROSSED_OUT) {
             queue!(w, SetAttribute(CAttribute::NotCrossedOut))?;
@@ -832,7 +829,6 @@ impl ModifierDiff {
             queue!(w, SetAttribute(CAttribute::NoBlink))?;
         }
 
-        let added = self.to - self.from;
         if added.contains(Modifier::REVERSED) {
             queue!(w, SetAttribute(CAttribute::Reverse))?;
         }
@@ -914,6 +910,88 @@ mod tests {
 
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
+        }
+    }
+
+    #[test]
+    fn transcript_images_survive_unrelated_redraws_and_are_removed_for_overlays() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("viewed.png");
+        image::RgbaImage::from_pixel(32, 32, image::Rgba([10, 110, 200, 255]))
+            .save(&path)
+            .unwrap();
+        for (protocol, tmux_base) in [
+            (crate::pets::ImageProtocol::Kitty, None),
+            (crate::pets::ImageProtocol::KittyLocalFile, None),
+            (crate::pets::ImageProtocol::Kitty, Some(0x80_0100)),
+        ] {
+            let image = std::sync::Arc::new(
+                crate::transcript_image::TranscriptImage::load(&path, /*width*/ 40, protocol)
+                    .unwrap(),
+            );
+            let mut terminal =
+                Terminal::with_options(CaptureBackend::new(/*width*/ 40, /*height*/ 12)).unwrap();
+            terminal.tmux_kitty_image_base = tmux_base;
+            let size = terminal.last_known_screen_size;
+            terminal.set_viewport_area(Rect::new(
+                /*x*/ 0,
+                /*y*/ 0,
+                size.width,
+                size.height,
+            ));
+            let mut retained = Vec::new();
+            for (index, text) in ["", "a", "ab", "ab"].into_iter().enumerate() {
+                if index == 3 {
+                    assert_eq!(terminal.backend().output().matches("_Ga=T").count(), 1);
+                    terminal.clear().unwrap();
+                }
+                terminal
+                    .draw_with_size(size, &mut retained, |frame| {
+                        Line::from(text).render(
+                            Rect::new(
+                                /*x*/ 0, /*y*/ 10, /*width*/ 40, /*height*/ 1,
+                            ),
+                            frame.buffer_mut(),
+                        );
+                        frame
+                            .image_placements
+                            .push(crate::transcript_image::ImagePlacement {
+                                image: std::sync::Arc::clone(&image),
+                                area: Rect::new(
+                                    /*x*/ 2,
+                                    /*y*/ 2,
+                                    image.columns,
+                                    image.rows,
+                                ),
+                                first_row: 0,
+                                file: None,
+                            });
+                    })
+                    .unwrap();
+            }
+            let output = terminal.backend().output();
+            assert_eq!(output.matches("_Ga=T").count(), 2);
+            assert_eq!(output.matches("_Ga=d").count(), 0);
+            if tmux_base.is_some() {
+                assert!(output.contains("i=8388864,U=1"));
+                let (_, grid) = output.split_once("\x1b[38;2;128;1;0m").unwrap();
+                let (grid, _) = grid.split_once("\x1b[39m").unwrap();
+                insta::assert_snapshot!(
+                    "fullscreen_tmux_image_cells",
+                    grid.replace('\x1b', "\nESC").trim()
+                );
+            }
+            if protocol == crate::pets::ImageProtocol::KittyLocalFile {
+                assert!(output.contains("t=f") && output.contains("C=1"));
+                assert!(retained[0].file.as_ref().unwrap().path().exists());
+            } else {
+                assert!(retained[0].file.is_none());
+            }
+            terminal
+                .draw_with_size(size, &mut retained, |_| {})
+                .unwrap();
+            assert_eq!(terminal.backend().output().matches("_Ga=d").count(), 1);
+            assert!(retained.is_empty());
         }
     }
 
@@ -1115,7 +1193,9 @@ mod tests {
         let screen_size = terminal.last_known_screen_size;
 
         for _ in 0..3 {
-            terminal.draw_with_size(screen_size, |_| {}).expect("draw");
+            terminal
+                .draw_with_size(screen_size, &mut Vec::new(), |_| {})
+                .expect("draw");
         }
 
         terminal.set_viewport_area(Rect::new(
@@ -1139,7 +1219,7 @@ mod tests {
             let area = Rect::new(/*x*/ 0, /*y*/ 0, size.width, size.height);
             terminal.set_viewport_area(area);
             terminal
-                .draw_with_size(size, |frame| {
+                .draw_with_size(size, &mut Vec::new(), |frame| {
                     Paragraph::new("alpha beta")
                         .wrap(Wrap { trim: false })
                         .render(area, frame.buffer_mut());
@@ -1348,10 +1428,7 @@ mod tests {
         ));
 
         terminal
-            .try_draw(|frame| {
-                frame.set_cursor_position(cursor_position);
-                io::Result::Ok(())
-            })
+            .draw(|frame| frame.set_cursor_position(cursor_position))
             .expect("draw");
 
         let mut expected_move = Vec::new();

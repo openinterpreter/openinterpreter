@@ -175,6 +175,8 @@ impl Default for RawAccounts {
 #[derive(Deserialize)]
 struct ChatGptAccountEntry {
     account: ChatGptAccountInfo,
+    can_access_with_session: Option<bool>,
+    sso_connection_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -202,7 +204,8 @@ impl<'de> Deserialize<'de> for AccountsCheckResponse {
                 .account_ordering
                 .iter()
                 .filter_map(|account_id| {
-                    let account = accounts.remove(account_id)?.account;
+                    let entry = accounts.remove(account_id)?;
+                    let account = entry.account;
                     Some(AccountEntry {
                         id: account.account_id?,
                         plan_type: account.plan_type,

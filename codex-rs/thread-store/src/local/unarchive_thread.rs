@@ -1,5 +1,5 @@
 use super::LocalThreadStore;
-use super::helpers::owned_rollout_paths;
+use super::helpers::owned_rollout_paths_from_index;
 use super::helpers::restore_rollout_moves;
 use super::helpers::rollout_path_is_archived;
 use super::helpers::scoped_rollout_path;
@@ -10,12 +10,15 @@ use crate::ReadThreadParams;
 use crate::StoredThread;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
+use codex_protocol::ThreadId;
+use codex_rollout::RolloutReferenceIndex;
 use codex_rollout::rollout_date_parts;
+use tracing::warn;
 
 use super::thread_rollout_resolver;
 use super::thread_rollout_resolver::RolloutLocation;
 
-pub(super) async fn unarchive_thread(
+pub(super) async fn unarchive_threads(
     store: &LocalThreadStore,
     params: ArchiveThreadParams,
 ) -> ThreadStoreResult<StoredThread> {
@@ -25,16 +28,16 @@ pub(super) async fn unarchive_thread(
     // rollout files. Unarchive must participate before it moves those files back.
     let _writer_lock = store.acquire_writer_lock(thread_id)?;
     let state_db_ctx = store.state_db().await;
-    let selected_archived_path =
+    let Some(selected_archived_path) =
         thread_rollout_resolver::resolve_current_including_archived(store, thread_id)
             .await?
             .filter(|resolved| resolved.location == RolloutLocation::Archived)
             .map(|resolved| resolved.path)
-            .ok_or_else(|| ThreadStoreError::InvalidRequest {
-                message: format!("no archived rollout found for thread id {thread_id}"),
-            })?;
+    else {
+        return Ok(None);
+    };
 
-    let mut rollout_paths = owned_rollout_paths(store, thread_id).await?;
+    let mut rollout_paths = owned_rollout_paths_from_index(reference_index, thread_id);
     if !rollout_paths.contains(&selected_archived_path) {
         rollout_paths.push(selected_archived_path.clone());
     }
@@ -131,15 +134,8 @@ pub(super) async fn unarchive_thread(
         });
     }
 
-    super::read_thread::read_thread(
-        store,
-        ReadThreadParams {
-            thread_id,
-            include_archived: false,
-            include_history: false,
-        },
-    )
-    .await
+    // Descendants need only their restored id for notifications, not metadata hydration.
+    Ok(Some(thread_id))
 }
 
 #[cfg(test)]
@@ -157,6 +153,7 @@ mod tests {
     use crate::local::LocalThreadStore;
     use crate::local::test_support::test_config;
     use crate::local::test_support::write_archived_session_file;
+    use crate::local::test_support::write_session_file;
 
     #[tokio::test]
     async fn unarchive_thread_restores_rollout_and_returns_updated_thread() {
@@ -242,15 +239,15 @@ mod tests {
             .mark_backfill_complete(/*last_watermark*/ None)
             .await
             .expect("backfill should be complete");
-        let mut builder = codex_state::ThreadMetadataBuilder::new(
+        let builder = codex_state::ThreadMetadataBuilder::new(
             thread_id,
             selected_archived_path,
             Utc::now(),
             SessionSource::Cli,
-        );
-        builder.model_provider = Some(config.default_model_provider_id.clone());
-        builder.cwd = home.path().to_path_buf();
-        builder.cli_version = Some("test_version".to_string());
+        )
+        .with_model_provider(Some(config.default_model_provider_id.clone()))
+        .with_cwd(home.path().to_path_buf())
+        .with_cli_version("test_version".to_string());
         let mut metadata = builder.build(config.default_model_provider_id.as_str());
         metadata.archived_at = Some(metadata.updated_at);
         metadata.section = Some(codex_state::ThreadSection {
@@ -263,10 +260,31 @@ mod tests {
             .await
             .expect("state db upsert should succeed");
 
-        let unarchived = store
-            .unarchive_thread(ArchiveThreadParams { thread_id })
+        let child_uuid = Uuid::from_u128(208);
+        let child_id = ThreadId::from_string(&child_uuid.to_string()).expect("valid child id");
+        let child_path =
+            write_archived_session_file(home.path(), "2025-01-03T13-00-00", child_uuid)
+                .expect("child rollout");
+        let mut child_metadata = metadata.clone();
+        child_metadata.id = child_id;
+        child_metadata.rollout_path = child_path.clone();
+        runtime
+            .upsert_thread(&child_metadata)
             .await
-            .expect("unarchive thread");
+            .expect("child metadata");
+        std::fs::write(&child_path, "invalid session metadata\n").expect("malformed child rollout");
+
+        let active_uuid = Uuid::from_u128(209);
+        let active_id = ThreadId::from_string(&active_uuid.to_string()).expect("valid active id");
+        let active_path = write_session_file(home.path(), "2025-01-03T13-00-00", active_uuid)
+            .expect("active rollout");
+        let (unarchived, restored_ids) = store
+            .unarchive_threads(ArchiveThreadParams { thread_id }, vec![active_id, child_id])
+            .await
+            .expect("unarchive threads");
+        assert!(active_path.is_file());
+        assert_eq!(restored_ids, vec![thread_id, child_id]);
+        assert!(!child_path.exists());
         assert_eq!(unarchived.section, metadata.section);
 
         let restored_path = home
@@ -282,5 +300,13 @@ mod tests {
         assert_eq!(updated.archived_at, None);
         assert_eq!(updated.recency_at, metadata.recency_at);
         assert_eq!(updated.section, metadata.section);
+
+        let child = runtime.get_thread(child_id).await.unwrap().unwrap();
+        assert_eq!(child.archived_at, None);
+        assert_eq!(
+            child.rollout_path,
+            restored_path.with_file_name(child_path.file_name().unwrap())
+        );
+        assert!(child.rollout_path.is_file());
     }
 }

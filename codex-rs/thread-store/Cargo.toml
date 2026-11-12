@@ -13,6 +13,7 @@ doctest = false
 workspace = true
 
 [dependencies]
+caseless = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 codex-app-server-protocol = { workspace = true }
 codex-extension-items = { workspace = true }
@@ -30,12 +31,14 @@ pulldown-cmark = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
+sqlx-macros = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 zstd = { workspace = true }
 
 [dev-dependencies]
+codex-protocol-test-support = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }

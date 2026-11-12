@@ -135,7 +135,9 @@ async fn local_mcp_startup_and_refresh_use_configured_http_client() -> Result<()
                     environment_id: DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
                     enabled: true,
                     required: false,
+                    startup_readiness: Default::default(),
                     supports_parallel_tool_calls: false,
+                    tool_input_schema_max_bytes: None,
                     omit_tools_from: None,
                     disabled_reason: None,
                     startup_timeout_sec: Some(Duration::from_secs(10)),
@@ -158,6 +160,7 @@ async fn local_mcp_startup_and_refresh_use_configured_http_client() -> Result<()
         .await?;
     wait_for_mcp_server(&fixture.codex, SERVER_NAME).await?;
 
+    let current_config = fixture.codex.config().await;
     let mut refreshed_config = fixture.config.clone();
     let mut servers = refreshed_config.mcp_servers.get().clone();
     let server = servers
@@ -175,7 +178,10 @@ async fn local_mcp_startup_and_refresh_use_configured_http_client() -> Result<()
         .mcp_servers
         .set(servers)
         .expect("test MCP servers should accept the refreshed configuration");
-    fixture.codex.refresh_runtime_config(refreshed_config).await;
+    let _ = fixture
+        .codex
+        .refresh_runtime_config(current_config, refreshed_config)
+        .await;
     let result = fixture
         .codex
         .call_mcp_tool(
@@ -361,6 +367,7 @@ async fn skill_mcp_dependency_oauth_uses_configured_http_client() -> Result<()> 
         turn_permission_fields(PermissionProfile::Disabled, fixture.config.cwd.as_path());
     let mut environments = local_selections(fixture.config.cwd.clone());
     environments.environments[0].config = EnvironmentConfigState::Ready(EnvironmentConfig {
+        environment_hooks: Default::default(),
         allow_login_shell: fixture.config.permissions.allow_login_shell,
         workspace_roots: environments.environments[0].workspace_roots.clone(),
         permission_profile: PermissionProfileSnapshot::legacy(PermissionProfile::Disabled),
@@ -397,7 +404,7 @@ async fn skill_mcp_dependency_oauth_uses_configured_http_client() -> Result<()> 
                 },
             ])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(environments),
+                environments: Some(environments.into_requests()),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,

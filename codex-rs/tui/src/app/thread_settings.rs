@@ -12,6 +12,7 @@ use codex_app_server_protocol::ApprovalsReviewer as AppServerApprovalsReviewer;
 use codex_app_server_protocol::AskForApproval as AppServerAskForApproval;
 use codex_app_server_protocol::ThreadSettings;
 use codex_app_server_protocol::ThreadSettingsUpdateParams;
+use codex_app_server_protocol::ThreadSettingsUpdatedNotification;
 use codex_config::types::ApprovalsReviewer;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ModeKind;
@@ -30,6 +31,14 @@ impl App {
             return;
         };
         params.effort = effort;
+        self.send_model_settings_update(app_server, params).await;
+    }
+
+    pub(super) async fn send_model_settings_update(
+        &mut self,
+        app_server: &mut AppServerSession,
+        params: ThreadSettingsUpdateParams,
+    ) -> bool {
         let defaulted_to_auto_review = params.approvals_reviewer
             == Some(AppServerApprovalsReviewer::AutoReview)
             && (self.chat_widget.config_ref().approvals_reviewer != ApprovalsReviewer::AutoReview
@@ -62,6 +71,7 @@ impl App {
         if defaulted_to_auto_review && settings_updated {
             self.app_event_tx.send(AppEvent::CyberModelAutoReviewNotice);
         }
+        settings_updated
     }
 
     pub(super) fn active_thread_model_setting_update_params(
@@ -162,7 +172,6 @@ impl App {
             summary,
             service_tier,
             collaboration_mode,
-            personality,
         } = op
         else {
             return;
@@ -181,10 +190,25 @@ impl App {
             summary: *summary,
             service_tier: service_tier.clone(),
             collaboration_mode: collaboration_mode.clone(),
-            personality: *personality,
             ..ThreadSettingsUpdateParams::default()
         };
         self.send_thread_settings_update(app_server, params).await;
+    }
+
+    // Retained blank sessions stay subscribed after their event channels are cleared.
+    pub(super) async fn update_retained_blank_settings(
+        &mut self,
+        thread_id: ThreadId,
+        notification: &ThreadSettingsUpdatedNotification,
+    ) -> bool {
+        if !self.agents_overview.blank_sessions.contains_key(&thread_id)
+            || self.thread_event_channels.contains_key(&thread_id)
+        {
+            return false;
+        }
+        self.apply_thread_settings_to_cached_session(thread_id, &notification.thread_settings)
+            .await;
+        true
     }
 
     pub(super) async fn apply_thread_settings_to_cached_session(
@@ -218,19 +242,29 @@ impl App {
         if !thread_settings_update_has_changes(&params) {
             return false;
         }
-        if ThreadId::from_string(&params.thread_id)
-            .ok()
-            .is_some_and(|thread_id| self.pending_server_profiles.contains_key(&thread_id))
-            && (params.cwd.is_some()
-                || params.approval_policy.is_some()
-                || params.approvals_reviewer.is_some()
-                || params.sandbox_policy.is_some()
-                || params.permissions.is_some())
+        let thread_id = ThreadId::from_string(&params.thread_id).ok();
+        let changes_permissions = params.cwd.is_some()
+            || params.approval_policy.is_some()
+            || params.approvals_reviewer.is_some()
+            || params.sandbox_policy.is_some()
+            || params.permissions.is_some();
+        if changes_permissions
+            && thread_id.is_some_and(|id| self.pending_server_profiles.contains_key(&id))
         {
             return false;
         }
         match app_server.thread_settings_update(params).await {
-            Ok(settings_updated) => settings_updated,
+            Ok(settings_updated) => {
+                if settings_updated
+                    && changes_permissions
+                    && let Some(thread_id) = thread_id
+                {
+                    self.agents_overview
+                        .requested_permission_profiles
+                        .remove(&thread_id);
+                }
+                settings_updated
+            }
             Err(err) => {
                 tracing::warn!("failed to update app-server thread settings from TUI: {err}");
                 self.chat_widget
@@ -241,7 +275,10 @@ impl App {
     }
 }
 
-fn apply_thread_settings_to_session(session: &mut ThreadSessionState, settings: &ThreadSettings) {
+pub(super) fn apply_thread_settings_to_session(
+    session: &mut ThreadSessionState,
+    settings: &ThreadSettings,
+) {
     if settings.collaboration_mode.mode == ModeKind::Default {
         session.model = settings.model.clone();
         session.reasoning_effort = settings.effort.clone();
@@ -256,7 +293,6 @@ fn apply_thread_settings_to_session(session: &mut ThreadSessionState, settings: 
     );
     session.active_permission_profile = settings.active_permission_profile.clone().map(Into::into);
     session.set_cwd_retargeting_implicit_runtime_workspace_root(settings.cwd.clone());
-    session.personality = settings.personality;
     let mut collaboration_mode = settings.collaboration_mode.clone();
     collaboration_mode
         .settings
@@ -277,5 +313,4 @@ fn thread_settings_update_has_changes(params: &ThreadSettingsUpdateParams) -> bo
         || params.effort.is_some()
         || params.summary.is_some()
         || params.collaboration_mode.is_some()
-        || params.personality.is_some()
 }

@@ -8,8 +8,10 @@ use codex_config::McpServerTransportConfig;
 use codex_config::types::AuthKeyringBackendKind;
 use codex_config::types::OAuthCredentialsStoreMode;
 use codex_exec_server::HttpClient;
+use codex_login::AccountOAuthGrant;
 use codex_login::CodexAuth;
 use codex_rmcp_client::McpAuthState;
+use codex_rmcp_client::McpLoginRequirement;
 use codex_rmcp_client::McpOAuthCallbackMode;
 use codex_rmcp_client::OAuthDiscoveryTimeout;
 use codex_rmcp_client::OAuthProviderError;
@@ -20,6 +22,7 @@ use codex_rmcp_client::discover_streamable_http_oauth;
 use codex_rmcp_client::resolve_mcp_oauth_callback_url;
 use futures::FutureExt;
 use futures::future::join_all;
+use tokio::sync::OnceCell;
 use tracing::warn;
 
 use crate::runtime::McpRuntimeContext;
@@ -199,12 +202,17 @@ pub async fn compute_auth_statuses<'a, I>(
     store_mode: OAuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
     auth: Option<&CodexAuth>,
+    auth_manager: Option<&std::sync::Arc<codex_login::AuthManager>>,
+    ema_state: &crate::EmaState,
     runtime_context: &McpRuntimeContext,
 ) -> HashMap<String, McpAuthStatusEntry>
 where
     I: IntoIterator<Item = (&'a String, &'a EffectiveMcpServer)>,
 {
+    // Share successful, missing, and failed reads without starting storage work for non-EMA servers.
+    let account_grant = OnceCell::new();
     let futures = servers.into_iter().map(|(name, server)| {
+        let account_grant = &account_grant;
         let name = name.clone();
         let redirect_mode = if server.is_agent_plugin() {
             StreamableHttpRedirectMode::AgentPluginV1
@@ -242,6 +250,7 @@ where
     join_all(futures).await.into_iter().collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn compute_auth_status(
     server_name: &str,
     config: &McpServerConfig,

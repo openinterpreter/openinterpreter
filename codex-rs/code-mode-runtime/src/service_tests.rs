@@ -2,8 +2,6 @@
 
 use codex_code_mode_protocol::NoopCodeModeSessionDelegate;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use super::CellId;
@@ -20,6 +18,7 @@ use crate::ExecuteRequest;
 use crate::ExecuteToPendingOutcome;
 use crate::FunctionCallOutputContentItem;
 use crate::ToolDefinition;
+use codex_code_mode_protocol::CodeModeSession;
 use codex_code_mode_protocol::CodeModeSessionCellExecutionLimits;
 use codex_code_mode_protocol::NotificationFuture;
 use codex_code_mode_protocol::ToolInvocationFuture;
@@ -27,6 +26,7 @@ use codex_protocol::ToolName;
 use pretty_assertions::assert_eq;
 use serde_json::Value as JsonValue;
 use tokio::sync::Notify;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 #[test]
@@ -60,7 +60,8 @@ fn resolve_yield_timeout_applies_grace_before_session_limits() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn execute_waits_for_nested_tool_during_yield_grace() {
+async fn interrupt_yields_execute_and_wait_without_stopping_the_cell() {
+    let _time_guard = hold_virtual_time();
     let delegate = Arc::new(ReleasableToolDelegate::default());
     let service = InProcessCodeModeSession::new();
     let request = ExecuteRequest {
@@ -71,10 +72,9 @@ async fn execute_waits_for_nested_tool_during_yield_grace() {
     };
     let started = service.execute(request, delegate.clone()).await.unwrap();
     let response = tokio::spawn(started.initial_response());
-    wait_until_tool_started(&delegate).await;
+    wait_until_tool_started(&delegate).await.unwrap();
     tokio::time::advance(Duration::from_millis(10_500)).await;
     delegate.release_tool();
-    wait_until_finished(&response).await;
     let response = response.await.unwrap().unwrap();
 
     assert_eq!(
@@ -85,6 +85,7 @@ async fn execute_waits_for_nested_tool_during_yield_grace() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "done".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -92,6 +93,7 @@ async fn execute_waits_for_nested_tool_during_yield_grace() {
 
 #[tokio::test(start_paused = true)]
 async fn execute_and_wait_clamp_yield_grace_without_stopping_the_cell() {
+    let _time_guard = hold_virtual_time();
     let delegate = Arc::new(ReleasableToolDelegate::default());
     let service = InProcessCodeModeSession::with_limits(CodeModeSessionCellExecutionLimits {
         max_yield_time_ms: Some(/*value*/ 10_000),
@@ -110,12 +112,11 @@ async fn execute_and_wait_clamp_yield_grace_without_stopping_the_cell() {
         .await
         .unwrap();
     let initial_response = tokio::spawn(started.initial_response());
-    wait_until_tool_started(&delegate).await;
+    wait_until_tool_started(&delegate).await.unwrap();
 
     tokio::time::advance(Duration::from_millis(9_999)).await;
     assert!(!initial_response.is_finished());
     tokio::time::advance(Duration::from_millis(/*millis*/ 1)).await;
-    wait_until_finished(&initial_response).await;
     assert_eq!(
         initial_response.await.unwrap().unwrap(),
         RuntimeResponse::Yielded {
@@ -126,15 +127,18 @@ async fn execute_and_wait_clamp_yield_grace_without_stopping_the_cell() {
     );
 
     let wait_response = service
-        .begin_wait(WaitRequest {
-            cell_id: cell_id("1"),
-            yield_time_ms: 10_000,
-        })
+        .begin_wait(
+            WaitRequest {
+                cell_id: cell_id("1"),
+                yield_time_ms: 10_000,
+                max_output_tokens: None,
+            },
+            /*preempt*/ None,
+        )
         .await;
     let wait_response = tokio::spawn(wait_response);
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(/*secs*/ 10)).await;
-    wait_until_finished(&wait_response).await;
     assert_eq!(
         wait_response.await.unwrap().unwrap(),
         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
@@ -146,13 +150,16 @@ async fn execute_and_wait_clamp_yield_grace_without_stopping_the_cell() {
 
     delegate.release_tool();
     let completion = service
-        .begin_wait(WaitRequest {
-            cell_id: cell_id("1"),
-            yield_time_ms: 10_000,
-        })
+        .begin_wait(
+            WaitRequest {
+                cell_id: cell_id("1"),
+                yield_time_ms: 10_000,
+                max_output_tokens: None,
+            },
+            /*preempt*/ None,
+        )
         .await;
     let completion = tokio::spawn(completion);
-    wait_until_finished(&completion).await;
     assert_eq!(
         completion.await.unwrap().unwrap(),
         WaitOutcome::LiveCell(RuntimeResponse::Result {
@@ -161,6 +168,7 @@ async fn execute_and_wait_clamp_yield_grace_without_stopping_the_cell() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "done".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         })
     );
@@ -168,6 +176,7 @@ async fn execute_and_wait_clamp_yield_grace_without_stopping_the_cell() {
 
 #[tokio::test(start_paused = true)]
 async fn wait_waits_for_nested_tool_during_yield_grace() {
+    let _time_guard = hold_virtual_time();
     let delegate = Arc::new(ReleasableToolDelegate::default());
     let service = InProcessCodeModeSession::new();
     let initial_response = service
@@ -190,16 +199,19 @@ async fn wait_waits_for_nested_tool_during_yield_grace() {
         }
     );
     let response = service
-        .begin_wait(WaitRequest {
-            cell_id: cell_id("1"),
-            yield_time_ms: 10_000,
-        })
+        .begin_wait(
+            WaitRequest {
+                cell_id: cell_id("1"),
+                yield_time_ms: 10_000,
+                max_output_tokens: None,
+            },
+            /*preempt*/ None,
+        )
         .await;
     let response = tokio::spawn(response);
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(10_500)).await;
     delegate.release_tool();
-    wait_until_finished(&response).await;
     let response = response.await.unwrap();
 
     assert_eq!(
@@ -210,6 +222,7 @@ async fn wait_waits_for_nested_tool_during_yield_grace() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "done".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         })
     );
@@ -217,6 +230,7 @@ async fn wait_waits_for_nested_tool_during_yield_grace() {
 
 #[tokio::test(start_paused = true)]
 async fn zero_yield_limit_is_immediate_and_scoped_to_its_session() {
+    let _time_guard = hold_virtual_time();
     let zero_delegate = Arc::new(ReleasableToolDelegate::default());
     let zero_session = InProcessCodeModeSession::with_limits(CodeModeSessionCellExecutionLimits {
         max_yield_time_ms: Some(/*value*/ 0),
@@ -244,9 +258,8 @@ async fn zero_yield_limit_is_immediate_and_scoped_to_its_session() {
         .unwrap();
     let zero_response = tokio::spawn(zero_started.initial_response());
     let limited_response = tokio::spawn(limited_started.initial_response());
-    wait_until_tool_started(&zero_delegate).await;
-    wait_until_tool_started(&limited_delegate).await;
-    wait_until_finished(&zero_response).await;
+    wait_until_tool_started(&zero_delegate).await.unwrap();
+    wait_until_tool_started(&limited_delegate).await.unwrap();
     assert!(!limited_response.is_finished());
     assert_eq!(
         zero_response.await.unwrap().unwrap(),
@@ -258,13 +271,16 @@ async fn zero_yield_limit_is_immediate_and_scoped_to_its_session() {
     );
 
     let zero_wait = zero_session
-        .begin_wait(WaitRequest {
-            cell_id: cell_id("1"),
-            yield_time_ms: 60_000,
-        })
+        .begin_wait(
+            WaitRequest {
+                cell_id: cell_id("1"),
+                yield_time_ms: 60_000,
+                max_output_tokens: None,
+            },
+            /*preempt*/ None,
+        )
         .await;
     let zero_wait = tokio::spawn(zero_wait);
-    wait_until_finished(&zero_wait).await;
     assert_eq!(
         zero_wait.await.unwrap().unwrap(),
         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
@@ -275,7 +291,6 @@ async fn zero_yield_limit_is_immediate_and_scoped_to_its_session() {
     );
 
     tokio::time::advance(Duration::from_millis(/*millis*/ 10)).await;
-    wait_until_finished(&limited_response).await;
     assert_eq!(
         limited_response.await.unwrap().unwrap(),
         RuntimeResponse::Yielded {
@@ -289,30 +304,89 @@ async fn zero_yield_limit_is_immediate_and_scoped_to_its_session() {
     limited_session.shutdown().await.unwrap();
 }
 
-async fn wait_until_finished<T>(task: &tokio::task::JoinHandle<T>) {
-    for _ in 0..10_000 {
-        if task.is_finished() {
-            return;
+#[tokio::test(start_paused = true)]
+async fn tool_start_acknowledgement_reports_error_before_invocation() {
+    let _time_guard = hold_virtual_time();
+    let delegate = Arc::new(ReleasableToolDelegate::default());
+    let service = InProcessCodeModeSession::new();
+    let started = service
+        .execute(
+            execute_request("throw 'startup failed';"),
+            delegate.clone(),
+            /*preempt*/ None,
+        )
+        .await
+        .unwrap();
+
+    let (startup, response) = tokio::join!(
+        wait_until_tool_started(&delegate),
+        started.initial_response(),
+    );
+    assert_eq!(startup, Err("cell closed before nested tool started"));
+    assert_eq!(
+        response.unwrap(),
+        RuntimeResponse::Result {
+            code_mode_host_duration: None,
+            cell_id: cell_id("1"),
+            content_items: Vec::new(),
+            result_buffered_for: Duration::ZERO,
+            error_text: Some("startup failed".to_string()),
         }
-        tokio::task::yield_now().await;
-    }
-    panic!("code-mode response did not finish while virtual time was held in the grace period");
+    );
 }
 
-async fn wait_until_tool_started(delegate: &ReleasableToolDelegate) {
-    for _ in 0..10_000 {
-        if delegate.tool_started.load(Ordering::Acquire) {
-            return;
-        }
-        tokio::task::yield_now().await;
+#[tokio::test(start_paused = true)]
+async fn tool_start_acknowledgement_reports_termination_before_invocation() {
+    let _time_guard = hold_virtual_time();
+    let delegate = Arc::new(ReleasableToolDelegate::default());
+    let service = InProcessCodeModeSession::new();
+    let started = service
+        .execute(
+            execute_request("await new Promise(() => {});"),
+            delegate.clone(),
+            /*preempt*/ None,
+        )
+        .await
+        .unwrap();
+
+    let (startup, terminated) = tokio::join!(
+        wait_until_tool_started(&delegate),
+        service.terminate(cell_id("1").into()),
+    );
+    assert_eq!(startup, Err("cell closed before nested tool started"));
+    let response = RuntimeResponse::Terminated {
+        code_mode_host_duration: None,
+        cell_id: cell_id("1"),
+        content_items: Vec::new(),
+    };
+    assert_eq!(terminated.unwrap(), WaitOutcome::LiveCell(response.clone()));
+    assert_eq!(started.initial_response().await.unwrap(), response);
+}
+
+fn hold_virtual_time() -> oneshot::Sender<()> {
+    // A live blocking task prevents Tokio's paused clock from auto-advancing while
+    // we await the V8 thread. Tests advance time explicitly; dropping the guard
+    // releases the task even if the test panics or is cancelled.
+    let (guard, released) = oneshot::channel();
+    tokio::task::spawn_blocking(move || {
+        let _ = released.blocking_recv();
+    });
+    guard
+}
+
+async fn wait_until_tool_started(delegate: &ReleasableToolDelegate) -> Result<(), &'static str> {
+    tokio::select! {
+        biased;
+        _ = delegate.tool_started.notified() => Ok(()),
+        _ = delegate.cell_closed.cancelled() => Err("cell closed before nested tool started"),
     }
-    panic!("nested code-mode tool did not start");
 }
 
 #[derive(Default)]
 struct ReleasableToolDelegate {
     tool_release: Notify,
-    tool_started: AtomicBool,
+    tool_started: Notify,
+    cell_closed: CancellationToken,
 }
 
 impl ReleasableToolDelegate {
@@ -327,7 +401,7 @@ impl CodeModeSessionDelegate for ReleasableToolDelegate {
         _invocation: CodeModeNestedToolCall,
         cancellation_token: CancellationToken,
     ) -> ToolInvocationFuture<'a> {
-        self.tool_started.store(true, Ordering::Release);
+        self.tool_started.notify_one();
         Box::pin(async move {
             tokio::select! {
                 _ = self.tool_release.notified() => Ok(JsonValue::Null),
@@ -346,7 +420,9 @@ impl CodeModeSessionDelegate for ReleasableToolDelegate {
         Box::pin(async { Ok(()) })
     }
 
-    fn cell_closed(&self, _cell_id: &CellId) {}
+    fn cell_closed(&self, _cell_id: &CellId) {
+        self.cell_closed.cancel();
+    }
 }
 
 fn execute_request(source: &str) -> ExecuteRequest {
@@ -370,6 +446,7 @@ fn echo_tool() -> ToolDefinition {
         description: String::new(),
         kind: CodeModeToolKind::Function,
         input_schema: None,
+        input_schema_max_bytes: None,
         output_schema: None,
     }
 }
@@ -406,6 +483,211 @@ async fn synchronous_exit_returns_successfully() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "before".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
+            error_text: None,
+        }
+    );
+}
+
+#[tokio::test]
+async fn exit_stops_the_whole_cell_and_preserves_only_prior_writes() {
+    for (label, source) in [
+        ("exit inside infinite loop", r#"for (;;) { exit(); }"#),
+        ("infinite loop after exit", r#"exit(); for (;;) {}"#),
+        (
+            "invalid helper after exit",
+            r#"try { exit(); image(null); } catch { for (;;) {} }"#,
+        ),
+        (
+            "catch and finally",
+            r#"try { exit(); } catch { text("caught"); } finally { store("phase", "finally"); text("finally"); }"#,
+        ),
+        (
+            "queued microtask",
+            r#"Promise.resolve().then(() => { store("phase", "microtask"); text("microtask"); }); exit();"#,
+        ),
+        (
+            "unawaited promise",
+            r#"Promise.resolve().then(() => exit()).catch(() => text("caught")); await new Promise(() => {});"#,
+        ),
+        (
+            "async module",
+            r#"await Promise.resolve(); try { exit(); } finally { text("finally"); }"#,
+        ),
+        (
+            "parallel promises",
+            r#"await Promise.all([Promise.resolve().then(() => exit()), Promise.resolve().then(() => { store("phase", "sibling"); text("sibling"); })]);"#,
+        ),
+        (
+            "timer callback",
+            r#"setTimeout(() => { try { exit(); } catch { text("caught"); } finally { text("finally"); } }, 0); await new Promise(() => {});"#,
+        ),
+        (
+            "timer microtask",
+            r#"setTimeout(() => { Promise.resolve().then(() => exit()); }, 0); await new Promise(() => {});"#,
+        ),
+        (
+            "after awaited timer",
+            r#"await new Promise((resolve) => setTimeout(resolve, 0)); try { exit(); } catch { text("caught"); }"#,
+        ),
+        (
+            "text toJSON",
+            r#"try { text({ toJSON() { exit(); } }); } catch { text("caught"); } finally { text("finally"); }"#,
+        ),
+        (
+            "store toJSON",
+            r#"try { store("phase", { toJSON() { exit(); } }); } catch { text("caught"); } finally { text("finally"); }"#,
+        ),
+        (
+            "store key coercion",
+            r#"try { store({ toString() { exit(); } }, "late"); } catch { text("caught"); } finally { text("finally"); }"#,
+        ),
+        (
+            "image getter",
+            r#"try { image({ get image_url() { exit(); } }); } catch { text("caught"); } finally { text("finally"); }"#,
+        ),
+        (
+            "exception stack getter",
+            r#"store("phase", "before formatting");
+throw {
+    get stack() { store("phase", "before"); exit(); for (;;) {} },
+    toString() { for (;;) {} }
+};"#,
+        ),
+    ] {
+        let service = InProcessCodeModeSession::new();
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            execute(
+                &service,
+                ExecuteRequest {
+                    source: format!(
+                        r#"store("phase", "before"); text("before"); {source} store("phase", "after"); text("after");"#
+                    ),
+                    yield_time_ms: Some(30_000),
+                    ..execute_request("")
+                },
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("exit did not stop {label}"));
+        assert_eq!(
+            response,
+            RuntimeResponse::Result {
+                code_mode_host_duration: None,
+                cell_id: cell_id("1"),
+                content_items: vec![FunctionCallOutputContentItem::InputText {
+                    text: "before".to_string(),
+                }],
+                result_buffered_for: Duration::ZERO,
+                error_text: None,
+            },
+            "{label}"
+        );
+
+        let response = execute(
+            &service,
+            ExecuteRequest {
+                yield_time_ms: None,
+                ..execute_request(r#"text(load("phase"));"#)
+            },
+        )
+        .await;
+        assert_eq!(
+            response,
+            RuntimeResponse::Result {
+                code_mode_host_duration: None,
+                cell_id: cell_id("2"),
+                content_items: vec![FunctionCallOutputContentItem::InputText {
+                    text: "before".to_string(),
+                }],
+                result_buffered_for: Duration::ZERO,
+                error_text: None,
+            },
+            "{label}: next cell"
+        );
+    }
+}
+
+#[tokio::test]
+async fn exit_after_yield_and_tool_response_finishes_successfully() {
+    let delegate = Arc::new(ReleasableToolDelegate::default());
+    let service = InProcessCodeModeSession::new();
+    let yield_signal = CancellationToken::new();
+    let started = service
+        .execute(
+            ExecuteRequest {
+                enabled_tools: vec![echo_tool()],
+                source: r#"
+text("before yield");
+await tools.echo({});
+store("phase", "after tool");
+text("after tool");
+try { exit(); } catch { text("caught"); } finally { text("finally"); }
+text("after exit");
+"#
+                .to_string(),
+                yield_time_ms: Some(30_000),
+                ..execute_request("")
+            },
+            delegate.clone(),
+            Some(yield_signal.clone()),
+        )
+        .await
+        .unwrap();
+    let response = tokio::spawn(started.initial_response());
+    wait_until_tool_started(&delegate).await.unwrap();
+    yield_signal.cancel();
+    assert_eq!(
+        response.await.unwrap().unwrap(),
+        RuntimeResponse::Yielded {
+            code_mode_host_duration: None,
+            cell_id: cell_id("1"),
+            content_items: vec![FunctionCallOutputContentItem::InputText {
+                text: "before yield".to_string(),
+            }],
+        }
+    );
+    delegate.release_tool();
+    let actual = service
+        .wait(
+            WaitRequest {
+                max_output_tokens: None,
+                cell_id: cell_id("1"),
+                yield_time_ms: 30_000,
+            },
+            /*preempt*/ None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        actual,
+        WaitOutcome::LiveCell(RuntimeResponse::Result {
+            code_mode_host_duration: None,
+            cell_id: cell_id("1"),
+            content_items: vec![FunctionCallOutputContentItem::InputText {
+                text: "after tool".to_string(),
+            }],
+            result_buffered_for: actual.result_buffered_for().unwrap(),
+            error_text: None,
+        })
+    );
+    assert_eq!(
+        execute(
+            &service,
+            ExecuteRequest {
+                yield_time_ms: None,
+                ..execute_request(r#"text(load("phase"));"#)
+            },
+        )
+        .await,
+        RuntimeResponse::Result {
+            code_mode_host_duration: None,
+            cell_id: cell_id("2"),
+            content_items: vec![FunctionCallOutputContentItem::InputText {
+                text: "after tool".to_string(),
+            }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -451,6 +733,7 @@ async fn stored_values_are_shared_between_cells_but_not_sessions() {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -462,6 +745,7 @@ async fn stored_values_are_shared_between_cells_but_not_sessions() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "visible".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -473,6 +757,7 @@ async fn stored_values_are_shared_between_cells_but_not_sessions() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "undefined".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -590,6 +875,7 @@ async fn execute_to_pending_returns_completed_for_synchronous_results() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "done".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         })
     );
@@ -625,7 +911,7 @@ async fn execute_to_pending_returns_once_the_runtime_is_quiescent() {
         }
     );
 
-    let termination = service.terminate(cell_id("1")).await.unwrap();
+    let termination = service.terminate(cell_id("1").into()).await.unwrap();
 
     assert_eq!(
         termination,
@@ -669,7 +955,7 @@ await Promise.all([
         }
     );
 
-    let termination = service.terminate(cell_id("1")).await.unwrap();
+    let termination = service.terminate(cell_id("1").into()).await.unwrap();
 
     assert_eq!(
         termination,
@@ -737,7 +1023,7 @@ await Promise.all([
         })
     );
 
-    let termination = service.terminate(cell_id("1")).await.unwrap();
+    let termination = service.terminate(cell_id("1").into()).await.unwrap();
 
     assert_eq!(
         termination,
@@ -804,7 +1090,7 @@ await new Promise(() => {});
         })
     );
 
-    let termination = service.terminate(cell_id("1")).await.unwrap();
+    let termination = service.terminate(cell_id("1").into()).await.unwrap();
 
     assert_eq!(
         termination,
@@ -868,6 +1154,7 @@ text("done");
                 content_items: vec![FunctionCallOutputContentItem::InputText {
                     text: "done".to_string(),
                 }],
+                result_buffered_for: Duration::ZERO,
                 error_text: None,
             }
         ))
@@ -959,7 +1246,9 @@ async fn global_scope_contains_only_allowed_items() {
         "WeakSet",
         "__codexContentItems",
         "add_content",
+        "as_settled",
         "audio",
+        "content",
         "decodeURI",
         "decodeURIComponent",
         "encodeURI",
@@ -978,6 +1267,7 @@ async fn global_scope_contains_only_allowed_items() {
         "parseInt",
         "setTimeout",
         "store",
+        "stream_settled",
         "text",
         "tools",
         "undefined",
@@ -1014,6 +1304,7 @@ async fn v8_console_is_not_exposed_on_global_this() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "false".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1055,6 +1346,7 @@ text(value);
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "jeudi 2 janvier \u{e0} 03:04:05".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1095,6 +1387,7 @@ text(formatter.format(new Date("2025-01-02T03:04:05Z")));
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "jeudi 2 janvier \u{e0} 03:04:05".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1143,19 +1436,24 @@ text(JSON.stringify(returnsUndefined));
                     text: "[true,true,true,true]".to_string(),
                 },
             ],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
 }
 
 #[tokio::test]
-async fn text_helper_serializes_objects() {
+async fn text_serializes_objects_and_content_forwards_mcp_text() {
     let service = InProcessCodeModeSession::new();
 
     let response = execute(
         &service,
         ExecuteRequest {
-            source: "text({ json: true });".to_string(),
+            source: r#"const block = {type: "text", text: "caption", json: true};
+text(block);
+text(block.text);
+content(block);"#
+                .to_string(),
             yield_time_ms: None,
             ..execute_request("")
         },
@@ -1167,54 +1465,76 @@ async fn text_helper_serializes_objects() {
         RuntimeResponse::Result {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
-            content_items: vec![FunctionCallOutputContentItem::InputText {
-                text: r#"{"json":true}"#.to_string(),
-            }],
+            content_items: [
+                r#"{"type":"text","text":"caption","json":true}"#,
+                "caption",
+                "caption"
+            ]
+            .map(|text| FunctionCallOutputContentItem::InputText { text: text.into() })
+            .into(),
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
 }
 
 #[tokio::test]
-async fn text_helper_surfaces_stringify_errors() {
-    let service = InProcessCodeModeSession::new();
+async fn output_helpers_surface_input_errors() {
+    for (source, expected_error) in [
+        (
+            "const circular = {}; circular.self = circular; text(circular);",
+            "Converting circular structure to JSON",
+        ),
+        (
+            "image({get image_url() { throw new Error('image getter failed'); }});",
+            "image getter failed",
+        ),
+        (
+            "image({type: 'image', get data() { throw new Error('MCP getter failed'); }});",
+            "MCP getter failed",
+        ),
+        (
+            "image({type: 'image', data: ''});",
+            "image expected MCP image data",
+        ),
+        (
+            "image({type: 'audio'});",
+            r#"image only accepts MCP image blocks, got "audio""#,
+        ),
+    ] {
+        let service = InProcessCodeModeSession::new();
+        let response = execute(
+            &service,
+            ExecuteRequest {
+                yield_time_ms: None,
+                ..execute_request(source)
+            },
+        )
+        .await;
 
-    let response = execute(
-        &service,
-        ExecuteRequest {
-            source: r#"
-const circular = {};
-circular.self = circular;
-text(circular);
-"#
-            .to_string(),
-            yield_time_ms: None,
-            ..execute_request("")
-        },
-    )
-    .await;
-
-    let RuntimeResponse::Result {
-        error_text: Some(error_text),
-        ..
-    } = &response
-    else {
-        panic!("circular stringify unexpectedly succeeded: {response:?}");
-    };
-    assert!(
-        error_text.contains("Converting circular structure to JSON"),
-        "unexpected circular stringify error: {error_text}"
-    );
-    let error_text = error_text.clone();
-    assert_eq!(
-        response,
-        RuntimeResponse::Result {
-            code_mode_host_duration: None,
-            cell_id: cell_id("1"),
-            content_items: Vec::new(),
+        let RuntimeResponse::Result {
             error_text: Some(error_text),
-        }
-    );
+            ..
+        } = &response
+        else {
+            panic!("serialization unexpectedly succeeded: {response:?}");
+        };
+        assert!(
+            error_text.contains(expected_error),
+            "unexpected serialization error: {error_text}"
+        );
+        let error_text = error_text.clone();
+        assert_eq!(
+            response,
+            RuntimeResponse::Result {
+                code_mode_host_duration: None,
+                cell_id: cell_id("1"),
+                content_items: Vec::new(),
+                result_buffered_for: Duration::ZERO,
+                error_text: Some(error_text),
+            }
+        );
+    }
 }
 
 #[tokio::test]
@@ -1254,6 +1574,7 @@ audio({
                     audio_url: "data:audio/wav;base64,YXVkaW8=".to_string(),
                 },
             ],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1286,6 +1607,7 @@ async fn audio_helper_rejects_non_data_urls() {
                 code_mode_host_duration: None,
                 cell_id: cell_id("1"),
                 content_items: Vec::new(),
+                result_buffered_for: Duration::ZERO,
                 error_text: Some(
                     "Tool call failed: invalid audio output. Pass a base64 data URI instead"
                         .to_string(),
@@ -1296,17 +1618,19 @@ async fn audio_helper_rejects_non_data_urls() {
 }
 
 #[tokio::test]
-async fn image_helper_accepts_raw_mcp_image_block_with_original_detail() {
+async fn image_and_content_forward_the_same_raw_mcp_image() {
     let service = InProcessCodeModeSession::new();
 
     let response = execute(&service, ExecuteRequest {
                 source: r#"
-image({
+const block = {
   type: "image",
   data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
-  mimeType: "image/png",
+  mime_type: "image/png",
   _meta: { "codex/imageDetail": "original" },
-});
+};
+image(block);
+content(block);
 "#
                 .to_string(),
                 yield_time_ms: None,
@@ -1322,10 +1646,219 @@ image({
                 content_items: vec![FunctionCallOutputContentItem::InputImage {
                     image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==".to_string(),
                     detail: Some(crate::ImageDetail::Original),
-                }],
+                }; 2],
+                result_buffered_for: Duration::ZERO,
                 error_text: None,
             }
         );
+}
+
+#[tokio::test]
+async fn media_helpers_preserve_legacy_mime_inputs_and_detail_overrides() {
+    let response = execute(
+        &InProcessCodeModeSession::new(),
+        ExecuteRequest {
+            yield_time_ms: None,
+            ..execute_request(
+                r#"
+image({type: "image", data: "YQ==", mimeType: "image/png", mime_type: "image/jpeg"});
+audio({type: "audio", data: "YQ==", mimeType: 1, mime_type: "audio/wav"});
+image({type: "image", data: "DaTa:image/png;base64,YQ==", mimeType: ""}, "LOW");
+"#,
+            )
+        },
+    )
+    .await;
+    assert_eq!(
+        response,
+        RuntimeResponse::Result {
+            code_mode_host_duration: None,
+            cell_id: cell_id("1"),
+            content_items: vec![
+                FunctionCallOutputContentItem::InputImage {
+                    image_url: "data:image/png;base64,YQ==".into(),
+                    detail: Some(crate::DEFAULT_IMAGE_DETAIL),
+                },
+                FunctionCallOutputContentItem::InputAudio {
+                    audio_url: "data:application/octet-stream;base64,YQ==".into(),
+                },
+                FunctionCallOutputContentItem::InputImage {
+                    image_url: "DaTa:image/png;base64,YQ==".into(),
+                    detail: Some(crate::ImageDetail::Low),
+                },
+            ],
+            result_buffered_for: Duration::ZERO,
+            error_text: None,
+        }
+    );
+}
+
+#[tokio::test]
+async fn content_helper_forwards_mixed_mcp_blocks_in_order() {
+    let link = serde_json::json!({
+        "type": "resource_link", "name": "notes", "uri": "file:///notes",
+    });
+    let resource = serde_json::json!({
+        "type": "resource", "resource": {"uri": "file:///notes", "text": "notes"},
+    });
+    let blob = serde_json::json!({
+        "type": "resource", "resource": {"uri": "file:///sample", "blob": "YWJj"},
+    });
+    let blocks = serde_json::json!([
+        {"type": "text", "text": "caption", "annotations": {"priority": 0.5}},
+        {
+            "type": "image",
+            "data": "aW1hZ2U=",
+            "mimeType": "image/png",
+            "_meta": {"codex/imageDetail": "original"},
+        },
+        {"type": "audio", "data": "YXVkaW8=", "mimeType": "audio/mpeg"},
+        link, resource, blob,
+    ]);
+    let response = execute(
+        &InProcessCodeModeSession::new(),
+        ExecuteRequest {
+            yield_time_ms: None,
+            ..execute_request(&format!("content({blocks})"))
+        },
+    )
+    .await;
+    assert_eq!(
+        response,
+        RuntimeResponse::Result {
+            code_mode_host_duration: None,
+            cell_id: cell_id("1"),
+            content_items: vec![
+                FunctionCallOutputContentItem::InputText {
+                    text: "caption".into()
+                },
+                FunctionCallOutputContentItem::InputImage {
+                    image_url: "data:image/png;base64,aW1hZ2U=".into(),
+                    detail: Some(crate::ImageDetail::Original),
+                },
+                FunctionCallOutputContentItem::InputAudio {
+                    audio_url: "data:audio/mpeg;base64,YXVkaW8=".into(),
+                },
+                FunctionCallOutputContentItem::InputText {
+                    text: link.to_string()
+                },
+                FunctionCallOutputContentItem::InputText {
+                    text: resource.to_string()
+                },
+                FunctionCallOutputContentItem::InputText {
+                    text: blob.to_string()
+                },
+            ],
+            result_buffered_for: Duration::ZERO,
+            error_text: None,
+        }
+    );
+}
+
+#[tokio::test]
+async fn content_helper_consumes_iterables_in_order_and_closes_on_error() {
+    let response = execute(
+        &InProcessCodeModeSession::new(),
+        ExecuteRequest {
+            yield_time_ms: None,
+            ..execute_request(
+                r#"
+const block = (text) => ({type: "text", text});
+content([]);
+[block("single")].forEach(content);
+content(new Set([block("set")]));
+
+const failure = new Error("iterator failed");
+function* generator() { yield block("generator"); throw failure; }
+try { content(generator()); } catch (error) {
+  if (error !== failure) throw error;
+  text("caught iterator error");
+}
+
+let reads = 0;
+const iterable = {
+  get [Symbol.iterator]() {
+    if (++reads !== 1) throw new Error("iterator getter read twice");
+    return function () {
+      if (this !== iterable) throw new Error("wrong iterator receiver");
+      const items = [block("first"), {type: "image"}, block("past error")].values();
+      return {
+        next() { text("next"); return items.next(); },
+        return() { text("closed"); return {}; },
+      };
+    };
+  },
+};
+try { content(iterable); } catch (error) { text(error); }
+"#,
+            )
+        },
+    )
+    .await;
+    let expected = [
+        "single",
+        "set",
+        "generator",
+        "caught iterator error",
+        "next",
+        "first",
+        "next",
+        "closed",
+        "content expects one MCP ContentBlock",
+    ];
+    assert_eq!(
+        response,
+        RuntimeResponse::Result {
+            code_mode_host_duration: None,
+            cell_id: cell_id("1"),
+            content_items: expected
+                .into_iter()
+                .map(|text| FunctionCallOutputContentItem::InputText { text: text.into() })
+                .collect(),
+            result_buffered_for: Duration::ZERO,
+            error_text: None,
+        }
+    );
+}
+
+#[tokio::test]
+async fn content_helper_rejects_invalid_blocks_and_encrypted_text_without_emitting_them() {
+    let response = execute(
+        &InProcessCodeModeSession::new(),
+        ExecuteRequest {
+            yield_time_ms: None,
+            ..execute_request(
+                r#"
+for (const block of [
+  undefined, "", {content: []}, [[{type: "text", text: "nested"}]], ["text", "nested"],
+  {type: "unknown"}, {type: "text", text: 1}, {type: "image"},
+  {type: "resource", resource: {uri: "file:///notes"}}, {type: "resource_link"},
+  {type: "text", text: "opaque", _meta: {"codex/encryptedContent": true}},
+]) {
+  try { content(block); } catch (error) {
+    const expected = block?._meta?.["codex/encryptedContent"]
+      ? "content cannot emit encrypted MCP text"
+      : "content expects one MCP ContentBlock";
+    if (error === expected) continue;
+    throw error;
+  }
+  throw new Error("expected content to reject the block");
+}
+"#,
+            )
+        },
+    )
+    .await;
+    assert_eq!(
+        response,
+        RuntimeResponse::Result {
+            code_mode_host_duration: None,
+            cell_id: cell_id("1"),
+            content_items: Vec::new(),
+            result_buffered_for: Duration::ZERO,
+            error_text: None,
+        }
+    );
 }
 
 #[tokio::test]
@@ -1362,6 +1895,7 @@ generatedImage({
                     text: "generated image save hint".to_string(),
                 },
             ],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1399,6 +1933,7 @@ image(
                 image_url: "data:image/png;base64,AAA".to_string(),
                 detail: Some(crate::ImageDetail::Original),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1435,6 +1970,7 @@ image(
                     image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==".to_string(),
                     detail: Some(crate::ImageDetail::High),
                 }],
+                result_buffered_for: Duration::ZERO,
                 error_text: None,
             }
         );
@@ -1469,6 +2005,7 @@ image({
                 image_url: "data:image/png;base64,AAA".to_string(),
                 detail: Some(crate::ImageDetail::Low),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );
@@ -1502,6 +2039,7 @@ async fn image_helpers_reject_remote_urls() {
                         code_mode_host_duration: None,
                         cell_id: cell_id("1"),
                         content_items: Vec::new(),
+                        result_buffered_for: Duration::ZERO,
                         error_text: Some(
                             "Tool call failed: remote image URLs are not supported in tool outputs. Pass a base64 data URI instead".to_string(),
                         ),
@@ -1537,6 +2075,7 @@ async fn image_helpers_reject_invalid_image_outputs() {
                 code_mode_host_duration: None,
                 cell_id: cell_id("1"),
                 content_items: Vec::new(),
+                result_buffered_for: Duration::ZERO,
                 error_text: Some(
                     "Tool call failed: invalid image output. Pass a base64 data URI instead"
                         .to_string(),
@@ -1572,6 +2111,7 @@ image({
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            result_buffered_for: Duration::ZERO,
             error_text: Some("image detail must be one of: auto, low, high, original".to_string()),
         }
     );
@@ -1607,6 +2147,7 @@ image({
                 code_mode_host_duration: None,
                 cell_id: cell_id("1"),
                 content_items: Vec::new(),
+                result_buffered_for: Duration::ZERO,
                 error_text: Some(
                     "image expects a non-empty image URL string, an object with image_url and optional detail, or a raw MCP image block".to_string(),
                 ),
@@ -1619,10 +2160,14 @@ async fn wait_reports_missing_cell_separately_from_runtime_results() {
     let service = InProcessCodeModeSession::new();
 
     let response = service
-        .wait(WaitRequest {
-            cell_id: cell_id("missing"),
-            yield_time_ms: 1,
-        })
+        .wait(
+            WaitRequest {
+                cell_id: cell_id("missing"),
+                yield_time_ms: 1,
+                max_output_tokens: None,
+            },
+            /*preempt*/ None,
+        )
         .await
         .unwrap();
 
@@ -1632,6 +2177,7 @@ async fn wait_reports_missing_cell_separately_from_runtime_results() {
             code_mode_host_duration: None,
             cell_id: cell_id("missing"),
             content_items: Vec::new(),
+            result_buffered_for: Duration::ZERO,
             error_text: Some("exec cell missing not found".to_string()),
         })
     );

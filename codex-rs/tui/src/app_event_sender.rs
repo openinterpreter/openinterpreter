@@ -3,7 +3,9 @@
 //! This wraps the raw channel so call sites can submit typed `AppCommand`s
 //! without duplicating event construction or session logging behavior.
 
-use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use crate::app_command::AppCommand;
 use crate::app_command::UserVerificationResponse;
@@ -23,16 +25,41 @@ use crate::session_log;
 #[derive(Clone, Debug)]
 pub(crate) struct AppEventSender {
     pub app_event_tx: UnboundedSender<AppEvent>,
+    pub(crate) voice_only: Arc<AtomicBool>,
 }
 
 impl AppEventSender {
     pub(crate) fn new(app_event_tx: UnboundedSender<AppEvent>) -> Self {
-        Self { app_event_tx }
+        Self {
+            app_event_tx,
+            voice_only: Arc::default(),
+        }
     }
 
     /// Send an event to the app event channel. If it fails, we swallow the
     /// error and log it.
     pub(crate) fn send(&self, event: AppEvent) {
+        // A parked voice owner keeps processing its session, but its UI and queued
+        // typed work must not act on the visible session. Thread-scoped metadata still applies.
+        if self.voice_only.load(Ordering::Relaxed)
+            && !matches!(
+                &event,
+                AppEvent::CodexOp(
+                    AppCommand::RealtimeConversationStart { .. }
+                        | AppCommand::RealtimeConversationStop { .. }
+                        | AppCommand::RealtimeConversationSpeech { .. }
+                ) | AppEvent::RealtimeWebrtcOfferCreated { .. }
+                    | AppEvent::RealtimeWebrtcConnected { .. }
+                    | AppEvent::StopRealtimeConversation { .. }
+                    | AppEvent::RealtimeSessionLockStopped { .. }
+                    | AppEvent::RealtimeConversationStateChanged
+                    | AppEvent::BackgroundVoiceError { .. }
+                    | AppEvent::SyncThreadGitBranch { .. }
+                    | AppEvent::RefreshRateLimits { .. }
+            )
+        {
+            return;
+        }
         // Record inbound events for high-fidelity session replay.
         // Avoid double-logging Ops; those are logged at the point of submission.
         if !matches!(event, AppEvent::CodexOp(_)) {
@@ -59,17 +86,16 @@ impl AppEventSender {
         self.send(AppEvent::CodexOp(AppCommand::review(target)));
     }
 
-    pub(crate) fn list_skills(&self, cwds: Vec<PathBuf>, force_reload: bool) {
-        self.send(AppEvent::CodexOp(AppCommand::list_skills(
-            cwds,
-            force_reload,
-        )));
-    }
-
-    pub(crate) fn user_input_answer(&self, id: String, response: ToolRequestUserInputResponse) {
-        self.send(AppEvent::CodexOp(AppCommand::user_input_answer(
-            id, response,
-        )));
+    pub(crate) fn user_input_answer(
+        &self,
+        thread_id: ThreadId,
+        id: String,
+        response: ToolRequestUserInputResponse,
+    ) {
+        self.send(AppEvent::SubmitThreadOp {
+            thread_id,
+            op: AppCommand::user_input_answer(id, response),
+        });
     }
 
     pub(crate) fn exec_approval(

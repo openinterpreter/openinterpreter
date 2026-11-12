@@ -370,7 +370,7 @@ pub(crate) fn foreground_style_for_scopes_with_theme(
     scope_names.iter().find_map(|scope_name| {
         let scope = Scope::new(scope_name).ok()?;
         let fg = highlighter.style_mod_for_stack(&[scope]).foreground?;
-        convert_syntect_color(fg).map(|fg| Style::default().fg(fg))
+        convert_syntect_color(fg)
     })
 }
 

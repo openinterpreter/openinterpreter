@@ -220,6 +220,9 @@ pub struct ThreadRealtimeStartParams {
     /// default to `thinking`. Realtime V1 and V2 ignore this setting.
     #[ts(optional = nullable)]
     pub codex_response_handoff_mode: Option<CodexResponseHandoffMode>,
+    /// Relays public reasoning summaries as quiet context for realtime V3 delegations. Defaults to false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub backend_reasoning_status: bool,
     /// Overrides BEM channel prefixes by `analysis`, `commentary`, or `final`.
     /// Omitted channels retain their default uppercase bracketed prefixes.
     #[ts(optional = nullable)]
@@ -254,6 +257,10 @@ pub struct ThreadRealtimeStartParams {
     pub prompt: Option<Option<String>>,
     #[ts(optional = nullable)]
     pub realtime_session_id: Option<String>,
+    /// Client-generated identifier for the product voice session. This is distinct from
+    /// `realtimeSessionId`.
+    #[ts(optional = nullable)]
+    pub voice_session_id: Option<String>,
     #[ts(optional = nullable)]
     pub transport: Option<ThreadRealtimeStartTransport>,
     /// Overrides the configured realtime protocol version for this session only.

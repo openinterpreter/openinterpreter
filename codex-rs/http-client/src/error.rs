@@ -1,18 +1,22 @@
 //! Errors returned by the shared Codex HTTP transport.
 
 use crate::client::HttpError;
+use crate::retry_after::RetryAfter;
 use http::HeaderMap;
 use http::StatusCode;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum TransportError {
+    #[error(transparent)]
+    Policy(#[from] crate::NetworkPolicyDenied),
     #[error("http {status}: {body:?}")]
     Http {
         status: StatusCode,
         url: Option<String>,
         headers: Option<HeaderMap>,
         body: Option<String>,
+        retry_after: Option<RetryAfter>,
     },
     #[error("retry limit reached")]
     RetryLimit,

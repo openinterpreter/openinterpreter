@@ -64,7 +64,7 @@ use rmcp::model::MetaObject;
 use rmcp::model::PrimitiveSchemaDefinition;
 use rmcp::model::RequestMetaObject;
 use rmcp::model::ServerCapabilities;
-use rmcp::model::ServerInfo;
+use rmcp::model::ServerConfig;
 use rmcp::model::ServerRequest as McpServerRequest;
 use rmcp::model::Tool;
 use rmcp::model::ToolAnnotations;
@@ -521,6 +521,7 @@ async fn initialize_websocket_client(
                 version: "0.1.0".to_string(),
             },
             capabilities: Some(InitializeCapabilities {
+                required_human_approval: false,
                 experimental_api: true,
                 extensions: supports_openai_form_elicitation
                     .then(|| HashMap::from([("openai/form".to_string(), serde_json::json!({}))])),
@@ -1048,8 +1049,8 @@ impl ServerHandler for ElicitationAppsMcpServer {
         Ok(self.get_info())
     }
 
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(rmcp::model::ProtocolVersion::V_2025_06_18)
     }
 

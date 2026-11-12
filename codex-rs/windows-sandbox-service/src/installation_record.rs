@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::io;
 use std::os::windows::ffi::OsStringExt;
+use std::os::windows::io::OwnedHandle;
 use std::path::Path;
 use std::path::PathBuf;
 use std::ptr;

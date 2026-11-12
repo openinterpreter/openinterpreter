@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use codex_exec_server_protocol::ExecutorCapabilityDiscoverySnapshot;
 use codex_protocol::ThreadId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::openai_models::ModelInfo;
@@ -26,6 +25,12 @@ pub struct WorldStateContributionInput<'a> {
     pub session_store: &'a ExtensionData,
     pub thread_store: &'a ExtensionData,
     pub turn_store: &'a ExtensionData,
+    /// The same captured extension inputs that were used to build this step's tools.
+    pub step_store: &'a ExtensionData,
+    /// Persisted comparison state from the last recorded step. Its rendered text may have
+    /// left model history; use a retained-fragment matcher before referring back to it.
+    /// After compaction, sections may contain only retained extension metadata.
+    pub previous_world_state: Option<&'a serde_json::Map<String, Value>>,
 }
 
 /// What the harness knows about the previous value of one extension-owned section.
@@ -35,25 +40,40 @@ pub enum PreviousWorldStateSection<'a> {
     Known(&'a Value),
 }
 
-/// Plain model-visible data rendered by an extension-owned World State section.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Model-visible content rendered by an extension-owned World State section.
+/// Markers apply only to `InputText` bodies.
+/// The producer owns size bounds for the content; rendering does not truncate it.
+/// Non-text user-role bodies are currently classified as ordinary user media.
+#[derive(Clone, Debug, PartialEq)]
 pub struct RenderedWorldStateFragment {
     role: &'static str,
     markers: (&'static str, &'static str),
-    body: String,
+    body: ContentItem,
+    metadata: ContentItemMetadata,
 }
 
 impl RenderedWorldStateFragment {
     pub fn new(
         role: &'static str,
         markers: (&'static str, &'static str),
-        body: impl Into<String>,
+        body: ContentItem,
     ) -> Self {
         Self {
             role,
             markers,
-            body: body.into(),
+            body,
+            metadata: ContentItemMetadata::harness(),
         }
+    }
+
+    /// Attach the producer's source before the harness assembles the context message.
+    pub fn with_metadata(mut self, metadata: ContentItemMetadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    pub fn metadata(&self) -> &ContentItemMetadata {
+        &self.metadata
     }
 
     pub fn role(&self) -> &'static str {
@@ -64,12 +84,12 @@ impl RenderedWorldStateFragment {
         self.markers
     }
 
-    pub fn body(&self) -> &str {
+    pub fn body(&self) -> &ContentItem {
         &self.body
     }
 }
 
-type RenderDiff = dyn for<'a> Fn(PreviousWorldStateSection<'a>) -> Option<RenderedWorldStateFragment>
+type RenderDiff = dyn for<'a> Fn(PreviousWorldStateSection<'a>) -> (Option<Value>, Option<RenderedWorldStateFragment>)
     + Send
     + Sync;
 type LegacyFragmentMatcher = dyn Fn(&str, &str) -> bool + Send + Sync;
@@ -81,30 +101,48 @@ type LegacyFragmentMatcher = dyn Fn(&str, &str) -> bool + Send + Sync;
 #[derive(Clone)]
 pub struct WorldStateSectionContribution {
     id: &'static str,
-    snapshot: Value,
+    include_in_full_context: bool,
+    window_prefix: bool,
     render_diff: Arc<RenderDiff>,
     matches_legacy_fragment: Arc<LegacyFragmentMatcher>,
     matches_retained_fragment: Option<Arc<LegacyFragmentMatcher>>,
 }
 
 impl WorldStateSectionContribution {
+    /// Return a replacement snapshot and/or fragment. A missing snapshot retains the
+    /// previous section state; a missing fragment emits no model-visible update. A null
+    /// snapshot removes the section from persisted state.
     pub fn new(
         id: &'static str,
-        snapshot: Value,
         render_diff: impl for<'a> Fn(
             PreviousWorldStateSection<'a>,
-        ) -> Option<RenderedWorldStateFragment>
+        ) -> (Option<Value>, Option<RenderedWorldStateFragment>)
         + Send
         + Sync
         + 'static,
     ) -> Self {
         Self {
             id,
-            snapshot,
+            include_in_full_context: true,
+            window_prefix: false,
             render_diff: Arc::new(render_diff),
             matches_legacy_fragment: Arc::new(|_, _| false),
             matches_retained_fragment: None,
         }
+    }
+
+    /// Recompute this section during ordinary step context updates instead of replaying
+    /// its captured value when initial or compacted context is rebuilt. Full rendering
+    /// omits both its fragment and comparison snapshot so a fresh contribution can emit.
+    /// After prefix compaction, the next diff receives [`PreviousWorldStateSection::Unknown`]
+    /// if the section's legacy matcher recognizes text in the retained suffix.
+    pub fn without_full_context(mut self) -> Self {
+        self.include_in_full_context = false;
+        self
+    }
+
+    pub fn include_in_full_context(&self) -> bool {
+        self.include_in_full_context
     }
 
     pub fn with_legacy_matcher(
@@ -113,6 +151,20 @@ impl WorldStateSectionContribution {
     ) -> Self {
         self.matches_legacy_fragment = Arc::new(matcher);
         self
+    }
+
+    /// Render this section's developer fragments as separate messages before retained
+    /// history when the harness builds a window (including after compaction). Changes
+    /// within an existing window are still appended as ordinary history updates.
+    /// Fragments with any other role are not rendered, including in history updates.
+    /// The producer still owns content size bounds; prefix placement does not truncate.
+    pub fn with_window_prefix(mut self) -> Self {
+        self.window_prefix = true;
+        self
+    }
+
+    pub fn is_window_prefix(&self) -> bool {
+        self.window_prefix
     }
 
     /// Requires a matching model-visible fragment whenever a persisted snapshot is reused.
@@ -128,14 +180,10 @@ impl WorldStateSectionContribution {
         self.id
     }
 
-    pub fn snapshot(&self) -> &Value {
-        &self.snapshot
-    }
-
     pub fn render_diff(
         &self,
         previous: PreviousWorldStateSection<'_>,
-    ) -> Option<RenderedWorldStateFragment> {
+    ) -> (Option<Value>, Option<RenderedWorldStateFragment>) {
         (self.render_diff)(previous)
     }
 

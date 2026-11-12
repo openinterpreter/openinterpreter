@@ -8,16 +8,15 @@ use crate::app_server_session::AppServerSession;
 use crate::app_server_session::HistoryHydrationScope;
 use crate::git_action_directives::parse_assistant_markdown;
 use crate::history_cell::AgentMarkdownCell;
+use crate::history_cell::DelegatedMessageCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
-use crate::history_cell::PrefixedWrappedHistoryCell;
 use crate::history_cell::ReasoningSummaryCell;
-use crate::history_cell::UserHistoryCell;
 use crate::history_cell::split_reasoning_summary_parts;
 use crate::inline_visualization::InlineVisualizationContext;
 use crate::legacy_core::config::Config;
 use codex_app_server_protocol::Thread;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::UserInput;
 use codex_protocol::ThreadId;
 use codex_protocol::items::UserMessageItem;
@@ -82,7 +81,7 @@ pub(crate) async fn load_session_transcript(
             /*item_cursor*/ None,
             /*config*/ None,
             /*local_settings*/ None,
-            HistoryHydrationScope::Complete,
+            HistoryHydrationScope::FullTranscript,
         )
         .await
         .map_err(std::io::Error::other)?;
@@ -124,7 +123,7 @@ pub(crate) fn thread_to_transcript_cells(
 pub(crate) fn thread_items_to_transcript_cells(
     thread_id: Option<ThreadId>,
     cwd: &AbsolutePathBuf,
-    items: impl IntoIterator<Item = ThreadItem>,
+    items: impl IntoIterator<Item = ThreadItemPayload>,
     raw_reasoning_visibility: RawReasoningVisibility,
     config: Option<&Config>,
 ) -> TranscriptCells {

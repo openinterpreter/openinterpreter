@@ -10,9 +10,11 @@ use crate::terminal_palette::best_color;
 use crate::terminal_palette::default_bg;
 use crate::terminal_palette::default_fg;
 use crate::terminal_palette::effective_stdout_color_level;
+use crate::terminal_palette::indexed_color;
 use crate::terminal_palette::rgb_color;
 use crate::terminal_palette::stdout_color_level;
 use ratatui::style::Color;
+use ratatui::style::Modifier;
 use ratatui::style::Style;
 
 const LIGHT_BG_ACCENT_RGB: (u8, u8, u8) = (28, 100, 200);
@@ -256,12 +258,16 @@ pub fn user_message_bg(terminal_bg: (u8, u8, u8)) -> Color {
 }
 
 pub(crate) fn user_message_bg_rgb(terminal_bg: (u8, u8, u8)) -> (u8, u8, u8) {
+    shade_rgb(terminal_bg, terminal_bg)
+}
+
+fn shade_rgb(surface: (u8, u8, u8), terminal_bg: (u8, u8, u8)) -> (u8, u8, u8) {
     let (top, alpha) = if is_light(terminal_bg) {
         ((0, 0, 0), 0.04)
     } else {
         ((255, 255, 255), 0.12)
     };
-    blend(top, terminal_bg, alpha)
+    blend(top, surface, alpha)
 }
 
 #[allow(clippy::disallowed_methods)]

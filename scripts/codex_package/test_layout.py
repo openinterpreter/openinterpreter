@@ -16,6 +16,7 @@ from codex_package.layout import validate_package_dir
 from codex_package.targets import PACKAGE_VARIANTS
 from codex_package.targets import PackageInputs
 from codex_package.targets import TARGET_SPECS
+from codex_package.targets import default_target
 
 
 class PackageLayoutTest(unittest.TestCase):
@@ -137,9 +138,7 @@ class PackageLayoutTest(unittest.TestCase):
                         package_dir = root / "package"
                         package_dir.mkdir()
                         rg_bin = touch_executable(root / "signed-rg")
-                        zsh_bin = touch_executable(root / "signed-zsh")
                         rg_bin.write_bytes(b"signed ripgrep binary")
-                        zsh_bin.write_bytes(b"signed zsh binary")
                         variant = PACKAGE_VARIANTS[variant_name]
                         spec = TARGET_SPECS[target]
                         inputs = PackageInputs(
@@ -150,31 +149,49 @@ class PackageLayoutTest(unittest.TestCase):
                             code_mode_host_bin=touch_executable(
                                 root / "codex-code-mode-host"
                             ),
+                            exec_server_bin=rg_bin,
                             rg_bin=rg_bin,
-                            zsh_bin=zsh_bin,
                             bwrap_bin=None,
                             codex_command_runner_bin=None,
                             codex_windows_sandbox_setup_bin=None,
                         )
                         build_package_dir(package_dir, "1.2.3", variant, spec, inputs)
-                        validate_package_dir(
-                            package_dir, variant, spec, include_zsh=True
-                        )
+                        validate_package_dir(package_dir, variant, spec)
+                        for suffix in (".tar.gz", ".tar.zst"):
+                            archive_path = root / f"package{suffix}"
+                            write_archive(package_dir, archive_path, force=False)
+                            data = (
+                                subprocess.check_output(
+                                    [
+                                        *resolve_zstd_command(),
+                                        "-d",
+                                        "--stdout",
+                                        str(archive_path),
+                                    ]
+                                )
+                                if suffix == ".tar.zst"
+                                else archive_path.read_bytes()
+                            )
+                            with tarfile.open(
+                                fileobj=io.BytesIO(data), mode="r:*"
+                            ) as archive:
+                                member = archive.getmember("bin/codex-exec-server")
+                                self.assertTrue(member.mode & 0o111)
+                                self.assertEqual(
+                                    archive.extractfile(member).read(),
+                                    rg_bin.read_bytes(),
+                                )
 
                         self.assertEqual(
                             {
                                 "rg": (package_dir / "codex-path" / "rg").read_bytes(),
-                                "zsh": (
-                                    package_dir
-                                    / "codex-resources"
-                                    / "zsh"
-                                    / "bin"
-                                    / "zsh"
+                                "executor": (
+                                    package_dir / "bin/codex-exec-server"
                                 ).read_bytes(),
                             },
                             {
                                 "rg": b"signed ripgrep binary",
-                                "zsh": b"signed zsh binary",
+                                "executor": b"signed ripgrep binary",
                             },
                         )
 
@@ -187,8 +204,8 @@ class PackageLayoutTest(unittest.TestCase):
                 entrypoint_bin=touch_executable(root / "codex-app-server"),
                 managed_codex_bin=None,
                 code_mode_host_bin=touch_executable(root / "codex-code-mode-host"),
+                exec_server_bin=touch_executable(root / "codex-exec-server"),
                 rg_bin=touch_executable(root / "rg"),
-                zsh_bin=None,
                 bwrap_bin=touch_executable(root / "bwrap"),
                 codex_command_runner_bin=None,
                 codex_windows_sandbox_setup_bin=None,
@@ -205,7 +222,6 @@ class PackageLayoutTest(unittest.TestCase):
                 package_dir,
                 PACKAGE_VARIANTS["codex-app-server"],
                 TARGET_SPECS["x86_64-unknown-linux-musl"],
-                include_zsh=False,
             )
 
             self.assertTrue((package_dir / "bin" / "codex-code-mode-host").is_file())

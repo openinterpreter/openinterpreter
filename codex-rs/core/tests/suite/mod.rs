@@ -26,6 +26,9 @@ pub static CODEX_ALIASES_TEMP_DIR: Option<TestBinaryDispatchGuard> = {
         if argv1 == Some(CODEX_FS_HELPER_ARG1) {
             return TestBinaryDispatchMode::DispatchArg0Only;
         }
+        if argv1 == Some(codex_sandboxing::CODEX_WINDOWS_MXC_ARG1) {
+            return TestBinaryDispatchMode::DispatchArg0Only;
+        }
         if exe_name == CODEX_LINUX_SANDBOX_ARG0 {
             return TestBinaryDispatchMode::DispatchArg0Only;
         }
@@ -33,19 +36,34 @@ pub static CODEX_ALIASES_TEMP_DIR: Option<TestBinaryDispatchGuard> = {
     })
 };
 
+mod abort_lifecycle;
 #[cfg(not(target_os = "windows"))]
 mod abort_tasks;
+#[path = "actor_access_program_tests.rs"]
+mod actor_access_program;
 mod additional_context;
+#[path = "agent_control_tests.rs"]
+mod agent_control;
 mod agent_execution;
+mod agent_message_wake;
 mod agent_websocket;
 mod agents_md;
 mod app_tool_exposure;
 mod apply_patch_cli;
 mod apply_patch_serialization;
+#[cfg(target_os = "macos")]
+mod apply_patch_system_aliases;
 #[cfg(not(target_os = "windows"))]
 mod approvals;
+mod audio_duration_store;
 mod audio_truncation;
+mod auth_recovery_policy;
 mod auto_review;
+mod base_instructions;
+#[path = "bedrock_multi_agent_tests.rs"]
+mod bedrock_multi_agent;
+#[path = "bedrock_service_tier_tests.rs"]
+mod bedrock_service_tier;
 mod catalog_permission_messages;
 #[cfg(unix)]
 mod claude_code_chat;
@@ -74,12 +92,14 @@ mod exec_policy;
 mod extension_sandbox;
 mod external_auth;
 mod fork_thread;
+mod gcp;
 mod git_enrichment;
 mod guardian_authorization;
 #[path = "guardian_cached_score_tests.rs"]
 mod guardian_cached_score;
 #[path = "guardian_checkpoint_migration_tests.rs"]
 mod guardian_checkpoint_migration;
+mod reasoning_replay_metrics;
 // Uses the same command-approval harness as guardian_review below.
 mod canonical_plugin_connectors;
 mod gateway_auth;
@@ -104,6 +124,7 @@ mod hooks;
 mod hooks_executor;
 #[cfg(not(target_os = "windows"))]
 mod hooks_mcp;
+mod hooks_plugin_policy_refresh;
 mod image_rollout;
 mod injected_models_cache;
 #[cfg(not(target_os = "windows"))]
@@ -118,7 +139,6 @@ mod mcp_auth_refresh;
 mod mcp_ema_config;
 mod mcp_extension_protocol;
 mod mcp_optional_startup_grace;
-#[cfg(unix)]
 mod mcp_refresh_cleanup;
 mod mcp_startup_refresh_http_proxy;
 mod mcp_subagent_elicitation;
@@ -143,6 +163,7 @@ mod multi_exec_server_sandbox;
 mod network_approval;
 mod openai_file_mcp;
 mod otel;
+mod output_token_replay;
 mod override_updates;
 mod pending_input;
 mod pending_input_persistence;
@@ -153,10 +174,12 @@ mod prompt_cache_key;
 mod prompt_caching;
 mod prompt_debug_tests;
 mod quota_exceeded;
+mod realtime_attachment;
 mod realtime_conversation;
 mod realtime_initial_items;
 mod realtime_misalignment;
 mod realtime_sideband_endpoint;
+mod realtime_system_proxy;
 mod reasoning_effort_override;
 mod remote_env;
 mod remote_models;
@@ -168,6 +191,8 @@ mod request_permissions_tool;
 mod request_plugin_install;
 mod request_user_input;
 mod request_user_input_async;
+#[path = "required_access_program_tests.rs"]
+mod required_access_program;
 mod responses_api_proxy_headers;
 mod responses_lite;
 #[cfg(target_os = "linux")]
@@ -180,6 +205,8 @@ mod rmcp_client;
 mod rollout_budget;
 mod rollout_compression;
 mod rollout_list_find;
+mod runtime_auth;
+mod runtime_auth_denials;
 mod safety_buffering;
 mod safety_check_downgrade;
 mod scenarios;
@@ -187,7 +214,6 @@ mod search_tool;
 mod settings_commits;
 mod settings_constraints;
 mod shell_snapshot;
-mod skill_approval;
 mod skills;
 mod skills_extension;
 mod spawn_agent_description;
@@ -197,6 +223,7 @@ mod step_settings;
 mod step_settings_snapshots;
 mod stream_error_allows_next_turn;
 mod stream_no_completed;
+mod subagent_dynamic_tools;
 mod subagent_notifications;
 mod subagent_service_tier;
 mod token_budget;
@@ -204,21 +231,31 @@ mod token_usage_rollout;
 mod tool_harness;
 mod tool_lifecycle;
 mod tool_parallelism;
+mod tool_registration_metrics;
 mod tools;
 mod truncation;
+#[path = "turn_error_details_tests.rs"]
+mod turn_error_details;
 mod turn_input_submission;
+mod turn_phase_trace;
 mod turn_state;
 mod unified_exec;
+#[path = "unified_exec_launch_failure_tests.rs"]
+mod unified_exec_launch_failure;
+#[cfg(windows)]
+#[path = "unified_exec_mxc_powershell_tests.rs"]
+mod unified_exec_mxc_powershell;
 mod unified_exec_process_events;
 mod unified_exec_stdin_approval;
 mod unified_exec_stdin_review_size;
-#[cfg(unix)]
-mod unified_exec_zsh_fork_approvals;
 mod unstable_features_warning;
 mod user_notification;
 mod user_shell_cmd;
 mod view_image;
+mod wake_reservation;
 mod web_search;
+#[path = "web_search_system_proxy_tests.rs"]
+mod web_search_system_proxy;
 mod websocket_fallback;
 mod window_headers;
 #[cfg(target_os = "windows")]

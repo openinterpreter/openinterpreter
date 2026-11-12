@@ -23,7 +23,7 @@ async fn slash_new_and_fork_offer_checkout_choices_inside_local_git_repository()
     chat.dispatch_command(SlashCommand::New);
     assert_matches!(rx.try_recv(), Ok(AppEvent::NewSession { name: None }));
 
-    chat.set_feature_enabled(Feature::Worktrees, /*enabled*/ true);
+    chat.set_local_worktree_operations(/*enabled*/ true);
     chat.dispatch_command(SlashCommand::Fork);
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
@@ -32,16 +32,17 @@ async fn slash_new_and_fork_offer_checkout_choices_inside_local_git_repository()
     chat.dispatch_command(SlashCommand::New);
     let popup = render_bottom_popup(&chat, /*width*/ 80);
     assert_chatwidget_snapshot!("worktrees_new_choices", popup);
-    assert!(popup.contains("Current checkout"), "popup: {popup}");
-    assert!(popup.contains("New worktree"), "popup: {popup}");
+    assert!(popup.contains("Use current Git worktree"), "popup: {popup}");
+    assert!(popup.contains("Create new Git worktree"), "popup: {popup}");
     assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
     chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    chat.set_feature_enabled(Feature::TuiMultiBackend, /*enabled*/ true);
     chat.bottom_pane
         .set_composer_text("/new named".into(), Vec::new(), Vec::new());
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_matches!(rx.try_recv(), Ok(AppEvent::FollowTranscript));
     chat.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
-    assert_matches!(rx.try_recv(), Ok(AppEvent::NewSession { name: Some(name) }) if name == "named");
+    assert_matches!(rx.try_recv(), Ok(AppEvent::NewSessionInCurrentWorktree { name: Some(name) }) if name == "named");
     chat.bottom_pane
         .set_composer_text("/fork named".into(), Vec::new(), Vec::new());
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -51,6 +52,7 @@ async fn slash_new_and_fork_offer_checkout_choices_inside_local_git_repository()
         mode: crate::app_event::ManagedWorktreeMode::Fork,
         name: Some(name),
     }) if name == "named");
+    chat.set_feature_enabled(Feature::TuiMultiBackend, /*enabled*/ false);
     chat.set_local_worktree_operations(/*enabled*/ false);
     chat.dispatch_command(SlashCommand::New);
     assert_matches!(rx.try_recv(), Ok(AppEvent::NewSession { name: None }));
@@ -63,7 +65,7 @@ async fn slash_new_and_fork_offer_checkout_choices_inside_local_git_repository()
         (false, "worktrees_command_remote"),
         (true, "worktrees_command_local"),
     ] {
-        chat.set_feature_enabled(Feature::Worktrees, /*enabled*/ true);
+        chat.set_local_worktree_operations(/*enabled*/ true);
         chat.set_local_worktree_operations(available);
         chat.bottom_pane
             .set_composer_text("/work".into(), Vec::new(), Vec::new());
@@ -82,7 +84,7 @@ async fn slash_worktree_offers_current_or_new_conversation() {
     chat.config.cwd =
         AbsolutePathBuf::from_absolute_path(checkout.path()).expect("absolute checkout");
 
-    chat.set_feature_enabled(Feature::Worktrees, /*enabled*/ true);
+    chat.set_local_worktree_operations(/*enabled*/ true);
     chat.dispatch_command(SlashCommand::Worktree);
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
@@ -105,7 +107,7 @@ async fn worktree_browser_actions_and_stale_results() {
     std::fs::create_dir(checkout.path().join(".git")).unwrap();
     std::fs::write(checkout.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     chat.config.cwd = AbsolutePathBuf::from_absolute_path(checkout.path()).unwrap();
-    chat.set_feature_enabled(Feature::Worktrees, /*enabled*/ true);
+    chat.set_local_worktree_operations(/*enabled*/ true);
     let request = chat.request_managed_worktrees().unwrap();
     assert_chatwidget_snapshot!(
         "worktree_browser_loading",

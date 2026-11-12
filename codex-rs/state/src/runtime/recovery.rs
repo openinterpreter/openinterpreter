@@ -3,13 +3,38 @@
 //! Codex keeps several independent runtime SQLite databases under one SQLite
 //! home. When SQLite reports that one of them is corrupt, automatic recovery
 //! moves only that database file and its sidecars into a backup folder so the
-//! other databases keep their data.
+//! other databases keep their data. Startup callers may collect backups in a
+//! task-local scope to notify users after recovery; backup behavior is unchanged
+//! outside that scope.
 
-use std::borrow::Cow;
+use sqlx::error::DatabaseError;
+use std::cell::RefCell;
+use std::future::Future;
 use std::path::Path;
 use std::path::PathBuf;
 
 const BACKUP_DIR_NAME: &str = "db-backups";
+
+tokio::task_local! {
+    static RECOVERY_BACKUPS: RefCell<Vec<RuntimeDbBackup>>;
+}
+
+/// Collect backups made while polling startup, including recovery across retries.
+///
+/// The report is scoped to this task: unrelated processes and tasks are excluded.
+/// Recovery in spawned tasks is not collected. Callers should report successful
+/// recovery only after startup has completed successfully.
+pub async fn collect_runtime_db_backups<T>(
+    startup: impl Future<Output = T>,
+) -> (T, Vec<RuntimeDbBackup>) {
+    RECOVERY_BACKUPS
+        .scope(RefCell::new(Vec::new()), async {
+            let result = startup.await;
+            let backups = RECOVERY_BACKUPS.with(std::cell::RefCell::take);
+            (result, backups)
+        })
+        .await
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeDbBackup {
@@ -77,7 +102,7 @@ pub async fn backup_runtime_db_for_fresh_start(
             db_path.display()
         ))
     })?;
-    match tokio::fs::metadata(sqlite_home).await {
+    let backups = match tokio::fs::metadata(sqlite_home).await {
         Ok(metadata) if metadata.is_dir() => backup_runtime_db_files(db_path).await,
         Ok(_) => backup_blocking_sqlite_home(sqlite_home).await,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -88,7 +113,9 @@ pub async fn backup_runtime_db_for_fresh_start(
             )))
         }
         Err(err) => Err(err),
-    }
+    }?;
+    let _ = RECOVERY_BACKUPS.try_with(|report| report.borrow_mut().extend(backups.iter().cloned()));
+    Ok(backups)
 }
 
 pub fn runtime_db_path_for_corruption_error(err: &anyhow::Error) -> Option<PathBuf> {
@@ -105,35 +132,35 @@ pub fn is_sqlite_corruption_error(err: &anyhow::Error) -> bool {
 }
 
 fn sqlite_error_source_is_corruption(source: &(dyn std::error::Error + 'static)) -> bool {
-    let Some(err) = source.downcast_ref::<sqlx::Error>() else {
+    if let Some(err) = source.downcast_ref::<libsqlite3_sys::Error>() {
+        return matches!(
+            err.code,
+            libsqlite3_sys::ErrorCode::DatabaseCorrupt | libsqlite3_sys::ErrorCode::NotADatabase
+        );
+    }
+
+    let sqlite_error = source
+        .downcast_ref::<sqlx::sqlite::SqliteError>()
+        .or_else(|| {
+            source
+                .downcast_ref::<sqlx::Error>()?
+                .as_database_error()?
+                .try_downcast_ref::<sqlx::sqlite::SqliteError>()
+        });
+    let Some(err) = sqlite_error else {
         return false;
     };
-    let sqlx::Error::Database(database_error) = err else {
-        return false;
-    };
-    sqlite_error_detail_is_corruption(database_error.message())
-        || database_error
-            .code()
-            .is_some_and(sqlite_database_code_is_corruption)
-}
 
-fn sqlite_database_code_is_corruption(code: Cow<'_, str>) -> bool {
-    matches!(
-        code.as_ref().to_ascii_lowercase().as_str(),
-        "11" | "26" | "sqlite_corrupt" | "sqlite_notadb"
-    )
-}
-
-pub fn sqlite_error_detail_is_corruption(detail: &str) -> bool {
-    let detail = detail.to_ascii_lowercase();
-    detail.contains("database disk image is malformed")
-        || detail.contains("database schema is malformed")
-        || detail.contains("database is corrupt")
-        || detail.contains("file is not a database")
-        || detail.contains("sqlite_corrupt")
-        || detail.contains("sqlite_notadb")
-        || detail.contains("(code: 11)")
-        || detail.contains("(code: 26)")
+    // SQLx exposes SQLite's extended result code as a decimal string.
+    err.code()
+        .and_then(|code| code.parse::<i32>().ok())
+        .is_some_and(|code| {
+            matches!(
+                libsqlite3_sys::Error::new(code).code,
+                libsqlite3_sys::ErrorCode::DatabaseCorrupt
+                    | libsqlite3_sys::ErrorCode::NotADatabase
+            )
+        })
 }
 
 pub fn sqlite_error_detail_is_lock(detail: &str) -> bool {

@@ -13,6 +13,7 @@ use codex_context_fragments::ContextualUserFragment;
 use codex_execpolicy::Policy;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::SandboxMode;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::format_allow_prefixes;
@@ -20,8 +21,13 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::GranularApprovalConfig;
 use codex_protocol::protocol::NetworkAccess;
 use codex_utils_template::Template;
+use path_warnings::OMITTED_PERMISSION_PATHS;
+use path_warnings::denied_reads_text;
+use path_warnings::omitted_paths_text;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::LazyLock;
+use writable_roots::writable_roots_text;
 
 const REQUEST_PERMISSION_RULE: &str =
     include_str!("../templates/permissions/approval_policy/on_request_rule_request_permission.md");
@@ -63,6 +69,39 @@ impl<'a> ApprovalPromptContext<'a> {
             permission_messages: model_messages.permissions(),
         }
     }
+
+    /// Resolves a plain heading for the standalone notification about newly saved prefixes.
+    pub fn approved_command_prefix_saved_heading(&self) -> Option<&'a str> {
+        self.permission_messages
+            .approved_command_prefix_saved
+            .filter(|text| {
+                text.len() <= 500
+                    && !text.trim().is_empty()
+                    && !text.chars().any(char::is_control)
+                    && !text.contains(['<', '>', '{', '}', '\u{2028}', '\u{2029}'])
+            })
+    }
+}
+
+/// Prepared runtime facts borrowed only while composing the fragment.
+/// Paths retain their resolved display spellings and order.
+#[derive(Debug, Clone, Copy)]
+struct PermissionsRenderContext<'a> {
+    sandbox_mode: SandboxMode,
+    network_access: NetworkAccess,
+    approval_policy: AskForApproval,
+    approved_command_prefixes: &'a [Vec<String>],
+    writable_roots: &'a [String],
+    denied_read_paths: &'a [String],
+    denied_read_globs: &'a [String],
+    exec_permission_approvals_enabled: bool,
+    request_permissions_tool_enabled: bool,
+}
+
+/// Developer fragment describing the active sandbox and approval policy.
+#[derive(Debug, Clone)]
+pub struct PermissionsInstructions {
+    text: String,
 }
 
 /// Prepared runtime facts borrowed only while composing the fragment.
@@ -232,6 +271,7 @@ fn approval_text(
         ResolvedMessage::Catalog(text) => return text.to_string(),
         ResolvedMessage::Bundled(text) => text,
     };
+    let instructions = ApprovalInstructions::new(approval_context);
     let text = match approval_policy {
         AskForApproval::Never => return base.to_string(),
         AskForApproval::UnlessTrusted => {
@@ -333,6 +373,7 @@ fn granular_instructions(
     exec_permission_approvals_enabled: bool,
     request_permissions_tool_enabled: bool,
 ) -> String {
+    let instructions = ApprovalInstructions::new(approval_context);
     let sandbox_approval_prompts_allowed = granular_config.allows_sandbox_approval();
     let shell_permission_requests_available =
         exec_permission_approvals_enabled && sandbox_approval_prompts_allowed;

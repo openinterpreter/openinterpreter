@@ -1,6 +1,7 @@
 mod config;
 mod discovery;
 mod signing;
+mod transport;
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -113,6 +114,8 @@ pub struct AwsSignedRequest {
 /// Errors returned by credential loading or SigV4 signing.
 #[derive(Debug, Error)]
 pub enum AwsAuthError {
+    #[error(transparent)]
+    Policy(#[from] codex_http_client::NetworkPolicyDenied),
     #[error("AWS service name must not be empty")]
     EmptyService,
     #[error("AWS profile must be configured")]
@@ -125,6 +128,8 @@ pub enum AwsAuthError {
     ProfileLoad(#[from] aws_config::profile::ProfileFileLoadError),
     #[error("failed to load AWS credentials: {0}")]
     Credentials(#[from] aws_credential_types::provider::error::CredentialsError),
+    #[error("request URL is not a valid URL: {0}")]
+    InvalidUrl(#[source] url::ParseError),
     #[error("request URL is not a valid URI: {0}")]
     InvalidUri(#[source] http::uri::InvalidUri),
     #[error("failed to construct HTTP request for signing: {0}")]
@@ -142,6 +147,7 @@ pub enum AwsAuthError {
 /// Loaded AWS auth context that can sign outbound HTTP requests.
 #[derive(Clone)]
 pub struct AwsAuthContext {
+    network_policy: codex_http_client::NetworkPolicy,
     credentials_provider: SharedCredentialsProvider,
     region: String,
     service: String,
@@ -157,14 +163,15 @@ impl std::fmt::Debug for AwsAuthContext {
 }
 
 impl AwsAuthContext {
-    pub async fn load(config: AwsAuthConfig) -> Result<Self, AwsAuthError> {
-        let sdk_config = config::load_sdk_config(&config).await?;
-        let credentials_provider = config::credentials_provider(&sdk_config)?;
-        let region = config::resolved_region(&sdk_config)?;
-
+    pub async fn load(
+        config: AwsAuthConfig,
+        factory: codex_http_client::HttpClientFactory,
+    ) -> Result<Self, AwsAuthError> {
+        let sdk_config = config::load_sdk_config(&config, &factory).await?;
         Ok(Self {
-            credentials_provider,
-            region,
+            network_policy: factory.network_policy().clone(),
+            credentials_provider: config::credentials_provider(&sdk_config)?,
+            region: config::resolved_region(&sdk_config)?,
             service: config.service.trim().to_string(),
         })
     }
@@ -172,16 +179,40 @@ impl AwsAuthContext {
     pub async fn load_with_access_keys(
         config: AwsAuthConfig,
         access_keys: AwsAccessKeys,
+        factory: codex_http_client::HttpClientFactory,
     ) -> Result<Self, AwsAuthError> {
-        let mut context = Self::load(config).await?;
-        context.credentials_provider =
-            SharedCredentialsProvider::new(aws_credential_types::Credentials::new(
-                access_keys.access_key_id,
-                access_keys.secret_access_key,
-                access_keys.session_token,
-                /*expires_after*/ None,
-                "codex-managed-bedrock-access-keys",
-            ));
+        if config.service.trim().is_empty() {
+            return Err(AwsAuthError::EmptyService);
+        }
+        let region = match config.region.as_ref() {
+            Some(region) => region.clone(),
+            None => config::resolved_region(&config::load_sdk_config(&config, &factory).await?)?,
+        };
+        Ok(Self {
+            network_policy: factory.network_policy().clone(),
+            credentials_provider: SharedCredentialsProvider::new(
+                aws_credential_types::Credentials::new(
+                    access_keys.access_key_id,
+                    access_keys.secret_access_key,
+                    access_keys.session_token,
+                    /*expires_after*/ None,
+                    "codex-managed-bedrock-access-keys",
+                ),
+            ),
+            region,
+            service: config.service.trim().to_string(),
+        })
+    }
+
+    pub async fn load_with_credentials_provider(
+        config: AwsAuthConfig,
+        provider: Arc<impl AwsCredentialsProvider + 'static>,
+        factory: codex_http_client::HttpClientFactory,
+    ) -> Result<Self, AwsAuthError> {
+        let mut context = Self::load(config, factory).await?;
+        context.credentials_provider = SharedCredentialsProvider::new(
+            AwsCredentialsProviderAdapter(provider, context.network_policy.clone()),
+        );
         Ok(context)
     }
 
@@ -203,8 +234,6 @@ impl AwsAuthContext {
         let credentials_provider = SharedCredentialsProvider::new(
             discovery::profile_credentials_provider(profile, config.region.as_deref()).await,
         );
-        let mut context = Self::load(config).await?;
-        context.credentials_provider = credentials_provider;
         Ok(context)
     }
 
@@ -225,7 +254,28 @@ impl AwsAuthContext {
         request: AwsRequestToSign,
         time: SystemTime,
     ) -> Result<AwsSignedRequest, AwsAuthError> {
-        let credentials = self.credentials_provider.provide_credentials().await?;
+        let url = request
+            .url
+            .parse::<url::Url>()
+            .map_err(AwsAuthError::InvalidUrl)?;
+        let permit = self.network_policy.acquire(&url)?;
+        let credentials = permit
+            .run(self.credentials_provider.provide_credentials())
+            .await?
+            .map_err(|error| {
+                let mut source: &(dyn std::error::Error + 'static) = &error;
+                loop {
+                    if let Some(policy) =
+                        source.downcast_ref::<codex_http_client::NetworkPolicyDenied>()
+                    {
+                        return AwsAuthError::Policy(*policy);
+                    }
+                    match source.source() {
+                        Some(next) => source = next,
+                        None => return AwsAuthError::Credentials(error),
+                    }
+                }
+            })?;
         signing::sign_request(&credentials, &self.region, &self.service, request, time)
     }
 }
@@ -249,11 +299,13 @@ impl AwsAuthError {
                 aws_credential_types::provider::error::CredentialsError::ProviderTimedOut(_)
                     | aws_credential_types::provider::error::CredentialsError::ProviderError(_)
             ),
-            AwsAuthError::EmptyService
+            AwsAuthError::Policy(_)
+            | AwsAuthError::EmptyService
             | AwsAuthError::MissingProfile
             | AwsAuthError::MissingCredentialsProvider
             | AwsAuthError::MissingRegion
             | AwsAuthError::ProfileLoad(_)
+            | AwsAuthError::InvalidUrl(_)
             | AwsAuthError::InvalidUri(_)
             | AwsAuthError::BuildHttpRequest(_)
             | AwsAuthError::InvalidHeaderValue(_)

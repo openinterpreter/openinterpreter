@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import get_type_hints
 
 import pytest
+from pydantic import ValidationError
 
 from openai_codex._runtime_requirements import CheckoutCapabilities
 from openai_codex.client import CodexClient, _params_dict
@@ -20,9 +21,14 @@ from openai_codex.generated.v2_all import (
     AuthRecoveryNotification,
     CommandGuardianApprovalReviewAction,
     GetAccountResponse,
+    ModelProviderConfigWriteParams,
+    ModelProviderConfigWriteResponse,
+    ModelProviderListResponse,
     PlanType,
     ReasoningEffort,
     ReasoningEffortOption,
+    ReviewDelivery,
+    ReviewStartParams,
     ThreadForkParams,
     ThreadListParams,
     ThreadQueueChangedNotification,

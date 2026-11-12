@@ -2,6 +2,9 @@ use super::*;
 use crate::git_policy::REPOSITORY_LOCAL_GIT_ENVIRONMENT_VARIABLES;
 use crate::test_support::RecordingHttpClientSelector;
 use crate::test_support::recorded_http_client_urls;
+use codex_http_client::DestinationPolicy::Restricted;
+use codex_http_client::NetworkPolicyDenied::Destination;
+use codex_http_client::RouteAwareRequestError::Policy;
 use pretty_assertions::assert_eq;
 use std::ffi::OsStr;
 use std::io::Write;
@@ -185,6 +188,16 @@ async fn backup_archive_routes_metadata_and_backend_supplied_download_urls() {
         .expect("backup archive download should succeed");
 
     assert_eq!(body, b"archive");
+    let controller = codex_http_client::NetworkPolicyController::default();
+    let policy = controller.policy();
+    let allowed_hosts = Default::default();
+    controller.publish(policy.revision(), Restricted { allowed_hosts });
+    let factory = crate::test_support::test_http_client_factory().with_network_policy(policy);
+    let clients = StartupSyncHttpClient::new(&factory);
+    for url in [&metadata_url, &download_url] {
+        let result = clients.request(Method::GET, url).send().await;
+        assert!(matches!(result, Err(Policy(Destination))));
+    }
     assert_eq!(
         recorded_http_client_urls(&selected_urls),
         vec![metadata_url, download_url]
@@ -486,16 +499,7 @@ fn has_plugins_clone_dirs(codex_home: &Path) -> bool {
 
 #[cfg(unix)]
 fn write_executable_script(path: &Path, contents: &str) {
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::write(path, contents).expect("write script");
-    #[cfg(unix)]
-    {
-        let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(path, permissions).expect("chmod");
-    }
+    codex_utils_cargo_bin::write_executable(path, contents).expect("write script");
 }
 
 #[cfg(unix)]
@@ -1225,6 +1229,28 @@ async fn sync_openai_plugins_repo_via_http_cleans_up_staged_dir_on_extract_failu
 
     assert!(err.contains("failed to open curated plugins zip archive"));
     assert!(!has_plugins_clone_dirs(tmp.path()));
+}
+
+/// Plugin executables keep their access permissions, but not setuid, setgid, or sticky bits.
+#[cfg(unix)]
+#[test]
+fn extract_zipball_preserves_only_unix_access_permissions() {
+    use std::io::Cursor;
+    use std::os::unix::fs::PermissionsExt;
+
+    let destination = tempdir().expect("tempdir");
+    let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+    // unix_permissions() strips special bits on write; encode the untrusted mode directly.
+    let options = SimpleFileOptions::default().external_attributes(0o107755 << 16);
+    archive
+        .start_file("repo/script", options)
+        .expect("add script");
+    let bytes = archive.finish().expect("finish archive").into_inner();
+
+    extract_zipball_to_dir(&bytes, destination.path()).expect("extract archive");
+
+    let script = std::fs::metadata(destination.path().join("script")).expect("script metadata");
+    assert_eq!(script.permissions().mode() & 0o7777, 0o755);
 }
 
 #[tokio::test]

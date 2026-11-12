@@ -1,0 +1,5 @@
+---
+source: tui/src/app/tests/local_command_scroll_tests.rs
+expression: lines_to_single_string(&error.display_lines(80))
+---
+■ Failed to save shortcut: config/value/write failed: Invalid configuration: unknown key `super-left` (code -32600)

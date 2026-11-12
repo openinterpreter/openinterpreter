@@ -35,7 +35,11 @@ use windows_sys::Win32::System::RemoteDesktop::WTSFreeMemory;
 use windows_sys::Win32::System::RemoteDesktop::WTSQueryUserToken;
 
 use crate::installation_record::InstallationRecord;
-use crate::ipc::OwnedHandle;
+
+mod cleanup;
+mod registered;
+
+pub(crate) use registered::runtime_owner_removed;
 
 mod cleanup;
 mod registered;
@@ -55,6 +59,7 @@ struct UserInstallation {
 
 pub(crate) struct PackageLifecycle {
     package_name: HSTRING,
+    preinstalled: bool,
     uninstalling: Arc<AtomicBool>,
     installation: RefCell<Option<UserInstallation>>,
 }
@@ -63,8 +68,20 @@ impl PackageLifecycle {
     pub(crate) fn new(uninstalling: Arc<AtomicBool>) -> Result<Self> {
         unsafe { RoInitialize(RO_INIT_MULTITHREADED) }
             .context("initialize the sandbox service Windows Runtime apartment")?;
+        let package = Package::Current()?;
+        // Windows removes OEM metadata on uninstall; capture it while the package is installed.
+        let preinstalled = package
+            .InstalledLocation()
+            .and_then(|location| location.Path())
+            .is_ok_and(|path| {
+                PathBuf::from(path.to_os_string())
+                    .join("microsoft.system.package.metadata")
+                    .join("Custom.data")
+                    .is_file()
+            });
         Ok(Self {
-            package_name: Package::Current()?.Id()?.FullName()?,
+            package_name: package.Id()?.FullName()?,
+            preinstalled,
             uninstalling,
             installation: RefCell::default(),
         })
@@ -210,7 +227,9 @@ impl PackageLifecycle {
         if self.installation.borrow().is_some() {
             return Ok(());
         }
-        let Some(record) = crate::installation_record::load()? else {
+        let setup_lock =
+            codex_windows_sandbox::acquire_sandbox_setup_lock(/*timeout_ms*/ 5_000)?;
+        let Some(mut record) = crate::installation_record::load()? else {
             return Ok(());
         };
 

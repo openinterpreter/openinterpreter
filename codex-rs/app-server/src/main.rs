@@ -4,7 +4,6 @@ use clap::Parser;
 use codex_app_server::AppServerCodeModeHostArgs;
 use codex_app_server::AppServerRuntimeOptions;
 use codex_app_server::AppServerTransport;
-use codex_app_server::AppServerWebsocketAuthArgs;
 use codex_app_server::PluginStartupTasks;
 use codex_app_server::run_main_with_transport_options;
 use codex_arg0::Arg0DispatchPaths;
@@ -12,6 +11,7 @@ use codex_arg0::arg0_dispatch_or_else;
 use codex_config::LoaderOverrides;
 use codex_protocol::protocol::SessionSource;
 use codex_utils_cli::CliConfigOverrides;
+use codex_websocket_auth::WebsocketAuthArgs;
 use std::path::PathBuf;
 
 #[cfg(all(
@@ -30,6 +30,9 @@ const DISABLE_MANAGED_CONFIG_ENV_VAR: &str = "CODEX_APP_SERVER_DISABLE_MANAGED_C
 #[derive(Debug, Parser)]
 #[command(version)]
 struct AppServerArgs {
+    /// Load frozen cloud skills from a JSON snapshot instead of a live skill service.
+    #[arg(long, value_name = "PATH")]
+    cloud_skills_snapshot: Option<PathBuf>,
     #[command(flatten)]
     config_overrides: CliConfigOverrides,
 
@@ -55,7 +58,7 @@ struct AppServerArgs {
     session_source: SessionSource,
 
     #[command(flatten)]
-    auth: AppServerWebsocketAuthArgs,
+    auth: WebsocketAuthArgs,
 
     /// Fail if config.toml contains unknown configuration fields.
     #[arg(long = "strict-config", default_value_t = false)]
@@ -80,6 +83,7 @@ fn main() -> anyhow::Result<()> {
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
         let AppServerArgs {
+            cloud_skills_snapshot,
             config_overrides,
             code_mode_host,
             listen,
@@ -101,6 +105,7 @@ fn main() -> anyhow::Result<()> {
         let transport = listen;
         let auth = auth.try_into_settings()?;
         let mut runtime_options = AppServerRuntimeOptions {
+            cloud_skills_snapshot,
             code_mode_host_transport: code_mode_host.into(),
             managed_daemon,
             ..Default::default()

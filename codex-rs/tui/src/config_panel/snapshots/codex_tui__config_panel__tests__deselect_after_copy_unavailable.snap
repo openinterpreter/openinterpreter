@@ -1,0 +1,24 @@
+---
+source: tui/src/config_panel/config_panel_tests.rs
+assertion_line: 128
+expression: "render(&panel, 50)"
+---
+
+  Configuration
+  Changes save automatically
+
+  ‹  Input   Sessions   Text selection
+
+  Search › deselect after copy
+
+› Deselect after copy   Unavailable
+
+
+
+
+
+
+  Text selection · Turn on Copy on select to
+  deselect after copying
+
+  esc clear search

@@ -184,7 +184,33 @@ mod tests {
     struct DummyAuth;
 
     impl AuthProvider for DummyAuth {
-        fn add_auth_headers(&self, _headers: &mut HeaderMap) {}
+        fn add_auth_headers(&self, _headers: &mut HeaderMap) -> Result<(), crate::AuthError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RetryAuth {
+        request_limits: Mutex<Vec<Option<usize>>>,
+    }
+
+    impl AuthProvider for RetryAuth {
+        fn add_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), AuthError> {
+            headers.insert(http::header::AUTHORIZATION, "Bearer test".parse().unwrap());
+            Ok(())
+        }
+
+        fn apply_auth(&self, mut request: Request) -> AuthProviderFuture<'_> {
+            Box::pin(async move {
+                let mut limits = self.request_limits.lock().unwrap();
+                limits.push(request.response_body_limit_bytes);
+                if limits.len() == 1 {
+                    return Err(AuthError::Transient("retry authentication".to_string()));
+                }
+                self.add_auth_headers(&mut request.headers)?;
+                Ok(request)
+            })
+        }
     }
 
     #[derive(Default)]

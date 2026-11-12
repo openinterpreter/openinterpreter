@@ -49,6 +49,304 @@ use tokio::time::timeout;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Selection-only changes are observable after acknowledgment, including attaching and clearing.
+#[tokio::test]
+async fn environments_attach_replace_preserve_and_clear_without_inference() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    std::fs::write(
+        codex_home.path().join("environments.toml"),
+        r#"
+[[environments]]
+id = "remote-a"
+url = "ws://127.0.0.1:1"
+[[environments]]
+id = "remote-b"
+url = "ws://127.0.0.1:2"
+"#,
+    )?;
+    std::fs::write(
+        codex_home.path().join("requirements.toml"),
+        "allowed_approval_policies = [\"never\"]\n",
+    )?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        // This test owns environments.toml and starts with no selected executor.
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    let request_id = mcp
+        .send_thread_start_request(ThreadStartParams {
+            cwd: Some(codex_home.path().to_string_lossy().into_owned()),
+            environments: Some(Vec::new()),
+            ..Default::default()
+        })
+        .await?;
+    let started: ThreadStartResponse = mcp.read_response(request_id).await?;
+    let environment_a = ThreadEnvironment {
+        environment_id: "remote-a".to_string(),
+        cwd: started.cwd.clone().into(),
+        runtime_workspace_roots: vec![started.cwd.clone().into()],
+    };
+    let environment_b = ThreadEnvironment {
+        environment_id: "remote-b".to_string(),
+        ..environment_a.clone()
+    };
+    let rejected_id = mcp
+        .send_raw_request(
+            "thread/settings/update",
+            Some(json!({
+                "threadId": started.thread.id,
+                "environments": [environment_a],
+                "approvalPolicy": "on-request",
+            })),
+        )
+        .await?;
+    let rejected = mcp
+        .read_stream_until_error_message(RequestId::Integer(rejected_id))
+        .await?;
+    assert_eq!(rejected.error.code, -32600);
+    assert!(rejected.error.message.contains("approval_policy"));
+    let read_id = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: started.thread.id.clone(),
+            include_turns: false,
+        })
+        .await?;
+    let read: ThreadReadResponse = mcp.read_response(read_id).await?;
+    assert_eq!(read.thread.environments, Some(Vec::new()));
+
+    for (mut params, expected, changed) in [
+        (
+            json!({"environments": [environment_a]}),
+            vec![environment_a],
+            true,
+        ),
+        (
+            json!({"environments": [environment_b]}),
+            vec![environment_b.clone()],
+            true,
+        ),
+        (
+            json!({"environments": [environment_b]}),
+            vec![environment_b.clone()],
+            false,
+        ),
+        (json!({}), vec![environment_b.clone()], false),
+        (json!({"environments": null}), vec![environment_b], false),
+        (json!({"environments": []}), vec![], true),
+    ] {
+        params["threadId"] = json!(started.thread.id);
+        let request_id = mcp
+            .send_raw_request("thread/settings/update", Some(params))
+            .await?;
+        let _: ThreadSettingsUpdateResponse = mcp.read_response(request_id).await?;
+        let read_id = mcp
+            .send_thread_read_request(ThreadReadParams {
+                thread_id: started.thread.id.clone(),
+                include_turns: false,
+            })
+            .await?;
+        let read: ThreadReadResponse = mcp.read_response(read_id).await?;
+        assert_eq!(read.thread.environments, Some(expected.clone()));
+        if changed {
+            let updated = read_thread_settings_updated(&mut mcp).await?;
+            assert_eq!(
+                (
+                    updated.thread_id,
+                    updated.thread_settings.cwd,
+                    updated.thread_settings.environments,
+                ),
+                (
+                    started.thread.id.clone(),
+                    started.cwd.clone(),
+                    Some(expected.clone()),
+                )
+            );
+        }
+    }
+    assert!(received_response_bodies(&server).await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn disabled_plugin_ids_replace_preserve_and_clear_without_inference() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let started = start_thread(&mut mcp).await?;
+    assert_eq!(started.disabled_plugin_ids, Vec::<String>::new());
+
+    for (mut params, expected) in [
+        (
+            json!({"disabledPluginIds": ["slack@openai", "notion@openai"]}),
+            vec!["slack@openai", "notion@openai"],
+        ),
+        (
+            json!({"disabledPluginIds": ["slack@openai"]}),
+            vec!["slack@openai"],
+        ),
+        (json!({"model": "mock-model-2"}), vec!["slack@openai"]),
+        (
+            json!({"disabledPluginIds": null, "model": "mock-model-3"}),
+            vec!["slack@openai"],
+        ),
+        (json!({"disabledPluginIds": []}), vec![]),
+    ] {
+        params["threadId"] = json!(started.thread.id);
+        let request_id = mcp
+            .send_raw_request("thread/settings/update", Some(params))
+            .await?;
+        let _: ThreadSettingsUpdateResponse =
+            timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
+        let updated = read_thread_settings_updated(&mut mcp).await?;
+        assert_eq!(updated.thread_settings.disabled_plugin_ids, expected);
+    }
+    assert!(received_response_bodies(&server).await?.is_empty());
+    Ok(())
+}
+
+#[test_case(ThreadHistoryMode::Legacy, true; "cold legacy parent")]
+#[test_case(ThreadHistoryMode::Legacy, false; "loaded legacy parent")]
+#[test_case(ThreadHistoryMode::Paginated, true; "cold paginated parent")]
+#[test_case(ThreadHistoryMode::Paginated, false; "loaded paginated parent")]
+#[tokio::test]
+async fn disabled_plugin_ids_restore_from_fork_boundary(
+    history_mode: ThreadHistoryMode,
+    restart_before_fork: bool,
+) -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(vec![
+        create_final_assistant_message_sse_response("done")?,
+        create_final_assistant_message_sse_response("done again")?,
+    ])
+    .await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let started = mcp
+        .start_thread(ThreadStartParams {
+            history_mode: Some(history_mode),
+            ..Default::default()
+        })
+        .await?;
+    let thread_id = started.thread.id;
+    let initial_selection = vec!["slack@openai".to_string()];
+    let first_turn = mcp
+        .start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: thread_id.clone(),
+            disabled_plugin_ids: Some(initial_selection.clone()),
+            input: vec![V2UserInput::Text {
+                text: "materialize the thread".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    assert_eq!(
+        read_thread_settings_updated(&mut mcp)
+            .await?
+            .thread_settings
+            .disabled_plugin_ids,
+        initial_selection
+    );
+    let second_turn = mcp
+        .start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: thread_id.clone(),
+            input: vec![V2UserInput::Text {
+                text: "continue beyond the fork cutoff".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    // Clearing after the second turn must not affect forks at an earlier boundary.
+    let current_selection = Vec::<String>::new();
+    send_thread_settings_update(
+        &mut mcp,
+        ThreadSettingsUpdateParams {
+            thread_id: thread_id.clone(),
+            disabled_plugin_ids: Some(current_selection.clone()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    assert_eq!(
+        read_thread_settings_updated(&mut mcp)
+            .await?
+            .thread_settings
+            .disabled_plugin_ids,
+        current_selection
+    );
+    if restart_before_fork {
+        mcp.shutdown_gracefully().await?;
+        mcp = TestAppServer::builder()
+            .with_codex_home(codex_home.path())
+            .build_initialized()
+            .await?;
+    }
+    for (params, expected_selection) in [
+        (
+            ThreadForkParams {
+                thread_id: thread_id.clone(),
+                ..Default::default()
+            },
+            &current_selection,
+        ),
+        (
+            ThreadForkParams {
+                thread_id: thread_id.clone(),
+                last_turn_id: Some(first_turn.turn.id.clone()),
+                ..Default::default()
+            },
+            &initial_selection,
+        ),
+        (
+            ThreadForkParams {
+                thread_id: thread_id.clone(),
+                before_turn_id: Some(second_turn.turn.id),
+                ..Default::default()
+            },
+            &initial_selection,
+        ),
+        (
+            ThreadForkParams {
+                thread_id: thread_id.clone(),
+                last_turn_id: Some(first_turn.turn.id),
+                // Selection restoration must not depend on restoring permissions.
+                approval_policy: Some(AskForApproval::Never),
+                approvals_reviewer: Some(ApprovalsReviewer::User),
+                sandbox: Some(SandboxMode::DangerFullAccess),
+                ..Default::default()
+            },
+            &initial_selection,
+        ),
+    ] {
+        let forked: ThreadForkResponse = mcp
+            .request(|request_id| ClientRequest::ThreadFork { request_id, params })
+            .await?;
+        assert_eq!(&forked.disabled_plugin_ids, expected_selection);
+    }
+    let resumed: ThreadResumeResponse = mcp
+        .request(|request_id| ClientRequest::ThreadResume {
+            request_id,
+            params: ThreadResumeParams {
+                thread_id,
+                ..Default::default()
+            },
+        })
+        .await?;
+    assert_eq!(resumed.disabled_plugin_ids, current_selection);
+    Ok(())
+}
+
 #[tokio::test]
 async fn disabled_plugin_ids_replace_preserve_and_clear_without_inference() -> Result<()> {
     let server = responses::start_mock_server().await;
@@ -265,8 +563,6 @@ async fn thread_settings_update_emits_notification_and_updates_future_turns() ->
         "settings-only update should not start a model request"
     );
 
-    start_text_turn(&mut mcp, thread.id.clone()).await?;
-
     let updated = read_thread_settings_updated(&mut mcp).await?;
     assert_eq!(updated.thread_id, thread.id);
     assert_eq!(updated.thread_settings.model, model_id);
@@ -274,6 +570,8 @@ async fn thread_settings_update_emits_notification_and_updates_future_turns() ->
         updated.thread_settings.service_tier.as_deref(),
         Some(service_tier_id.as_str())
     );
+
+    start_text_turn(&mut mcp, thread.id.clone()).await?;
 
     timeout(
         DEFAULT_TIMEOUT,
@@ -345,10 +643,9 @@ async fn thread_settings_update_emits_notification_and_updates_future_turns() ->
     assert!(
         request_bodies.iter().any(|body| {
             body.get("model").and_then(Value::as_str) == Some(model_id.as_str())
-                && body.get("service_tier").and_then(Value::as_str)
-                    == Some(service_tier_id.as_str())
+                && body.get("service_tier").is_none()
         }),
-        "future turn did not use updated model/service tier: {request_bodies:#?}"
+        "future turn did not omit the unsupported service tier: {request_bodies:#?}"
     );
     Ok(())
 }

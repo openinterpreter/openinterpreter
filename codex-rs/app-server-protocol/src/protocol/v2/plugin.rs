@@ -10,6 +10,7 @@ use codex_protocol::protocol::SkillMetadata as CoreSkillMetadata;
 use codex_protocol::protocol::SkillScope as CoreSkillScope;
 use codex_protocol::protocol::SkillToolDependency as CoreSkillToolDependency;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use serde::Deserialize;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -46,13 +47,16 @@ pub struct SkillsExtraRootsSetParams {
 #[ts(export_to = "v2/")]
 pub struct SkillsExtraRootsSetResponse {}
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct HooksListParams {
-    /// When empty, defaults to the current session working directory.
+    /// Working directories to inspect when no thread is specified. An empty list uses the session cwd.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cwds: Vec<PathBuf>,
+    /// List a loaded thread's hooks, including its selected environments. Omit `cwds` in this mode.
+    #[ts(optional = nullable)]
+    pub thread_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -477,7 +481,7 @@ pub struct SkillMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub dependencies: Option<SkillDependencies>,
-    pub path: AbsolutePathBuf,
+    pub path: LegacyAppPathString,
     pub scope: SkillScope,
     pub enabled: bool,
     /// Owning plugin ID, matching `PluginSummary.id`, when known.
@@ -596,6 +600,8 @@ pub struct HookMetadata {
     pub source_path: AbsolutePathBuf,
     pub source: HookSource,
     pub plugin_id: Option<String>,
+    /// The owning execution environment, if this hook came from its requirements.
+    pub environment_id: Option<String>,
     pub display_order: i64,
     pub enabled: bool,
     pub is_managed: bool,
@@ -858,7 +864,7 @@ pub struct SkillSummary {
     pub description: String,
     pub short_description: Option<String>,
     pub interface: Option<SkillInterface>,
-    pub path: Option<AbsolutePathBuf>,
+    pub path: Option<LegacyAppPathString>,
     pub enabled: bool,
 }
 
@@ -876,7 +882,7 @@ pub struct PluginInterface {
     pub privacy_policy_url: Option<String>,
     pub terms_of_service_url: Option<String>,
     /// Starter prompts for the plugin. Capped at 3 entries with a maximum of
-    /// 128 characters per entry.
+    /// 512 characters per entry.
     pub default_prompt: Option<Vec<String>>,
     pub brand_color: Option<String>,
     /// Local composer icon path, resolved from the installed plugin package.
@@ -989,7 +995,7 @@ impl From<CoreSkillMetadata> for SkillMetadata {
             short_description: value.short_description,
             interface: value.interface.map(SkillInterface::from),
             dependencies: value.dependencies.map(SkillDependencies::from),
-            path: value.path,
+            path: value.path.into(),
             scope: value.scope.into(),
             enabled: true,
             plugin_id: None,

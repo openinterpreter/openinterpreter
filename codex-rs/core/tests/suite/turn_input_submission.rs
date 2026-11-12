@@ -1,4 +1,5 @@
 use codex_core::NotSubmittedReason;
+use codex_core::PromptCacheTtl;
 use codex_core::RecoverTurnRequest;
 use codex_core::StartIfIdleSubmission;
 use codex_core::StartThreadOptions;
@@ -7,6 +8,7 @@ use codex_core::TurnInput;
 use codex_core::TurnInputRequest;
 use codex_core::TurnInputSubmission;
 use codex_core::TurnStartOptions;
+use codex_core::WithTurnExtensionData;
 use codex_core::config::Constrained;
 use codex_core::context::ContextualUserFragment;
 use codex_core::context::InternalContextSource;
@@ -18,6 +20,7 @@ use codex_protocol::AgentPath;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
+use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -25,8 +28,13 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::TurnEnvironmentRequests;
 use codex_protocol::protocol::TurnEnvironmentSelections;
+use codex_protocol::turn_input::AnnotatedResponseItem;
+use codex_protocol::turn_input::ResponseItemAnnotations;
+use codex_protocol::turn_input::TurnAttribution;
 use codex_protocol::user_input::UserInput;
+use core_test_support::ThreadIdle;
 use core_test_support::responses;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
@@ -34,16 +42,20 @@ use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::submit_thread_settings;
 use core_test_support::test_codex::local;
+use core_test_support::test_codex::local_request;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use test_case::test_case;
 use tokio::sync::Barrier;
+use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
@@ -477,6 +489,7 @@ async fn recover_turn_if_idle_preserves_id_and_resumes_plan_mode() {
                 ..Default::default()
             },
             trace: None,
+            prompt_cache_ttl: None,
             cyber_access_program: None,
         })
         .await
@@ -484,7 +497,8 @@ async fn recover_turn_if_idle_preserves_id_and_resumes_plan_mode() {
     assert_eq!(
         submission,
         StartIfIdleSubmission::Started {
-            turn_id: turn_id.to_string(),
+            root_turn_id: turn_id.to_string(),
+            turn_id: turn_id.to_string()
         }
     );
     assert_eq!(
@@ -513,7 +527,14 @@ async fn recover_turn_if_idle_preserves_id_and_resumes_plan_mode() {
             .expect("recovered turn should include turn metadata"),
     )
     .expect("recovered turn metadata should be valid JSON");
-    assert_eq!(turn_metadata["turn_trigger"].as_str(), Some("retry"));
+    assert_eq!(
+        (
+            turn_metadata.get("turn_trigger"),
+            turn_metadata.get("parent_turn_id"),
+            turn_metadata["root_turn_id"].as_str(),
+        ),
+        (None, None, Some(turn_id))
+    );
     let user_input_groups = request.message_input_text_groups("user");
     assert_eq!(user_input_groups.len(), 1);
     assert_eq!(user_input_groups[0].len(), 1);
@@ -660,7 +681,11 @@ async fn turn_input_submission_reports_started_and_steered_for_concurrent_submis
         }],
     ])
     .await;
+    let (tx, mut completions) = mpsc::unbounded_channel();
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.turn_lifecycle_contributor(Arc::new(CompletedInputRecorder(tx)));
     let test = test_codex()
+        .with_extensions(Arc::new(extensions.build()))
         .with_model("gpt-5.4")
         .build_with_streaming_server(&server)
         .await
@@ -668,12 +693,26 @@ async fn turn_input_submission_reports_started_and_steered_for_concurrent_submis
     let codex = Arc::clone(&test.codex);
     let barrier = Arc::new(Barrier::new(3));
 
+    let annotated = |text: &str| {
+        let mut request = TurnInputRequest::new(TurnInput::UserInput {
+            content: vec![UserInput::Text {
+                text: text.to_owned(),
+                text_elements: Vec::new(),
+            }],
+            client_id: Some("shared-id".to_owned()),
+        });
+        request.user_input_extension_data.insert(
+            "test".into(),
+            Value::from(format!("extension-test-marker:{text}")),
+        );
+        request
+    };
     let first_submission = tokio::spawn({
         let codex = Arc::clone(&codex);
         let barrier = Arc::clone(&barrier);
         async move {
             barrier.wait().await;
-            submit_user_message(codex.as_ref(), "first message").await
+            codex.start_or_steer_turn(annotated("first message")).await
         }
     });
     let second_submission = tokio::spawn({
@@ -681,7 +720,7 @@ async fn turn_input_submission_reports_started_and_steered_for_concurrent_submis
         let barrier = Arc::clone(&barrier);
         async move {
             barrier.wait().await;
-            submit_user_message(codex.as_ref(), "second message").await
+            codex.start_or_steer_turn(annotated("second message")).await
         }
     });
     barrier.wait().await;
@@ -710,12 +749,20 @@ async fn turn_input_submission_reports_started_and_steered_for_concurrent_submis
     let (started_turn_id, steered_turn_id, started_message) =
         match (&first_submission, &second_submission) {
             (
-                TurnInputSubmission::Started { turn_id: started },
-                TurnInputSubmission::Steered { turn_id: steered },
+                TurnInputSubmission::Started {
+                    turn_id: started, ..
+                },
+                TurnInputSubmission::Steered {
+                    turn_id: steered, ..
+                },
             ) => (started, steered, "first message"),
             (
-                TurnInputSubmission::Steered { turn_id: steered },
-                TurnInputSubmission::Started { turn_id: started },
+                TurnInputSubmission::Steered {
+                    turn_id: steered, ..
+                },
+                TurnInputSubmission::Started {
+                    turn_id: started, ..
+                },
             ) => (started, steered, "second message"),
             _ => panic!(
                 "concurrent messages must start exactly one turn and steer the other: \
@@ -738,6 +785,28 @@ async fn turn_input_submission_reports_started_and_steered_for_concurrent_submis
     assert!(request_bodies[0].to_string().contains(started_message));
     assert!(request_bodies[1].to_string().contains("first message"));
     assert!(request_bodies[1].to_string().contains("second message"));
+
+    let mut recorded = [
+        completions.try_recv().unwrap(),
+        completions.try_recv().unwrap(),
+    ];
+    recorded.sort_by(|a, b| a.1.cmp(&b.1));
+    for ((turn, message, data), expected) in recorded
+        .into_iter()
+        .zip(["first message", "second message"])
+    {
+        assert_eq!(&turn, started_turn_id);
+        assert_eq!(message, expected);
+        assert_eq!(
+            data,
+            Some(Value::from(format!("extension-test-marker:{expected}")))
+        );
+    }
+    assert!(
+        request_bodies
+            .iter()
+            .all(|body| !body.to_string().contains("extension-test-marker:"))
+    );
 
     server.shutdown().await;
 }
@@ -775,7 +844,7 @@ async fn turn_input_submission_applies_thread_settings_only_after_accepted_input
     let started = submit_user_message(codex, "start turn")
         .await
         .expect("first message should start a turn");
-    let TurnInputSubmission::Started { turn_id } = started else {
+    let TurnInputSubmission::Started { turn_id, .. } = started else {
         panic!("first message should start a turn");
     };
     timeout(
@@ -793,14 +862,20 @@ async fn turn_input_submission_applies_thread_settings_only_after_accepted_input
             user_message_request("steer active turn").with_thread_settings(
                 ThreadSettingsOverrides {
                     approval_policy: Some(AskForApproval::Never),
-                    environments: Some(steered_environments.clone()),
+                    environments: Some(steered_environments.clone().into_requests()),
                     ..Default::default()
                 },
             ),
         )
         .await
         .expect("persistent settings should not reject a steer");
-    assert_eq!(steered, TurnInputSubmission::Steered { turn_id });
+    assert_eq!(
+        steered,
+        TurnInputSubmission::Steered {
+            root_turn_id: turn_id.clone(),
+            turn_id
+        }
+    );
     assert_eq!(
         codex.config_snapshot().await.approval_policy,
         AskForApproval::Never
@@ -820,9 +895,9 @@ async fn turn_input_submission_applies_thread_settings_only_after_accepted_input
         .steer_turn(
             user_message_request("no active turn").with_thread_settings(ThreadSettingsOverrides {
                 approval_policy: Some(AskForApproval::OnRequest),
-                environments: Some(TurnEnvironmentSelections::new(
+                environments: Some(TurnEnvironmentRequests::new(
                     rejected_cwd.clone(),
-                    vec![local(rejected_cwd)],
+                    vec![local_request(rejected_cwd)],
                 )),
                 ..Default::default()
             }),
@@ -897,7 +972,7 @@ async fn start_or_steer_turn_requires_matching_active_output_schema() {
         )
         .await
         .expect("first message should start a turn");
-    let TurnInputSubmission::Started { turn_id } = started else {
+    let TurnInputSubmission::Started { turn_id, .. } = started else {
         panic!("first message should start a turn");
     };
     timeout(
@@ -941,7 +1016,13 @@ async fn start_or_steer_turn_requires_matching_active_output_schema() {
         )
         .await
         .expect("matching schema should steer");
-    assert_eq!(steered, TurnInputSubmission::Steered { turn_id });
+    assert_eq!(
+        steered,
+        TurnInputSubmission::Steered {
+            root_turn_id: turn_id.clone(),
+            turn_id
+        }
+    );
 
     release_response
         .send(())

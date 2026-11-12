@@ -45,7 +45,8 @@ fn section(label: &str, history_len: usize) -> ContextSection {
         items: vec![ConversationTranscriptEntry {
             kind: ConversationTranscriptEntryKind::User,
             original_bytes: text.len(),
-            text,
+            retained_source: None,
+            content: crate::TranscriptContent::Text(text),
         }],
     }
 }
@@ -86,7 +87,9 @@ fn registry_collects_target_specific_sections_in_registration_order() {
         target: ContextTarget::Sync,
         history: &history,
         transcript: &transcript,
+        is_selected_exec_output: None,
         root_conversation: &[],
+        root_conversation_candidates: None,
         trusted_user_answers: &[],
         planned_action: None,
         permissions: None,
@@ -100,7 +103,9 @@ fn registry_collects_target_specific_sections_in_registration_order() {
         target: ContextTarget::Async,
         history: &history,
         transcript: &transcript,
+        is_selected_exec_output: None,
         root_conversation: &[],
+        root_conversation_candidates: None,
         trusted_user_answers: &[],
         planned_action: None,
         permissions: None,
@@ -165,7 +170,9 @@ fn registry_skips_optional_sections_and_stops_on_missing_required_evidence() {
                 target,
                 history: &[ResponseItem::Other],
                 transcript: &transcript,
+                is_selected_exec_output: None,
                 root_conversation: &[],
+                root_conversation_candidates: None,
                 trusted_user_answers: &[],
                 planned_action: None,
                 permissions: None,
@@ -232,6 +239,8 @@ fn reused_registry_preserves_section_identity_and_source_roles() {
         mode: super::NodeReplReviewEvidenceMode::TextOnly,
     };
     let history = [ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".into(),
         content: vec![codex_protocol::models::ContentItem::InputText {
@@ -271,13 +280,14 @@ fn reused_registry_preserves_section_identity_and_source_roles() {
                 ">>> ROOT CONVERSATION END\n".into(),
             ]}, ContextSection::TrustedUserAnswers { items: vec![
                 ">>> TRUSTED USER ANSWERS START\n".into(),
-                answers[0].clone(),
+                answers[0].clone().into(),
                 ">>> TRUSTED USER ANSWERS END\n".into(),
             ],
             }, ContextSection::ConversationTranscript { items: vec![ConversationTranscriptEntry {
                 kind: ConversationTranscriptEntryKind::User,
-                text: "Inspect the workspace.".into(),
+                content: crate::TranscriptContent::Text("Inspect the workspace.".into()),
                 original_bytes: "Inspect the workspace.".len(),
+                retained_source: None,
             }],
         }];
         if target == ContextTarget::Sync {
@@ -311,7 +321,9 @@ fn reused_registry_preserves_section_identity_and_source_roles() {
                     target,
                     history: &[],
                     transcript: &transcript,
+                    is_selected_exec_output: None,
                     root_conversation: &[],
+                    root_conversation_candidates: None,
                     trusted_user_answers: &[],
                     planned_action: None,
                     permissions: None,

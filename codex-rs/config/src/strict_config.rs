@@ -22,7 +22,7 @@ use std::fmt::Write;
 use std::path::Path;
 use toml::Value as TomlValue;
 
-pub fn config_error_from_ignored_toml_fields<T: DeserializeOwned>(
+pub fn config_error_from_ignored_toml_fields<T: DeserializeOwned + 'static>(
     path: impl AsRef<Path>,
     contents: &str,
 ) -> Option<ConfigError> {
@@ -35,7 +35,7 @@ pub fn config_error_from_ignored_toml_fields<T: DeserializeOwned>(
     }
 }
 
-pub(crate) fn config_error_from_ignored_toml_value_fields<T: DeserializeOwned>(
+pub(crate) fn config_error_from_ignored_toml_value_fields<T: DeserializeOwned + 'static>(
     path: impl AsRef<Path>,
     contents: &str,
     value: TomlValue,
@@ -47,7 +47,9 @@ pub(crate) fn config_error_from_ignored_toml_value_fields<T: DeserializeOwned>(
     )
 }
 
-pub(crate) fn config_error_from_ignored_toml_value_fields_for_source_name<T: DeserializeOwned>(
+pub(crate) fn config_error_from_ignored_toml_value_fields_for_source_name<
+    T: DeserializeOwned + 'static,
+>(
     source_name: &str,
     contents: &str,
     value: TomlValue,
@@ -59,24 +61,20 @@ pub(crate) fn config_error_from_ignored_toml_value_fields_for_source_name<T: Des
     )
 }
 
-fn config_error_from_ignored_toml_value_fields_for_source<T: DeserializeOwned>(
+fn config_error_from_ignored_toml_value_fields_for_source<T: DeserializeOwned + 'static>(
     source: ConfigDiagnosticSource<'_>,
     contents: &str,
     value: TomlValue,
 ) -> Option<ConfigError> {
     let unknown_feature_paths = unknown_feature_toml_value_path(&value);
-    let mut ignored_paths = Vec::new();
-    let mut ignored_callback = |ignored_path: serde_ignored::Path<'_>| {
-        let path_segments = ignored_path_segments(&ignored_path);
-        if !path_segments.is_empty() {
-            ignored_paths.push(path_segments);
-        }
+    let unknown_tui_paths = if TypeId::of::<T>() == TypeId::of::<ConfigToml>() {
+        unknown_tui_toml_value_path(&value)
+    } else {
+        Vec::new()
     };
-    let deserializer = serde_ignored::Deserializer::new(value, &mut ignored_callback);
-    let result: Result<T, _> = serde_path_to_error::deserialize(deserializer);
-
-    match result {
-        Ok(_) => unknown_field_error_from_paths(source, contents, ignored_paths)
+    match ignored_toml_value_fields::<T>(value) {
+        Ok(ignored_paths) => unknown_field_error_from_paths(source, contents, ignored_paths)
+            .or_else(|| unknown_field_error_from_paths(source, contents, unknown_tui_paths))
             .or_else(|| unknown_field_error_from_paths(source, contents, unknown_feature_paths)),
         Err(err) => {
             let path_hint = err.path().clone();

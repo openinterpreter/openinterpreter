@@ -9,6 +9,7 @@ use crate::app_server_session::thread_items_page_params;
 use crate::history_cell::SessionHeaderHistoryCell;
 use crate::history_cell::SessionInfoCell;
 use crate::history_cell::UserHistoryCell;
+use crate::history_cell::is_session_history_prefix_cell;
 use crate::pager_overlay::TranscriptHistoryState;
 use crate::thread_transcript::RawReasoningVisibility;
 use crate::thread_transcript::thread_items_to_transcript_cells;

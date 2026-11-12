@@ -1,9 +1,10 @@
+use crate::terminal_hyperlinks::HyperlinkLine;
+use crate::terminal_hyperlinks::HyperlinkRows;
 use crossterm::event::KeyCode;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
-use ratatui::widgets::Paragraph;
 
 use crate::key_hint;
 use crate::render::renderable::Renderable;
@@ -17,15 +18,13 @@ use crate::wrapping::adaptive_wrap_lines;
 /// steers explain that they will be submitted after the next tool/result
 /// boundary unless the user invokes the interrupt binding to send them
 /// immediately. The edit hint at the bottom only appears when there are actual
-/// queued user inputs to pop back into the composer. Because some terminals
-/// intercept certain modifier-key combinations, the displayed binding is
+/// queued user inputs to pop back into the composer. The displayed binding is
 /// configurable via [`set_edit_binding`](Self::set_edit_binding).
 pub(crate) struct PendingInputPreview {
     pub pending_steers: Vec<String>,
     pub rejected_steers: Vec<String>,
     pub queued_messages: Vec<String>,
-    /// Key combination rendered in the hint line.  Defaults to Alt+Up but may
-    /// be overridden for terminals where that chord is unavailable.
+    /// Key combination rendered in the hint line. Defaults to Shift+Left.
     pub(super) edit_binding: Option<key_hint::ShortcutHint>,
     /// Key combination rendered for immediately interrupting and sending steers.
     interrupt_binding: Option<key_hint::ShortcutHint>,
@@ -44,7 +43,7 @@ impl PendingInputPreview {
             pending_steers: Vec::new(),
             rejected_steers: Vec::new(),
             queued_messages: Vec::new(),
-            edit_binding: Some(key_hint::alt(KeyCode::Up).into()),
+            edit_binding: Some(key_hint::shift(KeyCode::Left).into()),
             interrupt_binding: Some(key_hint::plain(KeyCode::Esc).into()),
         }
     }
@@ -61,23 +60,25 @@ impl PendingInputPreview {
     }
 
     fn push_truncated_preview_lines(
-        lines: &mut Vec<Line<'static>>,
-        wrapped: Vec<Line<'static>>,
+        lines: &mut Vec<HyperlinkLine>,
+        wrapped: Vec<HyperlinkLine>,
         overflow_line: Line<'static>,
     ) {
         let wrapped_len = wrapped.len();
         lines.extend(wrapped.into_iter().take(PREVIEW_LINE_LIMIT));
         if wrapped_len > PREVIEW_LINE_LIMIT {
-            lines.push(overflow_line);
+            lines.push(HyperlinkLine::new(overflow_line));
         }
     }
 
-    fn push_section_header(lines: &mut Vec<Line<'static>>, width: u16, header: Line<'static>) {
+    fn push_section_header(lines: &mut Vec<HyperlinkLine>, width: u16, header: Line<'static>) {
         let mut spans = vec!["• ".dim()];
         spans.extend(header.spans);
-        lines.extend(adaptive_wrap_lines(
-            std::iter::once(Line::from(spans)),
-            RtOptions::new(width as usize).subsequent_indent(Line::from("  ".dim())),
+        lines.extend(crate::terminal_hyperlinks::plain_hyperlink_lines(
+            adaptive_wrap_lines(
+                std::iter::once(Line::from(spans)),
+                RtOptions::new(width as usize).subsequent_indent(Line::from("  ".dim())),
+            ),
         ));
     }
 
@@ -104,11 +105,11 @@ impl PendingInputPreview {
             Self::push_section_header(&mut lines, width, Line::from(header));
 
             for steer in &self.pending_steers {
-                let wrapped = adaptive_wrap_lines(
+                let wrapped = wrap_preview_lines(
                     steer
                         .lines()
                         .take(PREVIEW_LINE_LIMIT + 1)
-                        .map(|line| Line::from(line.dim())),
+                        .map(|line| Line::from(line.to_owned().dim())),
                     RtOptions::new(width as usize)
                         .initial_indent(Line::from("  ↳ ".dim()))
                         .subsequent_indent(Line::from("    ")),
@@ -119,7 +120,7 @@ impl PendingInputPreview {
 
         if !self.rejected_steers.is_empty() {
             if !lines.is_empty() {
-                lines.push(Line::from(""));
+                lines.push(HyperlinkLine::new(Line::from("")));
             }
             Self::push_section_header(
                 &mut lines,
@@ -128,11 +129,11 @@ impl PendingInputPreview {
             );
 
             for steer in &self.rejected_steers {
-                let wrapped = adaptive_wrap_lines(
+                let wrapped = wrap_preview_lines(
                     steer
                         .lines()
                         .take(PREVIEW_LINE_LIMIT + 1)
-                        .map(|line| Line::from(line.dim())),
+                        .map(|line| Line::from(line.to_owned().dim())),
                     RtOptions::new(width as usize)
                         .initial_indent(Line::from("  ↳ ".dim()))
                         .subsequent_indent(Line::from("    ")),
@@ -143,16 +144,16 @@ impl PendingInputPreview {
 
         if !self.queued_messages.is_empty() || has_questions {
             if !lines.is_empty() {
-                lines.push(Line::from(""));
+                lines.push(HyperlinkLine::new(Line::from("")));
             }
             Self::push_section_header(&mut lines, width, "Queued follow-up inputs".into());
 
             for message in &self.queued_messages {
-                let wrapped = adaptive_wrap_lines(
+                let wrapped = wrap_preview_lines(
                     message
                         .lines()
                         .take(PREVIEW_LINE_LIMIT + 1)
-                        .map(|line| Line::from(line.dim().italic())),
+                        .map(|line| Line::from(line.to_owned().dim().italic())),
                     RtOptions::new(width as usize)
                         .initial_indent(Line::from("  ↳ ".dim()))
                         .subsequent_indent(Line::from("    ")),
@@ -175,8 +176,42 @@ impl PendingInputPreview {
             lines.push(hint);
         }
 
-        Paragraph::new(lines).into()
+        Box::new(HyperlinkRows::from(lines))
     }
+}
+
+/// Preserve complete destinations while clipping oversized tokens to the preview width.
+fn wrap_preview_lines(
+    lines: impl IntoIterator<Item = Line<'static>>,
+    options: RtOptions<'static>,
+) -> Vec<HyperlinkLine> {
+    lines
+        .into_iter()
+        .enumerate()
+        .flat_map(|(index, line)| {
+            let source = crate::terminal_hyperlinks::annotate_web_urls_in_line(line);
+            let options = if index == 0 {
+                options.clone()
+            } else {
+                options
+                    .clone()
+                    .initial_indent(options.subsequent_indent.clone())
+            };
+            let width = options.width;
+            let wrapped = crate::wrapping::adaptive_wrap_line_with_source(&source.line, options);
+            let mut lines = crate::terminal_hyperlinks::remap_source_wrapped_line(&source, wrapped);
+            for line in &mut lines {
+                line.line =
+                    crate::line_truncation::truncate_line_to_width(line.line.clone(), width);
+                let visible_width = crate::line_truncation::line_width(&line.line);
+                line.hyperlinks.retain_mut(|link| {
+                    link.columns.end = link.columns.end.min(visible_width);
+                    !link.columns.is_empty()
+                });
+            }
+            lines
+        })
+        .collect()
 }
 
 impl Renderable for PendingInputPreview {
@@ -225,10 +260,57 @@ mod tests {
     }
 
     #[test]
-    fn desired_height_one_message() {
+    fn oversized_preview_urls_keep_complete_destinations() {
+        let url = "https://github.com/openai/codex/pull/12345?diff=split";
+        for section in 0..3 {
+            let mut queue = PendingInputPreview::new();
+            let messages = match section {
+                0 => &mut queue.pending_steers,
+                1 => &mut queue.rejected_steers,
+                2 => &mut queue.queued_messages,
+                _ => unreachable!(),
+            };
+            messages.push(format!("Review {url}"));
+            let area = Rect::new(0, 0, 32, queue.desired_height(/*width*/ 32));
+            let mut buf = Buffer::empty(area);
+            queue.render(area, &mut buf);
+            let linked = buf
+                .content
+                .iter()
+                .filter(|cell| cell.symbol().contains("\x1b]8;;"))
+                .map(|cell| {
+                    assert!(cell.symbol().starts_with(&format!("\x1b]8;;{url}\x07")));
+                    crate::terminal_hyperlinks::strip_osc8(cell.symbol())
+                })
+                .collect::<String>();
+            assert!(!linked.is_empty() && url.starts_with(&linked));
+            if section == 2 {
+                let visible = buf
+                    .content
+                    .chunks(32)
+                    .map(|row| {
+                        row.iter()
+                            .map(|cell| crate::terminal_hyperlinks::strip_osc8(cell.symbol()))
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert_snapshot!("render_oversized_preview_url", visible);
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_preview_clips_the_overflow_and_edit_hint() {
         let mut queue = PendingInputPreview::new();
-        queue.queued_messages.push("Hello, world!".to_string());
-        assert_eq!(queue.desired_height(/*width*/ 40), 3);
+        queue
+            .queued_messages
+            .push("First\nSecond\nThird\nFourth".to_string());
+        let width = 4;
+        let area = Rect::new(0, 0, width, queue.desired_height(width));
+        let mut buf = Buffer::empty(area);
+        queue.render(area, &mut buf);
+        assert_snapshot!("render_narrow_preview", format!("{buf:?}"));
     }
 
     #[test]
@@ -240,21 +322,6 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
         queue.render(Rect::new(0, 0, width, height), &mut buf);
         assert_snapshot!("render_one_message", format!("{buf:?}"));
-    }
-
-    #[test]
-    fn render_one_message_with_shift_left_binding() {
-        let mut queue = PendingInputPreview::new();
-        queue.queued_messages.push("Hello, world!".to_string());
-        queue.set_edit_binding(Some(key_hint::shift(KeyCode::Left).into()));
-        let width = 40;
-        let height = queue.desired_height(width);
-        let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
-        queue.render(Rect::new(0, 0, width, height), &mut buf);
-        assert_snapshot!(
-            "render_one_message_with_shift_left_binding",
-            format!("{buf:?}")
-        );
     }
 
     #[test]

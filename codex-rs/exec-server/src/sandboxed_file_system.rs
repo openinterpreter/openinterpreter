@@ -9,7 +9,8 @@ use crate::CapabilityRootsDiscoverParams;
 use crate::CapabilityRootsDiscoverResponse;
 use crate::CopyOptions;
 use crate::CreateDirectoryOptions;
-use crate::ExecServerRuntimePaths;
+use crate::DiscoverV2CapabilitiesResponse;
+use crate::ExecServerRuntimeOptions;
 use crate::ExecutorFileSystem;
 use crate::ExecutorFileSystemFuture;
 use crate::FILE_READ_CHUNK_SIZE;
@@ -24,6 +25,7 @@ use crate::RemoveOptions;
 use crate::WalkOptions;
 use crate::WalkOutcome;
 use crate::WriteFileOptions;
+use crate::discover_v2::capability_locations::CapabilityLocation;
 use crate::fs_helper::FsHelperPayload;
 use crate::fs_helper::FsHelperRequest;
 use crate::fs_sandbox::FileSystemSandboxRunner;
@@ -31,6 +33,7 @@ use crate::protocol::FsCanonicalizeParams;
 use crate::protocol::FsCopyParams;
 use crate::protocol::FsCreateDirectoryParams;
 use crate::protocol::FsGetMetadataParams;
+use crate::protocol::FsOpenMode;
 use crate::protocol::FsReadDirectoryParams;
 use crate::protocol::FsReadFileParams;
 use crate::protocol::FsRemoveParams;
@@ -43,6 +46,25 @@ pub struct SandboxedFileSystem {
 }
 
 impl SandboxedFileSystem {
+    pub(crate) async fn load_sandboxed_capability_discoveries(
+        &self,
+        locations: Vec<CapabilityLocation>,
+        warnings: Vec<String>,
+        sandbox: &FileSystemSandboxContext,
+    ) -> FileSystemResult<DiscoverV2CapabilitiesResponse> {
+        require_platform_sandbox(Some(sandbox))?;
+        self.run_sandboxed(
+            sandbox,
+            FsHelperRequest::LoadCapabilityDiscoveries {
+                locations,
+                warnings,
+            },
+        )
+        .await?
+        .expect_capability_discoveries()
+        .map_err(map_sandbox_error)
+    }
+
     #[tracing::instrument(
         name = "capability_roots.discover_v1",
         skip_all,
@@ -59,9 +81,10 @@ impl SandboxedFileSystem {
             .map_err(map_sandbox_error)
     }
 
-    pub(crate) async fn open_file_for_read(
+    pub(crate) async fn open_file(
         &self,
         path: &PathUri,
+        mode: FsOpenMode,
         sandbox: Option<&FileSystemSandboxContext>,
     ) -> FileSystemResult<tokio::fs::File> {
         let sandbox = require_platform_sandbox(sandbox)?;
@@ -70,12 +93,13 @@ impl SandboxedFileSystem {
             .sandbox_runner
             .sandbox_command(sandbox)
             .map_err(map_sandbox_error)?;
-        crate::sandboxed_file_open::open(command, path.clone())
+        crate::run_integrity_checks(&command).await;
+        crate::sandboxed_file_open::open(command, path.clone(), mode)
             .await
             .map_err(map_sandbox_error)
     }
 
-    pub fn new(runtime_paths: ExecServerRuntimePaths) -> Self {
+    pub fn new(runtime_paths: ExecServerRuntimeOptions) -> Self {
         Self {
             sandbox_runner: FileSystemSandboxRunner::new(runtime_paths),
         }
@@ -346,7 +370,7 @@ impl ExecutorFileSystem for SandboxedFileSystem {
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, FileSystemReadStream> {
         Box::pin(async move {
-            let file = self.open_file_for_read(path, sandbox).await?;
+            let file = self.open_file(path, FsOpenMode::Read, sandbox).await?;
             Ok(FileSystemReadStream::new(ReaderStream::with_capacity(
                 file,
                 FILE_READ_CHUNK_SIZE,

@@ -8,13 +8,11 @@ use ts_rs::TS;
 use super::InternalChatMessageMetadataPassthrough;
 use super::ResponseItem;
 
-const MAX_EXECUTED_TOOL_CALL_ARGUMENT_BYTES: usize = 8 * 1024;
 /// Maximum distinct result sources retained for one tool invocation.
 const MAX_TOOL_RESULT_SOURCES: usize = 32;
 /// Maximum UTF-8 bytes for each source's `type` and `id` separately, not the source list.
 pub const MAX_TOOL_RESULT_SOURCE_FIELD_BYTES: usize = 128;
-/// Maximum serialized warehouse-only attempted-tool metadata in one request.
-const MAX_EXECUTED_TOOL_CALL_METADATA_BYTES: usize = 32 * 1024;
+const RESOURCE_ACCESS_METADATA_KEY: &str = "openai/resource_access";
 const EXECUTED_TOOL_CALL_METADATA_FIELD_BYTES: usize = b"\"executed_tool_calls\":".len();
 const INTERNAL_CHAT_MESSAGE_METADATA_PASSTHROUGH_FIELD_BYTES: usize =
     b"\"internal_chat_message_metadata_passthrough\":".len();
@@ -39,6 +37,7 @@ fn executed_tool_call_metadata_field_bytes(
     } else if metadata.turn_id.is_some()
         || metadata.create_time.is_some()
         || metadata.content_item_kinds.is_some()
+        || metadata.content_item_metadata.is_some()
     {
         bytes + 1
     } else {
@@ -69,6 +68,18 @@ impl InternalChatMessageMetadataPassthrough {
             recorded.len() == calls.len()
                 && recorded.iter().zip(calls).all(|(recorded, call)| {
                     recorded.name == call.name && recorded.arguments() == call.arguments()
+                })
+        })
+    }
+
+    /// Compares the complete ordered call inventory, independently of recorded arguments.
+    pub fn has_same_tool_call_inventory(&self, calls: &[ExecutedToolCall]) -> bool {
+        self.executed_tool_calls.as_ref().is_some_and(|recorded| {
+            recorded.len() == calls.len()
+                && recorded.iter().zip(calls).all(|(recorded, call)| {
+                    recorded.name == call.name
+                        && recorded.has_complete_inventory()
+                        && call.has_complete_inventory()
                 })
         })
     }
@@ -386,6 +397,11 @@ impl ExecutedToolCall {
         &self.arguments
     }
 
+    /// Whether this call has result metadata or an omission marker.
+    pub fn has_tool_result_metadata(&self) -> bool {
+        self.tool_result_metadata.is_some()
+    }
+
     /// Replaces this invocation's capture outcome, including clearing omitted evidence.
     pub fn set_tool_result_sources(&mut self, sources: ToolResultSources) -> bool {
         self.tool_result_sources = sources.0;
@@ -402,6 +418,14 @@ impl ExecutedToolCall {
             ExecutedToolCallArguments::Raw(_) => None,
             ExecutedToolCallArguments::Truncated { truncation } => Some(truncation),
         }
+    }
+
+    /// Whether this entry retains its invocation and full tool name, regardless of arguments.
+    pub fn has_complete_inventory(&self) -> bool {
+        self.truncation().is_none_or(|truncation| {
+            truncation.omitted_calls.unwrap_or_default() == 0
+                && truncation.original_name_bytes.is_none()
+        })
     }
 
     fn set_truncation(

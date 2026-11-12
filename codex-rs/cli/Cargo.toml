@@ -14,6 +14,10 @@ path = "src/main.rs"
 name = "logs_client"
 path = "src/bin/logs_client.rs"
 
+[[test]]
+name = "app_server_daemon_package"
+path = "tests/app_server_daemon/package.rs"
+
 [lib]
 name = "codex_cli"
 path = "src/lib.rs"
@@ -23,6 +27,7 @@ doctest = false
 workspace = true
 
 [dependencies]
+codex-utils-process = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
@@ -35,7 +40,6 @@ codex-app-server-test-client = { workspace = true }
 codex-arg0 = { workspace = true }
 codex-build-info = { workspace = true }
 codex-api = { workspace = true }
-codex-aws-auth = { workspace = true }
 codex-chatgpt = { workspace = true }
 codex-cloud-config = { workspace = true }
 codex-cloud-tasks = { path = "../cloud-tasks" }
@@ -48,9 +52,11 @@ codex-home = { workspace = true }
 codex-http-client = { workspace = true }
 codex-exec = { workspace = true }
 codex-exec-server = { workspace = true }
+codex-exec-server-cli = { workspace = true }
 codex-execpolicy = { workspace = true }
 codex-extension-api = { workspace = true }
 codex-features = { workspace = true }
+codex-multi-env-copy-file = { workspace = true }
 codex-git-attribution = { workspace = true }
 codex-git-utils = { workspace = true }
 codex-install-context = { workspace = true }
@@ -87,6 +93,7 @@ owo-colors = { workspace = true }
 regex-lite = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sqlx = { workspace = true }
 supports-color = { workspace = true }
 sys-locale = { workspace = true }
 tempfile = { workspace = true }
@@ -112,7 +119,7 @@ tikv-jemallocator = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 codex_windows_sandbox = { package = "codex-windows-sandbox", path = "../windows-sandbox-rs" }
-windows-sys = { version = "0.52", features = [
+windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Storage_Packaging_Appx",
     "Win32_System_Console",
@@ -124,13 +131,17 @@ app_test_support = { workspace = true }
 agent-client-protocol = { workspace = true }
 assert_cmd = { workspace = true }
 assert_matches = { workspace = true }
+codex-app-server-client = { workspace = true }
+codex-uds = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 codex-utils-pty = { workspace = true }
+core_test_support = { workspace = true }
 flate2 = { workspace = true }
 insta = { workspace = true }
+jsonwebtoken = { workspace = true }
 predicates = { workspace = true }
 pretty_assertions = { workspace = true }
-sqlx = { workspace = true }
+sha2 = { workspace = true }
 tar = { workspace = true }
 tokio-tungstenite = { workspace = true }
 vt100 = { workspace = true }

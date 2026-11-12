@@ -44,7 +44,7 @@ use crate::pager_overlay::Overlay;
 use crate::pager_overlay::TranscriptHistoryState;
 use crate::tui;
 use crate::tui::TuiEvent;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnStatus;
 use codex_protocol::ThreadId;
@@ -166,10 +166,21 @@ impl App {
             return;
         }
         let _ = tui.enter_alt_screen();
-        self.overlay = Some(Overlay::new_transcript(
-            self.transcript_cells.clone(),
-            self.keymap.pager.clone(),
-        ));
+        self.overlay = Some(
+            Overlay::new_transcript(
+                self.transcript_cells.clone(),
+                self.keymap.pager.clone(),
+                self.local_settings
+                    .copy_on_select(&codex_terminal_detection::terminal_info()),
+                self.local_settings
+                    .tui
+                    .mouse_scroll_speed
+                    .unwrap_or(/*default*/ 1.0),
+            )
+            .with_copy_on_select_clear_selection(
+                self.local_settings.tui.copy_on_select_clear_selection,
+            ),
+        );
         if self.scrollback_has_older_history
             && let Some(Overlay::Transcript(overlay)) = self.overlay.as_mut()
         {
@@ -389,12 +400,29 @@ impl App {
             }
             result?;
             let close_overlay = t.is_done();
+            let select_mode_closed = was_select_mode && (!t.is_select_mode() || close_overlay);
+            let pending_follow_id = t.pending_follow_id();
             if !close_overlay
                 && active_key.is_some_and(|key| key.animation_tick.is_some())
                 && t.is_scrolled_to_bottom()
             {
                 tui.frame_requester()
                     .schedule_frame_in(std::time::Duration::from_millis(50));
+            }
+            if pending_follow_id != pending_follow_before
+                && let (Some(id), Some(key)) = (pending_follow_id, select_exit_key)
+            {
+                self.backtrack.pending_select_exit_key = Some((id, key));
+            }
+            let completed_exit_key = completed_copy.and_then(|completed_id| {
+                self.backtrack
+                    .finish_pending_select_exit_key(completed_id, select_mode_closed)
+            });
+            if select_mode_closed {
+                self.backtrack.select_exit_key = select_exit_key.or(completed_exit_key);
+                if select_exit_key.is_some() {
+                    self.backtrack.pending_select_exit_key = None;
+                }
             }
             if close_overlay {
                 self.close_transcript_overlay(tui);
@@ -404,7 +432,7 @@ impl App {
         }
 
         if let Some(overlay) = &mut self.overlay {
-            overlay.handle_event(tui, event)?;
+            tui.with_shortcut_hud(hud, |tui| overlay.handle_event(tui, event))?;
             if overlay.is_done() {
                 self.close_transcript_overlay(tui);
                 tui.frame_requester().schedule_frame();
@@ -539,15 +567,15 @@ pub(crate) fn backtrack_revert_before_turn_id(
             .count();
         for item in &turn.items[first_item..] {
             let content = match item {
-                ThreadItem::EnteredReviewMode { .. } => {
+                ThreadItemPayload::EnteredReviewMode { .. } => {
                     review_mode = true;
                     continue;
                 }
-                ThreadItem::ExitedReviewMode { .. } => {
+                ThreadItemPayload::ExitedReviewMode { .. } => {
                     review_mode = false;
                     continue;
                 }
-                ThreadItem::UserMessage { content, .. } => content,
+                ThreadItemPayload::UserMessage { content, .. } => content,
                 _ => continue,
             };
             let is_steer = user_messages_in_turn > 0;
@@ -605,19 +633,17 @@ pub(crate) fn is_hidden_nested_review_turn(previous: &Turn, turn: &Turn) -> bool
         || turn.status != TurnStatus::Interrupted
         || turn.completed_at.is_some()
         || !previous
-            .items
-            .iter()
-            .any(|item| matches!(item, ThreadItem::EnteredReviewMode { .. }))
+            .item_payloads()
+            .any(|item| matches!(item, ThreadItemPayload::EnteredReviewMode { .. }))
         || !previous
-            .items
-            .iter()
-            .any(|item| matches!(item, ThreadItem::ExitedReviewMode { .. }))
+            .item_payloads()
+            .any(|item| matches!(item, ThreadItemPayload::ExitedReviewMode { .. }))
     {
         return false;
     }
 
-    let mut user_messages = turn.items.iter().filter_map(|item| match item {
-        ThreadItem::UserMessage { content, .. } => Some(content),
+    let mut user_messages = turn.item_payloads().filter_map(|item| match item {
+        ThreadItemPayload::UserMessage { content, .. } => Some(content),
         _ => None,
     });
     matches!(
@@ -702,6 +728,7 @@ mod tests {
     use crate::bottom_pane::MentionBinding;
     use crate::history_cell::AgentMessageCell;
     use crate::history_cell::HistoryCell;
+    use codex_app_server_protocol::ThreadItem;
     use codex_app_server_protocol::UserInput;
     use pretty_assertions::assert_eq;
     use ratatui::prelude::Line;
@@ -720,11 +747,44 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn pending_select_exit_key_ends_on_completion_or_release() {
+        let key = crate::key_hint::KeyBinding::from_event(KeyCode::Enter.into());
+        let mut state = BacktrackState {
+            pending_select_exit_key: Some((7, key)),
+            ..BacktrackState::default()
+        };
+
+        assert_eq!(
+            state.finish_pending_select_exit_key(
+                /*completed_id*/ 7, /*select_mode_closed*/ false,
+            ),
+            None
+        );
+        assert_eq!(state.pending_select_exit_key, None);
+        state.pending_select_exit_key = Some((8, key));
+        state.observe_pending_select_exit_key(KeyEvent::new_with_kind(
+            KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ));
+        assert_eq!(state.pending_select_exit_key, None);
+        state.pending_select_exit_key = Some((9, key));
+        assert_eq!(
+            state.finish_pending_select_exit_key(
+                /*completed_id*/ 9, /*select_mode_closed*/ true,
+            ),
+            Some(key)
+        );
+        assert_eq!(state.pending_select_exit_key, None);
+    }
+
     fn turn(turn_id: &str, status: TurnStatus, user_messages: usize) -> Turn {
         Turn {
             id: turn_id.to_string(),
+            root_turn_id: None,
             items: (0..user_messages)
-                .map(|index| ThreadItem::UserMessage {
+                .map(|index| ThreadItemPayload::UserMessage {
                     id: format!("user-{index}"),
                     client_id: None,
                     content: vec![UserInput::Text {
@@ -732,6 +792,7 @@ mod tests {
                         text_elements: Vec::new(),
                     }],
                 })
+                .map(ThreadItem::untimed)
                 .collect(),
             items_view: codex_app_server_protocol::TurnItemsView::Full,
             status,
@@ -896,15 +957,17 @@ mod tests {
         );
         review_turn.items.insert(
             /*index*/ 0,
-            ThreadItem::EnteredReviewMode {
+            ThreadItem::untimed(ThreadItemPayload::EnteredReviewMode {
                 id: "review-start".to_string(),
                 review: "changes against main".to_string(),
-            },
+            }),
         );
-        review_turn.items.push(ThreadItem::ExitedReviewMode {
-            id: "review-end".to_string(),
-            review: "review complete".to_string(),
-        });
+        review_turn
+            .items
+            .push(ThreadItem::untimed(ThreadItemPayload::ExitedReviewMode {
+                id: "review-end".to_string(),
+                review: "review complete".to_string(),
+            }));
         let turns = vec![
             turn("turn-1", TurnStatus::Completed, /*user_messages*/ 1),
             review_turn,
@@ -942,14 +1005,14 @@ mod tests {
             "Review the current code changes (staged, unstaged, and untracked files).";
         let review_turn = Turn {
             items: vec![
-                ThreadItem::EnteredReviewMode {
+                ThreadItem::untimed(ThreadItemPayload::EnteredReviewMode {
                     id: "review-start".to_string(),
                     review: review_hint.to_string(),
-                },
-                ThreadItem::ExitedReviewMode {
+                }),
+                ThreadItem::untimed(ThreadItemPayload::ExitedReviewMode {
                     id: "review-end".to_string(),
                     review: "review complete".to_string(),
-                },
+                }),
             ],
             ..turn(
                 "turn-review",
@@ -959,7 +1022,7 @@ mod tests {
         };
         let review_child_turn = Turn {
             items: (0..2)
-                .map(|index| ThreadItem::UserMessage {
+                .map(|index| ThreadItemPayload::UserMessage {
                     id: format!("review-prompt-{index}"),
                     client_id: None,
                     content: vec![UserInput::Text {
@@ -967,6 +1030,7 @@ mod tests {
                         text_elements: Vec::new(),
                     }],
                 })
+                .map(ThreadItem::untimed)
                 .collect(),
             ..turn(
                 "turn-review-child",
@@ -1008,7 +1072,7 @@ mod tests {
     #[test]
     fn backtrack_revert_before_turn_id_restores_canonical_mention_bindings() {
         let mut selected_turn = turn("turn-2", TurnStatus::Completed, /*user_messages*/ 1);
-        selected_turn.items = vec![ThreadItem::UserMessage {
+        selected_turn.items = vec![ThreadItem::untimed(ThreadItemPayload::UserMessage {
             id: "selected-prompt".to_string(),
             client_id: None,
             content: vec![
@@ -1029,7 +1093,7 @@ mod tests {
                     path: "app://google_calendar".to_string(),
                 },
             ],
-        }];
+        })];
         let turns = vec![
             turn("turn-1", TurnStatus::Completed, /*user_messages*/ 1),
             selected_turn,

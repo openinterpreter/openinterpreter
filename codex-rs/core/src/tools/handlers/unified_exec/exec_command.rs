@@ -1,75 +1,58 @@
-use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
-use crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS;
-use crate::exec_policy::prompt_is_rejected_by_policy;
 use crate::function_tool::FunctionCallError;
 use crate::maybe_emit_implicit_skill_invocation;
 use crate::tools::context::ExecCommandToolOutput;
+use crate::tools::context::ToolEnvironments;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
-use crate::tools::handlers::apply_granted_turn_permissions;
+use crate::tools::handlers::ToolEnvironmentArgs;
 use crate::tools::handlers::apply_patch::intercept_apply_patch;
-use crate::tools::handlers::file_system_sandbox_policy_context_for_cwd;
-use crate::tools::handlers::implicit_granted_permissions;
-use crate::tools::handlers::normalize_and_validate_additional_permissions;
+use crate::tools::handlers::function_tool_environment;
 use crate::tools::handlers::parse_arguments;
-use crate::tools::handlers::parse_arguments_with_base_path;
-use crate::tools::handlers::resolve_sandbox_permissions;
-use crate::tools::handlers::resolve_tool_environment;
 use crate::tools::handlers::rewrite_function_string_argument;
+use crate::tools::handlers::selected_executor;
 use crate::tools::handlers::updated_hook_command;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::PostToolUsePayload;
 use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolExecutor;
+use crate::tools::registry::ToolTelemetryTags;
 use crate::unified_exec::ExecCommandRequest;
 use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::UnifiedExecError;
 use crate::unified_exec::UnifiedExecProcessManager;
 use crate::unified_exec::generate_chunk_id;
+use crate::unified_exec::output::CapturedStream;
 use codex_features::Feature;
 use codex_otel::SessionTelemetry;
 use codex_otel::TOOL_CALL_UNIFIED_EXEC_METRIC;
-use codex_sandboxing::SandboxManager;
-use codex_sandboxing::SandboxType;
-use codex_sandboxing::SandboxablePreference;
-use codex_shell_command::shell_detect::detect_shell_type;
 use codex_tools::JsonSchema;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 use codex_utils_output_truncation::approx_token_count;
-use codex_utils_path_uri::PathConvention;
+use codex_utils_path_uri::PathUri;
 use codex_utils_string::truncate_middle_chars;
 
 use super::super::shell_spec::CommandToolOptions;
 use super::super::shell_spec::create_exec_command_tool_with_environment_id;
 use super::ExecCommandArgs;
-use super::ExecCommandEnvironmentArgs;
-use super::get_command;
+use super::ExecCommandWorkdirArgs;
 use super::post_unified_exec_tool_use_payload;
-use super::shell_mode_for_environment;
+use super::preparation::ExecCommandLifetime;
+use super::preparation::ParsedExecCommand;
 
 // A byte limit is a conservative hard token bound even for byte-fallback tokenizers.
 const EXEC_COMMAND_REJECTION_MAX_BYTES: usize = 900;
 
 #[derive(Clone, Copy)]
 pub(crate) struct ExecCommandHandlerOptions {
-    pub(crate) allow_login_shell: bool,
     pub(crate) allow_tty: bool,
     pub(crate) exec_permission_approvals_enabled: bool,
     pub(crate) include_environment_id: bool,
-    pub(crate) include_shell_parameter: bool,
     pub(crate) include_windows_shell_guidance: bool,
-}
-
-#[derive(Clone, Copy)]
-enum ExecCommandLifetime {
-    Interactive,
-    OneShot,
 }
 
 pub struct ExecCommandHandler {
@@ -82,11 +65,9 @@ impl Default for ExecCommandHandler {
         Self {
             lifetime: ExecCommandLifetime::Interactive,
             options: ExecCommandHandlerOptions {
-                allow_login_shell: false,
                 allow_tty: true,
                 exec_permission_approvals_enabled: false,
                 include_environment_id: false,
-                include_shell_parameter: true,
                 include_windows_shell_guidance: cfg!(windows),
             },
         }
@@ -117,11 +98,9 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
     fn spec(&self) -> ToolSpec {
         let spec = create_exec_command_tool_with_environment_id(
             CommandToolOptions {
-                allow_login_shell: self.options.allow_login_shell,
                 exec_permission_approvals_enabled: self.options.exec_permission_approvals_enabled,
             },
             self.options.include_environment_id,
-            self.options.include_shell_parameter,
             self.options.include_windows_shell_guidance,
         );
         let mut spec = match self.lifetime {
@@ -157,8 +136,8 @@ impl ExecCommandHandler {
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
         let ToolInvocation {
+            environments,
             session,
-            turn,
             step_context,
             cancellation_token,
             tracker,
@@ -253,11 +232,11 @@ impl ExecCommandHandler {
             resolve_sandbox_permissions(args.sandbox_permissions, args.justification.as_deref())?;
         let hook_command = args.cmd.clone();
         maybe_emit_implicit_skill_invocation(
-            session.as_ref(),
-            context.step_context.turn.as_ref(),
-            &hook_command,
-            &cwd,
-            native_cwd.as_ref(),
+            &session,
+            &step_context,
+            &parsed.args.cmd,
+            &parsed.cwd,
+            parsed.native_cwd.as_ref(),
             &turn_environment.selection.environment_id,
         )
         .await;
@@ -376,10 +355,10 @@ impl ExecCommandHandler {
         };
 
         let intercepted_patch = intercept_apply_patch(
-            &command,
-            &cwd,
+            &prepared.resolved.command,
+            &prepared.cwd,
             fs.as_ref(),
-            turn_environment.clone(),
+            &prepared.turn_environment,
             context.session.clone(),
             Arc::clone(&context.step_context),
             context.cancellation_token.clone(),
@@ -399,8 +378,8 @@ impl ExecCommandHandler {
                 process_id: None,
                 exit_code: None,
                 original_token_count: None,
-                output_omitted_bytes: None,
                 hook_command: None,
+                tool_cwd: None,
             }));
         }
 
@@ -417,26 +396,11 @@ impl ExecCommandHandler {
         // Preparation can be cancelled. Reserve a process only once it is done.
         let process_id = manager.allocate_process_id().await;
         let request = ExecCommandRequest {
-            command,
-            shell_type,
-            hook_command: hook_command.clone(),
+            prepared,
             process_id,
-            yield_time_ms,
-            max_output_tokens,
-            cwd,
-            sandbox_cwd: native_environment_cwd,
-            turn_environment: turn_environment.clone(),
-            shell_mode,
             network: context.step_context.turn.network.clone(),
-            tty,
-            sandbox_permissions: effective_additional_permissions.sandbox_permissions,
-            additional_permissions: normalized_additional_permissions,
-            additional_permissions_preapproved: effective_additional_permissions
-                .permissions_preapproved,
-            justification,
-            prefix_rule,
         };
-        let result = match completion_timeout {
+        let result = match request.prepared.completion_timeout {
             Some(timeout) => {
                 UnifiedExecProcessManager::exec_command_to_completion(request, &context, timeout)
                     .await
@@ -466,8 +430,8 @@ impl ExecCommandHandler {
                     process_id: None,
                     exit_code: Some(output.exit_code),
                     original_token_count: Some(original_token_count),
-                    output_omitted_bytes,
                     hook_command: Some(hook_command),
+                    tool_cwd,
                 }))
             }
             Err(err) => {
@@ -513,6 +477,26 @@ fn one_shot_exec_command_spec(spec: ToolSpec) -> ToolSpec {
 }
 
 impl CoreToolRuntime for ExecCommandHandler {
+    fn telemetry_tags(&self, invocation: &ToolInvocation) -> ToolTelemetryTags {
+        // Record the configured mode so fallback calls remain in their rollout cohort.
+        // This does not indicate whether the command actually used a snapshot.
+        let mode = if invocation.session.enabled(Feature::ShellSnapshotV2) {
+            "v2"
+        } else if invocation.session.enabled(Feature::ShellSnapshot) {
+            "v1"
+        } else {
+            "disabled"
+        };
+        vec![("shell_snapshot_mode", mode.to_string())]
+    }
+
+    fn environments_for_input(
+        &self,
+        invocation: &ToolInvocation,
+    ) -> Result<ToolEnvironments, FunctionCallError> {
+        function_tool_environment(invocation, |args: ToolEnvironmentArgs| args.environment_id)
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Function { .. })
     }
@@ -528,6 +512,24 @@ impl CoreToolRuntime for ExecCommandHandler {
                 tool_name: HookToolName::bash(),
                 tool_input: serde_json::json!({ "command": args.cmd }),
             })
+    }
+
+    fn pre_tool_use_cwd(
+        &self,
+        invocation: &ToolInvocation,
+    ) -> Result<Option<PathUri>, FunctionCallError> {
+        let ToolPayload::Function { arguments } = &invocation.payload else {
+            return Ok(None);
+        };
+        let args: ExecCommandWorkdirArgs = parse_arguments(arguments)?;
+        let environment = selected_executor(
+            &invocation.environments,
+            &invocation.step_context.environments,
+        )?;
+        let cwd = args.resolve_cwd(environment)?;
+        // Hook scripts execute on the host. Remote command paths cannot replace
+        // the host cwd in hook input, even when both machines use the same OS.
+        Ok((!environment.environment().is_remote()).then_some(cwd))
     }
 
     fn with_updated_hook_input(

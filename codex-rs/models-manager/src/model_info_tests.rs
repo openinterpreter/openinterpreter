@@ -3,9 +3,11 @@ use crate::ModelsManagerConfig;
 use codex_prompts::render_model_instructions;
 use codex_protocol::config_types::Personality;
 use codex_protocol::openai_models::ApprovalMessages;
+use codex_protocol::openai_models::AppsMessages;
 use codex_protocol::openai_models::AutoReviewMessages;
 use codex_protocol::openai_models::CollaborationModeMessages;
 use codex_protocol::openai_models::ConfirmationPolicies;
+use codex_protocol::openai_models::GranularApprovalMessages;
 use codex_protocol::openai_models::GuardianV2ModelConfig;
 use codex_protocol::openai_models::ModelInstructionsVariables;
 use codex_protocol::openai_models::ModelTokenBudgetConfig;
@@ -78,6 +80,12 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
         on_request_auto_review: Some("auto approvals".to_string()),
         never: Some("never approvals".to_string()),
         unless_trusted: Some("unless-trusted approvals".to_string()),
+        granular: Some(GranularApprovalMessages {
+            intro: Some("Catalog: {{ policy }}".to_string()),
+            prompted_categories: Some("Allowed: {{ categories }}".to_string()),
+            rejected_categories: Some("Denied: {{ categories }}".to_string()),
+        }),
+        ..Default::default()
     };
     let collaboration_modes = CollaborationModeMessages {
         default: Some("default instructions".to_string()),
@@ -94,6 +102,8 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
         danger_full_access: Some("danger".to_string()),
         workspace_write: Some(String::new()),
         read_only: None,
+        approved_prefixes: None,
+        ..PermissionMessages::default()
     };
     let multi_agent = MultiAgentMessages {
         role: Some(MultiAgentRoleMessages {
@@ -137,6 +147,14 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
                 }),
                 ..Default::default()
             }),
+            multi_agent: Some(MultiAgentToolMessages {
+                spawn_agent: Some(ToolMessage {
+                    description: Some("Catalog spawn description.".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
         }),
         instructions_template: Some("template".to_string()),
         instructions_variables: Some(ModelInstructionsVariables {

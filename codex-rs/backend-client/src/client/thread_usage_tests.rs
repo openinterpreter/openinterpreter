@@ -41,11 +41,13 @@ async fn get_thread_usage_returns_requested_thread_totals() {
                 "thread_id": "thread-123",
                 "estimated_usage_credits_micros": 46_000_000,
                 "estimated_usage_usd_micros": 1_820_000,
+                "native_usage_usd_micros": 3_250_000,
                 "groups": [{
                     "model": "gpt-5.4",
                     "reasoning_effort": "high",
                     "speed": "fast",
                     "estimated_usage_credits_micros": 46_000_000,
+                    "native_usage_usd_micros": 3_250_000,
                     "net_new_input_tokens": 80,
                     "cached_input_tokens": 20,
                     "input_tokens": 100,
@@ -71,11 +73,13 @@ async fn get_thread_usage_returns_requested_thread_totals() {
             thread_id: "thread-123".to_string(),
             estimated_usage_credits_micros: 46_000_000,
             estimated_usage_usd_micros: Some(1_820_000),
+            native_usage_usd_micros: Some(3_250_000),
             groups: vec![ThreadUsageBreakdownGroup {
                 model: Some("gpt-5.4".to_string()),
                 reasoning_effort: Some("high".to_string()),
                 speed: Some("fast".to_string()),
                 estimated_usage_credits_micros: 46_000_000,
+                native_usage_usd_micros: Some(3_250_000),
                 net_new_input_tokens: Some(80),
                 cached_input_tokens: Some(20),
                 input_tokens: Some(100),
@@ -115,6 +119,7 @@ async fn get_thread_usage_accepts_credits_without_usd_estimate() {
             thread_id: "thread-123".to_string(),
             estimated_usage_credits_micros: 46_000_000,
             estimated_usage_usd_micros: None,
+            native_usage_usd_micros: None,
             groups: Vec::new(),
         }
     );

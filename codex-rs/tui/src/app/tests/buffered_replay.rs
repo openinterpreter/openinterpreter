@@ -18,11 +18,11 @@ fn delta(thread: &str, turn: &str, item: &str) -> ServerNotification {
 }
 
 fn completed(thread: &str) -> ServerNotification {
-    ServerNotification::ItemCompleted(ItemCompletedNotification {
-        thread_id: thread.into(),
-        turn_id: "turn".into(),
-        completed_at_ms: 0,
-        item: ThreadItem::AgentMessage {
+    ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+        thread.into(),
+        "turn".into(),
+        ThreadItemPayload::AgentMessage {
+            moderation: None,
             id: "answer".into(),
             text: "Final **answer**".into(),
             phase: None,
@@ -30,7 +30,152 @@ fn completed(thread: &str) -> ServerNotification {
             delivery: None,
             questions: None,
         },
-    })
+        /*started_at_ms*/ None,
+        /*completed_at_ms*/ 0,
+    ))
+}
+
+#[tokio::test]
+async fn refreshed_active_reasoning_accepts_later_deltas_and_complete_summary() {
+    for (refresh, refreshed_item_is_partial, capacity, voice_handoff) in [
+        (true, false, 1, false),
+        (true, true, 1, false),
+        (false, false, 8, false),
+        (false, false, 1, false),
+        (true, false, 1, true),
+    ] {
+        let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+        let thread_id = ThreadId::new();
+        let session = test_thread_session(thread_id, app.config.cwd.to_path_buf());
+        let mut turn = test_turn("reasoning-turn", TurnStatus::InProgress, Vec::new());
+        let channel =
+            ThreadEventChannel::new_with_session(capacity, session.clone(), vec![turn.clone()]);
+        {
+            let mut store = channel.store.lock().await;
+            store.push_notification(ServerNotification::ItemStarted(
+                ItemStartedNotification::new(
+                    thread_id.to_string(),
+                    turn.id.clone(),
+                    ThreadItemPayload::Reasoning {
+                        id: "reasoning".into(),
+                        summary: vec!["**First heading**".into()],
+                        content: Vec::new(),
+                    },
+                    /*started_at_ms*/ 0,
+                ),
+            ));
+            store.push_notification(ServerNotification::ReasoningSummaryTextDelta(
+                ReasoningSummaryTextDeltaNotification {
+                    thread_id: thread_id.to_string(),
+                    turn_id: turn.id.clone(),
+                    item_id: "reasoning".into(),
+                    delta: "\nOriginal analysis paragraph".into(),
+                    summary_index: 0,
+                },
+            ));
+            assert_eq!(store.buffer.len(), capacity.min(/*other*/ 2));
+            if voice_handoff {
+                store.push_notification(ServerNotification::ItemStarted(ItemStartedNotification::new(thread_id.to_string(), turn.id.clone(), ThreadItemPayload::UserMessage {
+                        id: "voice-handoff".into(),
+                        client_id: None,
+                        content: vec![AppServerUserInput::Text {
+                            text: "<realtime_delegation><input>spoken follow-up</input></realtime_delegation>".into(),
+                            text_elements: Vec::new(),
+                        }],
+                    }, /*started_at_ms*/ 0)));
+            }
+        }
+        let mut snapshot = channel.store.lock().await.snapshot();
+        app.thread_event_channels.insert(thread_id, channel);
+        if refreshed_item_is_partial {
+            turn.items
+                .push(ThreadItem::untimed(ThreadItemPayload::Reasoning {
+                    id: "reasoning".into(),
+                    summary: vec!["**First heading**\nOriginal analysis paragraph".into()],
+                    content: Vec::new(),
+                }));
+        }
+        if refresh {
+            app.apply_refreshed_snapshot_thread(
+                thread_id,
+                AppServerStartedThread {
+                    session,
+                    turns: vec![turn],
+                    blocks_direct_input: false,
+                    task_tools_available: false,
+                },
+                &mut snapshot,
+            )
+            .await;
+            assert!(snapshot.events.is_empty());
+        }
+        assert!(snapshot.active_reasoning_item.is_some());
+        app.replay_thread_snapshot(snapshot, /*resume_restored_queue*/ false);
+        if refresh && !refreshed_item_is_partial && !voice_handoff {
+            assert!(render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("First heading"));
+        }
+        app.chat_widget.handle_server_notification(
+            ServerNotification::ReasoningSummaryTextDelta(ReasoningSummaryTextDeltaNotification {
+                thread_id: thread_id.to_string(),
+                turn_id: "reasoning-turn".into(),
+                item_id: "reasoning".into(),
+                delta: "\n**Running checks**\nFinal paragraph".into(),
+                summary_index: 0,
+            }),
+            /*replay_kind*/ None,
+        );
+        assert!(render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("Final paragraph"));
+        let completed = ServerNotification::ItemCompleted(ItemCompletedNotification::new(thread_id.to_string(), "reasoning-turn".into(), ThreadItemPayload::Reasoning {
+                    id: "reasoning".into(),
+                    summary: vec![
+                        "**First heading**\nOriginal analysis paragraph\n**Running checks**\nFinal paragraph"
+                            .into(),
+                    ],
+                    content: Vec::new(),
+                }, /*started_at_ms*/ None, /*completed_at_ms*/ 0));
+        let store = &app.thread_event_channels[&thread_id].store;
+        store.lock().await.push_notification_ref(&completed);
+        assert!(
+            store
+                .lock()
+                .await
+                .snapshot()
+                .active_reasoning_item
+                .is_none()
+        );
+        app.chat_widget
+            .handle_server_notification(completed, /*replay_kind*/ None);
+        app.chat_widget.handle_server_notification(
+            ServerNotification::ReasoningSummaryTextDelta(ReasoningSummaryTextDeltaNotification {
+                thread_id: thread_id.to_string(),
+                turn_id: "reasoning-turn".into(),
+                item_id: "reasoning".into(),
+                delta: "\n**Stale heading**".into(),
+                summary_index: 0,
+            }),
+            /*replay_kind*/ None,
+        );
+        assert!(!render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("Stale heading"));
+        let transcript = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                AppEvent::InsertHistoryCell(cell)
+                    if cell
+                        .as_any()
+                        .is::<crate::history_cell::ReasoningSummaryCell>() =>
+                {
+                    Some(lines_to_single_string(&cell.transcript_lines(/*width*/ 80)))
+                }
+                _ => None,
+            })
+            .collect::<String>();
+        insta::allow_duplicates! {
+            insta::assert_snapshot!(transcript, @"
+            • Original analysis paragraph
+              Running checks
+              Final paragraph
+            ");
+        }
+    }
 }
 
 #[tokio::test]
@@ -646,7 +791,7 @@ async fn misalignment_buffered_replay_preserves_input_after_continuation() {
     };
     let failed_turn = Turn {
         error: Some(error.clone()),
-        items: vec![ThreadItem::McpToolCall {
+        items: vec![ThreadItem::untimed(ThreadItemPayload::McpToolCall {
             id: "tool-call".into(),
             server: "sample".into(),
             tool: "inspect".into(),
@@ -660,7 +805,7 @@ async fn misalignment_buffered_replay_preserves_input_after_continuation() {
             result: None,
             error: None,
             duration_ms: None,
-        }],
+        })],
         ..test_turn("failed-turn", TurnStatus::Failed, Vec::new())
     };
     let continued_turn = test_turn("continued-turn", TurnStatus::Completed, Vec::new());

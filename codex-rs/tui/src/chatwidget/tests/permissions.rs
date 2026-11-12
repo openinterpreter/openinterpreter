@@ -3,6 +3,7 @@ use crate::legacy_core::config::PermissionProfileCatalogEntry;
 use crate::permission_discovery::PermissionDiscovery as Discovery;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
+use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY;
 use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
@@ -60,7 +61,13 @@ async fn permission_discovery_uses_server_catalog_for_remote_custom_selection() 
         }))
         .unwrap(),
     );
-    chat.request_permission_profiles();
+    // Conflicting local availability must not disable server-provided choices.
+    chat.config.config_layer_stack = requirements_stack(codex_config::ConfigRequirementsToml {
+        allowed_sandbox_modes: Some(vec![codex_config::SandboxModeRequirement::ReadOnly]),
+        ..Default::default()
+    });
+    chat.thread_id = Some(ThreadId::new());
+    chat.open_permissions_popup();
     let request_id = chat.permission_popup_request_id.unwrap();
     rx.try_recv().unwrap();
     assert_chatwidget_snapshot!(
@@ -79,27 +86,224 @@ async fn permission_discovery_uses_server_catalog_for_remote_custom_selection() 
         AppEvent::SelectPermissionProfile(PermissionProfileSelection { profile_id, .. })
             if profile_id == "server-only"
     ));
+}
+
+#[tokio::test]
+async fn permissions_command_waits_for_covering_modal_before_selecting_profile() {
+    let (mut chat, mut events, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.select_permission_profile(BUILT_IN_PERMISSION_PROFILE_READ_ONLY);
+    let request_id = assert_matches!(
+        events.try_recv(),
+        Ok(AppEvent::FetchPermissionProfiles { request_id, .. }) => request_id
+    );
+    chat.bottom_pane.show_selection_view(SelectionViewParams {
+        view_id: Some("other-modal"),
+        title: Some("Other modal".to_string()),
+        ..Default::default()
+    });
+
+    chat.on_permission_profiles_loaded(request_id, Ok(Discovery::local(&chat.config)));
+
+    assert_eq!(chat.bottom_pane.active_view_id(), Some("other-modal"));
+    assert!(events.try_recv().is_err());
+
     chat.handle_key_event(KeyEvent::from(KeyCode::Esc));
+
+    assert_matches!(
+        events.try_recv(),
+        Ok(AppEvent::SelectPermissionProfile(PermissionProfileSelection { profile_id, .. }))
+            if profile_id == BUILT_IN_PERMISSION_PROFILE_READ_ONLY
+    );
+    assert_matches!(events.try_recv(), Ok(AppEvent::SettingsSelectionClosed));
+}
+
+#[tokio::test]
+async fn cancelled_permissions_command_does_not_apply_after_later_modal() {
+    let (mut chat, mut events, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.input_queue
+        .queued_user_messages
+        .push_back(UserMessage::from("follow-up").into());
+    chat.select_permission_profile(BUILT_IN_PERMISSION_PROFILE_READ_ONLY);
+    let request_id = assert_matches!(
+        events.try_recv(),
+        Ok(AppEvent::FetchPermissionProfiles { request_id, .. }) => request_id
+    );
+    chat.handle_key_event(KeyEvent::from(KeyCode::Esc));
+    assert_matches!(events.try_recv(), Ok(AppEvent::SettingsSelectionClosed));
+    assert!(chat.input_queue.recovered_queue);
+
+    chat.on_permission_profiles_loaded(request_id, Ok(Discovery::local(&chat.config)));
+    chat.bottom_pane.show_selection_view(SelectionViewParams {
+        view_id: Some("other-modal"),
+        title: Some("Other modal".to_string()),
+        ..Default::default()
+    });
+    chat.handle_key_event(KeyEvent::from(KeyCode::Esc));
+
+    assert_matches!(events.try_recv(), Ok(AppEvent::SettingsSelectionClosed));
+    assert!(
+        events.try_recv().is_err(),
+        "cancelled profile must not apply"
+    );
+}
+
+#[tokio::test]
+async fn permissions_command_preserves_full_access_confirmation() {
+    let (mut chat, mut events, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.set_feature_enabled(Feature::GuardianApproval, /*enabled*/ true);
+    chat.permission_discovery = Some(Discovery::local(&chat.config));
+    chat.input_queue
+        .queued_user_messages
+        .push_back(UserMessage::from("follow-up").into());
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Permissions,
+        format!("{BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS} --reviewer=auto_review"),
+        Vec::new(),
+    );
+
+    let (preset, return_to_permissions, profile_selection) = assert_matches!(
+        events.try_recv(),
+        Ok(AppEvent::OpenFullAccessConfirmation {
+            preset,
+            return_to_permissions,
+            profile_selection: Some(profile_selection),
+        }) if preset.id == "full-access"
+            && profile_selection.profile_id == BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS
+            && profile_selection.approvals_reviewer == Some(ApprovalsReviewer::AutoReview)
+            => (preset, return_to_permissions, Some(profile_selection))
+    );
+    assert_matches!(events.try_recv(), Ok(AppEvent::SettingsSelectionClosed));
+    chat.open_full_access_confirmation(preset, return_to_permissions, profile_selection);
+
+    // Cancel returns to the picker; closing that picker must still recover the queue.
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert_matches!(events.try_recv(), Ok(AppEvent::OpenPermissionsPopup));
     chat.open_permissions_popup();
-    rx.try_recv().unwrap();
-    let request_id = chat.permission_popup_request_id.unwrap();
-    let mut legacy = Discovery::local(&chat.config);
-    legacy.explicit_profile_mode = false;
-    chat.on_permission_profiles_loaded(request_id, Ok(legacy));
-    let actual = render_bottom_popup(&chat, /*width*/ 110);
-    chat.open_legacy_permissions_popup();
-    assert_eq!(actual, render_bottom_popup(&chat, /*width*/ 110));
+    assert_matches!(events.try_recv(), Ok(AppEvent::SettingsSelectionClosed));
+    assert!(chat.inline_permission_profile_selection_pending());
+    chat.handle_key_event(KeyEvent::from(KeyCode::Esc));
+
+    assert_matches!(events.try_recv(), Ok(AppEvent::SettingsSelectionClosed));
+    assert!(chat.inline_permission_profile_selection_pending());
+    assert!(chat.recover_inline_permission_profile_selection());
+    assert!(chat.input_queue.recovered_queue);
+    assert!(events.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn permissions_command_rejects_disabled_profile() {
+    let (mut chat, mut events, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let mut discovery = Discovery::local(&chat.config);
+    discovery.requirements = Some(
+        serde_json::from_value(serde_json::json!({
+            "allowedPermissionProfiles": {BUILT_IN_PERMISSION_PROFILE_READ_ONLY: false}
+        }))
+        .unwrap(),
+    );
+    chat.permission_discovery = Some(discovery);
+    chat.input_queue
+        .queued_user_messages
+        .push_back(UserMessage::from("follow-up").into());
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Permissions,
+        BUILT_IN_PERMISSION_PROFILE_READ_ONLY.to_string(),
+        Vec::new(),
+    );
+
+    let cell = assert_matches!(events.try_recv(), Ok(AppEvent::InsertHistoryCell(cell)) => cell);
+    insta::assert_snapshot!(
+        "permissions_command_disabled_profile",
+        lines_to_single_string(&cell.display_lines(/*width*/ 80))
+    );
+    assert_matches!(events.try_recv(), Ok(AppEvent::SettingsSelectionClosed));
+    assert!(chat.input_queue.recovered_queue);
+}
+
+#[tokio::test]
+async fn permissions_command_rejects_unknown_profile() {
+    let (mut chat, mut events, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.permission_discovery = Some(Discovery::local(&chat.config));
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Permissions,
+        "unknown-profile".to_string(),
+        Vec::new(),
+    );
+
+    let cell = assert_matches!(events.try_recv(), Ok(AppEvent::InsertHistoryCell(cell)) => cell);
+    insta::assert_snapshot!(
+        "permissions_command_unknown_profile",
+        lines_to_single_string(&cell.display_lines(/*width*/ 80))
+    );
+    assert_matches!(events.try_recv(), Ok(AppEvent::SettingsSelectionClosed));
+}
+
+#[tokio::test]
+async fn invalidating_inline_permission_discovery_recovers_queued_input() {
+    let (mut chat, mut events, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.input_queue
+        .queued_user_messages
+        .push_back(UserMessage::from("follow-up").into());
+    chat.select_permission_profile(BUILT_IN_PERMISSION_PROFILE_READ_ONLY);
+    let request_id = assert_matches!(
+        events.try_recv(),
+        Ok(AppEvent::FetchPermissionProfiles { request_id, .. }) => request_id
+    );
+
+    chat.invalidate_permission_discovery();
+
+    assert_matches!(events.try_recv(), Ok(AppEvent::SettingsSelectionClosed));
+    assert!(chat.input_queue.recovered_queue);
+    chat.on_permission_profiles_loaded(request_id, Ok(Discovery::local(&chat.config)));
+    assert!(events.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn inline_permission_discovery_retry_preserves_profile_id() {
+    let (mut chat, mut events, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.select_permission_profile("server-only");
+    let request_id = assert_matches!(
+        events.try_recv(),
+        Ok(AppEvent::FetchPermissionProfiles { request_id, .. }) => request_id
+    );
+    chat.on_permission_profiles_loaded(
+        request_id,
+        Err("Failed to load permissions: disconnected".to_string()),
+    );
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    assert_matches!(
+        events.try_recv(),
+        Ok(AppEvent::ResolvePermissionProfile { profile_id }) if profile_id == "server-only"
+    );
+    assert_eq!(
+        chat.bottom_pane.active_view_id(),
+        Some("permission-profiles")
+    );
+    assert!(events.try_recv().is_err());
 }
 
 #[tokio::test]
 async fn permission_discovery_discards_stale_results_and_preserves_covering_modal() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.config.explicit_permission_profile_mode = true;
     chat.open_permissions_popup();
     let first = chat.permission_popup_request_id.unwrap();
     chat.handle_key_event(KeyEvent::from(KeyCode::Esc));
     chat.on_permission_profiles_loaded(first, Ok(Discovery::local(&chat.config)));
     assert!(!chat.bottom_pane.has_active_view());
+    chat.permission_discovery = None;
+    chat.dispatch_command(SlashCommand::Permissions);
+    while rx.try_recv().is_ok() {}
     chat.open_permissions_popup();
     let second = chat.permission_popup_request_id.unwrap();
     chat.on_permission_profiles_loaded(first, Ok(Discovery::local(&chat.config)));
@@ -110,18 +314,35 @@ async fn permission_discovery_discards_stale_results_and_preserves_covering_moda
     );
     chat.on_permission_profiles_loaded(second, Ok(Discovery::local(&chat.config)));
     assert!(!chat.bottom_pane.has_active_view());
+    assert!(
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::SettingsSelectionClosed)),
+        "an invalidated menu must settle the input hold"
+    );
 
+    chat.permission_discovery = None;
     chat.open_permissions_popup();
     let request_id = chat.permission_popup_request_id.unwrap();
-    chat.bottom_pane.show_selection_view(SelectionViewParams {
-        view_id: Some("other-modal"),
-        title: Some("Other modal".to_string()),
-        ..Default::default()
+    chat.on_request_user_input(ToolRequestUserInputParams {
+        thread_id: "thread-1".into(),
+        turn_id: "turn-1".into(),
+        item_id: "question".into(),
+        questions: Vec::new(),
+        is_blocking: true,
+        auto_resolution_ms: None,
     });
     chat.on_permission_profiles_loaded(request_id, Ok(Discovery::local(&chat.config)));
-    assert_eq!(chat.bottom_pane.active_view_id(), Some("other-modal"));
-    chat.handle_key_event(KeyEvent::from(KeyCode::Esc));
+    assert!(chat.bottom_pane.has_active_view());
+    while rx.try_recv().is_ok() {}
+    chat.dismiss_app_server_request(&ResolvedAppServerRequest::UserInput {
+        call_id: "question".into(),
+    });
     assert!(!chat.bottom_pane.has_active_view());
+    assert!(
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::SettingsSelectionClosed)),
+        "resolving the covering request must release the permissions hold"
+    );
 }
 
 #[tokio::test]
@@ -265,7 +486,14 @@ async fn profile_permissions_selection_popup_with_disallowed_full_access_snapsho
         ..Default::default()
     });
 
-    chat.open_permission_profiles_popup(Discovery::local(&chat.config));
+    let mut discovery = Discovery::local(&chat.config);
+    discovery
+        .profiles
+        .iter_mut()
+        .find(|profile| profile.id == ":danger-full-access")
+        .unwrap()
+        .allowed = false;
+    chat.open_permission_profiles_popup(discovery);
 
     assert_chatwidget_snapshot!(
         "profile_permissions_selection_popup_with_disallowed_full_access",
@@ -326,15 +554,26 @@ async fn profile_permissions_selection_emits_named_profile_event_only() {
 
     let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
     assert_eq!(events.len(), 1);
-    assert!(matches!(
-        &events[0],
-        AppEvent::SelectPermissionProfile(PermissionProfileSelection {
-            profile_id,
-            approval_policy: Some(AskForApproval::OnRequest),
-            approvals_reviewer: Some(ApprovalsReviewer::User),
-            display_label,
-        }) if profile_id == ":workspace" && display_label == "Ask for approval"
+    assert!(chat.try_select_permission_profile(
+        &Discovery::local(&chat.config),
+        ":ask-for-approval",
+        /*requested_approval_policy*/ None,
+        /*requested_reviewer*/ None,
     ));
+    for event in events
+        .into_iter()
+        .chain(std::iter::from_fn(|| rx.try_recv().ok()))
+    {
+        assert!(matches!(
+            event,
+            AppEvent::SelectPermissionProfile(PermissionProfileSelection {
+                profile_id,
+                approval_policy: Some(AskForApproval::OnRequest),
+                approvals_reviewer: Some(ApprovalsReviewer::User),
+                display_label,
+            }) if profile_id == ":workspace" && display_label == "Ask for approval"
+        ));
+    }
 }
 
 #[tokio::test]
@@ -392,15 +631,129 @@ async fn profile_permissions_selection_emits_auto_review_mode_event() {
 
     let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
     assert_eq!(events.len(), 1);
-    assert!(matches!(
-        &events[0],
-        AppEvent::SelectPermissionProfile(PermissionProfileSelection {
+    assert!(chat.try_select_permission_profile(
+        &Discovery::local(&chat.config),
+        ":approve-for-me",
+        /*requested_approval_policy*/ None,
+        /*requested_reviewer*/ None,
+    ));
+    for event in events
+        .into_iter()
+        .chain(std::iter::from_fn(|| rx.try_recv().ok()))
+    {
+        assert!(matches!(
+            event,
+            AppEvent::SelectPermissionProfile(PermissionProfileSelection {
+                profile_id,
+                approval_policy: Some(AskForApproval::OnRequest),
+                approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+                display_label,
+            }) if profile_id == ":workspace" && display_label == "Approve for me"
+        ));
+    }
+}
+
+#[tokio::test]
+async fn permissions_command_selects_auto_review_mode() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    #[cfg(target_os = "windows")]
+    {
+        chat.set_windows_sandbox_mode(Some(WindowsSandboxSetupMode::Unelevated));
+    }
+    chat.config.explicit_permission_profile_mode = true;
+    chat.set_feature_enabled(Feature::GuardianApproval, /*enabled*/ true);
+    chat.permission_discovery = Some(Discovery::local(&chat.config));
+
+    chat.select_permission_profile(
+        ":workspace --approval-policy on-request --reviewer auto_review",
+    );
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SelectPermissionProfile(PermissionProfileSelection {
             profile_id,
             approval_policy: Some(AskForApproval::OnRequest),
             approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
             display_label,
-        }) if profile_id == ":workspace" && display_label == "Approve for me"
+        })) if profile_id == ":workspace" && display_label == "Approve for me"
+    );
+}
+
+#[tokio::test]
+async fn permissions_command_restores_quoted_profile_and_complete_settings() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let granular = AskForApproval::Granular {
+        sandbox_approval: false,
+        rules: true,
+        skill_approval: false,
+        request_permissions: true,
+        mcp_elicitations: false,
+    };
+    chat.config.custom_permission_profiles = vec![PermissionProfileCatalogEntry {
+        id: "team review".to_string(),
+        description: None,
+        allowed: true,
+    }];
+    chat.permission_discovery = Some(Discovery::local(&chat.config));
+    let policy = serde_json::to_string(&granular).expect("granular policy serializes");
+
+    chat.select_permission_profile(&format!(
+        "'team review' --approval-policy='{policy}' --reviewer user"
     ));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SelectPermissionProfile(PermissionProfileSelection {
+            profile_id,
+            approval_policy: Some(actual_policy),
+            approvals_reviewer: Some(ApprovalsReviewer::User),
+            display_label,
+        })) if profile_id == "team review"
+            && display_label == "team review"
+            && actual_policy == granular
+    );
+}
+
+#[tokio::test]
+async fn permissions_command_rejects_unavailable_auto_review_and_settles_input() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_feature_enabled(Feature::GuardianApproval, /*enabled*/ false);
+    chat.permission_discovery = Some(Discovery::local(&chat.config));
+    chat.input_queue
+        .queued_user_messages
+        .push_back(UserMessage::from("follow-up").into());
+
+    chat.select_permission_profile(":workspace --reviewer=auto_review");
+
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, AppEvent::SelectPermissionProfile(_)))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AppEvent::SettingsSelectionClosed))
+    );
+    assert!(chat.input_queue.recovered_queue);
+}
+
+#[tokio::test]
+async fn invalid_permissions_arguments_settle_suppressed_input() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.input_queue
+        .queued_user_messages
+        .push_back(UserMessage::from("follow-up").into());
+    chat.set_queue_autosend_suppressed(/*suppressed*/ true);
+
+    chat.select_permission_profile(":workspace --reviewer=bogus");
+
+    assert!(chat.input_queue.recovered_queue);
+    assert!(
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::SettingsSelectionClosed))
+    );
 }
 
 #[tokio::test]
@@ -571,10 +924,9 @@ async fn windows_auto_mode_prompt_requests_enabling_sandbox_feature() {
     );
 }
 
-#[cfg(target_os = "windows")]
 #[tokio::test]
 async fn startup_prompts_for_windows_sandbox_when_agent_requested() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.set_windows_sandbox_mode(/*mode*/ None);
 
@@ -597,6 +949,15 @@ async fn startup_prompts_for_windows_sandbox_when_agent_requested() {
         popup.contains("Quit"),
         "expected startup prompt to offer quit action: {popup}"
     );
+    assert_chatwidget_snapshot!("projectless_windows_sandbox_setup", popup);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let preset = std::iter::from_fn(|| rx.try_recv().ok())
+        .find_map(|event| match event {
+            AppEvent::BeginWindowsSandboxElevatedSetup { preset, .. } => Some(preset),
+            _ => None,
+        })
+        .expect("sandbox setup event");
+    assert_eq!(preset.approval, approval);
 }
 
 #[cfg(target_os = "windows")]
@@ -618,6 +979,49 @@ async fn startup_windows_sandbox_prompt_blocks_disallowed_unelevated_fallback() 
         !popup.contains("Use non-admin sandbox"),
         "expected required sandbox prompt to hide non-admin fallback: {popup}"
     );
+}
+
+#[tokio::test]
+async fn windows_sandbox_help_links_keep_complete_wrapped_destinations() {
+    let url = "https://developers.openai.com/codex/windows";
+    for fallback in [false, true] {
+        let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+        let preset = builtin_approval_presets()
+            .into_iter()
+            .find(|preset| preset.id == "auto")
+            .unwrap();
+        if fallback {
+            chat.open_windows_sandbox_fallback_prompt(preset, /*profile_selection*/ None);
+        } else {
+            chat.open_windows_sandbox_enable_prompt(preset, /*profile_selection*/ None);
+        }
+        let area = Rect::new(0, 0, 40, 24);
+        let mut buf = Buffer::empty(area);
+        chat.bottom_pane.render(area, &mut buf);
+        let linked = buf
+            .content
+            .iter()
+            .filter(|cell| cell.symbol().contains("\x1b]8;;"))
+            .map(|cell| {
+                assert!(cell.symbol().starts_with(&format!("\x1b]8;;{url}\x07")));
+                crate::terminal_hyperlinks::strip_osc8(cell.symbol())
+            })
+            .collect::<String>();
+        assert_eq!(linked, url);
+        if !fallback {
+            let visible = buf
+                .content
+                .chunks(40)
+                .map(|row| {
+                    row.iter()
+                        .map(|cell| crate::terminal_hyperlinks::strip_osc8(cell.symbol()))
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            insta::assert_snapshot!("windows_sandbox_wrapped_help_url", visible);
+        }
+    }
 }
 
 #[tokio::test]
@@ -749,7 +1153,6 @@ async fn required_windows_sandbox_setup_defers_configured_initial_prompt() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(PathBuf::new()),
@@ -962,7 +1365,6 @@ async fn approvals_popup_navigation_skips_disabled() {
             ev,
             AppEvent::CodexOp(Op::OverrideTurnContext {
                 approval_policy: Some(AskForApproval::OnRequest),
-                personality: None,
                 ..
             })
         )),
@@ -973,7 +1375,6 @@ async fn approvals_popup_navigation_skips_disabled() {
             ev,
             AppEvent::CodexOp(Op::OverrideTurnContext {
                 approval_policy: Some(AskForApproval::Never),
-                personality: None,
                 ..
             })
         )),
@@ -1119,7 +1520,7 @@ async fn permissions_selection_emits_history_cell_when_current_is_selected() {
 
 #[tokio::test]
 async fn permissions_selection_hides_auto_review_when_feature_disabled() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     #[cfg(target_os = "windows")]
     {
         chat.set_windows_sandbox_mode(Some(WindowsSandboxSetupMode::Unelevated));
@@ -1132,6 +1533,14 @@ async fn permissions_selection_hides_auto_review_when_feature_disabled() {
         !popup.contains("Approve for me"),
         "expected Approve for me to stay hidden until the feature is enabled: {popup}"
     );
+    assert!(!chat.try_select_permission_profile(
+        &Discovery::local(&chat.config),
+        ":approve-for-me",
+        /*requested_approval_policy*/ None,
+        /*requested_reviewer*/ None,
+    ));
+    let cell = assert_matches!(rx.try_recv(), Ok(AppEvent::InsertHistoryCell(cell)) => cell);
+    insta::assert_snapshot!(lines_to_single_string(&cell.display_lines(/*width*/ 120)), @"■ Approve for me is unavailable. Run `/permissions` to see available profiles.");
 }
 
 #[tokio::test]
@@ -1193,15 +1602,19 @@ async fn permissions_selection_marks_auto_review_current_after_session_configure
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(PathBuf::new()),
     });
 
     chat.open_permissions_popup();
+    chat.on_permission_profiles_loaded(
+        chat.permission_popup_request_id.unwrap(),
+        Ok(Discovery::local(&chat.config)),
+    );
     let popup = render_bottom_popup(&chat, /*width*/ 120);
 
+    assert_chatwidget_snapshot!("permissions_unnamed_server_profile", popup);
     assert!(
         popup.contains("Approve for me (current)"),
         "expected Approve for me to be current after SessionConfigured sync: {popup}"
@@ -1242,13 +1655,16 @@ async fn permissions_selection_marks_auto_review_current_with_custom_workspace_w
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(PathBuf::new()),
     });
 
     chat.open_permissions_popup();
+    chat.on_permission_profiles_loaded(
+        chat.permission_popup_request_id.unwrap(),
+        Ok(Discovery::local(&chat.config)),
+    );
     let popup = render_bottom_popup(&chat, /*width*/ 120);
 
     assert!(
@@ -1356,7 +1772,6 @@ async fn permissions_selection_sends_approvals_reviewer_in_override_turn_context
             summary: None,
             service_tier: None,
             collaboration_mode: None,
-            personality: None,
         }
     );
 

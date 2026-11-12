@@ -1,4 +1,10 @@
 exports_files([
+    "opusic_sys_install_headers.patch",
+    "protobuf_windows_arm64_seh.patch",
+    "opusic-sys_presume_neon.patch",
+    "llvm_mingw_import_warnings.patch",
+    "rules_rust_declared_msvc_linker.patch",
+    "rules_rs_bindgen_v0_0_4.patch",
     "abseil_windows_gnullvm_thread_identity.patch",
     "bzip2_windows_stack_args.patch",
     "llvm_rusty_v8_custom_libcxx.patch",
@@ -14,7 +20,8 @@ exports_files([
     "rules_foreign_cc_make_xcompile.patch",
     "rules_foreign_cc_make_msvc_stdint.patch",
     "rules_rs_build_script_deps_annotation.patch",
-    "rules_rs_windows_msvc_linker.patch",
+    "rules_rs_rust_debug_modes.patch",
+    "rules_rs_workspace_package_version.patch",
     "rules_rs_zlib_snapshot_urls.patch",
     "rusty_v8_prebuilt_out_dir.patch",
     "ring_windows_msvc_include_dirs.patch",
@@ -28,5 +35,4 @@ exports_files([
     "windows-support-remote-case-aliases.patch",
     "windows-support-native-tools.patch",
     "xz_windows_stack_args.patch",
-    "zstd-sys_windows_msvc_include_dirs.patch",
 ])

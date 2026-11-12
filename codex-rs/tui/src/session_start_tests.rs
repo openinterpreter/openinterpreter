@@ -37,7 +37,10 @@ async fn start_session(
 #[tokio::test]
 async fn archived_session_requires_confirmation_before_resume_or_fork() -> Result<()> {
     for action in [
-        SessionStartAction::Resume(ResumeModelSettings::RestoreFromThread),
+        SessionStartAction::Resume(
+            ResumeModelSettings::RestoreFromThread,
+            crate::resume_permissions::ResumePermissions::default(),
+        ),
         SessionStartAction::Fork(crate::app_server_session::ForkPermissionMode::InheritSaved),
     ] {
         let codex_home = TempDir::new()?;
@@ -61,13 +64,15 @@ async fn archived_session_requires_confirmation_before_resume_or_fork() -> Resul
         std::fs::create_dir_all(&archived_dir)?;
         let archived_path = archived_dir.join(active_path.file_name().unwrap());
         std::fs::rename(&active_path, &archived_path)?;
+        let mut app_server = crate::start_embedded_app_server_for_picker(&config).await?;
+        let backend_id = app_server.backend_id();
         let target = SessionTarget {
+            backend_id,
             path: Some(archived_path.clone()),
             thread_id: ThreadId::from_string(&id)?,
             cwd: None,
             history_mode: None,
         };
-        let mut app_server = crate::start_embedded_app_server_for_picker(&config).await?;
         let prompts = Cell::new(0);
         let local_settings = LocalSettings::from(&config);
 
@@ -134,7 +139,7 @@ async fn archived_session_requires_confirmation_before_resume_or_fork() -> Resul
             (7, false, true)
         );
         match action {
-            SessionStartAction::Resume(_) => {
+            SessionStartAction::Resume(..) => {
                 assert_eq!(started.session.thread_id, target.thread_id)
             }
             SessionStartAction::Fork(_) => {
@@ -153,7 +158,10 @@ async fn archived_session_requires_confirmation_before_resume_or_fork() -> Resul
             &mut app_server,
             &config,
             &target,
-            SessionStartAction::Resume(ResumeModelSettings::RestoreFromThread),
+            SessionStartAction::Resume(
+                ResumeModelSettings::RestoreFromThread,
+                crate::resume_permissions::ResumePermissions::default(),
+            ),
             async || panic!("active sessions must not prompt"),
         )
         .await?
@@ -163,6 +171,7 @@ async fn archived_session_requires_confirmation_before_resume_or_fork() -> Resul
         assert_eq!(resumed.session.thread_id, target.thread_id);
 
         let missing = SessionTarget {
+            backend_id,
             path: None,
             thread_id: ThreadId::new(),
             cwd: None,
@@ -188,6 +197,7 @@ fn session_start_error_surfaces_archived_guidance_without_rollout_path() {
     let thread_id =
         ThreadId::from_string("019e72f4-e09a-70f2-b2c2-a153a57b8cc0").expect("thread id");
     let target_session = SessionTarget {
+        backend_id: crate::backend_id::BackendId::new(),
         path: Some(std::path::PathBuf::from(
             "/Users/me/.codex/archived_sessions/rollout.jsonl",
         )),

@@ -1,19 +1,16 @@
+use self::launch::PreparedLaunchPolicy;
+use self::launch::WrappedSandboxCommand;
+use crate::LinuxSandboxPidNamespace;
+#[cfg(windows)]
+use crate::WindowsSandboxFilesystemOverrides;
 #[cfg(target_os = "linux")]
 use crate::bwrap::WSL1_BWRAP_WARNING;
-#[cfg(target_os = "linux")]
-use crate::bwrap::is_wsl1;
 use crate::landlock::CODEX_LINUX_SANDBOX_ARG0;
 use crate::landlock::create_linux_sandbox_command_args_for_permission_profile;
 use crate::policy_transforms::effective_permission_profile;
 use crate::policy_transforms::should_require_platform_sandbox;
-#[cfg(target_os = "windows")]
-use crate::resolve_windows_elevated_filesystem_overrides;
-#[cfg(target_os = "windows")]
-use crate::resolve_windows_restricted_token_filesystem_overrides;
 #[cfg(target_os = "macos")]
 use crate::seatbelt::MacosSeatbeltProfile;
-#[cfg(target_os = "windows")]
-use crate::windows_sandbox_uses_elevated_backend;
 use codex_network_proxy::ManagedNetworkSandboxContext;
 use codex_network_proxy::NetworkProxy;
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -26,9 +23,13 @@ pub use codex_protocol::sandbox::SandboxType;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::io;
 use std::path::Path;
+
+#[path = "launch.rs"]
+pub(super) mod launch;
 
 #[cfg(target_os = "windows")]
 const WINDOWS_SANDBOX_WRAPPER_SETUP_ENV_ALLOWLIST: &[&str] = &[
@@ -92,12 +93,14 @@ pub struct SandboxCommand {
     pub additional_permissions: Option<AdditionalPermissionProfile>,
 }
 
-/// A host-native launch request produced after [`SandboxManager::transform`] validates URI inputs.
+/// A host-native launch request produced after the sandbox manager validates URI inputs.
 /// Build this only at the execution boundary: in exec-server, or in its logical equivalent within
 /// app-server. Orchestration and transport code should retain [`PathUri`] values and defer
 /// conversion to native paths until this request is created.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SandboxExecRequest {
+    /// Controller-selected override, retained for observations without altering the sandbox command.
+    pub sandbox_override: SandboxOverride,
     pub command: Vec<String>,
     pub cwd: PathUri,
     pub sandbox_policy_cwd: PathUri,
@@ -112,13 +115,26 @@ pub struct SandboxExecRequest {
     pub arg0: Option<String>,
 }
 
+/// How the execution host selects a backend for this launch.
+#[derive(Clone, Copy)]
+pub enum SandboxSelection {
+    /// Use the selected backend, including an explicitly native launch.
+    Explicit(SandboxType),
+    /// Refuse the launch if this host cannot provide its platform sandbox.
+    RequirePlatform,
+}
+
 /// Bundled arguments for sandbox transformation.
 ///
 /// This keeps call sites self-documenting when several fields are optional.
 pub struct SandboxTransformRequest<'a> {
     pub command: SandboxCommand,
     pub permissions: &'a PermissionProfile,
-    pub sandbox: SandboxType,
+    /// Bind symbolic workspace rules to these executor roots. `None` means they are already resolved.
+    pub workspace_roots: Option<&'a [PathUri]>,
+    /// Executor-selected helper binaries and validated trust bundles needed by the child.
+    pub runtime_readable_paths: &'a [AbsolutePathBuf],
+    pub selection: SandboxSelection,
     pub enforce_managed_network: bool,
     pub environment_id: Option<&'a str>,
     // TODO(viyatb): Evaluate switching this to Option<Arc<NetworkProxy>>
@@ -185,6 +201,7 @@ impl PendingSandboxedExecRequest {
 
 #[derive(Debug)]
 pub enum SandboxTransformError {
+    InvalidPolicy(io::Error),
     InvalidCommandCwd {
         cwd: PathUri,
         source: io::Error,
@@ -209,6 +226,7 @@ pub enum SandboxTransformError {
 impl std::fmt::Display for SandboxTransformError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidPolicy(err) => err.fmt(f),
             Self::InvalidCommandCwd { cwd, source } => {
                 write!(
                     f,
@@ -219,6 +237,9 @@ impl std::fmt::Display for SandboxTransformError {
                 f,
                 "sandbox policy cwd URI `{cwd}` is not valid on this host: {source}"
             ),
+            Self::SandboxUnavailable => {
+                write!(f, "sandbox intent cannot be enforced on this executor")
+            }
             Self::MissingLinuxSandboxExecutable => {
                 write!(f, "missing codex-linux-sandbox executable path")
             }
@@ -238,7 +259,7 @@ impl std::fmt::Display for SandboxTransformError {
             Self::SeatbeltUnavailable => write!(f, "seatbelt sandbox is only available on macOS"),
             #[cfg(target_os = "windows")]
             Self::WindowsSandboxPreparation(err) => {
-                write!(f, "failed to prepare windows sandbox wrapper: {err}")
+                write!(f, "failed to prepare Windows sandbox: {err}")
             }
         }
     }
@@ -247,6 +268,7 @@ impl std::fmt::Display for SandboxTransformError {
 impl std::error::Error for SandboxTransformError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::InvalidPolicy(source) => Some(source),
             Self::InvalidCommandCwd { source, .. }
             | Self::InvalidSandboxPolicyCwd { source, .. } => Some(source),
             Self::MissingLinuxSandboxExecutable => None,
@@ -266,8 +288,11 @@ impl std::error::Error for SandboxTransformError {
 
 #[derive(Clone, Default)]
 pub struct SandboxManager {
+    linux_sandbox_pid_namespace: LinuxSandboxPidNamespace,
     #[cfg(target_os = "macos")]
     seatbelt_profile: MacosSeatbeltProfile,
+    #[cfg(target_os = "macos")]
+    extra_allow_unix_sockets: Vec<AbsolutePathBuf>,
     #[cfg(target_os = "macos")]
     allowed_symlinked_codex_home: Option<AbsolutePathBuf>,
 }
@@ -282,9 +307,28 @@ impl SandboxManager {
         Self {
             #[cfg(target_os = "macos")]
             seatbelt_profile: MacosSeatbeltProfile::FileSystemHelper,
-            #[cfg(target_os = "macos")]
-            allowed_symlinked_codex_home: None,
+            ..Self::default()
         }
+    }
+
+    /// Prepare commands that inherit the controlling terminal. On macOS this also
+    /// grants access to the named Unix sockets and denies terminal input injection.
+    pub fn for_inherited_terminal(allow_unix_sockets: &[AbsolutePathBuf]) -> Self {
+        #[cfg(not(target_os = "macos"))]
+        let _ = allow_unix_sockets;
+        Self {
+            #[cfg(target_os = "macos")]
+            seatbelt_profile: MacosSeatbeltProfile::ProcessWithInheritedTerminal,
+            #[cfg(target_os = "macos")]
+            extra_allow_unix_sockets: allow_unix_sockets.to_vec(),
+            ..Self::default()
+        }
+    }
+
+    /// Applies a trusted executor startup policy, never a command or repository setting.
+    pub fn with_linux_sandbox_pid_namespace(mut self, mode: LinuxSandboxPidNamespace) -> Self {
+        self.linux_sandbox_pid_namespace = mode;
+        self
     }
 
     /// Allows otherwise-authorized writable roots beneath the opted-in user home
@@ -340,86 +384,130 @@ impl SandboxManager {
         }
     }
 
+    /// Prepare filesystem and network enforcement for a command on the execution host.
     pub fn transform(
         &self,
         request: SandboxTransformRequest<'_>,
-    ) -> Result<SandboxExecRequest, SandboxTransformError> {
-        let SandboxTransformRequest {
-            mut command,
+    ) -> Result<WrappedSandboxCommand, SandboxTransformError> {
+        let command = request.command;
+        let permissions = effective_permission_profile(
+            request.permissions,
+            command.additional_permissions.as_ref(),
+        );
+        let policy = PreparedLaunchPolicy::resolve(
             permissions,
-            sandbox,
-            enforce_managed_network,
-            environment_id,
-            network,
-            sandbox_policy_cwd,
-            sandbox_exe,
-            use_legacy_landlock,
-            windows_sandbox_level,
-        } = request;
-        #[cfg(target_os = "macos")]
-        let managed_network = command.managed_network.as_ref();
-        let additional_permissions = command.additional_permissions.take();
-        let managed_mitm_ca_trust_bundle_path =
-            network.and_then(NetworkProxy::managed_mitm_ca_trust_bundle_path);
-        let base_effective_permission_profile =
-            effective_permission_profile(permissions, additional_permissions.as_ref());
-        let pending_sandboxed_request = PendingSandboxedExecRequest::new(
-            &command.cwd,
-            sandbox_policy_cwd,
-            base_effective_permission_profile.clone(),
+            request.sandbox_policy_cwd,
+            request.workspace_roots,
+            request.runtime_readable_paths,
+        )
+        .map_err(SandboxTransformError::InvalidPolicy)?;
+        let backend = match request.selection {
+            SandboxSelection::Explicit(sandbox) => sandbox,
+            SandboxSelection::RequirePlatform => {
+                #[cfg(windows)]
+                crate::windows_mxc::record_availability_once();
+                get_platform_sandbox(request.windows_sandbox_level != WindowsSandboxLevel::Disabled)
+                    .ok_or(SandboxTransformError::SandboxUnavailable)?
+            }
+        };
+        #[cfg(windows)]
+        if backend == SandboxType::WindowsRestrictedToken
+            && request.enforce_managed_network
+            && request.windows_sandbox_level != WindowsSandboxLevel::Elevated
+        {
+            return Err(SandboxTransformError::WindowsSandboxPreparation(
+                "managed networking requires the elevated Windows sandbox backend".into(),
+            ));
+        }
+        let native_program = match backend {
+            SandboxType::None => Some(command.program.as_os_str()),
+            SandboxType::LinuxSeccomp | SandboxType::WindowsMxc => {
+                request.sandbox_exe.map(Path::as_os_str)
+            }
+            SandboxType::MacosSeatbelt | SandboxType::WindowsRestrictedToken => None,
+        }
+        .filter(|path| path.to_str().is_none())
+        .map(OsStr::to_owned);
+        let wrapped = |request| WrappedSandboxCommand {
+            request,
+            native_program,
+        };
+        let managed_network = command
+            .managed_network
+            .filter(|_| request.enforce_managed_network || backend == SandboxType::MacosSeatbelt);
+        let managed_mitm_ca_trust_bundle_path = request
+            .network
+            .and_then(NetworkProxy::managed_mitm_ca_trust_bundle_path);
+        let mut argv = Vec::with_capacity(1 + command.args.len());
+        argv.push(command.program.to_string_lossy().into_owned());
+        argv.extend(command.args);
+        let mut exec = SandboxExecRequest {
+            sandbox_override: SandboxOverride::NoOverride,
+            command: argv,
+            cwd: command.cwd,
+            sandbox_policy_cwd: request.sandbox_policy_cwd.clone(),
+            env: command.env,
+            network: request.network.cloned(),
+            network_environment_id: request.environment_id.map(str::to_owned),
+            sandbox: backend,
+            windows_sandbox_level: request.windows_sandbox_level,
+            permission_profile: policy.permissions,
+            arg0: None,
+        };
+        if backend == SandboxType::None {
+            return Ok(wrapped(exec));
+        }
+        let pending = PendingSandboxedExecRequest::new(
+            &exec.cwd,
+            &exec.sandbox_policy_cwd,
+            exec.permission_profile,
             managed_mitm_ca_trust_bundle_path.as_ref(),
         );
-        let mut argv = Vec::with_capacity(1 + command.args.len());
-        argv.push(os_string_to_command_component(command.program));
-        argv.extend(command.args);
-
-        let (argv, arg0_override, pending_sandboxed_request) = match sandbox {
-            SandboxType::None => (argv, None, None),
+        match backend {
+            SandboxType::None => unreachable!("native launch returned above"),
             SandboxType::WindowsMxc => {
                 if !codex_mxc_sandbox::is_available() {
                     return Err(SandboxTransformError::WindowsMxcPreparation(
-                        "native MXC is unavailable on this executor".to_string(),
+                        "native MXC is unavailable on this executor".into(),
                     ));
                 }
-                if enforce_managed_network && command.managed_network.is_none() {
-                    let network = network.ok_or_else(|| {
-                        SandboxTransformError::WindowsMxcPreparation(
-                            "managed networking requires an executor-local proxy".to_string(),
-                        )
-                    })?;
-                    let prepared = network
-                        .prepare_for_optional_environment(
-                            std::mem::take(&mut command.env),
-                            environment_id,
-                        )
-                        .map_err(|err| {
-                            SandboxTransformError::EnvironmentNetworkProxy(err.to_string())
+                let route = match managed_network {
+                    None if request.enforce_managed_network => {
+                        let proxy = request.network.ok_or_else(|| {
+                            SandboxTransformError::WindowsMxcPreparation(
+                                "managed networking requires an executor-local proxy".to_string(),
+                            )
                         })?;
-                    command.env = prepared.env;
-                    command.managed_network = Some(prepared.sandbox_context);
-                }
-                let managed_network = command.managed_network.filter(|_| enforce_managed_network);
-                let pending = pending_sandboxed_request?;
-                let exe = sandbox_exe.ok_or_else(|| {
+                        let prepared = proxy
+                            .prepare_for_optional_environment(exec.env, request.environment_id)
+                            .map_err(|err| {
+                                SandboxTransformError::EnvironmentNetworkProxy(err.to_string())
+                            })?;
+                        exec.env = prepared.env;
+                        Some(prepared.sandbox_context)
+                    }
+                    route => route,
+                };
+                let pending = pending?;
+                exec.permission_profile = pending.effective_permission_profile;
+                let exe = request.sandbox_exe.ok_or_else(|| {
                     SandboxTransformError::WindowsMxcPreparation(
-                        "missing Codex executable path".to_string(),
+                        "missing Codex executable path".into(),
                     )
                 })?;
-                let mut full_command =
-                    vec![os_string_to_command_component(exe.as_os_str().to_owned())];
-                full_command.extend(
-                    codex_mxc_sandbox::create_command_args(
-                        codex_mxc_sandbox::CreateMxcCommandArgsParams {
-                            command: argv,
-                            permission_profile: &pending.effective_permission_profile,
-                            sandbox_policy_cwd: pending.native_sandbox_policy_cwd.as_path(),
-                            managed_network: managed_network.as_ref(),
-                            env: &mut command.env,
-                        },
-                    )
-                    .map_err(|err| SandboxTransformError::WindowsMxcPreparation(err.to_string()))?,
-                );
-                (full_command, None, Some(pending))
+                let args = codex_mxc_sandbox::create_command_args(
+                    codex_mxc_sandbox::CreateMxcCommandArgsParams {
+                        command: std::mem::take(&mut exec.command),
+                        permission_profile: &exec.permission_profile,
+                        sandbox_policy_cwd: &pending.native_sandbox_policy_cwd,
+                        managed_network: route.as_ref(),
+                        env: &mut exec.env,
+                    },
+                )
+                .map_err(|err| SandboxTransformError::WindowsMxcPreparation(err.to_string()))?;
+                exec.command = std::iter::once(exe.to_string_lossy().into_owned())
+                    .chain(args)
+                    .collect();
             }
             #[cfg(target_os = "macos")]
             SandboxType::MacosSeatbelt => {
@@ -428,21 +516,33 @@ impl SandboxManager {
                 use crate::seatbelt::SeatbeltPreparationError;
                 use crate::seatbelt::create_seatbelt_command_args_with_profile;
 
-                let pending = pending_sandboxed_request?;
-                let (file_system_sandbox_policy, network_sandbox_policy) = pending
-                    .effective_permission_profile
-                    .to_runtime_permissions();
-                let mut args = create_seatbelt_command_args_with_profile(
+                let pending = pending?;
+                exec.permission_profile = pending.effective_permission_profile;
+                let (file_system_sandbox_policy, network_sandbox_policy) =
+                    exec.permission_profile.to_runtime_permissions();
+                let managed_network = match (managed_network, request.network) {
+                    (None, Some(proxy)) => {
+                        let prepared = proxy
+                            .prepare_for_optional_environment(exec.env, request.environment_id)
+                            .map_err(|err| {
+                                SandboxTransformError::EnvironmentNetworkProxy(err.to_string())
+                            })?;
+                        exec.env = prepared.env;
+                        Some(prepared.sandbox_context)
+                    }
+                    (context, _) => context,
+                };
+                let args = create_seatbelt_command_args_with_profile(
                     CreateSeatbeltCommandArgsParams {
-                        command: argv,
+                        command: std::mem::take(&mut exec.command),
                         file_system_sandbox_policy: &file_system_sandbox_policy,
                         network_sandbox_policy,
-                        sandbox_policy_cwd: pending.native_sandbox_policy_cwd.as_path(),
-                        enforce_managed_network,
-                        managed_network,
-                        environment_id,
-                        network,
-                        extra_allow_unix_sockets: &[],
+                        sandbox_policy_cwd: &pending.native_sandbox_policy_cwd,
+                        enforce_managed_network: request.enforce_managed_network,
+                        managed_network: managed_network.as_ref(),
+                        environment_id: request.environment_id,
+                        network: request.network,
+                        extra_allow_unix_sockets: &self.extra_allow_unix_sockets,
                     },
                     self.seatbelt_profile,
                     self.allowed_symlinked_codex_home.as_ref(),
@@ -455,96 +555,92 @@ impl SandboxManager {
                         SandboxTransformError::EnvironmentNetworkProxy(message)
                     }
                 })?;
-                let mut full_command = Vec::with_capacity(1 + args.len());
-                full_command.push(MACOS_PATH_TO_SEATBELT_EXECUTABLE.to_string());
-                full_command.append(&mut args);
-                (full_command, None, Some(pending))
+                exec.command = std::iter::once(MACOS_PATH_TO_SEATBELT_EXECUTABLE.to_owned())
+                    .chain(args)
+                    .collect();
             }
             #[cfg(not(target_os = "macos"))]
             SandboxType::MacosSeatbelt => return Err(SandboxTransformError::SeatbeltUnavailable),
             SandboxType::LinuxSeccomp => {
-                let pending = pending_sandboxed_request?;
-                let exe =
-                    sandbox_exe.ok_or(SandboxTransformError::MissingLinuxSandboxExecutable)?;
-                if enforce_managed_network
-                    && command.managed_network.is_none()
-                    && let Some(network) = network
-                {
-                    let prepared = network
-                        .prepare_for_optional_environment(
-                            std::mem::take(&mut command.env),
-                            environment_id,
-                        )
-                        .map_err(|err| {
-                            SandboxTransformError::EnvironmentNetworkProxy(err.to_string())
-                        })?;
-                    command.env = prepared.env;
-                    command.managed_network = Some(prepared.sandbox_context);
-                }
-                let managed_network =
-                    enforce_managed_network.then(|| command.managed_network.unwrap_or_default());
-                #[cfg(target_os = "linux")]
-                ensure_linux_bubblewrap_is_supported(
-                    &pending
-                        .effective_permission_profile
-                        .file_system_sandbox_policy(),
-                    use_legacy_landlock,
-                    managed_network.is_some(),
-                    is_wsl1(),
+                let pending = pending?;
+                exec.permission_profile = pending.effective_permission_profile;
+                let exe = request
+                    .sandbox_exe
+                    .ok_or(SandboxTransformError::MissingLinuxSandboxExecutable)?;
+                let route = match (
+                    request.enforce_managed_network,
+                    managed_network,
+                    request.network,
+                ) {
+                    (false, _, _) => None,
+                    (true, None, Some(proxy)) => {
+                        let prepared = proxy
+                            .prepare_for_optional_environment(exec.env, request.environment_id)
+                            .map_err(|err| {
+                                SandboxTransformError::EnvironmentNetworkProxy(err.to_string())
+                            })?;
+                        exec.env = prepared.env;
+                        Some(prepared.sandbox_context)
+                    }
+                    (true, context, _) => Some(context.unwrap_or_default()),
+                };
+                self.wrap_linux(
+                    &mut exec,
+                    (
+                        &pending.native_command_cwd,
+                        &pending.native_sandbox_policy_cwd,
+                    ),
+                    exe,
+                    request.use_legacy_landlock,
+                    route.as_ref(),
                 )?;
-                let mut args = create_linux_sandbox_command_args_for_permission_profile(
-                    argv,
-                    pending.native_command_cwd.as_path(),
-                    &pending.effective_permission_profile,
-                    pending.native_sandbox_policy_cwd.as_path(),
-                    use_legacy_landlock,
-                    managed_network.as_ref(),
-                );
-                let mut full_command = Vec::with_capacity(1 + args.len());
-                full_command.push(os_string_to_command_component(exe.as_os_str().to_owned()));
-                full_command.append(&mut args);
-                (
-                    full_command,
-                    Some(linux_sandbox_arg0_override(exe)),
-                    Some(pending),
-                )
             }
-            #[cfg(target_os = "windows")]
             SandboxType::WindowsRestrictedToken => {
-                if enforce_managed_network && windows_sandbox_level != WindowsSandboxLevel::Elevated
-                {
-                    return Err(SandboxTransformError::WindowsSandboxPreparation(
-                        "managed networking requires the elevated Windows sandbox backend"
-                            .to_string(),
-                    ));
-                }
-                let pending = pending_sandboxed_request?;
-                (argv, None, Some(pending))
+                exec.permission_profile = pending?.effective_permission_profile;
             }
-            #[cfg(not(target_os = "windows"))]
-            SandboxType::WindowsRestrictedToken => (argv, None, Some(pending_sandboxed_request?)),
+        }
+        Ok(wrapped(exec))
+    }
+
+    fn wrap_linux(
+        &self,
+        exec: &mut SandboxExecRequest,
+        (cwd, policy_cwd): (&AbsolutePathBuf, &AbsolutePathBuf),
+        exe: &Path,
+        use_legacy_landlock: bool,
+        managed_network: Option<&ManagedNetworkSandboxContext>,
+    ) -> Result<(), SandboxTransformError> {
+        #[cfg(target_os = "linux")]
+        ensure_linux_bubblewrap_is_supported(
+            &exec.permission_profile.file_system_sandbox_policy(),
+            use_legacy_landlock,
+            managed_network.is_some(),
+            crate::bwrap::is_wsl1(),
+        )?;
+        let program = exe.to_string_lossy().into_owned();
+        let mut args = crate::landlock::create_linux_sandbox_command_args_for_permission_profile(
+            std::mem::take(&mut exec.command),
+            cwd,
+            &exec.permission_profile,
+            policy_cwd,
+            use_legacy_landlock,
+            managed_network,
+        );
+        // Only the startup opt-in requires a helper that understands PID inheritance.
+        if self.linux_sandbox_pid_namespace == LinuxSandboxPidNamespace::Inherit {
+            args.insert(0, "--inherit-pid-namespace".to_owned());
+        }
+        exec.command = std::iter::once(program).chain(args).collect();
+        // Without bwrap --argv0, the Linux helper uses its own argv[0] as the inner executable.
+        let arg0 = if let Some(path) = exe.to_str()
+            && exe.file_name() == Some(OsStr::new(CODEX_LINUX_SANDBOX_ARG0))
+        {
+            path
+        } else {
+            CODEX_LINUX_SANDBOX_ARG0
         };
-
-        // Unsandboxed exec-server requests may have foreign cwd values that cannot be prepared
-        // locally, but their effective permissions must still be preserved. In that case, carry
-        // forward the base profile.
-        let permission_profile = pending_sandboxed_request
-            .map_or(base_effective_permission_profile, |pending| {
-                pending.effective_permission_profile
-            });
-
-        Ok(SandboxExecRequest {
-            command: argv,
-            cwd: command.cwd,
-            sandbox_policy_cwd: sandbox_policy_cwd.clone(),
-            env: command.env,
-            network: network.cloned(),
-            network_environment_id: environment_id.map(str::to_string),
-            sandbox,
-            windows_sandbox_level,
-            permission_profile,
-            arg0: arg0_override,
-        })
+        exec.arg0 = Some(arg0.to_owned());
+        Ok(())
     }
 
     pub fn transform_for_direct_spawn(
@@ -564,19 +660,40 @@ impl SandboxManager {
     fn transform_for_direct_spawn_with_codex_home(
         &self,
         request: SandboxDirectSpawnTransformRequest<'_>,
-        codex_home: &Path,
+        codex_home: Option<&Path>,
     ) -> Result<SandboxExecRequest, SandboxTransformError> {
-        let workspace_roots = request.workspace_roots;
+        let roots = request.transform.workspace_roots;
+        let fallback_roots = request.workspace_roots;
         let proxy_settings_mode = request.windows_sandbox_proxy_settings_mode;
-        let mut request = self.transform(request.transform)?;
-        if request.sandbox == SandboxType::WindowsRestrictedToken {
-            wrap_windows_sandbox_exec_request_for_direct_spawn(
-                &mut request,
-                workspace_roots,
-                codex_home,
-                proxy_settings_mode,
-            )?;
+        let sandbox_exe = request.transform.sandbox_exe;
+        let mut request = self.transform(request.transform)?.into_command_request();
+        if request.sandbox != SandboxType::WindowsRestrictedToken {
+            return Ok(request);
         }
+        let owned_codex_home;
+        let codex_home = if let Some(codex_home) = codex_home {
+            codex_home
+        } else {
+            owned_codex_home = codex_utils_home_dir::find_codex_home()
+                .map_err(|err| SandboxTransformError::WindowsSandboxPreparation(err.to_string()))?;
+            owned_codex_home.as_path()
+        };
+        let workspace_roots = roots
+            .map(launch::native_workspace_roots)
+            .transpose()
+            .map_err(SandboxTransformError::InvalidPolicy)?;
+        let sandbox_exe = sandbox_exe.ok_or_else(|| {
+            SandboxTransformError::WindowsSandboxPreparation(
+                "missing Codex executable path".to_string(),
+            )
+        })?;
+        wrap_windows_sandbox_exec_request_for_direct_spawn(
+            &mut request,
+            workspace_roots.as_deref().unwrap_or(fallback_roots),
+            codex_home,
+            sandbox_exe,
+            proxy_settings_mode,
+        )?;
         Ok(request)
     }
 }
@@ -586,6 +703,7 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
     request: &mut SandboxExecRequest,
     workspace_roots: &[AbsolutePathBuf],
     codex_home: &Path,
+    sandbox_exe: &Path,
     proxy_settings_mode: codex_windows_sandbox::WindowsSandboxProxySettingsMode,
 ) -> Result<(), SandboxTransformError> {
     // TODO(anp): Keep PathUri through the Windows sandbox wrapper boundary.
@@ -608,9 +726,12 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
             "sandbox command was empty".to_string(),
         ));
     };
-    let source = std::path::PathBuf::from(&program);
-    let helper = codex_windows_sandbox::resolve_exe_for_launch(source.as_path(), codex_home);
-    *program = helper.to_string_lossy().into_owned();
+    // transform() may have made the inner command a Codex helper. Only that
+    // helper needs materializing; an arbitrary workload such as cmd.exe does not.
+    if Path::new(program.as_str()) == sandbox_exe {
+        let helper = codex_windows_sandbox::resolve_exe_for_launch(sandbox_exe, codex_home);
+        *program = helper.to_string_lossy().into_owned();
+    }
 
     let inner_command = std::mem::take(&mut request.command);
     let proxy_enforced = request.network.is_some();
@@ -627,22 +748,13 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
                 })
         })
         .transpose()?;
-    let use_elevated = windows_sandbox_uses_elevated_backend(request.windows_sandbox_level);
-    let overrides = if use_elevated {
-        resolve_windows_elevated_filesystem_overrides(
-            request.sandbox,
-            &request.permission_profile,
-            &native_sandbox_policy_cwd,
-            use_elevated,
-        )
-    } else {
-        resolve_windows_restricted_token_filesystem_overrides(
-            request.sandbox,
-            &request.permission_profile,
-            &native_sandbox_policy_cwd,
-            request.windows_sandbox_level,
-        )
-    }
+    let overrides = WindowsSandboxFilesystemOverrides::resolve(
+        request.sandbox,
+        &request.permission_profile,
+        &native_sandbox_policy_cwd,
+        request.windows_sandbox_level,
+        &request.env,
+    )
     .map_err(SandboxTransformError::WindowsSandboxPreparation)?;
     let empty_paths: &[AbsolutePathBuf] = &[];
     let read_roots_override = overrides
@@ -665,7 +777,7 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
             inner_command,
             &native_cwd,
             workspace_roots,
-            &request.env,
+            &mut request.env,
             &request.permission_profile,
             request.windows_sandbox_level,
             proxy_enforced,
@@ -681,7 +793,11 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
         .map_err(|err| SandboxTransformError::WindowsSandboxPreparation(err.to_string()))?;
 
     request.command = Vec::with_capacity(1 + wrapper_args.len());
-    request.command.push(source.to_string_lossy().into_owned());
+    // This outer process interprets Codex wrapper arguments, so it must be the
+    // supplied Codex executable even when the inner command is another program.
+    request
+        .command
+        .push(sandbox_exe.to_string_lossy().into_owned());
     request.command.append(&mut wrapper_args);
     request.sandbox = SandboxType::None;
     request.arg0 = None;

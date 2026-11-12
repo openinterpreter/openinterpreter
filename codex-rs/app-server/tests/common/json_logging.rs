@@ -26,26 +26,17 @@ impl JsonLogCapture {
         self.updated.notify_one();
     }
 
-    pub(crate) async fn wait_for_event(&self, event_name: &str) -> Result<Value> {
-        let mut events = self.wait_for_events(event_name, /*count*/ 1).await?;
-        Ok(events.remove(0))
-    }
-
-    pub(crate) async fn wait_for_events(
+    pub(crate) async fn wait_for_event(
         &self,
-        event_name: &str,
-        count: usize,
-    ) -> Result<Vec<Value>> {
-        let result = tokio::time::timeout(Duration::from_secs(10), async {
+        description: &str,
+        predicate: impl Fn(&Value) -> bool,
+        timeout: Duration,
+    ) -> Result<Value> {
+        let result = tokio::time::timeout(timeout, async {
             loop {
                 let updated = self.updated.notified();
-                let events = self
-                    .events()?
-                    .into_iter()
-                    .filter(|event| event["fields"]["event.name"].as_str() == Some(event_name))
-                    .collect::<Vec<_>>();
-                if events.len() >= count {
-                    return Ok(events);
+                if let Some(event) = self.events()?.into_iter().find(&predicate) {
+                    return Ok(event);
                 }
                 updated.await;
             }
@@ -60,7 +51,7 @@ impl JsonLogCapture {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .join("\n");
                 anyhow::bail!(
-                    "timed out waiting for {count} JSON log event(s) named `{event_name}`; captured stderr:\n{lines}"
+                    "timed out waiting for a JSON log event {description}; captured stderr:\n{lines}"
                 )
             }
         }

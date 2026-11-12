@@ -39,14 +39,31 @@ def _snapshot_targets(root: Path) -> dict[str, dict[str, bytes] | bytes | None]:
 def test_generated_files_are_up_to_date():
     """Regenerating from repository schemas should leave reviewed artifacts unchanged."""
     before = _snapshot_targets(ROOT)
+    sdk = tmp_path / "sdk" / "python"
+    sdk.mkdir(parents=True)
+    for directory in ("src", "scripts"):
+        shutil.copytree(
+            ROOT / directory, sdk / directory, ignore=shutil.ignore_patterns("__pycache__")
+        )
+    for name in ("pyproject.toml", "release_version.py"):
+        shutil.copyfile(ROOT / name, sdk / name)
 
     env = os.environ.copy()
     python_bin = str(Path(sys.executable).parent)
     env["PATH"] = f"{python_bin}{os.pathsep}{env.get('PATH', '')}"
 
+    command = [
+        sys.executable,
+        "scripts/update_sdk_artifacts.py",
+        "generate-types",
+        "--schema-dir",
+        str(ROOT.parents[1] / "codex-rs/app-server-protocol/schema/json"),
+    ]
+    if not format_output:
+        command.append("--no-format")
     subprocess.run(
-        [sys.executable, "scripts/update_sdk_artifacts.py", "generate-types"],
-        cwd=ROOT,
+        command,
+        cwd=sdk,
         check=True,
         env=env,
     )

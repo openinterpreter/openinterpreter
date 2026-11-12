@@ -1,5 +1,7 @@
 use super::PreviousSectionState;
+use super::SectionTransition;
 use super::WorldStateSection;
+use super::WorldStateUpdate;
 use crate::context::AppsInstructions;
 use crate::context::ContextualUserFragment;
 
@@ -19,10 +21,6 @@ impl WorldStateSection for AppsInstructionsState {
     const ID: &'static str = "apps_instructions";
     type Snapshot = bool;
 
-    fn snapshot(&self) -> Self::Snapshot {
-        self.available
-    }
-
     fn matches_legacy_fragment(role: &str, text: &str) -> bool {
         role == "developer" && AppsInstructions::matches_text(text)
     }
@@ -38,15 +36,19 @@ impl WorldStateSection for AppsInstructionsState {
     fn render_diff(
         &self,
         previous: PreviousSectionState<'_, Self::Snapshot>,
-    ) -> Option<Box<dyn ContextualUserFragment>> {
+    ) -> SectionTransition<Self::Snapshot> {
+        let current = self.available;
         if !self.available
             || matches!(previous, PreviousSectionState::Known(previous) if *previous)
             || matches!(previous, PreviousSectionState::Unknown)
         {
-            return None;
+            return (Some(current), Vec::new());
         }
 
-        Some(Box::new(AppsInstructions))
+        (
+            Some(current),
+            vec![WorldStateUpdate::fragment(AppsInstructions)],
+        )
     }
 }
 

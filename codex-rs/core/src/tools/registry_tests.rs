@@ -122,6 +122,20 @@ impl LifecycleTestHandler {
 
 impl CoreToolRuntime for LifecycleTestHandler {}
 
+impl codex_extension_api::ApprovalReviewContributor for LifecycleTestHandler {
+    fn decide<'a>(
+        &'a self,
+        _input: &'a codex_extension_api::ApprovalDecisionInput<'_>,
+    ) -> codex_extension_api::ExtensionFuture<'a, Option<codex_extension_api::ApprovalDecision>>
+    {
+        Box::pin(async {
+            Some(codex_extension_api::ApprovalDecision::Reviewed(
+                codex_protocol::protocol::ReviewDecision::denied("review denied"),
+            ))
+        })
+    }
+}
+
 fn test_spec(tool_name: &codex_tools::ToolName) -> codex_tools::ToolSpec {
     codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
         name: tool_name.name.clone(),
@@ -470,6 +484,7 @@ async fn function_tools_expose_default_hook_payloads_and_rewrites() -> anyhow::R
     assert_eq!(
         handler.post_tool_use_payload(&invocation, &output),
         Some(PostToolUsePayload {
+            tool_cwd: None,
             tool_name: HookToolName::new("functions.echo"),
             tool_use_id: "call-1".to_string(),
             tool_input: serde_json::json!({ "message": "hello" }),
@@ -563,7 +578,9 @@ async fn code_mode_wait_does_not_expose_default_hook_payloads() {
     let (session, turn) = crate::session::tests::make_session_and_context().await;
     let output = crate::tools::context::FunctionToolOutput::from_text("ok".to_string(), Some(true));
 
-    let wait = crate::tools::handlers::CodeModeWaitHandler;
+    let wait = crate::tools::handlers::CodeModeWaitHandler::new(
+        /*description_override*/ None, /*parameters_override*/ None,
+    );
     let wait_invocation = test_invocation(
         Arc::new(session),
         Arc::new(turn),
@@ -739,7 +756,6 @@ async fn dispatch_uses_canonical_tool_names_for_lifecycle_contributors() -> anyh
     builder.tool_lifecycle_contributor(Arc::new(ToolLifecycleRecorder {
         records: Arc::clone(&records),
     }));
-    session.services.extensions = Arc::new(builder.build());
 
     let ok_tool = codex_tools::ToolName::plain("ok_tool");
     let failing_tool = codex_tools::ToolName::namespaced("extensions", "failing_tool");
@@ -751,7 +767,19 @@ async fn dispatch_uses_canonical_tool_names_for_lifecycle_contributors() -> anyh
         tool_name: failing_tool.clone(),
         result: LifecycleTestResult::Err,
     }) as Arc<dyn CoreToolRuntime>;
-    let registry = ToolRegistry::from_tools([ok_handler, failing_handler]);
+    let reviewed_tool = codex_tools::ToolName::namespaced("extensions", "reviewed_tool");
+    let reviewed_handler = Arc::new(LifecycleTestHandler {
+        tool_name: reviewed_tool.clone(),
+        result: LifecycleTestResult::Err,
+    });
+    builder.approval_review_contributor(reviewed_handler.clone());
+    session.services.extensions = Arc::new(builder.build());
+    let mut registry = ToolRegistry::from_tools([ok_handler, failing_handler]);
+    registry.register_trusted_with_native_review(
+        reviewed_handler,
+        super::ToolExposure::Direct,
+        super::NativeReview::Required,
+    );
     let session = Arc::new(session);
     let turn = Arc::new(turn);
 
@@ -782,6 +810,16 @@ async fn dispatch_uses_canonical_tool_names_for_lifecycle_contributors() -> anyh
         Err(err) => err,
     };
     assert_eq!(err.to_string(), "handler failed");
+    let denied = registry
+        .dispatch_any_with_state(
+            test_invocation(session, turn, "reviewed-call", reviewed_tool.clone()),
+            /*call_state*/ None,
+        )
+        .await;
+    assert_eq!(
+        denied.err().expect("review must deny").to_string(),
+        "review denied"
+    );
 
     let expected = vec![
         RecordedToolLifecycle::Start {
@@ -804,6 +842,13 @@ async fn dispatch_uses_canonical_tool_names_for_lifecycle_contributors() -> anyh
             tool_name: failing_tool,
             outcome: codex_extension_api::ToolCallOutcome::Failed {
                 handler_executed: true,
+            },
+        },
+        RecordedToolLifecycle::Finish {
+            call_id: "reviewed-call".to_string(),
+            tool_name: reviewed_tool,
+            outcome: codex_extension_api::ToolCallOutcome::Failed {
+                handler_executed: false,
             },
         },
     ];
@@ -835,6 +880,8 @@ fn test_invocation(
         call_id: call_id.to_string(),
         tool_name,
         source: crate::tools::context::ToolCallSource::Direct,
+        native_call: None,
+        environments: Default::default(),
         payload: ToolPayload::Function {
             arguments: "{}".to_string(),
         },

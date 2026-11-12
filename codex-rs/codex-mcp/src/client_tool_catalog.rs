@@ -8,7 +8,11 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
+use anyhow::Context;
 use anyhow::Result;
 use codex_connectors::ConnectorRuntimeSnapshot;
 use tokio::sync::Mutex;
@@ -139,17 +143,78 @@ impl ClientToolCatalog {
         }
     }
 
-    /// Serialize fetching and publication, leaving the current catalog usable during the fetch.
-    /// The publication callback runs alongside the exact-client update under the write lock.
+    /// Captures tools and their client-local revision together, without retaining them in the client.
+    async fn read_current(&self) -> (RwLockReadGuard<'_, CatalogState>, ToolCatalogSnapshot) {
+        loop {
+            {
+                let current = self.current.read().await;
+                let catalog = match &current.source {
+                    CatalogSource::Local { tools, meta } => Some((Arc::clone(tools), meta.clone())),
+                    CatalogSource::Live { updates, .. } => {
+                        // Hold the watch borrow while checking its version so the tools and
+                        // revision come from the same publication.
+                        let snapshot = updates.borrow();
+                        (!updates.has_changed().unwrap_or(false)).then(|| {
+                            snapshot
+                                .as_ref()
+                                .map(|snapshot| {
+                                    (snapshot.shared_tools(), snapshot.shared_tool_list_meta())
+                                })
+                                .unwrap_or_default()
+                        })
+                    }
+                };
+                if let Some((tools, meta)) = catalog {
+                    let snapshot = ToolCatalogSnapshot {
+                        revision: current.revision,
+                        tools,
+                        meta,
+                    };
+                    return (current, snapshot);
+                }
+            }
+            let mut current = self.current.write().await;
+            let changed = match &mut current.source {
+                CatalogSource::Live {
+                    updates,
+                    tools_version,
+                } => {
+                    let version = updates
+                        .borrow_and_update()
+                        .as_ref()
+                        .map_or(0, |snapshot| snapshot.tools_version());
+                    let changed = *tools_version != version;
+                    *tools_version = version;
+                    changed
+                }
+                CatalogSource::Local { .. } => false,
+            };
+            if changed {
+                current.revision += 1;
+            }
+        }
+    }
+
+    pub(crate) fn notifications_current(&self, notifications: &ToolListRevision) -> bool {
+        self.listed_notification_revision.load(Ordering::Acquire) == notifications.current()
+    }
+
+    /// Refresh ordinary server catalogs, coalescing concurrent readers. Never mark a
+    /// listing current if another notification arrived while fetching its pages.
+    /// Retry once; persistent churn stays pending until the retry cooldown expires.
     #[expect(
         clippy::await_holding_invalid_type,
         reason = "refreshes must remain serialized through fetching and catalog publication"
     )]
-    pub(crate) async fn refresh<C, R, F, Fut, P>(&self, fetch: F, publish: P) -> Result<R>
+    pub(crate) async fn refresh_after_notifications<F, Fut>(
+        &self,
+        notifications: &ToolListRevision,
+        timeout: Duration,
+        mut fetch: F,
+    ) -> Result<()>
     where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<(Vec<ToolInfo>, C)>>,
-        P: FnOnce(&[ToolInfo], C) -> R,
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<(Vec<ToolInfo>, Option<Arc<serde_json::Value>>)>>,
     {
         let _refresh = self.refresh_lock.lock().await;
         let (tools, context) = fetch().await?;
@@ -172,7 +237,54 @@ impl ClientToolCatalog {
         Ok(result)
     }
 
-    /// Reject stale calls before preparation and hold catalog authority until execution finishes.
+    /// Validate under the caller's publication guard after fetching and draining calls.
+    /// The guard covers both shared-provider publication and this client's revision update.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "refreshes must remain serialized through fetching and catalog publication"
+    )]
+    pub(crate) async fn refresh<C, R, Fut, G>(
+        &self,
+        fetch: impl FnOnce() -> Fut,
+        validate: impl FnOnce() -> Option<G>,
+        publish: impl FnOnce(&[ToolInfo], Option<Arc<serde_json::Value>>, C) -> R,
+    ) -> Result<Option<R>>
+    where
+        Fut: Future<Output = Result<(Vec<ToolInfo>, Option<Arc<serde_json::Value>>, C)>>,
+    {
+        let _refresh = self.refresh_lock.lock().await;
+        let (tools, meta, context) = fetch().await?;
+        let _calls = self.calls.write().await;
+        let mut current = self.current.write().await;
+        let Some(_validity) = validate() else {
+            return Ok(None);
+        };
+        let result = publish(&tools, meta.clone(), context);
+        match &mut current.source {
+            CatalogSource::Local {
+                tools: current_tools,
+                meta: current_meta,
+            } => {
+                *current_tools = tools.into();
+                *current_meta = meta;
+            }
+            CatalogSource::Live {
+                updates,
+                tools_version,
+            } => {
+                *tools_version = updates
+                    .borrow_and_update()
+                    .as_ref()
+                    .map_or(0, |snapshot| snapshot.tools_version());
+            }
+        }
+        current.revision += 1;
+        current.last_refresh_revision = current.revision;
+        Ok(Some(result))
+    }
+
+    /// Reject stale calls before preparation. Explicit refreshes wait for execution;
+    /// ordinary list-change notifications may publish while an admitted call runs.
     #[expect(
         clippy::await_holding_invalid_type,
         reason = "catalog publication must wait for call preparation and execution"
@@ -193,6 +305,13 @@ impl ClientToolCatalog {
         {
             return None;
         }
+        let current = match current.source {
+            CatalogSource::Local { .. } => {
+                drop(current);
+                None
+            }
+            CatalogSource::Live { .. } => Some(current),
+        };
         let result = run().await;
         drop(current);
         Some(result)

@@ -30,6 +30,9 @@ pub(crate) const KEY_CHORD_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 1);
 
 const FIRST_DISPATCH_FUNCTION_KEY: u8 = codex_config::types::MAX_FUNCTION_KEY + 1;
 const LAST_DISPATCH_FUNCTION_KEY: u8 = u8::MAX;
+const MAX_LEADER_CHORD_BINDINGS: usize = 1024;
+
+pub(super) mod leader_defaults;
 const LIST_RESERVED_BINDINGS: &[(&str, KeyBinding)] = &[
     ("cancel", ctrl(KeyCode::Char('c'))),
     ("resume_picker.toggle_transcript", ctrl(KeyCode::Char('t'))),
@@ -139,12 +142,43 @@ pub(crate) struct KeyChord {
 pub(crate) struct RuntimeChordBinding {
     pub(crate) action: KeymapActionId,
     pub(crate) chord: KeyChord,
-    spec: String,
+    pub(crate) spec: String,
+}
+
+impl RuntimeChordBinding {
+    fn is_leader(&self) -> bool {
+        self.spec.starts_with("leader ")
+    }
+
+    /// Transcript selection remains active beside pager actions on native transcript surfaces.
+    fn overlaps(&self, action: KeymapActionId) -> bool {
+        self.action.overlaps(action)
+            || (matches!(
+                (self.action.context, self.action.action),
+                (KeymapContext::Global, "select_transcript")
+            ) || matches!(
+                (action.context, action.action),
+                (KeymapContext::Global, "select_transcript")
+            )) && KeymapContextSet::transcript().contains_action(self.action)
+                && KeymapContextSet::transcript().contains_action(action)
+            || self.is_leader()
+                && [
+                    KeymapContextSet::browsing(),
+                    KeymapContextSet::new(KeymapContext::Global)
+                        .with(KeymapContext::Chat)
+                        .with_transcript_close(),
+                ]
+                .iter()
+                .any(|contexts| {
+                    contexts.contains_action(self.action) && contexts.contains_action(action)
+                })
+    }
 }
 
 /// Chord bindings plus configured alternatives in declaration order.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RuntimeChordKeymap {
+    pub(crate) leader: Vec<KeyBinding>,
     pub(crate) bindings: Vec<RuntimeChordBinding>,
     configured_specs: Vec<(KeymapActionId, Vec<String>)>,
 }
@@ -152,6 +186,7 @@ pub(crate) struct RuntimeChordKeymap {
 impl RuntimeChordKeymap {
     pub(super) fn from_config(keymap: &TuiKeymap) -> Result<Self, String> {
         let mut keymap_chords = Self::default();
+        let mut leader_bindings = Vec::new();
         for action in keymap_action_ids() {
             let Some(configured) = effective_configured_binding(keymap, action) else {
                 continue;
@@ -162,7 +197,22 @@ impl RuntimeChordKeymap {
                 if configured_specs.iter().any(|configured| configured == raw) {
                     continue;
                 }
-                if let Some((prefix, completion)) = raw.split_once(' ') {
+                if let Some(completion) = raw.strip_prefix("leader ") {
+                    let invalid_binding = || {
+                        format!(
+                            "Invalid `{}` = `{raw}`. Use `leader` followed by one key, such as \
+`leader c`.",
+                            action.config_path()
+                        )
+                    };
+                    leader_bindings.push((
+                        action,
+                        normalize_chord_binding(
+                            parse_keybinding(completion).ok_or_else(invalid_binding)?,
+                        ),
+                        raw.to_string(),
+                    ));
+                } else if let Some((prefix, completion)) = raw.split_once(' ') {
                     let invalid_binding = || {
                         format!(
                             "Invalid `{}` = `{raw}`. Use a single key such as `ctrl-a` \
@@ -225,6 +275,34 @@ or a two-stroke chord such as `ctrl-x ctrl-t`.",
                 spec: "g g".to_string(),
             });
         }
+        super::leader::resolve(keymap, &mut keymap_chords)?;
+        let explicit_count = leader_bindings
+            .len()
+            .saturating_mul(keymap_chords.leader.len());
+        if explicit_count > MAX_LEADER_CHORD_BINDINGS {
+            return Err(format!(
+                "Too many leader shortcut combinations (maximum {MAX_LEADER_CHORD_BINDINGS}). \
+Reduce `tui.keymap.global.leader` alternatives or `leader ...` bindings."
+            ));
+        }
+        for (action, completion, spec) in leader_bindings {
+            for &prefix in &keymap_chords.leader {
+                let chord = KeyChord { prefix, completion };
+                if let Some(existing) = keymap_chords
+                    .bindings
+                    .iter_mut()
+                    .find(|existing| existing.action == action && existing.chord == chord)
+                {
+                    existing.spec.clone_from(&spec);
+                } else {
+                    keymap_chords.bindings.push(RuntimeChordBinding {
+                        action,
+                        chord,
+                        spec: spec.clone(),
+                    });
+                }
+            }
+        }
         Ok(keymap_chords)
     }
 
@@ -260,24 +338,35 @@ or a two-stroke chord such as `ctrl-x ctrl-t`.",
             })
     }
 
-    /// Return the user's first configured shortcut without exposing dispatch tokens.
+    /// Return the user's first active configured shortcut without exposing dispatch tokens.
     pub(crate) fn primary_hint(
         &self,
         action: KeymapActionId,
         bindings: &[KeyBinding],
     ) -> Option<crate::key_hint::ShortcutHint> {
-        if let Some(spec) = self
-            .configured_specs(action)
-            .and_then(|specs| specs.first())
-        {
-            return if let Some((prefix, completion)) = spec.split_once(' ') {
-                Some(crate::key_hint::ShortcutHint::Chord {
-                    prefix: parse_keybinding(prefix)?,
-                    completion: parse_keybinding(completion)?,
-                })
-            } else {
-                parse_keybinding(spec).map(crate::key_hint::ShortcutHint::Single)
-            };
+        if let Some(hint) = self.configured_specs(action).and_then(|specs| {
+            specs.iter().find_map(|spec| {
+                if let Some((prefix, completion)) = spec.split_once(' ') {
+                    Some(crate::key_hint::ShortcutHint::Chord {
+                        prefix: if prefix == "leader" {
+                            *self.leader.first()?
+                        } else {
+                            parse_keybinding(prefix)?
+                        },
+                        completion: parse_keybinding(completion)?,
+                    })
+                } else {
+                    parse_keybinding(spec)
+                        .filter(|configured| {
+                            bindings.iter().any(|binding| {
+                                binding.normalized_parts() == configured.normalized_parts()
+                            })
+                        })
+                        .map(crate::key_hint::ShortcutHint::Single)
+                }
+            })
+        }) {
+            return Some(hint);
         }
 
         super::primary_binding(bindings)
@@ -311,7 +400,63 @@ struct PendingChord {
     contexts: KeymapContextSet,
 }
 
-/// Tracks one pending two-stroke chord without buffering ordinary input.
+impl PendingChord {
+    pub(crate) fn actions(self, keymap: &RuntimeChordKeymap) -> Vec<(KeymapActionId, Vec<String>)> {
+        let mut actions = Vec::<(KeymapActionId, Vec<String>)>::new();
+        for binding in self.completions(keymap) {
+            let action = binding.action;
+            let key = binding.chord.completion.display_label();
+            if let Some((_, keys)) = actions.iter_mut().find(|(id, _)| *id == action) {
+                keys.push(key);
+            } else {
+                actions.push((action, vec![key]));
+            }
+        }
+        actions
+    }
+
+    pub(crate) fn guide(
+        self,
+        keymap: &RuntimeChordKeymap,
+        is_available: impl Fn(KeymapActionId) -> bool,
+    ) -> Option<crate::bottom_pane::ShortcutHud> {
+        use crate::bottom_pane::ShortcutHud;
+        use ratatui::style::Stylize;
+        let rows: Vec<_> = self
+            .actions(keymap)
+            .into_iter()
+            .filter(|(action, _)| is_available(*action))
+            .map(|(action, keys)| {
+                ShortcutHud::item(
+                    keys.join(" / "),
+                    crate::keymap_setup::action_label(action.action).into(),
+                )
+            })
+            .collect();
+        if rows.is_empty() {
+            return None;
+        }
+        Some(ShortcutHud::new(
+            self.prefix.display_label(),
+            rows,
+            vec!["Esc cancel".dim().into()],
+        ))
+    }
+
+    pub(crate) fn completions(
+        self,
+        keymap: &RuntimeChordKeymap,
+    ) -> impl Iterator<Item = &RuntimeChordBinding> {
+        keymap.bindings.iter().filter(move |binding| {
+            let (code, modifiers) = binding.chord.completion.parts();
+            keymap
+                .binding_for_completion(self.prefix, KeyEvent::new(code, modifiers), self.contexts)
+                .is_some_and(|active| std::ptr::eq(active, *binding))
+        })
+    }
+}
+
+/// Tracks one pending chord or leader menu without buffering ordinary input.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct KeyChordMatcher {
     pending: Option<PendingChord>,
@@ -415,7 +560,9 @@ impl KeyChordMatcher {
         }
 
         if let Some(pending) = self.pending.take() {
-            if crate::key_hint::plain(KeyCode::Esc).is_press(key_event) {
+            if crate::key_hint::plain(KeyCode::Esc).is_press(key_event)
+                || (pending.persistent && chord_stroke_matches(pending.prefix, key_event))
+            {
                 return KeyChordMatch::Cancelled;
             }
             if let Some(binding) =
@@ -437,6 +584,15 @@ impl KeyChordMatcher {
             })
             .map(|binding| binding.chord.prefix)
         {
+            let persistent = keymap.bindings.iter().any(|binding| {
+                binding.chord.prefix == prefix
+                    && contexts.contains_action(binding.action)
+                    && (binding.is_leader()
+                        || (keymap.leader.contains(&prefix)
+                            && contexts.contains(KeymapContext::Global)
+                            && !contexts.contains(KeymapContext::List)
+                            && binding.action.context.overlaps(KeymapContext::Global)))
+            });
             self.pending = Some(PendingChord {
                 started_at: Instant::now(),
                 prefix,
@@ -483,7 +639,7 @@ fn dispatch_binding(action: KeymapActionId) -> Option<KeyBinding> {
     ))
 }
 
-fn dispatch_event(action: KeymapActionId) -> Option<KeyEvent> {
+pub(crate) fn dispatch_event(action: KeymapActionId) -> Option<KeyEvent> {
     let (code, modifiers) = dispatch_binding(action)?.parts();
     Some(KeyEvent::new(code, modifiers))
 }
@@ -498,14 +654,14 @@ pub(crate) fn is_dispatch_token(binding: KeyBinding) -> bool {
     )
 }
 
-fn is_dispatch_token_event(event: KeyEvent) -> bool {
+pub(crate) fn is_dispatch_token_event(event: KeyEvent) -> bool {
     matches!(
         event.code,
         KeyCode::F(FIRST_DISPATCH_FUNCTION_KEY..=LAST_DISPATCH_FUNCTION_KEY)
     )
 }
 
-fn chord_stroke_matches(binding: KeyBinding, key_event: KeyEvent) -> bool {
+pub(crate) fn chord_stroke_matches(binding: KeyBinding, key_event: KeyEvent) -> bool {
     let ctrl_slash = crate::key_hint::ctrl(KeyCode::Char('/'));
     let ctrl_seven = crate::key_hint::ctrl(KeyCode::Char('7'));
 
@@ -547,6 +703,21 @@ pub(super) fn validate_chord_conflicts(keymap: &RuntimeKeymap) -> Result<(), Str
     for (index, binding) in keymap.chords.bindings.iter().enumerate() {
         validate_binding_shape(binding)?;
         validate_reserved_strokes(binding)?;
+        if binding.chord.completion == binding.chord.prefix
+            && ((keymap.chords.leader.contains(&binding.chord.prefix)
+                && binding.action.context.overlaps(KeymapContext::Global))
+                || keymap.chords.bindings.iter().any(|leader| {
+                    leader.is_leader()
+                        && leader.chord.prefix == binding.chord.prefix
+                        && leader.overlaps(binding.action)
+                }))
+        {
+            return Err(format!(
+                "Ambiguous `{}` = `{}`: repeating the leader is reserved for cancellation.",
+                binding.action.config_path(),
+                binding.spec,
+            ));
+        }
 
         if let Some(conflict) = runtime_action_bindings(keymap)
             .filter(|candidate| binding.action.overlaps(candidate.id))
@@ -569,6 +740,19 @@ Unbind or remap the existing shortcut before using it as a chord prefix.",
             if previous.action != binding.action
                 && previous.action.overlaps(binding.action)
                 && previous.chord == binding.chord
+                && !matches!(
+                    (
+                        (previous.action.context, previous.action.action),
+                        (binding.action.context, binding.action.action),
+                    ),
+                    (
+                        (KeymapContext::Global, "find_transcript"),
+                        (KeymapContext::Pager, "find")
+                    ) | (
+                        (KeymapContext::Pager, "find"),
+                        (KeymapContext::Global, "find_transcript")
+                    )
+                )
             {
                 return Err(format!(
                     "Ambiguous `{}` = `{}`: the same chord is already assigned to `{}`. \
@@ -600,7 +784,7 @@ Windows. Choose a different chord and retry.",
     }
 
     if matches!(prefix_key, KeyCode::Char(_))
-        && !crate::key_hint::has_ctrl_or_alt(prefix_modifiers)
+        && crate::key_hint::is_plain_text_key_event(KeyEvent::new(prefix_key, prefix_modifiers))
         && !binding.action.context.allows_plain_chord_prefix()
         && binding.action.context != KeymapContext::Agents
     {

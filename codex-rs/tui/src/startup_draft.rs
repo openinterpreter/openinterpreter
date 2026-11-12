@@ -3,16 +3,15 @@
 
 use std::future::Future;
 use std::io;
+use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
-use std::time::Instant;
+use tokio::time::Instant;
 
 use crossterm::SynchronizedUpdate;
 use ratatui::layout::Size;
-use ratatui::style::Modifier;
-use ratatui::style::Style;
 use ratatui::style::Stylize;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::unbounded_channel;
@@ -30,7 +29,7 @@ use crate::bottom_pane::ComposerDraftSnapshot;
 use crate::history_cell;
 use crate::history_cell::HistoryCell;
 use crate::keymap::RuntimeKeymap;
-use crate::legacy_core::config::Config;
+use crate::local_settings::LocalSettings;
 use crate::render::Insets;
 use crate::render::renderable::FlexRenderable;
 use crate::render::renderable::Renderable;
@@ -103,6 +102,8 @@ pub(crate) struct StartupDraft {
 /// Keeps terminal input responsive and carries one submission intent into the live session.
 pub(crate) struct StartupDraftPump {
     header: Box<dyn HistoryCell>,
+    pub(crate) blossom: std::cell::RefCell<crate::empty_state_animation::EmptyStateAnimation>,
+    motion: crate::motion::MotionMode,
     bottom_pane: BottomPane,
     events: Pin<Box<dyn Stream<Item = TuiEvent> + Send>>,
     app_event_rx: UnboundedReceiver<AppEvent>,
@@ -169,8 +170,8 @@ impl StartupDraft {
     }
 
     /// Apply the loaded editing preferences without enabling startup actions or submission.
-    pub(crate) fn apply_config(&mut self, config: &Config) {
-        self.pump.apply_config(config);
+    pub(crate) fn apply_settings(&mut self, settings: &LocalSettings, cwd: &Path) {
+        self.pump.apply_settings(settings, cwd);
     }
 
     /// Lend the original terminal to an existing interactive startup screen.
@@ -306,6 +307,11 @@ impl StartupDraftPump {
         }
         self.resolved_selection = Some(session_selection.clone());
         self.session_action = session_action;
+        if matches!(session_selection, SessionSelection::StartFresh)
+            && !self.blossom.borrow().is_eligible()
+        {
+            self.blossom.borrow_mut().start_fresh();
+        }
         if self.initial_screen == StartupDraftInitialScreen::Composer {
             self.draw(tui, tui.terminal.last_known_screen_size)?;
         }
@@ -508,7 +514,11 @@ fn startup_draft_bottom_pane(
             effects: Default::default(),
             skills: None,
         },
-        ChatComposerConfig::plain_text(),
+        ChatComposerConfig {
+            // Keep partial pastes literal until the startup draft is handed off.
+            blockquote_paste_enabled: false,
+            ..ChatComposerConfig::plain_text()
+        },
     );
     bottom_pane.set_context_window_pending(/*pending*/ true);
     bottom_pane

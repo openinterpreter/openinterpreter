@@ -1,0 +1,100 @@
+//! Prune current and legacy diagnostic logs immediately, then on a timer.
+//! Legacy cleanup continues when current diagnostics are unavailable.
+//! SQLite keeps freed pages for reuse.
+
+use super::StateRuntime;
+use chrono::Utc;
+use sqlx::SqlitePool;
+use std::sync::Arc;
+use std::time::Duration;
+
+const LOG_RETENTION_SECONDS: i64 = 10 * 24 * 60 * 60; // 10 days
+const LOG_DATABASE_BUDGET_BYTES: i64 = 64 * 1024 * 1024; // 64 MiB
+
+impl StateRuntime {
+    pub(super) fn start_periodic_logs_maintenance(self: &Arc<Self>, period: Duration) {
+        let runtime = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval_at(
+                /*start*/ tokio::time::Instant::now(),
+                /*period*/ period,
+            );
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut first_sweep = true;
+            loop {
+                // Hold no strong runtime reference while waiting.
+                interval.tick().await;
+                let Some(runtime) = runtime.upgrade() else {
+                    break;
+                };
+                let logs_pool = runtime.logs_pool.as_deref();
+                if runtime.pool.is_closed() || logs_pool.is_some_and(SqlitePool::is_closed) {
+                    break;
+                }
+                // Older versions write logs in sqlite_home. Keep the same retention policy
+                // there until those logs expire. Do not create a missing legacy database.
+                let legacy_pool = match runtime.sqlite.open_legacy_logs_for_cleanup().await {
+                    Ok(pool) => pool,
+                    Err(err) => {
+                        tracing::warn!("failed to open legacy diagnostic logs for cleanup: {err}");
+                        None
+                    }
+                };
+                for pool in logs_pool.into_iter().chain(legacy_pool.as_ref()) {
+                    if let Err(err) = prune_by_age_and_size(
+                        pool,
+                        Utc::now().timestamp(),
+                        LOG_DATABASE_BUDGET_BYTES,
+                    )
+                    .await
+                    {
+                        tracing::warn!("failed to prune diagnostic logs: {err}");
+                    }
+                    if first_sweep {
+                        // Preserve the startup checkpoint without waiting for readers or writers.
+                        if let Err(err) = sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
+                            .execute(pool)
+                            .await
+                        {
+                            tracing::warn!("failed to checkpoint diagnostic logs: {err}");
+                        }
+                    }
+                }
+                if let Some(pool) = legacy_pool {
+                    pool.close().await;
+                }
+                first_sweep = false;
+            }
+        });
+    }
+}
+
+async fn prune_by_age_and_size(
+    pool: &SqlitePool,
+    now: i64,
+    budget_bytes: i64,
+) -> anyhow::Result<()> {
+    let mut retention_seconds = LOG_RETENTION_SECONDS;
+    loop {
+        sqlx::query("DELETE FROM logs WHERE ts < ?")
+            .bind(now.saturating_sub(retention_seconds))
+            .execute(pool)
+            .await?;
+        // Exclude free pages: SQLite reuses them without shrinking the file.
+        let occupied_bytes: i64 = sqlx::query_scalar(
+            "SELECT (page_count - freelist_count) * page_size \
+             FROM pragma_page_count(), pragma_freelist_count(), pragma_page_size()",
+        )
+        .fetch_one(pool)
+        .await?;
+        if occupied_bytes <= budget_bytes || retention_seconds == 1 {
+            return Ok(());
+        }
+        // Keep the newest second even if it exceeds the budget.
+        retention_seconds = (retention_seconds / 2).max(1);
+    }
+}
+
+#[cfg(test)]
+#[path = "logs_maintenance_tests.rs"]
+mod tests;

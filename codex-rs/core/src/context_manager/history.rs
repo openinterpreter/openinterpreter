@@ -5,29 +5,38 @@
 //! Token estimates charge item content rather than transport metadata.
 //! Oversized instructions keep an incomplete excerpt for bounded root review, including
 //! sources recovered from legacy Guardian checkpoints before their raw history is dropped.
+//! Prompt projections replace unavailable file images without changing retained history.
 
+#[path = "history_rejected_audio.rs"]
+pub(crate) mod rejected_audio;
 #[path = "history_user_authorization.rs"]
 mod user_authorization;
 
+use crate::context::BaseInstructionsFragment;
 use crate::context::ContextualUserFragment;
 use crate::context::ModelSwitchInstructions;
+use crate::context::is_guardian_context_message;
 use crate::context::world_state::PersistentModeState;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSnapshot;
+use crate::context::world_state::WorldStateUpdate;
 use crate::context_manager::normalize;
-use crate::event_mapping::has_non_contextual_dev_message_content;
-use crate::event_mapping::is_contextual_dev_message_content;
+use crate::context_manager::replace_unresolvable_image_files;
+use crate::event_mapping::contextual_dev_fragments;
 use crate::event_mapping::is_contextual_user_message_content;
 use crate::event_mapping::parse_turn_item;
 use crate::guardian::GUARDIAN_MAX_ROOT_MESSAGE_TOKENS;
 use crate::guardian::guardian_truncate_text;
+use crate::session::FileAudioDurations;
 use crate::session::turn_context::TurnContext;
 use crate::utils::json::serialized_json_bytes;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_attachment_store::AttachmentStore;
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
 use codex_extension_api::ConversationHistorySnapshot;
+use codex_guardian_context::ContextBudgeting;
 use codex_guardian_context::SectionHistory;
 use codex_guardian_context::TranscriptHistory;
 use codex_history::CodexHarnessMetadata;
@@ -41,6 +50,7 @@ use codex_prompts::render_model_instructions;
 use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::AgentMessageInputContent;
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -50,12 +60,12 @@ use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::InterAgentCommunication;
-use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
+use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::WorldStateItem;
-use codex_utils_audio::estimate_audio_token_count;
+use codex_utils_audio::estimate_tool_audio_tokens;
 use codex_utils_cache::BlockingLruCache;
 use codex_utils_cache::sha1_digest;
 use codex_utils_output_truncation::TruncationPolicy;
@@ -68,17 +78,34 @@ use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::OnceLock;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
+use crate::config::ManagedFeatures;
 use crate::context::GuardianContextMode;
+use codex_features::Feature;
+
+static GUARDIAN_REVIEW_CONTEXT_REVISION: AtomicU64 = AtomicU64::new(/*v*/ 1);
+
+fn next_guardian_review_context_revision() -> u64 {
+    GUARDIAN_REVIEW_CONTEXT_REVISION.fetch_add(/*val*/ 1, Ordering::Relaxed)
+}
 
 /// Transcript of thread history
-#[derive(Debug, Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct ContextManager {
+    item_id_generator: ItemIdGenerator,
+    sampling: super::sampling::SamplingProgress,
+    /// Inclusive sequence cutoff for calls that may still be running in the fork source.
+    pub(crate) restored_through_sequence: u64,
     /// The oldest items are at the beginning of the vector. Snapshots share the vector until a
     /// caller needs to mutate it, avoiding deep copies for read-only history consumers.
     items: Arc<Vec<ResponseItemEnvelope>>,
     /// Legacy-only history preserved across compaction and resume. Thread-owned review uses parent context.
     review_history: Option<TranscriptHistory>,
+    /// Captured before recording; replay and legacy backups keep the same storage policy.
+    review_budgeting: ContextBudgeting,
     /// Host facts independent of the model window; snapshots share immutable state.
     retained_context: Arc<RetainedContext>,
     /// Capture follows the session flag, including while an older checkpoint uses legacy review.
@@ -92,7 +119,14 @@ pub(crate) struct ContextManager {
     pub(crate) reset_version: u64,
     /// Monotonic user-input/reset revision, independent of compaction's history generation.
     user_message_revision: u64,
+    /// Process-unique so resumed roots cannot match a worker's cached assistant evidence.
+    guardian_review_context_revision: u64,
     token_info: Option<TokenUsageInfo>,
+    /// History items at this index and later are estimated on top of the saved token count.
+    /// Failed responses preserve this index. It is not saved in rollouts.
+    last_server_reported_usage_item_count: usize,
+    /// Index immediately after the latest model output, including failed responses.
+    last_model_output_item_count: Option<usize>,
     /// Reference context snapshot used for diffing and producing model-visible
     /// settings update items.
     ///
@@ -104,8 +138,47 @@ pub(crate) struct ContextManager {
     /// also clear this when it trims a mixed initial-context developer bundle
     /// whose non-diff fragments no longer exist in the surviving history.
     reference_context_item: Option<TurnContextItem>,
-    /// World state most recently appended to model-visible history.
+    /// World-state comparison checkpoint. After compaction this may contain only
+    /// extension metadata, with model-visible context still awaiting reinjection.
     world_state_baseline: Option<WorldStateSnapshot>,
+}
+
+impl std::fmt::Debug for ContextManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContextManager")
+            .field("items", &self.items)
+            .field("review_history", &self.review_history)
+            .field("retained_context", &self.retained_context)
+            .field("rejected_audio_file_ids", &self.rejected_audio_file_ids)
+            .field("guardian_review_mode", &self.guardian_review_mode)
+            .field(
+                "guardian_include_additional_context",
+                &self.guardian_include_additional_context,
+            )
+            .field(
+                "retain_inherited_user_messages",
+                &self.retain_inherited_user_messages,
+            )
+            .field("history_version", &self.history_version)
+            .field("reset_version", &self.reset_version)
+            .field("user_message_revision", &self.user_message_revision)
+            .field(
+                "guardian_review_context_revision",
+                &self.guardian_review_context_revision,
+            )
+            .field("token_info", &self.token_info)
+            .field(
+                "last_server_reported_usage_item_count",
+                &self.last_server_reported_usage_item_count,
+            )
+            .field(
+                "last_model_output_item_count",
+                &self.last_model_output_item_count,
+            )
+            .field("reference_context_item", &self.reference_context_item)
+            .field("world_state_baseline", &self.world_state_baseline)
+            .finish()
+    }
 }
 
 struct SharedConversationHistory {
@@ -116,6 +189,7 @@ struct SharedConversationHistory {
     guardian_review_mode: GuardianContextMode,
     history_version: u64,
     user_message_revision: u64,
+    guardian_review_context_revision: u64,
 }
 
 pub(crate) enum HistoryReplacement {
@@ -131,8 +205,15 @@ impl ConversationHistorySnapshot for SharedConversationHistory {
     }
 
     fn retained_context(&self) -> Option<&RetainedContext> {
-        (self.guardian_context_mode == GuardianContextMode::ThreadOwned)
-            .then_some(&self.retained_context)
+        Some(&self.retained_context)
+    }
+
+    fn uses_parent_context_for_review(&self) -> bool {
+        self.guardian_review_mode == GuardianContextMode::ThreadOwned
+    }
+
+    fn uses_independent_review_history(&self) -> bool {
+        self.guardian_review_mode == GuardianContextMode::Independent
     }
 
     fn uses_parent_context_for_review(&self) -> bool {
@@ -140,16 +221,38 @@ impl ConversationHistorySnapshot for SharedConversationHistory {
     }
 
     fn review_items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
-        match &self.review_history {
-            Some(history) => history.items(),
-            None => self.items(),
+        Box::new(self.review_items_with_sources().map(|(item, _)| item))
+    }
+
+    fn review_items_with_sources(
+        &self,
+    ) -> Box<dyn Iterator<Item = (&ResponseItem, Option<&codex_history::RetainedSource>)> + Send + '_>
+    {
+        if self.guardian_review_mode != GuardianContextMode::ThreadOwned {
+            let items = self.review_history.as_ref().map_or_else(
+                || self.items(),
+                |history| {
+                    Box::new(
+                        history
+                            .reviewable_items()
+                            .filter(|item| self.allows_additional_context(item))
+                            .map(|item| &item.item),
+                    )
+                },
+            );
+            return Box::new(items.map(|item| (item, None)));
         }
+        Box::new(self.items_with_sources())
     }
 
     fn review_history_version(&self) -> u64 {
-        self.review_history
-            .as_ref()
-            .map_or(self.history_version, TranscriptHistory::generation)
+        if self.guardian_review_mode != GuardianContextMode::ThreadOwned {
+            return self
+                .review_history
+                .as_ref()
+                .map_or(self.history_version, TranscriptHistory::generation);
+        }
+        self.history_version
     }
 
     fn history_version(&self) -> u64 {
@@ -160,27 +263,61 @@ impl ConversationHistorySnapshot for SharedConversationHistory {
         self.user_message_revision
     }
 
+    fn guardian_review_context_revision(&self) -> u64 {
+        self.guardian_review_context_revision
+    }
+
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
-        Box::new(
-            self.items
-                .iter()
-                .map(|envelope| &envelope.item)
-                .filter(|item| {
-                    !matches!(
-                        item,
-                        ResponseItem::Message { role, content, .. }
-                            if role == "user" && is_contextual_user_message_content(content)
-                    )
-                }),
-        )
+        Box::new(self.items_with_sources().map(|(item, _)| item))
+    }
+}
+
+impl SharedConversationHistory {
+    fn allows_additional_context(&self, item: &ResponseItemEnvelope) -> bool {
+        self.guardian_include_additional_context
+            || !item
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.additional_context_tool_output)
+    }
+
+    fn items_with_sources(
+        &self,
+    ) -> impl Iterator<Item = (&ResponseItem, Option<&codex_history::RetainedSource>)> + Send + '_
+    {
+        self.items
+            .iter()
+            .filter(|envelope| self.allows_additional_context(envelope))
+            .filter(|envelope| !is_guardian_context_message(&envelope.item))
+            .filter(|envelope| !codex_guardian_context::is_inherited_manual_approval(envelope))
+            .map(|envelope| {
+                (
+                    &envelope.item,
+                    envelope
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.retained_source.as_ref()),
+                )
+            })
+    }
+}
+
+#[cfg(test)]
+impl Default for ContextManager {
+    fn default() -> Self {
+        Self::new(codex_protocol_test_support::uuid_v7_item_id_generator_for_test())
     }
 }
 
 impl ContextManager {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(item_id_generator: ItemIdGenerator) -> Self {
         Self {
+            item_id_generator,
+            sampling: Default::default(),
+            restored_through_sequence: 0,
             items: Arc::new(Vec::new()),
             review_history: None,
+            review_budgeting: ContextBudgeting::Fixed,
             retained_context: Arc::default(),
             guardian_context_mode: GuardianContextMode::Legacy,
             guardian_review_mode: GuardianContextMode::Legacy,
@@ -188,9 +325,10 @@ impl ContextManager {
             history_version: 0,
             reset_version: 0,
             user_message_revision: 0,
-            token_info: TokenUsageInfo::new_or_append(
-                &None, &None, /*model_context_window*/ None,
-            ),
+            guardian_review_context_revision: next_guardian_review_context_revision(),
+            token_info: None,
+            last_server_reported_usage_item_count: 0,
+            last_model_output_item_count: None,
             reference_context_item: None,
             world_state_baseline: None,
         }
@@ -205,6 +343,7 @@ impl ContextManager {
             guardian_review_mode: self.guardian_review_mode,
             history_version: self.history_version,
             user_message_revision: self.user_message_revision,
+            guardian_review_context_revision: self.guardian_review_context_revision,
         })
     }
 
@@ -212,10 +351,13 @@ impl ContextManager {
         &self.retained_context
     }
 
-    pub(crate) fn with_guardian_context_mode(
-        guardian_context_mode: GuardianContextMode,
-        source: &SessionSource,
+    pub(crate) fn for_session(
+        root_capabilities_restricted: bool,
+        features: &ManagedFeatures,
+        budgeting: ContextBudgeting,
+        item_id_generator: ItemIdGenerator,
     ) -> Self {
+        let independent = !features.enabled(Feature::GuardianReuseParentCompaction);
         Self {
             guardian_context_mode,
             guardian_review_mode: guardian_context_mode,
@@ -231,11 +373,36 @@ impl ContextManager {
     }
 
     pub(crate) fn record_retained_context(&mut self, event: &RetainedContextEvent) -> bool {
-        if !Arc::make_mut(&mut self.retained_context).record(event) {
+        self.record_retained_context_for_persistence(&mut event.clone())
+    }
+
+    pub(crate) fn record_retained_context_for_persistence(
+        &mut self,
+        event: &mut RetainedContextEvent,
+    ) -> bool {
+        if !Arc::make_mut(&mut self.retained_context)
+            .record_and_capture(event, &self.item_id_generator)
+        {
             return false;
         }
-        self.user_message_revision = self.user_message_revision.saturating_add(1);
+        match event {
+            RetainedContextEvent::AcceptedFileAudio { .. } => {}
+            RetainedContextEvent::VerifiedAnswer { .. } => {
+                self.user_message_revision =
+                    self.user_message_revision.saturating_add(/*rhs*/ 1);
+            }
+            RetainedContextEvent::DeliveredAssistantMessage { .. } => {
+                self.guardian_review_context_revision = next_guardian_review_context_revision();
+            }
+        }
         true
+    }
+
+    /// Original checkpoint evidence, independent of the selected review window.
+    pub(crate) fn guardian_history_items(
+        &self,
+    ) -> Option<Box<dyn Iterator<Item = &ResponseItem> + Send + '_>> {
+        self.review_history.as_ref().map(SectionHistory::items)
     }
 
     pub(crate) fn guardian_history_checkpoint(&self) -> Option<GuardianHistoryCheckpoint> {
@@ -244,7 +411,7 @@ impl ContextManager {
         }
         self.review_history
             .as_ref()
-            .map(|history| GuardianHistoryCheckpoint(history.items().cloned().collect()))
+            .map(TranscriptHistory::checkpoint)
     }
 
     pub(crate) fn restore_review_context(
@@ -350,6 +517,16 @@ impl ContextManager {
         self.token_info = info;
     }
 
+    /// Install a context count together with the history it covers.
+    pub(crate) fn set_token_info_with_boundary(
+        &mut self,
+        info: Option<TokenUsageInfo>,
+        covered_item_count: usize,
+    ) {
+        self.last_server_reported_usage_item_count = covered_item_count;
+        self.token_info = info;
+    }
+
     pub(crate) fn set_reference_context_item(&mut self, item: Option<TurnContextItem>) {
         self.reference_context_item = item;
     }
@@ -358,23 +535,29 @@ impl ContextManager {
         self.reference_context_item.clone()
     }
 
-    pub(crate) fn update_world_state(
-        &mut self,
+    pub(crate) fn render_step_world_state(
+        &self,
         world_state: &WorldState,
-    ) -> (Vec<Box<dyn ContextualUserFragment>>, Option<WorldStateItem>) {
-        let snapshot = world_state.snapshot();
-        let fragments =
+    ) -> (
+        WorldStateSnapshot,
+        Vec<WorldStateUpdate>,
+        Option<WorldStateItem>,
+    ) {
+        let (snapshot, fragments) =
             world_state.render_history_diff(self.world_state_baseline.as_ref(), self.raw_items());
-        let rollout_item = self.world_state_baseline.as_ref().map_or_else(
+        let rollout_item = self.world_state_item(&snapshot);
+        (snapshot, fragments, rollout_item)
+    }
+
+    fn world_state_item(&self, snapshot: &WorldStateSnapshot) -> Option<WorldStateItem> {
+        self.world_state_baseline.as_ref().map_or_else(
             || Some(WorldStateItem::full(snapshot.clone().into_object())),
             |previous| {
                 snapshot
                     .merge_patch_from(previous)
                     .map(WorldStateItem::patch)
             },
-        );
-        self.world_state_baseline = Some(snapshot);
-        (fragments, rollout_item)
+        )
     }
 
     pub(crate) fn set_world_state_baseline(&mut self, snapshot: WorldStateSnapshot) {
@@ -402,21 +585,26 @@ impl ContextManager {
         I: IntoIterator,
         I::Item: Deref<Target = ResponseItem>,
     {
-        self.record_items_with_metadata(items.into_iter().map(|item| (item, None)), policy);
+        for item in items {
+            self.record_item_with_metadata(&item, /*metadata*/ None, policy);
+        }
     }
 
-    /// Records output while preserving its history-only metadata.
+    /// Records output and annotates the original envelopes with captured provenance.
+    /// Tool output truncation applies only to live history, preserving full rollout payloads.
     pub(crate) fn record_annotated_items(
         &mut self,
-        items: &[ResponseItemEnvelope],
+        items: &mut [ResponseItemEnvelope],
         policy: TruncationPolicy,
     ) {
-        self.record_items_with_metadata(
-            items
-                .iter()
-                .map(|envelope| (&envelope.item, envelope.metadata.as_ref())),
-            policy,
-        );
+        for envelope in items {
+            self.sampling.record(envelope);
+            if let Some(source) =
+                self.record_item_with_metadata(&envelope.item, envelope.metadata.as_ref(), policy)
+            {
+                envelope.metadata.get_or_insert_default().retained_source = Some(source);
+            }
+        }
     }
 
     fn record_items_with_metadata<'a, I, T>(&mut self, items: I, policy: TruncationPolicy)
@@ -465,23 +653,99 @@ impl ContextManager {
         }
     }
 
+    fn record_item_with_metadata(
+        &mut self,
+        item: &ResponseItem,
+        metadata: Option<&CodexHarnessMetadata>,
+        policy: TruncationPolicy,
+    ) -> Option<codex_history::RetainedSource> {
+        if !is_api_message(item, metadata) {
+            return None;
+        }
+        let mut processed = ResponseItemEnvelope {
+            item: item.clone(),
+            metadata: metadata.cloned(),
+        };
+        self.sampling.record(&mut processed);
+        if let ResponseItem::FunctionCallOutput { output, .. }
+        | ResponseItem::CustomToolCallOutput { output, .. } = &mut processed.item
+        {
+            // The override already includes the tool's serialization allowance.
+            let policy = metadata
+                .and_then(|metadata| metadata.history_truncation_token_limit)
+                .map(TruncationPolicy::Tokens)
+                .unwrap_or_else(|| with_serialization_allowance(policy));
+            truncate_function_output_payload(output, policy, estimate_tool_audio_tokens);
+        }
+        if let Some(review_history) = &mut self.review_history
+            && !is_guardian_context_message(item)
+        {
+            review_history.record(&processed);
+        }
+        if let Some(metadata) = metadata
+            && Arc::make_mut(&mut self.retained_context).record_sender_user_messages(metadata)
+        {
+            self.user_message_revision = self.user_message_revision.saturating_add(1);
+        }
+        let source = self.record_retained_message(
+            item,
+            metadata,
+            user_authorization::RetainedMessageSource::Original,
+        );
+        if let Some(source) = &source {
+            processed.metadata.get_or_insert_default().retained_source = Some(source.clone());
+        }
+        if is_model_generated_item(&processed.item) {
+            self.last_model_output_item_count = Some(self.items.len() + 1);
+        }
+        Arc::make_mut(&mut self.items).push(processed);
+        source
+    }
+
     /// Returns the history prepared for sending to the model. This applies a proper
     /// normalization and drops un-suited items. Unsupported image and audio content
     /// is stripped from messages and tool outputs according to `input_modalities`.
-    pub(crate) fn for_prompt(self, input_modalities: &[InputModality]) -> Vec<ResponseItem> {
-        self.for_prompt_annotated(input_modalities)
+    /// Unavailable file images are replaced with text placeholders.
+    pub(crate) async fn for_prompt(
+        self,
+        input_modalities: &[InputModality],
+        image_store: &dyn AttachmentStore,
+    ) -> Vec<ResponseItem> {
+        self.for_prompt_annotated(input_modalities, image_store)
+            .await
             .into_iter()
             .map(ResponseItemEnvelope::into_item)
             .collect()
     }
 
     /// Returns normalized history envelopes for internal consumers that must retain metadata.
-    pub(crate) fn for_prompt_annotated(
+    pub(crate) async fn for_prompt_annotated(
         mut self,
         input_modalities: &[InputModality],
+        image_store: &dyn AttachmentStore,
     ) -> Vec<ResponseItemEnvelope> {
         self.normalize_history(input_modalities);
+        replace_unresolvable_image_files(
+            Arc::make_mut(&mut self.items)
+                .iter_mut()
+                .map(|envelope| &mut envelope.item),
+            image_store,
+        )
+        .await;
+        self.project_file_audio_for_prompt();
         Arc::unwrap_or_clone(self.items)
+    }
+
+    /// Applies the file-audio request projection to a normalized snapshot whose
+    /// remaining preparation is performed by another request path.
+    pub(crate) fn project_file_audio_for_prompt(&mut self) {
+        if self.rejected_audio_file_ids.is_empty() {
+            return;
+        }
+        rejected_audio::project_file_audio(
+            Arc::make_mut(&mut self.items),
+            &self.rejected_audio_file_ids,
+        );
     }
 
     /// Iterates over raw response items without exposing their history envelopes.
@@ -489,6 +753,11 @@ impl ContextManager {
         &self,
     ) -> impl Clone + ExactSizeIterator<Item = &ResponseItem> + DoubleEndedIterator {
         self.items.iter().map(|envelope| &envelope.item)
+    }
+
+    pub(crate) fn has_tool_declarations(&self) -> bool {
+        self.raw_items()
+            .any(|item| matches!(item, ResponseItem::AdditionalTools { .. }))
     }
 
     /// Returns annotated history items without cloning their response payloads.
@@ -510,6 +779,14 @@ impl ContextManager {
         self.history_version
     }
 
+    pub(crate) fn input_sequence(&self) -> u64 {
+        self.sampling.last_sequence
+    }
+
+    pub(crate) fn checkpoint_sampling(&mut self, items: &mut [ResponseItemEnvelope]) {
+        self.sampling.checkpoint(items);
+    }
+
     // Estimate token usage using byte-based heuristics from the truncation helpers.
     // This is a coarse lower bound, not a tokenizer-accurate count.
     pub(crate) fn estimate_token_count(&self, turn_context: &TurnContext) -> Option<i64> {
@@ -525,13 +802,23 @@ impl ContextManager {
         &self,
         base_instructions: &BaseInstructions,
     ) -> Option<i64> {
-        let base_tokens =
-            i64::try_from(approx_token_count(&base_instructions.text)).unwrap_or(i64::MAX);
+        // Incremental windows supply instructions through history, including an empty base.
+        let has_recorded_instructions = self.has_tool_declarations()
+            || self
+                .raw_items()
+                .any(|item| BaseInstructionsFragment::text_from_item(item).is_some());
+        let base_tokens = if has_recorded_instructions {
+            0
+        } else {
+            i64::try_from(approx_token_count(&base_instructions.text)).unwrap_or(i64::MAX)
+        };
 
         let items_tokens = self
             .items
             .iter()
-            .map(|envelope| estimate_item_token_count(&envelope.item))
+            .map(|envelope| {
+                estimate_item_token_count_with_audio(&envelope.item, &self.file_audio_durations)
+            })
             .fold(0i64, i64::saturating_add);
 
         Some(base_tokens.saturating_add(items_tokens))
@@ -547,6 +834,7 @@ impl ContextManager {
             // its corresponding counterpart to keep the invariants intact without
             // running a full normalization pass.
             normalize::remove_corresponding_for(items, &removed.item);
+            self.reset_last_usage_boundary();
             self.world_state_baseline = None;
         }
     }
@@ -556,16 +844,22 @@ impl ContextManager {
         self.replace_annotated(items.into_iter().map(ResponseItemEnvelope::new).collect());
     }
 
-    pub(crate) fn replace_annotated(&mut self, items: Vec<ResponseItemEnvelope>) {
+    pub(crate) fn replace_annotated(&mut self, mut items: Vec<ResponseItemEnvelope>) {
+        self.sampling = super::sampling::SamplingProgress::restore(&mut items);
+        self.restored_through_sequence = self
+            .restored_through_sequence
+            .min(self.sampling.last_sequence);
         self.retained_context = Arc::default();
         self.user_message_revision = self.user_message_revision.saturating_add(1);
         if let Some(review_history) = &mut self.review_history {
-            review_history.reset(items.iter().map(|item| &item.item).filter(|item| {
-                !matches!(item, ResponseItem::Message { role, content, .. }
-                    if role == "user" && is_contextual_user_message_content(content))
-            }));
+            review_history.reset(
+                items
+                    .iter()
+                    .filter(|entry| !is_guardian_context_message(&entry.item)),
+            );
         }
         self.items = Arc::new(items);
+        self.reset_last_usage_boundary();
         self.history_version = self.history_version.saturating_add(1);
         self.reset_version = self.history_version;
         self.world_state_baseline = None;
@@ -589,16 +883,25 @@ impl ContextManager {
         }
         if self.guardian_review_mode == GuardianContextMode::Legacy && self.review_history.is_none()
         {
-            let mut retained = TranscriptHistory::new(self.history_version.saturating_add(1));
-            for item in self.raw_items().filter(|item| {
-                !matches!(item, ResponseItem::Message { role, content, .. }
-                    if role == "user" && is_contextual_user_message_content(content))
-            }) {
+            self.review_history = None;
+        }
+        if self.guardian_review_mode == GuardianContextMode::Legacy && self.review_history.is_none()
+        {
+            let mut retained = TranscriptHistory::new(
+                self.history_version.saturating_add(1),
+                self.review_budgeting,
+            );
+            for item in self
+                .annotated_items()
+                .iter()
+                .filter(|entry| !is_guardian_context_message(&entry.item))
+            {
                 retained.record(item);
             }
             self.review_history = Some(retained);
         }
         self.items = Arc::new(items);
+        self.reset_last_usage_boundary();
         self.history_version = self.history_version.saturating_add(1);
         if promoted {
             self.reset_version = self.history_version;
@@ -650,13 +953,26 @@ impl ContextManager {
         let source = RetainedInputSource::from(snapshot[cut_idx].metadata.as_ref());
         let mut review_history = self.review_history.take();
         if let Some(history) = &mut review_history {
-            history.truncate_before(&snapshot[cut_idx].item);
+            history.truncate_before(&snapshot[cut_idx]);
         }
 
         cut_idx =
             self.trim_pre_turn_context_updates(&snapshot, first_instruction_turn_idx, cut_idx);
 
-        let mut retained_items = snapshot[..cut_idx].to_vec();
+        // Apply the same acceptance boundary to the parent model window. The independent
+        // transcript owns its rollback provenance even after this window is compacted.
+        let mut retained_items = snapshot[..cut_idx]
+            .iter()
+            .filter(|envelope| {
+                !source.acceptance_order().is_some_and(|boundary| {
+                    (matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "assistant")
+                        || matches!(&envelope.item, ResponseItem::FunctionCall { .. }))
+                        && RetainedInputSource::from(envelope.metadata.as_ref())
+                            .acceptance_order().is_some_and(|order| order >= boundary)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         if cut_idx == first_instruction_turn_idx
             && let Some(first_turn_id) = snapshot[first_instruction_turn_idx].turn_id()
         {
@@ -688,7 +1004,14 @@ impl ContextManager {
             .iter()
             .filter_map(|item| item.turn_id())
             .collect::<Vec<_>>();
-        if self.guardian_context_mode == GuardianContextMode::ThreadOwned {
+        // Old checkpoints lack an accepted-input boundary. Their answers still follow
+        // the original source calls, even after the capture opt-out has been retired.
+        if source == RetainedInputSource::Inherited
+            || source.acceptance_order().is_some()
+            || retained_context
+                .ordered_entries()
+                .any(|(_, entry)| matches!(entry, RetainedContextEntry::UserMessage(_)))
+        {
             Arc::make_mut(&mut retained_context).rollback(
                 &removed_turns,
                 first_removed_message_id,
@@ -716,12 +1039,40 @@ impl ContextManager {
         &mut self,
         usage: &TokenUsage,
         model_context_window: Option<i64>,
+        includes_reasoning: bool,
+        input_item_count: usize,
     ) {
-        self.token_info = TokenUsageInfo::new_or_append(
+        let info = TokenUsageInfo::new_or_append(
             &self.token_info,
-            &Some(usage.clone()),
+            usage,
+            includes_reasoning,
             model_context_window,
         );
+        let covered_item_count = self
+            .last_model_output_item_count
+            .unwrap_or(0)
+            .max(input_item_count);
+        tracing::debug!(
+            target: "codex_core::history_item_count",
+            history_items = self.items.len(),
+            input_items = input_item_count,
+            covered_items = covered_item_count,
+            unreported_items = self.items.len().saturating_sub(covered_item_count),
+            "context history item counts"
+        );
+        self.set_token_info_with_boundary(Some(info), covered_item_count);
+    }
+
+    /// Align the context count after history changes or buffered model output is committed.
+    pub(crate) fn reset_last_usage_boundary(&mut self) {
+        self.last_model_output_item_count = self
+            .items
+            .iter()
+            .rposition(|envelope| is_model_generated_item(&envelope.item))
+            .map(|index| index + 1);
+        self.last_server_reported_usage_item_count = self
+            .last_model_output_item_count
+            .unwrap_or(self.items.len());
     }
 
     fn get_non_last_reasoning_items_tokens(&self) -> i64 {
@@ -736,7 +1087,8 @@ impl ContextManager {
 
         self.items
             .iter()
-            .take(last_user_index)
+            // Reasoning after the usage boundary is already included in the tail estimate.
+            .take(last_user_index.min(self.last_server_reported_usage_item_count))
             .filter(|envelope| {
                 matches!(
                     &envelope.item,
@@ -746,47 +1098,44 @@ impl ContextManager {
                     }
                 )
             })
-            .map(|envelope| estimate_item_token_count(&envelope.item))
+            .map(|envelope| {
+                estimate_item_token_count_with_audio(&envelope.item, &self.file_audio_durations)
+            })
             .fold(0i64, i64::saturating_add)
     }
 
-    // These are local items added after the most recent model-emitted item.
-    // They are not reflected in `last_token_usage.total_tokens`.
-    fn items_after_last_model_generated_item(
+    // Keep failed or usage-less output in the estimate until a usable count covers it.
+    fn items_since_last_usage(
         &self,
     ) -> impl Clone + ExactSizeIterator<Item = &ResponseItem> + DoubleEndedIterator {
-        let start = self
-            .items
+        self.items[self.last_server_reported_usage_item_count..]
             .iter()
-            .rposition(|envelope| is_model_generated_item(&envelope.item))
-            .map_or(self.items.len(), |index| index.saturating_add(1));
-        self.items[start..].iter().map(|envelope| &envelope.item)
+            .map(|envelope| &envelope.item)
     }
 
-    /// When true, the server already accounted for past reasoning tokens and
-    /// the client should not re-estimate them.
-    pub(crate) fn get_total_token_usage(&self, server_reasoning_included: bool) -> i64 {
+    pub(crate) fn get_total_token_usage(&self) -> i64 {
         let last_tokens = self
             .token_info
             .as_ref()
             .map(|info| info.last_token_usage.total_tokens)
             .unwrap_or(0);
-        let items_after_last_model_generated_tokens = self
-            .items_after_last_model_generated_item()
-            .map(estimate_item_token_count)
-            .fold(0i64, i64::saturating_add);
-        if server_reasoning_included {
-            last_tokens.saturating_add(items_after_last_model_generated_tokens)
+        let unreported_tokens = self.estimated_tokens_since_last_usage();
+        if self
+            .token_info
+            .as_ref()
+            .is_some_and(|info| info.last_usage_includes_reasoning == Some(true))
+        {
+            last_tokens.saturating_add(unreported_tokens)
         } else {
             last_tokens
                 .saturating_add(self.get_non_last_reasoning_items_tokens())
-                .saturating_add(items_after_last_model_generated_tokens)
+                .saturating_add(unreported_tokens)
         }
     }
 
-    pub(crate) fn estimated_tokens_after_last_model_generated_item(&self) -> i64 {
-        self.items_after_last_model_generated_item()
-            .map(estimate_item_token_count)
+    pub(crate) fn estimated_tokens_since_last_usage(&self) -> i64 {
+        self.items_since_last_usage()
+            .map(|item| estimate_item_token_count_with_audio(item, &self.file_audio_durations))
             .fold(0i64, i64::saturating_add)
     }
 
@@ -794,11 +1143,11 @@ impl ContextManager {
     /// 1. every call (function/custom) has a corresponding output entry
     /// 2. every output has a corresponding call entry or names an external tool event
     /// 3. unsupported image and audio content is stripped from messages and tool outputs
-    fn normalize_history(&mut self, input_modalities: &[InputModality]) {
+    pub(crate) fn normalize_history(&mut self, input_modalities: &[InputModality]) {
         let items = Arc::make_mut(&mut self.items);
 
         // all function/tool calls must have a corresponding output
-        normalize::ensure_call_outputs_present(items);
+        normalize::ensure_call_outputs_present(items, self.restored_through_sequence);
 
         // Paired outputs must have a corresponding call; named external outputs stand alone.
         normalize::remove_orphan_outputs(items);
@@ -808,6 +1157,11 @@ impl ContextManager {
 
         // strip audio when model does not support it
         normalize::strip_audio_when_unsupported(input_modalities, items);
+
+        self.last_model_output_item_count = items
+            .iter()
+            .rposition(|envelope| is_model_generated_item(&envelope.item))
+            .map(|index| index + 1);
     }
 
     /// Walk backward from a rollback cut and trim contiguous pre-turn context-update items.
@@ -835,10 +1189,23 @@ impl ContextManager {
     ) -> usize {
         while cut_idx > first_instruction_turn_idx {
             match &snapshot[cut_idx - 1].item {
-                ResponseItem::Message { role, content, .. }
-                    if role == "developer" && is_contextual_dev_message_content(content) =>
-                {
-                    if has_non_contextual_dev_message_content(content) {
+                ResponseItem::Message {
+                    role,
+                    content,
+                    internal_chat_message_metadata_passthrough,
+                    ..
+                } if role == "developer" => {
+                    let kinds = internal_chat_message_metadata_passthrough
+                        .as_ref()
+                        .and_then(|metadata| metadata.content_item_kinds.as_deref())
+                        .unwrap_or_default();
+                    let contextual_count = contextual_dev_fragments(content, kinds)
+                        .filter(|matched| *matched)
+                        .count();
+                    if contextual_count == 0 {
+                        break;
+                    }
+                    if contextual_count < content.len() {
                         // Mixed `build_initial_context` bundles are not reconstructible from
                         // steady-state diffs once trimmed, so the next real turn must fully
                         // reinject context instead of diffing against a stale baseline.
@@ -901,8 +1268,17 @@ fn estimate_encrypted_function_output_length(encoded_len: usize) -> usize {
 /// Counts content directly, excluding transport IDs, metadata, and outer JSON escaping.
 /// Original-detail file images use the maximum patch count.
 pub(crate) fn estimate_item_token_count(item: &ResponseItem) -> i64 {
-    let model_visible_bytes = estimate_response_item_model_visible_bytes(item);
-    approx_tokens_from_byte_count_i64(model_visible_bytes)
+    estimate_item_token_count_with_audio(item, &FileAudioDurations::default())
+}
+
+pub(crate) fn estimate_item_token_count_with_audio(
+    item: &ResponseItem,
+    audio_durations: &FileAudioDurations,
+) -> i64 {
+    approx_tokens_from_byte_count_i64(estimate_response_item_model_visible_bytes(
+        item,
+        audio_durations,
+    ))
 }
 
 /// Approximate model-visible byte cost for one image input.
@@ -920,14 +1296,18 @@ const ORIGINAL_IMAGE_PATCH_SIZE: u32 = 32;
 const ORIGINAL_IMAGE_MAX_PATCHES: usize = 10_000;
 const ORIGINAL_IMAGE_ESTIMATE_CACHE_SIZE: usize = 32;
 
-static ORIGINAL_IMAGE_ESTIMATE_CACHE: LazyLock<BlockingLruCache<[u8; 20], Option<i64>>> =
-    LazyLock::new(|| {
-        BlockingLruCache::new(
-            NonZeroUsize::new(ORIGINAL_IMAGE_ESTIMATE_CACHE_SIZE).unwrap_or(NonZeroUsize::MIN),
-        )
-    });
+type OriginalImageEstimateCache = BlockingLruCache<[u8; 20], Arc<OnceLock<Option<i64>>>>;
 
-fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
+static ORIGINAL_IMAGE_ESTIMATE_CACHE: LazyLock<OriginalImageEstimateCache> = LazyLock::new(|| {
+    BlockingLruCache::new(
+        NonZeroUsize::new(ORIGINAL_IMAGE_ESTIMATE_CACHE_SIZE).unwrap_or(NonZeroUsize::MIN),
+    )
+});
+
+fn estimate_response_item_model_visible_bytes(
+    item: &ResponseItem,
+    audio_durations: &FileAudioDurations,
+) -> i64 {
     match item {
         ResponseItem::Message { content, .. } => content
             .iter()
@@ -962,8 +1342,8 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
         ResponseItem::Reasoning {
             encrypted_content: Some(content),
             ..
-        }
-        | ResponseItem::Compaction {
+        } => i64::try_from(estimate_reasoning_length(content.len())).unwrap_or(i64::MAX),
+        ResponseItem::Compaction {
             encrypted_content: content,
             ..
         }
@@ -1082,7 +1462,7 @@ fn parse_base64_image_data_url(url: &str) -> Option<&str> {
 
 fn estimate_original_image_bytes(image_url: &str) -> Option<i64> {
     let key = sha1_digest(image_url.as_bytes());
-    ORIGINAL_IMAGE_ESTIMATE_CACHE.get_or_insert_with(key, || {
+    ORIGINAL_IMAGE_ESTIMATE_CACHE.get_or_init(key, || {
         let payload = match parse_base64_image_data_url(image_url) {
             Some(payload) => payload,
             None => {
@@ -1097,15 +1477,18 @@ fn estimate_original_image_bytes(image_url: &str) -> Option<i64> {
                 return None;
             }
         };
-        let dynamic = match image::load_from_memory(&bytes) {
-            Ok(dynamic) => dynamic,
+        let dimensions = image::guess_format(&bytes).and_then(|format| {
+            ImageReader::with_format(Cursor::new(bytes.as_slice()), format).into_dimensions()
+        });
+        let (width, height) = match dimensions {
+            Ok(dimensions) => dimensions,
             Err(error) => {
-                tracing::trace!("failed to decode original-detail image bytes: {error}");
+                tracing::trace!("failed to read original-detail image dimensions: {error}");
                 return None;
             }
         };
-        let width = i64::from(dynamic.width());
-        let height = i64::from(dynamic.height());
+        let width = i64::from(width);
+        let height = i64::from(height);
         let patch_size = i64::from(ORIGINAL_IMAGE_PATCH_SIZE);
         let patches_wide = width.saturating_add(patch_size.saturating_sub(1)) / patch_size;
         let patches_high = height.saturating_add(patch_size.saturating_sub(1)) / patch_size;
@@ -1205,7 +1588,12 @@ pub(crate) fn is_user_turn_boundary(item: &ResponseItem) -> bool {
         return false;
     };
 
-    (role == "user" && !is_contextual_user_message_content(content))
+    (role == "user"
+        && !is_contextual_user_message_content(content)
+        // Local compaction persists its synthetic summary as a user-role message.
+        // It must not consume a rollback turn or become the transcript boundary.
+        && !content.iter().any(|part| matches!(part,
+            ContentItem::InputText { text } if crate::compact::is_summary_message(text))))
         || (role == "assistant" && is_inter_agent_instruction_content(content))
 }
 

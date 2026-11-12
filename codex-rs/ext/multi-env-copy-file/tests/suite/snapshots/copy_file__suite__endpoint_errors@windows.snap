@@ -1,0 +1,61 @@
+---
+source: ext/multi-env-copy-file/tests/suite/mod.rs
+expression: errors
+---
+[
+  {
+    "field": "source_environment_id",
+    "output": "missing field `source_environment_id` at line 1 column <COLUMN>",
+    "value": null
+  },
+  {
+    "field": "target_environment_id",
+    "output": "missing field `target_environment_id` at line 1 column <COLUMN>",
+    "value": null
+  },
+  {
+    "field": "source_environment_id",
+    "output": "unknown or unavailable environment ID: unknown",
+    "value": "unknown"
+  },
+  {
+    "field": "target_environment_id",
+    "output": "unknown or unavailable environment ID: unknown",
+    "value": "unknown"
+  },
+  {
+    "field": "source_path",
+    "output": "provide an absolute Windows file path for environment <PRIMARY>",
+    "value": "source.txt"
+  },
+  {
+    "field": "target_path",
+    "output": "provide an absolute Windows file path for environment <PRIMARY>",
+    "value": "target.txt"
+  },
+  {
+    "field": "source_path",
+    "output": "provide an absolute Windows file path for environment <PRIMARY>",
+    "value": "/foreign/source.txt"
+  },
+  {
+    "field": "source_path",
+    "output": "could not open copy source: entity not found",
+    "value": "<CWD>\\missing.bin"
+  },
+  {
+    "field": "target_path",
+    "output": "copy failed; target may be truncated or partially written: <DIRECTORY_ERROR>",
+    "value": "<CWD>"
+  },
+  {
+    "field": "source_path",
+    "output": "could not open copy source: <DIRECTORY_ERROR>",
+    "value": "<CWD>"
+  },
+  {
+    "field": "target_path",
+    "output": "copy failed; target may be truncated or partially written: entity not found",
+    "value": "<CWD>\\missing\\target.txt"
+  }
+]

@@ -13,6 +13,7 @@
 //! is a stop-gap that prevents additional local persistence writes from slipping
 //! in unnoticed.
 
+use codex_protocol::ContextWindowId;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -27,6 +28,7 @@ use codex_app_server::in_process::InProcessServerEvent;
 use codex_app_server::in_process::InProcessStartArgs;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::RequestId;
@@ -345,6 +347,10 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
         .request(ClientRequest::ThreadList {
             request_id: RequestId::Integer(3),
             params: ThreadListParams {
+                include_attached_threads: false,
+                current_account_only: false,
+                excluded_thread_ids: None,
+                attached_to_thread_id: None,
                 originators: None,
                 cursor: None,
                 limit: Some(10),
@@ -374,6 +380,9 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
     let unloaded_thread_id = ThreadId::from_string(&Uuid::new_v4().to_string())?;
     thread_store
         .create_thread(StoreCreateThreadParams {
+            attached_thread: false,
+            creator_user_id: None,
+            creator_account_id: None,
             session_id: unloaded_thread_id.into(),
             thread_id: unloaded_thread_id,
             extra_config: None,
@@ -444,7 +453,12 @@ async fn cold_thread_resume_rechecks_non_local_history_after_config_load() -> Re
     let thread_store = InMemoryThreadStore::for_id(store_id.clone());
     let _in_memory_store = InMemoryThreadStoreId { store_id };
 
-    let mut client = start_in_process_client(config.clone(), loader_overrides.clone()).await?;
+    let mut client = start_in_process_client(
+        config.clone(),
+        loader_overrides.clone(),
+        /*capabilities*/ None,
+    )
+    .await?;
     let response = client
         .request(ClientRequest::ThreadStart {
             request_id: RequestId::Integer(1),
@@ -485,7 +499,7 @@ async fn cold_thread_resume_rechecks_non_local_history_after_config_load() -> Re
     .await??;
     client.shutdown().await?;
 
-    let client = start_in_process_client(config, loader_overrides).await?;
+    let client = start_in_process_client(config, loader_overrides, /*capabilities*/ None).await?;
     let reads_before_resume = thread_store.calls().await.read_thread_with_history;
     // The in-memory store is pathless, so resume currently fails later while
     // assembling the response. Reuse the probe within each attempt, but read it
@@ -507,6 +521,13 @@ async fn cold_thread_resume_rechecks_non_local_history_after_config_load() -> Re
 }
 
 async fn start_in_process_server(codex_home: &Path) -> Result<InProcessClientHandle> {
+    start_in_process_server_with_capabilities(codex_home, /*capabilities*/ None).await
+}
+
+async fn start_in_process_server_with_capabilities(
+    codex_home: &Path,
+    capabilities: Option<InitializeCapabilities>,
+) -> Result<InProcessClientHandle> {
     let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
     let config = Arc::new(
         ConfigBuilder::default()
@@ -517,12 +538,13 @@ async fn start_in_process_server(codex_home: &Path) -> Result<InProcessClientHan
             .await?,
     );
 
-    Ok(start_in_process_client(config, loader_overrides).await?)
+    Ok(start_in_process_client(config, loader_overrides, capabilities).await?)
 }
 
 async fn start_in_process_client(
     config: Arc<Config>,
     loader_overrides: LoaderOverrides,
+    capabilities: Option<InitializeCapabilities>,
 ) -> std::io::Result<InProcessClientHandle> {
     in_process::start(InProcessStartArgs {
         arg0_paths: Arg0DispatchPaths::default(),
@@ -531,6 +553,7 @@ async fn start_in_process_client(
         loader_overrides,
         strict_config: false,
         cloud_config_bundle: CloudConfigBundleLoader::default(),
+        embedded_network_policy: Default::default(),
         thread_config_loader: Arc::new(NoopThreadConfigLoader),
         feedback: CodexFeedback::new(),
         log_db: None,
@@ -545,7 +568,7 @@ async fn start_in_process_client(
                 title: None,
                 version: "0.1.0".to_string(),
             },
-            capabilities: None,
+            capabilities,
         },
         channel_capacity: in_process::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
     })
@@ -607,9 +630,12 @@ fn assert_no_local_persistence_artifacts(codex_home: &Path) -> Result<()> {
         "non-local thread persistence should not create sqlite artifacts: {sqlite_artifacts:?}"
     );
     let mut entries = codex_home_entries(codex_home)?;
-    // Host startup may leave sandbox migration markers, and Bazel test runs may
-    // initialize shell snapshot storage. Neither is thread persistence.
+    // Host startup may leave sandbox migration markers or Windows sandbox logs,
+    // and Bazel test runs may initialize shell snapshot storage. None is thread
+    // persistence.
     entries.remove(".sandbox_migration");
+    #[cfg(windows)]
+    entries.remove(".sandbox");
     entries.remove("shell_snapshots");
     assert_eq!(
         entries,

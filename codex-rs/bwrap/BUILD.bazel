@@ -1,5 +1,6 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 load("//:defs.bzl", "codex_rust_crate")
+load("//bazel/rules:runtime_package.bzl", "release_binary")
 
 codex_rust_crate(
     name = "bwrap",
@@ -21,6 +22,11 @@ codex_rust_crate(
     }),
 )
 
+release_binary(
+    binary = ":bwrap",
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
 genrule(
     name = "bwrap-sha256-env",
     srcs = [":bwrap"],
@@ -35,6 +41,11 @@ genrule(
     visibility = ["//codex-rs/linux-sandbox:__pkg__"],
 )
 
+config_setting(
+    name = "optimized",
+    values = {"compilation_mode": "opt"},
+)
+
 cc_library(
     name = "bwrap-ffi",
     srcs = ["//codex-rs/vendor:bubblewrap_c_sources"],
@@ -45,7 +56,16 @@ cc_library(
     copts = [
         "-D_GNU_SOURCE",
         "-Dmain=bwrap_main",
-    ],
+    ] + select({
+        # Cargo cc-rs uses release OPT_LEVEL=3 and DEBUG=true, without
+        # the C toolchain's default NDEBUG; retain native symbols for packaging.
+        ":optimized": [
+            "-O3",
+            "-g",
+            "-UNDEBUG",
+        ],
+        "//conditions:default": [],
+    }),
     includes = ["."],
     target_compatible_with = ["@platforms//os:linux"],
     visibility = ["//visibility:private"],

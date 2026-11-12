@@ -7,6 +7,8 @@ use codex_protocol::mcp::CallToolResult;
 use serde_json::Value as JsonValue;
 use tracing::Span;
 
+use crate::tools::ApprovalResolutionSource;
+
 const MCP_CALL_COUNT_METRIC: &str = "codex.mcp.call";
 const MCP_CALL_DURATION_METRIC: &str = "codex.mcp.call.duration_ms";
 const MCP_CALL_ERROR_COUNT_METRIC: &str = "codex.mcp.call.error";
@@ -25,14 +27,39 @@ pub(super) struct McpCallMetricOutcome {
     status: &'static str,
     error_type: Option<&'static str>,
     error_code: Option<String>,
+    approval_source: Option<&'static str>,
 }
 
 impl McpCallMetricOutcome {
+    pub(super) fn with_request_error_code(mut self, code: Option<&str>) -> Self {
+        if self.error_type == Some(MCP_CALL_ERROR_TYPE_MCP_REQUEST)
+            && let Some(code) = code
+        {
+            self.error_code = Some(code.to_string());
+        }
+        self
+    }
+
     pub(super) fn from_status(status: &'static str) -> Self {
         Self {
             status,
             error_type: None,
             error_code: None,
+            approval_source: None,
+        }
+    }
+
+    pub(super) fn approval_cancelled(source: Option<ApprovalResolutionSource>) -> Self {
+        Self {
+            status: "error",
+            error_type: Some("approval"),
+            error_code: Some("cancelled".to_string()),
+            approval_source: Some(match source {
+                Some(ApprovalResolutionSource::Guardian) => "guardian",
+                Some(ApprovalResolutionSource::User) => "user",
+                Some(ApprovalResolutionSource::Hook) => "hook",
+                None => "unknown",
+            }),
         }
     }
 }
@@ -69,6 +96,9 @@ pub(super) fn emit_mcp_call_metrics(
     let mut error_tags = tags;
     error_tags.push(("error_type", sanitize_metric_tag_value(error_type)));
     error_tags.push(("error_code", error_code.to_string()));
+    if let Some(approval_source) = outcome.approval_source {
+        error_tags.push(("approval_source", approval_source.to_string()));
+    }
     let error_tag_refs: Vec<(&str, &str)> = error_tags
         .iter()
         .map(|(key, value)| (*key, value.as_str()))
@@ -128,6 +158,15 @@ pub(super) fn mcp_call_metric_outcome(
                         .and_then(|auth_failure| auth_failure.get("error_code"))
                         .and_then(JsonValue::as_str)
                         .filter(|error_code| !error_code.is_empty())
+                })
+                .or_else(|| {
+                    result
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get(super::MCP_RESULT_TELEMETRY_META_KEY))
+                        .and_then(|telemetry| telemetry.get("error_code"))
+                        .and_then(JsonValue::as_str)
+                        .and_then(allowlisted_codex_telemetry_error_code)
                 });
             let error_code: String = error_code
                 .unwrap_or(MCP_CALL_ERROR_CODE_UNKNOWN)
@@ -138,6 +177,7 @@ pub(super) fn mcp_call_metric_outcome(
                 status: "error",
                 error_type: Some(MCP_CALL_ERROR_TYPE_TOOL_RESULT),
                 error_code: Some(sanitize_metric_tag_value(&error_code)),
+                approval_source: None,
             }
         }
         Ok(_) => McpCallMetricOutcome::from_status("ok"),
@@ -145,16 +185,37 @@ pub(super) fn mcp_call_metric_outcome(
             status: "error",
             error_type: Some(MCP_CALL_ERROR_TYPE_MCP_REQUEST),
             error_code: Some(MCP_CALL_ERROR_CODE_UNKNOWN.to_string()),
+            approval_source: None,
         },
     }
 }
 
-pub(super) fn record_mcp_call_outcome_span_telemetry(
-    span: &Span,
-    result: &Result<CallToolResult, String>,
-) {
-    let outcome = mcp_call_metric_outcome(result);
-    let (Some(error_type), Some(error_code)) = (outcome.error_type, outcome.error_code) else {
+fn allowlisted_codex_telemetry_error_code(code: &str) -> Option<&str> {
+    matches!(
+        code,
+        "kernel_start_failed"
+            | "kernel_exited"
+            | "kernel_io_error"
+            | "execution_timeout"
+            | "execution_cancelled"
+            | "execution_error"
+            | "execution_rejected"
+            | "execution_reset"
+            | "import_error"
+            | "syntax_error"
+            | "reference_error"
+            | "type_error"
+            | "uncaught_exception"
+            | "unhandled_rejection"
+            | "locator_timeout"
+            | "guardian_denied"
+    )
+    .then_some(code)
+}
+
+pub(super) fn record_mcp_call_outcome_span_telemetry(span: &Span, outcome: &McpCallMetricOutcome) {
+    let (Some(error_type), Some(error_code)) = (outcome.error_type, outcome.error_code.as_deref())
+    else {
         return;
     };
     span.record(MCP_CALL_ERROR_TYPE_SPAN_ATTR, error_type);

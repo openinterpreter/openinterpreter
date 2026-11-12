@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use codex_core::TurnInputRequest;
-use core_test_support::test_codex::local_selections;
+use core_test_support::test_codex::local_requests;
 use std::collections::HashMap;
 
 use codex_features::Feature;
@@ -138,7 +138,7 @@ async fn request_user_input_round_trip_for_mode(mode: ModeKind) -> anyhow::Resul
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(cwd.abs())),
+                environments: Some(local_requests(cwd.abs())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -235,8 +235,12 @@ fn ev_rate_limits() -> Value {
     })
 }
 
+#[test_case::test_case("response.completed"; "completed")]
+#[test_case::test_case("response.incomplete"; "incomplete")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn request_user_input_interrupt_emits_deferred_token_count() -> anyhow::Result<()> {
+async fn request_user_input_interrupt_emits_deferred_token_count(
+    terminal_type: &str,
+) -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -264,10 +268,13 @@ async fn request_user_input_interrupt_emits_deferred_token_count() -> anyhow::Re
     })
     .to_string();
 
+    let mut terminal = ev_completed_with_tokens("resp-interrupt", /*total_tokens*/ 77);
+    terminal["type"] = json!(terminal_type);
+    terminal["response"]["incomplete_details"] = json!({"reason": "max_output_tokens"});
     let response = sse(vec![
         ev_response_created("resp-interrupt"),
         ev_function_call(call_id, "request_user_input", &request_args),
-        ev_completed_with_tokens("resp-interrupt", /*total_tokens*/ 77),
+        terminal,
     ]);
     responses::mount_sse_once(&server, response).await;
 
@@ -280,7 +287,7 @@ async fn request_user_input_interrupt_emits_deferred_token_count() -> anyhow::Re
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(cwd.abs())),
+                environments: Some(local_requests(cwd.abs())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -381,7 +388,7 @@ where
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(cwd.abs())),
+                environments: Some(local_requests(cwd.abs())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,

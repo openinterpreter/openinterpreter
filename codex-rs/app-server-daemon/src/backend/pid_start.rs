@@ -1,5 +1,7 @@
 //! Detached process launch and PID publication. Hold the reservation lock until
 //! the record is published, and on Windows until an updater acknowledges startup.
+//! Windows children use a separate working directory to preserve the state directory ACL.
+//! Recover a deleted Unix cwd without changing workspace defaults for usable directories.
 
 use super::PidBackend;
 #[cfg(windows)]
@@ -24,6 +26,21 @@ impl PidBackend {
                 .await
                 .with_context(|| format!("failed to create pid directory {}", parent.display()))?;
         }
+        #[cfg(windows)]
+        let workdir = {
+            let workdir = self
+                .pid_file
+                .parent()
+                .context("daemon pid path has no parent")?
+                .join("workdir");
+            fs::create_dir_all(&workdir).await.with_context(|| {
+                format!(
+                    "failed to create daemon working directory {}",
+                    workdir.display()
+                )
+            })?;
+            workdir
+        };
         let reservation_lock = self.acquire_reservation_lock().await?;
         loop {
             match fs::OpenOptions::new()
@@ -133,6 +150,13 @@ impl PidBackend {
             command.env(key, value);
         }
 
+        crate::background_command::set_working_directory(
+            command.as_std_mut(),
+            self.pid_file
+                .parent()
+                .context("daemon pid path has no parent")?,
+        )?;
+
         #[cfg(unix)]
         {
             unsafe {
@@ -148,62 +172,12 @@ impl PidBackend {
         #[cfg(windows)]
         {
             use windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
+            use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
             use windows_sys::Win32::System::Threading::DETACHED_PROCESS;
-            // Preserve process-scoped paths before changing cwd; CA names match CUSTOM_CA_ENV_KEYS.
-            for name in [
-                "CODEX_HOME",
-                "CODEX_SQLITE_HOME",
-                "CODEX_CA_CERTIFICATE",
-                "SSL_CERT_FILE",
-                "REQUESTS_CA_BUNDLE",
-                "CURL_CA_BUNDLE",
-                "NODE_EXTRA_CA_CERTS",
-                "GIT_SSL_CAINFO",
-                "CARGO_HTTP_CAINFO",
-                "PIP_CERT",
-                "BUNDLE_SSL_CA_CERT",
-                "npm_config_cafile",
-                "AWS_CONFIG_FILE",
-                "AWS_SHARED_CREDENTIALS_FILE",
-                "AWS_WEB_IDENTITY_TOKEN_FILE",
-                "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
-            ] {
-                let Some(mut value) = std::env::var_os(name) else {
-                    continue;
-                };
-                if matches!(name, "CODEX_SQLITE_HOME" | "npm_config_cafile") {
-                    value = value.to_str().unwrap_or_default().trim().into();
-                }
-                // These consumers expand `~` independently of the working directory.
-                let expands_home = if name == "npm_config_cafile" {
-                    value
-                        .to_str()
-                        .is_some_and(|path| path.starts_with("~/") || path.starts_with("~\\"))
-                } else {
-                    matches!(
-                        name,
-                        "CODEX_SQLITE_HOME" | "AWS_CONFIG_FILE" | "AWS_SHARED_CREDENTIALS_FILE"
-                    ) && std::path::Path::new(&value).starts_with("~")
-                };
-                if value.is_empty() || expands_home {
-                    continue;
-                }
-                command.env(name, std::path::absolute(value)?);
-            }
-            if let Some(value) = std::env::var_os("SSL_CERT_DIR") {
-                let paths = std::env::split_paths(&value)
-                    .filter(|path| !path.as_os_str().is_empty())
-                    .map(std::path::absolute)
-                    .collect::<std::io::Result<Vec<_>>>()?;
-                command.env("SSL_CERT_DIR", std::env::join_paths(paths)?);
-            }
             // A Windows process pins its working directory for its lifetime.
             // Keep both managed children out of the launching project's directory.
-            command.current_dir(
-                self.pid_file
-                    .parent()
-                    .context("daemon pid path has no parent")?,
-            );
+            // Sandbox setup may broaden the cwd ACL, so do not use the private state directory.
+            command.current_dir(&workdir);
             // Never retry inside the parent's Job Object: that would report a
             // successful launch that dies when the terminal/SSH session closes.
             command.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
@@ -235,7 +209,13 @@ impl PidBackend {
             }
         }
 
-        let child = match command.spawn() {
+        let started = std::time::Instant::now();
+        #[cfg(windows)]
+        let child = super::super::windows::spawn_without_inheriting_stdio(&mut command);
+        #[cfg(not(windows))]
+        let child = command.spawn().map_err(anyhow::Error::from);
+        let child = crate::diagnostics::result("process_spawn", started, child);
+        let mut child = match child {
             Ok(child) => child,
             Err(err) => {
                 if replacement.is_none() {
@@ -247,10 +227,10 @@ impl PidBackend {
                     } else {
                         ""
                     };
-                    format!(
+                    StartFailure::Spawn(format!(
                         "failed to spawn detached app-server process using {}{job_hint}",
                         self.codex_bin.display()
-                    )
+                    ))
                 });
             }
         };
@@ -281,19 +261,33 @@ impl PidBackend {
         {
             Ok(record) => record,
             Err(err) => {
-                let _ = self.terminate_process(pid);
+                let exited = managed_app_server && matches!(child.try_wait(), Ok(Some(_)));
+                if !exited {
+                    let _ = self.terminate_process(pid);
+                }
                 let mut context =
                     format!("failed to record pid-managed app-server process {pid} startup");
                 super::super::append_stderr_log_tail_context(&self.pid_file, &mut context).await;
                 if replacement.is_none() {
                     let _ = fs::remove_file(&self.pid_file).await;
                 }
-                return Err(err).context(context);
+                return if exited {
+                    Err(err).context(StartFailure::EarlyChildExit(context))
+                } else {
+                    Err(err).context(context)
+                };
             }
         };
         let contents = serde_json::to_vec(&record).context("failed to serialize pid record")?;
         let temp_pid_file = self.pid_file.with_extension("pid.tmp");
-        if let Err(err) = fs::write(&temp_pid_file, &contents).await {
+        let started = std::time::Instant::now();
+        if let Err(err) = crate::diagnostics::result(
+            "pid_write",
+            started,
+            fs::write(&temp_pid_file, &contents)
+                .await
+                .map_err(anyhow::Error::from),
+        ) {
             let _ = self.terminate_process(pid);
             if replacement.is_none() {
                 let _ = fs::remove_file(&self.pid_file).await;
@@ -302,7 +296,14 @@ impl PidBackend {
                 format!("failed to write pid temp file {}", temp_pid_file.display())
             });
         }
-        if let Err(err) = fs::rename(&temp_pid_file, &self.pid_file).await {
+        let started = std::time::Instant::now();
+        if let Err(err) = crate::diagnostics::result(
+            "pid_publish",
+            started,
+            fs::rename(&temp_pid_file, &self.pid_file)
+                .await
+                .map_err(anyhow::Error::from),
+        ) {
             let _ = self.terminate_process(pid);
             let _ = fs::remove_file(&temp_pid_file).await;
             if replacement.is_none() {

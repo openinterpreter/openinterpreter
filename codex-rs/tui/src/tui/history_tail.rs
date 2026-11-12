@@ -1,4 +1,5 @@
 //! Update visible terminal-history tails without discarding terminal scrollback.
+//! When the existing tail is an unchanged prefix, append only the new rows.
 
 use super::Tui;
 use crate::custom_terminal::Terminal as CustomTerminal;
@@ -66,7 +67,7 @@ where
     let Ok(previous_rows) = u16::try_from(previous_rows) else {
         return Ok(false);
     };
-    if previous_rows == 0 || previous_rows > viewport.top() {
+    if previous_rows > viewport.top() {
         return Ok(false);
     }
 

@@ -115,7 +115,7 @@ model = "gpt-5.4-mini"
         })
         .await?;
 
-    assert_eq!(response.model, "openai.gpt-5.6-sol");
+    assert_eq!(response.model, "openai.gpt-6.1-sol");
     Ok(())
 }
 
@@ -244,9 +244,21 @@ async fn thread_start_provider_model_fallback_uses_bedrock_static_catalog() -> R
         /*allow_provider_model_fallback*/ true,
     )
     .await?;
+    for model in [
+        "openai.gpt-6.1-sol",
+        "openai.gpt-6.1-terra",
+        "openai.gpt-6-sol",
+        "openai.gpt-6-luna",
+        "openai.gpt-5.6-sol",
+    ] {
+        let response =
+            start_thread_with_model(&mut mcp, model, /*allow_provider_model_fallback*/ true)
+                .await?;
+        assert_eq!(response.model, model);
+    }
     let supported_with_fallback = start_thread_with_model(
         &mut mcp,
-        "openai.gpt-5.4",
+        "openai.gpt-5.5",
         /*allow_provider_model_fallback*/ true,
     )
     .await?;
@@ -263,7 +275,7 @@ async fn thread_start_provider_model_fallback_uses_bedrock_static_catalog() -> R
             supported_with_fallback.model,
             unsupported_without_fallback.model,
         ],
-        vec!["openai.gpt-5.6-sol", "openai.gpt-5.4", "gpt-5.4-mini"]
+        vec!["openai.gpt-6.1-sol", "openai.gpt-5.5", "gpt-5.4-mini"]
     );
     Ok(())
 }
@@ -281,7 +293,18 @@ async fn thread_start_bedrock_runtime_prefers_global_cross_region_models() -> Re
         .build_initialized()
         .await?;
 
-    for model in ["global.openai.gpt-5.6-sol", "us.openai.gpt-5.6-sol"] {
+    for model in [
+        "global.openai.gpt-6.1-sol",
+        "us.openai.gpt-6.1-sol",
+        "global.openai.gpt-6.1-terra",
+        "us.openai.gpt-6.1-terra",
+        "global.openai.gpt-6-sol",
+        "us.openai.gpt-6-sol",
+        "global.openai.gpt-6-luna",
+        "us.openai.gpt-6-luna",
+        "global.openai.gpt-5.6-sol",
+        "us.openai.gpt-5.6-sol",
+    ] {
         let response =
             start_thread_with_model(&mut mcp, model, /*allow_provider_model_fallback*/ true)
                 .await?;
@@ -294,7 +317,7 @@ async fn thread_start_bedrock_runtime_prefers_global_cross_region_models() -> Re
         /*allow_provider_model_fallback*/ true,
     )
     .await?;
-    assert_eq!(response.model, "global.openai.gpt-5.6-sol");
+    assert_eq!(response.model, "global.openai.gpt-6.1-sol");
 
     Ok(())
 }
@@ -932,8 +955,9 @@ fn normalize_path_for_comparison(path: impl AsRef<Path>) -> PathBuf {
     path.as_ref().to_path_buf()
 }
 
+#[test_case("codex_work_desktop")]
 #[tokio::test]
-async fn thread_start_tracks_thread_initialized_analytics() -> Result<()> {
+async fn thread_start_tracks_thread_initialized_analytics(originator: &str) -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
 
     let codex_home = TempDir::new()?;
@@ -949,7 +973,7 @@ async fn thread_start_tracks_thread_initialized_analytics() -> Result<()> {
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
             thread_source: Some(ThreadSource::User),
-            service_name: Some("codex_work_desktop".to_string()),
+            service_name: Some(originator.to_string()),
             ..Default::default()
         })
         .await?;
@@ -961,7 +985,7 @@ async fn thread_start_tracks_thread_initialized_analytics() -> Result<()> {
         event,
         &thread.id,
         &thread.session_id,
-        "codex_work_desktop",
+        originator,
         "mock-model",
         "new",
         "user",
@@ -1109,7 +1133,7 @@ async fn thread_start_ephemeral_remains_pathless() -> Result<()> {
         thread.ephemeral,
         "ephemeral threads should be marked explicitly"
     );
-    assert_eq!(thread.history_mode, ThreadHistoryMode::Legacy);
+    assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
     assert_eq!(
         thread.path, None,
         "ephemeral threads should not expose a path"
@@ -1633,6 +1657,7 @@ required = true
         .request(|request_id| ClientRequest::McpServerStatusList {
             request_id,
             params: ListMcpServerStatusParams {
+                server_name: None,
                 cursor: None,
                 limit: None,
                 detail: Some(McpServerStatusDetail::ToolsAndAuthOnly),

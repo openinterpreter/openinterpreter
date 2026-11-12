@@ -15,6 +15,7 @@ use crate::ProjectRoot;
 use crate::ProjectSortKey;
 use crate::ProjectsPage;
 use crate::SortDirection;
+use crate::sqlite::SqlitePoolWriteExt;
 
 const PROJECT_SELECT: &str = "SELECT projects.*,
     (SELECT MAX(recency_at_ms) FROM threads
@@ -27,7 +28,7 @@ impl StateRuntime {
         thread_id: &str,
         project_id: Option<&str>,
     ) -> anyhow::Result<Option<Option<String>>> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_immediate().await?;
         if let Some(project_id) = project_id {
             let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM projects WHERE id = ?")
                 .bind(project_id)
@@ -143,7 +144,7 @@ impl StateRuntime {
         thread_ids: &[String],
         idempotency_key: &str,
     ) -> anyhow::Result<CreatedProject> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_immediate().await?;
         let existing_project_id = sqlx::query_scalar::<_, String>(
             "SELECT project_id FROM project_idempotency_keys WHERE key = ?",
         )
@@ -234,7 +235,7 @@ impl StateRuntime {
         roots: Option<Vec<ProjectRoot>>,
         metadata: Option<BTreeMap<String, String>>,
     ) -> anyhow::Result<Option<(Project, bool)>> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_immediate().await?;
         let row = QueryBuilder::<Sqlite>::new(PROJECT_SELECT)
             .push(" WHERE id = ")
             .push_bind(id)
@@ -291,7 +292,7 @@ impl StateRuntime {
         project_id: &str,
         before_project_id: Option<&str>,
     ) -> anyhow::Result<Option<bool>> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_immediate().await?;
         let mut project_ids = sqlx::query_scalar::<_, String>(
             "SELECT id FROM projects ORDER BY position ASC, id ASC",
         )
@@ -340,7 +341,7 @@ impl StateRuntime {
         &self,
         id: &str,
     ) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_immediate().await?;
         let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM projects WHERE id = ?")
             .bind(id)
             .fetch_one(&mut *tx)

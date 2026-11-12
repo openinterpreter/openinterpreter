@@ -18,6 +18,7 @@ use crate::BudgetPriority;
 use crate::Budgeted;
 use crate::ContextSection;
 use crate::ConversationTranscriptEntry;
+use crate::Retention;
 use crate::SectionError;
 use crate::TruncationObservation;
 

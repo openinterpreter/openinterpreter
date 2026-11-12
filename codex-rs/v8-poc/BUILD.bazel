@@ -2,12 +2,11 @@ load("//:defs.bzl", "codex_rust_crate")
 
 codex_rust_crate(
     name = "v8-poc",
-    crate_features = select({
-        "@llvm//constraints/windows/abi:msvc": [],
-        "//conditions:default": ["sandbox"],
-    }),
+    crate_features = ["sandbox"],
     crate_name = "codex_v8_poc",
     deps_extra = ["@crates//:v8"],
+    # Bazel always builds the native pair required by the CppGC ABI checks.
+    unit_test_args = ["--include-ignored"],
 )
 
 alias(

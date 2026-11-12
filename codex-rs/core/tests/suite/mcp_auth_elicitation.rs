@@ -15,6 +15,7 @@ use codex_extension_api::ToolLifecycleFuture;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
+use codex_protocol::SessionId;
 use codex_protocol::approvals::ElicitationRequest;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::items::McpToolCallStatus;

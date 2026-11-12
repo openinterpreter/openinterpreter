@@ -15,12 +15,15 @@ use serde::Deserialize;
 
 use crate::function_tool::FunctionCallError;
 use crate::original_image_detail::can_request_original_image_detail;
+use crate::tools::context::ToolEnvironments;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
+use crate::tools::handlers::ToolEnvironmentArgs;
+use crate::tools::handlers::function_tool_environment;
 use crate::tools::handlers::parse_arguments;
-use crate::tools::handlers::resolve_tool_environment;
+use crate::tools::handlers::selected_executor;
 use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
 use crate::tools::handlers::view_image_spec::create_view_image_tool;
 use crate::tools::registry::CoreToolRuntime;
@@ -58,8 +61,6 @@ const VIEW_IMAGE_INVALID_MESSAGE: &str =
 #[derive(Deserialize)]
 struct ViewImageArgs {
     path: String,
-    #[serde(default)]
-    environment_id: Option<String>,
     detail: Option<String>,
 }
 
@@ -108,6 +109,7 @@ impl ViewImageHandler {
         }
 
         let ToolInvocation {
+            environments,
             session,
             turn,
             step_context,
@@ -125,11 +127,7 @@ impl ViewImageHandler {
             }
         };
 
-        let ViewImageArgs {
-            path,
-            environment_id,
-            detail,
-        } = parse_arguments(&arguments)?;
+        let ViewImageArgs { path, detail } = parse_arguments(&arguments)?;
         // Keep accepting previously supported detail hints after they disappear from the schema.
         let detail = match detail.as_deref() {
             None => None,
@@ -142,13 +140,7 @@ impl ViewImageHandler {
             }
         };
 
-        let Some(turn_environment) =
-            resolve_tool_environment(&step_context.environments, environment_id.as_deref())?
-        else {
-            return Err(FunctionCallError::RespondToModel(
-                "view_image is unavailable in this session".to_string(),
-            ));
-        };
+        let turn_environment = selected_executor(&environments, &step_context.environments)?;
         let path_uri = turn_environment.cwd().join(&path).map_err(|err| {
             FunctionCallError::RespondToModel(format!(
                 "unable to resolve image path `{path}` against environment cwd `{}`: {err}",
@@ -157,7 +149,7 @@ impl ViewImageHandler {
         })?;
         let model_visible_path = path_uri.inferred_native_path_string();
         let sandbox = turn_environment.sandbox_context(/*additional_permissions*/ None);
-        let fs = turn_environment.environment.get_filesystem();
+        let fs = turn_environment.environment().get_filesystem();
 
         let metadata = fs
             .get_metadata(&path_uri, GetMetadataOptions::default(), Some(&sandbox))
@@ -216,6 +208,13 @@ impl ViewImageHandler {
 }
 
 impl CoreToolRuntime for ViewImageHandler {
+    fn environments_for_input(
+        &self,
+        invocation: &ToolInvocation,
+    ) -> Result<ToolEnvironments, FunctionCallError> {
+        function_tool_environment(invocation, |args: ToolEnvironmentArgs| args.environment_id)
+    }
+
     fn is_builtin_control_tool(&self) -> bool {
         true
     }
@@ -398,6 +397,8 @@ mod tests {
                 call_id: "call-view-image".to_string(),
                 tool_name: codex_tools::ToolName::plain("view_image"),
                 source: ToolCallSource::Direct,
+                native_call: None,
+                environments: Default::default(),
                 payload: ToolPayload::Function {
                     arguments: json!({ "path": "image.png" }).to_string(),
                 },
@@ -428,6 +429,8 @@ mod tests {
                 call_id: "call-view-image".to_string(),
                 tool_name: codex_tools::ToolName::plain("view_image"),
                 source: ToolCallSource::Direct,
+                native_call: None,
+                environments: Default::default(),
                 payload: ToolPayload::Function {
                     arguments: json!({ "path": "image.png", "detail": "low" }).to_string(),
                 },
@@ -471,6 +474,8 @@ mod tests {
                 call_id: "call-view-image".to_string(),
                 tool_name: codex_tools::ToolName::plain("view_image"),
                 source: ToolCallSource::Direct,
+                native_call: None,
+                environments: Default::default(),
                 payload: ToolPayload::Function {
                     arguments: json!({ "path": "image.png", "detail": "high" }).to_string(),
                 },
@@ -512,6 +517,8 @@ mod tests {
                     cell_id: "cell-1".to_string(),
                     runtime_tool_call_id: "tool-1".to_string(),
                 },
+                native_call: None,
+                environments: Default::default(),
                 payload: ToolPayload::Function {
                     arguments: json!({ "path": "not-an-image.txt" }).to_string(),
                 },

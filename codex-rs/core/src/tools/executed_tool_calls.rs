@@ -25,6 +25,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::models::bound_executed_tool_calls_for_prompt;
 use codex_protocol::models::bound_executed_tool_calls_for_prompt_prioritizing_recent;
 use codex_protocol::models::executed_tool_call_metadata_bytes;
+use codex_protocol::models::normalize_executed_tool_call_completeness;
 use codex_protocol::openai_models::ToolMode;
 use indexmap::IndexMap;
 use serde_json::Value as JsonValue;
@@ -33,6 +34,7 @@ use crate::session::step_context::StepContext;
 use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
+use crate::tools::metadata_metrics;
 use crate::tools::router::ToolCall;
 use crate::utils::json::serialized_json_bytes;
 
@@ -115,9 +117,11 @@ enum CellCompletion {
 #[derive(Default)]
 struct RecordedCell {
     pending_calls: IndexMap<String, ExecutedToolCall>,
-    pending_full_argument_bytes: usize,
     completion: CellCompletion,
     originating_call_id: Option<String>,
+    truncated_metadata_binding_valid: bool,
+    observed_truncated_call: bool,
+    dispatch_closed: bool,
 }
 
 impl ExecutedToolCallRecorderState {
@@ -426,13 +430,8 @@ impl ExecutedToolCalls {
         );
         let call = if at_pending_call_limit {
             ExecutedToolCall::truncated(call.name, original_bytes, /*max_bytes*/ 0)
-        } else if original_bytes <= max_bytes {
-            cell.pending_full_argument_bytes = cell
-                .pending_full_argument_bytes
-                .saturating_add(original_bytes);
-            call
         } else {
-            ExecutedToolCall::truncated(call.name, original_bytes, max_bytes)
+            call
         };
         cell.completion = if cell.completion == CellCompletion::Recording
             && !duplicate_call_id
@@ -445,7 +444,9 @@ impl ExecutedToolCalls {
             CellCompletion::Incomplete
         };
         cell.pending_calls.insert(call_id, call);
-        state.pending_nested_calls += 1;
+        if !duplicate_call_id {
+            state.pending_nested_calls += 1;
+        }
     }
 
     fn record_tool_result_metadata(
@@ -477,7 +478,21 @@ impl ExecutedToolCalls {
             }
             let index = *retained.call_index_by_id.get(call_id)?;
             Some((retained, index))
-        }) else {
+        });
+        if let Some((retained, index)) = retained_call {
+            // Older retry copies must not overwrite this output's accepted result metadata.
+            retained.result_metadata_updated = true;
+            retained.calls[index].set_tool_result_metadata(metadata);
+            return has_metadata;
+        }
+        let mut candidates = state.retained_calls.values_mut().filter_map(|retained| {
+            if retained.runtime_cell_id.as_ref()?.as_str() != cell_id.as_str() {
+                return None;
+            }
+            let index = *retained.truncated_call_index_by_id.get(call_id)?;
+            Some((retained, index))
+        });
+        let Some((retained, index)) = candidates.next() else {
             return false;
         };
         // Older retry copies must not overwrite this output's accepted result metadata.

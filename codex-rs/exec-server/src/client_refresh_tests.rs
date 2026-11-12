@@ -1,5 +1,8 @@
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -13,7 +16,8 @@ use tokio::task::JoinSet;
 use tokio_util::task::AbortOnDropHandle;
 
 use super::*;
-use crate::ExecServerRuntimePaths;
+use crate::EnvironmentConnectionState;
+use crate::ExecServerRuntimeOptions;
 use crate::NoiseChannelIdentity;
 use crate::ProcessId;
 use crate::noise_relay::stream_handler::NoiseOutboundMessage;
@@ -49,6 +53,8 @@ struct Registry {
     target: Mutex<Target>,
     next_lookup: Mutex<Option<oneshot::Receiver<()>>>,
     lookup_started: Notify,
+    offline: AtomicBool,
+    calls: AtomicUsize,
 }
 
 impl Registry {
@@ -65,6 +71,14 @@ impl NoiseRendezvousConnectProvider for Registry {
         _: NoiseChannelPublicKey,
     ) -> BoxFuture<'_, Result<NoiseRendezvousConnectBundle, ExecServerError>> {
         Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if self.offline.load(Ordering::Relaxed) {
+                return Err(ExecServerError::EnvironmentRegistryHttp {
+                    status: http::StatusCode::CONFLICT,
+                    code: Some("environment_offline".to_owned()),
+                    message: "executor is still starting".to_owned(),
+                });
+            }
             let target = self.target.lock().unwrap().clone();
             let block = self.next_lookup.lock().unwrap().take();
             if let Some(block) = block {
@@ -95,6 +109,7 @@ impl HarnessKeyValidator for Validator {
         &self,
         _: &NoiseChannelPublicKey,
         _: &str,
+        _: Option<uuid::Uuid>,
     ) -> Result<(), ExecServerError> {
         if let Some(handshake) = &self.handshake {
             self.started.notify_one();
@@ -203,6 +218,8 @@ impl Executor {
             target: Mutex::new(self.target.clone()),
             next_lookup: Mutex::new(None),
             lookup_started: Notify::new(),
+            offline: AtomicBool::new(false),
+            calls: AtomicUsize::new(0),
         });
         let client = LazyRemoteExecServerClient::new(
             ExecServerTransportParams::NoiseRendezvous {
@@ -246,12 +263,25 @@ async fn refresh_cancels_old_recovery_and_connects_without_resuming_old_session(
     assert!(futures::poll!(refresh.as_mut()).is_pending());
     assert!(original.inner.retired.is_cancelled());
     assert!(original.is_disconnected());
+    let mut state = client.subscribe_connection_state();
+    assert_eq!(
+        *state.borrow_and_update(),
+        EnvironmentConnectionState::Disconnected
+    );
+    {
+        let mut connection = original.inner.connection.lock().unwrap();
+        connection.set_status(ConnectionStatus::Recovering);
+        connection.set_status(ConnectionStatus::Failed(
+            super::super::ConnectionFailure::Disconnected("late retired failure".to_owned()),
+        ));
+    }
+    assert!(!state.has_changed()?);
     assert_eq!(started.elapsed(), Duration::ZERO);
     refresh.await?;
     let replacement = client.get().await?;
     assert_ne!(original.session_id(), replacement.session_id());
     assert_eq!(
-        *client.environment_connection_state_tx.borrow(),
+        *client.subscribe_connection_state().borrow(),
         EnvironmentConnectionState::Connected
     );
     assert!(matches!(
@@ -262,6 +292,21 @@ async fn refresh_cancels_old_recovery_and_connects_without_resuming_old_session(
     let _ = blocked_recovery.send(());
     tokio::task::yield_now().await;
     assert!(Arc::ptr_eq(&client.get().await?.inner, &replacement.inner));
+    let mut state = client.subscribe_connection_state();
+    original
+        .inner
+        .connection
+        .lock()
+        .unwrap()
+        .set_status(ConnectionStatus::Failed(
+            super::super::ConnectionFailure::Disconnected("late old failure".to_owned()),
+        ));
+    assert!(!state.has_changed()?);
+    assert_eq!(
+        *state.borrow_and_update(),
+        EnvironmentConnectionState::Connected
+    );
+    assert!(matches!(client.readiness_result(), Some(Ok(()))));
     replacement.environment_status().await?;
     Ok(())
 }
@@ -269,14 +314,57 @@ async fn refresh_cancels_old_recovery_and_connects_without_resuming_old_session(
 #[tokio::test]
 async fn refresh_retires_a_still_connected_old_executor() -> Result<()> {
     let _clock = freeze_clock();
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().canonicalize()?;
+    for name in ["old", "new"] {
+        location_fixtures::write(
+            &root.join(name),
+            &format!("codex/skills/{name}/SKILL.md"),
+            &format!("---\nname: {name}\ndescription: {name} executor\n---\n"),
+        )?;
+    }
     let old = Executor::start(Validator::default()).await?;
     let new = Executor::start(Validator::default()).await?;
+    old.processor
+        .seed_capability_locations(location_fixtures::request(&root.join("old"))?)
+        .await?;
+    new.processor
+        .seed_capability_locations(location_fixtures::request(&root.join("new"))?)
+        .await?;
     let (client, registry) = old.client()?;
     let original = client.get().await?;
+    let environment = Arc::new(crate::Environment::remote_with_client(
+        client.clone(),
+        /*local_runtime_paths*/ None,
+        ScopedSkillsConfig::default(),
+    ));
+    let cache = crate::ExecutorCapabilityDiscoveryV2Cache::default();
+    let request = crate::DiscoverV2CapabilitiesRequest {
+        cwd: codex_utils_path_uri::PathUri::from_host_native_path(&root)?,
+        sandbox: None,
+    };
+    let inventory = cache
+        .discover("environment", &environment, request.clone())
+        .await
+        .map_err(anyhow::Error::msg)?;
+    assert!(inventory.skills.iter().any(|skill| skill.name == "old"));
+    environment.refresh_connection().await?;
+    let reused = cache
+        .discover("environment", &environment, request.clone())
+        .await
+        .map_err(anyhow::Error::msg)?;
+    assert!(Arc::ptr_eq(&inventory, &reused));
     *registry.target.lock().unwrap() = new.target.clone();
-    client.refresh_connection().await?;
+    environment.refresh_connection().await?;
     assert!(original.is_disconnected());
     assert_ne!(original.session_id(), client.get().await?.session_id());
+    let refreshed = cache
+        .discover("environment", &environment, request)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    assert!(!Arc::ptr_eq(&inventory, &refreshed));
+    assert!(refreshed.skills.iter().any(|skill| skill.name == "new"));
+    assert!(!refreshed.skills.iter().any(|skill| skill.name == "old"));
     Ok(())
 }
 
@@ -514,7 +602,14 @@ async fn refresh_cancels_a_stalled_initial_lookup() -> Result<()> {
     assert!(futures::poll!(initial.as_mut()).is_pending());
     *registry.target.lock().unwrap() = new.target.clone();
     client.refresh_connection().await?;
+    let mut state = client.subscribe_connection_state();
+    assert_eq!(
+        *state.borrow_and_update(),
+        EnvironmentConnectionState::Connected
+    );
+    // Finish the cancelled attempt only after its replacement has connected.
     assert!(initial.await.is_err());
+    assert!(!state.has_changed()?);
     let _ = release.send(());
     client.get().await?.environment_status().await?;
     Ok(())
@@ -539,7 +634,7 @@ async fn refresh_cancels_a_stalled_noise_handshake() -> Result<()> {
     validator.handshake.unwrap().notify_one();
     client.get().await?.environment_status().await?;
     assert_eq!(
-        *client.environment_connection_state_tx.borrow(),
+        *client.subscribe_connection_state().borrow(),
         EnvironmentConnectionState::Connected
     );
     Ok(())
@@ -593,7 +688,7 @@ async fn failed_replacement_connection_keeps_old_handles_retired_and_get_retries
         Err(ExecServerError::Disconnected(_))
     ));
     assert_eq!(
-        *client.environment_connection_state_tx.borrow(),
+        *client.subscribe_connection_state().borrow(),
         EnvironmentConnectionState::Disconnected
     );
 
@@ -603,7 +698,7 @@ async fn failed_replacement_connection_keeps_old_handles_retired_and_get_retries
     assert_ne!(original.session_id(), replacement.session_id());
     replacement.environment_status().await?;
     assert_eq!(
-        *client.environment_connection_state_tx.borrow(),
+        *client.subscribe_connection_state().borrow(),
         EnvironmentConnectionState::Connected
     );
     assert!(matches!(
@@ -632,6 +727,63 @@ async fn superseded_refresh_lookup_does_not_retire_a_newer_session() -> Result<(
     assert!(Arc::ptr_eq(&replacement.inner, &client.get().await?.inner));
     assert!(!replacement.inner.retired.is_cancelled());
     replacement.environment_status().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn provisioned_environment_waits_for_offline_executor_on_the_same_handle() -> Result<()> {
+    let _clock = freeze_clock();
+    let executor = Executor::start(Validator::default()).await?;
+    let (_, registry) = executor.client()?;
+    registry.offline.store(true, Ordering::Relaxed);
+    let manager = crate::EnvironmentManager::from_snapshot(
+        crate::environment_provider::EnvironmentProviderSnapshot {
+            environments: Vec::new(),
+            default: crate::environment_provider::EnvironmentDefault::Disabled,
+            include_local: false,
+        },
+        /*local_runtime_paths*/ None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    )?;
+    let environment = manager
+        .report_environment_provisioning_status(
+            "environment".to_owned(),
+            Ok(crate::EnvironmentReadyInfo::default()),
+            registry.clone(),
+        )?
+        .expect("provisioned environment");
+    let ready = environment.wait_until_ready();
+    let info = environment.info();
+    tokio::pin!(ready, info);
+    assert!(futures::poll!(ready.as_mut()).is_pending());
+    assert!(futures::poll!(info.as_mut()).is_pending());
+    assert_eq!(registry.calls.load(Ordering::Relaxed), 1);
+
+    // A restore can outlast both the ordinary registry retry count and deadline.
+    for _ in 0..35 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(futures::poll!(ready.as_mut()).is_pending());
+        assert!(futures::poll!(info.as_mut()).is_pending());
+    }
+    assert!(registry.calls.load(Ordering::Relaxed) > 5);
+    let reported = manager
+        .report_environment_provisioning_status(
+            "environment".to_owned(),
+            Ok(crate::EnvironmentReadyInfo::default()),
+            registry.clone(),
+        )?
+        .expect("same provisioned environment");
+    assert!(Arc::ptr_eq(&environment, &reported));
+    assert!(futures::poll!(ready.as_mut()).is_pending());
+    assert!(futures::poll!(info.as_mut()).is_pending());
+
+    registry.offline.store(false, Ordering::Relaxed);
+    tokio::time::advance(Duration::from_secs(8)).await;
+    let ((), _) = tokio::try_join!(ready, info)?;
+    assert_eq!(
+        environment.cached_executor_registration_id(),
+        Some(executor.target.registration.clone())
+    );
     Ok(())
 }
 
@@ -879,5 +1031,137 @@ async fn retirement_rejects_pending_process_start_before_stream_cleanup() -> Res
         drop(streams);
         retirement.await;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn application_policy_registry_denial_does_not_poison_later_noise_startup() -> Result<()> {
+    let _clock = freeze_clock();
+    let executor = Executor::start(Validator::default()).await?;
+    let registry = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path(
+            "/cloud/environment/environment/connect",
+        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "environment_id": "environment",
+                "url": executor.target.url,
+                "security_profile": "noise_hybrid_ik_v1",
+                "executor_registration_id": executor.target.registration,
+                "executor_public_key": executor.target.identity.public_key(),
+                "harness_key_authorization": "authorization",
+            })),
+        )
+        .expect(1)
+        .mount(&registry)
+        .await;
+    let controller = codex_http_client::NetworkPolicyController::default();
+    let policy = controller.policy();
+    let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault)
+        .with_network_policy(policy.clone());
+    let provider = crate::remote::NoiseRendezvousEnvironmentConfig::new(
+        registry.uri(),
+        "environment".into(),
+        "registry-token".into(),
+        /*chatgpt_account_id*/ None,
+    )?
+    .into_connect_provider(factory.clone())?;
+    let client = LazyRemoteExecServerClient::new(
+        ExecServerTransportParams::NoiseRendezvous {
+            provider,
+            identity: NoiseChannelIdentity::generate()?,
+        },
+        factory,
+    );
+    let error = client.get().await.err().unwrap();
+    assert_eq!(
+        error.application_network_policy_denial(),
+        Some(codex_http_client::NetworkPolicyDenied::Unavailable)
+    );
+    assert!(!crate::client::is_retryable_recovery_error(&error));
+    assert!(registry.received_requests().await.unwrap().is_empty());
+    controller.publish(
+        policy.revision(),
+        codex_http_client::DestinationPolicy::Unrestricted,
+    );
+    client.get().await?;
+    Ok(())
+}
+
+/// A closed transport is recovery, even before the recovery task changes session status.
+#[tokio::test]
+async fn connection_watch_reports_recovery_before_recovery_task_runs() -> Result<()> {
+    let _clock = freeze_clock();
+    let executor = Executor::start(Validator::default()).await?;
+    let (client, registry) = executor.client()?;
+    let original = client.get().await?;
+    let mut state = client.subscribe_connection_state();
+    let release = registry.block_next_lookup();
+    // Closing does not yield, so publishing here precedes the RPC reader's recovery task.
+    disconnect(&original).await;
+    assert!(matches!(
+        original.inner.connection.lock().unwrap().status,
+        ConnectionStatus::Connected(_)
+    ));
+    original.attach_environment_connection_state(client.environment_connection_state_tx.clone());
+    assert_eq!(
+        *state.borrow_and_update(),
+        EnvironmentConnectionState::Recovering
+    );
+    assert!(client.fail_fast().get().await.is_err());
+
+    registry.lookup_started.notified().await;
+    executor.detached.notified().await;
+    assert_eq!(
+        *state.borrow_and_update(),
+        EnvironmentConnectionState::Recovering
+    );
+    let waiting = original.inner.rpc_client();
+    tokio::pin!(waiting);
+    assert!(futures::poll!(waiting.as_mut()).is_pending());
+    release.send(()).unwrap();
+    waiting.await?;
+    assert!(state.has_changed()?);
+    assert_eq!(
+        *state.borrow_and_update(),
+        EnvironmentConnectionState::Connected
+    );
+    assert!(!state.has_changed()?);
+    original.environment_status().await?;
+    Ok(())
+}
+
+/// Refresh announces retirement before asynchronous transport cleanup. A delayed
+/// callback from that transport must not leave the shared watch in Recovering.
+#[tokio::test]
+async fn late_recovery_callback_cannot_overwrite_retirement() -> Result<()> {
+    let _clock = freeze_clock();
+    let executor = Executor::start(Validator::default()).await?;
+    let (client, _registry) = executor.client()?;
+    let original = client.get().await?;
+    let mut state = client.subscribe_connection_state();
+    let rpc = {
+        let current = client.current_client.lock().unwrap();
+        let connection = current.as_ref().unwrap().inner.connection.lock().unwrap();
+        let ConnectionStatus::Connected(rpc) = &connection.status else {
+            panic!("expected connected session");
+        };
+        // Stop at refresh's retirement/publication boundary.
+        original.inner.retired.cancel();
+        client
+            .environment_connection_state_tx
+            .send_replace(EnvironmentConnectionState::Disconnected);
+        Arc::clone(rpc)
+    };
+    original
+        .inner
+        .request_recovery(rpc, "late old transport callback".to_owned());
+    original.inner.retire().await;
+    // A failed replacement adds no further wakeup in the base implementation.
+    assert_eq!(
+        *state.borrow_and_update(),
+        EnvironmentConnectionState::Disconnected
+    );
     Ok(())
 }

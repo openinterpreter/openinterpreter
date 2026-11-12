@@ -1,0 +1,16 @@
+---
+source: tui/src/app/tests/key_chords.rs
+expression: frame
+---
+                                                                               │                                     +
+                                                                               │
+                                                                               │ Open in sidebar
+                                                                               │
+                                                                               │ › + New side chat
+                                                                               │     Start from the main chat
+                                                                               │
+                                                                               │
+› parent draft                                                                 │
+                                                                               │
+  gpt-test default                                                             │
+                                                                               │ f5 g open · esc back · ↑/↓ move …

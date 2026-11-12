@@ -19,7 +19,6 @@ const PATH_DIRNAME: &str = "codex-path";
 const RELEASES_DIRNAME: &str = "releases";
 const RESOURCES_DIRNAME: &str = "codex-resources";
 const STANDALONE_PACKAGES_DIRNAME: &str = "standalone";
-const ZSH_DIRNAME: &str = "zsh";
 static INSTALL_CONTEXT: OnceLock<InstallContext> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -244,18 +243,6 @@ impl InstallContext {
 
         None
     }
-
-    pub fn bundled_zsh_path(&self) -> Option<AbsolutePathBuf> {
-        if cfg!(windows) {
-            None
-        } else {
-            self.bundled_resource(zsh_resource_path())
-        }
-    }
-
-    pub fn bundled_zsh_bin_dir(&self) -> Option<AbsolutePathBuf> {
-        self.bundled_zsh_path()?.parent()
-    }
 }
 
 impl CodexPackageLayout {
@@ -418,10 +405,6 @@ fn default_rg_command() -> PathBuf {
     } else {
         PathBuf::from("rg")
     }
-}
-
-fn zsh_resource_path() -> PathBuf {
-    PathBuf::from(ZSH_DIRNAME).join(BIN_DIRNAME).join("zsh")
 }
 
 #[cfg(test)]

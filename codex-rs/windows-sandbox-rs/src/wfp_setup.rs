@@ -6,6 +6,7 @@ use codex_otel::OtelProvider;
 use codex_otel::OtelSettings;
 use codex_otel::StatsigMetricsSettings;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::Path;
 
 const WFP_SETUP_SERVICE_NAME: &str = "codex-windows-sandbox-setup";
@@ -47,6 +48,9 @@ fn build_wfp_metrics_provider(
     // Statsig environment in the elevation payload. Other exporters are
     // intentionally omitted from this helper path.
     OtelProvider::try_new(&OtelSettings {
+        http_client_factory: codex_http_client::HttpClientFactory::new(
+            codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+        ),
         environment: otel.environment.clone(),
         service_name: WFP_SETUP_SERVICE_NAME.to_string(),
         service_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -55,7 +59,7 @@ fn build_wfp_metrics_provider(
         trace_exporter: OtelExporter::None,
         metrics_exporter: OtelExporter::Statsig,
         runtime_metrics: false,
-        span_attributes: BTreeMap::new(),
+        span_attributes: HashMap::new(),
         tracestate: BTreeMap::new(),
     })
     .map_err(|err| anyhow::anyhow!("failed to initialize WFP setup metrics provider: {err}"))

@@ -1,10 +1,22 @@
+mod display;
+
+pub use display::AgentMessageDisplay;
+pub use display::AgentMessageDisplayVersion;
+pub use display::AnswerAnnotation;
+pub use display::AnswerReplacement;
+pub use display::BlockReason;
+pub use display::HelplineSubject;
+pub use display::TrustedContacts;
+
 use crate::AgentPath;
-use crate::ResponseItemId;
+use crate::ItemIdGenerator;
 use crate::ThreadId;
 use crate::dynamic_tools::DynamicToolCallOutputContentItem;
 use crate::mcp::CallToolResult;
 use crate::memory_citation::MemoryCitation;
+use crate::models::AudioReference;
 use crate::models::ContentItem;
+use crate::models::ContentItemMetadata;
 use crate::models::FunctionCallOutputBody;
 use crate::models::ImageDetail;
 use crate::models::ImageReference;
@@ -22,6 +34,7 @@ use crate::protocol::PatchApplyStatus;
 use crate::protocol::ReviewOutputEvent;
 use crate::protocol::ReviewTarget;
 use crate::protocol::SubAgentActivityKind;
+use crate::protocol::UserMessageAudioKind;
 use crate::user_input::ByteRange;
 use crate::user_input::TextElement;
 use crate::user_input::UserInput;
@@ -108,6 +121,11 @@ pub struct HookPromptItem {
 pub struct HookPromptFragment {
     pub text: String,
     pub hook_run_id: String,
+    /// Emission-time attribution; persisted on the ResponseItem, not the UI hook fragment.
+    #[serde(skip)]
+    #[ts(skip)]
+    #[schemars(skip)]
+    pub metadata: ContentItemMetadata,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -142,6 +160,15 @@ pub struct AsyncUserInputQuestion {
     pub options: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS, JsonSchema)]
+#[serde(from = "display::StoredModeration")]
+pub struct AgentMessageModeration {
+    pub moderated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub display: Option<AgentMessageDisplay>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
 /// Assistant-authored message payload used in turn-item streams.
 ///
@@ -149,6 +176,9 @@ pub struct AsyncUserInputQuestion {
 /// should use it when present, but retain legacy completion semantics when it
 /// is `None`.
 pub struct AgentMessageItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub moderation: Option<AgentMessageModeration>,
     pub id: String,
     pub content: Vec<AgentMessageContent>,
     /// Optional phase metadata carried through from `ResponseItem::Message`.
@@ -266,12 +296,6 @@ pub struct CommandExecutionItem {
     pub status: CommandExecutionStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub stdout: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub stderr: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub aggregated_output: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -279,9 +303,6 @@ pub struct CommandExecutionItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(type = "string", optional)]
     pub duration: Option<Duration>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub formatted_output: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
@@ -363,6 +384,10 @@ pub struct CollabAgentToolCallItem {
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
 pub struct SubAgentActivityItem {
+    /// Resolved model at sub-agent creation; absent from older records and other activities.
+    pub model: Option<String>,
+    /// Resolved reasoning effort at sub-agent creation, when known.
+    pub reasoning_effort: Option<ReasoningEffortConfig>,
     pub id: String,
     pub kind: SubAgentActivityKind,
     pub agent_thread_id: ThreadId,
@@ -628,7 +653,52 @@ impl UserMessageItem {
         self.content
             .iter()
             .filter_map(|c| match c {
-                UserInput::Audio { audio_url } => Some(audio_url.clone()),
+                UserInput::Audio {
+                    audio: AudioReference::Inline { audio_url },
+                } => Some(audio_url.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Returns file-backed audio references when the message includes an upload.
+    /// Inline payloads remain exclusively in the legacy `audio` field.
+    pub fn audio_references(&self) -> Option<Vec<AudioReference>> {
+        let audio = self
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                UserInput::Audio {
+                    audio: audio @ AudioReference::File { .. },
+                } => Some(audio.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        (!audio.is_empty()).then_some(audio)
+    }
+
+    /// Returns the original inline/file ordering when uploaded audio is present.
+    pub fn audio_order(&self) -> Vec<UserMessageAudioKind> {
+        if !self.content.iter().any(|content| {
+            matches!(
+                content,
+                UserInput::Audio {
+                    audio: AudioReference::File { .. }
+                }
+            )
+        }) {
+            return Vec::new();
+        }
+
+        self.content
+            .iter()
+            .filter_map(|content| match content {
+                UserInput::Audio {
+                    audio: AudioReference::Inline { .. },
+                } => Some(UserMessageAudioKind::Inline),
+                UserInput::Audio {
+                    audio: AudioReference::File { .. },
+                } => Some(UserMessageAudioKind::File),
                 _ => None,
             })
             .collect()
@@ -668,30 +738,42 @@ impl HookPromptFragment {
         Self {
             text: text.into(),
             hook_run_id: hook_run_id.into(),
+            metadata: ContentItemMetadata::default(),
         }
     }
 }
 
-pub fn build_hook_prompt_message(fragments: &[HookPromptFragment]) -> Option<ResponseItem> {
-    let content = fragments
-        .iter()
-        .filter(|fragment| !fragment.hook_run_id.trim().is_empty())
-        .filter_map(|fragment| {
-            serialize_hook_prompt_fragment(&fragment.text, &fragment.hook_run_id)
-                .map(|text| ContentItem::InputText { text })
-        })
-        .collect::<Vec<_>>();
+pub fn build_hook_prompt_message(
+    fragments: &[HookPromptFragment],
+    item_id_generator: &ItemIdGenerator,
+) -> Option<ResponseItem> {
+    let mut content = Vec::new();
+    let mut metadata = Vec::new();
+    for fragment in fragments {
+        if let Some(text) = serialize_hook_prompt_fragment(&fragment.text, &fragment.hook_run_id) {
+            content.push(ContentItem::InputText { text });
+            metadata.push(fragment.metadata.clone());
+        }
+    }
 
     if content.is_empty() {
         return None;
     }
 
     Some(ResponseItem::Message {
-        id: Some(ResponseItemId::new("msg")),
+        status: None,
+        encrypted_content: None,
+        id: Some(item_id_generator("msg")),
         role: "user".to_string(),
         content,
         phase: None,
-        internal_chat_message_metadata_passthrough: None,
+        internal_chat_message_metadata_passthrough: metadata
+            .iter()
+            .any(|part| part != &ContentItemMetadata::default())
+            .then_some(InternalChatMessageMetadataPassthrough {
+                content_item_metadata: Some(metadata),
+                ..Default::default()
+            }),
     })
 }
 
@@ -723,7 +805,7 @@ pub fn parse_hook_prompt_fragment(text: &str) -> Option<HookPromptFragment> {
         return None;
     }
 
-    Some(HookPromptFragment { text, hook_run_id })
+    Some(HookPromptFragment::from_single_hook(text, hook_run_id))
 }
 
 fn serialize_hook_prompt_fragment(text: &str, hook_run_id: &str) -> Option<String> {
@@ -796,7 +878,14 @@ mod tests {
                 text_elements: Vec::new(),
             },
             UserInput::Audio {
-                audio_url: "https://example.com/remote.mp3".to_string(),
+                audio: AudioReference::Inline {
+                    audio_url: "https://example.com/remote.mp3".to_string(),
+                },
+            },
+            UserInput::Audio {
+                audio: AudioReference::File {
+                    file_id: "file_audio".to_string(),
+                },
             },
             UserInput::LocalAudio {
                 path: std::path::PathBuf::from("local.wav"),
@@ -809,6 +898,16 @@ mod tests {
                 vec!["https://example.com/remote.mp3".to_string()],
                 vec![std::path::PathBuf::from("local.wav")],
             )
+        );
+        assert_eq!(
+            item.audio_references(),
+            Some(vec![AudioReference::File {
+                file_id: "file_audio".to_string(),
+            }])
+        );
+        assert_eq!(
+            item.audio_order(),
+            vec![UserMessageAudioKind::Inline, UserMessageAudioKind::File]
         );
     }
 
@@ -840,7 +939,9 @@ mod tests {
             HookPromptFragment::from_single_hook("Retry with care & joy.", "hook-run-1"),
             HookPromptFragment::from_single_hook("Then summarize cleanly.", "hook-run-2"),
         ];
-        let message = build_hook_prompt_message(&original).expect("hook prompt");
+        let message =
+            build_hook_prompt_message(&original, &crate::uuid_v7_item_id_generator_for_test())
+                .expect("hook prompt");
 
         let ResponseItem::Message { id, content, .. } = message else {
             panic!("expected hook prompt message");
@@ -863,6 +964,7 @@ mod tests {
             HookPromptFragment {
                 text: "Retry with tests.".to_string(),
                 hook_run_id: "hook-run-1".to_string(),
+                metadata: Default::default(),
             }
         );
     }

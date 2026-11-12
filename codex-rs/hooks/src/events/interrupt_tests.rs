@@ -99,6 +99,7 @@ fn error(text: &str) -> HookOutputEntry {
 fn handler() -> ConfiguredHandler {
     ConfiguredHandler {
         builtin: false,
+        plugin_trust: None,
         event_name: HookEventName::Interrupt,
         matcher: None,
         timeout_sec: 600,
@@ -117,6 +118,7 @@ fn handler() -> ConfiguredHandler {
 
 fn run_result(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HandlerRunResult {
     HandlerRunResult {
+        context_metadata: codex_protocol::models::ContentItemMetadata::harness(),
         started_at: 1,
         completed_at: 2,
         duration_ms: 1,

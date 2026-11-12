@@ -2,6 +2,9 @@ mod common;
 #[cfg(target_os = "linux")]
 #[path = "common/fake_bwrap.rs"]
 mod fake_bwrap;
+#[cfg(target_os = "linux")]
+#[path = "capability_discovery/mount_watch.rs"]
+mod mount_watch;
 
 #[cfg(target_os = "linux")]
 use anyhow::Context as _;
@@ -73,6 +76,10 @@ async fn discovers_a_complete_capability_bundle_in_one_request() -> anyhow::Resu
     write_file(
         &root.path().join("config/apps.json"),
         r#"{"apps":{"demo":{"connector_id":"connector-demo"}}}"#,
+    )?;
+    write_file(
+        &root.path().join(".app.json"),
+        r#"{"apps":{"fallback":{"id":"connector-fallback"}}}"#,
     )?;
     write_file(
         &root.path().join("skills/deploy/SKILL.md"),
@@ -156,6 +163,29 @@ async fn discovers_a_complete_capability_bundle_in_one_request() -> anyhow::Resu
         ]
     );
 
+    // Without an apps declaration, discovery returns the default .app.json.
+    let mut manifest: serde_json::Value = serde_json::from_str(&plugin.manifest.contents)?;
+    manifest
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("manifest must be an object"))?
+        .remove("apps");
+    write_file(
+        &root.path().join(".codex-plugin/plugin.json"),
+        &serde_json::to_string(&manifest)?,
+    )?;
+    let fallback = discover_root(&mut server, "demo@1", root_uri.clone()).await?;
+    assert_eq!(fallback.error, None);
+    assert_eq!(fallback.warnings, Vec::<String>::new());
+    let apps = fallback
+        .plugin
+        .and_then(|plugin| plugin.apps_config)
+        .ok_or_else(|| anyhow::anyhow!("missing fallback apps config"))?;
+    assert_eq!(apps.path, root_uri.join(".app.json")?);
+    assert_eq!(
+        apps.contents,
+        r#"{"apps":{"fallback":{"id":"connector-fallback"}}}"#,
+    );
+
     server.shutdown().await?;
     Ok(())
 }
@@ -186,6 +216,7 @@ async fn discovers_cursor_plugin_without_reading_default_mcp_for_inline_servers(
         root_uri.join(".cursor-plugin/plugin.json")?
     );
     assert_eq!(plugin.mcp_config, None);
+    assert_eq!(plugin.apps_config, None);
     assert_eq!(
         discovery
             .namespace_manifests

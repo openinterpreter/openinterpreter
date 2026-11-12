@@ -1,4 +1,5 @@
 use crate::session::tests::update_turn_settings_for_test;
+use codex_mcp::McpServerKey;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -27,7 +28,6 @@ use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
-use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_tools::DiscoverablePluginInfo;
 use codex_tools::DiscoverableTool;
 use codex_tools::ResponsesApiNamespaceTool;
@@ -43,6 +43,7 @@ use serde_json::json;
 
 use crate::WaitForEnvironmentToolConfig;
 use crate::config::CurrentTimeReminderConfig;
+use crate::environment_selection::EnvironmentAttachment;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::responses_metadata::TurnToolFunctionInfo;
 use crate::responses_metadata::TurnToolNamespacesInfo;
@@ -305,21 +306,6 @@ fn set_features(turn: &mut TurnContext, features: &[Feature]) {
     }
 }
 
-fn zsh_fork_config_for_spec_plan_tests() -> codex_tools::ZshForkConfig {
-    let placeholder_exe = codex_utils_absolute_path::AbsolutePathBuf::try_from(
-        std::env::current_exe().expect("current exe path"),
-    )
-    .expect("current exe should be absolute");
-
-    // Spec planning only checks whether the shell mode is ZshFork. These paths
-    // are never executed, so use a stable absolute placeholder instead of
-    // depending on packaged zsh-fork artifacts in schema tests.
-    codex_tools::ZshForkConfig {
-        shell_zsh_path: placeholder_exe.clone(),
-        main_execve_wrapper_exe: placeholder_exe,
-    }
-}
-
 fn update_config(turn: &mut TurnContext, update: impl FnOnce(&mut crate::config::Config)) {
     let mut config = (*turn.config).clone();
     update(&mut config);
@@ -440,7 +426,7 @@ fn duplicate_primary_environment(turn: &mut TurnContext) {
 
 fn mcp_tool(server: &str, namespace: &str, name: &str) -> ToolInfo {
     ToolInfo {
-        server_name: server.to_string(),
+        server_key: McpServerKey::unscoped(server),
         supports_parallel_tool_calls: false,
         server_origin: None,
         callable_name: name.to_string(),
@@ -474,6 +460,8 @@ fn mcp_runtime(
     RegisteredTool {
         runtime: handler,
         exposure,
+        native_review: Default::default(),
+        model_spec: None,
     }
 }
 
@@ -644,6 +632,7 @@ async fn reviewer_tool_policy_exclude_optional_core_tools() {
         /*apps_enabled*/ false,
         &turn.extension_data,
         /*tool_suggest_candidates*/ None,
+        session.dynamic_tools().await.as_ref(),
     )
     .expect("build internal Guardian tool router");
 
@@ -675,6 +664,7 @@ async fn reviewer_tool_policy_respect_managed_shell_restrictions() {
                 Some(codex_config::Sourced::new(
                     codex_config::FeatureRequirementsToml {
                         entries: BTreeMap::from([(feature.key().to_string(), false)]),
+                        ..Default::default()
                     },
                     codex_config::RequirementSource::Unknown,
                 )),
@@ -696,6 +686,7 @@ async fn reviewer_tool_policy_respect_managed_shell_restrictions() {
             /*apps_enabled*/ false,
             &turn.extension_data,
             /*tool_suggest_candidates*/ None,
+            session.dynamic_tools().await.as_ref(),
         )
         .expect("build internal Guardian tool router");
 
@@ -732,6 +723,7 @@ async fn reviewer_tool_policy_preserve_code_mode() {
         /*apps_enabled*/ false,
         &turn.extension_data,
         /*tool_suggest_candidates*/ None,
+        session.dynamic_tools().await.as_ref(),
     )
     .expect("build internal Guardian tool router");
 
@@ -802,6 +794,7 @@ async fn reviewer_tool_policy_require_managed_secondary_environments() {
             /*apps_enabled*/ false,
             &turn.extension_data,
             /*tool_suggest_candidates*/ None,
+            session.dynamic_tools().await.as_ref(),
         )
         .expect("build internal Guardian tool router");
 
@@ -1003,7 +996,6 @@ async fn request_user_input_stays_direct_in_code_mode_only() {
 async fn shell_family_registers_only_unified_exec_tools() {
     let plan = probe(|turn| {
         set_features(turn, &[Feature::ShellTool]);
-        set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
         update_turn_settings_for_test(turn, |settings| {
             Arc::make_mut(&mut settings.model_info).shell_type = ConfigShellToolType::UnifiedExec;
         });
@@ -1027,7 +1019,6 @@ async fn exec_command_guidance_follows_executor_platform_and_fallbacks() {
     ] {
         let plan = probe(|turn| {
             set_features(turn, &[Feature::ShellTool, Feature::UnifiedExec]);
-            set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
             update_turn_settings_for_test(turn, |settings| {
                 Arc::make_mut(&mut settings.model_info).shell_type =
                     ConfigShellToolType::UnifiedExec;
@@ -1125,6 +1116,15 @@ async fn login_shell_parameter_is_available_when_any_environment_allows_it() {
 
 #[tokio::test]
 async fn disabling_shell_tools_disables_command_tools_for_all_environments() {
+    let (attachment, _guard, _) = EnvironmentAttachment::new(
+        "remote",
+        Arc::new(
+            codex_exec_server::Environment::create_for_tests(Some(
+                "ws://127.0.0.1:1/remote-exec-server".to_string(),
+            ))
+            .expect("remote test environment"),
+        ),
+    );
     let remote_environment = probe(|turn| {
         set_feature(turn, Feature::ShellTool, /*enabled*/ false);
         update_turn_settings_for_test(turn, |settings| {
@@ -1140,12 +1140,7 @@ async fn disabling_shell_tools_disables_command_tools_for_all_environments() {
             panic!("primary environment should be ready");
         };
         environment.selection.environment_id = "remote".to_string();
-        environment.environment = Arc::new(
-            codex_exec_server::Environment::create_for_tests(Some(
-                "ws://127.0.0.1:1/remote-exec-server".to_string(),
-            ))
-            .expect("remote test environment"),
-        );
+        environment.attachment = attachment;
     })
     .await;
     remote_environment.assert_visible_lacks(&["exec_command", "write_stdin"]);
@@ -1406,7 +1401,12 @@ async fn environment_tools_follow_the_step_context() {
             /*tool_suggest_candidates*/ None,
             /*wait_for_environment_tool_config*/ None,
         ),
-        super::hosted_model_tool_specs(turn.as_ref(), turn.model_info(), &[]),
+        super::hosted_model_tool_specs(
+            turn.as_ref(),
+            turn.model_info(),
+            turn.config.web_search_mode.value(),
+            &[],
+        ),
         &Default::default(),
     ));
 
@@ -1616,6 +1616,226 @@ async fn mcp_and_tool_search_follow_direct_and_deferred_tool_exposure() {
 }
 
 #[tokio::test]
+async fn code_mode_tool_search_requires_experiment_and_model_capability() {
+    for tool_mode in [ToolMode::Direct, ToolMode::CodeMode, ToolMode::CodeModeOnly] {
+        for experiment_enabled in [false, true] {
+            for supports_search_tool in [false, true] {
+                let plan = probe_with(
+                    |turn| {
+                        set_feature(turn, Feature::Collab, /*enabled*/ false);
+                        set_feature(turn, Feature::CodeModeToolSearch, experiment_enabled);
+                        set_feature(turn, Feature::CodeMode, tool_mode != ToolMode::Direct);
+                        set_feature(
+                            turn,
+                            Feature::CodeModeOnly,
+                            tool_mode == ToolMode::CodeModeOnly,
+                        );
+                        update_turn_settings_for_test(turn, |settings| {
+                            Arc::make_mut(&mut settings.model_info).supports_search_tool =
+                                supports_search_tool;
+                        });
+                    },
+                    ToolPlanInputs {
+                        tool_runtimes: vec![mcp_runtime(
+                            "searchable",
+                            "mcp__searchable",
+                            "lookup",
+                            ToolExposure::Deferred,
+                        )],
+                        ..ToolPlanInputs::default()
+                    },
+                )
+                .await;
+
+                let nested_search_enabled =
+                    experiment_enabled && supports_search_tool && tool_mode != ToolMode::Direct;
+                assert_eq!(
+                    (
+                        plan.tool_mode,
+                        plan.registered_names
+                            .iter()
+                            .any(|name| name == "tool_search"),
+                        plan.visible_names.iter().any(|name| name == "tool_search"),
+                        plan.code_mode_tool_names.get("tool_search").cloned(),
+                    ),
+                    (
+                        tool_mode,
+                        supports_search_tool,
+                        supports_search_tool && tool_mode != ToolMode::CodeModeOnly,
+                        nested_search_enabled.then(|| ToolName::plain("tool_search")),
+                    ),
+                    "tool mode {tool_mode:?}, experiment {experiment_enabled}, model capability {supports_search_tool}",
+                );
+                if tool_mode != ToolMode::Direct {
+                    let ToolSpec::Freeform(exec) =
+                        plan.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME)
+                    else {
+                        panic!("expected code mode exec tool");
+                    };
+                    assert_eq!(
+                        exec.description.contains("await tools.tool_search("),
+                        nested_search_enabled,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn code_mode_tool_search_respects_direct_only_functions() {
+    for (code_mode_only, nested_search_enabled) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let plan = probe_with(
+            |turn| {
+                set_feature(turn, Feature::Collab, /*enabled*/ false);
+                set_feature(turn, Feature::CodeMode, /*enabled*/ true);
+                set_feature(turn, Feature::CodeModeOnly, code_mode_only);
+                set_feature(turn, Feature::CodeModeToolSearch, nested_search_enabled);
+                update_turn_settings_for_test(turn, |settings| {
+                    Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
+                });
+                update_config(turn, |config| {
+                    config.code_mode.direct_only_tool_namespaces = vec!["functions".to_string()];
+                });
+            },
+            ToolPlanInputs {
+                tool_runtimes: vec![mcp_runtime(
+                    "searchable",
+                    "mcp__searchable",
+                    "lookup",
+                    ToolExposure::Deferred,
+                )],
+                ..ToolPlanInputs::default()
+            },
+        )
+        .await;
+
+        assert_eq!(
+            plan.visible_names.iter().any(|name| name == "tool_search"),
+            !code_mode_only || nested_search_enabled,
+        );
+        assert_eq!(
+            plan.exposure("tool_search"),
+            if nested_search_enabled {
+                ToolExposure::DirectModelOnly
+            } else {
+                ToolExposure::Direct
+            },
+        );
+        assert_eq!(plan.code_mode_tool_names.get("tool_search"), None);
+        let ToolSpec::Freeform(exec) = plan.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME) else {
+            panic!("expected code mode exec tool");
+        };
+        assert!(!exec.description.contains("await tools.tool_search("));
+    }
+}
+
+#[tokio::test]
+async fn dynamic_tool_search_does_not_enable_ranked_search_guidance() {
+    for (experiment_enabled, supports_search_tool, has_deferred_tools) in [
+        (false, false, true),
+        (true, false, true),
+        (true, true, false),
+    ] {
+        let plan = probe_with(
+            |turn| {
+                set_features(turn, &[Feature::CodeMode, Feature::CodeModeOnly]);
+                set_feature(turn, Feature::Collab, /*enabled*/ false);
+                set_feature(turn, Feature::CodeModeToolSearch, experiment_enabled);
+                update_turn_settings_for_test(turn, |settings| {
+                    Arc::make_mut(&mut settings.model_info).supports_search_tool =
+                        supports_search_tool;
+                });
+            },
+            ToolPlanInputs {
+                dynamic_tools: vec![dynamic_tool(
+                    /*namespace*/ None,
+                    "tool_search",
+                    /*defer_loading*/ false,
+                )],
+                tool_runtimes: if has_deferred_tools {
+                    vec![mcp_runtime(
+                        "searchable",
+                        "mcp__searchable",
+                        "lookup",
+                        ToolExposure::Deferred,
+                    )]
+                } else {
+                    Vec::new()
+                },
+                ..ToolPlanInputs::default()
+            },
+        )
+        .await;
+
+        assert_eq!(
+            plan.code_mode_tool_names.get("tool_search"),
+            Some(&ToolName::plain("tool_search")),
+        );
+        let ToolSpec::Freeform(exec) = plan.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME) else {
+            panic!("expected code mode exec tool");
+        };
+        assert!(exec.description.contains("tool_search dynamic tool"));
+        assert!(!exec.description.contains("await tools.tool_search("));
+    }
+}
+
+#[tokio::test]
+async fn code_mode_tool_search_respects_exclusions_and_requires_deferred_tools() {
+    for (exclude_functions, has_deferred_tools) in [(true, true), (false, false)] {
+        let plan = probe_with(
+            |turn| {
+                set_features(
+                    turn,
+                    &[
+                        Feature::CodeMode,
+                        Feature::CodeModeOnly,
+                        Feature::CodeModeToolSearch,
+                    ],
+                );
+                set_feature(turn, Feature::Collab, /*enabled*/ false);
+                update_turn_settings_for_test(turn, |settings| {
+                    Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
+                });
+                if exclude_functions {
+                    update_config(turn, |config| {
+                        config.code_mode.excluded_tool_namespaces = vec!["functions".to_string()];
+                    });
+                }
+            },
+            ToolPlanInputs {
+                tool_runtimes: if has_deferred_tools {
+                    vec![mcp_runtime(
+                        "searchable",
+                        "mcp__searchable",
+                        "lookup",
+                        ToolExposure::Deferred,
+                    )]
+                } else {
+                    Vec::new()
+                },
+                ..ToolPlanInputs::default()
+            },
+        )
+        .await;
+
+        assert_eq!(plan.code_mode_tool_names.get("tool_search"), None);
+        assert_eq!(
+            plan.registered_names
+                .iter()
+                .any(|name| name == "tool_search"),
+            has_deferred_tools,
+        );
+        let ToolSpec::Freeform(exec) = plan.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME) else {
+            panic!("expected code mode exec tool");
+        };
+        assert!(!exec.description.contains("await tools.tool_search("));
+    }
+}
+
+#[tokio::test]
 async fn tool_namespaces_info_is_opt_in_and_tracks_mcp_exposure() {
     for (enabled, use_responses_lite) in [(false, true), (true, false), (true, true)] {
         let plan = probe_with(
@@ -1780,6 +2000,8 @@ async fn strict_namespace_ownership_requires_tool_namespace_inventory_opt_in() {
             RegisteredTool {
                 runtime: Arc::new(McpHandler::new(tool).expect("MCP tool spec should build")),
                 exposure,
+                native_review: Default::default(),
+                model_spec: None,
             }
         })
         .collect();
@@ -1816,7 +2038,6 @@ async fn unified_tool_runtimes_preserve_source_order_and_collision_priority() {
     let plan = probe_with(
         |turn| {
             set_features(turn, &[Feature::ShellTool]);
-            set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
             update_turn_settings_for_test(turn, |settings| {
                 Arc::make_mut(&mut settings.model_info).shell_type =
                     ConfigShellToolType::UnifiedExec;
@@ -2076,6 +2297,8 @@ async fn strict_tool_collisions_allow_multiple_tools_in_one_namespace() {
                         McpHandler::new(undocumented_tool).expect("MCP tool spec should build"),
                     ),
                     exposure: ToolExposure::Direct,
+                    native_review: Default::default(),
+                    model_spec: None,
                 },
                 mcp_runtime("shared", "shared", "lookup", ToolExposure::Direct),
                 mcp_runtime("shared", "shared", "list", ToolExposure::Direct),
@@ -2108,6 +2331,8 @@ async fn relaxed_tool_collisions_preserve_first_nonempty_namespace_description()
             Some("Second namespace description."),
             "Second namespace description.",
         ),
+        (None, None, "Tools in the shared namespace."),
+        (Some(""), Some(" \t\n"), "Tools in the shared namespace."),
     ] {
         let runtime = |name, description: Option<&str>| {
             let mut tool = mcp_tool("shared", "shared", name);
@@ -2115,6 +2340,8 @@ async fn relaxed_tool_collisions_preserve_first_nonempty_namespace_description()
             RegisteredTool {
                 runtime: Arc::new(McpHandler::new(tool).expect("MCP tool spec should build")),
                 exposure: ToolExposure::Direct,
+                native_review: Default::default(),
+                model_spec: None,
             }
         };
         let plan = probe_with(
@@ -2283,6 +2510,11 @@ async fn tool_search_cache_rebuilds_when_deferred_sources_change() {
     let cache = ToolSearchHandlerCache::default();
 
     let (_session, mut first_turn) = make_session_and_context().await;
+    set_feature(
+        &mut first_turn,
+        Feature::DeferredToolWorldState,
+        /*enabled*/ false,
+    );
     update_turn_settings_for_test(&mut first_turn, |settings| {
         Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
     });
@@ -2305,6 +2537,7 @@ async fn tool_search_cache_rebuilds_when_deferred_sources_change() {
         super::hosted_model_tool_specs(
             first_step_context.turn.as_ref(),
             first_step_context.turn.model_info(),
+            first_step_context.turn.config.web_search_mode.value(),
             &[],
         ),
         &cache,
@@ -2312,6 +2545,11 @@ async fn tool_search_cache_rebuilds_when_deferred_sources_change() {
     let first_plan = ToolPlanProbe::from_router(first_router);
 
     let (_session, mut second_turn) = make_session_and_context().await;
+    set_feature(
+        &mut second_turn,
+        Feature::DeferredToolWorldState,
+        /*enabled*/ false,
+    );
     update_turn_settings_for_test(&mut second_turn, |settings| {
         Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
     });
@@ -2334,6 +2572,7 @@ async fn tool_search_cache_rebuilds_when_deferred_sources_change() {
         super::hosted_model_tool_specs(
             second_step_context.turn.as_ref(),
             second_step_context.turn.model_info(),
+            second_step_context.turn.config.web_search_mode.value(),
             &[],
         ),
         &cache,
@@ -2399,6 +2638,7 @@ async fn tool_search_cache_rebuilds_when_deferred_world_state_changes() {
             super::hosted_model_tool_specs(
                 step_context.turn.as_ref(),
                 step_context.turn.model_info(),
+                step_context.turn.config.web_search_mode.value(),
                 &[],
             ),
             &cache,
@@ -2726,10 +2966,10 @@ async fn excluded_deferred_namespaces_do_not_enable_nested_tool_guidance() {
         panic!("expected code mode exec tool");
     };
     assert!(
-        !exec
-            .description
+        exec.description
             .contains("Some deferred nested tools may be omitted")
     );
+    assert!(!exec.description.contains("excluded__lookup("));
     plan.assert_registered_contains(&[
         &ToolName::namespaced("excluded", "lookup").to_string(),
         "tool_search",
@@ -2978,6 +3218,11 @@ async fn tool_mode_selector_overrides_feature_flags() {
 #[tokio::test]
 async fn v1_multi_agent_tools_defer_when_tool_search_available() {
     let plan = probe(|turn| {
+        set_feature(
+            turn,
+            Feature::DeferredToolWorldState,
+            /*enabled*/ false,
+        );
         update_turn_settings_for_test(turn, |settings| {
             Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
         });
@@ -3436,3 +3681,6 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
     bedrock_with_standalone_web_search.assert_visible_contains(&["web_search"]);
     bedrock_with_standalone_web_search.assert_visible_lacks(&["web"]);
 }
+
+#[path = "spec_plan_strict_third_party_tests.rs"]
+mod strict_third_party;

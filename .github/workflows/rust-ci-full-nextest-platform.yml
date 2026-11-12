@@ -67,6 +67,8 @@ jobs:
       CODEX_CI_PROFILE: ${{ inputs.profile }}
       CODEX_CI_TARGET: ${{ inputs.target }}
       CARGO_INCREMENTAL: "0"
+      # Debug symbols for hundreds of test binaries can exhaust the archive runner's disk.
+      CARGO_PROFILE_CI_TEST_DEBUG: "0"
       SCCACHE_CACHE_SIZE: 10G
       NEXTEST_ARCHIVE_FILE: nextest-${{ inputs.artifact_id }}.tar.zst
       NEXTEST_SOURCE_ROOT_FILE: nextest-source-root-${{ inputs.artifact_id }}.txt
@@ -178,6 +180,11 @@ jobs:
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
           tool: nextest@0.9.103
+
+      - name: Set up native voice dependencies
+        uses: ./third_party/voice/cargo-ci/setup
+        with:
+          target: ${{ inputs.target }}
 
       - name: Build nextest archive
         shell: bash
@@ -383,10 +390,16 @@ jobs:
           set -euo pipefail
           archive_file="${RUNNER_TEMP}/nextest-archive/${NEXTEST_ARCHIVE_FILE}"
           workspace_root="$(pwd)"
+          extract_dir="${RUNNER_TEMP}/nextest-extracted"
+          mkdir -p "$extract_dir"
+          runtime_relative="$(cat "${RUNNER_TEMP}/nextest-archive/voice-runtime-path.txt")"
+          export CODEX_TEST_VOICE_RUNTIME="$extract_dir/target/$runtime_relative"
 
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
             archive_file="$(cygpath -w "${archive_file}")"
             workspace_root="$(cygpath -w "${workspace_root}")"
+            extract_dir="$(cygpath -w "$extract_dir")"
+            CODEX_TEST_VOICE_RUNTIME="$(cygpath -w "$CODEX_TEST_VOICE_RUNTIME")"
           fi
 
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
@@ -407,6 +420,7 @@ jobs:
             run
             --no-fail-fast
             --archive-file "${archive_file}"
+            --extract-to "$extract_dir"
             --workspace-remap "${workspace_root}"
             --partition "hash:${{ matrix.shard }}/4"
           )
@@ -437,6 +451,8 @@ jobs:
           "${test_command[@]}"
         env:
           RUST_BACKTRACE: 1
+          # Keep panic backtraces without changing the CLI errors asserted by tests.
+          RUST_LIB_BACKTRACE: "0"
           RUST_MIN_STACK: "8388608" # 8 MiB
           NEXTEST_STATUS_LEVEL: leak
 
@@ -445,7 +461,7 @@ jobs:
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: nextest-junit-rust-ci-${{ inputs.artifact_id }}-shard-${{ matrix.shard }}
-          path: ${{ env.CARGO_TARGET_DIR }}/nextest/default/junit.xml
+          path: codex-rs/target/nextest/default/junit.xml
           if-no-files-found: warn
 
       - name: Tear down remote test env

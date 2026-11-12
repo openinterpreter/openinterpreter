@@ -4,11 +4,14 @@ mod exchange;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub use exchange::ApiTokenMetadata;
+pub use exchange::ChatgptTokenMetadata;
 pub use exchange::WorkloadIdentityExchange;
+pub use exchange::WorkloadIdentityMetadata;
 pub use exchange::WorkloadIdentityToken;
 use thiserror::Error;
 
-/// The inputs needed to exchange a file-backed assertion for ChatGPT auth.
+/// The inputs needed to exchange a file-backed assertion for workload identity auth.
 #[derive(Clone)]
 pub struct WorkloadIdentityConfig {
     pub(crate) assertion_file: PathBuf,
@@ -39,6 +42,8 @@ impl WorkloadIdentityConfig {
 
 #[derive(Clone, Debug, Error)]
 pub enum WorkloadIdentityError {
+    #[error(transparent)]
+    Policy(#[from] codex_http_client::NetworkPolicyDenied),
     #[error("the workload identity federation rule ID must not be empty")]
     InvalidFederationRuleId,
     #[error("the workload identity assertion file path must be absolute")]
@@ -77,7 +82,8 @@ impl WorkloadIdentityError {
                     | std::io::ErrorKind::WouldBlock
             ),
             Self::ExchangeUnavailable | Self::ExchangeRejected(408 | 429 | 500..=599) => true,
-            Self::InvalidFederationRuleId
+            Self::Policy(_)
+            | Self::InvalidFederationRuleId
             | Self::AssertionFileMustBeAbsolute
             | Self::InvalidAssertion
             | Self::AssertionTooLarge

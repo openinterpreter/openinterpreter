@@ -22,6 +22,8 @@
     },
     "HookEventName": {
       "enum": [
+        "preModelRequest",
+        "postModelRequest",
         "preToolUse",
         "permissionRequest",
         "postToolUse",
@@ -133,6 +135,13 @@
         },
         "enabled": {
           "type": "boolean"
+        },
+        "environmentId": {
+          "description": "The owning execution environment, if this hook came from its requirements.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "eventName": {
           "$ref": "#/definitions/HookEventName"

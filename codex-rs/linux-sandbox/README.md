@@ -7,6 +7,12 @@ This crate is responsible for producing:
   - the `codex-exec` CLI can check if its arg0 is `codex-linux-sandbox` and, if so, execute as if it were `codex-linux-sandbox`
   - this should also be true of the `codex` multitool CLI
 
+The helper uses bubblewrap for filesystem and namespace isolation, and seccomp
+for syscall filtering. `src/seccomp.rs` installs `PR_SET_NO_NEW_PRIVS` and the
+seccomp filters; it also retains the legacy Landlock filesystem implementation.
+`src/linux_run_main.rs` coordinates these stages through `LinuxSandboxCommand`.
+End-to-end coverage lives in `tests/suite/sandbox.rs` and the other suite modules.
+
 On Linux, Codex prefers the first `bwrap` found on `PATH`
 outside the current working directory whenever it is available. If `bwrap` is
 present but too old to support
@@ -22,6 +28,7 @@ it cannot create the required user namespaces, so Codex rejects sandboxed shell
 commands that would enter the bubblewrap path.
 
 **Current Behavior**
+
 - Legacy `SandboxPolicy` / `sandbox_mode` configs remain supported.
 - Bubblewrap is the default filesystem sandbox.
 - If `bwrap` is present on `PATH` outside the current working directory, the
@@ -44,7 +51,10 @@ commands that would enter the bubblewrap path.
   `SandboxPolicy` model stay on bubblewrap so nested read-only or denied
   carveouts are preserved.
 - When bubblewrap is active, the helper applies `PR_SET_NO_NEW_PRIVS` and a
-  seccomp network filter in-process.
+  seccomp filter in-process after establishing the filesystem view. Restricted
+  network policies block network syscalls; filesystem-restricted policies with
+  otherwise unrestricted networking still block `AF_VSOCK` sockets. All filter
+  modes block `io_uring` to prevent bypassing socket-family restrictions.
 - When bubblewrap is active, the filesystem is read-only by default via `--ro-bind / /`.
 - When bubblewrap is active, writable roots are layered with `--bind <root> <root>`.
 - When bubblewrap is active, protected subpaths under writable roots (for
@@ -79,16 +89,36 @@ commands that would enter the bubblewrap path.
   writable roots are blocked by mounting `/dev/null` on the symlink or first
   missing component.
 - When bubblewrap is active, the helper explicitly isolates the user namespace via
-  `--unshare-user` and the PID namespace via `--unshare-pid`.
+  `--unshare-user`. By default it also creates a PID namespace via `--unshare-pid`.
 - When bubblewrap is active and network is restricted without proxy routing, the helper also
   isolates the network namespace via `--unshare-net`.
 - In managed proxy mode, the helper uses `--unshare-net` plus an internal
   TCP->UDS->TCP routing bridge so tool traffic reaches only configured proxy
   endpoints.
-- In managed proxy mode, after the bridge is live, seccomp blocks new
-  AF_UNIX/socketpair creation for the user command.
-- When bubblewrap is active, it mounts a fresh `/proc` via `--proc /proc` by default, but
-  you can skip this in restrictive container environments with `--no-proc`.
+- In managed proxy mode, after the bridge is live, seccomp allows IP sockets
+  inside the isolated network namespace and blocks new standalone `AF_UNIX`
+  sockets unless `dangerously_allow_all_unix_sockets` is granted. Unix socket
+  pairs remain allowed for communication between related processes.
+- When bubblewrap is active, it mounts a fresh `/proc` via `--proc /proc` by default.
+  If that mount is denied, it retains the inherited `/proc` and still creates a
+  PID namespace, preserving the existing fallback. `--no-proc` also retains the
+  inherited `/proc` without disabling PID isolation. In these cases, process IDs
+  inside the sandbox can differ from those exposed by `/proc`. Default invocations
+  send no new helper flags and remain compatible with older helpers.
+- Trusted provisioning of a dedicated environment can start
+  `codex exec-server --linux-sandbox-pid-namespace=inherit`. This startup-only
+  setting applies to both process and filesystem helpers; repository config and
+  command environment variables cannot enable it. The helper receives the new
+  `--inherit-pid-namespace` option, which requires an updated helper; deploy the
+  helper and startup flag together.
+  Inheritance reuses the caller's PID namespace and `/proc` together, omitting
+  `--unshare-pid` and `--as-pid-1`. This preserves process lookups but allows
+  sandboxed commands to signal other same-UID processes, including the executor.
+  With `:minimal`, the existing `/proc` is bound read-only, preserving its
+  container masks; explicit filesystem denials are applied afterward.
+  Filesystem, user, IPC, network, seccomp, and existing container `/proc` masks
+  remain in force. The default `isolate` mode retains PID isolation.
 
 **Notes**
+
 - The CLI surface is `codex sandbox`; the host OS selects the sandbox backend.

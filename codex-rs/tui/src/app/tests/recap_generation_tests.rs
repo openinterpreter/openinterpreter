@@ -3,6 +3,8 @@ use crate::app::session_lifecycle::ThreadAttachPresentation;
 use crate::app::tests::session_lifecycle_requests::recorded_params;
 use crate::app::tests::session_lifecycle_requests::start_recording_remote_app_server;
 use crate::app_event::RecapTrigger;
+use crate::temporary_structured_request::TemporaryThreadKind;
+use codex_app_server_client::AppServerClient;
 use codex_model_provider_info::ModelProviderInfo;
 use core_test_support::responses;
 use core_test_support::responses::ev_assistant_message;
@@ -160,7 +162,7 @@ stream_max_retries = 0
                 }
                 event = app_server.next_event() => {
                     let event = event.expect("app-server event stream");
-                    app.handle_app_server_event(&app_server, event).await;
+                    app.handle_backend_event(&app_server, event).await;
                 }
             }
         }
@@ -336,6 +338,45 @@ async fn manual_recap_works_when_auto_recap_disabled() -> Result<()> {
 }
 
 #[tokio::test]
+async fn cloud_recap_stays_idle_and_reports_manual_unavailability() -> Result<()> {
+    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+    let thread_id = ThreadId::new();
+    let (client, mut commands, _server_events) =
+        codex_app_server_client::CloudClient::channel(/*capacity*/ 1);
+    let app_server = AppServerSession::new(
+        crate::backend_id::BackendId::new(),
+        AppServerClient::Cloud(client),
+        crate::app_server_session::ThreadParamsMode::Cloud,
+    );
+    while events.try_recv().is_ok() {}
+
+    app.request_recap(&app_server, thread_id, RecapTrigger::Automatic);
+    app.request_recap(&app_server, thread_id, RecapTrigger::Manual);
+
+    assert!(commands.try_recv().is_err());
+    let observed = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        !observed
+            .iter()
+            .any(|event| matches!(event, AppEvent::RecapStarted { .. }))
+    );
+    let messages = observed
+        .into_iter()
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => {
+                Some(lines_to_single_string(&cell.transcript_lines(/*width*/ 80)))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    insta::assert_snapshot!(
+        messages.join("\n"),
+        @"■ Conversation recaps are not available for cloud conversations."
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn auto_recap_opt_out_blocks_requests_and_cleans_up_pending_start() -> Result<()> {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let thread_id = ThreadId::new();
@@ -461,13 +502,50 @@ async fn temporary_recap_threads_disable_memories_and_remote_mcp_servers() -> Re
             .permissions
             .active_permission_profile()
             .map(|profile| profile.id),
-        mcp_server_names: Vec::new(),
     };
-    crate::temporary_structured_request::start_temporary_thread(
+    let response = crate::temporary_structured_request::start_temporary_thread(
         &app_server.request_handle(),
         options,
     )
     .await?;
+    let thread_id = ThreadId::from_string(&response.thread.id)?;
+    let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    app.temporary_structured_requests
+        .insert(thread_id, (TemporaryThreadKind::Recap, sender));
+    // Even if a hidden thread reaches visible routing, it must not prompt.
+    app.primary_thread_id = Some(thread_id);
+    app.active_thread_id = Some(thread_id);
+    for request in [
+        exec_approval_request(thread_id, "turn", "item", /*approval_id*/ None),
+        request_user_input_request(thread_id, "turn", "item"),
+    ] {
+        app.handle_app_server_event(
+            &app_server,
+            codex_app_server_client::AppServerEvent::ServerRequest(Box::new(request.clone())),
+        )
+        .await;
+        assert!(
+            !app.pending_app_server_requests
+                .contains_server_request(&request)
+        );
+    }
+
+    // A managed policy can also cause an ephemeral title to ask for input.
+    // Its request stays unanswered and never enters the visible chat.
+    let title_id = ThreadId::new();
+    let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    app.temporary_structured_requests
+        .insert(title_id, (TemporaryThreadKind::Title, sender));
+    let question = request_user_input_request(title_id, "title-turn", "question");
+    app.handle_app_server_event(
+        &app_server,
+        codex_app_server_client::AppServerEvent::ServerRequest(Box::new(question.clone())),
+    )
+    .await;
+    assert!(
+        !app.pending_app_server_requests
+            .contains_server_request(&question)
+    );
 
     let starts = recorded_params(&requests, "thread/start");
     assert_eq!(starts.len(), 1);
@@ -484,6 +562,24 @@ async fn temporary_recap_threads_disable_memories_and_remote_mcp_servers() -> Re
 
     app_server.shutdown().await?;
     proxy.await??;
+    assert_eq!(
+        requests
+            .lock()
+            .expect("request recorder lock")
+            .iter()
+            .filter(|request| request.method == "server/request/error")
+            .map(|request| (request.id.clone(), request.params.clone()))
+            .collect::<Vec<_>>(),
+        [1, 2]
+            .map(|id| (
+                AppServerRequestId::Integer(id),
+                Some(serde_json::json!({
+                    "code": -32000,
+                    "message": "temporary structured threads cannot request tools or user interaction"
+                }))
+            ))
+            .to_vec()
+    );
     Ok(())
 }
 

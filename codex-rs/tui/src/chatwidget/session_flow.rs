@@ -57,6 +57,7 @@ impl ChatWidget {
                 session.windows_sandbox_host
             };
         self.invalidate_permission_discovery();
+        self.permission_discovery = None;
         self.permission_profiles_menu_opened = false;
         self.transcript.reset_copy_history();
         let history_metadata = session.message_history.unwrap_or_default();
@@ -68,6 +69,9 @@ impl ChatWidget {
         self.set_skills(/*skills*/ None);
         self.session_network_proxy = session.network_proxy.clone();
         let previous_thread_id = self.thread_id;
+        if previous_thread_id != Some(session.thread_id) || self.cloud_picker_selection.is_some() {
+            self.dismiss_stale_model_picker();
+        }
         let connector_scope_changed = previous_thread_id != Some(session.thread_id)
             || self.config.cwd.as_path() != session.cwd.as_path();
         self.thread_id = Some(session.thread_id);
@@ -89,13 +93,22 @@ impl ChatWidget {
         self.bottom_pane
             .set_queue_submissions(/*queue_submissions*/ false);
         if previous_thread_id != self.thread_id {
+            if (previous_thread_id.is_some() || self.config.cwd != session.cwd)
+                && self.status_account_display == Some(StatusAccountDisplay::ApiKey)
+            {
+                self.refresh_account_scoped_models();
+            }
             self.backend_banner_notice_model = None;
             self.automatic_model_switch_state =
                 backend_banners::AutomaticModelSwitchState::default();
             self.review.recent_auto_review_denials = RecentAutoReviewDenials::default();
             self.clear_thread_usage_state();
         }
+        let has_turn_history =
+            previous_thread_id == self.thread_id && self.turn_lifecycle.has_turn_history;
         self.turn_lifecycle.reset_thread();
+        self.turn_lifecycle.has_turn_history = has_turn_history;
+        self.safety_recourse = None;
         self.clear_safety_buffering();
         self.thread_name = session.thread_name.clone();
         self.current_goal_status_indicator = None;
@@ -106,6 +119,12 @@ impl ChatWidget {
         self.current_cwd = Some(session.cwd.to_path_buf());
         self.config.cwd = session.cwd.clone();
         self.config.model_provider_id = session.model_provider_id.clone();
+        if previous_thread_id.is_none()
+            && let Some(event) = crate::app::provider::refresh_list_if_present(self)
+        {
+            self.app_event_tx.send(AppEvent::Provider(event));
+        }
+        self.set_daybreak_enabled(self.daybreak_enabled);
         if connector_scope_changed {
             self.invalidate_connector_scope();
         }
@@ -114,6 +133,7 @@ impl ChatWidget {
         self.config
             .permissions
             .set_workspace_roots(runtime_workspace_roots);
+        self.config.service_tier = session.service_tier.clone();
         self.effective_service_tier = session.service_tier.clone();
         if let Err(err) = self
             .config
@@ -147,7 +167,6 @@ impl ChatWidget {
             }
         }
         self.config.approvals_reviewer = session.approvals_reviewer;
-        self.config.personality = session.personality;
         self.status_line_project_root_name_cache = None;
         let forked_from_id = session.forked_from_id;
         let default_model = session.model.clone();
@@ -201,8 +220,6 @@ impl ChatWidget {
         let model_for_header = self.current_model().to_string();
         if display == SessionConfiguredDisplay::Normal {
             let startup_tooltip_override = self.startup_tooltip_override.take();
-            let show_fast_status = self
-                .should_show_fast_status(&model_for_header, self.effective_service_tier.as_deref());
             let session_info_cell = history_cell::new_session_info(
                 &self.config,
                 &self.local_settings,
@@ -212,7 +229,6 @@ impl ChatWidget {
                 self.show_welcome_banner,
                 startup_tooltip_override,
                 self.plan_type,
-                show_fast_status,
             );
             self.apply_session_info_cell(session_info_cell);
         } else if self
@@ -223,6 +239,10 @@ impl ChatWidget {
         {
             self.transcript.active_cell = None;
             self.bump_active_cell_revision();
+        }
+        // Emit notices after replacing or removing the placeholder header.
+        if self.daybreak_enabled && previous_thread_id != self.thread_id {
+            self.add_info_message("Daybreak is on for new turns.".into(), /*hint*/ None);
         }
         self.transcript.saw_copy_source_this_turn = false;
         self.refresh_skills_for_current_cwd(/*force_reload*/ true);
@@ -300,7 +320,7 @@ impl ChatWidget {
             .into()
         };
         self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-            PlainHistoryCell::new(vec![line]),
+            ForkedThreadHistoryCell(PlainHistoryCell::new(vec![line])),
         )));
     }
 
@@ -368,8 +388,8 @@ impl ChatWidget {
         )));
     }
 
-    /// Update status surfaces before a confirmed manual rename's server notification arrives.
-    pub(crate) fn expect_manual_thread_name(&mut self, thread_id: ThreadId, name: String) {
+    /// Show a provisional or manually chosen name before its server notification arrives.
+    pub(crate) fn display_thread_name(&mut self, thread_id: ThreadId, name: String) {
         if self.thread_id == Some(thread_id) {
             self.thread_name = Some(name);
             self.refresh_status_surfaces();

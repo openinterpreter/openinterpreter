@@ -3,6 +3,9 @@ mod common;
 use anyhow::Context;
 use codex_build_info::BuildInfo;
 use codex_build_info::build_id;
+use codex_exec_server::CAPABILITIES_DISCOVER_V2_METHOD;
+use codex_exec_server::DiscoverV2CapabilitiesRequest;
+use codex_exec_server::DiscoverV2CapabilitiesResponse;
 use codex_exec_server::EnvironmentInfo;
 use codex_exec_server::InitializeParams;
 use codex_exec_server::InitializeResponse;
@@ -26,7 +29,7 @@ async fn exec_server_accepts_initialize(version: Option<&str>) -> anyhow::Result
     let bin_dir = package.path().join("bin");
     std::fs::create_dir(&bin_dir)?;
     let executable = bin_dir.join(format!("codex{}", std::env::consts::EXE_SUFFIX));
-    std::fs::copy(std::env::current_exe()?, &executable)?;
+    codex_utils_cargo_bin::copy_executable(&std::env::current_exe()?, &executable)?;
     let manifest = package.path().join("codex-package.json");
     if let Some(version) = version {
         std::fs::write(
@@ -96,6 +99,117 @@ async fn exec_server_accepts_initialize(version: Option<&str>) -> anyhow::Result
         serde_json::from_value::<EnvironmentInfo>(result)?,
         expected_environment
     );
+
+    server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discovery_prewarms_before_initialize_and_recovers_without_client_opt_in()
+-> anyhow::Result<()> {
+    let codex_home = TempDir::new()?;
+    #[cfg(not(windows))]
+    let discovery_home = {
+        // Fail the scan before startup, without racing the background task.
+        std::fs::write(codex_home.path().join("plugins"), "not a directory")?;
+        codex_home.path().to_path_buf()
+    };
+    // Windows treats the file-parent fixture as NotFound, which discovery skips.
+    // A missing explicit home instead makes home resolution fail deterministically.
+    #[cfg(windows)]
+    let discovery_home = codex_home.path().join("missing");
+    let user_home = codex_home.path().join("home");
+    std::fs::create_dir_all(user_home.join(".agents/skills"))?;
+    let stderr_path = codex_home.path().join("executor.log");
+    let stderr = std::fs::File::create(&stderr_path)?;
+    let helper_paths = common::exec_server::test_codex_helper_paths()?;
+    let mut command = Command::new(helper_paths.codex_exe);
+    command.args(["exec-server", "--listen", "ws://127.0.0.1:0"]);
+    command.env("CODEX_HOME", &discovery_home);
+    command.env("HOME", &user_home);
+    command.env("USERPROFILE", &user_home);
+    command.env("RUST_LOG", "codex_exec_server=warn");
+    let mut server = ExecServerHarness::start_with_stderr(command, stderr.into()).await?;
+    // No initialize or discovery request has been sent: the scan must run at startup.
+    let observed_failure = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let logs = tokio::fs::read_to_string(&stderr_path).await?;
+            if logs.contains("capability location prewarming unavailable") {
+                return Ok::<_, std::io::Error>(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    anyhow::ensure!(
+        observed_failure.is_ok(),
+        "prewarm failure was not observed; executor stderr:\n{}",
+        std::fs::read_to_string(&stderr_path)?
+    );
+    observed_failure??;
+    let initialize_id = server
+        .send_request(
+            "initialize",
+            serde_json::to_value(InitializeParams {
+                client_name: "exec-server-test".to_string(),
+                resume_session_id: None,
+            })?,
+        )
+        .await?;
+
+    let JSONRPCMessage::Response(JSONRPCResponse { id, result }) = server.next_event().await?
+    else {
+        anyhow::bail!("expected initialize response without V2 opt-in");
+    };
+    assert_eq!(id, initialize_id);
+    let response: InitializeResponse = serde_json::from_value(result)?;
+    assert!(
+        response
+            .environment_info
+            .context("initialize metadata missing")?
+            .capabilities
+            .capability_discovery_v2
+    );
+    server
+        .send_notification("initialized", serde_json::json!({}))
+        .await?;
+
+    let environment_info_id = server
+        .send_request("environment/info", serde_json::json!({}))
+        .await?;
+    let JSONRPCMessage::Response(JSONRPCResponse { id, result }) = server.next_event().await?
+    else {
+        panic!("expected environment info response after degraded discovery startup");
+    };
+    assert_eq!(id, environment_info_id);
+    let info: EnvironmentInfo = serde_json::from_value(result)?;
+    // Repair the failed startup fixture; discovery must retry and find the new skill.
+    #[cfg(not(windows))]
+    std::fs::remove_file(discovery_home.join("plugins"))?;
+    let skill_root = discovery_home.join("skills/recovered");
+    std::fs::create_dir_all(&skill_root)?;
+    std::fs::write(
+        skill_root.join("SKILL.md"),
+        "---\nname: recovered\ndescription: Found after startup recovery\n---\n",
+    )?;
+    let discovery_id = server
+        .send_request(
+            CAPABILITIES_DISCOVER_V2_METHOD,
+            serde_json::to_value(DiscoverV2CapabilitiesRequest {
+                cwd: info.cwd.context("startup cwd")?,
+                sandbox: None,
+            })?,
+        )
+        .await?;
+    let JSONRPCMessage::Response(JSONRPCResponse { id, result }) = server.next_event().await?
+    else {
+        anyhow::bail!("expected discovery to recover after repairing the startup fixture");
+    };
+    assert_eq!(id, discovery_id);
+    let discovery: DiscoverV2CapabilitiesResponse = serde_json::from_value(result)?;
+    assert!(discovery.skills.iter().any(|skill| {
+        skill.name == "recovered" && skill.description == "Found after startup recovery"
+    }));
 
     server.shutdown().await?;
     Ok(())

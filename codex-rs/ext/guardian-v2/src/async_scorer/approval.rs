@@ -1,5 +1,6 @@
 //! Owns approval routing and the choice between cached evidence and a fresh assessment.
 //! Registration does not depend on the async scorer starting successfully.
+//! Tool-linked approvals never reuse a score from a later action.
 
 use super::authorization::ScoreAuthorization;
 use super::config::GuardianV2Config;
@@ -14,7 +15,9 @@ use codex_core::context::GuardianContextMode;
 use codex_extension_api::ApprovalDecision;
 use codex_extension_api::ApprovalDecisionInput;
 use codex_extension_api::ApprovalReviewContributor;
+use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionFuture;
+use codex_extension_api::ExtensionMetrics;
 use codex_protocol::approvals::GuardianReviewReason;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::openai_models::GuardianModelPolicy;
@@ -40,7 +43,8 @@ impl ApprovalReviewContributor for GuardianApprovalReviewer {
                 record_fast_decision(input.metrics.as_deref(), "deferred", "scoring_failure");
                 return None;
             };
-            Some(self.decide_request(&thread, input).await)
+            let config = input.turn_store.get::<codex_core::config::Config>()?;
+            Some(self.decide_request(&thread, input, &config).await)
         })
     }
 }
@@ -51,6 +55,7 @@ impl GuardianApprovalReviewer {
         &self,
         thread: &CodexThread,
         input: &ApprovalDecisionInput<'_>,
+        config: &codex_core::config::Config,
     ) -> ApprovalDecision {
         if input.full_access {
             return ApprovalDecision::Allow;
@@ -64,7 +69,6 @@ impl GuardianApprovalReviewer {
         {
             return ApprovalDecision::AskUser;
         }
-        let config = thread.config().await;
         let model = input
             .thread_store
             .get::<codex_protocol::openai_models::ModelInfo>();
@@ -72,8 +76,9 @@ impl GuardianApprovalReviewer {
             .thread_store
             .get::<GuardianV2Config>()
             .map(|config| (*config).clone())
-            .map_or_else(|| GuardianV2Config::resolve(&config), Ok)
+            .map_or_else(|| GuardianV2Config::resolve(config), Ok)
             .ok();
+        let requirements = config.config_layer_stack.requirements();
         let mut policy = guardian_config.as_ref().map_or_else(
             || {
                 codex_config::GuardianPolicyLoader::new(
@@ -97,21 +102,34 @@ impl GuardianApprovalReviewer {
         if mode == GuardianReviewMode::Disabled && !input.require_guardian {
             return ApprovalDecision::AskUser;
         }
-        let reason = if mode == GuardianReviewMode::Adaptive && !input.require_fresh_review {
+        let adaptive = mode == GuardianReviewMode::Adaptive && !input.require_fresh_review;
+        if adaptive && let Some(metrics) = input.metrics.as_deref() {
+            metrics.counter("codex.guardian_v2.adaptive_review", /*inc*/ 1, &[]);
+        }
+        let reason = if input.require_fresh_review {
+            GuardianReviewReason::FreshRequired
+        } else if !adaptive {
+            GuardianReviewReason::Policy
+        } else if let Some(requires_review) = input.serving_assessment {
+            if !requires_review {
+                return ApprovalDecision::Allow;
+            }
+            GuardianReviewReason::ElevatedRisk
+        } else {
             match guardian_config.as_ref() {
-                Some(config) => match cached_evidence(thread, input, config, &policy).await {
-                    Ok(()) => return ApprovalDecision::Allow,
-                    Err(reason) => reason,
-                },
+                Some(config) => {
+                    match cached_evidence(thread, input, config, &policy, input.metrics.as_deref())
+                        .await
+                    {
+                        Ok(_) => return ApprovalDecision::Allow,
+                        Err(reason) => reason,
+                    }
+                }
                 None => {
                     record_fast_decision(input.metrics.as_deref(), "deferred", "scoring_failure");
                     GuardianReviewReason::ScoringFailure
                 }
             }
-        } else if input.require_fresh_review {
-            GuardianReviewReason::FreshRequired
-        } else {
-            GuardianReviewReason::Policy
         };
         tracing::debug!(
             decision_source = "synchronous_assessment",
@@ -125,6 +143,7 @@ impl GuardianApprovalReviewer {
     }
 }
 
+/// Checks score reuse; the success value says whether it can also release a pending review.
 async fn cached_evidence(
     thread: &CodexThread,
     input: &ApprovalDecisionInput<'_>,
@@ -132,8 +151,14 @@ async fn cached_evidence(
     policy: &GuardianModelPolicy,
 ) -> Result<(), GuardianReviewReason> {
     let store = input.thread_store;
-    let metrics = input.metrics.as_deref();
     let Some(progress) = store.get::<GuardianV2ScoreProgress>() else {
+        if let Some(metrics) = metrics {
+            metrics.counter(
+                "codex.guardian_v2.score_readiness",
+                /*inc*/ 1,
+                &[("ready", "false")],
+            );
+        }
         record_fast_decision(metrics, "deferred", "missing_score");
         return Err(GuardianReviewReason::MissingScore);
     };
@@ -176,8 +201,13 @@ async fn cached_evidence(
             == Some("node_repl")
         && cached.js_executions == 1
     {
+        if !permitted.allows_initial_cua_call()
+            || permitted.review_mode(input.category) != GuardianReviewMode::Adaptive
+        {
+            return Err(GuardianReviewReason::Policy);
+        }
         record_fast_decision(metrics, "approved", "initial_cua_call");
-        return Ok(());
+        return Ok(false);
     }
     let current = ScoreAuthorization::current(thread).await;
     // Classification may publish or fail while authorization is collected.
@@ -191,6 +221,22 @@ async fn cached_evidence(
             .root
             .is_some_and(|root| !root.retained_context_complete)
     {
+        // Age of the sampled input, including inference time; not time since publication.
+        let age = std::time::SystemTime::now()
+            .duration_since(sampled_at)
+            .unwrap_or_default();
+        metrics.histogram(
+            "codex.guardian_v2.score_age_ms",
+            i64::try_from(age.as_millis()).unwrap_or(i64::MAX),
+            &[],
+        );
+    }
+    if cached.oversized {
+        record_fast_decision(metrics, "deferred", "scoring_failure");
+        return Err(GuardianReviewReason::ScoringFailure);
+    }
+    // Root omissions remain visible to the classifier but do not veto a matching cached score.
+    if !current.local.retained_context_complete {
         record_fast_decision(metrics, "deferred", "incomplete_authorization");
         return Err(GuardianReviewReason::Policy);
     }
@@ -225,9 +271,17 @@ async fn cached_evidence(
                     GuardianReviewReason::AuthorizationChanged,
                     "authorization_changed",
                 )
+            } else if input.tool_call_id.is_some() && !cached.score_at_or_before_action {
+                // Apply action ordering to both initial and pending approvals. Intercepted
+                // actions without a tool-call ID retain their existing thread-level checks.
+                (GuardianReviewReason::MissingScore, "missing_score")
             } else {
+                // A pending review can receive a late score after requirements tighten.
+                if permitted.review_mode(input.category) != GuardianReviewMode::Adaptive {
+                    return Err(GuardianReviewReason::Policy);
+                }
                 record_fast_decision(metrics, "approved", "low_risk");
-                return Ok(());
+                return Ok(cached.score_at_or_before_action);
             }
         }
         Some(score) if score >= config.review_threshold => {
@@ -242,4 +296,25 @@ async fn cached_evidence(
     );
     record_fast_decision(metrics, "deferred", label);
     Err(reason)
+}
+
+async fn constrained_live_policy(
+    thread: &CodexThread,
+    store: &ExtensionData,
+    policy: &GuardianModelPolicy,
+) -> GuardianModelPolicy {
+    let mut permitted = policy.clone();
+    thread
+        .config()
+        .await
+        .config_layer_stack
+        .requirements()
+        .constrain_guardian_policy(
+            &mut permitted,
+            store
+                .get::<codex_protocol::openai_models::ModelInfo>()
+                .as_ref()
+                .map(|model| model.slug.as_str()),
+        );
+    permitted
 }

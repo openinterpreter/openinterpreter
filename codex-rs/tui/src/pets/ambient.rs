@@ -123,6 +123,12 @@ pub(crate) struct AmbientPetDraw {
     pub(crate) sixel_dir: PathBuf,
 }
 
+impl AmbientPetDraw {
+    pub(crate) fn area(&self) -> Rect {
+        Rect::new(self.x, self.y, self.columns, self.rows)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct AmbientPet {
     pet: Pet,
@@ -178,6 +184,10 @@ impl AmbientPet {
     pub(crate) fn set_notification(&mut self, kind: PetNotificationKind, body: Option<String>) {
         self.notification = Some(PetNotification::new(kind, body));
         self.animation_started_at = Instant::now();
+    }
+
+    pub(crate) fn set_animations_enabled(&mut self, enabled: bool) {
+        self.animations_enabled = enabled;
     }
 
     pub(crate) fn image_enabled(&self) -> bool {

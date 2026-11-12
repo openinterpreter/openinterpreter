@@ -23,7 +23,6 @@ use tracing::warn;
 /// subagent sessions.
 pub fn start_memories_startup_task(
     thread_manager: Arc<ThreadManager>,
-    auth_manager: Arc<AuthManager>,
     thread_id: ThreadId,
     thread: Arc<CodexThread>,
     config: Arc<Config>,

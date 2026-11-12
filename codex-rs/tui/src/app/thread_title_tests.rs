@@ -25,11 +25,13 @@ use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_protocol::ThreadId;
 use codex_protocol::models::MessagePhase;
 use core_test_support::responses;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
+use futures::FutureExt;
 use pretty_assertions::assert_eq;
 use tempfile::tempdir;
 use tokio::sync::mpsc::unbounded_channel;
@@ -90,6 +92,29 @@ fn bounds_the_entire_title_prompt_for_dense_unicode() {
 }
 
 #[tokio::test]
+async fn cloud_conversations_skip_tui_generated_titles() {
+    let mut app = make_test_app().await;
+    let thread_id = ThreadId::new();
+    let (client, mut commands, _server_events) =
+        codex_app_server_client::CloudClient::channel(/*capacity*/ 1);
+    let app_server = crate::app_server_session::AppServerSession::new(
+        crate::backend_id::BackendId::new(),
+        codex_app_server_client::AppServerClient::Cloud(client),
+        crate::app_server_session::ThreadParamsMode::Cloud,
+    );
+
+    app.generate_thread_title(
+        &app_server,
+        thread_id,
+        ThreadTitleDestination::Automatic,
+        "Fix the login timeout",
+    );
+
+    assert!(app.pending_thread_titles.is_empty());
+    assert!(commands.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn automatic_thread_title_respects_origin_metadata_after_switching() -> color_eyre::Result<()>
 {
     for (switch_threads, manual_name) in [
@@ -115,6 +140,7 @@ async fn automatic_thread_title_respects_origin_metadata_after_switching() -> co
         );
 
         let mut tui = crate::tui::test_support::make_test_tui()?;
+        let automatic = app_server.automatic_thread_name_writer(thread_id);
         if switch_threads {
             let second = app_server.start_thread(&app.config).await?;
             let second_id = second.session.thread_id;
@@ -133,6 +159,9 @@ async fn automatic_thread_title_respects_origin_metadata_after_switching() -> co
                 .await?;
         }
         let displayed_thread = (app.chat_widget.thread_id(), app.chat_widget.thread_name());
+        automatic
+            .save("Generated title".into(), &CancellationToken::new())
+            .await;
         app.handle_event(
             &mut tui,
             &mut app_server,
@@ -144,7 +173,8 @@ async fn automatic_thread_title_respects_origin_metadata_after_switching() -> co
                 result: Ok(r#"{"title":"Generated title"}"#.to_string()),
             },
         )
-        .await?;
+        .now_or_never()
+        .expect("title dispatch must return to keyboard polling")?;
         let expected_name = Some(manual_name.unwrap_or("Generated title").to_string());
         assert_eq!(
             app_server
@@ -269,7 +299,11 @@ async fn check_thread_title_generation(scenario: TitleScenario) -> color_eyre::R
         .turns
         .push(Turn {
             id: "existing-turn".to_string(),
-            items: vec![title_user_message("user-message", "Fix the login timeout")],
+            root_turn_id: None,
+            items: vec![ThreadItem::untimed(title_user_message(
+                "user-message",
+                user_message,
+            ))],
             items_view: Default::default(),
             status: TurnStatus::Completed,
             error: None,
@@ -285,12 +319,13 @@ async fn check_thread_title_generation(scenario: TitleScenario) -> color_eyre::R
                 &mut tui,
                 &mut app_server,
                 ThreadBufferedEvent::Notification(Box::new(ServerNotification::ItemCompleted(
-                    ItemCompletedNotification {
-                        thread_id: thread_id.to_string(),
-                        turn_id: "existing-turn".to_string(),
-                        item: title_user_message("user-message", "Fix the login timeout"),
-                        completed_at_ms: 0,
-                    },
+                    ItemCompletedNotification::new(
+                        thread_id.to_string(),
+                        "existing-turn".to_string(),
+                        title_user_message("user-message", user_message),
+                        /*started_at_ms*/ None,
+                        /*completed_at_ms*/ 0,
+                    ),
                 ))),
             )
             .await?;
@@ -430,9 +465,9 @@ async fn check_thread_title_generation(scenario: TitleScenario) -> color_eyre::R
     let request = response.single_request();
     assert!(
         request
-            .body_json()
-            .to_string()
-            .contains("Fix the login timeout")
+            .message_input_texts("user")
+            .iter()
+            .any(|prompt| prompt.contains(user_message))
     );
 
     app_server.shutdown().await?;
@@ -731,8 +766,8 @@ fn truncates_generated_titles_without_splitting_unicode() {
     assert_eq!(parse_thread_title(&response), Some(expected));
 }
 
-fn title_user_message(id: &str, text: &str) -> ThreadItem {
-    ThreadItem::UserMessage {
+fn title_user_message(id: &str, text: &str) -> ThreadItemPayload {
+    ThreadItemPayload::UserMessage {
         id: id.to_string(),
         client_id: None,
         content: vec![UserInput::Text {
@@ -742,8 +777,9 @@ fn title_user_message(id: &str, text: &str) -> ThreadItem {
     }
 }
 
-fn title_agent_message(id: &str, text: &str, phase: Option<MessagePhase>) -> ThreadItem {
-    ThreadItem::AgentMessage {
+fn title_agent_message(id: &str, text: &str, phase: Option<MessagePhase>) -> ThreadItemPayload {
+    ThreadItemPayload::AgentMessage {
+        moderation: None,
         id: id.to_string(),
         text: text.to_string(),
         phase,
@@ -754,8 +790,7 @@ fn title_agent_message(id: &str, text: &str, phase: Option<MessagePhase>) -> Thr
 }
 
 #[tokio::test]
-async fn thread_title_progress_clears_failed_requests_and_follows_thread_switches()
--> color_eyre::Result<()> {
+async fn failed_thread_title_requests_are_removed() -> color_eyre::Result<()> {
     let mut app = make_test_app().await;
     app.local_settings.tui.animations = false;
     app.chat_widget.local_settings.tui.animations = false;
@@ -778,20 +813,22 @@ async fn thread_title_progress_clears_failed_requests_and_follows_thread_switche
     assert!(render_bottom_popup(&app.chat_widget, /*width*/ 120).contains('⠋'));
 
     app.on_thread_title_started(
-        &app_server,
+        &mut app_server,
         thread_id,
         ThreadTitleDestination::Automatic,
         "prompt".to_string(),
+        /*fallback_title*/ None,
         /*effort*/ None,
         Err("startup failed".to_string()),
         CancellationToken::new(),
     );
     assert!(render_bottom_popup(&app.chat_widget, /*width*/ 120).contains('⠋'));
     app.on_thread_title_started(
-        &app_server,
+        &mut app_server,
         thread_id,
         suggestion,
         "prompt".to_string(),
+        /*fallback_title*/ None,
         /*effort*/ None,
         Ok("invalid-thread-id".to_string()),
         CancellationToken::new(),

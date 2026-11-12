@@ -2,7 +2,7 @@ use codex_http_client::HttpClientFactory;
 
 use crate::EnvironmentManager;
 use crate::ExecServerError;
-use crate::ExecServerRuntimePaths;
+use crate::ExecServerRuntimeOptions;
 use crate::environment_provider::EnvironmentDefault;
 use crate::environment_provider::EnvironmentProviderSnapshot;
 use crate::remote::NoiseRendezvousEnvironmentConfig;
@@ -33,7 +33,7 @@ impl PreparedEnvironmentManager {
                 EnvironmentDefault::EnvironmentId(default_id) => snapshot
                     .environments
                     .iter()
-                    .any(|(environment_id, _)| environment_id == default_id),
+                    .any(|entry| &entry.id == default_id),
             },
         }
     }
@@ -41,7 +41,7 @@ impl PreparedEnvironmentManager {
     /// Builds the manager and starts remote connections using the supplied policy.
     pub fn build(
         self,
-        local_runtime_paths: Option<ExecServerRuntimePaths>,
+        local_runtime_paths: Option<ExecServerRuntimeOptions>,
         http_client_factory: HttpClientFactory,
     ) -> Result<EnvironmentManager, ExecServerError> {
         match self.source {

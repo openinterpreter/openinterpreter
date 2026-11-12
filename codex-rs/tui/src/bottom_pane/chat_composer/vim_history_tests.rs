@@ -12,6 +12,7 @@ use pretty_assertions::assert_eq;
 
 use super::super::super::chat_composer_history::HistoryEntry;
 use super::super::ChatComposer;
+use super::super::ComposerDraftSnapshot;
 use super::super::InputResult;
 use super::super::LARGE_PASTE_CHAR_THRESHOLD;
 use super::super::PasteBurst;
@@ -76,6 +77,116 @@ fn undo_and_redo_group_complete_vim_edits() {
         ctrl_r(&mut composer);
         assert_eq!(composer.current_text(), edited);
     }
+}
+
+#[test]
+fn recovered_answers_undo_as_one_vim_edit() {
+    for answer in [
+        "answer".to_owned(),
+        "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 1),
+    ] {
+        let mut composer = vim_composer("abc");
+        keys(&mut composer, "iX");
+        escape(&mut composer);
+        let before = composer.draft_snapshot();
+        composer.append_recovered_drafts(&answer);
+        keys(&mut composer, "u");
+        assert_eq!(composer.draft_snapshot(), before);
+        keys(&mut composer, ".");
+        assert_eq!(composer.current_text(), "XXabc");
+
+        for (command, mode, edited) in [("iX", "Insert", "Xabc"), ("RX", "Replace", "Xbc")] {
+            let mut composer = vim_composer("abc");
+            let before = composer.draft_snapshot();
+            keys(&mut composer, command);
+            composer.append_recovered_drafts(&answer);
+            assert_eq!(
+                (
+                    composer.current_text_with_pending(),
+                    composer.draft.textarea.vim_mode_label(),
+                ),
+                (format!("{edited}\n\n{answer}"), Some(mode))
+            );
+            escape(&mut composer);
+            let after = composer.draft_snapshot();
+            keys(&mut composer, "u");
+            assert_eq!(composer.draft_snapshot(), before);
+            ctrl_r(&mut composer);
+            assert_eq!(composer.draft_snapshot(), after);
+            keys(&mut composer, "u");
+            keys(&mut composer, ".");
+            assert_eq!(composer.current_text(), edited);
+        }
+        for command in ["", "d", "/draft", "?draft", "d/draft", "c?draft", "y/draft"] {
+            let mut composer = vim_composer("existing draft");
+            let before = composer.draft_snapshot();
+            keys(&mut composer, command);
+            composer.append_recovered_drafts(&answer);
+            assert_eq!(
+                (
+                    composer.current_text_with_pending(),
+                    composer.draft.textarea.vim_query().is_some(),
+                    composer.draft.textarea.is_vim_operator_pending(),
+                ),
+                (format!("existing draft\n\n{answer}"), false, false)
+            );
+            let after = composer.draft_snapshot();
+            keys(&mut composer, "u");
+            assert_eq!(composer.draft_snapshot(), before);
+            ctrl_r(&mut composer);
+            assert_eq!(composer.draft_snapshot(), after);
+        }
+
+        let mut composer = vim_composer("abc");
+        composer
+            .history
+            .record_local_submission(HistoryEntry::new("archived prompt".into()));
+        keys(&mut composer, "x");
+        let before = composer.draft_snapshot();
+        keys(&mut composer, "d");
+        ctrl_r(&mut composer);
+        keys(&mut composer, "archive");
+        composer.edit_stored_draft(|composer| composer.append_recovered_drafts(&answer));
+        assert_eq!(composer.current_text(), "archived prompt");
+        assert!(composer.history_search_active());
+        escape(&mut composer);
+        assert_eq!(
+            composer.current_text_with_pending(),
+            format!("bc\n\n{answer}")
+        );
+        let after = composer.draft_snapshot();
+        keys(&mut composer, "u");
+        assert_eq!(composer.draft_snapshot(), before);
+        ctrl_r(&mut composer);
+        assert_eq!(composer.draft_snapshot(), after);
+    }
+    for command in ["!echo", "/diff"] {
+        let mut composer = vim_composer(command);
+        let before = composer.draft_snapshot();
+        composer.append_recovered_drafts("answer");
+        assert_eq!(composer.current_text(), format!("\\{command}\n\nanswer"));
+        keys(&mut composer, "u");
+        assert_eq!(composer.draft_snapshot(), before);
+    }
+    let mut composer = vim_composer("echo");
+    composer.draft.is_bash_mode = true;
+    let before = composer.draft_snapshot();
+    composer.append_recovered_drafts("answer");
+    assert_eq!(composer.current_text(), "\\!echo\n\nanswer");
+    keys(&mut composer, "u");
+    assert_eq!(composer.draft_snapshot(), before);
+    snapshot_composer_state_with_width(
+        "recovered_answer_cancels_vim_search",
+        /*width*/ 40,
+        /*enhanced_keys_supported*/ false,
+        |composer| {
+            composer.set_disable_paste_burst(/*disabled*/ true);
+            composer.set_text_content("existing draft".into(), Vec::new(), Vec::new());
+            composer.set_vim_enabled(/*enabled*/ true);
+            keys(composer, "d/draft");
+            composer.append_recovered_drafts("answer");
+        },
+    );
 }
 
 #[test]
@@ -480,7 +591,13 @@ fn undo_and_redo_restore_deleted_image_attachment() {
     ctrl_r(&mut composer);
     escape(&mut composer);
     let _ = composer.handle_key_event(KeyEvent::from(KeyCode::Backspace));
-    assert_eq!(composer.draft_snapshot(), before);
+    assert_eq!(
+        composer.draft_snapshot(),
+        ComposerDraftSnapshot {
+            vim_normal_mode: false,
+            ..before.clone()
+        }
+    );
     escape(&mut composer);
     composer.draft.textarea.set_cursor("alpha ".len());
     keys(&mut composer, "x");
@@ -491,6 +608,25 @@ fn undo_and_redo_restore_deleted_image_attachment() {
     ctrl_r(&mut composer);
     assert_eq!(composer.current_text(), "alpha ");
     assert!(composer.local_image_paths().is_empty());
+}
+
+#[test]
+fn vim_replace_yank_preserves_existing_image_and_recovers_atomically() {
+    let mut composer = vim_composer("");
+    keys(&mut composer, "i");
+    composer.attach_image(PathBuf::from("killed.png"));
+    composer.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    composer.attach_image(PathBuf::from("existing.png"));
+    keys(&mut composer, "abcdefghij");
+    let before = (composer.current_text(), composer.local_image_paths());
+    escape(&mut composer);
+    keys(&mut composer, "0R");
+    composer.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    composer.handle_key_event(KeyEvent::from(KeyCode::Backspace));
+    assert_eq!(
+        (composer.current_text(), composer.local_image_paths()),
+        before
+    );
 }
 
 #[test]
@@ -571,6 +707,17 @@ fn vim_replace_backspace_restores_characters_in_new_slash_element() {
                 );
             }
         },
+    );
+}
+
+#[test]
+fn vim_replace_delete_backward_restores_characters_hidden_by_prompt_prefixes() {
+    let mut composer = vim_composer("ébc");
+    keys(&mut composer, "R!");
+    let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL));
+    assert_eq!(
+        (composer.current_text(), composer.current_cursor()),
+        ("ébc".to_owned(), 0)
     );
 }
 
@@ -662,4 +809,67 @@ fn external_editor_import_preserves_replace_backspace_recovery() {
         (textarea.text(), textarea.vim_mode_label()),
         ("bc", Some("Replace"))
     );
+}
+
+#[test]
+fn repeated_deletion_leaves_exposed_bang_literal() {
+    let mut composer = vim_composer("Yes! I agree.");
+    keys(&mut composer, "x..");
+    let literal = composer.snapshot_draft();
+    keys(&mut composer, "u");
+    ctrl_r(&mut composer);
+    assert_eq!(composer.snapshot_draft(), literal);
+    assert_eq!(composer.current_text(), "! I agree.");
+    assert!(!composer.draft.is_bash_mode);
+    keys(&mut composer, "x");
+    assert_eq!(composer.current_text(), " I agree.");
+}
+
+#[test]
+fn cancelled_history_search_preserves_literal_bang_draft() {
+    let mut composer = vim_composer("x!echo hello");
+    composer.set_vim_enabled(/*enabled*/ false);
+    composer.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+    let literal = composer.snapshot_draft();
+    ctrl_r(&mut composer);
+    escape(&mut composer);
+    assert_eq!(composer.snapshot_draft(), literal);
+    assert_eq!(
+        composer
+            .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .0,
+        InputResult::Queued {
+            text: "!echo hello".to_owned(),
+            text_elements: Vec::new(),
+            action: super::super::QueuedInputAction::Literal,
+            pending_pastes: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn editor_actions_insert_shell_prefixes() {
+    let mut composer = vim_composer("x!echo hi");
+    composer.set_vim_enabled(/*enabled*/ false);
+    for (code, modifiers) in [
+        (KeyCode::Right, KeyModifiers::NONE),
+        (KeyCode::Char('k'), KeyModifiers::CONTROL),
+        (KeyCode::Backspace, KeyModifiers::NONE),
+        (KeyCode::Char('y'), KeyModifiers::CONTROL),
+    ] {
+        composer.handle_key_event(KeyEvent::new(code, modifiers));
+    }
+    assert_eq!(
+        (composer.current_text(), composer.draft.is_bash_mode),
+        ("!echo hi".to_owned(), true)
+    );
+
+    for (commands, expected) in [("r!", "!xecho hi"), ("lr!0.", "!!echo hi")] {
+        let mut composer = vim_composer("xxecho hi");
+        keys(&mut composer, commands);
+        assert_eq!(
+            (composer.current_text(), composer.draft.is_bash_mode),
+            (expected.to_owned(), true)
+        );
+    }
 }

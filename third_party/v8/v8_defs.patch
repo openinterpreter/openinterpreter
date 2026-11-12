@@ -1,0 +1,260 @@
+# What: adapt the pinned V8 rule helpers to Codex's engine configuration.
+# Scope: bazel/defs.bzl and bazel/config/v8-target-cpu.bzl; the engine graph
+# and dependency choices live in third_party/v8/engine.BUILD.bazel. ABI,
+# runtime and CPU settings are internal outputs of artifact_profile.bzl.
+# Preserve Chromium libc++ headers/runtime, Clang Windows driver flags, and
+# the Windows target-ABI snapshot tool. The optional
+# Linux backtrace link flag is omitted because that feature is fixed off.
+# On a V8 pin change, review these hunks and build the native canary matrix.
+
+diff --git a/orig/v8-15.2.124.1/bazel/defs.bzl b/mod/v8-15.2.124.1/bazel/defs.bzl
+--- a/orig/v8-15.2.124.1/bazel/defs.bzl
++++ b/mod/v8-15.2.124.1/bazel/defs.bzl
+@@ -8,4 +8,4 @@
+
+ load("@rules_cc//cc:cc_library.bzl", "cc_library")
+-load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
++load("@@//third_party/v8:binary.bzl", cc_binary = "v8_cc_binary")
+ load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
+@@ -19,7 +19,7 @@
+
+ _create_option_flag = rule(
+     implementation = _options_impl,
+-    build_setting = config.bool(flag = True),
++    build_setting = config.bool(flag = False),
+     attrs = {
+         "scope": attr.string(),
+     },
+@@ -27,7 +27,7 @@
+
+ _create_option_string = rule(
+     implementation = _options_impl,
+-    build_setting = config.string(flag = True),
++    build_setting = config.string(flag = False),
+     attrs = {
+         "scope": attr.string(),
+     },
+@@ -42,12 +42,30 @@
+ )
+
+ def v8_flag(name, default = False):
+-    _create_option_flag(name = name, build_setting_default = default, scope = "universal")
+-    native.config_setting(name = "is_" + name, flag_values = {name: "True"})
+-    native.config_setting(name = "is_not_" + name, flag_values = {name: "False"})
+-
+-def v8_string(name, default = ""):
+-    _create_option_string(name = name, build_setting_default = default, scope = "universal")
++    _create_option_flag(
++        name = name,
++        build_setting_default = default,
++        scope = "universal",
++        visibility = ["//visibility:public"],
++    )
++    native.config_setting(
++        name = "is_" + name,
++        flag_values = {name: "True"},
++        visibility = ["//visibility:public"],
++    )
++    native.config_setting(
++        name = "is_not_" + name,
++        flag_values = {name: "False"},
++        visibility = ["//visibility:public"],
++    )
++
++def v8_string(name, default = "", visibility = None):
++    _create_option_string(
++        name = name,
++        build_setting_default = default,
++        scope = "universal",
++        visibility = visibility,
++    )
+
+ def v8_int(name, default = 0):
+     _create_option_int(name = name, build_setting_default = default, scope = "universal")
+@@ -106,7 +124,18 @@
+
+ def _default_args():
+     return struct(
+-        deps = [":define_flags", "@libcxx//:libc++"],
++        deps = [":define_flags"] + select({
++            "@v8//:is_v8_use_rusty_v8_custom_libcxx": [
++                "@@//third_party/v8:rusty_v8_custom_libcxx_headers",
++                "@@//third_party/v8:rusty_v8_custom_libcxx_runtime",
++            ],
++            "//conditions:default": [],
++        }) + select({
++            "@@//third_party/v8:platform_windows_msvc": [
++                "@@//third_party/v8:native_windows_compiler_builtins",
++            ],
++            "//conditions:default": [],
++        }),
+         defines = select({
+             "@v8//bazel/config:is_windows": [
+                 "UNICODE",
+@@ -136,11 +165,27 @@
+             ],
+             "//conditions:default": [],
+         }) + select({
+-            "@v8//bazel/config:is_clang": [
+-                "-Wno-invalid-offsetof",
+-                "-Wno-deprecated-this-capture",
+-                "-Wno-deprecated-declarations",
+-                "-std=c++20",
++            "@@//third_party/v8:use_rusty_v8_custom_libcxx_native_windows": [
++                "/D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS",
++                "/D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE",
++                "/D_LIBCPP_INSTRUMENTED_WITH_ASAN=0",
++            ],
++            "@v8//:is_v8_use_rusty_v8_custom_libcxx": [
++                "-nostdinc++",
++                "-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS",
++                "-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE",
++                "-D_LIBCPP_INSTRUMENTED_WITH_ASAN=0",
++                "-D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS",
++            ],
++            "//conditions:default": [],
++        }) + select({
++            "@@//third_party/v8:platform_windows_msvc": [
++                "/std:c++20",
++                "/Zc:__cplusplus",
++                "/clang:-fconstexpr-steps=2000000",
++                "/clang:-Wno-deprecated-declarations",
++                "/clang:-Wno-deprecated-this-capture",
++                "/clang:-Wno-invalid-offsetof",
+             ],
+             "@v8//bazel/config:is_gcc": [
+                 "-Wno-extra",
+@@ -161,9 +206,17 @@
+                 "-std=gnu++2a",
+             ],
+             "@v8//bazel/config:is_windows": [
+-                "/std:c++20",
+-            ],
+-            "//conditions:default": [],
++                "-Wno-invalid-offsetof",
++                "-Wno-deprecated-this-capture",
++                "-Wno-deprecated-declarations",
++                "-std=c++20",
++            ],
++            "//conditions:default": [
++                "-Wno-invalid-offsetof",
++                "-Wno-deprecated-this-capture",
++                "-Wno-deprecated-declarations",
++                "-std=c++20",
++            ],
+         }) + select({
+             "@v8//bazel/config:is_gcc_fastbuild": [
+                 # Non-debug builds without optimizations fail because
+@@ -186,16 +239,18 @@
+         }),
+         includes = ["include"],
+         linkopts = select({
+-            "@v8//bazel/config:is_windows": [
++            "@@//third_party/v8:platform_windows_msvc": [
+                 "Winmm.lib",
+                 "DbgHelp.lib",
+                 "Advapi32.lib",
+             ],
++            "@v8//bazel/config:is_windows": [
++                "-lwinmm",
++                "-ldbghelp",
++                "-ladvapi32",
++            ],
+             "@v8//bazel/config:is_macos": ["-pthread"],
+-            "//conditions:default": ["-Wl,--no-as-needed -ldl -latomic -pthread"],
+-        }) + select({
+-            ":should_add_rdynamic": ["-rdynamic"],
+-            "//conditions:default": [],
++            "//conditions:default": ["-Wl,--no-as-needed -ldl -pthread"],
+         }),
+     )
+
+@@ -466,6 +521,12 @@
+ def _mksnapshot(ctx):
+     prefix = ctx.attr.prefix
+     suffix = ctx.attr.suffix
++
++    # Windows cross-builds use Linux for the exec configuration, but the
++    # snapshot generator must match the target ABI and run on the Windows
++    # runner. Action strategies only choose where an action runs; they cannot
++    # change this executable from the exec to the target configuration.
++    tool = ctx.executable.target_tool if ctx.attr.target_os == "win" else ctx.executable.tool
+     outs = [
+         ctx.actions.declare_file(prefix + "/snapshot" + suffix + ".cc"),
+         ctx.actions.declare_file(prefix + "/embedded" + suffix + ".S"),
+@@ -483,9 +544,22 @@
+             "--embedded_src",
+             outs[1].path,
+         ] + ctx.attr.args,
+-        executable = ctx.executable.tool,
++        executable = tool,
+         progress_message = "Running mksnapshot",
+     )
++    if ctx.attr.inline_asm_converter:
++        # The installed Windows toolchain sends .S files to MASM. V8 provides
++        # this conversion for clang-cl so its generated assembly is compiled
++        # as C++, using the same target flags as the rest of the engine.
++        embedded_cc = ctx.actions.declare_file(prefix + "/embedded" + suffix + ".cc")
++        ctx.actions.run(
++            executable = ctx.attr.inline_asm_converter[DefaultInfo].files_to_run,
++            inputs = [outs[1]],
++            outputs = [embedded_cc],
++            arguments = [outs[1].path, embedded_cc.path],
++            mnemonic = "V8NativeWindowsInlineAssembly",
++        )
++        outs = [outs[0], embedded_cc]
+     return [DefaultInfo(files = depset(outs))]
+
+ _v8_mksnapshot = rule(
+@@ -498,6 +572,13 @@
+             executable = True,
+             cfg = "exec",
+         ),
++        "target_tool": attr.label(
++            mandatory = True,
++            allow_files = True,
++            executable = True,
++            cfg = "target",
++        ),
++        "inline_asm_converter": attr.label(executable = True, cfg = "exec"),
+         "target_os": attr.string(mandatory = True),
+         "prefix": attr.string(mandatory = True),
+         "suffix": attr.string(mandatory = True),
+@@ -511,6 +592,11 @@
+         args = args,
+         prefix = "noicu",
+         tool = ":noicu/mksnapshot" + suffix,
++        target_tool = ":noicu/mksnapshot" + suffix,
++        inline_asm_converter = select({
++            "@@//third_party/v8:platform_windows_msvc": ":native_windows_inline_asm",
++            "//conditions:default": None,
++        }),
+         suffix = suffix,
+         target_os = select({
+             "@v8//bazel/config:is_macos": "mac",
+@@ -523,6 +609,11 @@
+         args = args,
+         prefix = "icu",
+         tool = ":icu/mksnapshot" + suffix,
++        target_tool = ":icu/mksnapshot" + suffix,
++        inline_asm_converter = select({
++            "@@//third_party/v8:platform_windows_msvc": ":native_windows_inline_asm",
++            "//conditions:default": None,
++        }),
+         suffix = suffix,
+         target_os = select({
+             "@v8//bazel/config:is_macos": "mac",
+diff --git a/orig/v8-15.2.124.1/bazel/config/v8-target-cpu.bzl b/mod/v8-15.2.124.1/bazel/config/v8-target-cpu.bzl
+--- a/orig/v8-15.2.124.1/bazel/config/v8-target-cpu.bzl
++++ b/mod/v8-15.2.124.1/bazel/config/v8-target-cpu.bzl
+@@ -24,8 +24,8 @@
+
+ v8_target_cpu = rule(
+     implementation = _host_target_cpu_impl,
+-    build_setting = config.string(flag = True),
+-    doc = "CPU that V8 will generate code for.",
++    build_setting = config.string(flag = False),
++    doc = "Internal CPU that V8 generates code for; set by the artifact transition.",
+     attrs = {
+         "scope": attr.string(),
+     },

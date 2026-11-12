@@ -130,7 +130,7 @@ fn build_http_client_inner(
                     key_location.display()
                 ))
             })?;
-            builder = builder.identity(identity).https_only(true);
+            builder = builder.use_rustls_tls().identity(identity).https_only(true);
         }
         (Some(_), None) | (None, Some(_)) => {
             return Err(config_error(
@@ -146,23 +146,23 @@ fn build_http_client_inner(
 }
 
 pub(crate) fn build_async_http_client(
+    factory: &codex_http_client::HttpClientFactory,
     tls: Option<&OtelTlsConfig>,
     timeout_var: &str,
-) -> Result<reqwest::Client, Box<dyn Error>> {
-    let mut builder = reqwest::Client::builder().timeout(resolve_otlp_timeout(timeout_var));
+) -> Result<crate::network_policy::RuntimeHttpClient, Box<dyn Error>> {
+    let mut config = codex_http_client::HttpClientTlsConfig::default();
 
     if let Some(tls) = tls {
         if let Some(path) = tls.ca_certificate.as_ref() {
             let (pem, location) = read_bytes(path)?;
-            let certificate = ReqwestCertificate::from_pem(pem.as_slice()).map_err(|error| {
-                config_error(format!(
-                    "failed to parse certificate {}: {error}",
-                    location.display()
-                ))
-            })?;
-            builder = builder
-                .tls_built_in_root_certs(false)
-                .add_root_certificate(certificate);
+            config = config
+                .with_root_certificate_pem(pem.as_slice())
+                .map_err(|error| {
+                    config_error(format!(
+                        "failed to parse certificate {}: {error}",
+                        location.display()
+                    ))
+                })?;
         }
 
         match (&tls.client_certificate, &tls.client_private_key) {
@@ -170,14 +170,15 @@ pub(crate) fn build_async_http_client(
                 let (mut cert_pem, cert_location) = read_bytes(cert_path)?;
                 let (key_pem, key_location) = read_bytes(key_path)?;
                 cert_pem.extend_from_slice(key_pem.as_slice());
-                let identity = ReqwestIdentity::from_pem(cert_pem.as_slice()).map_err(|error| {
-                    config_error(format!(
-                        "failed to parse client identity using {} and {}: {error}",
-                        cert_location.display(),
-                        key_location.display()
-                    ))
-                })?;
-                builder = builder.identity(identity).https_only(true);
+                config = config
+                    .with_client_identity_pem(cert_pem.as_slice())
+                    .map_err(|error| {
+                        config_error(format!(
+                            "failed to parse client identity using {} and {}: {error}",
+                            cert_location.display(),
+                            key_location.display()
+                        ))
+                    })?;
             }
             (Some(_), None) | (None, Some(_)) => {
                 return Err(config_error(
@@ -188,9 +189,13 @@ pub(crate) fn build_async_http_client(
         }
     }
 
-    builder
-        .build()
-        .map_err(|error| Box::new(error) as Box<dyn Error>)
+    Ok(crate::network_policy::RuntimeHttpClient {
+        client: codex_http_client::HttpClientBuilder::new()
+            .without_request_logging()
+            .build_with_tls(factory, codex_http_client::ClientRouteClass::Other, config),
+        timeout: resolve_otlp_timeout(timeout_var),
+        runtime: tokio::runtime::Handle::try_current()?,
+    })
 }
 
 pub(crate) fn resolve_otlp_timeout(signal_var: &str) -> Duration {
@@ -229,7 +234,13 @@ fn config_error(message: impl Into<String>) -> Box<dyn Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_http_client::HttpClientFactory;
+    use codex_http_client::OutboundProxyPolicy;
     use pretty_assertions::assert_eq;
+    use rcgen::CertifiedKey;
+    use rcgen::generate_simple_self_signed;
+    use std::fs;
+    use tempfile::TempDir;
     use tokio::runtime::Builder;
 
     #[test]
@@ -268,5 +279,52 @@ mod tests {
         });
 
         assert!(client.is_ok());
+    }
+
+    #[test]
+    fn build_http_client_accepts_pem_client_identity() {
+        let (_temp_dir, tls) = write_test_mtls_config();
+
+        build_http_client(&tls, OTEL_EXPORTER_OTLP_TIMEOUT)
+            .expect("blocking HTTP client should accept PEM client identity");
+    }
+
+    #[tokio::test]
+    async fn build_async_http_client_accepts_pem_client_identity() {
+        let (_temp_dir, tls) = write_test_mtls_config();
+
+        let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
+        build_async_http_client(&factory, Some(&tls), OTEL_EXPORTER_OTLP_TIMEOUT)
+            .expect("async HTTP client should accept PEM client identity");
+    }
+
+    fn write_test_mtls_config() -> (TempDir, OtelTlsConfig) {
+        let temp_dir = tempfile::tempdir().expect("temporary TLS fixture directory");
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(vec!["localhost".to_string()])
+                .expect("test certificate should generate");
+        let certificate_path = temp_dir.path().join("client.pem");
+        let private_key_path = temp_dir.path().join("client-key.pem");
+        fs::write(&certificate_path, cert.pem()).expect("client certificate should write");
+        fs::write(&private_key_path, signing_key.serialize_pem())
+            .expect("client private key should write");
+
+        (
+            temp_dir,
+            OtelTlsConfig {
+                ca_certificate: Some(
+                    AbsolutePathBuf::from_absolute_path(&certificate_path)
+                        .expect("CA certificate path should be absolute"),
+                ),
+                client_certificate: Some(
+                    AbsolutePathBuf::from_absolute_path(&certificate_path)
+                        .expect("client certificate path should be absolute"),
+                ),
+                client_private_key: Some(
+                    AbsolutePathBuf::from_absolute_path(&private_key_path)
+                        .expect("client private key path should be absolute"),
+                ),
+            },
+        )
     }
 }

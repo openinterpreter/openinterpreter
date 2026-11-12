@@ -12,6 +12,7 @@ expression: status_line_popup_snapshot(&mut chat)
   [x] project-name          Project name (omitted when unavailable)
   [x] git-branch            Current Git branch (omitted when unavailable)
   [x] thread-title          Current thread title, or thread identifier when unnamed
+  [x] daybreak              Whether Daybreak is enabled for this thread
   [ ] model                 Current model name
   [ ] model-with-reasoning  Current model name with reasoning level
   [ ] reasoning             Current reasoning level

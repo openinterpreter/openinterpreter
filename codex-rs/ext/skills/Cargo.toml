@@ -13,6 +13,7 @@ doctest = false
 workspace = true
 
 [dependencies]
+blake3 = { workspace = true }
 codex-analytics = { workspace = true }
 codex-config = { workspace = true }
 codex-exec-server = { workspace = true }
@@ -31,19 +32,21 @@ futures = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-serde_yaml = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 toml = { workspace = true }
 tracing = { workspace = true }
-url = { workspace = true }
 
 [dev-dependencies]
 assert_matches = { workspace = true }
+codex-attachment-store = { workspace = true }
+codex-core-plugin-common = { workspace = true }
 codex-models-manager = { workspace = true }
+codex-protocol-test-support = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 dunce = { workspace = true }
 insta = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tracing-subscriber = { workspace = true }

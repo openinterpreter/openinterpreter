@@ -87,18 +87,21 @@ impl codex_code_mode::CodeModeSession for MissingCellCodeModeSession {
     fn wait<'a>(
         &'a self,
         request: codex_code_mode::WaitRequest,
+        _preempt: Option<CancellationToken>,
     ) -> codex_code_mode::CodeModeSessionResultFuture<'a, codex_code_mode::WaitOutcome> {
-        self.terminate(request.cell_id)
+        self.terminate(request.cell_id.into())
     }
 
     fn terminate<'a>(
         &'a self,
-        cell_id: codex_code_mode::CellId,
+        request: codex_code_mode::TerminateRequest,
     ) -> codex_code_mode::CodeModeSessionResultFuture<'a, codex_code_mode::WaitOutcome> {
         Box::pin(async move {
+            let cell_id = request.cell_id;
             Ok(codex_code_mode::WaitOutcome::MissingCell(
                 codex_code_mode::RuntimeResponse::Result {
                     code_mode_host_duration: None,
+                    result_buffered_for: std::time::Duration::ZERO,
                     error_text: Some(format!("exec cell {cell_id} not found")),
                     cell_id,
                     content_items: Vec::new(),
@@ -245,7 +248,7 @@ async fn dispatch_lifecycle_trace_records_incompatible_payload_failures() -> any
     attach_test_trace(&mut session, &turn, temp.path())?;
 
     let registry = ToolRegistry::with_handler_for_test(Arc::new(TestHandler {
-        tool_name: codex_tools::ToolName::plain("test_tool"),
+        tool_name: codex_tools::ToolName::plain(codex_code_mode::PUBLIC_TOOL_NAME),
     }));
     let session = Arc::new(session);
     let turn = Arc::new(turn);
@@ -256,7 +259,7 @@ async fn dispatch_lifecycle_trace_records_incompatible_payload_failures() -> any
                 session,
                 turn,
                 "incompatible-call",
-                codex_tools::ToolName::plain("test_tool"),
+                codex_tools::ToolName::plain(codex_code_mode::PUBLIC_TOOL_NAME),
                 ToolCallSource::Direct,
                 ToolPayload::Custom {
                     input: "{}".to_string(),
@@ -271,6 +274,7 @@ async fn dispatch_lifecycle_trace_records_incompatible_payload_failures() -> any
     let tool_call = &replayed.tool_calls["incompatible-call"];
     assert_eq!(tool_call.execution.status, ExecutionStatus::Failed);
     assert!(tool_call.raw_result_payload_id.is_some());
+    assert!(replayed.code_cells.is_empty());
 
     Ok(())
 }
@@ -287,7 +291,9 @@ async fn missing_code_mode_wait_traces_only_the_wait_tool_call() -> anyhow::Resu
     );
     attach_test_trace(&mut session, &turn, temp.path())?;
 
-    let registry = ToolRegistry::with_handler_for_test(Arc::new(CodeModeWaitHandler));
+    let registry = ToolRegistry::with_handler_for_test(Arc::new(CodeModeWaitHandler::new(
+        /*description_override*/ None, /*parameters_override*/ None,
+    )));
     let session = Arc::new(session);
     let turn = Arc::new(turn);
 
@@ -361,6 +367,8 @@ fn test_invocation_with_payload(
         tool_name,
         source,
         payload,
+        native_call: None,
+        environments: Default::default(),
     }
 }
 

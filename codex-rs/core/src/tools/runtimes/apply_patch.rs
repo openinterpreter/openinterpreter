@@ -15,6 +15,7 @@ use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::executor_windows_sandbox_selection;
 use codex_apply_patch::AppliedPatchDelta;
+use codex_apply_patch::AppliedPatchFileChange;
 use codex_apply_patch::ApplyPatchAction;
 use codex_apply_patch::ApplyPatchOptions;
 use codex_exec_server::FileSystemSandboxContext;
@@ -52,6 +53,20 @@ pub struct ApplyPatchRequest {
     pub permissions_preapproved: bool,
 }
 
+impl ApplyPatchRequest {
+    pub(crate) fn approval_action(&self, call_id: &str) -> ApprovalAction {
+        ApprovalAction::ApplyPatch {
+            id: call_id.to_string(),
+            environment_id: self.turn_environment.selection.environment_id.clone(),
+            cwd: self.action.cwd.clone(),
+            files: self.file_paths.clone(),
+            patch: self.action.patch.clone(),
+            changes: Arc::clone(&self.changes),
+            permissions_preapproved: self.permissions_preapproved,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct ApplyPatchRuntime {
     committed_delta: AppliedPatchDelta,
@@ -70,18 +85,6 @@ impl ApplyPatchRuntime {
 
     pub fn committed_delta(&self) -> &AppliedPatchDelta {
         &self.committed_delta
-    }
-
-    fn build_approval_action(req: &ApplyPatchRequest, call_id: &str) -> ApprovalAction {
-        ApprovalAction::ApplyPatch {
-            id: call_id.to_string(),
-            environment_id: req.turn_environment.selection.environment_id.clone(),
-            cwd: req.action.cwd.clone(),
-            files: req.file_paths.clone(),
-            patch: req.action.patch.clone(),
-            changes: Arc::clone(&req.changes),
-            permissions_preapproved: req.permissions_preapproved,
-        }
     }
 
     fn file_system_sandbox_context_for_attempt(
@@ -128,7 +131,7 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
         req: &ApplyPatchRequest,
         call_id: &str,
     ) -> std::io::Result<ApprovalAction> {
-        Ok(ApplyPatchRuntime::build_approval_action(req, call_id))
+        Ok(req.approval_action(call_id))
     }
 
     fn wants_no_sandbox_approval(&self, policy: AskForApproval) -> bool {
@@ -158,7 +161,7 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
     }
 
     fn uses_executor_managed_process_sandbox(&self, req: &ApplyPatchRequest) -> bool {
-        req.turn_environment.environment.is_remote()
+        req.turn_environment.environment().is_remote()
     }
 
     fn sandbox_cwd<'a>(&self, req: &'a ApplyPatchRequest) -> Option<&'a PathUri> {
@@ -169,17 +172,16 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
         &mut self,
         req: &ApplyPatchRequest,
         attempt: &SandboxAttempt<'_>,
-        _ctx: &ToolCtx,
+        ctx: &ToolCtx,
     ) -> Result<ApplyPatchRuntimeOutput, ToolError> {
         let started_at = Instant::now();
-        let fs = req.turn_environment.environment.get_filesystem();
+        let fs = req.turn_environment.environment().get_filesystem();
         let sandbox = Self::file_system_sandbox_context_for_attempt(req, attempt);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let result = codex_apply_patch::apply_patch_with_options(
             &req.action.patch,
             ApplyPatchOptions {
-                update_file_mode: req.action.update_file_mode(),
                 // Only reject links when an otherwise-required sandbox was bypassed.
                 // Executor-managed sandboxes can have SandboxType::None.
                 follow_symlinks: attempt.sandbox_requested
@@ -204,6 +206,28 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
             Ok(delta) => delta,
             Err(failure) => failure.into_parts().1,
         };
+        // Count committed paths, including changes made before a later patch failure.
+        for change in delta.changes() {
+            let move_path = match &change.change {
+                AppliedPatchFileChange::Update { move_path, .. } => move_path.as_ref(),
+                AppliedPatchFileChange::Add { .. } | AppliedPatchFileChange::Delete { .. } => None,
+            };
+            for path in
+                std::iter::once(&change.path).chain(move_path.filter(|path| *path != &change.path))
+            {
+                if let Some(filename @ ("agents.md" | "agents.override.md")) = path
+                    .basename()
+                    .map(|name| name.to_ascii_lowercase())
+                    .as_deref()
+                {
+                    ctx.step_context.session_telemetry.counter(
+                        "codex.agents_md.edit",
+                        /*inc*/ 1,
+                        &[("filename", filename)],
+                    );
+                }
+            }
+        }
         self.committed_delta.append(delta);
         let output = ExecToolCallOutput {
             exit_code,

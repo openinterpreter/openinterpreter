@@ -1,12 +1,13 @@
 ---
 source: tui/src/bottom_pane/feedback_view.rs
-assertion_line: 728
 expression: rendered
 ---
-Upload logs?
+Include logs and session history?
 
-The following files will be sent:
+Saving a ZIP does not submit feedback to OpenAI.
+Files may contain prompts, commands, and tool output:
   • codex-logs.log
+  • client-logs.txt (if available)
   • codex-doctor-report.json
   • codex-apps-tools-cache.json (if available)
   • codex-app-directory-cache.json (if available)

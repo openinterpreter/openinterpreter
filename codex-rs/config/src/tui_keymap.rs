@@ -6,8 +6,8 @@
 //!
 //! Responsibilities:
 //!
-//! 1. Define strongly typed config contexts/actions with unknown-field
-//!    rejection.
+//! 1. Define strongly typed config contexts/actions. Unknown fields are ignored
+//!    during deserialization and reported by the shared strict-config policy.
 //! 2. Normalize accepted key aliases into canonical names.
 //! 3. Reject malformed bindings early with user-facing diagnostics.
 //!
@@ -21,7 +21,10 @@ use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::de::Error as SerdeError;
+use serde::de::SeqAccess;
+use serde::de::Visitor;
 use std::collections::BTreeMap;
+use std::fmt;
 
 /// Highest function key supported by portable TUI keymap configuration.
 pub const MAX_FUNCTION_KEY: u8 = 24;
@@ -67,11 +70,50 @@ impl<'de> Deserialize<'de> for KeybindingSpec {
 /// An empty list explicitly unbinds the action in that scope. Because an
 /// explicit empty list is still a configured value, runtime resolution must not
 /// fall through to global or built-in defaults for that action.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[derive(Serialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
 #[serde(untagged)]
 pub enum KeybindingsSpec {
     One(KeybindingSpec),
     Many(Vec<KeybindingSpec>),
+}
+
+impl<'de> Deserialize<'de> for KeybindingsSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Dispatch by value type so untagged enum matching cannot hide validation errors.
+        struct KeybindingsVisitor;
+
+        impl<'de> Visitor<'de> for KeybindingsVisitor {
+            type Value = KeybindingsSpec;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a keybinding string or a list of keybinding strings")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: SerdeError,
+            {
+                let normalized = normalize_keybinding_spec(value).map_err(E::custom)?;
+                Ok(KeybindingsSpec::One(KeybindingSpec(normalized)))
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut bindings = Vec::new();
+                while let Some(binding) = sequence.next_element::<KeybindingSpec>()? {
+                    bindings.push(binding);
+                }
+                Ok(KeybindingsSpec::Many(bindings))
+            }
+        }
+
+        deserializer.deserialize_any(KeybindingsVisitor)
+    }
 }
 
 impl KeybindingsSpec {
@@ -89,9 +131,44 @@ impl KeybindingsSpec {
 
 /// Global keybindings. These are used when a context does not define an override.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
-#[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct TuiGlobalKeymap {
+    /// Prefix for persistent, context-aware shortcut menus.
+    pub leader: Option<KeybindingsSpec>,
+    /// Change where a new conversation runs.
+    pub change_host: Option<KeybindingsSpec>,
+    /// Focus the main conversation composer.
+    pub focus_main_composer: Option<KeybindingsSpec>,
+    /// Focus the side conversation, or hide it when already focused.
+    pub focus_sidebar_content: Option<KeybindingsSpec>,
+    /// Open the sidebar tab chooser.
+    pub focus_sidebar_tabs: Option<KeybindingsSpec>,
+    /// Hide the focused sidebar pane.
+    pub hide_pane: Option<KeybindingsSpec>,
+    /// Close the active sidebar tab.
+    pub close_sidebar_tab: Option<KeybindingsSpec>,
+    /// Switch to the previous sidebar tab.
+    pub sidebar_up: Option<KeybindingsSpec>,
+    /// Switch to the next sidebar tab.
+    pub sidebar_down: Option<KeybindingsSpec>,
+    /// Focus the parent conversation.
+    pub focus_pane_left: Option<KeybindingsSpec>,
+    /// Focus the open side conversation.
+    pub focus_pane_right: Option<KeybindingsSpec>,
+    /// Minimize the focused pane width.
+    pub minimize_pane_width: Option<KeybindingsSpec>,
+    /// Maximize the focused pane width.
+    pub maximize_pane_width: Option<KeybindingsSpec>,
+    /// Equalize visible pane widths.
+    pub equalize_pane_widths: Option<KeybindingsSpec>,
+    /// Enter keyboard resize mode for visible dividers.
+    pub resize_panes: Option<KeybindingsSpec>,
+    /// Move the divider left when the side pane has focus.
+    pub move_divider_left: Option<KeybindingsSpec>,
+    /// Move the divider right when the side pane has focus.
+    pub move_divider_right: Option<KeybindingsSpec>,
+    /// Zoom or restore the focused pane.
+    pub toggle_pane_zoom: Option<KeybindingsSpec>,
     /// Open the shared agent-session overview.
     pub open_agents: Option<KeybindingsSpec>,
     /// Open the transcript overlay.
@@ -124,7 +201,6 @@ pub struct TuiGlobalKeymap {
 
 /// Chat context keybindings.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
-#[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct TuiChatKeymap {
     /// Start or stop a voice conversation.
@@ -151,7 +227,6 @@ pub struct TuiChatKeymap {
 
 /// Composer context keybindings. These override corresponding `global` actions.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
-#[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct TuiComposerKeymap {
     /// Submit the current composer draft.
@@ -168,7 +243,6 @@ pub struct TuiComposerKeymap {
 
 /// Editor context keybindings for text editing inside text areas.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
-#[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct TuiEditorKeymap {
     /// Insert a newline in the editor.
@@ -342,7 +416,6 @@ pub struct TuiVimOperatorKeymap {
 
 /// Search motions shared by Vim normal and operator-pending input.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
-#[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct TuiVimSearchKeymap {
     /// Search forward in the active buffer (`/`).
@@ -357,7 +430,6 @@ pub struct TuiVimSearchKeymap {
 
 /// Vim text-object keybindings for modal editing inside text areas.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
-#[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct TuiVimTextObjectKeymap {
     /// Text object: word.
@@ -382,7 +454,6 @@ pub struct TuiVimTextObjectKeymap {
 
 /// Pager context keybindings for transcript and static overlays.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
-#[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct TuiPagerKeymap {
     /// Scroll up by one row.
@@ -411,7 +482,6 @@ pub struct TuiPagerKeymap {
 
 /// List selection context keybindings for popup-style selectable lists.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
-#[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct TuiListKeymap {
     /// Move list selection up.
@@ -438,7 +508,6 @@ pub struct TuiListKeymap {
 
 /// Shortcuts specific to the shared agents overview.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
-#[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct TuiAgentsKeymap {
     /// Open the session resume picker.
@@ -465,7 +534,6 @@ pub struct TuiAgentsKeymap {
 
 /// Approval overlay keybindings.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
-#[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct TuiApprovalKeymap {
     /// Open the full-screen approval details view.
@@ -497,7 +565,6 @@ pub struct TuiApprovalKeymap {
 /// `RuntimeKeymap` first so precedence, empty-list unbinding, and duplicate-key
 /// validation are applied consistently.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
-#[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct TuiKeymap {
     #[serde(default)]
@@ -528,7 +595,7 @@ pub struct TuiKeymap {
 
 /// Normalize one user-entered key spec into canonical storage format.
 ///
-/// The output always orders modifiers as `ctrl-alt-shift-<key>` when present
+/// The output always orders modifiers as `ctrl-alt-shift-super-<key>` when present
 /// and applies accepted aliases (`escape` -> `esc`, `pageup` -> `page-up`).
 /// Inputs that cannot be represented unambiguously are rejected.
 ///
@@ -546,6 +613,17 @@ fn normalize_keybinding_spec(raw: &str) -> Result<String, String> {
             "invalid keybinding `{raw}`: key chords may contain at most \
 {MAX_KEY_CHORD_STROKES} strokes (for example `ctrl-x ctrl-s`)."
         ));
+    }
+
+    if strokes[0].eq_ignore_ascii_case("leader") {
+        let [_, completion] = strokes.as_slice() else {
+            return Err(format!(
+                "invalid keybinding `{raw}`: `leader` must be followed by one key \
+(for example `leader c`)."
+            ));
+        };
+        return normalize_keybinding_stroke(completion)
+            .map(|completion| format!("leader {completion}"));
     }
 
     strokes
@@ -576,8 +654,12 @@ See the Codex keymap documentation for supported actions and examples."
         ));
     }
 
-    let mut modifiers =
-        BTreeMap::<&str, bool>::from([("ctrl", false), ("alt", false), ("shift", false)]);
+    let mut modifiers = BTreeMap::<&str, bool>::from([
+        ("ctrl", false),
+        ("alt", false),
+        ("shift", false),
+        ("super", false),
+    ]);
     let mut key_segments = Vec::new();
     let mut saw_key = false;
 
@@ -586,6 +668,7 @@ See the Codex keymap documentation for supported actions and examples."
             "ctrl" | "control" => Some("ctrl"),
             "alt" | "option" => Some("alt"),
             "shift" => Some("shift"),
+            "super" | "cmd" | "command" => Some("super"),
             _ => None,
         };
 
@@ -609,10 +692,12 @@ See the Codex keymap documentation for supported actions and examples."
         ));
     }
 
-    if key_segments
-        .iter()
-        .any(|segment| matches!(*segment, "ctrl" | "control" | "alt" | "option" | "shift"))
-    {
+    if key_segments.iter().any(|segment| {
+        matches!(
+            *segment,
+            "ctrl" | "control" | "alt" | "option" | "shift" | "super" | "cmd" | "command"
+        )
+    }) {
         return Err(format!(
             "invalid keybinding `{raw}`: modifiers must come before the key (for example `ctrl-a`)."
         ));
@@ -628,6 +713,9 @@ See the Codex keymap documentation for supported actions and examples."
     }
     if modifiers.get("shift").copied().unwrap_or(false) {
         normalized.push("shift".to_string());
+    }
+    if modifiers.get("super").copied().unwrap_or(false) {
+        normalized.push("super".to_string());
     }
     normalized.push(key);
     Ok(normalized.join("-"))
@@ -695,75 +783,6 @@ See the Codex keymap documentation for supported actions and examples."
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
-
-    #[test]
-    fn misplaced_action_at_keymap_root_is_rejected() {
-        // Actions placed directly under [tui.keymap] instead of a context
-        // sub-table (e.g. [tui.keymap.global]) must produce a parse error,
-        // not be silently ignored.
-        let toml_input = r#"
-            open_transcript = "ctrl-s"
-        "#;
-        let result = toml::from_str::<TuiKeymap>(toml_input);
-        assert!(
-            result.is_err(),
-            "expected error for action at keymap root, got: {result:?}"
-        );
-    }
-
-    #[test]
-    fn misspelled_action_under_context_is_rejected() {
-        let toml_input = r#"
-            [global]
-            open_transcrip = "ctrl-x"
-        "#;
-        let err = toml::from_str::<TuiKeymap>(toml_input)
-            .expect_err("expected unknown action under context");
-        assert!(
-            err.to_string().contains("open_transcrip"),
-            "expected error to mention misspelled field, got: {err}"
-        );
-    }
-
-    #[test]
-    fn misspelled_vim_text_object_action_is_rejected() {
-        let toml_input = r#"
-            [vim_text_object]
-            double_quotes = "shift-quote"
-        "#;
-        let err = toml::from_str::<TuiKeymap>(toml_input)
-            .expect_err("expected unknown vim text object action");
-        assert!(
-            err.to_string().contains("double_quotes"),
-            "expected error to mention misspelled field, got: {err}"
-        );
-    }
-
-    #[test]
-    fn removed_backtrack_actions_are_rejected() {
-        for (context, action) in [
-            ("global", "edit_previous_message"),
-            ("global", "confirm_edit_previous_message"),
-            ("chat", "edit_previous_message"),
-            ("chat", "confirm_edit_previous_message"),
-            ("pager", "edit_previous_message"),
-            ("pager", "edit_next_message"),
-            ("pager", "confirm_edit_message"),
-        ] {
-            let toml_input = format!(
-                r#"
-                [{context}]
-                {action} = "ctrl-x"
-                "#
-            );
-            let err = toml::from_str::<TuiKeymap>(&toml_input)
-                .expect_err("expected removed backtrack action to be rejected");
-            assert!(
-                err.to_string().contains(action),
-                "expected error to mention removed field {action}, got: {err}"
-            );
-        }
-    }
 
     #[test]
     fn action_under_global_context_is_accepted() {
@@ -848,6 +867,16 @@ mod tests {
         assert_eq!(normalize_keybinding_spec("F13"), Ok("f13".to_string()));
         assert_eq!(normalize_keybinding_spec("f24"), Ok("f24".to_string()));
         assert!(normalize_keybinding_spec("f25").is_err());
+    }
+
+    #[test]
+    fn command_modifier_aliases_normalize_to_super() {
+        for spec in ["cmd-left", "command-left", "super-left"] {
+            assert_eq!(
+                normalize_keybinding_spec(spec),
+                Ok("super-left".to_string())
+            );
+        }
     }
 }
 

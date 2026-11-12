@@ -265,6 +265,64 @@ fn config_parse_errors_are_distinguished_from_policy_and_io_failures() {
 }
 
 #[test]
+fn policy_event_excludes_real_parser_values_but_retains_safe_codes() {
+    let contents = "Authorization = \"Bearer synthetic-secret";
+    let requirements =
+        codex_config::compose_requirements([codex_config::RequirementsLayerEntry::from_toml(
+            codex_config::RequirementSource::Unknown,
+            contents,
+        )])
+        .unwrap_err();
+    let fragment = codex_config::cloud_config_layers_from_fragments(
+        [codex_config::CloudConfigFragment {
+            id: "synthetic-id".into(),
+            name: "private-name".into(),
+            contents: contents.into(),
+        }],
+        &Path::new(r"C:\CodexTest").try_into().unwrap(),
+    )
+    .unwrap_err();
+    for error in [
+        std::io::Error::from(requirements),
+        std::io::Error::from(fragment),
+    ] {
+        let error = anyhow::Error::new(error).context("load managed configuration");
+        assert!(format!("{error:#}").contains("synthetic-secret"));
+        assert!(!is_config_parse_error(&error));
+        assert_eq!(
+            policy_rejection_diagnostic(&error),
+            "Codex sandbox provisioning was rejected by administrator policy: stage=managed io=InvalidData win32=None"
+        );
+    }
+
+    for (error, expected) in [
+        (
+            anyhow::Error::new(std::io::Error::from_raw_os_error(5))
+                .context("load bootstrap configuration"),
+            "stage=bootstrap io=PermissionDenied win32=Some(5)",
+        ),
+        (
+            anyhow::Error::new(codex_config::CloudConfigBundleLoadError::new(
+                codex_config::CloudConfigBundleLoadErrorCode::RequestFailed,
+                Some(503),
+                contents,
+            ))
+            .context("load managed configuration"),
+            "stage=managed cloud=RequestFailed http=Some(503)",
+        ),
+        (
+            anyhow::anyhow!("{contents}"),
+            "stage=unknown cause=unavailable",
+        ),
+    ] {
+        assert_eq!(
+            policy_rejection_diagnostic(&error),
+            format!("Codex sandbox provisioning was rejected by administrator policy: {expected}")
+        );
+    }
+}
+
+#[test]
 fn provisioning_request_preserves_home_spaces_and_unicode() {
     let request = framed_request(SandboxProvisioningRequest {
         codex_home: "D:\\Codex Homes\\Jos\u{00e9}\\.codex".to_string(),
@@ -501,7 +559,8 @@ fn unpackaged_pipe_clients_are_rejected_before_sending_a_request() {
         )
     };
     assert_ne!(server, foundation::INVALID_HANDLE_VALUE);
-    let server = OwnedHandle(server);
+    // SAFETY: CreateNamedPipeW returned a valid owned handle.
+    let server = unsafe { OwnedHandle::from_raw_handle(server) };
 
     let client = unsafe {
         filesystem::CreateFileW(
@@ -511,18 +570,19 @@ fn unpackaged_pipe_clients_are_rejected_before_sending_a_request() {
             ptr::null(),
             filesystem::OPEN_EXISTING,
             0,
-            0,
+            ptr::null_mut(),
         )
     };
     assert_ne!(client, foundation::INVALID_HANDLE_VALUE);
-    let _client = OwnedHandle(client);
+    // SAFETY: CreateFileW returned a valid owned handle.
+    let _client = unsafe { OwnedHandle::from_raw_handle(client) };
 
-    let connected = unsafe { pipes::ConnectNamedPipe(server.0, ptr::null_mut()) };
+    let connected = unsafe { pipes::ConnectNamedPipe(server.as_raw_handle(), ptr::null_mut()) };
     assert!(
         connected != 0 || unsafe { foundation::GetLastError() } == foundation::ERROR_PIPE_CONNECTED
     );
 
-    let error = match crate::package_identity::authorize_client_process(server.0) {
+    let error = match crate::package_identity::authorize_client_process(server.as_raw_handle()) {
         Ok(_) => panic!("an unpackaged client was authorized without sending a request"),
         Err(error) => error,
     };
@@ -557,7 +617,8 @@ fn disconnected_pipe_clients_do_not_prevent_subsequent_connections() {
         )
     };
     assert_ne!(server, foundation::INVALID_HANDLE_VALUE);
-    let server = OwnedHandle(server);
+    // SAFETY: CreateNamedPipeW returned a valid owned handle.
+    let server = unsafe { OwnedHandle::from_raw_handle(server) };
 
     let first_client = unsafe {
         filesystem::CreateFileW(
@@ -567,19 +628,24 @@ fn disconnected_pipe_clients_do_not_prevent_subsequent_connections() {
             ptr::null(),
             filesystem::OPEN_EXISTING,
             0,
-            0,
+            ptr::null_mut(),
         )
     };
     assert_ne!(first_client, foundation::INVALID_HANDLE_VALUE);
-    drop(OwnedHandle(first_client));
+    // SAFETY: CreateFileW returned a valid owned handle.
+    drop(unsafe { OwnedHandle::from_raw_handle(first_client) });
 
     assert_eq!(
-        accept_pipe_connection(server.0).unwrap(),
+        accept_pipe_connection(server.as_raw_handle()).unwrap(),
         PipeConnection::Disconnected
     );
 
-    let server_handle = server.0;
-    let listener = std::thread::spawn(move || accept_pipe_connection(server_handle));
+    let server_handle = NonOwningPipeHandle(server.as_raw_handle());
+    let listener = std::thread::spawn(move || {
+        // Capture the wrapper rather than its raw pointer field.
+        let server_handle = &server_handle;
+        accept_pipe_connection(server_handle.0)
+    });
     let available = unsafe { pipes::WaitNamedPipeW(name.as_ptr(), 5_000) };
     assert_ne!(
         available,
@@ -595,7 +661,7 @@ fn disconnected_pipe_clients_do_not_prevent_subsequent_connections() {
             ptr::null(),
             filesystem::OPEN_EXISTING,
             0,
-            0,
+            ptr::null_mut(),
         )
     };
     assert_ne!(
@@ -604,14 +670,18 @@ fn disconnected_pipe_clients_do_not_prevent_subsequent_connections() {
         "connect replacement named-pipe client: {}",
         std::io::Error::last_os_error()
     );
-    let next_client = OwnedHandle(next_client);
+    // SAFETY: CreateFileW returned a valid owned handle.
+    let next_client = unsafe { OwnedHandle::from_raw_handle(next_client) };
     assert_eq!(
         listener.join().expect("join named-pipe listener").unwrap(),
         PipeConnection::Connected
     );
 
     drop(next_client);
-    assert_ne!(unsafe { pipes::DisconnectNamedPipe(server.0) }, 0);
+    assert_ne!(
+        unsafe { pipes::DisconnectNamedPipe(server.as_raw_handle()) },
+        0
+    );
 
     let timeout = Duration::from_secs(5);
     let deadline = Instant::now() + timeout;
@@ -628,7 +698,7 @@ fn disconnected_pipe_clients_do_not_prevent_subsequent_connections() {
 
     let (accepted_tx, accepted_rx) = mpsc::channel();
     let listener = std::thread::spawn(move || {
-        let _ = accepted_tx.send(accept_pipe_connection(server.0));
+        let _ = accepted_tx.send(accept_pipe_connection(server.as_raw_handle()));
         drop(server);
     });
     let accepted = accepted_rx.recv_timeout(timeout);

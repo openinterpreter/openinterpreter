@@ -23,27 +23,11 @@ use std::os::fd::AsRawFd;
 use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 use url::Url;
-
-const PROXY_ENV_KEYS: &[&str] = &[
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "WS_PROXY",
-    "WSS_PROXY",
-    "ALL_PROXY",
-    "FTP_PROXY",
-    "YARN_HTTP_PROXY",
-    "YARN_HTTPS_PROXY",
-    "NPM_CONFIG_HTTP_PROXY",
-    "NPM_CONFIG_HTTPS_PROXY",
-    "NPM_CONFIG_PROXY",
-    "BUNDLE_HTTP_PROXY",
-    "BUNDLE_HTTPS_PROXY",
-    "PIP_PROXY",
-    "DOCKER_HTTP_PROXY",
-    "DOCKER_HTTPS_PROXY",
-];
 
 const HOST_BRIDGE_READY: u8 = 1;
 const LOOPBACK_INTERFACE_NAME: &[u8] = b"lo";
@@ -72,7 +56,9 @@ struct ProxyRoutePlan {
     has_proxy_config: bool,
 }
 
-pub(crate) fn prepare_host_proxy_route_spec() -> io::Result<(String, Vec<File>)> {
+pub(crate) fn prepare_host_proxy_route_spec(
+    port_allowlist: Option<&[u16]>,
+) -> io::Result<(String, Vec<File>)> {
     let (attribution_token, plan) = extract_attribution_token_and_plan(std::env::vars().collect());
     // SAFETY: the sandbox helper is single-threaded here, before it forks bridge workers or
     // executes the user command.
@@ -87,6 +73,20 @@ pub(crate) fn prepare_host_proxy_route_spec() -> io::Result<(String, Vec<File>)>
             "managed proxy mode requires proxy environment variables"
         };
         return Err(io::Error::new(io::ErrorKind::InvalidInput, message));
+    }
+
+    // Validate the entire plan before forking any host-side workers or sending
+    // attribution. An empty enforced list grants no routes.
+    if let Some(ports) = port_allowlist
+        && plan
+            .routes
+            .iter()
+            .any(|route| !ports.contains(&route.endpoint.port()))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "proxy endpoint is outside the managed sandbox context",
+        ));
     }
 
     let mut control_by_endpoint = BTreeMap::new();
@@ -237,8 +237,12 @@ fn plan_proxy_routes(env: &HashMap<String, String>) -> ProxyRoutePlan {
 }
 
 fn is_proxy_env_key(key: &str) -> bool {
-    let upper = key.to_ascii_uppercase();
-    PROXY_ENV_KEYS.contains(&upper.as_str())
+    // Only exact key spellings overwritten by managed setup may nominate a host
+    // socket. A caller-controlled mixed-case alias can otherwise create a second bridge.
+    codex_network_proxy::PROXY_ENV_KEYS.contains(&key)
+        && codex_network_proxy::PROXY_URL_ENV_KEYS
+            .iter()
+            .any(|url_key| key.eq_ignore_ascii_case(url_key))
 }
 
 fn parse_loopback_proxy_endpoint(proxy_url: &str) -> Option<SocketAddr> {
@@ -352,6 +356,26 @@ fn spawn_host_bridge(
     Ok(File::from(OwnedFd::from(control)))
 }
 
+/// Each connection worker holds a permit until it exits.
+pub(super) struct ConnectionSlots(Arc<Semaphore>);
+
+impl ConnectionSlots {
+    pub(super) fn new() -> Self {
+        const MAX_CONNECTIONS: usize = 128;
+        Self(Arc::new(Semaphore::new(MAX_CONNECTIONS)))
+    }
+
+    pub(super) fn spawn(&self, serve: impl FnOnce() + Send + 'static) {
+        let Ok(permit) = Arc::clone(&self.0).try_acquire_owned() else {
+            return;
+        };
+        let _ = std::thread::Builder::new().spawn(move || {
+            let _permit = permit;
+            serve();
+        });
+    }
+}
+
 fn run_host_bridge(
     endpoint: SocketAddr,
     mut control: UnixStream,
@@ -368,10 +392,11 @@ fn run_host_bridge(
     drop(control);
 
     let attribution_token = attribution_token.map(str::to_owned);
+    let slots = ConnectionSlots::new();
     loop {
         let (client_stream, _) = listener.accept()?;
         let attribution_token = attribution_token.clone();
-        std::thread::spawn(move || {
+        slots.spawn(move || {
             let mut tcp_stream = match TcpStream::connect(endpoint) {
                 Ok(stream) => stream,
                 Err(_) => return,
@@ -468,151 +493,40 @@ fn ensure_loopback_interface_up() -> io::Result<()> {
     close_fd(fd)
 }
 
-fn proxy_bidirectional(mut upstream: TcpStream, mut client: TcpStream) -> io::Result<()> {
-    let mut upstream_reader = upstream.try_clone()?;
-    let mut client_writer = client.try_clone()?;
-    let upstream_to_client = std::thread::spawn(move || {
-        let result = std::io::copy(&mut upstream_reader, &mut client_writer);
-        let _ = client_writer.shutdown(Shutdown::Write);
-        result
-    });
-    let client_to_upstream = std::io::copy(&mut client, &mut upstream);
-    let _ = upstream.shutdown(Shutdown::Write);
-    let upstream_to_client = upstream_to_client
-        .join()
-        .map_err(|_| io::Error::other("bridge thread panicked"))?;
-    upstream_to_client?;
-    client_to_upstream?;
-    Ok(())
+pub(super) fn proxy_bidirectional(upstream: TcpStream, client: TcpStream) -> io::Result<()> {
+    let (upload_done, upload) = mpsc::channel();
+    let (download_done, download) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let response = std::thread::Builder::new().spawn_scoped(scope, || {
+            copy_and_shutdown(&upstream, &client, download_done, upload)
+        })?;
+        let request = copy_and_shutdown(&client, &upstream, upload_done, download);
+        response
+            .join()
+            .map_err(|_| io::Error::other("bridge thread panicked"))??;
+        request
+    })
+}
+
+fn copy_and_shutdown(
+    mut source: &TcpStream,
+    mut destination: &TcpStream,
+    done: mpsc::Sender<()>,
+    peer: mpsc::Receiver<()>,
+) -> io::Result<()> {
+    let result = io::copy(&mut source, &mut destination);
+    let _ = destination.shutdown(Shutdown::Write);
+    let _ = done.send(());
+    // Let the other direction flush queued bytes. A stalled peer must still release the permit.
+    if result.is_err()
+        && peer.recv_timeout(Duration::from_secs(1)) == Err(mpsc::RecvTimeoutError::Timeout)
+    {
+        let _ = source.shutdown(Shutdown::Both);
+        let _ = destination.shutdown(Shutdown::Both);
+    }
+    result.map(|_| ())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::PROXY_ATTRIBUTION_TOKEN_ENV_KEY;
-    use super::ProxyRouteEntry;
-    use super::ProxyRouteSpec;
-    use super::default_proxy_port;
-    use super::extract_attribution_token_and_plan;
-    use super::is_proxy_env_key;
-    use super::parse_loopback_proxy_endpoint;
-    use super::plan_proxy_routes;
-    use super::rewrite_proxy_env_value;
-    use pretty_assertions::assert_eq;
-    use std::collections::HashMap;
-    use std::net::SocketAddr;
-
-    #[test]
-    fn recognizes_proxy_env_keys_case_insensitively() {
-        assert_eq!(is_proxy_env_key("HTTP_PROXY"), true);
-        assert_eq!(is_proxy_env_key("http_proxy"), true);
-        assert_eq!(is_proxy_env_key("WS_PROXY"), true);
-        assert_eq!(is_proxy_env_key("wss_proxy"), true);
-        assert_eq!(is_proxy_env_key("PATH"), false);
-    }
-
-    #[test]
-    fn parses_loopback_proxy_endpoint() {
-        let endpoint = parse_loopback_proxy_endpoint("http://127.0.0.1:43128");
-        assert_eq!(
-            endpoint,
-            Some(
-                "127.0.0.1:43128"
-                    .parse::<SocketAddr>()
-                    .expect("valid socket")
-            )
-        );
-    }
-
-    #[test]
-    fn ignores_non_loopback_proxy_endpoint() {
-        assert_eq!(
-            parse_loopback_proxy_endpoint("http://example.com:3128"),
-            None
-        );
-    }
-
-    #[test]
-    fn plan_proxy_routes_only_includes_valid_loopback_endpoints() {
-        let mut env = HashMap::new();
-        env.insert(
-            "HTTP_PROXY".to_string(),
-            "http://127.0.0.1:43128".to_string(),
-        );
-        env.insert(
-            "HTTPS_PROXY".to_string(),
-            "http://example.com:3128".to_string(),
-        );
-        env.insert("PATH".to_string(), "/usr/bin".to_string());
-
-        let plan = plan_proxy_routes(&env);
-        assert_eq!(plan.has_proxy_config, true);
-        assert_eq!(plan.routes.len(), 1);
-        assert_eq!(plan.routes[0].env_key, "HTTP_PROXY");
-        assert_eq!(
-            plan.routes[0].endpoint,
-            "127.0.0.1:43128"
-                .parse::<SocketAddr>()
-                .expect("valid socket")
-        );
-    }
-
-    #[test]
-    fn attribution_token_is_extracted_before_proxy_route_planning() {
-        let mut env = HashMap::new();
-        env.insert(
-            "HTTP_PROXY".to_string(),
-            "http://127.0.0.1:43128".to_string(),
-        );
-        env.insert(
-            PROXY_ATTRIBUTION_TOKEN_ENV_KEY.to_string(),
-            "exec-token".to_string(),
-        );
-
-        let (attribution_token, plan) = extract_attribution_token_and_plan(env);
-
-        assert_eq!(attribution_token.as_deref(), Some("exec-token"));
-        assert_eq!(
-            plan,
-            super::ProxyRoutePlan {
-                routes: vec![super::PlannedProxyRoute {
-                    env_key: "HTTP_PROXY".to_string(),
-                    endpoint: "127.0.0.1:43128"
-                        .parse::<SocketAddr>()
-                        .expect("valid socket"),
-                }],
-                has_proxy_config: true,
-            }
-        );
-    }
-
-    #[test]
-    fn rewrites_proxy_url_to_local_loopback_port() {
-        let rewritten =
-            rewrite_proxy_env_value("socks5h://127.0.0.1:8081", /*local_port*/ 43210)
-                .expect("rewritten value");
-        assert_eq!(rewritten, "socks5h://127.0.0.1:43210");
-    }
-
-    #[test]
-    fn default_proxy_ports_match_expected_schemes() {
-        assert_eq!(default_proxy_port("http"), 80);
-        assert_eq!(default_proxy_port("https"), 443);
-        assert_eq!(default_proxy_port("socks5h"), 1080);
-    }
-
-    #[test]
-    fn proxy_route_spec_serialization_omits_proxy_urls() {
-        let spec = ProxyRouteSpec {
-            routes: vec![ProxyRouteEntry {
-                env_key: "HTTP_PROXY".to_string(),
-                control_fd: 3,
-            }],
-        };
-        let serialized = serde_json::to_string(&spec).expect("proxy route spec should serialize");
-
-        assert_eq!(
-            serialized,
-            r#"{"routes":[{"env_key":"HTTP_PROXY","control_fd":3}]}"#
-        );
-    }
-}
+#[path = "proxy_routing_tests.rs"]
+mod tests;

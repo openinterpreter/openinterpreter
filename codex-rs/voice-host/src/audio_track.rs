@@ -115,10 +115,18 @@ impl AudioTrack {
 
     pub(crate) async fn send(&mut self, frame: EncodedAudio) -> Result<(), &'static str> {
         tokio::time::timeout(SEND_TIMEOUT, async {
-            let mut gap = self
+            let duration = Duration::from_millis(/*millis*/ 20);
+            let elapsed = self
                 .end
                 .map(|end| frame.at.saturating_duration_since(end))
                 .unwrap_or_default();
+            // RTP counts audio samples, not callback wall-clock jitter. Skipping
+            // fractional packets changes the source grid and causes receivers
+            // that assemble fixed-duration frames to reject subsequent audio.
+            let skipped = Duration::from_millis(
+                (elapsed.as_millis() / duration.as_millis() * duration.as_millis()) as u64,
+            );
+            let mut gap = skipped;
             while !gap.is_zero() {
                 let duration = gap.min(Duration::from_secs(/*secs*/ 3600));
                 self.track
@@ -126,7 +134,9 @@ impl AudioTrack {
                         self.ssrc,
                         /*payload_type*/ OPUS_PAYLOAD_TYPE,
                         &Sample {
-                            duration,
+                            // write_sample truncates floating-point seconds to RTP ticks.
+                            // Bias empty gaps by 1 ns to keep whole packets exact.
+                            duration: duration + Duration::from_nanos(/*nanos*/ 1),
                             ..Default::default()
                         },
                         &[],
@@ -135,7 +145,6 @@ impl AudioTrack {
                     .map_err(|_| "failed to advance voice clock")?;
                 gap -= duration;
             }
-            let duration = Duration::from_millis(/*millis*/ 20);
             self.track
                 .write_sample(
                     self.ssrc,
@@ -149,7 +158,7 @@ impl AudioTrack {
                 )
                 .await
                 .map_err(|_| "failed to send voice audio")?;
-            self.end = Some(self.end.unwrap_or(frame.at).max(frame.at) + duration);
+            self.end = Some(self.end.unwrap_or(frame.at) + skipped + duration);
             Ok(())
         })
         .await

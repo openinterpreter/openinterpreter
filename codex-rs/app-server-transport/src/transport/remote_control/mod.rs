@@ -43,7 +43,9 @@ use codex_app_server_protocol::RemoteControlPairingStartResponse;
 use codex_app_server_protocol::RemoteControlPairingStatusParams;
 use codex_app_server_protocol::RemoteControlPairingStatusResponse;
 use codex_app_server_protocol::RemoteControlStatusChangedNotification;
+use codex_features::RuntimeAuthMode;
 use codex_login::AuthManager;
+use codex_runtime_agent_instance::RuntimeAuthSlot;
 use codex_state::StateRuntime;
 use gethostname::gethostname;
 use std::error::Error;
@@ -64,6 +66,7 @@ use tracing::info;
 use tracing::warn;
 
 pub struct RemoteControlStartConfig {
+    pub runtime_auth: Option<(RuntimeAuthSlot, RuntimeAuthMode)>,
     pub remote_control_url: String,
     pub installation_id: String,
     pub policy: RemoteControlPolicy,
@@ -535,7 +538,7 @@ impl RemoteControlSession {
                     .await?;
                     return Err(pairing_unavailable_error());
                 }
-                io::ErrorKind::PermissionDenied => {
+                io::ErrorKind::PermissionDenied if auth::is_auth_error(err) => {
                     clear_pairing_server_token(&mut current_enrollment, &mut enrollment)?;
                     return Err(pairing_unavailable_error());
                 }
@@ -760,7 +763,7 @@ impl RemoteControlSession {
                     .await?;
                     return Err(pairing_unavailable_error());
                 }
-                io::ErrorKind::PermissionDenied => {
+                io::ErrorKind::PermissionDenied if auth::is_auth_error(err) => {
                     clear_pairing_server_token(&mut current_enrollment, &mut enrollment)?;
                     return Err(pairing_unavailable_error());
                 }
@@ -847,7 +850,7 @@ async fn enroll_pairing_server(
         .await
     {
         Ok(enrollment) => return Ok(enrollment),
-        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+        Err(err) if auth::is_auth_error(&err) => {
             let mut auth_recovery = auth_manager.unauthorized_recovery();
             let mut auth_change_rx = auth_manager.auth_change_receiver();
             if !recover_remote_control_auth(&mut auth_recovery, &mut auth_change_rx).await {
@@ -893,10 +896,7 @@ async fn refresh_pairing_enrollment(
 ) -> io::Result<()> {
     current_enrollment.state.check_retry_after()?;
     let mut refresh_result = refresh_remote_control_server(auth, installation_id, enrollment).await;
-    if refresh_result
-        .as_ref()
-        .is_err_and(|err| err.kind() == io::ErrorKind::PermissionDenied)
-    {
+    if refresh_result.as_ref().is_err_and(auth::is_auth_error) {
         let mut auth_recovery = auth_manager.unauthorized_recovery();
         let mut auth_change_rx = auth_manager.auth_change_receiver();
         if recover_remote_control_auth(&mut auth_recovery, &mut auth_change_rx).await {
@@ -916,10 +916,7 @@ async fn refresh_pairing_enrollment(
             enrollment.clear_server_token();
         }
     }
-    if refresh_result
-        .as_ref()
-        .is_err_and(|err| err.kind() == io::ErrorKind::PermissionDenied)
-    {
+    if refresh_result.as_ref().is_err_and(auth::is_auth_error) {
         enrollment.clear_server_token();
     }
     if !replace_current_enrollment(current_enrollment, enrollment) {
@@ -1000,3 +997,7 @@ fn same_remote_control_enrollment(
 mod segment_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "runtime_auth_tests.rs"]
+mod runtime_auth_tests;

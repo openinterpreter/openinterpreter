@@ -10,6 +10,8 @@
 //! - `rules.prefix_rules` append high-priority rules first.
 //! - `hooks` append high-priority event groups first while failing closed on
 //!   active managed-dir conflicts.
+//! - `otel` replaces exact managed values, treats exporters atomically, and
+//!   merges span attributes and fields within each tracestate member by key.
 //! - `permissions.filesystem.deny_read` is a high-priority-first union across
 //!   layers.
 //! - `auto_review.required_on_models` is a high-priority-first union across layers.
@@ -18,6 +20,8 @@ use crate::ConfigRequirementsToml;
 use crate::ConfigRequirementsWithSources;
 use crate::RequirementSource;
 use crate::Sourced;
+use crate::config_requirements::PermissionsRequirementsToml;
+use crate::config_requirements::merge_otel_requirements;
 use crate::merge::merge_toml_values;
 use std::cell::OnceCell;
 use std::io;
@@ -152,6 +156,12 @@ impl RequirementsLayerStack {
 
         let mut merged_toml = TomlValue::Table(toml::map::Map::new());
         for layer in &layers {
+            // An endpoint and its credentials must come from the same requirements layer.
+            if layer.regular_toml.get("config_server").is_some()
+                && let Some(table) = merged_toml.as_table_mut()
+            {
+                table.remove("config_server");
+            }
             merge_toml_values(&mut merged_toml, &layer.regular_toml);
         }
 
@@ -163,6 +173,28 @@ impl RequirementsLayerStack {
             })?;
         let mut output = ConfigRequirementsWithSources::default();
         populate_merged_regular_fields_with_sources(&mut output, requirements, &layers);
+        output.validate_network_spelling().map_err(|err| {
+            RequirementsCompositionError::ComposedParse {
+                message: err.to_string(),
+            }
+        })?;
+        // Merge OTEL requirements so higher-priority exact values replace
+        // lower-priority values while exporters stay atomic.
+        let mut otel = None;
+        let mut otel_sources = Vec::new();
+        for layer in &layers {
+            if let Some(incoming) = layer.domain_fields.otel.as_deref()
+                && merge_otel_requirements(&mut otel, incoming)
+            {
+                otel_sources.push(layer.source.clone());
+            }
+        }
+        output.otel = otel.map(|value| {
+            Box::new(Sourced::new(
+                value,
+                RequirementSource::composite(otel_sources.into_iter().rev()),
+            ))
+        });
         let mut rules = None;
         let mut hooks = HookMergeState::new(hook_directory_field);
         let mut hooks_output = None;
@@ -211,11 +243,13 @@ fn populate_merged_regular_fields_with_sources(
     // Destructure without `..` so every new requirements field must choose
     // whether it belongs in the regular TOML merge path or in a special merger.
     let ConfigRequirementsToml {
+        config_server,
         allowed_login_methods,
         allowed_chatgpt_workspaces,
         cli_auth_credentials_store,
         chatgpt_base_url,
         sqlite_home,
+        unsafe_enforce_sqlite_journal_mode,
         log_dir,
         model_catalog_json,
         model_provider,
@@ -243,23 +277,30 @@ fn populate_merged_regular_fields_with_sources(
         mcp_servers,
         plugins,
         marketplaces,
+        otel: _,
         apps,
         rules: _,
         enforce_residency,
         network,
         application,
-        permissions,
+        mut permissions,
         auto_review,
         models,
         additional_developer_instructions,
         guardian_policy_config,
+        guardian_extra_policy,
     } = requirements;
 
+    set_sourced!(config_server, &["config_server"]);
     set_sourced!(allowed_login_methods, &["allowed_login_methods"]);
     set_sourced!(allowed_chatgpt_workspaces, &["allowed_chatgpt_workspaces"]);
     set_sourced!(cli_auth_credentials_store, &["cli_auth_credentials_store"]);
     set_sourced!(chatgpt_base_url, &["chatgpt_base_url"]);
     set_sourced!(sqlite_home, &["sqlite_home"]);
+    set_sourced!(
+        unsafe_enforce_sqlite_journal_mode,
+        &["unsafe_enforce_sqlite_journal_mode"]
+    );
     set_sourced!(log_dir, &["log_dir"]);
     set_sourced!(model_catalog_json, &["model_catalog_json"]);
     set_sourced!(model_provider, &["model_provider"]);
@@ -300,9 +341,37 @@ fn populate_merged_regular_fields_with_sources(
     set_sourced!(marketplaces, &["marketplaces"]);
     set_sourced!(apps, &["apps"]);
     set_sourced!(enforce_residency, &["enforce_residency"]);
-    set_sourced!(network, &["experimental_network"]);
+    set_sourced!(network, &["network_proxy"]);
     set_sourced!(application, &["application"]);
-    set_sourced!(permissions, &["permissions"]);
+    let permission_sources = |contributes: fn(&toml::Table) -> bool| {
+        RequirementSource::composite(
+            layers
+                .iter()
+                .rev()
+                .filter(|layer| {
+                    layer
+                        .regular_toml
+                        .get("permissions")
+                        .and_then(TomlValue::as_table)
+                        .is_some_and(contributes)
+                })
+                .map(|layer| layer.source.clone()),
+        )
+    };
+    if let Some(network) = PermissionsRequirementsToml::take_network(&mut permissions) {
+        output.permissions_network = Some(Box::new(Sourced::new(
+            *network,
+            permission_sources(|table| table.contains_key("network")),
+        )));
+    }
+    output.permissions = permissions.map(|value| {
+        let source = if value.filesystem.is_some() {
+            permission_sources(|table| table.contains_key("filesystem"))
+        } else {
+            permission_sources(|table| table.keys().any(|key| key != "network"))
+        };
+        Sourced::new(value, source)
+    });
     set_sourced!(models, &["models"]);
     set_sourced!(
         additional_developer_instructions,
@@ -315,6 +384,14 @@ fn populate_merged_regular_fields_with_sources(
         output.guardian_policy_config = Some(Sourced::new(
             guardian_policy_config,
             source_for_top_level_keys(layers, &["guardian_policy_config"]),
+        ));
+    }
+    if let Some(guardian_extra_policy) =
+        guardian_extra_policy.filter(|value| !value.trim().is_empty())
+    {
+        output.guardian_extra_policy = Some(Sourced::new(
+            guardian_extra_policy,
+            source_for_top_level_keys(layers, &["guardian_extra_policy"]),
         ));
     }
 }
@@ -334,7 +411,8 @@ fn source_for_top_level_keys(
     };
     let winning_source = (*winning_source).clone();
 
-    if !winning_value.is_table() {
+    // The config_server block is replaced as a whole, including its source attribution.
+    if keys == ["config_server"] || !winning_value.is_table() {
         return winning_source;
     }
 

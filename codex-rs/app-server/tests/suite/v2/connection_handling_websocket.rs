@@ -1,7 +1,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
-use app_test_support::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
+use app_test_support::DEFAULT_APP_SERVER_TEST_ARGS;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::to_response;
 use base64::Engine;
@@ -24,6 +24,10 @@ use codex_http_client::HttpClient;
 use codex_http_client::HttpClientBuilder;
 use codex_http_client::HttpResponse;
 use codex_protocol::config_types::TrustLevel;
+use core_test_support::responses::ev_completed;
+use core_test_support::responses::sse;
+use core_test_support::streaming_sse::StreamingSseChunk;
+use core_test_support::streaming_sse::start_streaming_sse_server;
 use futures::SinkExt;
 use futures::StreamExt;
 use hmac::Hmac;
@@ -450,6 +454,74 @@ async fn websocket_transport_rejects_unauthenticated_non_loopback_startup() -> R
 }
 
 #[tokio::test]
+async fn websocket_disconnect_cancels_guardian_review_and_releases_thread() -> Result<()> {
+    let (release, gate) = tokio::sync::oneshot::channel();
+    let (guardian, _) = start_streaming_sse_server(vec![vec![StreamingSseChunk {
+        gate: Some(gate),
+        body: sse(vec![ev_completed("review")]),
+    }]])
+    .await;
+    let home = TempDir::new()?;
+    app_test_support::MockResponsesConfig::new(guardian.uri())
+        .with_approval_policy("on-request")
+        .with_root_config("approvals_reviewer = \"auto_review\"")
+        .with_extra_config("[auto_review]\ntimeout_ms = 0")
+        .write(home.path())?;
+    let (mut process, addr) = spawn_websocket_server(home.path()).await?;
+    let mut owner = connect_websocket(addr).await?;
+    let mut observer = connect_websocket(addr).await?;
+    for client in [&mut owner, &mut observer] {
+        send_request(
+            client,
+            "initialize",
+            /*id*/ 1,
+            Some(json!({
+                "clientInfo": {"name":"guardian-test","version":"1"},
+                "capabilities": {"experimentalApi":true}
+            })),
+        )
+        .await?;
+        read_response_for_id(client, /*id*/ 1).await?;
+    }
+    let thread_id = start_thread(&mut owner, /*id*/ 2).await?;
+    send_request(&mut owner, "thread/inject_items", /*id*/ 3, Some(json!({
+        "threadId":thread_id, "items":[{
+            "type":"function_call","name":"exec_command","call_id":"review",
+            "arguments":r#"{"cmd":"touch marker","sandbox_permissions":"require_escalated","justification":"create the marker"}"#
+        }]
+    }))).await?;
+    read_response_for_id(&mut owner, /*id*/ 3).await?;
+    send_request(
+        &mut owner,
+        "thread/guardianReview",
+        /*id*/ 4,
+        Some(json!({"threadId":thread_id})),
+    )
+    .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        guardian.wait_for_request_count(/*count*/ 1),
+    )
+    .await?;
+    owner.close(None).await?;
+    drop(owner);
+
+    send_request(&mut observer, "thread/inject_items", /*id*/ 5, Some(json!({
+        "threadId":thread_id, "items":[{"type":"function_call_output","call_id":"review","output":"recorded"}]
+    }))).await?;
+    // Disconnect must release the thread before the 30-second connection drain timeout.
+    let response = timeout(
+        Duration::from_secs(10),
+        read_response_for_id(&mut observer, /*id*/ 5),
+    )
+    .await??;
+    assert_eq!(response.result, json!({}));
+    drop(release);
+    process.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn websocket_disconnect_keeps_last_subscribed_thread_loaded_until_idle_timeout() -> Result<()>
 {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
@@ -501,13 +573,14 @@ pub(super) async fn spawn_websocket_server_with_args(
     let mut cmd = Command::new(program);
     cmd.arg("--listen")
         .arg(listen_url)
-        .arg(DISABLE_PLUGIN_STARTUP_TASKS_ARG)
+        .args(DEFAULT_APP_SERVER_TEST_ARGS)
         .args(extra_args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .env("CODEX_HOME", codex_home)
-        .env("RUST_LOG", "warn");
+        .env("RUST_LOG", "warn")
+        .env("OTEL_METRIC_EXPORT_INTERVAL", "200");
 
     let mut process = cmd
         .kill_on_drop(true)
@@ -638,7 +711,7 @@ async fn run_websocket_server_to_completion_with_args(
     let mut cmd = Command::new(program);
     cmd.arg("--listen")
         .arg(listen_url)
-        .arg(DISABLE_PLUGIN_STARTUP_TASKS_ARG)
+        .args(DEFAULT_APP_SERVER_TEST_ARGS)
         .args(extra_args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -718,7 +791,7 @@ pub(super) async fn send_initialize_request(
     .await
 }
 
-async fn start_thread(stream: &mut WsClient, id: i64) -> Result<String> {
+pub(super) async fn start_thread(stream: &mut WsClient, id: i64) -> Result<String> {
     send_request(
         stream,
         "thread/start",

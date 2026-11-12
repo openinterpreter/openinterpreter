@@ -4,17 +4,22 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
+use codex_config::McpEmaTokenEndpointAuthMethod;
+use rmcp::transport::auth::enterprise::EmaError;
+use rmcp::transport::auth::enterprise::EmaExchangeStage;
 use serde_json::Value;
 use url::Host;
 use url::Url;
 
 /// A sanitized enterprise-auth failure that callers may handle without parsing text.
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum EmaAuthFailure {
     #[error("invalid_grant")]
     InvalidGrant { grant_source: EmaInvalidGrantSource },
     #[error("insufficient_user_authentication")]
-    InsufficientUserAuthentication,
+    InsufficientUserAuthentication { grant_source: EmaInvalidGrantSource },
+    #[error("enterprise identity rejected the OAuth client")]
+    IdentityClientRejected,
     #[error("enterprise identity requires authentication")]
     ReauthenticationRequired,
 }
@@ -25,34 +30,259 @@ pub enum EmaInvalidGrantSource {
     ResourceAuthorization,
 }
 
+/// The credential source selected for enterprise token acquisition or validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EmaCredentialKind {
+    Account,
+    Keyring,
+}
+
+/// A diagnostic containing only static local text or sanitized SDK exchange fields.
+/// Never retains an arbitrary error's display text, provider response, or source chain.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EmaErrorDetail {
+    message: &'static str,
+    stage: Option<EmaExchangeStage>,
+    status: Option<u16>,
+}
+
+impl EmaErrorDetail {
+    pub fn new(message: &'static str) -> Self {
+        Self {
+            message,
+            stage: None,
+            status: None,
+        }
+    }
+
+    pub fn from_error(error: &anyhow::Error) -> Self {
+        // SDK diagnostics are already sanitized, including allowlisted OAuth codes.
+        // Prefer them to an outer operation label when both are available.
+        if let Some(error) = error.downcast_ref::<EmaError>() {
+            let (stage, status, message) = match error {
+                EmaError::InvalidRequest(message) => (None, None, *message),
+                EmaError::InvalidResponse { stage, message } => (Some(*stage), None, *message),
+                EmaError::RequestFailed(stage) => (Some(*stage), None, "request failed"),
+                EmaError::InvalidGrant(stage) => (Some(*stage), None, "invalid_grant"),
+                EmaError::InsufficientUserAuthentication(stage) => {
+                    (Some(*stage), None, "insufficient_user_authentication")
+                }
+                EmaError::OAuthRejected {
+                    stage,
+                    status,
+                    code,
+                } => (Some(*stage), Some(*status), *code),
+                _ => (None, None, "enterprise MCP token exchange failed"),
+            };
+            return Self {
+                message,
+                stage,
+                status,
+            };
+        }
+        error
+            .chain()
+            .filter_map(|cause| cause.downcast_ref::<Self>())
+            .last()
+            .copied()
+            .or_else(|| error.downcast_ref::<Self>().copied())
+            .unwrap_or_else(|| Self::new("enterprise MCP token exchange failed"))
+    }
+}
+
+impl std::fmt::Display for EmaErrorDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(stage) = self.stage {
+            write!(f, "{stage:?}: ")?;
+        }
+        if let Some(status) = self.status {
+            write!(f, "HTTP {status}: ")?;
+        }
+        f.write_str(self.message)
+    }
+}
+
+impl std::error::Error for EmaErrorDetail {}
+
+/// Carries a credential kind and sanitized failure to transport, without raw error chains.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EmaTokenSourceError {
+    AuthFailure {
+        credential: EmaCredentialKind,
+        failure: EmaAuthFailure,
+    },
+    Unexpected {
+        credential: EmaCredentialKind,
+        detail: EmaErrorDetail,
+    },
+}
+
+impl EmaTokenSourceError {
+    pub fn new(credential: EmaCredentialKind, failure: EmaAuthFailure) -> Self {
+        Self::AuthFailure {
+            credential,
+            failure,
+        }
+    }
+
+    pub fn unexpected(credential: EmaCredentialKind) -> Self {
+        Self::Unexpected {
+            credential,
+            detail: EmaErrorDetail::new("enterprise MCP token exchange failed"),
+        }
+    }
+
+    fn credential(self) -> EmaCredentialKind {
+        match self {
+            Self::AuthFailure { credential, .. } | Self::Unexpected { credential, .. } => {
+                credential
+            }
+        }
+    }
+
+    fn failure(self) -> Option<EmaAuthFailure> {
+        match self {
+            Self::AuthFailure { failure, .. } => Some(failure),
+            Self::Unexpected { .. } => None,
+        }
+    }
+
+    pub fn is_authentication_required(&self) -> bool {
+        match (self.credential(), self.failure()) {
+            (
+                _,
+                Some(
+                    EmaAuthFailure::InvalidGrant {
+                        grant_source: EmaInvalidGrantSource::EnterpriseIdentity,
+                    }
+                    | EmaAuthFailure::InsufficientUserAuthentication {
+                        grant_source: EmaInvalidGrantSource::EnterpriseIdentity,
+                    }
+                    | EmaAuthFailure::ReauthenticationRequired,
+                ),
+            )
+            | (EmaCredentialKind::Account, Some(EmaAuthFailure::IdentityClientRejected)) => true,
+            (
+                _,
+                Some(
+                    EmaAuthFailure::InvalidGrant {
+                        grant_source: EmaInvalidGrantSource::ResourceAuthorization,
+                    }
+                    | EmaAuthFailure::InsufficientUserAuthentication {
+                        grant_source: EmaInvalidGrantSource::ResourceAuthorization,
+                    },
+                )
+                | None,
+            )
+            | (EmaCredentialKind::Keyring, Some(EmaAuthFailure::IdentityClientRejected)) => false,
+        }
+    }
+}
+
+impl std::fmt::Display for EmaTokenSourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Self::Unexpected { detail, .. } = self {
+            return std::fmt::Display::fmt(detail, f);
+        }
+        let message = match (self.credential(), self.failure()) {
+            (
+                _,
+                Some(EmaAuthFailure::InsufficientUserAuthentication {
+                    grant_source: EmaInvalidGrantSource::ResourceAuthorization,
+                }),
+            ) => {
+                "The MCP authorization server requires additional user authentication; contact your administrator"
+            }
+            (EmaCredentialKind::Keyring, Some(EmaAuthFailure::IdentityClientRejected)) => {
+                "The enterprise IdP rejected the configured MCP OAuth client; contact your administrator"
+            }
+            (
+                EmaCredentialKind::Account,
+                Some(
+                    EmaAuthFailure::InvalidGrant {
+                        grant_source: EmaInvalidGrantSource::EnterpriseIdentity,
+                    }
+                    | EmaAuthFailure::InsufficientUserAuthentication {
+                        grant_source: EmaInvalidGrantSource::EnterpriseIdentity,
+                    }
+                    | EmaAuthFailure::IdentityClientRejected,
+                ),
+            ) => "Complete enterprise sign-in for this MCP server",
+            (EmaCredentialKind::Account, Some(EmaAuthFailure::ReauthenticationRequired)) => {
+                "Sign in to your Codex account to restore enterprise MCP access"
+            }
+            (
+                EmaCredentialKind::Keyring,
+                Some(
+                    EmaAuthFailure::InvalidGrant {
+                        grant_source: EmaInvalidGrantSource::EnterpriseIdentity,
+                    }
+                    | EmaAuthFailure::InsufficientUserAuthentication {
+                        grant_source: EmaInvalidGrantSource::EnterpriseIdentity,
+                    }
+                    | EmaAuthFailure::ReauthenticationRequired,
+                ),
+            ) => "Complete enterprise sign-in to restore MCP access",
+            (
+                _,
+                Some(EmaAuthFailure::InvalidGrant {
+                    grant_source: EmaInvalidGrantSource::ResourceAuthorization,
+                }),
+            ) => "The MCP authorization server rejected the enterprise grant: invalid_grant",
+            (_, None) => "enterprise MCP token exchange failed",
+        };
+        f.write_str(message)
+    }
+}
+
+impl std::error::Error for EmaTokenSourceError {}
+
 pub(crate) fn ema_reauthentication_required(message: &'static str) -> anyhow::Error {
     anyhow::Error::new(EmaAuthFailure::ReauthenticationRequired).context(message)
 }
 
-pub(crate) fn safe_oauth_error_code(code: Option<&str>) -> &str {
-    code.filter(|code| {
-        matches!(
-            *code,
-            "invalid_request"
-                | "invalid_client"
-                | "invalid_grant"
-                | "invalid_scope"
-                | "invalid_target"
-                | "unauthorized_client"
-                | "unsupported_grant_type"
-                | "access_denied"
-                | "temporarily_unavailable"
-                | "server_error"
-                | "insufficient_user_authentication"
-        )
-    })
-    .unwrap_or("OAuth token request rejected")
-}
-
-pub(crate) fn validate_ema_public_client_auth(
+pub(crate) fn resolve_ema_client_auth(
     advertised_methods: Option<&Value>,
+    client_secret: Option<&str>,
+    token_endpoint_auth_method: Option<McpEmaTokenEndpointAuthMethod>,
     issuer_description: &str,
-) -> Result<()> {
+) -> Result<rmcp::transport::auth::enterprise::EmaClientAuthentication> {
+    use oauth2::ClientSecret;
+    use rmcp::transport::auth::enterprise::EmaClientAuthentication;
+
+    if let Some(secret) = client_secret {
+        if secret.trim().is_empty() {
+            bail!("{issuer_description} client secret must not be empty");
+        }
+        let registered_method = token_endpoint_auth_method.unwrap_or_default();
+        // RFC 8414 defaults absent server capabilities to Basic. Capabilities
+        // validate the registration; they do not select its authentication method.
+        let supported = match advertised_methods {
+            None => registered_method == McpEmaTokenEndpointAuthMethod::ClientSecretBasic,
+            Some(methods) => methods.as_array().is_some_and(|methods| {
+                methods
+                    .iter()
+                    .any(|method| method.as_str() == Some(registered_method.as_str()))
+            }),
+        };
+        if !supported {
+            bail!(
+                "{issuer_description} does not support the registered token endpoint authentication method"
+            );
+        }
+        let secret = ClientSecret::new(secret.to_owned());
+        return Ok(match registered_method {
+            McpEmaTokenEndpointAuthMethod::ClientSecretBasic => {
+                EmaClientAuthentication::ClientSecretBasic(secret)
+            }
+            McpEmaTokenEndpointAuthMethod::ClientSecretPost => {
+                EmaClientAuthentication::ClientSecretPost(secret)
+            }
+        });
+    }
+    if token_endpoint_auth_method.is_some() {
+        bail!("{issuer_description} token endpoint authentication method requires a client secret");
+    }
     let advertised_methods = advertised_methods.ok_or_else(|| {
         anyhow!(
             "{issuer_description} does not explicitly advertise public-client token endpoint authentication"
@@ -64,7 +294,7 @@ pub(crate) fn validate_ema_public_client_auth(
     if !methods.iter().any(|method| method.as_str() == Some("none")) {
         bail!("{issuer_description} does not support public-client token endpoint authentication");
     }
-    Ok(())
+    Ok(EmaClientAuthentication::None)
 }
 
 pub(crate) fn validate_ema_oauth_endpoint(endpoint: &str, description: &str) -> Result<()> {

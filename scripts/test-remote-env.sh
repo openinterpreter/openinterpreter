@@ -71,7 +71,7 @@ setup_remote_env() {
     --security-opt seccomp=unconfined \
     "${docker_network_args[@]}" \
     ubuntu:24.04 sleep infinity >/dev/null
-  if ! docker exec "${container_name}" sh -lc "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3 zsh bubblewrap"; then
+  if ! docker exec "${container_name}" sh -lc "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3 zsh bubblewrap git"; then
     docker rm -f "${container_name}" >/dev/null 2>&1 || true
     return 1
   fi

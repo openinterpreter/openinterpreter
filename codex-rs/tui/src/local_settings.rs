@@ -7,20 +7,25 @@
 //! The selected transcript ownership and alternate-screen restrictions survive local reloads.
 
 use crate::legacy_core::config::Config;
+use crate::legacy_core::config::ConfigTomlLoadResult;
 use crate::legacy_core::config::TerminalResizeReflowConfig;
 use crate::legacy_core::config::TerminalResizeReflowMaxRows;
 use crate::transcript_mode::TranscriptMode;
 use codex_config::types::History;
 use codex_config::types::Notice;
 use codex_config::types::Tui;
+use codex_terminal_detection::TerminalInfo;
+use codex_terminal_detection::TerminalName;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct LocalSettings {
+    pub(crate) audio: Result<codex_config::config_toml::RealtimeAudioToml, String>,
     pub(crate) tui: Tui,
     pub(crate) transcript_mode: TranscriptMode,
     pub(crate) history: History,
     pub(crate) notices: Notice,
+    pub(crate) custom_notification_filters: bool,
     pub(crate) codex_home: AbsolutePathBuf,
     pub(crate) user_config_path: AbsolutePathBuf,
 }
@@ -59,6 +64,7 @@ impl LocalSettings {
                 config.tui_alternate_screen != codex_config::types::AltScreenMode::Never,
             ),
             tui: Tui {
+                default_hosts: Default::default(),
                 notification_settings: config.tui_notifications.clone(),
                 animations: animations && system_motion == crate::motion::MotionMode::Animated,
                 screen_reader_detection_done: None,
@@ -80,8 +86,10 @@ impl LocalSettings {
                 pet: config.tui_pet.clone(),
                 pet_anchor: config.tui_pet_anchor,
                 session_picker_view: Some(config.tui_session_picker_view),
+                agents_overview_grouping: config.tui_agents_overview_grouping,
                 resume_cwd: config.tui_resume_cwd,
                 keymap: config.tui_keymap.clone(),
+                quick_dials: config.tui_quick_dials.clone(),
                 model_availability_nux: config.model_availability_nux.clone(),
                 terminal_resize_reflow_max_rows: match config.terminal_resize_reflow.max_rows {
                     TerminalResizeReflowMaxRows::Auto => None,
@@ -91,14 +99,109 @@ impl LocalSettings {
             },
             history: config.history.clone(),
             notices: config.notices.clone(),
+            custom_notification_filters: custom_notification_filters(&config.config_layer_stack),
             codex_home: config.codex_home.clone(),
             user_config_path: config
                 .config_layer_stack
                 .get_user_config_file()
                 .cloned()
                 .unwrap_or_else(|| config.codex_home.join("config.toml")),
-        }
+        };
+        settings.apply_host_preferences(
+            &config.config_layer_stack,
+            system_motion,
+            screen_reader_default,
+        );
+        settings
     }
+
+    /// Read client preferences without resolving model providers or execution permissions.
+    pub(crate) fn from_bootstrap(
+        bootstrap: &ConfigTomlLoadResult,
+        codex_home: AbsolutePathBuf,
+    ) -> Result<Self, toml::de::Error> {
+        let config = &bootstrap.config_toml;
+        let mut tui = match &config.tui {
+            Some(tui) => tui.clone(),
+            None => toml::Value::Table(Default::default()).try_into()?,
+        };
+        tui.disable_paste_burst = Some(
+            tui.disable_paste_burst
+                .or(config.disable_paste_burst)
+                .unwrap_or(false),
+        );
+        tui.session_picker_view = Some(tui.session_picker_view.unwrap_or_default());
+        tui.screen_reader_detection_done = None;
+        let mut settings = Self {
+            audio: Ok(Default::default()),
+            transcript_mode: TranscriptMode::resolve(
+                tui.fullscreen_transcript,
+                tui.alternate_screen != codex_config::types::AltScreenMode::Never,
+            ),
+            tui,
+            history: config.history.clone().unwrap_or_default(),
+            notices: config.notice.clone().unwrap_or_default(),
+            custom_notification_filters: custom_notification_filters(&bootstrap.config_layer_stack),
+            user_config_path: bootstrap
+                .config_layer_stack
+                .get_user_config_file()
+                .cloned()
+                .unwrap_or_else(|| codex_home.join("config.toml")),
+            codex_home,
+        };
+        settings.apply_host_preferences(
+            &bootstrap.config_layer_stack,
+            crate::system_motion::mode(),
+            crate::screen_reader::animation_default(),
+        );
+        Ok(settings)
+    }
+
+    fn apply_host_preferences(
+        &mut self,
+        layers: &ConfigLayerStack,
+        system_motion: crate::motion::MotionMode,
+        screen_reader_default: crate::motion::MotionMode,
+    ) {
+        self.tui.default_hosts = layers
+            .effective_user_config()
+            .and_then(|config| {
+                config
+                    .get("tui")
+                    .and_then(|tui| tui.get("default_hosts"))
+                    .and_then(|value| value.clone().try_into().ok())
+            })
+            .unwrap_or_default();
+        if screen_reader_default == crate::motion::MotionMode::Reduced {
+            // Consult the current layers so preferences edited after startup still win.
+            self.tui.animations &= layers
+                .effective_config()
+                .get("tui")
+                .and_then(|tui| tui.get("animations"))
+                .is_some();
+        }
+        self.tui.animations &= system_motion == crate::motion::MotionMode::Animated;
+        let mut audio = toml::Value::Table(Default::default());
+        for layer in layers.layers_low_to_high() {
+            if !matches!(layer.name, codex_config::ConfigLayerSource::Project { .. })
+                && let Some(value) = layer.config.get("audio")
+            {
+                codex_config::merge_toml_values(&mut audio, value);
+            }
+        }
+        self.audio = audio
+            .try_into()
+            .map_err(|error: toml::de::Error| format!("Invalid machine audio settings: {error}"));
+    }
+}
+
+fn custom_notification_filters(layers: &ConfigLayerStack) -> bool {
+    layers.effective_user_config().is_some_and(|config| {
+        config
+            .get("tui")
+            .and_then(|tui| tui.get("notifications"))
+            .is_some_and(toml::Value::is_array)
+    })
 }
 
 impl LocalSettings {

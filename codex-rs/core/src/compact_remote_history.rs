@@ -1,5 +1,6 @@
 use std::borrow::Borrow;
 
+use crate::compact_retained_tool_outputs::is_retained_tool_output;
 use crate::context::ContextualUserFragment;
 use crate::context::ImageResizeNotice;
 use crate::context_manager::ContextManager;
@@ -27,10 +28,16 @@ impl<T: Borrow<ResponseItem>> HistoryItemGroup<T> {
         std::iter::once(self.source).chain(self.attached_notice)
     }
 
-    pub(crate) fn estimated_token_count(&self) -> i128 {
-        let source_tokens = i128::from(estimate_item_token_count(self.source.borrow()));
+    pub(crate) fn estimated_token_count(&self, audio_durations: &FileAudioDurations) -> i128 {
+        let source_tokens = i128::from(estimate_item_token_count_with_audio(
+            self.source.borrow(),
+            audio_durations,
+        ));
         let notice_tokens = self.attached_notice.as_ref().map_or(0, |notice| {
-            i128::from(estimate_item_token_count(notice.borrow()))
+            i128::from(estimate_item_token_count_with_audio(
+                notice.borrow(),
+                audio_durations,
+            ))
         });
         source_tokens.saturating_add(notice_tokens)
     }

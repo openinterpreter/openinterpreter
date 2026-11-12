@@ -18,8 +18,9 @@ use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use strum::IntoEnumIterator;
-use unicode_width::UnicodeWidthStr;
 
+use self::render::detail_line;
+use self::render::detail_wrapped_lines;
 use super::CancellationEvent;
 use super::bottom_pane_view::BottomPaneView;
 use super::picker_style::selection_style;
@@ -164,47 +165,11 @@ impl HooksBrowserView {
             .and_then(|idx| self.entry.hooks.get(idx))
     }
 
-    fn move_up(&mut self) {
-        let len = self.page_len();
-        self.state.move_up_wrap(len);
-        self.state.ensure_visible(len, self.max_visible_rows());
-    }
-
-    fn move_down(&mut self) {
-        let len = self.page_len();
-        self.state.move_down_wrap(len);
-        self.state.ensure_visible(len, self.max_visible_rows());
-    }
-
-    fn page_up(&mut self) {
-        let len = self.page_len();
-        self.state.page_up_clamped(len, self.max_visible_rows());
-    }
-
-    fn page_down(&mut self) {
-        let len = self.page_len();
-        self.state.page_down_clamped(len, self.max_visible_rows());
-    }
-
-    fn jump_top(&mut self) {
-        let len = self.page_len();
-        self.state.jump_top(len, self.max_visible_rows());
-    }
-
-    fn jump_bottom(&mut self) {
-        let len = self.page_len();
-        self.state.jump_bottom(len, self.max_visible_rows());
-    }
-
     fn page_len(&self) -> usize {
         match self.page {
             HooksBrowserPage::Events => codex_protocol::protocol::HookEventName::iter().count(),
             HooksBrowserPage::Handlers(event_name) => self.handlers_for_event(event_name).count(),
         }
-    }
-
-    fn max_visible_rows(&self) -> usize {
-        MAX_POPUP_ROWS.min(self.page_len().max(1))
     }
 
     fn open_selected_event(&mut self) {
@@ -436,6 +401,12 @@ impl HooksBrowserView {
 
     #[allow(clippy::disallowed_methods)]
     fn handler_row_lines(&self, event_name: HookEventName, width: usize) -> Vec<Line<'static>> {
+        let index_width = self
+            .handlers_for_event(event_name)
+            .count()
+            .to_string()
+            .len()
+            .max(2);
         self.handlers_for_event(event_name)
             .enumerate()
             .map(|(idx, hook)| {
@@ -446,14 +417,16 @@ impl HooksBrowserView {
                 } else {
                     ' '
                 };
-                let row = match hook.trust_status {
-                    HookTrustStatus::Modified => {
-                        format!("[{marker}] {} · modified", hook_title(idx))
-                    }
-                    HookTrustStatus::Untrusted => format!("[{marker}] {} · new", hook_title(idx)),
-                    HookTrustStatus::Managed | HookTrustStatus::Trusted => {
-                        format!("[{marker}] {}", hook_title(idx))
-                    }
+                let title = hook
+                    .status_message
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or("Unnamed hook");
+                let trust_suffix = match hook.trust_status {
+                    HookTrustStatus::Modified => " · modified",
+                    HookTrustStatus::Untrusted => " · new",
+                    HookTrustStatus::Managed | HookTrustStatus::Trusted => "",
                 };
                 let prefix = if self.state.selected_idx == Some(idx) {
                     "› "
@@ -475,9 +448,15 @@ impl HooksBrowserView {
             .collect()
     }
 
-    fn detail_lines(&self, event_name: HookEventName, width: usize) -> Vec<Line<'static>> {
+    fn detail_lines(
+        &self,
+        event_name: HookEventName,
+        width: usize,
+    ) -> Vec<crate::terminal_hyperlinks::HyperlinkLine> {
         let Some(hook) = self.selected_hook(event_name) else {
-            return vec!["No hooks installed for this event.".dim().into()];
+            return crate::terminal_hyperlinks::plain_hyperlink_lines(vec![
+                "No hooks installed for this event.".dim().into(),
+            ]);
         };
 
         let mut lines = vec![detail_line("Event", event_label(event_name))];
@@ -594,13 +573,14 @@ impl BottomPaneView for HooksBrowserView {
     }
 
     fn handle_key_event(&mut self, key_event: KeyEvent) {
+        if let Some(action) = self.keymap.vertical_action_for(key_event) {
+            let len = self.page_len();
+            self.state
+                .apply_vertical_action(action, len, MAX_POPUP_ROWS.min(len.max(1)));
+            return;
+        }
+
         match key_event {
-            _ if self.keymap.move_up.is_pressed(key_event) => self.move_up(),
-            _ if self.keymap.move_down.is_pressed(key_event) => self.move_down(),
-            _ if self.keymap.page_up.is_pressed(key_event) => self.page_up(),
-            _ if self.keymap.page_down.is_pressed(key_event) => self.page_down(),
-            _ if self.keymap.jump_top.is_pressed(key_event) => self.jump_top(),
-            _ if self.keymap.jump_bottom.is_pressed(key_event) => self.jump_bottom(),
             _ if self.keymap.accept.is_pressed(key_event)
                 && self.page == HooksBrowserPage::Events =>
             {
@@ -692,6 +672,8 @@ fn event_label(event_name: HookEventName) -> &'static str {
         HookEventName::PostToolUse => "PostToolUse",
         HookEventName::PreCompact => "PreCompact",
         HookEventName::PostCompact => "PostCompact",
+        HookEventName::PreModelRequest => "PreModelRequest",
+        HookEventName::PostModelRequest => "PostModelRequest",
         HookEventName::SessionStart => "SessionStart",
         HookEventName::SessionEnd => "SessionEnd",
         HookEventName::UserPromptSubmit => "UserPromptSubmit",
@@ -709,6 +691,8 @@ fn event_description(event_name: HookEventName) -> &'static str {
         HookEventName::PostToolUse => "After a tool executes",
         HookEventName::PreCompact => "Before context compaction",
         HookEventName::PostCompact => "After context compaction",
+        HookEventName::PreModelRequest => "Before a model request",
+        HookEventName::PostModelRequest => "After a model request, including failures",
         HookEventName::SessionStart => "When a new session starts",
         HookEventName::SessionEnd => "Right before a session ends",
         HookEventName::UserPromptSubmit => "When the user submits a prompt",
@@ -719,11 +703,10 @@ fn event_description(event_name: HookEventName) -> &'static str {
     }
 }
 
-fn hook_title(idx: usize) -> String {
-    format!("Hook {}", idx + 1)
-}
-
 fn hook_source_summary(hook: &HookMetadata) -> String {
+    if let Some(id) = &hook.environment_id {
+        return format!("Environment - {id}");
+    }
     match hook.source {
         HookSource::Plugin => hook
             .plugin_id
@@ -735,6 +718,9 @@ fn hook_source_summary(hook: &HookMetadata) -> String {
 }
 
 fn detail_source_value(hook: &HookMetadata) -> String {
+    if hook.environment_id.is_some() {
+        return hook_source_summary(hook);
+    }
     match hook.source {
         HookSource::Plugin => hook_source_summary(hook),
         HookSource::System
@@ -767,59 +753,6 @@ fn config_source_label(source: HookSource) -> &'static str {
     }
 }
 
-fn detail_line(label: &str, value: &str) -> Line<'static> {
-    Line::from(vec![format!("{label:<10}").into(), value.to_string().dim()])
-}
-
-fn detail_wrapped_lines(
-    label: &str,
-    value: &str,
-    width: usize,
-    max_lines: Option<usize>,
-) -> Vec<Line<'static>> {
-    let label_width = label.width().saturating_add(1).max(10);
-    let prefix = format!("{label:<label_width$}");
-    let available = width.saturating_sub(prefix.width()).max(1);
-    let mut wrapped = textwrap::wrap(value, available).into_iter();
-    let first = wrapped.next().unwrap_or_default().into_owned();
-    let mut lines = vec![Line::from(vec![prefix.into(), first.dim()])];
-    lines.extend(wrapped.map(|line| {
-        Line::from(vec![
-            " ".repeat(label_width).into(),
-            line.into_owned().dim(),
-        ])
-    }));
-    let Some(max_lines) = max_lines else {
-        return lines;
-    };
-    if lines.len() <= max_lines {
-        return lines;
-    }
-
-    lines.truncate(max_lines);
-    if let Some(last_line) = lines.last_mut() {
-        let prefix_width = last_line.spans[..last_line.spans.len().saturating_sub(1)]
-            .iter()
-            .map(ratatui::prelude::Span::width)
-            .sum::<usize>();
-        let max_width = width.saturating_sub(prefix_width);
-        let Some(last_span) = last_line.spans.last_mut() else {
-            return lines;
-        };
-        let truncated = truncate_line_with_ellipsis_if_overflow(
-            Line::from(format!("{}…", last_span.content)),
-            max_width,
-        );
-        let content = truncated
-            .spans
-            .into_iter()
-            .map(|span| span.content.into_owned())
-            .collect::<String>();
-        last_span.content = content.into();
-    }
-    lines
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -839,13 +772,14 @@ mod tests {
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
     use insta::assert_snapshot;
+    use pretty_assertions::assert_eq;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use ratatui::style::Color;
     use ratatui::style::Modifier;
     use tokio::sync::mpsc::unbounded_channel;
 
-    fn render_lines(view: &HooksBrowserView, width: u16) -> String {
+    pub(super) fn render_lines(view: &HooksBrowserView, width: u16) -> String {
         let height = view.desired_height(width);
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
@@ -859,7 +793,7 @@ mod tests {
                         if symbol.is_empty() {
                             " ".to_string()
                         } else {
-                            symbol.to_string()
+                            crate::terminal_hyperlinks::strip_osc8(symbol)
                         }
                     })
                     .collect::<String>();
@@ -872,7 +806,7 @@ mod tests {
             .join("\n")
     }
 
-    fn render_buffer(view: &HooksBrowserView, width: u16) -> Buffer {
+    pub(super) fn render_buffer(view: &HooksBrowserView, width: u16) -> Buffer {
         let height = view.desired_height(width);
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
@@ -881,7 +815,7 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn hook(
+    pub(super) fn hook(
         key: &str,
         event_name: HookEventName,
         source: HookSource,
@@ -907,6 +841,7 @@ mod tests {
             source_path: test_path_buf("/tmp/hooks.json").abs(),
             source,
             plugin_id: plugin_id.map(str::to_string),
+            environment_id: None,
             display_order,
             enabled,
             current_hash,
@@ -963,6 +898,11 @@ mod tests {
     fn renders_event_browser() {
         let mut view = view();
         assert_snapshot!("hooks_browser_events", render_lines(&view, /*width*/ 112));
+        view.state.selected_idx = Some(view.event_rows().len() - 1);
+        assert_snapshot!(
+            "hooks_browser_model_requests",
+            render_lines(&view, /*width*/ 112),
+        );
         view.keymap.accept.clear();
         assert!(!render_lines(&view, /*width*/ 112).contains("enter details"));
     }
@@ -1078,6 +1018,46 @@ mod tests {
         let mut view = view();
         view.handle_key_event(KeyEvent::from(KeyCode::Enter));
         assert_snapshot!("hooks_browser_handlers", render_lines(&view, /*width*/ 112));
+    }
+
+    #[test]
+    fn renders_handler_status_messages_with_blank_fallback() {
+        let mut view = view();
+        view.entry.hooks[0].status_message = Some("  检查 🦀 shell commands  ".to_string());
+        view.entry.hooks[1].status_message = Some(" \t\n ".to_string());
+        view.entry.hooks[2].event_name = HookEventName::PreToolUse;
+        view.handle_key_event(KeyEvent::from(KeyCode::Enter));
+        assert_snapshot!(
+            "hooks_browser_status_messages",
+            render_lines(&view, /*width*/ 112)
+        );
+
+        for (fg, bg) in [
+            ((230, 230, 230), (18, 20, 30)),
+            ((32, 32, 32), (255, 255, 255)),
+        ] {
+            crate::terminal_palette::with_test_default_colors(
+                crate::terminal_probe::DefaultColors { fg, bg },
+                || {
+                    let buf = render_buffer(&view, /*width*/ 112);
+                    let selected_y = (0..buf.area.height)
+                        .find(|&y| buf[(0, y)].symbol() == "›")
+                        .expect("selected hook row");
+                    for y in [selected_y, selected_y + 1] {
+                        assert!(buf[(7, y)].modifier.contains(Modifier::DIM));
+                        assert!(!buf[(10, y)].modifier.contains(Modifier::DIM));
+                    }
+                    assert_eq!(buf[(10, selected_y)].symbol(), "检");
+                    assert_eq!(buf[(10, selected_y)].fg, selection_style().fg.unwrap());
+                    assert_eq!(
+                        (0..buf.area.width)
+                            .map(|x| buf[(x, selected_y)].bg)
+                            .collect::<Vec<_>>(),
+                        vec![selection_style().bg.unwrap(); usize::from(buf.area.width)]
+                    );
+                },
+            );
+        }
     }
 
     #[test]
@@ -1281,9 +1261,9 @@ mod tests {
     #[test]
     fn renders_scrolled_handler_window() {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
-        let hooks = (0..=MAX_POPUP_ROWS)
+        let hooks = (0..MAX_POPUP_ROWS + 3)
             .map(|idx| {
-                hook(
+                let mut hook = hook(
                     &format!("path:hook-{idx}"),
                     HookEventName::PreToolUse,
                     HookSource::User,
@@ -1292,18 +1272,27 @@ mod tests {
                     /*enabled*/ true,
                     /*is_managed*/ false,
                     idx as i64,
-                )
+                );
+                if idx % 2 == 0 {
+                    hook.status_message = Some(format!("Check tool {}", idx + 1));
+                }
+                hook
             })
             .collect();
         let mut view =
             HooksBrowserView::new(hooks, Vec::new(), Vec::new(), AppEventSender::new(tx_raw));
         view.handle_key_event(KeyEvent::from(KeyCode::Enter));
-        for _ in 0..MAX_POPUP_ROWS {
+        for _ in 0..MAX_POPUP_ROWS + 1 {
             view.handle_key_event(KeyEvent::from(KeyCode::Down));
         }
         assert_snapshot!(
             "hooks_browser_scrolled_handlers",
             render_lines(&view, /*width*/ 112)
+        );
+        assert_eq!(
+            view.selected_hook(HookEventName::PreToolUse)
+                .map(|hook| hook.key.as_str()),
+            Some("path:hook-9")
         );
     }
 
@@ -1321,6 +1310,8 @@ mod tests {
             /*display_order*/ 0,
         );
         capped_command_hook.source_path = test_path_buf("/tmp/h.json").abs();
+        capped_command_hook.status_message =
+            Some("Check shell commands before allowing them to execute".to_string());
         let mut view = HooksBrowserView::new(
             vec![capped_command_hook],
             Vec::new(),

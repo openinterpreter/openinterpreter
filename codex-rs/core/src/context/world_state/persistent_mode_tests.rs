@@ -5,11 +5,9 @@ use crate::context::world_state::WorldState;
 use pretty_assertions::assert_eq;
 
 #[test]
-fn persistent_instructions_follow_effort_and_catalog_updates_without_duplicates() {
+fn persistent_instructions_follow_mode_and_catalog_updates_without_duplicates() {
     let mut history = Vec::new();
     let mut previous = None;
-    let persistent = Some(ReasoningEffort::Persistent);
-    let medium = Some(ReasoningEffort::Medium);
     let replacement = format!("{REPLACEMENT_NOTICE}\n\nupdated instructions");
 
     for (effort, instructions, expected) in [
@@ -29,12 +27,13 @@ fn persistent_instructions_follow_effort_and_catalog_updates_without_duplicates(
     ] {
         let mut world_state = WorldState::default();
         world_state.add_section(PersistentModeState::new(
-            effort.as_ref(),
+            enabled,
             instructions,
             /*send_user_message_async_available*/ false,
         ));
-        let updates = world_state
-            .render_history_diff(previous.as_ref(), &history)
+        let (snapshot, fragments) =
+            world_state.render_history_fragment_diff(previous.as_ref(), &history);
+        let updates = fragments
             .into_iter()
             .map(ContextualUserFragment::into_boxed_response_item)
             .collect::<Vec<_>>();
@@ -50,7 +49,7 @@ fn persistent_instructions_follow_effort_and_catalog_updates_without_duplicates(
                 .collect::<Vec<_>>()
         );
         history.extend(updates);
-        previous = Some(world_state.snapshot());
+        previous = Some(snapshot);
     }
 }
 
@@ -59,12 +58,12 @@ fn retained_persistent_instructions_are_replaced_or_retired_without_a_snapshot()
     let retained = ContextualUserFragment::into(PersistentModeState {
         instructions: "previous instructions".to_string(),
     });
-    for (effort, expected) in [
+    for (enabled, expected) in [
         (
-            ReasoningEffort::Persistent,
+            true,
             format!("{REPLACEMENT_NOTICE}\n\ncurrent instructions"),
         ),
-        (ReasoningEffort::Medium, REMOVAL_NOTICE.to_string()),
+        (false, REMOVAL_NOTICE.to_string()),
     ] {
         let mut world_state = WorldState::default();
         world_state.add_section(PersistentModeState::new(
@@ -74,7 +73,11 @@ fn retained_persistent_instructions_are_replaced_or_retired_without_a_snapshot()
         ));
         assert_eq!(
             world_state
-                .render_history_diff(/*previous*/ None, std::slice::from_ref(&retained))
+                .render_history_fragment_diff(
+                    /*previous*/ None,
+                    std::slice::from_ref(&retained)
+                )
+                .1
                 .into_iter()
                 .map(ContextualUserFragment::into_boxed_response_item)
                 .collect::<Vec<_>>(),

@@ -6,6 +6,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
 use codex_http_client::cache_system_proxy_route_for_test;
@@ -19,17 +20,20 @@ use wiremock::matchers::path;
 
 use super::*;
 
-#[test]
-fn client_preserves_supplied_http_client_factory_policy() {
+#[tokio::test]
+async fn client_preserves_supplied_factory_and_typed_policy_denial() {
+    let controller = codex_http_client::NetworkPolicyController::default();
     let client = Client::new(
         "https://example.test",
-        HttpClientFactory::new(OutboundProxyPolicy::RespectSystemProxy),
+        HttpClientFactory::new(OutboundProxyPolicy::RespectSystemProxy)
+            .with_network_policy(controller.policy()),
     );
-
     assert_eq!(
         client.http.outbound_proxy_policy(),
         OutboundProxyPolicy::RespectSystemProxy
     );
+    let denied = client.get_config_bundle().await;
+    assert!(matches!(denied, Err(RequestError::Policy(_))));
 }
 
 #[test]
@@ -116,7 +120,8 @@ async fn migrated_requests_preserve_query_auth_and_json_body() {
     )
     .with_auth_provider(Arc::new(codex_model_provider::BearerAuthProvider::new(
         "request-token".to_string(),
-    )));
+    )))
+    .unwrap();
 
     let tasks = client
         .list_tasks(

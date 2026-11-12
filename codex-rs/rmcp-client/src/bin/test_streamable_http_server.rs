@@ -40,7 +40,7 @@ use rmcp::model::Resource;
 use rmcp::model::ResourceContents;
 use rmcp::model::ResourceTemplate;
 use rmcp::model::ServerCapabilities;
-use rmcp::model::ServerInfo;
+use rmcp::model::ServerConfig;
 use rmcp::model::Tool;
 use rmcp::model::ToolAnnotations;
 use rmcp::transport::StreamableHttpServerConfig;
@@ -165,6 +165,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!("starting rmcp streamable http test server on http://{actual_bind_addr}/mcp");
 
+    let mut transport_config = StreamableHttpServerConfig::default();
+    if !actual_bind_addr.ip().is_loopback() {
+        transport_config
+            .allowed_hosts
+            .push(actual_bind_addr.to_string());
+        transport_config =
+            transport_config.with_allowed_origins([format!("http://{actual_bind_addr}")]);
+    }
+
     let router = Router::new()
         .route(
             SESSION_POST_FAILURE_CONTROL_PATH,
@@ -220,7 +229,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             StreamableHttpService::new(
                 || Ok(TestToolServer::new()),
                 Arc::new(LocalSessionManager::default()),
-                StreamableHttpServerConfig::default(),
+                transport_config,
             ),
         )
         .layer(middleware::from_fn_with_state(
@@ -251,8 +260,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 impl ServerHandler for TestToolServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_tool_list_changed()

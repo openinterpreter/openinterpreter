@@ -191,7 +191,10 @@ impl RequestPluginInstallHandler {
             let auth = session.services.auth_manager.auth().await;
             let plugins_config = turn.config.plugins_config_input();
             match codex_core_plugins::hydrate_selected_recommended_plugin_install_metadata(
-                &plugins_config,
+                &session
+                    .services
+                    .plugins_manager
+                    .remote_plugin_service_config(&plugins_config),
                 auth.as_ref(),
                 tool,
             )
@@ -230,6 +233,7 @@ impl RequestPluginInstallHandler {
                         session.thread_id.to_string(),
                         turn.sub_id.clone(),
                         turn.originator.clone(),
+                        /*turn_metadata*/ None,
                     ),
                     PluginInstallRequested {
                         suggestion_id: suggestion_id.clone(),
@@ -247,7 +251,7 @@ impl RequestPluginInstallHandler {
         let request =
             build_request_plugin_install_elicitation_request(suggest_reason, &tool, &suggestion_id);
         let request_id = RequestId::String(suggestion_id.into());
-        let elicitation = session
+        let response = session
             .request_mcp_server_elicitation(
                 turn.as_ref(),
                 CODEX_APPS_MCP_SERVER_NAME.to_string(),
@@ -255,7 +259,6 @@ impl RequestPluginInstallHandler {
                 request,
             )
             .await;
-        let response = elicitation.response;
         if let Some(response) = response.as_ref() {
             maybe_persist_disabled_install_request(&session, &turn, &tool, response).await;
         }

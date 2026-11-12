@@ -11,9 +11,19 @@ use tonic::Request;
 pub(super) async fn open_session(
     host: &GrpcCodeModeHost,
 ) -> (String, GrpcStream<proto::SessionEvent>) {
+    let (opened, stream) = open_session_with_truncation(host, /*output_truncation*/ None).await;
+    (opened.session_id, stream)
+}
+
+async fn open_session_with_truncation(
+    host: &GrpcCodeModeHost,
+    output_truncation: Option<i32>,
+) -> (proto::SessionOpened, GrpcStream<proto::SessionEvent>) {
     let mut stream = host
         .open_session(Request::new(proto::OpenSessionRequest {
+            max_pending_delegate_calls: None,
             cell_execution_limits: None,
+            output_truncation,
         }))
         .await
         .expect("open code-mode session")
@@ -26,7 +36,7 @@ pub(super) async fn open_session(
     let Some(proto::session_event::Event::Opened(opened)) = event.event else {
         panic!("expected the first session event to open its lease");
     };
-    (opened.session_id, stream)
+    (opened, stream)
 }
 
 pub(super) fn execute_request(
@@ -79,6 +89,18 @@ pub(super) async fn execute_events(
     (started.cell_id, stream)
 }
 
+fn only_text(items: &[proto::ContentItem]) -> &str {
+    let [
+        proto::ContentItem {
+            item: Some(proto::content_item::Item::Text(text)),
+        },
+    ] = items
+    else {
+        panic!("expected one text item, got {items:?}");
+    };
+    &text.text
+}
+
 #[tokio::test]
 async fn execute_stream_starts_immediately_and_wait_preserves_missing_cells() {
     let host = GrpcCodeModeHost::new();
@@ -120,6 +142,7 @@ async fn execute_stream_starts_immediately_and_wait_preserves_missing_cells() {
             cell_id: cell_id.clone(),
             wait_id: "wait-1".to_string(),
             yield_time_ms: 60_000,
+            max_output_tokens: None,
         }))
         .await
         .expect("wait for completion")
@@ -163,6 +186,7 @@ async fn execute_stream_starts_immediately_and_wait_preserves_missing_cells() {
             cell_id: "missing-cell".to_string(),
             wait_id: "wait-missing".to_string(),
             yield_time_ms: 1,
+            max_output_tokens: None,
         }))
         .await
         .expect("missing cells remain successful wait outcomes")
@@ -355,6 +379,7 @@ async fn cancellation_before_wait_admission_is_preserved() {
             cell_id: cell_id.clone(),
             wait_id: "pre-cancelled".to_string(),
             yield_time_ms: 60_000,
+            max_output_tokens: Some(0),
         }))
         .await
         .unwrap_err();
@@ -363,9 +388,32 @@ async fn cancellation_before_wait_admission_is_preserved() {
     host.terminate(Request::new(proto::TerminateRequest {
         session_id,
         cell_id,
+        max_output_tokens: Some(0),
     }))
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn yield_before_observation_registration_is_remembered() {
+    let host = GrpcCodeModeHost::new();
+    let (session_id, _events) = open_session(&host).await;
+    let session = host.state.session(&session_id).unwrap();
+    for observation in [
+        proto::yield_observation_request::Observation::ExecutionId("exec".to_string()),
+        proto::yield_observation_request::Observation::WaitId("wait".to_string()),
+    ] {
+        host.yield_observation(Request::new(proto::YieldObservationRequest {
+            session_id: session_id.clone(),
+            observation: Some(observation),
+        }))
+        .await
+        .unwrap();
+    }
+
+    assert!(session.reserve_execution("exec").unwrap().is_cancelled());
+    let wait = super::waits::WaitRegistration::new(session, "wait".to_string()).unwrap();
+    assert!(wait.yield_signal().is_cancelled());
 }
 
 #[tokio::test]
@@ -412,4 +460,159 @@ async fn notifications_do_not_delay_cell_completion() {
     }))
     .await
     .expect("legacy notification acknowledgments remain accepted");
+}
+
+#[tokio::test]
+async fn output_truncation_is_a_session_setting_and_omitting_it_keeps_legacy_output() {
+    for (output_truncation, bounded_output) in [
+        (None, false),
+        (Some(proto::OutputTruncation::Unspecified.into()), false),
+        (Some(proto::OutputTruncation::Client.into()), false),
+        (Some(proto::OutputTruncation::Server.into()), true),
+    ] {
+        let host = GrpcCodeModeHost::new();
+        let (opened, _lease) = open_session_with_truncation(&host, output_truncation).await;
+        assert_eq!(
+            opened.output_truncation,
+            bounded_output.then_some(proto::OutputTruncation::Server.into()),
+        );
+        let mut request = execute_request(
+            &opened.session_id,
+            "execution",
+            "text('x'.repeat(2 * 1024 * 1024));",
+        );
+        request.yield_time_ms = Some(60_000);
+        let (_, mut execution) = execute_events(&host, request).await;
+        let outcome = execution
+            .next()
+            .await
+            .expect("outcome event")
+            .expect("outcome");
+        let Some(proto::execute_event::Event::Outcome(outcome)) = outcome.event else {
+            panic!("expected execution outcome");
+        };
+        assert!(matches!(
+            outcome.outcome,
+            Some(proto::execution_outcome::Outcome::Completed(_))
+        ));
+        assert_eq!(
+            outcome.content_items.iter().any(
+                |item| matches!(&item.item, Some(proto::content_item::Item::Text(text))
+                    if text.text.starts_with("[Code Mode session output limit reached: omitted "))
+            ),
+            bounded_output
+        );
+        if !bounded_output {
+            assert_eq!(
+                only_text(&outcome.content_items),
+                "x".repeat(2 * 1024 * 1024)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn server_output_budgets_follow_exec_wait_and_terminate_over_grpc() {
+    for (execution_id, after_yield) in [
+        ("failed", "throw '0123456789'.repeat(8);"),
+        (
+            "terminated",
+            "text('0123456789'.repeat(8)); notify('ready to terminate'); await new Promise(() => {});",
+        ),
+    ] {
+        let host = GrpcCodeModeHost::new();
+        let (opened, mut lease) =
+            open_session_with_truncation(&host, Some(proto::OutputTruncation::Server.into())).await;
+        let source = format!("text('0123456789'.repeat(4)); yield_control(); {after_yield}");
+        let mut request = execute_request(&opened.session_id, execution_id, &source);
+        request.yield_time_ms = Some(60_000);
+        request.max_output_tokens = Some(5);
+        let (cell_id, mut execution) = execute_events(&host, request).await;
+        let Some(proto::execute_event::Event::Outcome(first)) =
+            execution.next().await.unwrap().unwrap().event
+        else {
+            panic!("expected execution outcome");
+        };
+        assert_eq!(first.cell_id, cell_id);
+        assert!(matches!(
+            first.outcome,
+            Some(proto::execution_outcome::Outcome::Yielded(_))
+        ));
+        assert_eq!(
+            only_text(&first.content_items),
+            "Warning: truncated output (original token count: 10)\nTotal output lines: 1\n\n0123456789…5 tokens truncated…0123456789"
+        );
+
+        let response = if execution_id == "failed" {
+            host.wait(Request::new(proto::WaitRequest {
+                session_id: opened.session_id,
+                cell_id: cell_id.clone(),
+                wait_id: "wait-after-yield".to_string(),
+                yield_time_ms: 60_000,
+                max_output_tokens: Some(7),
+            }))
+            .await
+            .expect("script failures are completed results, not RPC failures")
+            .into_inner()
+        } else {
+            // The event is ordered after text in the runtime FIFO, so the
+            // termination observes it without a sleep or racing the cell.
+            assert!(matches!(
+                lease.next().await.unwrap().unwrap().event,
+                Some(proto::session_event::Event::Notification(
+                    proto::Notification { text, .. }
+                )) if text == "ready to terminate"
+            ));
+            host.terminate(Request::new(proto::TerminateRequest {
+                session_id: opened.session_id,
+                cell_id: cell_id.clone(),
+                max_output_tokens: Some(7),
+            }))
+            .await
+            .expect("terminate with an independent output budget")
+            .into_inner()
+        };
+        let Some(proto::wait_response::State::LiveCell(last)) = response.state else {
+            panic!("expected final observation from the live cell");
+        };
+        let expected_text = if execution_id == "failed" {
+            let Some(proto::execution_outcome::Outcome::Completed(proto::ExecutionCompleted {
+                error_text: Some(diagnostic),
+            })) = &last.outcome
+            else {
+                panic!(
+                    "expected completed failure with a diagnostic, got {:?}",
+                    last.outcome
+                );
+            };
+            assert_eq!(diagnostic, &"0123456789".repeat(8));
+            "Warning: truncated output (original token count: 24)\nTotal output lines: 2\n\nScript error:\n…17 tokens truncated…67890123456789"
+        } else {
+            assert_eq!(
+                last.outcome,
+                Some(proto::execution_outcome::Outcome::Terminated(
+                    proto::ExecutionTerminated {}
+                ))
+            );
+            "Warning: truncated output (original token count: 20)\nTotal output lines: 1\n\n01234567890123…13 tokens truncated…67890123456789"
+        };
+        assert_eq!(last.cell_id, cell_id);
+        assert_eq!(only_text(&last.content_items), expected_text);
+    }
+}
+
+#[tokio::test]
+async fn unknown_output_truncation_is_rejected_before_opening_a_session() {
+    let host = GrpcCodeModeHost::new();
+    let result = host
+        .open_session(Request::new(proto::OpenSessionRequest {
+            max_pending_delegate_calls: None,
+            cell_execution_limits: None,
+            output_truncation: Some(42),
+        }))
+        .await;
+    let Err(status) = result else {
+        panic!("unknown truncation mode should be rejected");
+    };
+    assert_eq!(status.code(), Code::InvalidArgument);
 }

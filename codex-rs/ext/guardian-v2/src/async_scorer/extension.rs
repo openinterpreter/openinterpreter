@@ -83,10 +83,26 @@ impl ThreadLifecycleContributor<Config> for GuardianV2Extension {
                     .get_or_init(NodeReplReviewEvidence::default)
                     .enable_image_capture();
             }
+            input.thread_store.remove::<ConversationBackend>();
             input.thread_store.remove::<LunaSampler>();
             let sampler = input
                 .thread_store
                 .get_or_init(|| LunaSampler::new(sampler_config));
+            input
+                .thread_store
+                .insert(ConversationBackend::new(Arc::clone(&sampler)));
+            input
+                .thread_store
+                .remove::<super::decisions::DecisionsSampler>();
+            if input
+                .config
+                .features
+                .enabled(Feature::GuardianV2DecisionsComparison)
+                && let Some(decisions_sampler) =
+                    super::startup::decisions_sampler(&input, &self.auth_manager)
+            {
+                input.thread_store.insert(decisions_sampler);
+            }
             input.thread_store.insert(guardian_config);
             input.thread_store.insert(GuardianV2ScoreProgress::new(
                 input.extension_metrics.clone(),
@@ -119,6 +135,11 @@ impl ThreadLifecycleContributor<Config> for GuardianV2Extension {
                     sampler.prewarm().await;
                 });
             }
+        })
+    }
+    fn on_thread_stop<'a>(&'a self, input: ThreadStopInput<'a>) -> ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            input.thread_store.remove::<ConversationBackend>();
         })
     }
 }

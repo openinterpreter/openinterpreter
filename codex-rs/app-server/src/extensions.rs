@@ -32,6 +32,7 @@ use crate::thread_state::ThreadListenerCommand;
 use crate::thread_state::ThreadStateManager;
 
 pub(crate) struct ThreadExtensionDependencies {
+    pub(crate) sample_responses: Arc<crate::thread_sample::SampleResponseRegistry>,
     pub(crate) event_sink: Arc<dyn ExtensionEventSink>,
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) state_db: Option<StateDbHandle>,
@@ -40,6 +41,7 @@ pub(crate) struct ThreadExtensionDependencies {
     pub(crate) goal_service: Arc<GoalService>,
     pub(crate) environment_manager: Arc<EnvironmentManager>,
     pub(crate) executor_skill_provider: Arc<dyn codex_skills_extension::SkillProvider>,
+    pub(crate) cloud_skill_provider: Option<Arc<dyn codex_skills_extension::SkillProvider>>,
     pub(crate) git_attribution_base_url: String,
     pub(crate) http_client_factory: HttpClientFactory,
     /// Process-scoped queue shared by idle dispatch and app-server requests.
@@ -51,6 +53,7 @@ pub(crate) fn thread_extensions(
     dependencies: ThreadExtensionDependencies,
 ) -> Arc<ExtensionRegistry<Config>> {
     let ThreadExtensionDependencies {
+        sample_responses,
         event_sink,
         auth_manager,
         state_db,
@@ -59,6 +62,7 @@ pub(crate) fn thread_extensions(
         goal_service,
         environment_manager,
         executor_skill_provider,
+        cloud_skill_provider,
         git_attribution_base_url,
         http_client_factory,
         queue_service,
@@ -101,26 +105,33 @@ pub(crate) fn thread_extensions(
     codex_image_generation_extension::install(&mut builder, auth_manager, |config: &Config| {
         Some(config.codex_home.clone())
     });
-    let skill_providers = codex_skills_extension::SkillProviders::new()
+    let mut skill_providers = codex_skills_extension::SkillProviders::new()
         .with_executor_provider(executor_skill_provider)
-        .with_orchestrator_provider(Arc::new(
-            codex_skills_extension::OrchestratorSkillProvider::new(),
-        ))
         .with_host_provider(Arc::new(codex_skills_extension::HostSkillProvider::new()));
+    if let Some(provider) = cloud_skill_provider {
+        skill_providers = skill_providers.with_cloud_provider(provider);
+    }
     codex_skills_extension::install_with_providers_and_metrics(
         &mut builder,
         skill_providers,
         codex_otel::global(),
         |config: &Config| codex_skills_extension::SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
+            catalog_deltas_enabled: config
+                .features
+                .enabled(codex_features::Feature::SkillCatalogDeltas),
+            omit_descriptions: config
+                .features
+                .enabled(codex_features::Feature::OmitSkillDescriptions),
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: config.bundled_skills_enabled(),
-            orchestrator_skills_enabled: config.orchestrator_skills_enabled,
+            cloud_skill_enabled: config.cloud_skill_enabled,
             shadow_selection_enabled: config
                 .features
                 .enabled(codex_features::Feature::SkillSearch),
         },
     );
+    builder.model_request_contributor(sample_responses);
     Arc::new(builder.build())
 }
 
@@ -410,14 +421,12 @@ mod tests {
                 .connection_initialized(connection_id, ConnectionCapabilities::default())
                 .await;
         }
-        thread_state_manager
-            .try_ensure_connection_subscribed(
-                thread_id,
-                subscribed_connection,
-                /*experimental_raw_events*/ false,
-            )
-            .await
-            .expect("connection should be subscribed");
+        assert!(
+            thread_state_manager
+                .try_add_connection_to_thread(thread_id, subscribed_connection)
+                .await,
+            "connection should be subscribed"
+        );
         let sink = app_server_extension_event_sink(outgoing, thread_state_manager);
 
         sink.emit_warning(ExtensionWarning {
@@ -476,14 +485,12 @@ mod tests {
             message: "catalog was shortened".to_string(),
         });
         tokio::task::yield_now().await;
-        thread_state_manager
-            .try_ensure_connection_subscribed(
-                thread_id,
-                subscribed_connection,
-                /*experimental_raw_events*/ false,
-            )
-            .await
-            .expect("connection should be subscribed");
+        assert!(
+            thread_state_manager
+                .try_add_connection_to_thread(thread_id, subscribed_connection)
+                .await,
+            "connection should be subscribed"
+        );
 
         let envelope = timeout(Duration::from_secs(1), outgoing_rx.recv())
             .await
@@ -526,14 +533,12 @@ mod tests {
         thread_state_manager
             .connection_initialized(subscribed_connection, ConnectionCapabilities::default())
             .await;
-        thread_state_manager
-            .try_ensure_connection_subscribed(
-                thread_id,
-                subscribed_connection,
-                /*experimental_raw_events*/ false,
-            )
-            .await
-            .expect("connection should be subscribed");
+        assert!(
+            thread_state_manager
+                .try_add_connection_to_thread(thread_id, subscribed_connection)
+                .await,
+            "connection should be subscribed"
+        );
         let (listener_command_tx, listener_command_rx) = mpsc::unbounded_channel();
         drop(listener_command_rx);
         thread_state_manager.register_listener_command_tx(thread_id, listener_command_tx);

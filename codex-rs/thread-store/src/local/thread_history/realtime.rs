@@ -52,7 +52,9 @@ pub(in crate::local) async fn list_timeline(
     .await?;
     validate_page_size(params.page_size)?;
 
-    let lineage = store.resolve_rollout_lineage(params.thread_id).await?;
+    let lineage = store
+        .resolve_rollout_lineage_for_history_page(params.thread_id)
+        .await?;
     let pool = store.thread_history_db().await?;
     let cursor = params
         .cursor
@@ -95,7 +97,18 @@ pub(in crate::local) async fn list_timeline(
             .map(|value| sqlite_integer(value, "rollout ordinal"))
             .transpose()?
             .unwrap_or(i64::MAX);
-        let segment_rows = sqlx::query_as::<_, (i64, i64, String, Option<String>, String)>(
+        let segment_rows = sqlx::query_as::<
+            _,
+            (
+                i64,
+                i64,
+                String,
+                Option<String>,
+                String,
+                Option<i64>,
+                Option<i64>,
+            ),
+        >(
             r#"
 WITH starts AS (
 SELECT rollout_ordinal, 0 AS kind, turn_id AS id, turn_id,
@@ -107,7 +120,7 @@ WHERE thread_id = ?1 AND rollout_ordinal >= ?2
   AND (rollout_ordinal, 0, turn_id) < (?4, ?5, ?6)
 ORDER BY rollout_ordinal DESC, turn_id DESC LIMIT ?7
 ), items AS (
-SELECT rollout_ordinal, 1 AS kind, item_id AS id, turn_id, item_json
+SELECT rollout_ordinal, 1 AS kind, item_id AS id, turn_id, item_json, started_at_ms, completed_at_ms
 FROM thread_items
 WHERE thread_id = ?1 AND rollout_ordinal >= ?2
   AND rollout_ordinal < ?3 AND rollout_ordinal <= ?4
@@ -132,10 +145,10 @@ WHERE thread_id = ?1 AND rollout_end_ordinal >= ?2
   AND (rollout_end_ordinal, 3, turn_id) < (?4, ?5, ?6)
 ORDER BY rollout_end_ordinal DESC, turn_id DESC LIMIT ?7
 )
-SELECT * FROM starts
+SELECT *, NULL, NULL FROM starts
 UNION ALL SELECT * FROM items
-UNION ALL SELECT * FROM realtime
-UNION ALL SELECT * FROM ends
+UNION ALL SELECT *, NULL, NULL FROM realtime
+UNION ALL SELECT *, NULL, NULL FROM ends
 ORDER BY rollout_ordinal DESC, kind DESC, id DESC
 LIMIT ?7
             "#,
@@ -151,7 +164,9 @@ LIMIT ?7
         .await
         .map_err(thread_history_error)?;
 
-        for (position, kind, _id, turn_id, item_json) in segment_rows {
+        for (position, kind, _id, turn_id, item_json, started_at_ms, completed_at_ms) in
+            segment_rows
+        {
             let position = u64::try_from(position).map_err(thread_history_error)?;
             rows.push(match kind {
                 0 | 3 => serde_json::from_str::<ThreadTimelineEntry>(&item_json)
@@ -159,10 +174,11 @@ LIMIT ?7
                 1 => ThreadTimelineEntry::Item {
                     position,
                     turn_id: turn_id.ok_or_else(|| thread_history_error("missing turn ID"))?,
-                    item: Box::new(
-                        serde_json::from_str::<ThreadItem>(&item_json)
-                            .map_err(thread_history_error)?,
-                    ),
+                    item: Box::new(ThreadItem {
+                        payload: serde_json::from_str(&item_json).map_err(thread_history_error)?,
+                        started_at_ms,
+                        completed_at_ms,
+                    }),
                 },
                 2 => ThreadTimelineEntry::Realtime {
                     position,

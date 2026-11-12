@@ -207,20 +207,55 @@ pub(crate) fn new_image_generation_call(
     status: &str,
     revised_prompt: Option<String>,
     saved_path: Option<AbsolutePathBuf>,
-) -> PlainHistoryCell {
+) -> ImageGenerationHistoryCell {
     let detail = revised_prompt.unwrap_or(call_id);
-    let heading = if status == "failed" {
+    let failed = status == "failed";
+    let heading = if failed {
         vec!["✗ ".red().bold(), "Image generation failed".bold()].into()
     } else {
         vec!["• ".dim(), "Generated Image:".bold()].into()
     };
     let mut lines: Vec<Line<'static>> = vec![heading, vec!["  └ ".dim(), detail.dim()].into()];
-    if let Some(saved_path) = saved_path {
+    if let Some(saved_path) = &saved_path {
         let saved_path = Url::from_file_path(saved_path.as_path())
             .map(|url| url.to_string())
             .unwrap_or_else(|_| saved_path.display().to_string());
         lines.push(vec!["  └ ".dim(), "Saved to: ".dim(), saved_path.into()].into());
     }
 
-    PlainHistoryCell { lines }
+    ImageGenerationHistoryCell {
+        lines,
+        failed,
+        saved_path: saved_path.filter(|_| !failed),
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ImageGenerationHistoryCell {
+    failed: bool,
+    lines: Vec<Line<'static>>,
+    saved_path: Option<AbsolutePathBuf>,
+}
+
+impl HistoryCell for ImageGenerationHistoryCell {
+    fn tool_call_labels(&self) -> Vec<String> {
+        let label = if self.failed {
+            "Image generation failed"
+        } else {
+            "Generated image"
+        };
+        vec![label.into()]
+    }
+
+    fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+        self.lines.clone()
+    }
+
+    fn raw_lines(&self) -> Vec<Line<'static>> {
+        plain_lines(self.lines.clone())
+    }
+
+    fn image_path(&self) -> Option<AbsolutePathBuf> {
+        self.saved_path.clone()
+    }
 }

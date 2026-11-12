@@ -1,5 +1,7 @@
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 
 // This warning is not produced anymore but fragment definition is used to filter messaged from old sessions
 #[derive(Debug, Clone, PartialEq)]
@@ -28,7 +30,7 @@ impl ContextualUserFragment for LegacyModelMismatchWarning {
         )
     }
 
-    fn body(&self) -> String {
-        String::new()
+    fn body(&self) -> ContentItem {
+        input_text(String::new())
     }
 }

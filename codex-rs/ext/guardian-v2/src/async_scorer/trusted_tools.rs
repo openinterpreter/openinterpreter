@@ -65,7 +65,7 @@ pub(crate) async fn trusted_tool_context(
             plugin_root.as_path().display().to_string()
         }
         McpToolSource::Config => {
-            trusted_user_config_source(config, "mcp_servers", &tool.server_name, &codex_home)?
+            trusted_user_config_source(config, "mcp_servers", tool.server_name(), &codex_home)?
         }
         McpToolSource::SelectedPlugin | McpToolSource::Other => return None,
     };

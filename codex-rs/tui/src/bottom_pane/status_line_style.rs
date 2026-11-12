@@ -13,21 +13,31 @@ use crate::style::secondary_text_style;
 use crate::thread_color::thread_color;
 use codex_protocol::ThreadId;
 
-const STATUS_LINE_SEPARATOR: &str = " · ";
+pub(crate) const STATUS_LINE_SEPARATOR: &str = " · ";
 const STATUS_LINE_COLOR_SATURATION_PERCENT: u16 = 85;
 const STATUS_LINE_COLOR_BRIGHTNESS_PERCENT: u16 = 100;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StatusLineAccent {
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum StatusLineAccent {
+    #[serde(rename = "status-model")]
     Model,
+    #[serde(rename = "status-path")]
     Path,
+    #[serde(rename = "status-branch")]
     Branch,
+    #[serde(rename = "status-state")]
     State,
+    #[serde(rename = "status-usage")]
     Usage,
+    #[serde(rename = "status-limit")]
     Limit,
+    #[serde(rename = "status-metadata")]
     Metadata,
+    #[serde(rename = "status-mode")]
     Mode,
+    #[serde(rename = "status-thread")]
     Thread,
+    #[serde(rename = "status-progress")]
     Progress,
 }
 
@@ -36,6 +46,7 @@ impl StatusLineAccent {
         match item {
             StatusLineItem::ModelName
             | StatusLineItem::ModelWithReasoning
+            | StatusLineItem::Provider
             | StatusLineItem::Reasoning => Self::Model,
             StatusLineItem::CurrentDir | StatusLineItem::ProjectRoot => Self::Path,
             StatusLineItem::GitBranch
@@ -51,10 +62,13 @@ impl StatusLineAccent {
             | StatusLineItem::ThreadCredits
             | StatusLineItem::EstimatedThreadCost => Self::Usage,
             StatusLineItem::FiveHourLimit | StatusLineItem::WeeklyLimit => Self::Limit,
-            StatusLineItem::CodexVersion | StatusLineItem::Hostname | StatusLineItem::SessionId => {
-                Self::Metadata
+            StatusLineItem::CodexVersion
+            | StatusLineItem::Hostname
+            | StatusLineItem::SessionId
+            | StatusLineItem::Profile => Self::Metadata,
+            StatusLineItem::FastMode | StatusLineItem::Daybreak | StatusLineItem::RawOutput => {
+                Self::Mode
             }
-            StatusLineItem::FastMode | StatusLineItem::RawOutput => Self::Mode,
             StatusLineItem::Permissions => Self::Mode,
             StatusLineItem::ApprovalMode => Self::Mode,
             StatusLineItem::ThreadName
@@ -64,7 +78,7 @@ impl StatusLineAccent {
         }
     }
 
-    fn scopes(self) -> &'static [&'static str] {
+    pub(crate) fn scopes(self) -> &'static [&'static str] {
         match self {
             Self::Model => &["entity.name.type", "support.type", "variable"],
             Self::Path => &["string", "markup.underline.link"],
@@ -79,11 +93,11 @@ impl StatusLineAccent {
         }
     }
 
-    fn fallback_style(self) -> Style {
+    pub(crate) fn fallback_color(self) -> Color {
         match self {
-            Self::Model | Self::State | Self::Metadata | Self::Mode => Style::default().cyan(),
-            Self::Path | Self::Usage | Self::Progress => Style::default().green(),
-            Self::Branch | Self::Limit | Self::Thread => Style::default().magenta(),
+            Self::Model | Self::State | Self::Metadata | Self::Mode => Color::Cyan,
+            Self::Path | Self::Usage | Self::Progress => Color::Green,
+            Self::Branch | Self::Limit | Self::Thread => Color::Magenta,
         }
     }
 }
@@ -106,7 +120,7 @@ fn status_line_from_segments_with_resolver<I, F>(
     use_theme_colors: bool,
     thread_id: Option<ThreadId>,
     theme_style_for_accent: F,
-) -> Option<Line<'static>>
+) -> Option<HyperlinkLine>
 where
     I: IntoIterator<Item = (StatusLineItem, String)>,
     F: Fn(StatusLineAccent) -> Option<Style>,
@@ -127,7 +141,8 @@ where
         } else if use_theme_colors {
             let accent = StatusLineAccent::for_item(item);
             soften_status_line_style(
-                theme_style_for_accent(accent).unwrap_or_else(|| accent.fallback_style()),
+                theme_style_for_accent(accent)
+                    .unwrap_or_else(|| Style::default().fg(accent.fallback_color())),
             )
         } else {
             secondary_text_style()
@@ -140,15 +155,26 @@ where
         } else {
             style
         };
-        let style = if item == StatusLineItem::PullRequestNumber {
-            style.underlined()
+        let style = if use_theme_colors {
+            let foreground = style.fg.unwrap_or(Color::Reset);
+            if effective_stdout_color_level() == StdoutColorLevel::Ansi16
+                && matches!(foreground, Color::Rgb(..) | Color::Indexed(16..))
+            {
+                style.fg(StatusLineAccent::for_item(item).fallback_color())
+            } else {
+                style.fg(readable_color_on(foreground, /*background*/ None))
+            }
         } else {
             style
         };
-        spans.push(Span::styled(text, style));
+        if item == StatusLineItem::PullRequestNumber {
+            line.push_span(Span::styled(text, style.underlined()), pull_request_url);
+        } else {
+            line.line.push_span(Span::styled(text, style));
+        }
     }
 
-    (!spans.is_empty()).then(|| Line::from(spans))
+    (!line.line.spans.is_empty()).then_some(line)
 }
 
 fn soften_status_line_style(mut style: Style) -> Style {
@@ -209,6 +235,7 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use ratatui::style::Modifier;
+    use ratatui::text::Line;
 
     fn line_text(line: &Line<'static>) -> String {
         line.spans
@@ -229,7 +256,8 @@ mod tests {
             /*thread_id*/ None,
             |_| None,
         )
-        .expect("status line");
+        .expect("status line")
+        .line;
 
         assert_eq!(line_text(&line), "gpt-5 · /repo · main");
         assert_eq!(line.spans[0].style.fg, Some(Color::Cyan));
@@ -254,7 +282,8 @@ mod tests {
                 _ => None,
             },
         )
-        .expect("status line");
+        .expect("status line")
+        .line;
 
         assert_eq!(line.spans[0].style.fg, Some(Color::Red));
         assert!(!line.spans[0].style.add_modifier.contains(Modifier::DIM));
@@ -274,7 +303,8 @@ mod tests {
             /*thread_id*/ None,
             |_| None,
         )
-        .expect("thread usage status line");
+        .expect("thread usage status line")
+        .line;
 
         assert_eq!(line_text(&line), "5.2 credits · ~$0.21");
         assert_eq!(line.spans[0].style, line.spans[2].style);
@@ -313,7 +343,8 @@ mod tests {
             /*thread_id*/ None,
             |_| Some(Style::default().red()),
         )
-        .expect("status line");
+        .expect("status line")
+        .line;
 
         assert_eq!(line_text(&line), "gpt-5 · Context 12% used");
         assert_eq!(line.spans[0].style, secondary_text_style());
@@ -329,7 +360,8 @@ mod tests {
             /*thread_id*/ None,
             |_| None,
         )
-        .expect("status line");
+        .expect("status line")
+        .line;
 
         assert_eq!(line.spans[0].style, secondary_text_style().underlined());
     }

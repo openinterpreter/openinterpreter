@@ -18,6 +18,7 @@ impl ThreadEventStore {
         }
 
         if let ServerNotification::AgentMessageDelta(delta) = notification.as_ref()
+            && self.attachment_prefix != Some(self.buffer.len())
             && let Some(ThreadBufferedEvent::Notification(previous)) = self.buffer.back_mut()
             && let ServerNotification::AgentMessageDelta(previous) = previous.as_mut()
             && previous.thread_id == delta.thread_id
@@ -58,12 +59,19 @@ impl ThreadEventStore {
             let Some(removed) = self.buffer.pop_front() else {
                 break;
             };
+            if let Some(prefix) = &mut self.attachment_prefix {
+                *prefix = prefix.saturating_sub(1);
+            }
             match removed {
                 ThreadBufferedEvent::Notification(notification) => {
                     if let ServerNotification::AgentMessageDelta(delta) = notification.as_ref() {
                         self.buffered_agent_message_delta_bytes = self
                             .buffered_agent_message_delta_bytes
                             .saturating_sub(delta.delta.len());
+                    } else if let ServerNotification::TurnStarted(started) = *notification
+                        && self.active_turn_id() == Some(&started.turn.id)
+                    {
+                        self.evicted_active_turn = Some(Box::new(started.turn));
                     }
                 }
                 ThreadBufferedEvent::Request(request) => self

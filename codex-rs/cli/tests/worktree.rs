@@ -89,7 +89,7 @@ async fn rejected_start(
             rows: 40,
             cols: 120,
         },
-        &[],
+        codex_utils_pty::ChildFds::Inherited(&[]),
     )
     .await?;
     let mut stdout = spawned.stdout_rx;
@@ -198,7 +198,7 @@ sandbox_mode = "workspace-write"
 windows.sandbox = "unelevated"
 tui.disable_paste_burst = true
 [otel]
-metrics_exporter = {{ otlp-http = {{ endpoint = "{}/metrics", protocol = "json" }} }}
+metrics_exporter = "none"
 [model_providers.local]
 name = "local test"
 base_url = "{}/v1"
@@ -234,6 +234,17 @@ trust_level = "trusted"
         codex_config::types::AuthCredentialsStoreMode::File,
     )?;
     let program = codex_utils_cargo_bin::cargo_bin("codex")?;
+    // Keep cold Rosetta translation outside the timed startup assertions.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    anyhow::ensure!(
+        Command::new(&program)
+            .env("CODEX_HOME", &home)
+            .arg("--version")
+            .output()?
+            .status
+            .success(),
+        "failed to prepare CLI test executable"
+    );
     let mut env: HashMap<String, String> = std::env::vars().collect();
     env.insert("CODEX_HOME".into(), home.display().to_string());
     env.insert("CODEX_SQLITE_HOME".into(), home.display().to_string());
@@ -242,6 +253,10 @@ trust_level = "trusted"
     env.insert("TERM".into(), "xterm-256color".into());
     env.insert("TERM_PROGRAM".into(), "unrecognized-terminal".into());
     env.insert("OTEL_METRIC_EXPORT_INTERVAL".into(), "100".into());
+    env.insert(
+        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE".into(),
+        "delta".into(),
+    );
     for key in [
         "CODEX_EXEC_SERVER_URL",
         "CODEX_ACCESS_TOKEN",
@@ -293,6 +308,7 @@ trust_level = "trusted"
     ];
     let mut owner = None;
     let mut previous: Vec<String> = Vec::new();
+    let prompt = "describe checkout";
     for (fork, explicit_cd, analytics, auth_failure) in [
         (false, false, false, false),
         (true, false, false, false),
@@ -319,8 +335,8 @@ trust_level = "trusted"
         }
         let (metric_tx, mut metric_rx) = tokio::sync::mpsc::unbounded_channel();
         Mock::given(wiremock::matchers::path("/metrics"))
-            .respond_with(move |_: &wiremock::Request| {
-                let _ = metric_tx.send(());
+            .respond_with(move |request: &wiremock::Request| {
+                let _ = metric_tx.send(request.body.clone());
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({}))
             })
             .mount(&server)
@@ -391,9 +407,18 @@ trust_level = "trusted"
             args.extend(["--cd".into(), source.join(".codex").display().to_string()]);
         }
         if analytics {
-            args.extend(["-c".into(), "analytics.enabled=true".into()]);
+            args.extend([
+                "-c".into(),
+                // An explicit collector is independent of built-in analytics consent.
+                "analytics.enabled=false".into(),
+                "-c".into(),
+                format!(
+                    "otel.metrics_exporter={{otlp-http={{endpoint=\"{}/metrics\",protocol=\"json\"}}}}",
+                    server.uri()
+                ),
+            ]);
         }
-        args.push("describe checkout".into());
+        args.push(prompt.into());
         if previous.is_empty() {
             let mut untrusted_args = args.clone();
             untrusted_args.extend([
@@ -423,7 +448,7 @@ trust_level = "trusted"
                 rows: 40,
                 cols: 120,
             },
-            &[],
+            codex_utils_pty::ChildFds::Inherited(&[]),
         )
         .await?;
         let session = spawned.session;
@@ -436,6 +461,18 @@ trust_level = "trusted"
                     body = rx.recv() => {
                         let (body, checkout, metadata) = body.context("model request")??;
                         let body: Value = serde_json::from_slice(&body)?;
+                        // Background title generation can reach the model before the user turn.
+                        let is_user_turn = body["input"].as_array().is_some_and(|input| {
+                            input.iter().any(|item| {
+                                item["role"] == "user"
+                                    && item["content"].as_array().is_some_and(|content| {
+                                        content.iter().any(|part| part["text"] == prompt)
+                                    })
+                            })
+                        });
+                        if !is_user_turn {
+                            continue;
+                        }
                         return Ok::<_, anyhow::Error>((body, checkout, metadata));
                     }
                     bytes = stdout.recv() => {
@@ -515,9 +552,44 @@ trust_level = "trusted"
             .with_context(|| format!("daemon status timed out: {output}"))??;
         }
         if analytics {
-            tokio::time::timeout(Duration::from_secs(/*secs*/ 10), metric_rx.recv())
-                .await?
-                .context("metrics export while the TUI is running")?;
+            for reason in ["turn_start", "resize"] {
+                let started = Instant::now();
+                let wait = if reason == "resize" {
+                    session.resize(codex_utils_pty::TerminalSize {
+                        rows: 80,
+                        cols: 240,
+                    })?;
+                    Duration::from_secs(/*secs*/ 30)
+                } else {
+                    Duration::from_secs(/*secs*/ 10)
+                };
+                tokio::time::timeout(wait, async {
+                    loop {
+                        tokio::select! {
+                            body = metric_rx.recv() => {
+                                let payload: Value = serde_json::from_slice(&body.context("metric body")?)?;
+                                let found = payload["resourceMetrics"].as_array().into_iter().flatten()
+                                    .flat_map(|resource| resource["scopeMetrics"].as_array().into_iter().flatten())
+                                    .flat_map(|scope| scope["metrics"].as_array().into_iter().flatten())
+                                    .filter(|metric| metric["name"] == "codex.tui.terminal_size")
+                                    .flat_map(|metric| metric["sum"]["dataPoints"].as_array().into_iter().flatten())
+                                    .any(|point| point["attributes"].as_array().into_iter().flatten().any(|attribute|
+                                        attribute["key"] == "observation_reason" && attribute["value"]["stringValue"] == reason));
+                                if found { return Ok::<_, anyhow::Error>(()); }
+                            }
+                            bytes = stdout.recv() => {
+                                let bytes = bytes.context("TUI exited before size observation")?;
+                                output.push_str(&String::from_utf8_lossy(&bytes));
+                                let replies = queries.feed(&bytes);
+                                if !replies.is_empty() { session.writer_sender().send(replies).await?; }
+                            }
+                        }
+                    }
+                }).await.with_context(|| format!("waiting for {reason} observation"))??;
+                if reason == "resize" {
+                    assert!(started.elapsed() >= Duration::from_secs(/*secs*/ 15));
+                }
+            }
         }
         let startup_result = observed.as_ref().map(|result| result.as_ref().map(|_| ()));
         assert!(
@@ -702,7 +774,7 @@ trust_level = "trusted"
         assert!(context.contains("managed cloud instructions"), "{context}");
         if previous.is_empty() {
             // A legacy summary still says launcher A, but persisted turns use checkout B.
-            let sqlite = codex_state::SqliteConfig::from_sqlite_home(
+            let sqlite = codex_state::SqliteConfig::new_for_testing(
                 codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(&home)?,
             );
             let db = sqlite.open_read_write_pool(&sqlite.state_db_path()).await?;

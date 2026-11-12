@@ -90,11 +90,29 @@ pub fn features_schema(schema_gen: &mut SchemaGenerator) -> Schema {
             );
             continue;
         }
+        if feature.id == codex_features::Feature::GuardianV3 {
+            validation.properties.insert(
+                feature.key.to_string(),
+                schema_gen.subschema_for::<codex_features::FeatureToml<
+                    codex_features::GuardianV3ConfigToml,
+                >>(),
+            );
+            continue;
+        }
         if feature.id == codex_features::Feature::MultiAgentV2 {
             validation.properties.insert(
                 feature.key.to_string(),
                 schema_gen.subschema_for::<codex_features::FeatureToml<
                     codex_features::MultiAgentV2ConfigToml,
+                >>(),
+            );
+            continue;
+        }
+        if feature.id == codex_features::Feature::AsyncCompaction {
+            validation.properties.insert(
+                feature.key.to_string(),
+                schema_gen.subschema_for::<codex_features::FeatureToml<
+                    codex_features::AsyncCompactionConfigToml,
                 >>(),
             );
             continue;
@@ -140,6 +158,15 @@ pub fn features_schema(schema_gen: &mut SchemaGenerator) -> Schema {
                 feature.key.to_string(),
                 schema_gen.subschema_for::<codex_features::FeatureToml<
                     codex_features::SleepToolConfigToml,
+                >>(),
+            );
+            continue;
+        }
+        if feature.id == codex_features::Feature::RuntimeAgentInstances {
+            validation.properties.insert(
+                feature.key.to_string(),
+                schema_gen.subschema_for::<codex_features::FeatureToml<
+                    codex_features::RuntimeAgentInstancesConfigToml,
                 >>(),
             );
             continue;

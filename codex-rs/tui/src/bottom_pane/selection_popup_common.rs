@@ -17,7 +17,6 @@ use crate::render::Insets;
 use crate::render::RectExt as _;
 use crate::style::accent_style;
 use crate::style::user_message_style;
-use crate::width::display_width;
 
 use super::scroll_state::ScrollState;
 use super::selection_row_layout::SelectionDescriptionLayout;
@@ -178,6 +177,24 @@ fn compute_desc_col(
     } else {
         desc_col
     }
+}
+
+pub(super) fn should_show_selected_description_below(
+    rows_all: &[GenericDisplayRow],
+    state: &ScrollState,
+    max_results: usize,
+    width: u16,
+    column_width: ColumnWidthConfig,
+) -> bool {
+    if rows_all.is_empty() {
+        return false;
+    }
+    let visible_items = max_results.min(rows_all.len());
+    let start_idx = compute_item_window_start(rows_all, state, visible_items);
+    let desc_col = compute_desc_col(rows_all, start_idx, visible_items, width, column_width);
+    column_width
+        .description_layout
+        .should_show_selected_below(width, desc_col)
 }
 
 /// Determine how many spaces to indent wrapped lines for a row.
@@ -537,7 +554,7 @@ fn render_rows_inner(
             if cur_y >= area.y + area.height {
                 break;
             }
-            line.render(
+            (&line).render(
                 Rect {
                     x: area.x,
                     y: cur_y,
@@ -680,8 +697,16 @@ pub(crate) fn render_rows_single_line_with_col_width_mode(
             row.selection_style,
         );
 
-        let full_line = truncate_line_with_ellipsis_if_overflow(full_line, area.width as usize);
-        full_line.render(
+        let mut full_line = full_hyperlink_row(row, full_line);
+        let clipped = line_width(&full_line.line) > usize::from(area.width);
+        full_line.line =
+            truncate_line_with_ellipsis_if_overflow(full_line.line, area.width as usize);
+        let visible_width = line_width(&full_line.line).saturating_sub(usize::from(clipped));
+        full_line.hyperlinks.retain_mut(|link| {
+            link.columns.end = link.columns.end.min(visible_width);
+            !link.columns.is_empty()
+        });
+        (&full_line).render(
             Rect {
                 x: area.x,
                 y: cur_y,
@@ -1036,7 +1061,7 @@ mod tests {
 
         let rendered = wrap_two_column_row(&row, /*desc_col*/ 8, /*width*/ 24)
             .into_iter()
-            .map(|line| line.to_string())
+            .map(|line| line.line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
 

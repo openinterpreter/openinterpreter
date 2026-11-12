@@ -75,6 +75,7 @@ pub(super) enum VimAction {
     Change(VimEditTarget),
     Replace(char),
     PasteAfter,
+    Yank(std::sync::Arc<super::register::RegisterSnapshot>),
     DeleteBackward,
     DeleteForward,
     DeleteBackwardWord,
@@ -119,7 +120,23 @@ impl TextArea {
         self.vim_commands.replace_steps.clear();
     }
 
-    pub(super) fn replace_vim_text(&mut self, text: &str) {
+    /// Remove a newly typed prompt marker without losing its Vim Replace recovery step.
+    pub(in crate::bottom_pane) fn absorb_prompt_prefix(&mut self, prefix_len: usize) {
+        if self.is_vim_replace_mode()
+            && self.cursor_pos == prefix_len
+            && let Some(step) = self.vim_commands.replace_steps.last_mut()
+            && step.cursor_before == 0
+            && step.start == 0
+            && step.inserted_len == prefix_len
+        {
+            step.inserted_len = 0;
+            self.replace_range_preserving_recovery(0..prefix_len, "");
+        } else {
+            self.replace_range(0..prefix_len, "");
+        }
+    }
+
+    pub(in crate::bottom_pane) fn replace_vim_text(&mut self, text: &str) {
         for grapheme in text.graphemes(/*is_extended*/ true) {
             let cursor_before = self.cursor_pos;
             while let Some(element) = self
@@ -316,8 +333,12 @@ impl TextArea {
     }
 
     fn apply_vim_editor_action(&mut self, action: VimAction) -> bool {
-        // Editor actions invalidate contiguous Replace offsets, including during replay.
-        if !matches!(action, VimAction::RestoreReplacedCharacter) {
+        // Plain yanks extend contiguous Replace recovery through insert_str. Rich yanks reset
+        // recovery through replace_range, just like inserting an element.
+        if !matches!(
+            action,
+            VimAction::RestoreReplacedCharacter | VimAction::Yank(_)
+        ) {
             self.clear_vim_replace_recovery();
         }
         let prior_len = self.text.len();
@@ -427,6 +448,7 @@ impl TextArea {
                 self.paste_after_cursor();
                 return self.text.len() != prior_len;
             }
+            VimAction::Yank(snapshot) => self.yank_snapshot(&snapshot),
             VimAction::DeleteBackward => self.delete_backward(/*n*/ 1),
             VimAction::DeleteForward => self.delete_forward(/*n*/ 1),
             VimAction::DeleteBackwardWord => self.delete_backward_word(),
@@ -548,7 +570,9 @@ impl TextArea {
     pub(super) fn handle_vim_pending_command(&mut self, pending: VimPending, event: KeyEvent) {
         match pending {
             VimPending::Replace => {
-                if let Some(ch) = vim_command_char(event) {
+                if let Some(ch) = vim_command_char(event)
+                    && !(self.single_line && matches!(ch, '\r' | '\n'))
+                {
                     self.start_vim_edit(VimAction::Replace(ch));
                 }
             }

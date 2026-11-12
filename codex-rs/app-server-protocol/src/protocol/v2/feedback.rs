@@ -1,5 +1,6 @@
 use crate::JsonSchema;
 use crate::TS;
+use codex_utils_path_uri::LegacyAppPathString;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;

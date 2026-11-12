@@ -1,11 +1,17 @@
 #![cfg(not(target_os = "windows"))]
 use anyhow::Result;
+use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::built_in_model_providers;
 use codex_models_manager::bundled_models_response;
+use codex_models_manager::cache::ModelsCache;
+use codex_models_manager::cache::ModelsCacheEntry;
+use codex_models_manager::cache::ModelsCacheError;
+use codex_models_manager::cache::ModelsCacheFuture;
+use codex_models_manager::manager::ModelCatalogSettings;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_models_manager::model_info::BASE_INSTRUCTIONS;
@@ -32,6 +38,7 @@ use core_test_support::load_default_config_for_test;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
+use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_models_once;
 use core_test_support::responses::mount_models_once_with_delay;
@@ -42,13 +49,17 @@ use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_sandbox;
 use core_test_support::test_codex::TestCodex;
-use core_test_support::test_codex::local_selections;
+use core_test_support::test_codex::local_requests;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use tempfile::TempDir;
 use test_case::test_case;
 use tokio::time::Duration;
@@ -63,6 +74,241 @@ use wiremock::matchers::method;
 use wiremock::matchers::path;
 
 const REMOTE_MODEL_SLUG: &str = "codex-test";
+
+enum ChildCatalogCache {
+    Warm,
+    Cold,
+    Disabled,
+}
+
+#[test_case(ChildCatalogCache::Warm; "warm_cache")]
+#[test_case(ChildCatalogCache::Cold; "cold_cache")]
+#[test_case(ChildCatalogCache::Disabled; "without_cache")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn child_loads_remote_tool_search_with_thread_provider_headers(
+    cache: ChildCatalogCache,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+    let cache_home = TempDir::new()?;
+    let catalog_settings = match cache {
+        ChildCatalogCache::Warm | ChildCatalogCache::Cold => {
+            ModelCatalogSettings::disk(cache_home.path().to_path_buf())
+        }
+        ChildCatalogCache::Disabled => ModelCatalogSettings::default(),
+    };
+    let mut model = test_remote_model(
+        REMOTE_MODEL_SLUG,
+        ModelVisibility::List,
+        /*priority*/ 0,
+    );
+    model.supports_search_tool = true;
+    let _models = Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ModelsResponse {
+            models: vec![model],
+        }))
+        .expect(match cache {
+            ChildCatalogCache::Warm => 2..=2,
+            ChildCatalogCache::Cold | ChildCatalogCache::Disabled => 2..=3,
+        })
+        .mount_as_scoped(&server)
+        .await;
+    let mut test = test_codex()
+        .with_model(REMOTE_MODEL_SLUG)
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_model_catalog_settings(catalog_settings)
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::Collab)
+                .expect("enable collaboration");
+            config
+                .features
+                .disable(Feature::MultiAgentV2)
+                .expect("disable multi-agent v2");
+            config.agent_max_depth = 2;
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    test.codex.shutdown_and_wait().await?;
+    test.config
+        .model_provider
+        .http_headers
+        .get_or_insert_default()
+        .insert("X-OpenAI-Product-Sku".to_string(), "test-product".into());
+    let root = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            metrics_service_name: Some("codex_work_cca".to_string()),
+            ..test.start_thread_options().await
+        })
+        .await?;
+    test.codex = root.thread;
+    test.session_configured = root.session_configured;
+    if matches!(cache, ChildCatalogCache::Cold) {
+        tokio::fs::remove_file(cache_home.path().join("models_cache.codex_work_cca.json")).await?;
+    }
+    assert_child_retains_tool_search(&mut test, &server).await
+}
+
+#[derive(Debug, Default)]
+struct FailingWritesCache {
+    entry: Mutex<Option<ModelsCacheEntry>>,
+    reject_writes: AtomicBool,
+}
+
+impl ModelsCache for FailingWritesCache {
+    fn load<'a>(
+        &'a self,
+        _client_version: &'a str,
+    ) -> ModelsCacheFuture<'a, Result<Option<ModelsCacheEntry>, ModelsCacheError>> {
+        Box::pin(async { Ok(self.entry.lock().expect("cache lock").clone()) })
+    }
+
+    fn store<'a>(
+        &'a self,
+        entry: &'a ModelsCacheEntry,
+    ) -> ModelsCacheFuture<'a, Result<(), ModelsCacheError>> {
+        Box::pin(async move {
+            if self.reject_writes.load(Ordering::SeqCst) {
+                return Err(ModelsCacheError::new("injected cache write failure"));
+            }
+            *self.entry.lock().expect("cache lock") = Some(entry.clone());
+            Ok(())
+        })
+    }
+
+    fn refresh_ttl<'a>(
+        &'a self,
+        _client_version: &'a str,
+        _identity: &'a str,
+        _etag: &'a str,
+    ) -> ModelsCacheFuture<'a, Result<(), ModelsCacheError>> {
+        Box::pin(async { Err(ModelsCacheError::new("unexpected TTL refresh")) })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn child_preserves_parent_catalog_after_cache_write_failure() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+    let cache = Arc::new(FailingWritesCache::default());
+    let mut model = test_remote_model(
+        REMOTE_MODEL_SLUG,
+        ModelVisibility::List,
+        /*priority*/ 0,
+    );
+    model.supports_search_tool = false;
+    let initial = mount_models_once(
+        &server,
+        ModelsResponse {
+            models: vec![model.clone()],
+        },
+    )
+    .await;
+    let mut test = test_codex()
+        .with_model(REMOTE_MODEL_SLUG)
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_model_catalog_settings(ModelCatalogSettings::with_cache(cache.clone()))
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::Collab)
+                .expect("enable collaboration");
+            config
+                .features
+                .disable(Feature::MultiAgentV2)
+                .expect("disable multi-agent v2");
+            config.agent_max_depth = 2;
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    assert_eq!(initial.requests().len(), 1);
+
+    model.supports_search_tool = true;
+    let updated = mount_models_once(
+        &server,
+        ModelsResponse {
+            models: vec![model],
+        },
+    )
+    .await;
+    cache.reject_writes.store(/*val*/ true, Ordering::SeqCst);
+    let manager = test.thread_manager.get_models_manager();
+    manager
+        .list_models(RefreshStrategy::Online, test.config.http_client_factory())
+        .await;
+    let model_config = test.config.to_models_manager_config();
+    let before = manager
+        .get_model_info(REMOTE_MODEL_SLUG, &model_config)
+        .await;
+    assert!(before.supports_search_tool);
+    assert!(
+        !cache
+            .entry
+            .lock()
+            .expect("cache lock")
+            .as_ref()
+            .expect("older cached catalog")
+            .models[0]
+            .supports_search_tool
+    );
+
+    assert_child_retains_tool_search(&mut test, &server).await?;
+    assert_eq!(
+        manager
+            .get_model_info(REMOTE_MODEL_SLUG, &model_config)
+            .await,
+        before
+    );
+    assert_eq!(updated.requests().len(), 1);
+    Ok(())
+}
+
+async fn assert_child_retains_tool_search(test: &mut TestCodex, server: &MockServer) -> Result<()> {
+    let responses = mount_sse_sequence(
+        server,
+        vec![
+            sse(vec![
+                ev_response_created("parent-spawn"),
+                ev_function_call_with_namespace(
+                    "spawn-child",
+                    "multi_agent_v1",
+                    "spawn_agent",
+                    &json!({"message": "Say done."}).to_string(),
+                ),
+                ev_completed("parent-spawn"),
+            ]),
+            sse(vec![ev_response_created("done-1"), ev_completed("done-1")]),
+            sse(vec![ev_response_created("done-2"), ev_completed("done-2")]),
+        ],
+    )
+    .await;
+    let mut created = test.thread_manager.subscribe_thread_created();
+    test.submit_turn("Spawn a child.").await?;
+    let child_id = timeout(Duration::from_secs(10), created.recv()).await??;
+    let child = test.thread_manager.get_thread(child_id).await?;
+    wait_for_event(&child, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    let requests = responses.requests();
+    let child_request = requests
+        .iter()
+        .find(|request| request.header("thread-id") == Some(child_id.to_string()))
+        .expect("child's first Responses request");
+    for (thread, request) in [("root", &requests[0]), ("child", child_request)] {
+        assert_eq!(request.body_json()["model"], REMOTE_MODEL_SLUG);
+        assert!(
+            request.body_json()["tools"]
+                .as_array()
+                .expect("request tools array")
+                .iter()
+                .any(|tool| { tool["type"] == "tool_search" }),
+            "{thread} must retain deferred tool search"
+        );
+    }
+    child.shutdown_and_wait().await?;
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn disabled_update_plan_preserves_custom_catalog_instructions() -> Result<()> {
@@ -85,7 +331,6 @@ async fn disabled_update_plan_preserves_custom_catalog_instructions() -> Result<
         .as_mut()
         .expect("model prompt templates");
     messages.instructions_template = Some(INSTRUCTIONS.to_string());
-    messages.instructions_variables = None;
     let test = test_codex()
         .with_model("gpt-5.5")
         .with_config(move |config| {
@@ -96,7 +341,7 @@ async fn disabled_update_plan_preserves_custom_catalog_instructions() -> Result<
         .await?;
     test.submit_turn("hello").await?;
     let request = response.single_request().body_json();
-    assert_eq!(request["instructions"], INSTRUCTIONS);
+    assert_eq!(response.single_request().instructions_text(), INSTRUCTIONS);
     assert!(!request["tools"].to_string().contains("update_plan"));
     Ok(())
 }
@@ -582,7 +827,6 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         visibility: ModelVisibility::List,
         supported_in_api: true,
         input_modalities: default_input_modalities(),
-        used_fallback_model_metadata: false,
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
@@ -612,6 +856,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         availability_nux: None,
         apply_patch_tool_type: None,
         web_search_tool_type: Default::default(),
+        web_search_provider: None,
         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
         supports_image_detail_original: false,
         context_window: Some(272_000),
@@ -695,7 +940,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(cwd_path)),
+                environments: Some(local_requests(cwd_path)),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -859,7 +1104,6 @@ async fn remote_models_apply_legacy_instructions(auth: CodexAuth) -> Result<()> 
         visibility: ModelVisibility::List,
         supported_in_api: true,
         input_modalities: default_input_modalities(),
-        used_fallback_model_metadata: false,
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
@@ -892,6 +1136,7 @@ async fn remote_models_apply_legacy_instructions(auth: CodexAuth) -> Result<()> 
         availability_nux: None,
         apply_patch_tool_type: None,
         web_search_tool_type: Default::default(),
+        web_search_provider: None,
         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
         supports_image_detail_original: false,
         context_window: Some(272_000),
@@ -950,6 +1195,7 @@ async fn remote_models_apply_legacy_instructions(auth: CodexAuth) -> Result<()> 
         cwd,
         config,
         thread_manager,
+        home: _home,
         ..
     } = builder.build(&server).await?;
 
@@ -966,7 +1212,7 @@ async fn remote_models_apply_legacy_instructions(auth: CodexAuth) -> Result<()> 
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(cwd_path.clone())),
+                environments: Some(local_requests(cwd_path.clone())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -996,7 +1242,7 @@ async fn remote_models_apply_legacy_instructions(auth: CodexAuth) -> Result<()> 
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(cwd_path)),
+                environments: Some(local_requests(cwd_path)),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -1449,7 +1695,6 @@ fn test_remote_model_with_policy(
         visibility,
         supported_in_api: true,
         input_modalities: default_input_modalities(),
-        used_fallback_model_metadata: false,
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
@@ -1479,6 +1724,7 @@ fn test_remote_model_with_policy(
         availability_nux: None,
         apply_patch_tool_type: None,
         web_search_tool_type: Default::default(),
+        web_search_provider: None,
         truncation_policy,
         supports_image_detail_original: false,
         context_window: Some(272_000),

@@ -27,15 +27,16 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::GuardianNodeReplPolicy;
 use crate::context::GuardianReviewEvidence;
+use crate::context_manager::ContextManager;
 use crate::session::session::Session;
 
 use super::ApprovalRequestReasons;
 #[cfg(test)]
 use super::GUARDIAN_REVIEW_TIMEOUT;
-use super::GUARDIAN_REVIEWER_NAME;
 use super::GuardianApprovalRequest;
 use super::GuardianAssessmentOutcome;
 use super::GuardianReviewContext;
+use super::GuardianReviewSessionManager;
 use super::approval_request::format_guardian_action_pretty;
 use super::approval_request::guardian_assessment_action;
 use super::approval_request::guardian_request_target_item_id;
@@ -66,8 +67,8 @@ async fn plugin_attribution_for_guardian_request(
                     .find(|environment| {
                         environment.selection.environment_id.as_str() == environment_id
                     })?;
-            if turn_environment.environment.is_remote() {
-                let file_system = turn_environment.environment.get_filesystem();
+            if turn_environment.environment().is_remote() {
+                let file_system = turn_environment.environment().get_filesystem();
                 turn.plugin_attribution_for_executor_command(command, cwd, file_system.as_ref())
                     .await
             } else {
@@ -75,19 +76,6 @@ async fn plugin_attribution_for_guardian_request(
                     .ok()
                     .and_then(|cwd| turn.plugin_attribution_for_command(command, &cwd))
             }
-        }
-        #[cfg(unix)]
-        GuardianApprovalRequest::Execve {
-            program, argv, cwd, ..
-        } => {
-            let command = if argv.is_empty() {
-                vec![program.clone()]
-            } else {
-                std::iter::once(program.clone())
-                    .chain(argv.iter().skip(1).cloned())
-                    .collect()
-            };
-            turn.plugin_attribution_for_command(&command, cwd)
         }
         _ => None,
     }
@@ -174,6 +162,90 @@ pub(super) async fn guardian_review_session_config(
     })
 }
 
+struct ReviewAttemptOptions {
+    authorization: Option<ReviewAuthorization>,
+    external_cancel: Option<CancellationToken>,
+    deadline: ReviewDeadline,
+}
+
+/// A prepared action and the parent transcript to use as evidence for it.
+pub(super) struct ReviewInput {
+    pub(super) session: Arc<Session>,
+    pub(super) context: GuardianReviewContext,
+    pub(super) history: ContextManager,
+    pub(super) request: GuardianApprovalRequest,
+    pub(super) reasons: ApprovalRequestReasons,
+}
+
+impl ReviewInput {
+    fn into_params(
+        self,
+        config: GuardianReviewSessionConfig,
+        category: GuardianScope,
+        options: ReviewAttemptOptions,
+    ) -> GuardianReviewSessionParams {
+        GuardianReviewSessionParams {
+            parent_session: self.session,
+            parent_history: self.history,
+            reasoning_summary: self.context.reasoning_summary,
+            personality: self.context.personality,
+            parent_context: self.context,
+            spawn_config: config.spawn_config,
+            node_repl_policy: config.node_repl_policy,
+            request: self.request,
+            category,
+            reasons: self.reasons,
+            authorization: options.authorization,
+            schema: guardian_output_schema(),
+            review_model: config.review_model,
+            external_cancel: options.external_cancel,
+            deadline: options.deadline,
+        }
+    }
+
+    /// Assess the supplied request in a fresh reviewer without publishing a live approval.
+    pub(super) async fn assess_isolated(
+        self,
+        deadline: ReviewDeadline,
+        cancellation: &CancellationToken,
+    ) -> Result<GuardianAssessment, GuardianReviewError> {
+        let review = async {
+            let (pool, config) = select_synchronous_reviewer(&self.session, &self.context)
+                .ok_or_else(|| {
+                    GuardianReviewError::session(anyhow::anyhow!(
+                        "Guardian reviewer is unavailable"
+                    ))
+                })?;
+            let config = config.await.map_err(GuardianReviewError::prompt_build)?;
+            let category = self.request.guardian_scope();
+            let params = self.into_params(
+                config,
+                category,
+                ReviewAttemptOptions {
+                    authorization: None,
+                    external_cancel: Some(cancellation.clone()),
+                    deadline,
+                },
+            );
+            let prepared = super::review_session::prepare_review(params)
+                .await
+                .map_err(GuardianReviewError::prompt_build)?;
+            Ok::<_, GuardianReviewError>(pool.review_isolated(&prepared).await.0)
+        };
+        let outcome = match run_before_review_deadline(
+            deadline,
+            Some(cancellation),
+            Box::pin(review),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(interruption) => interruption,
+        };
+        outcome.into_assessment()
+    }
+}
+
 /// Runs the guardian in a locked-down reusable review session.
 ///
 /// The guardian itself should not mutate state or trigger further approvals, so
@@ -192,10 +264,9 @@ async fn run_guardian_review_session_before_deadline(
     session: Arc<Session>,
     context: GuardianReviewContext,
     request: GuardianApprovalRequest,
+    category: GuardianScope,
     reasons: ApprovalRequestReasons,
-    schema: serde_json::Value,
-    external_cancel: Option<CancellationToken>,
-    deadline: Instant,
+    options: ReviewAttemptOptions,
 ) -> (GuardianReviewOutcome, GuardianReviewAnalyticsResult) {
     let Some(pool) = session.guardian_review_session() else {
         return (
@@ -210,6 +281,12 @@ async fn run_guardian_review_session_before_deadline(
         Err(err) => {
             return (
                 GuardianReviewOutcome::Error(GuardianReviewError::prompt_build(err)),
+                GuardianReviewAnalyticsResult::without_session(),
+            );
+        }
+        Err(outcome) => {
+            return (
+                outcome.into(),
                 GuardianReviewAnalyticsResult::without_session(),
             );
         }
@@ -245,7 +322,6 @@ pub(super) async fn run_guardian_review_session_with_retry(
     context: impl Into<GuardianReviewContext>,
     request: GuardianApprovalRequest,
     reasons: ApprovalRequestReasons,
-    schema: serde_json::Value,
     external_cancel: Option<CancellationToken>,
     max_attempts: i64,
 ) -> (GuardianReviewOutcome, GuardianReviewAnalyticsResult) {
@@ -254,11 +330,10 @@ pub(super) async fn run_guardian_review_session_with_retry(
         context,
         request,
         reasons,
-        schema,
         external_cancel,
         GuardianReviewSessionLimits {
             max_attempts,
-            deadline: Instant::now() + GUARDIAN_REVIEW_TIMEOUT,
+            deadline: ReviewDeadline::from_timeout(Some(GUARDIAN_REVIEW_TIMEOUT)),
         },
     )
     .await
@@ -270,7 +345,6 @@ async fn run_guardian_review_session_with_retry_before_deadline(
     context: impl Into<GuardianReviewContext>,
     request: GuardianApprovalRequest,
     reasons: ApprovalRequestReasons,
-    schema: serde_json::Value,
     external_cancel: Option<CancellationToken>,
     limits: GuardianReviewSessionLimits,
 ) -> (GuardianReviewOutcome, GuardianReviewAnalyticsResult) {

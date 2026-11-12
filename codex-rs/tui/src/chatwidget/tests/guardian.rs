@@ -320,7 +320,7 @@ async fn guardian_denied_exec_renders_warning_and_denied_request() {
 
     assert_chatwidget_snapshot!(
         "guardian_denied_exec_renders_warning_and_denied_request",
-        normalize_snapshot_paths(term.backend().vt100().screen().contents())
+        normalize_working_snapshot(term.backend().vt100().screen().contents())
     );
 }
 
@@ -462,7 +462,7 @@ async fn guardian_approved_request_permissions_clears_status_without_history() {
 
     assert_chatwidget_snapshot!(
         "guardian_approved_request_permissions_clears_status_without_history",
-        normalize_snapshot_paths(term.backend().vt100().screen().contents())
+        normalize_working_snapshot(term.backend().vt100().screen().contents())
     );
 }
 
@@ -536,7 +536,7 @@ async fn guardian_timed_out_exec_renders_warning_and_timed_out_request() {
 
     assert_chatwidget_snapshot!(
         "guardian_timed_out_exec_renders_warning_and_timed_out_request",
-        normalize_snapshot_paths(term.backend().vt100().screen().contents())
+        normalize_working_snapshot(term.backend().vt100().screen().contents())
     );
 }
 
@@ -655,7 +655,7 @@ async fn app_server_guardian_review_denied_renders_denied_request_snapshot() {
 
     assert_chatwidget_snapshot!(
         "app_server_guardian_review_denied_renders_denied_request",
-        normalize_snapshot_paths(term.backend().vt100().screen().contents())
+        normalize_working_snapshot(term.backend().vt100().screen().contents())
     );
 }
 
@@ -736,7 +736,7 @@ async fn app_server_guardian_review_timed_out_renders_timed_out_request_snapshot
 
     assert_chatwidget_snapshot!(
         "app_server_guardian_review_timed_out_renders_timed_out_request",
-        normalize_snapshot_paths(term.backend().vt100().screen().contents())
+        normalize_working_snapshot(term.backend().vt100().screen().contents())
     );
 }
 
@@ -802,7 +802,6 @@ async fn guardian_parallel_reviews_keep_remaining_review_visible_after_denial() 
 async fn guardian_cleanup_drops_stale_reviews_and_restores_mcp_status() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
-    chat.set_mcp_startup_expected_servers(["alpha".to_string()]);
     handle_turn_started(&mut chat, "turn-1");
     chat.on_mcp_server_status_updated(McpServerStatusUpdatedNotification {
         thread_id: None,

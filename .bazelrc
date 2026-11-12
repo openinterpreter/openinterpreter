@@ -4,12 +4,22 @@ common --repo_env=BAZEL_NO_APPLE_CPP_TOOLCHAIN=1
 common --xcode_version_config=//:disable_xcode
 
 common --disk_cache=~/.cache/bazel-disk-cache
+common --experimental_disk_cache_gc_max_age=7d
 common --repo_contents_cache=~/.cache/bazel-repo-contents-cache
+common --repo_contents_cache_gc_max_age=7d
 common --repository_cache=~/.cache/bazel-repo-cache
 common --remote_cache_compression
 startup --experimental_remote_repo_contents_cache
+# rules_python 2.x requires symlink support for Windows Python launchers.
+startup --windows_enable_symlinks
 
 common --experimental_platform_in_output_dir
+
+# Match Cargo's MSVC static CRT policy and V8's allocator linkage. Only the
+# MSVC C/C++ toolchain consumes this feature; other toolchains ignore it.
+# Include host dependencies so native build tools use the same runtime.
+build --features=-dynamic_link_msvcrt --features=static_link_msvcrt
+build --host_features=-dynamic_link_msvcrt --host_features=static_link_msvcrt
 
 build --workspace_status_command=./scripts/workspace-status.sh
 build:windows --workspace_status_command=./scripts/workspace-status.cmd
@@ -37,6 +47,8 @@ common:macos --strategy=CcConfigureMakeRule=remote,sandboxed,local
 common:windows --test_env=SYSTEMROOT
 common:windows --test_env=COMSPEC
 common:windows --test_env=WINDIR
+common:windows --test_env=SystemDrive
+common:windows --test_env=LOCALAPPDATA
 # Rust's libtest harness runs test bodies on std-spawned threads. The default
 # 2 MiB stack can be too small for large async test futures on Windows CI; see
 # https://github.com/openai/codex/pull/19067 for the motivating failure.
@@ -99,6 +111,8 @@ common:remote --jobs=800
 common:ci --remote_download_minimal
 common:ci --keep_going
 common:ci --verbose_failures
+# A failed snapshot assertion should print its diff without leaving a .snap.new after a passing retry.
+test:ci --test_env=INSTA_UPDATE=no
 common:ci --build_metadata=REPO_URL=https://github.com/openai/codex.git
 common:ci --build_metadata=ROLE=CI
 common:ci --build_metadata=VISIBILITY=PUBLIC
@@ -208,22 +222,48 @@ common:ci-v8 --config=ci
 common:ci-v8 --build_metadata=TAG_workflow=v8
 common:ci-v8 --build_metadata=TAG_os=linux
 
-# Source-built Bazel V8 artifacts use the in-process sandbox by default. This
-# does not affect Cargo's default prebuilt rusty_v8 path.
-common --@v8//:v8_enable_pointer_compression=True
-common --@v8//:v8_enable_sandbox=True
+# Native Windows MSVC builds use the registered LLVM toolchain and its SDK.
+# Voice's separately declared native build tools still need the runner environment.
+# Client environment capture and repository discovery happen before target
+# transitions, so these runner settings cannot live in runtime_package.bzl.
+build:ci-windows-msvc --repo_env=BAZEL_MSVC_RUNTIME_VISUAL_STUDIO_EULA=1
+build:ci-windows-msvc --action_env=PATH
+build:ci-windows-msvc --host_action_env=PATH
+build:ci-windows-msvc --action_env=INCLUDE
+build:ci-windows-msvc --host_action_env=INCLUDE
+build:ci-windows-msvc --action_env=LIB
+build:ci-windows-msvc --host_action_env=LIB
+build:ci-windows-msvc --action_env=LIBPATH
+build:ci-windows-msvc --host_action_env=LIBPATH
+build:ci-windows-msvc --action_env=SystemRoot
+build:ci-windows-msvc --host_action_env=SystemRoot
+build:ci-windows-msvc --action_env=PROCESSOR_ARCHITECTURE
+build:ci-windows-msvc --host_action_env=PROCESSOR_ARCHITECTURE
+build:ci-windows-msvc --action_env=WindowsSdkDir
+build:ci-windows-msvc --host_action_env=WindowsSdkDir
+build:ci-windows-msvc --action_env=VCINSTALLDIR
+build:ci-windows-msvc --host_action_env=VCINSTALLDIR
 
-# Keep currently published rusty_v8 release artifacts non-sandboxed until the
-# artifact migration ships matching Rust feature selection for Cargo consumers.
-common:v8-release-compat --@v8//:v8_enable_pointer_compression=False
-common:v8-release-compat --@v8//:v8_enable_sandbox=False
-common:v8-target-x64 --@v8//bazel/config:v8_target_cpu=x64
-common:v8-target-arm64 --@v8//bazel/config:v8_target_cpu=arm64
+# Release profile settings are also defined in codex-rs/Cargo.toml.
+# runtime_package.bzl applies this profile to archive dependencies automatically.
+# Packaging extracts symbols before stripping; the Rust toolchains retain
+# line tables and use split-debuginfo=off. opt mode selects Rust opt-level=3,
+# which disables debug assertions and overflow checks by default.
+build:release --compilation_mode=opt
+build:release --@rules_rust//rust/settings:lto=thin
+build:release --@rules_rust//rust/settings:codegen_units=4
+# Match observed Cargo 1.95 build-tool commands: opt-level=0, assertions off,
+# and rustc's non-incremental default of 16 codegen units (not target's 4).
+build:release --@rules_rust//rust/settings:extra_exec_rustc_flag=-Copt-level=0
+build:release --@rules_rust//rust/settings:extra_exec_rustc_flag=-Ccodegen-units=16
+build:release --@rules_rust//rust/settings:extra_exec_rustc_flag=-Cdebug-assertions=no
 
-# Match rusty_v8's upstream GN release contract for published artifacts: every
-# target object uses Chromium's custom libc++ headers and the archive folds in
-# the matching runtime objects.
-common:rusty-v8-upstream-libcxx --@v8//:v8_use_rusty_v8_custom_libcxx=True
+# Compatibility: Cargo build scripts consume the Rust profile, including debug
+# info, and choose their native optimization. Preserve explicit user C/C++ flags.
+# Opt in for target and host dependencies; normal Bazel builds keep defaults.
+build:release --features=cargo-release-profile
+build:release --host_features=cargo-release-profile
+# Bubblewrap and voice set release options on their own native rules.
 
 # Optional per-user local overrides.
 try-import %workspace%/user.bazelrc

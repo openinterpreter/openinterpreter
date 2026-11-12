@@ -9,14 +9,15 @@ workspace = true
 
 [dependencies]
 bitflags = { workspace = true }
+codex-attachment-store = { workspace = true }
 codex-code-mode = { workspace = true }
 codex-connectors = { workspace = true }
 codex-features = { workspace = true }
 codex-file-system = { workspace = true }
 codex-extension-items = { workspace = true }
 codex-protocol = { workspace = true }
-codex-utils-absolute-path = { workspace = true }
 codex-utils-output-truncation = { workspace = true }
+codex-utils-path-uri = { workspace = true }
 codex-utils-string = { workspace = true }
 jsonptr = { workspace = true }
 rmcp = { workspace = true, default-features = false, features = [

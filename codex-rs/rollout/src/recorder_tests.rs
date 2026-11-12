@@ -48,7 +48,7 @@ fn test_config(codex_home: &Path) -> RolloutConfig {
 }
 
 fn paginated_session_meta_item(thread_id: ThreadId, cwd: &Path) -> RolloutItem {
-    RolloutItem::SessionMeta(SessionMetaLine {
+    RolloutItem::SessionMeta(Box::new(SessionMetaLine {
         meta: SessionMeta {
             session_id: thread_id.into(),
             id: thread_id,
@@ -61,11 +61,12 @@ fn paginated_session_meta_item(thread_id: ThreadId, cwd: &Path) -> RolloutItem {
             ..SessionMeta::default()
         },
         git: None,
-    })
+    }))
 }
 
 fn agent_message_item(message: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+        moderation: None,
         message: message.to_string(),
         phase: None,
         memory_citation: None,
@@ -174,6 +175,31 @@ async fn opening_existing_rollout_preserves_modified_time() -> std::io::Result<(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn open_log_file_materializes_rollout_when_acl_denies_timestamp_changes() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let rollout_path = home.path().join("rollout.jsonl");
+    let compressed_path = rollout_path.with_extension("jsonl.zst");
+    fs::write(
+        &compressed_path,
+        zstd::stream::encode_all(&b"original\n"[..], 0)?,
+    )?;
+    let acl = std::process::Command::new("/bin/chmod")
+        .args(["+a", "everyone deny writeattr"])
+        .arg(&compressed_path)
+        .output()?;
+    assert!(acl.status.success(), "{acl:?}");
+
+    let mut file = open_log_file(&rollout_path)?;
+    file.write_all(b"appended\n")?;
+    drop(file);
+
+    assert!(!compressed_path.exists());
+    assert_eq!(fs::read(&rollout_path)?, b"original\nappended\n");
+    Ok(())
+}
+
 #[tokio::test]
 async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
     let home = TempDir::new().expect("temp dir");
@@ -189,6 +215,10 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
 
     let session_meta_line = SessionMetaLine {
         meta: SessionMeta {
+            account_scoped: false,
+            attached_thread: false,
+            creator_user_id: None,
+            creator_account_id: None,
             session_id: thread_id.into(),
             id: thread_id,
             forked_from_id: None,
@@ -221,7 +251,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
         RolloutLine {
             timestamp: "2026-01-27T12:34:56Z".to_string(),
             ordinal: None,
-            item: RolloutItem::SessionMeta(session_meta_line),
+            item: RolloutItem::SessionMeta(Box::new(session_meta_line)),
         },
         RolloutLine {
             timestamp: "2026-01-27T12:34:57Z".to_string(),
@@ -456,12 +486,6 @@ async fn load_rollout_items_preserves_security_risk_scores() -> std::io::Result<
         sampled_at: None,
     };
     let security_risk_item = RolloutItem::SecurityRiskScore(security_risk.clone());
-    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
-        assert!(crate::is_persisted_rollout_item(
-            &security_risk_item,
-            history_mode
-        ));
-    }
 
     let mut file = File::create(&rollout_path)?;
     for (ordinal, item) in [
@@ -618,12 +642,64 @@ fn strip_legacy_ghost_snapshot_keeps_checkpoint_metadata_aligned() {
 }
 
 #[tokio::test]
+async fn recorder_preserves_additional_tools_in_both_history_modes() -> std::io::Result<()> {
+    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let thread_id = ThreadId::new();
+        let recorder = RolloutRecorder::new(
+            &config,
+            RolloutRecorderParams::new(
+                thread_id,
+                /*forked_from_id*/ None,
+                /*parent_thread_id*/ None,
+                SessionSource::Exec,
+                /*thread_source*/ None,
+                "test_originator".to_string(),
+                BaseInstructions::default(),
+                Vec::new(),
+            )
+            .with_history_mode(history_mode),
+        )
+        .await?;
+        let item = RolloutItem::ResponseItem(
+            ResponseItem::AdditionalTools {
+                id: None,
+                role: "developer".to_string(),
+                tools: Arc::from([serde_json::json!({
+                    "type": "namespace",
+                    "name": "functions",
+                    "description": "Available tools.",
+                    "tools": [{"type": "function", "name": "lookup",
+                        "description": "Look up a value.",
+                        "parameters": {"type": "object", "properties": {}}}]
+                })]),
+            }
+            .into(),
+        );
+        let persisted = crate::persisted_rollout_items(std::slice::from_ref(&item), history_mode);
+        recorder.record_canonical_items(&persisted).await?;
+        recorder.flush().await?;
+        let (items, loaded_thread_id, parse_errors) =
+            RolloutRecorder::load_rollout_items(recorder.rollout_path()).await?;
+        assert_eq!(loaded_thread_id, Some(thread_id));
+        assert_eq!(parse_errors, 0);
+        assert_eq!(
+            serde_json::to_value(&items[1..])?,
+            serde_json::to_value([item])?
+        );
+        recorder.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<()> {
     let home = TempDir::new().expect("temp dir");
     let config = test_config(home.path());
     let session_id = SessionId::default();
     let thread_id = ThreadId::new();
-    let initial_window_id = Uuid::now_v7().to_string();
+    let initial_window_id = codex_protocol::ContextWindowId::new_uuid_v7();
     let recorder = RolloutRecorder::new(
         &config,
         RolloutRecorderParams::new(
@@ -651,6 +727,7 @@ async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<
     recorder
         .record_canonical_items(&[RolloutItem::EventMsg(EventMsg::AgentMessage(
             AgentMessageEvent {
+                moderation: None,
                 message: "buffered-event".to_string(),
                 phase: None,
                 memory_citation: None,
@@ -749,10 +826,20 @@ async fn referenced_paginated_rollout_starts_at_history_cutoff_and_resumes() -> 
     )
     .await?;
     let rollout_path = recorder.rollout_path().to_path_buf();
+    let initial_meta = recorder
+        .unpersisted_session_meta()
+        .await?
+        .expect("new rollout retains its creation metadata");
+    assert!(!rollout_path.exists());
     recorder.persist().await?;
+    assert!(recorder.unpersisted_session_meta().await?.is_none());
     recorder.shutdown().await?;
 
     let meta = crate::read_session_meta_line(&rollout_path).await?.meta;
+    assert_eq!(
+        serde_json::to_value(&initial_meta)?,
+        serde_json::to_value(&meta)?
+    );
     assert_eq!(
         meta.forked_from_ordinal_exclusive,
         Some(history_base.end_ordinal_exclusive)
@@ -760,6 +847,7 @@ async fn referenced_paginated_rollout_starts_at_history_cutoff_and_resumes() -> 
 
     let resumed =
         RolloutRecorder::new(&config, RolloutRecorderParams::resume(rollout_path.clone())).await?;
+    assert!(resumed.unpersisted_session_meta().await?.is_none());
     resumed
         .record_canonical_items(&[agent_message_item("first child record")])
         .await?;
@@ -907,6 +995,7 @@ async fn persist_reports_filesystem_error_and_retries_buffered_items() -> std::i
     recorder
         .record_canonical_items(&[RolloutItem::EventMsg(EventMsg::AgentMessage(
             AgentMessageEvent {
+                moderation: None,
                 message: "buffered-before-persist".to_string(),
                 phase: None,
                 memory_citation: None,
@@ -960,6 +1049,7 @@ async fn writer_state_retries_write_error_before_reporting_flush_success() -> st
     };
     state.add_items(vec![RolloutItem::EventMsg(EventMsg::AgentMessage(
         AgentMessageEvent {
+            moderation: None,
             message: "queued-after-writer-error".to_string(),
             phase: None,
             memory_citation: None,
@@ -1188,13 +1278,58 @@ async fn append_rollout_item_to_path_assigns_next_paginated_ordinal() -> std::io
 }
 
 #[tokio::test]
-async fn list_threads_db_disabled_does_not_skip_paginated_items() -> std::io::Result<()> {
+async fn discovery_without_database_skips_attached_threads_before_pagination() -> std::io::Result<()>
+{
     let home = TempDir::new().expect("temp dir");
     let config = test_config(home.path());
 
     let newest = write_session_file(home.path(), "2025-01-03T12-00-00", Uuid::from_u128(9001))?;
     let middle = write_session_file(home.path(), "2025-01-02T12-00-00", Uuid::from_u128(9002))?;
     let _oldest = write_session_file(home.path(), "2025-01-01T12-00-00", Uuid::from_u128(9003))?;
+    let parent = ThreadId::from_string(&Uuid::from_u128(9001).to_string()).unwrap();
+    crate::append_thread_name(home.path(), parent, "shared title").await?;
+    for (timestamp, uuid, mode) in [
+        (
+            "2025-01-04T12-00-00",
+            Uuid::from_u128(9004),
+            ThreadHistoryMode::Legacy,
+        ),
+        (
+            "2025-01-03T06-00-00",
+            Uuid::from_u128(9005),
+            ThreadHistoryMode::Paginated,
+        ),
+    ] {
+        let path = write_session_file(home.path(), timestamp, uuid)?;
+        let mut lines = read_rollout_lines(&path)?;
+        let RolloutItem::SessionMeta(meta) = &mut lines[0].item else {
+            panic!("fixture must start with session metadata");
+        };
+        meta.meta.attached_thread = true;
+        meta.meta.forked_from_id = Some(parent);
+        meta.meta.history_mode = mode;
+        let mut file = File::create(&path)?;
+        for line in lines {
+            writeln!(file, "{}", serde_json::to_string(&line)?)?;
+        }
+        let child = ThreadId::from_string(&uuid.to_string()).unwrap();
+        crate::append_thread_name(home.path(), child, "shared title").await?;
+        // Hiding discovery must not prevent opening an explicitly selected attached thread.
+        assert_eq!(
+            crate::read_thread_item_from_rollout(path)
+                .await
+                .unwrap()
+                .thread_id,
+            Some(child)
+        );
+    }
+    let named = crate::session_index::find_thread_meta_by_name_str(
+        home.path(),
+        "shared title",
+        /*state_db_ctx*/ None,
+    )
+    .await?;
+    assert_eq!(named.map(|(_, meta)| meta.meta.id), Some(parent));
 
     let default_provider = config.model_provider_id.clone();
     let page1 = RolloutRecorder::list_threads(
@@ -1209,6 +1344,7 @@ async fn list_threads_db_disabled_does_not_skip_paginated_items() -> std::io::Re
         /*cwd_filters*/ None,
         default_provider.as_str(),
         /*search_term*/ None,
+        /*include_attached_threads*/ false,
     )
     .await?;
     assert_eq!(page1.items.len(), 1);
@@ -1227,10 +1363,58 @@ async fn list_threads_db_disabled_does_not_skip_paginated_items() -> std::io::Re
         /*cwd_filters*/ None,
         default_provider.as_str(),
         /*search_term*/ None,
+        /*include_attached_threads*/ false,
     )
     .await?;
     assert_eq!(page2.items.len(), 1);
     assert_eq!(page2.items[0].path, middle);
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_archived_threads_without_db_keeps_threads_without_previews() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let archive_dir = home.path().join(crate::ARCHIVED_SESSIONS_SUBDIR);
+    fs::create_dir_all(&archive_dir)?;
+    let older = ThreadId::new();
+    let newer = ThreadId::new();
+    for (timestamp, thread_id) in [
+        ("2026-07-09T00-00-00", older),
+        ("2026-07-09T00-01-00", newer),
+    ] {
+        let path = archive_dir.join(format!("rollout-{timestamp}-{thread_id}.jsonl"));
+        write_paginated_rollout(&path, thread_id, &[])?;
+    }
+
+    let mut cursor = None;
+    let mut found = Vec::new();
+    for expected_more in [true, false] {
+        let page = RolloutRecorder::list_archived_threads(
+            /*state_db_ctx*/ None,
+            &config,
+            /*page_size*/ 1,
+            cursor.as_ref(),
+            ThreadSortKey::CreatedAt,
+            SortDirection::Desc,
+            &[],
+            /*model_providers*/ None,
+            /*cwd_filters*/ None,
+            config.model_provider_id.as_str(),
+            /*search_term*/ None,
+            /*include_attached_threads*/ false,
+        )
+        .await?;
+        assert_eq!(page.items.len(), 1);
+        found.extend(
+            page.items
+                .into_iter()
+                .map(|item| (item.thread_id, item.preview)),
+        );
+        cursor = page.next_cursor;
+        assert_eq!(cursor.is_some(), expected_more);
+    }
+    assert_eq!(found, vec![(Some(newer), None), (Some(older), None)]);
     Ok(())
 }
 
@@ -1260,14 +1444,14 @@ async fn list_threads_db_enabled_preserves_metadata_for_missing_rollout_paths()
         .with_ymd_and_hms(2025, 1, 3, 13, 0, 0)
         .single()
         .expect("valid datetime");
-    let mut builder = codex_state::ThreadMetadataBuilder::new(
+    let builder = codex_state::ThreadMetadataBuilder::new(
         thread_id,
         stale_path,
         created_at,
         SessionSource::Cli,
-    );
-    builder.model_provider = Some(config.model_provider_id.clone());
-    builder.cwd = home.path().to_path_buf();
+    )
+    .with_model_provider(Some(config.model_provider_id.clone()))
+    .with_cwd(home.path().to_path_buf());
     let mut metadata = builder.build(config.model_provider_id.as_str());
     metadata.first_user_message = Some("Hello from user".to_string());
     metadata.preview = metadata.first_user_message.clone();
@@ -1283,14 +1467,14 @@ async fn list_threads_db_enabled_preserves_metadata_for_missing_rollout_paths()
         .with_ymd_and_hms(2025, 1, 2, 13, 0, 0)
         .single()
         .expect("valid datetime");
-    let mut valid_builder = codex_state::ThreadMetadataBuilder::new(
+    let valid_builder = codex_state::ThreadMetadataBuilder::new(
         valid_thread_id,
         valid_path.clone(),
         valid_created_at,
         SessionSource::Cli,
-    );
-    valid_builder.model_provider = Some(config.model_provider_id.clone());
-    valid_builder.cwd = home.path().to_path_buf();
+    )
+    .with_model_provider(Some(config.model_provider_id.clone()))
+    .with_cwd(home.path().to_path_buf());
     let mut valid_metadata = valid_builder.build(config.model_provider_id.as_str());
     valid_metadata.first_user_message = Some("Older valid thread".to_string());
     valid_metadata.preview = valid_metadata.first_user_message.clone();
@@ -1298,6 +1482,8 @@ async fn list_threads_db_enabled_preserves_metadata_for_missing_rollout_paths()
         .upsert_thread(&valid_metadata)
         .await
         .expect("state db upsert should succeed");
+
+    let older_path = write_session_file(home.path(), "2025-01-01T13-00-00", Uuid::from_u128(9014))?;
 
     let default_provider = config.model_provider_id.clone();
     let page = RolloutRecorder::list_threads(
@@ -1312,6 +1498,7 @@ async fn list_threads_db_enabled_preserves_metadata_for_missing_rollout_paths()
         /*cwd_filters*/ None,
         default_provider.as_str(),
         /*search_term*/ None,
+        /*include_attached_threads*/ false,
     )
     .await?;
     assert_eq!(page.items.len(), 1);
@@ -1326,6 +1513,26 @@ async fn list_threads_db_enabled_preserves_metadata_for_missing_rollout_paths()
         .await
         .expect("state db lookup should succeed");
     assert_eq!(stored_metadata, Some(metadata));
+    let cursor = page.next_cursor.expect("another thread remains");
+    assert_eq!(cursor.thread_id(), Some(valid_thread_id));
+    runtime.close().await;
+    let fallback = RolloutRecorder::list_threads(
+        Some(runtime),
+        &config,
+        /*page_size*/ 1,
+        Some(&cursor),
+        ThreadSortKey::CreatedAt,
+        SortDirection::Desc,
+        &[],
+        /*model_providers*/ None,
+        /*cwd_filters*/ None,
+        default_provider.as_str(),
+        /*search_term*/ None,
+        /*include_attached_threads*/ false,
+    )
+    .await?;
+    assert_eq!(fallback.items.len(), 1);
+    assert_eq!(fallback.items[0].path, older_path);
     Ok(())
 }
 
@@ -1406,6 +1613,7 @@ async fn list_threads_state_db_only_skips_jsonl_repair_scan() -> std::io::Result
         /*cwd_filters*/ Some(cwd_filters.as_slice()),
         config.model_provider_id.as_str(),
         /*search_term*/ None,
+        /*include_attached_threads*/ false,
     )
     .await?;
     assert_eq!(repaired_page.items.len(), 1);
@@ -1425,6 +1633,23 @@ async fn list_threads_state_db_only_skips_jsonl_repair_scan() -> std::io::Result
     )
     .await?;
     assert_eq!(repaired_state_db_only_page.items.len(), 1);
+    runtime.close().await;
+    let error = RolloutRecorder::list_threads_from_state_db(
+        Some(runtime),
+        &config,
+        /*page_size*/ 10,
+        /*cursor*/ None,
+        ThreadSortKey::CreatedAt,
+        SortDirection::Desc,
+        &[],
+        /*model_providers*/ None,
+        /*cwd_filters*/ Some(cwd_filters.as_slice()),
+        config.model_provider_id.as_str(),
+        /*search_term*/ None,
+    )
+    .await
+    .expect_err("a failed database query must not look like an exhausted listing");
+    assert_eq!(error.kind(), std::io::ErrorKind::Other);
     Ok(())
 }
 
@@ -1452,14 +1677,14 @@ async fn list_threads_default_filter_returns_filesystem_scan_results() -> std::i
         .with_ymd_and_hms(2025, 1, 3, 13, 0, 0)
         .single()
         .expect("valid datetime");
-    let mut builder = codex_state::ThreadMetadataBuilder::new(
+    let builder = codex_state::ThreadMetadataBuilder::new(
         thread_id,
         real_path,
         created_at,
         SessionSource::Cli,
-    );
-    builder.model_provider = Some(config.model_provider_id.clone());
-    builder.cwd = stale_cwd.clone();
+    )
+    .with_model_provider(Some(config.model_provider_id.clone()))
+    .with_cwd(stale_cwd.clone());
     let mut metadata = builder.build(config.model_provider_id.as_str());
     metadata.first_user_message = Some("Hello from user".to_string());
     metadata.preview = metadata.first_user_message.clone();
@@ -1497,6 +1722,7 @@ async fn list_threads_default_filter_returns_filesystem_scan_results() -> std::i
         /*cwd_filters*/ Some(cwd_filters.as_slice()),
         config.model_provider_id.as_str(),
         /*search_term*/ None,
+        /*include_attached_threads*/ false,
     )
     .await?;
     assert_eq!(scanned_page.items.len(), 0);
@@ -1542,19 +1768,19 @@ async fn list_threads_metadata_filter_overlays_state_db_list_metadata() -> std::
         .with_ymd_and_hms(2025, 1, 3, 16, 0, 0)
         .single()
         .expect("valid datetime");
-    let mut builder = codex_state::ThreadMetadataBuilder::new(
+    let builder = codex_state::ThreadMetadataBuilder::new(
         thread_id,
         rollout_path,
         created_at,
         SessionSource::Cli,
-    );
-    builder.model_provider = Some(config.model_provider_id.clone());
-    builder.cwd = home.path().to_path_buf();
-    builder.git_branch = Some("sqlite-branch".to_string());
-    builder.git_sha = Some("sqlite-sha".to_string());
-    builder.git_origin_url = Some(
+    )
+    .with_model_provider(Some(config.model_provider_id.clone()))
+    .with_cwd(home.path().to_path_buf())
+    .with_git_branch(Some("sqlite-branch".to_string()))
+    .with_git_sha(Some("sqlite-sha".to_string()))
+    .with_git_origin_url(Some(
         SanitizedGitUrl::try_from("https://example.com/repo.git").expect("valid git remote URL"),
-    );
+    ));
     let mut metadata = builder.build(config.model_provider_id.as_str());
     metadata.first_user_message = Some("Hello from user".to_string());
     metadata.preview = metadata.first_user_message.clone();
@@ -1575,6 +1801,7 @@ async fn list_threads_metadata_filter_overlays_state_db_list_metadata() -> std::
         /*cwd_filters*/ None,
         config.model_provider_id.as_str(),
         /*search_term*/ None,
+        /*include_attached_threads*/ false,
     )
     .await?;
 
@@ -1612,6 +1839,7 @@ fn fill_missing_thread_item_metadata_preserves_identity_and_prefers_state_git_fi
         ),
         source: None,
         history_mode: Default::default(),
+        attached_to_thread_id: None,
         parent_thread_id: None,
         agent_nickname: None,
         agent_role: None,
@@ -1645,6 +1873,7 @@ fn fill_missing_thread_item_metadata_preserves_identity_and_prefers_state_git_fi
         ),
         source: Some(SessionSource::Exec),
         history_mode: Default::default(),
+        attached_to_thread_id: None,
         parent_thread_id: None,
         agent_nickname: Some("state-agent".to_string()),
         agent_role: Some("state-role".to_string()),
@@ -1715,14 +1944,14 @@ async fn list_threads_search_repairs_stale_state_db_hits_before_returning() -> s
         .with_ymd_and_hms(2025, 1, 3, 15, 0, 0)
         .single()
         .expect("valid datetime");
-    let mut builder = codex_state::ThreadMetadataBuilder::new(
+    let builder = codex_state::ThreadMetadataBuilder::new(
         thread_id,
         real_path,
         created_at,
         SessionSource::Cli,
-    );
-    builder.model_provider = Some(config.model_provider_id.clone());
-    builder.cwd = home.path().to_path_buf();
+    )
+    .with_model_provider(Some(config.model_provider_id.clone()))
+    .with_cwd(home.path().to_path_buf());
     let mut metadata = builder.build(config.model_provider_id.as_str());
     metadata.title = "needle stale first user".to_string();
     metadata.first_user_message = Some(metadata.title.clone());
@@ -1760,6 +1989,7 @@ async fn list_threads_search_repairs_stale_state_db_hits_before_returning() -> s
         /*cwd_filters*/ None,
         config.model_provider_id.as_str(),
         Some("needle"),
+        /*include_attached_threads*/ false,
     )
     .await?;
     assert_eq!(scanned_page.items.len(), 0);
@@ -1801,26 +2031,18 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
             disabled_plugin_ids: None,
             cwd: serde_json::from_value(serde_json::json!(&latest_cwd))
                 .expect("absolute latest cwd"),
-            workspace_roots: None,
-            current_date: None,
-            timezone: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
-            permission_profile: None,
+            permission_profile: codex_protocol::models::PermissionProfile::read_only(),
             active_permission_profile: None,
-            network: None,
-            file_system_sandbox_policy: None,
             model: "test-model".to_string(),
             comp_hash: None,
-            personality: None,
             collaboration_mode: None,
             multi_agent_version: None,
-            multi_agent_mode: None,
             realtime_active: None,
             cyber_access_program: None,
             effort: None,
-            summary: codex_protocol::config_types::ReasoningSummary::Auto,
+            summary: Some(codex_protocol::config_types::ReasoningSummary::Auto),
         }),
     };
     writeln!(file, "{}", serde_json::to_string(&turn_context)?)?;

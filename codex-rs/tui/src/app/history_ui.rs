@@ -267,11 +267,7 @@ impl App {
         if let Err(err) = webbrowser::open(&url) {
             self.chat_widget
                 .add_error_message(format!("Failed to open browser for {url}: {err}"));
-            return;
         }
-
-        self.chat_widget
-            .add_info_message(format!("Opened {url} in your browser."), /*hint*/ None);
     }
 
     pub(super) fn open_desktop_thread(&mut self, thread_id: ThreadId) {
@@ -304,10 +300,6 @@ impl App {
         history_cell::SessionHeaderHistoryCell::new(
             self.chat_widget.model_display_name().to_string(),
             self.chat_widget.current_reasoning_effort(),
-            self.chat_widget.should_show_fast_status(
-                self.chat_widget.current_model(),
-                self.chat_widget.current_service_tier(),
-            ),
             self.config.cwd.to_path_buf(),
             version,
         )
@@ -316,6 +308,14 @@ impl App {
 
     pub(super) fn clear_ui_header_lines(&self, width: u16) -> Vec<Line<'static>> {
         self.clear_ui_header_lines_with_version(width, CODEX_CLI_VERSION)
+    }
+
+    pub(super) fn start_cleared_display(&mut self, tui: &mut tui::Tui) {
+        self.reset_terminal_display_state();
+        self.transcript_cells
+            .retain(|cell| !cell.as_any().is::<history_cell::ClearScreenHeader>());
+        let header = history_cell::ClearScreenHeader(self.clear_ui_header_cell(CODEX_CLI_VERSION));
+        self.insert_history_cell(tui, Box::new(header));
     }
 
     pub(super) fn queue_clear_ui_header(&mut self, tui: &mut tui::Tui) {
@@ -336,7 +336,10 @@ impl App {
             .history_wrap_width(tui.terminal.last_known_screen_size.width);
         let header_lines = self.clear_ui_header_lines(width);
         if !header_lines.is_empty() {
-            tui.insert_history_lines(header_lines);
+            tui.insert_history_lines_with_wrap_policy(
+                header_lines,
+                self.history_line_wrap_policy(),
+            );
             self.has_emitted_history_lines = true;
         }
     }
@@ -379,7 +382,6 @@ impl App {
     }
 
     pub(super) fn reset_transcript_state_after_clear(&mut self) {
-        self.overlay = None;
         self.transcript_cells.clear();
         self.native_history = Default::default();
         self.cancel_pending_key_chord();

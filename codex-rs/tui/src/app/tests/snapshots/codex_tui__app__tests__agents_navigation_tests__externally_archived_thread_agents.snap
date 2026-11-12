@@ -1,0 +1,28 @@
+---
+source: tui/src/app/tests/agents_navigation_tests.rs
+expression: "render_bottom_popup(&app.chat_widget, 96)"
+---
+  Agent command center  Group: Project  g
+   All 0   Needs you 0   Working 0   Ready 0   Inactive 0                      tab/⇧tab filter
+  ────────────────────────────────────────────────────────────────────────────────────────────
+  Loading tasks…                                      │
+                                                      │
+                                                      │
+                                                      │
+                                                      │
+                                                      │
+                                                      │
+                                                      │
+                                                      │
+                                                      │
+                                                      │
+                                                      │
+                                                      │
+                                                      │
+                                                      │
+                                                      │
+                                                      │
+                                                      │
+                                                      │
+                                                      │
+  ? help  esc back  ↑/↓ move  enter open  n new

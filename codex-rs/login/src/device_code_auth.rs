@@ -167,6 +167,10 @@ pub async fn request_device_code(opts: &ServerOptions) -> std::io::Result<Device
     // paths are not resolved separately.
     let client = build_raw_auth_reqwest_client(base_url, &opts.auth_route_config)?;
     let api_base_url = format!("{base_url}/api/accounts");
+    let client = create_raw_auth_client(
+        &format!("{api_base_url}/deviceauth/usercode"),
+        &opts.auth_route_config,
+    )?;
     let uc = request_user_code(&client, &api_base_url, &opts.client_id).await?;
 
     Ok(DeviceCode {
@@ -184,6 +188,10 @@ pub async fn complete_device_code_login(
     let base_url = opts.issuer.trim_end_matches('/');
     let client = build_raw_auth_reqwest_client(base_url, &opts.auth_route_config)?;
     let api_base_url = format!("{base_url}/api/accounts");
+    let client = create_raw_auth_client(
+        &format!("{api_base_url}/deviceauth/token"),
+        &opts.auth_route_config,
+    )?;
 
     let code_resp = poll_for_token(
         &client,
@@ -218,16 +226,7 @@ pub async fn complete_device_code_login(
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, message));
     }
 
-    crate::server::persist_tokens_async(
-        &opts.codex_home,
-        /*api_key*/ None,
-        tokens.id_token,
-        tokens.access_token,
-        tokens.refresh_token,
-        opts.cli_auth_credentials_store_mode,
-        opts.auth_keyring_backend_kind,
-    )
-    .await
+    crate::server::persist_tokens_async(&opts, /*api_key*/ None, &tokens).await
 }
 
 pub async fn run_device_code_login(opts: ServerOptions) -> std::io::Result<()> {

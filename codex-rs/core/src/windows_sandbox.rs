@@ -1,3 +1,5 @@
+//! Windows sandbox configuration, runtime policy, and lifecycle diagnostics.
+
 use crate::config::Config;
 use crate::config::edit::ConfigEditsBuilder;
 use codex_config::config_toml::ConfigToml;

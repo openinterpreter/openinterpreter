@@ -373,49 +373,7 @@ async fn app_search_sources_are_hidden_for_api_key_auth() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn search_tool_adds_discovery_instructions_to_tool_description() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let server = start_mock_server().await;
-    let apps_server = AppsTestServer::mount_searchable(&server).await?;
-    let mock = mount_sse_once(
-        &server,
-        sse(vec![
-            ev_response_created("resp-1"),
-            ev_assistant_message("msg-1", "done"),
-            ev_completed("resp-1"),
-        ]),
-    )
-    .await;
-
-    let mut builder = configured_builder(apps_server.chatgpt_base_url.clone());
-    let test = builder.build_with_auto_env(&server).await?;
-
-    test.submit_turn_with_approval_and_permission_profile(
-        "list tools",
-        AskForApproval::Never,
-        PermissionProfile::Disabled,
-    )
-    .await?;
-
-    let body = mock.single_request().body_json();
-    let description = tool_search_description(&body).expect("tool_search description should exist");
-    assert!(
-        SEARCH_TOOL_DESCRIPTION_SNIPPETS
-            .iter()
-            .all(|snippet| description.contains(snippet)),
-        "tool_search description should include the updated workflow: {description:?}"
-    );
-    assert!(
-        !description.contains("remainder of the current session/thread"),
-        "tool_search description should not mention legacy client-side persistence: {description:?}"
-    );
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn search_tool_omits_sources_when_deferred_tool_world_state_is_enabled() -> Result<()> {
+async fn search_tool_adds_discovery_instructions_when_world_state_is_disabled() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -434,9 +392,59 @@ async fn search_tool_omits_sources_when_deferred_tool_world_state_is_enabled() -
         configured_builder(apps_server.chatgpt_base_url.clone()).with_config(|config| {
             config
                 .features
-                .enable(Feature::DeferredToolWorldState)
+                .disable(Feature::DeferredToolWorldState)
                 .expect("test config should allow feature update");
         });
+    let test = builder.build_with_auto_env(&server).await?;
+
+    test.submit_turn_with_approval_and_permission_profile(
+        "list tools",
+        AskForApproval::Never,
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    let request = mock.single_request();
+    assert!(
+        request
+            .message_input_texts("developer")
+            .into_iter()
+            .all(|text| !text.contains("<tools>")),
+        "explicitly disabling deferred tool world state must omit the tools block"
+    );
+    let body = request.body_json();
+    let description = tool_search_description(&body).expect("tool_search description should exist");
+    assert!(
+        SEARCH_TOOL_DESCRIPTION_SNIPPETS
+            .iter()
+            .all(|snippet| description.contains(snippet)),
+        "tool_search description should include the updated workflow: {description:?}"
+    );
+    assert!(
+        !description.contains("remainder of the current session/thread"),
+        "tool_search description should not mention legacy client-side persistence: {description:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_tool_omits_sources_with_deferred_tool_world_state_by_default() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let apps_server = AppsTestServer::mount_searchable(&server).await?;
+    let mock = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg-1", "done"),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+
+    let mut builder = configured_builder(apps_server.chatgpt_base_url.clone());
     let test = builder.build_with_auto_env(&server).await?;
     test.submit_turn_with_approval_and_permission_profile(
         "list tools",
@@ -656,6 +664,7 @@ async fn tool_search_returns_deferred_tools_without_follow_up_tool_injection() -
         Some(json!({
             "_codex_apps": {
                 "call_id": "calendar-call-1",
+                "root_turn_id": mock.requests()[0].body_json()["client_metadata"]["turn_id"],
                 "resource_uri": CALENDAR_CREATE_EVENT_RESOURCE_URI,
                 "contains_mcp_source": true,
                 "connector_id": "calendar",
@@ -678,6 +687,7 @@ async fn tool_search_returns_deferred_tools_without_follow_up_tool_injection() -
         apps_tool_call.pointer("/params/_meta/_codex_apps"),
         Some(&json!({
             "call_id": "calendar-call-1",
+            "root_turn_id": first_request_body["client_metadata"]["turn_id"],
             "resource_uri": CALENDAR_CREATE_EVENT_RESOURCE_URI,
             "contains_mcp_source": true,
             "connector_id": "calendar",
@@ -1326,6 +1336,7 @@ async fn tool_search_indexes_only_enabled_non_app_mcp_tools() -> Result<()> {
                     environment_id,
                     enabled: true,
                     required: false,
+                    startup_readiness: Default::default(),
                     disabled_reason: None,
                     startup_timeout_sec: Some(Duration::from_secs(10)),
                     tool_timeout_sec: None,
@@ -1336,6 +1347,7 @@ async fn tool_search_indexes_only_enabled_non_app_mcp_tools() -> Result<()> {
                     oauth: None,
                     oauth_resource: None,
                     supports_parallel_tool_calls: false,
+                    tool_input_schema_max_bytes: None,
                     omit_tools_from: None,
                     tools: HashMap::new(),
                 },
@@ -1459,6 +1471,7 @@ async fn tool_search_surfaced_mcp_tool_errors_are_returned_to_model() -> Result<
                     environment_id,
                     enabled: true,
                     required: false,
+                    startup_readiness: Default::default(),
                     disabled_reason: None,
                     startup_timeout_sec: Some(Duration::from_secs(10)),
                     tool_timeout_sec: None,
@@ -1469,6 +1482,7 @@ async fn tool_search_surfaced_mcp_tool_errors_are_returned_to_model() -> Result<
                     oauth: None,
                     oauth_resource: None,
                     supports_parallel_tool_calls: false,
+                    tool_input_schema_max_bytes: None,
                     omit_tools_from: None,
                     tools: HashMap::new(),
                 },
@@ -1608,6 +1622,7 @@ async fn tool_search_uses_non_app_mcp_server_instructions_as_namespace_descripti
                     environment_id,
                     enabled: true,
                     required: false,
+                    startup_readiness: Default::default(),
                     disabled_reason: None,
                     startup_timeout_sec: Some(Duration::from_secs(10)),
                     tool_timeout_sec: None,
@@ -1618,6 +1633,7 @@ async fn tool_search_uses_non_app_mcp_server_instructions_as_namespace_descripti
                     oauth: None,
                     oauth_resource: None,
                     supports_parallel_tool_calls: false,
+                    tool_input_schema_max_bytes: None,
                     omit_tools_from: None,
                     tools: HashMap::new(),
                 },

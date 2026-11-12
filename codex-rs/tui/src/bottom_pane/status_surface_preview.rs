@@ -34,11 +34,14 @@ pub(crate) enum StatusSurfacePreviewItem {
     EstimatedThreadCost,
     SessionId,
     FastMode,
+    Daybreak,
     RawOutput,
     WorkspaceHeadline,
     Model,
     ModelWithReasoning,
     Reasoning,
+    Profile,
+    Provider,
     TaskProgress,
 }
 
@@ -72,12 +75,15 @@ impl StatusSurfacePreviewItem {
             StatusSurfacePreviewItem::ThreadCredits => "5.2 credits",
             StatusSurfacePreviewItem::EstimatedThreadCost => "~$1.82",
             StatusSurfacePreviewItem::SessionId => "550e8400-e29b-41d4",
-            StatusSurfacePreviewItem::FastMode => "Fast on",
+            StatusSurfacePreviewItem::FastMode => "Fast",
+            StatusSurfacePreviewItem::Daybreak => "Daybreak off",
             StatusSurfacePreviewItem::RawOutput => "raw output",
             StatusSurfacePreviewItem::WorkspaceHeadline => "Workspace headline",
             StatusSurfacePreviewItem::Model => "gpt-5.2-codex",
             StatusSurfacePreviewItem::ModelWithReasoning => "gpt-5.2-codex medium",
             StatusSurfacePreviewItem::Reasoning => "medium",
+            StatusSurfacePreviewItem::Profile => "profile: <name>",
+            StatusSurfacePreviewItem::Provider => "provider: <id>",
             StatusSurfacePreviewItem::TaskProgress => "Tasks 0/0",
         }
     }
@@ -110,11 +116,14 @@ impl StatusSurfacePreviewItem {
             Self::EstimatedThreadCost,
             Self::SessionId,
             Self::FastMode,
+            Self::Daybreak,
             Self::RawOutput,
             Self::WorkspaceHeadline,
             Self::Model,
             Self::ModelWithReasoning,
             Self::Reasoning,
+            Self::Profile,
+            Self::Provider,
             Self::TaskProgress,
         ]
         .into_iter()
@@ -239,7 +248,7 @@ impl StatusSurfacePreviewData {
         &self,
         items: I,
         use_theme_colors: bool,
-    ) -> Option<Line<'static>>
+    ) -> Option<FooterContent>
     where
         I: IntoIterator<Item = StatusLineItem>,
     {

@@ -1,4 +1,4 @@
-//! Confirmed registration conflicts retry without replacing the Noise identity or session handler.
+//! Pre-write registration failures retry without replacing the Noise identity or session handler.
 
 use std::time::Duration;
 
@@ -12,6 +12,9 @@ use tokio_tungstenite::tungstenite::handshake::server::Request;
 use tokio_tungstenite::tungstenite::handshake::server::Response;
 
 use super::*;
+
+#[path = "auth_rejection_tests.rs"]
+mod auth_rejection;
 
 type RemoteTask = AbortOnDropHandle<Result<(), ExecServerError>>;
 type RelayTask = AbortOnDropHandle<Result<()>>;
@@ -42,6 +45,10 @@ impl RegistryFixture {
                         "url": format!("{rendezvous_url}/relay?role=environment&registration={attempt}"),
                         "security_profile": "noise_hybrid_ik_v1",
                         "executor_registration_id": format!("registration-{attempt}"),
+                    }));
+                } else if status == 502 {
+                    response = response.set_body_json(serde_json::json!({
+                        "detail": {"code": "authentication_service_unavailable", "message": "Authentication service unavailable"},
                     }));
                 } else {
                     response = response.set_body_json(serde_json::json!({
@@ -76,7 +83,7 @@ impl RegistryFixture {
             HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         )?;
         let (codex_exe, sandbox_exe) = common::current_test_binary_helper_paths()?;
-        let runtime_paths = ExecServerRuntimePaths::new(codex_exe, sandbox_exe)?;
+        let runtime_paths = ExecServerRuntimeOptions::new(codex_exe, sandbox_exe)?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let task = AbortOnDropHandle::new(tokio::spawn(
             codex_exec_server::run_remote_environment_until_shutdown(
@@ -139,9 +146,17 @@ impl RegistryFixture {
     }
 }
 
+#[test_case::test_case(503; "registration_conflict")]
+#[test_case::test_case(502; "authentication_service_unavailable")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn registration_retries_preserve_noise_identity_and_initialized_session() -> Result<()> {
-    let fixture = RegistryFixture::new(vec![503, 200, 503, 503, 200], Duration::ZERO).await?;
+async fn registration_retries_preserve_noise_identity_and_initialized_session(
+    retry_status: u16,
+) -> Result<()> {
+    let fixture = RegistryFixture::new(
+        vec![retry_status, 200, retry_status, retry_status, 200],
+        Duration::ZERO,
+    )
+    .await?;
     let (shutdown, remote) = fixture.start()?;
     let harness_identity = NoiseChannelIdentity::generate()?;
     let (client, first_relay) = fixture

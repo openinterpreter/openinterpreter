@@ -9,8 +9,8 @@ use pretty_assertions::assert_eq;
 use ratatui::layout::Rect;
 use ratatui::layout::Size;
 
-async fn app_with_pending_thread_usage() -> Result<(App, AppServerSession, tui::Tui, ThreadId, u64)>
-{
+async fn app_with_pending_thread_usage()
+-> Result<(Box<App>, AppServerSession, tui::Tui, ThreadId, u64)> {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let thread_id = ThreadId::new();
     app.chat_widget.handle_thread_session(test_thread_session(
@@ -56,6 +56,7 @@ fn successful_thread_usage(thread_id: ThreadId, request_id: u64) -> AppEvent {
         thread_id,
         request_id,
         result: Ok(ThreadUsageOutcome::Available(ThreadUsage {
+            native_usage_usd_micros: None,
             thread_id: thread_id.to_string(),
             estimated_usage_credits_micros: 50_000_000,
             estimated_usage_usd_micros: Some(1_820_000),

@@ -8,12 +8,16 @@ use std::sync::Arc;
 
 use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use codex_config::McpServerConfig;
+use codex_config::types::AuthKeyringBackendKind;
 use codex_config::types::OAuthCredentialsStoreMode;
 use codex_features::Feature;
 use codex_protocol::items::McpToolCallStatus;
 use codex_protocol::items::TurnItem;
 use codex_protocol::mcp::CallToolResult;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::McpStartupFailureReason;
+use codex_protocol::protocol::McpStartupStatus;
+use codex_rmcp_client::stored_oauth_credentials;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
@@ -27,12 +31,126 @@ use test_case::test_case;
 use wiremock::Mock;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::body_partial_json;
+use wiremock::matchers::body_string_contains;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
 enum ConfigRefreshPath {
     Runtime,
     Mcp,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(codex_home)]
+async fn rejected_refresh_requires_reauthentication_after_runtime_rebuild() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let responses_server = responses::start_mock_server().await;
+    let mcp_server = responses::start_mock_server().await;
+    let http_server = AppsTestServer::mount(&mcp_server).await?;
+    let server_name = "rejected_refresh";
+    let server_url = format!("{}/api/codex/ps/mcp", http_server.chatgpt_base_url);
+    Mock::given(method("GET"))
+        .and(path(
+            "/.well-known/oauth-authorization-server/api/codex/ps/mcp",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "issuer": server_url,
+            "authorization_endpoint": format!("{}/oauth/authorize", mcp_server.uri()),
+            "token_endpoint": format!("{}/oauth/token", mcp_server.uri()),
+        })))
+        .mount(&mcp_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .and(body_string_contains(
+            "refresh_token=synthetic-refresh-token",
+        ))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({"error": "invalid_grant"})))
+        .expect(1)
+        .mount(&mcp_server)
+        .await;
+    let server_config: McpServerConfig = serde_json::from_value(json!({
+        "url": server_url,
+        "environment_id": DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
+    }))?;
+    let credential_name = server_config.oauth_credential_name(server_name);
+    let home = Arc::new(tempfile::tempdir()?);
+    let _codex_home_guard = EnvVarGuard::set("CODEX_HOME", home.path().as_os_str());
+    write_fallback_oauth_tokens(
+        credential_name.as_ref(),
+        &server_url,
+        "test-client-id",
+        "synthetic-access-token",
+        "synthetic-refresh-token",
+        OAuthCredentialExpiry::Expired,
+    )
+    .await?;
+    // Another binary may have saved the same credential under a different computed key.
+    let credentials_path = home.path().join(".credentials.json");
+    let saved: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(&credentials_path)?)?;
+    let entry = saved.into_values().next().expect("seeded file entry");
+    std::fs::write(
+        &credentials_path,
+        serde_json::to_vec(&json!({"!legacy-key": entry}))?,
+    )?;
+    let mut expected = stored_oauth_credentials(
+        credential_name.as_ref(),
+        &server_url,
+        OAuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )?
+    .expect("seeded credentials");
+    expected.token_response.0.set_refresh_token(None);
+
+    // Rebuilding the agent must observe durable retirement, not retry the rejected token.
+    for _ in 0..2 {
+        let server_config = server_config.clone();
+        let fixture = test_codex()
+            .with_home(Arc::clone(&home))
+            .with_config(move |config| {
+                config
+                    .features
+                    .enable(Feature::McpOAuthRefreshCoordination)
+                    .expect("test config should allow coordinated OAuth refresh");
+                config.mcp_oauth_credentials_store_mode = OAuthCredentialsStoreMode::File;
+                config
+                    .mcp_servers
+                    .set([(server_name.to_string(), server_config)].into())
+                    .expect("test config should allow the OAuth server");
+            })
+            // The OAuth provider stays on the host when the executor is remote.
+            .build_with_remote_and_local_env(&responses_server)
+            .await?;
+        let mut failures = Vec::new();
+        wait_for_event(&fixture.codex, |event| {
+            if let EventMsg::McpStartupUpdate(update) = event
+                && update.server == server_name
+                && let McpStartupStatus::Failed { reason, .. } = &update.status
+            {
+                failures.push(*reason);
+            }
+            matches!(event, EventMsg::McpStartupComplete(_))
+        })
+        .await;
+        assert_eq!(
+            failures,
+            vec![Some(McpStartupFailureReason::ReauthenticationRequired)]
+        );
+        assert_eq!(
+            stored_oauth_credentials(
+                credential_name.as_ref(),
+                &server_url,
+                OAuthCredentialsStoreMode::File,
+                AuthKeyringBackendKind::default(),
+            )?,
+            Some(expected.clone()),
+        );
+        fixture.codex.shutdown_and_wait().await?;
+    }
+    mcp_server.verify().await;
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -206,16 +324,23 @@ async fn oauth_mode_refresh_replaces_the_live_connection(
     assert_eq!(startup_control.initialize_attempts(), 1);
 
     for (enabled, expected_initializations) in [(true, 2), (true, 2), (false, 3)] {
+        let current_config = fixture.codex.config().await;
         let mut refreshed_config = fixture.config.clone();
         refreshed_config
             .features
             .set_enabled(Feature::McpOAuthRefreshCoordination, enabled)?;
         match refresh_path {
             ConfigRefreshPath::Runtime => {
-                fixture.codex.refresh_runtime_config(refreshed_config).await;
+                let _ = fixture
+                    .codex
+                    .refresh_runtime_config(current_config, refreshed_config)
+                    .await;
             }
             ConfigRefreshPath::Mcp => {
-                fixture.codex.refresh_mcp_config(refreshed_config).await;
+                let _ = fixture
+                    .codex
+                    .refresh_mcp_config(current_config, refreshed_config)
+                    .await;
             }
         }
         // A normal tool call reconciles the refreshed config without forcing a reconnect.

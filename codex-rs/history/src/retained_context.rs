@@ -3,7 +3,18 @@
 //! Adopted parent instructions precede local facts without sharing the local acceptance counter.
 //! Their parent verified answers are unavailable, so adopted authorization stays incomplete.
 
+#[path = "retained_assistant_messages.rs"]
+mod assistant_messages;
+#[path = "retained_source.rs"]
+mod source;
+pub use source::RetainedSource;
+pub use source::RetainedSourceId;
+pub use source::RetainedSourceRole;
+
+use codex_protocol::ItemIdGenerator;
+use std::collections::BTreeSet;
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -33,7 +44,8 @@ pub struct VerifiedAnswer {
     pub questions: Vec<VerifiedQuestionAnswer>,
 }
 
-/// Original user instruction, retained outside model summarization for delegated review.
+/// Original conversational text, retained outside model summarization for review.
+/// The owning family supplies the source role; assistant text never establishes authorization.
 /// Non-text input is not reconstructed as text; missing evidence remains explicit.
 #[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RetainedUserMessage {
@@ -41,6 +53,12 @@ pub struct RetainedUserMessage {
     pub message_id: Option<String>,
     pub text: String,
     pub complete: bool,
+    /// Missing provenance in older checkpoints conservatively remains ordinary input.
+    #[serde(default, skip_serializing_if = "crate::UserInputOrigin::is_user")]
+    pub origin: crate::UserInputOrigin,
+    /// Original assistant phase; absent in legacy checkpoints and non-message evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<codex_protocol::models::MessagePhase>,
 }
 
 /// Local facts use their acceptance counter; copied parent instructions use prefix order.
@@ -81,6 +99,8 @@ impl std::fmt::Debug for RetainedUserMessage {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 struct Ordered<T> {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revision: Option<codex_protocol::ResponseItemId>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     inherited: bool,
     #[serde(default)]
@@ -108,8 +128,10 @@ pub enum RetainedContextOrder {
 }
 
 /// Borrowed host evidence across retained families.
+#[derive(Clone, Copy)]
 pub enum RetainedContextEntry<'a> {
     UserMessage(&'a RetainedUserMessage),
+    AssistantMessage(&'a RetainedUserMessage),
     VerifiedAnswer(&'a VerifiedAnswer),
 }
 
@@ -122,10 +144,29 @@ impl std::fmt::Debug for VerifiedAnswer {
     }
 }
 
+/// File IDs in a completed Responses request, scoped to its model and provider.
+/// This proves decoding only. The same ID may subsequently expire.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AcceptedFileAudio {
+    pub turn_id: String,
+    pub model: String,
+    pub provider: String,
+    pub file_ids: BTreeSet<String>,
+}
+
+impl AcceptedFileAudio {
+    fn fits_record_budget(&self) -> bool {
+        serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_RECORD_BYTES)
+    }
+}
+
 /// Sparse, model-invisible updates. Only the host may produce these records.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RetainedContextEvent {
+    AcceptedFileAudio {
+        evidence: Arc<AcceptedFileAudio>,
+    },
     VerifiedAnswer {
         #[serde(flatten)]
         answer: VerifiedAnswer,
@@ -133,12 +174,23 @@ pub enum RetainedContextEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         acceptance_order: Option<u64>,
     },
+    /// Assistant context confirmed by a messaging tool and never user authorization.
+    DeliveredAssistantMessage {
+        #[serde(flatten)]
+        message: RetainedUserMessage,
+        acceptance_order: u64,
+        /// The host-captured evidence revision. Older deliveries only persisted the call ID.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retained_source: Option<RetainedSource>,
+    },
 }
 
 /// Bounded snapshot of retained families, persisted with the parent compaction checkpoint.
 /// Facts live until their instruction boundary is rolled back; compaction does not expire them.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RetainedContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    accepted_file_audio: Option<Arc<AcceptedFileAudio>>,
     verified_answers: VecDeque<Ordered<VerifiedAnswer>>,
     /// Lost evidence cannot be treated as a complete authorization history.
     #[serde(rename = "incomplete")]
@@ -146,8 +198,14 @@ pub struct RetainedContext {
     #[serde(default)]
     user_messages: VecDeque<Ordered<RetainedUserMessage>>,
     /// Old checkpoints did not preserve user restrictions for delegated review.
-    #[serde(default = "legacy_user_messages_incomplete")]
+    #[serde(default = "missing_message_history")]
     user_messages_incomplete: bool,
+    /// Assistant context has a separate budget so it cannot evict user restrictions.
+    #[serde(default)]
+    assistant_messages: VecDeque<Ordered<RetainedUserMessage>>,
+    /// Observed assistant storage omissions; absent legacy metadata is not evidence of loss.
+    #[serde(default)]
+    assistant_messages_incomplete: bool,
     #[serde(default)]
     next_order: u64,
     /// Delivery snapshots share local input order, so later steers can be undone independently.
@@ -155,7 +213,7 @@ pub struct RetainedContext {
     sender_deliveries: VecDeque<Ordered<SenderUserMessages>>,
 }
 
-fn legacy_user_messages_incomplete() -> bool {
+fn missing_message_history() -> bool {
     true
 }
 
@@ -201,6 +259,9 @@ impl RetainedContextEvent {
                         .truncate(answer.call_id.floor_char_boundary(1_024));
                 }
             }
+            Self::DeliveredAssistantMessage { message, .. } => message.bound(),
+            // An oversized audio record is omitted in record(); IDs must never be truncated.
+            Self::AcceptedFileAudio { .. } => {}
         }
     }
 }
@@ -284,7 +345,7 @@ impl RetainedContext {
         self.user_messages.iter().any(|entry| entry.inherited)
     }
 
-    /// Returns retained evidence with its origin and persisted order across both families.
+    /// Returns retained evidence with its origin and persisted order across all families.
     /// Explicit acceptance order survives delayed recording; inherited prefix order stays separate.
     pub fn ordered_entries(
         &self,
@@ -303,6 +364,12 @@ impl RetainedContext {
                     .iter()
                     .map(|entry| (entry.key(), RetainedContextEntry::UserMessage(&entry.value))),
             )
+            .chain(self.assistant_messages.iter().map(|entry| {
+                (
+                    entry.key(),
+                    RetainedContextEntry::AssistantMessage(&entry.value),
+                )
+            }))
             .collect::<Vec<_>>();
         entries.sort_by_key(|(order, _)| *order);
         entries.into_iter()
@@ -311,13 +378,40 @@ impl RetainedContext {
     /// Records a delivered user item with its acceptance order. Legacy items without
     /// this metadata use recording order; checkpoint/suffix replay uses the same path.
     /// Inherited instructions use prefix order because their original counters belong to parents.
+    /// Returns the captured source for the original envelope, independently of buffer eviction.
     pub fn record_user_message(
         &mut self,
         mut message: RetainedUserMessage,
         source: RetainedInputSource,
-    ) {
+        item_id_generator: &ItemIdGenerator,
+    ) -> Option<RetainedSource> {
         message.bound();
         let inherited = source == RetainedInputSource::Inherited;
+        // An unchanged invocation is not a new instruction. Keep the original
+        // acceptance order; compare only the latest version of this automation,
+        // so A -> B -> A still records three distinct instruction versions.
+        if message.complete
+            && message.origin == crate::UserInputOrigin::Heartbeat
+            && let Some(current) = crate::Heartbeat::parse(&message.text)
+        {
+            for entry in self.user_messages.iter().rev().filter(|entry| {
+                entry.inherited == inherited
+                    && entry.value.origin == crate::UserInputOrigin::Heartbeat
+            }) {
+                let Some(previous) = crate::Heartbeat::parse(&entry.value.text) else {
+                    break;
+                };
+                if previous.automation_id == current.automation_id {
+                    if entry.value.complete && previous.instructions == current.instructions {
+                        return (entry.value.message_id == message.message_id
+                            && entry.value.turn_id == message.turn_id)
+                            .then(|| entry.source(RetainedSourceRole::User))
+                            .flatten();
+                    }
+                    break;
+                }
+            }
+        }
         // Worker forks omit parent answer records. Adopting their instructions
         // cannot establish whether an omitted answer restricted an inherited grant.
         self.verified_answers_incomplete |= inherited;
@@ -327,28 +421,31 @@ impl RetainedContext {
             if self.user_messages[index].value == message
                 && self.user_messages[index].inherited == inherited
             {
-                return;
+                return self.user_messages[index].source(RetainedSourceRole::User);
             }
             self.user_messages.remove(index);
         }
         // Parent and worker counters have different scopes. Adopt the copied prefix
         // in history order without advancing the worker's local acceptance counter.
         let order = if inherited {
-            self.user_messages
-                .iter()
-                .filter(|entry| entry.inherited)
-                .map(|entry| entry.order.saturating_add(1))
-                .max()
-                .unwrap_or_default()
+            self.next_inherited_order()
         } else {
             self.record_order(source.acceptance_order())
         };
-        self.user_messages.push_back(Ordered {
+        let revision = message
+            .message_id
+            .as_ref()
+            .map(|_| item_id_generator("retained"));
+        let entry = Ordered {
+            revision,
             inherited,
             order,
             value: message,
-        });
+        };
+        let source = entry.source(RetainedSourceRole::User);
+        self.user_messages.push_back(entry);
         bound_family(&mut self.user_messages, &mut self.user_messages_incomplete);
+        source
     }
 
     /// Recovers omitted text from an exact source without changing identity, order, or
@@ -371,10 +468,31 @@ impl RetainedContext {
     }
 
     /// Same-event delivery is idempotent; changed contents replace that source's record.
-    pub fn record(&mut self, event: &RetainedContextEvent) -> bool {
-        let mut event = event.clone();
+    pub fn record(
+        &mut self,
+        event: &RetainedContextEvent,
+        item_id_generator: &ItemIdGenerator,
+    ) -> bool {
+        self.record_and_capture(&mut event.clone(), item_id_generator)
+    }
+
+    /// Records a host event and fills in its retained source for rollout persistence.
+    pub fn record_and_capture(
+        &mut self,
+        event: &mut RetainedContextEvent,
+        item_id_generator: &ItemIdGenerator,
+    ) -> bool {
         event.bound();
         match event {
+            RetainedContextEvent::AcceptedFileAudio { evidence } => {
+                if !evidence.fits_record_budget()
+                    || self.accepted_file_audio.as_ref() == Some(evidence)
+                {
+                    return false;
+                }
+                self.accepted_file_audio = Some(Arc::clone(evidence));
+                true
+            }
             RetainedContextEvent::VerifiedAnswer {
                 answer,
                 acceptance_order,
@@ -383,24 +501,64 @@ impl RetainedContext {
                     existing.value.turn_id == answer.turn_id
                         && existing.value.call_id == answer.call_id
                 }) {
-                    if self.verified_answers[index].value == answer {
+                    if self.verified_answers[index].value == *answer {
                         return false;
                     }
                     self.verified_answers.remove(index);
                 }
-                let order = self.record_order(acceptance_order);
+                let order = self.record_order(*acceptance_order);
                 self.verified_answers.push_back(Ordered {
+                    revision: None,
                     inherited: false,
                     order,
-                    value: answer,
+                    value: answer.clone(),
                 });
                 bound_family(
                     &mut self.verified_answers,
                     &mut self.verified_answers_incomplete,
                 );
+                true
+            }
+            RetainedContextEvent::DeliveredAssistantMessage {
+                message,
+                acceptance_order,
+                retained_source,
+            } => {
+                if let Some(existing) = self.assistant_messages.iter().find(|entry| {
+                    message.message_id.is_some()
+                        && entry.value.message_id == message.message_id
+                        && entry.value == *message
+                        && !entry.inherited
+                }) {
+                    *retained_source = existing.source(RetainedSourceRole::Assistant);
+                    return false;
+                }
+                *retained_source = self.record_assistant_message_with_revision(
+                    message.clone(),
+                    RetainedInputSource::Local(Some(*acceptance_order)),
+                    || {
+                        retained_source.as_ref().map_or_else(
+                            || item_id_generator("retained"),
+                            |source| source.revision.clone(),
+                        )
+                    },
+                );
+                true
             }
         }
-        true
+    }
+
+    pub(super) fn max_source_ordinal(&self) -> Option<u64> {
+        self.user_messages
+            .iter()
+            .chain(&self.assistant_messages)
+            .filter_map(|entry| {
+                entry
+                    .revision
+                    .as_ref()
+                    .and_then(crate::model_id_ordinals::item_ordinal)
+            })
+            .max()
     }
 
     /// Restoring a saved thread must not bypass the live storage limits.
@@ -411,17 +569,25 @@ impl RetainedContext {
             user_messages_incomplete: true,
             ..Self::default()
         });
+        self.accepted_file_audio
+            .take_if(|evidence| !evidence.fits_record_budget());
         for entry in &mut self.verified_answers {
             let mut event = RetainedContextEvent::VerifiedAnswer {
                 answer: entry.value.clone(),
                 acceptance_order: Some(entry.order),
             };
             event.bound();
-            let RetainedContextEvent::VerifiedAnswer { answer, .. } = event;
+            let RetainedContextEvent::VerifiedAnswer { answer, .. } = event else {
+                unreachable!("verified answer constructed above");
+            };
             entry.value = answer;
             self.next_order = self.next_order.max(entry.order.saturating_add(1));
         }
-        for entry in &mut self.user_messages {
+        for entry in self
+            .user_messages
+            .iter_mut()
+            .chain(&mut self.assistant_messages)
+        {
             entry.value.bound();
             // Also repair checkpoints written before adoption recorded the answer gap.
             self.verified_answers_incomplete |= entry.inherited;
@@ -453,6 +619,10 @@ impl RetainedContext {
             &mut self.verified_answers_incomplete,
         );
         bound_family(&mut self.user_messages, &mut self.user_messages_incomplete);
+        bound_family(
+            &mut self.assistant_messages,
+            &mut self.assistant_messages_incomplete,
+        );
     }
 
     /// Keeps legacy answers whose source calls survive when no retained instruction boundary exists.
@@ -470,6 +640,8 @@ impl RetainedContext {
         first_removed_message_id: Option<&str>,
         source: RetainedInputSource,
     ) {
+        self.accepted_file_audio
+            .take_if(|evidence| turn_ids.contains(&evidence.turn_id.as_str()));
         let boundary = source.acceptance_order().map(RetainedContextOrder::Local);
         if let Some(boundary) = boundary.or_else(|| {
             first_removed_message_id.and_then(|id| {
@@ -483,6 +655,8 @@ impl RetainedContext {
                 .retain(|entry| entry.key() < boundary);
             self.verified_answers.retain(|entry| entry.key() < boundary);
             self.user_messages.retain(|entry| entry.key() < boundary);
+            self.assistant_messages
+                .retain(|entry| entry.key() < boundary);
             return;
         }
         self.user_messages_incomplete |= first_removed_message_id.is_some()

@@ -17,6 +17,18 @@ pub struct ResponseDebugContext {
 }
 
 pub fn extract_response_debug_context(transport: &TransportError) -> ResponseDebugContext {
+    match transport {
+        TransportError::Http {
+            headers: Some(headers),
+            ..
+        } => extract_response_debug_context_from_headers(headers),
+        _ => ResponseDebugContext::default(),
+    }
+}
+
+pub fn extract_response_debug_context_from_headers(
+    headers: &http::HeaderMap,
+) -> ResponseDebugContext {
     let mut context = ResponseDebugContext::default();
 
     let TransportError::Http { headers, .. } = transport else {
@@ -25,8 +37,7 @@ pub fn extract_response_debug_context(transport: &TransportError) -> ResponseDeb
 
     let extract_header = |name: &str| {
         headers
-            .as_ref()
-            .and_then(|headers| headers.get(name))
+            .get(name)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string)
     };
@@ -66,6 +77,7 @@ pub fn telemetry_transport_error_message(error: &TransportError) -> String {
         TransportError::Connection(err) => err.to_string(),
         TransportError::Network(err) => err.to_string(),
         TransportError::Build(err) => err.to_string(),
+        TransportError::Policy(denied) => denied.to_string(),
     }
 }
 
@@ -74,17 +86,32 @@ pub fn telemetry_api_error_message(error: &ApiError) -> String {
         ApiError::Transport(transport) => telemetry_transport_error_message(transport),
         ApiError::Api { status, .. } => format!("api error {}", status.as_u16()),
         ApiError::Stream(err) => err.to_string(),
+        ApiError::WebsocketMessageTooLarge => error.to_string(),
+        ApiError::ContentFilter => {
+            "Incomplete response returned, reason: content_filter".to_string()
+        }
+        ApiError::ResponseIncomplete(_) => "incomplete response".to_string(),
         ApiError::ContextWindowExceeded => "context window exceeded".to_string(),
         ApiError::QuotaExceeded => "quota exceeded".to_string(),
         ApiError::UsageNotIncluded => "usage not included".to_string(),
+        ApiError::SessionBudgetExceeded => "session budget exceeded".to_string(),
         ApiError::Retryable { .. } => "retryable error".to_string(),
         ApiError::RateLimitExceeded { .. } => "rate limit exceeded".to_string(),
         ApiError::RateLimit(_) => "rate limit".to_string(),
-        ApiError::InvalidRequest { .. } => "invalid request".to_string(),
+        ApiError::ModelNotFound { .. } => "model not found".to_string(),
+        ApiError::AccessProgramNotEnabled { .. } => "access program not enabled".to_string(),
+        ApiError::ContentPolicyViolation { .. } => "content policy violation".to_string(),
+        ApiError::InvalidRequest { .. }
+        | ApiError::InvalidAudioInput { .. }
+        | ApiError::InvalidPrompt { .. } => "invalid request".to_string(),
         ApiError::CyberPolicy { .. } => "cyber policy".to_string(),
         ApiError::BioPolicy { .. } => "bio policy".to_string(),
         ApiError::MisalignmentPolicyViolation { .. } => "misalignment policy violation".to_string(),
-        ApiError::ServerOverloaded => "server overloaded".to_string(),
+        ApiError::ServerOverloaded { .. } => "server overloaded".to_string(),
+        ApiError::PolicyCapacityUnavailable { .. } => {
+            "policy-restricted capacity unavailable".to_string()
+        }
+        ApiError::FlexUnavailable => "flex capacity unavailable".to_string(),
     }
 }
 
@@ -116,6 +143,7 @@ mod tests {
         );
 
         let context = extract_response_debug_context(&TransportError::Http {
+            retry_after: None,
             status: StatusCode::UNAUTHORIZED,
             url: Some("https://chatgpt.com/backend-api/codex/models".to_string()),
             headers: Some(headers),
@@ -136,6 +164,7 @@ mod tests {
     #[test]
     fn telemetry_error_messages_omit_upstream_bodies() {
         let transport = TransportError::Http {
+            retry_after: None,
             status: StatusCode::UNAUTHORIZED,
             url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
             headers: None,
@@ -150,7 +179,7 @@ mod tests {
         assert_eq!(
             telemetry_api_error_message(&ApiError::RateLimitExceeded {
                 message: "private upstream diagnostic".to_string(),
-                delay: Some(std::time::Duration::from_secs(1)),
+                retry_after: None,
             }),
             "rate limit exceeded"
         );

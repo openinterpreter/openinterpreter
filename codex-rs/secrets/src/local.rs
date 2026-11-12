@@ -64,7 +64,7 @@ struct SecretsFile {
     secrets: BTreeMap<String, String>,
 }
 
-struct CachedMcpSecrets {
+struct CachedSecrets {
     path: PathBuf,
     ciphertext_hash: [u8; 32],
     passphrase_hash: [u8; 32],
@@ -80,11 +80,22 @@ impl SecretsFile {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LocalSecretsBackend {
     codex_home: PathBuf,
     keyring_store: Arc<dyn KeyringStore>,
     namespace: LocalSecretsNamespace,
+    gateway_cache: Arc<Mutex<Option<CachedSecrets>>>,
+}
+
+impl std::fmt::Debug for LocalSecretsBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalSecretsBackend")
+            .field("codex_home", &self.codex_home)
+            .field("keyring_store", &self.keyring_store)
+            .field("namespace", &self.namespace)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LocalSecretsBackend {
@@ -105,6 +116,7 @@ impl LocalSecretsBackend {
             codex_home,
             keyring_store,
             namespace,
+            gateway_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -164,6 +176,17 @@ impl LocalSecretsBackend {
         self.secrets_dir().join(filename)
     }
 
+    /// Each namespace keeps at most one snapshot; gateway snapshots are scoped to
+    /// a backend and its clones. Every read still checks the file and keyring.
+    fn decrypted_cache(&self) -> &Mutex<Option<CachedSecrets>> {
+        match self.namespace {
+            LocalSecretsNamespace::ManagedSecrets => &MANAGED_SECRETS_CACHE,
+            LocalSecretsNamespace::CodexAuth => &CODEX_AUTH_CACHE,
+            LocalSecretsNamespace::McpOAuth => &MCP_OAUTH_CACHE,
+            LocalSecretsNamespace::GatewayOAuth => &self.gateway_cache,
+        }
+    }
+
     fn load_file(&self) -> Result<SecretsFile> {
         let path = self.secrets_path();
         if !path.exists() {
@@ -173,20 +196,19 @@ impl LocalSecretsBackend {
         let ciphertext = fs::read(&path)
             .with_context(|| format!("failed to read secrets file at {}", path.display()))?;
         let passphrase = self.load_or_create_passphrase()?;
-        let cache = (self.namespace == LocalSecretsNamespace::McpOAuth).then(|| {
-            let ciphertext_hash: [u8; 32] = Sha256::digest(&ciphertext).into();
-            let passphrase_hash: [u8; 32] =
-                Sha256::digest(passphrase.expose_secret().as_bytes()).into();
-            let cache = MCP_OAUTH_CACHE
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            (cache, ciphertext_hash, passphrase_hash)
-        });
-        if let Some((cache, ciphertext_hash, passphrase_hash)) = cache.as_ref()
-            && let Some(cached) = cache.as_ref()
+        let ciphertext_hash: [u8; 32] = Sha256::digest(&ciphertext).into();
+        let passphrase_hash: [u8; 32] =
+            Sha256::digest(passphrase.expose_secret().as_bytes()).into();
+        // Hold the namespace lock through decryption so concurrent misses share
+        // one decrypted snapshot instead of repeating the expensive scrypt work.
+        let mut cache = self
+            .decrypted_cache()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(cached) = cache.as_ref()
             && cached.path == path
-            && cached.ciphertext_hash == *ciphertext_hash
-            && cached.passphrase_hash == *passphrase_hash
+            && cached.ciphertext_hash == ciphertext_hash
+            && cached.passphrase_hash == passphrase_hash
         {
             return Ok(cached.file.as_ref().clone());
         }
@@ -206,14 +228,12 @@ impl LocalSecretsBackend {
             parsed.version,
             SECRETS_VERSION
         );
-        if let Some((mut cache, ciphertext_hash, passphrase_hash)) = cache {
-            *cache = Some(CachedMcpSecrets {
-                path,
-                ciphertext_hash,
-                passphrase_hash,
-                file: Arc::new(parsed.clone()),
-            });
-        }
+        *cache = Some(CachedSecrets {
+            path,
+            ciphertext_hash,
+            passphrase_hash,
+            file: Arc::new(parsed.clone()),
+        });
         Ok(parsed)
     }
 
@@ -227,13 +247,22 @@ impl LocalSecretsBackend {
         let ciphertext = encrypt_with_passphrase(&plaintext, &passphrase)?;
         let path = self.secrets_path();
         write_file_atomically(&path, &ciphertext)?;
-        if self.namespace == LocalSecretsNamespace::McpOAuth {
-            let mut cache = MCP_OAUTH_CACHE
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if cache.as_ref().is_some_and(|cached| cached.path == path) {
-                *cache = None;
-            }
+        let mut cache = self
+            .decrypted_cache()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Publish only committed contents. Reads still verify the ciphertext and
+        // keyring, so a racing replacement cannot make this snapshot authoritative.
+        if file.version == SECRETS_VERSION {
+            *cache = Some(CachedSecrets {
+                path,
+                ciphertext_hash: Sha256::digest(&ciphertext).into(),
+                passphrase_hash: Sha256::digest(passphrase.expose_secret().as_bytes()).into(),
+                file: Arc::new(file.clone()),
+            });
+        } else if cache.as_ref().is_some_and(|cached| cached.path == path) {
+            // Leave schema normalization and rejection to the normal read path.
+            *cache = None;
         }
         Ok(())
     }
@@ -243,7 +272,7 @@ impl LocalSecretsBackend {
         let loaded = self
             .keyring_store
             .load(keyring_service(), &account)
-            .map_err(|err| anyhow::anyhow!(err.message()))
+            .map_err(std::io::Error::from)
             .with_context(|| format!("failed to load secrets key from keyring for {account}"))?;
         match loaded {
             Some(existing) => Ok(SecretString::from(existing)),
@@ -254,7 +283,7 @@ impl LocalSecretsBackend {
                 let generated = generate_passphrase()?;
                 self.keyring_store
                     .save(keyring_service(), &account, generated.expose_secret())
-                    .map_err(|err| anyhow::anyhow!(err.message()))
+                    .map_err(std::io::Error::from)
                     .context("failed to persist secrets key in keyring")?;
                 Ok(generated)
             }
@@ -425,10 +454,11 @@ mod tests {
     use keyring::Error as KeyringError;
     use pretty_assertions::assert_eq;
 
-    static MCP_OAUTH_CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
-
     #[test]
     fn load_file_rejects_newer_schema_versions() -> Result<()> {
+        let _cache_lock = SECRETS_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let codex_home = tempfile::tempdir().expect("tempdir");
         let keyring = Arc::new(MockKeyringStore::default());
         let backend = LocalSecretsBackend::new(codex_home.path().to_path_buf(), keyring);
@@ -451,6 +481,9 @@ mod tests {
 
     #[test]
     fn set_fails_when_keyring_is_unavailable() -> Result<()> {
+        let _cache_lock = SECRETS_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let codex_home = tempfile::tempdir().expect("tempdir");
         let keyring = Arc::new(MockKeyringStore::default());
         let account =
@@ -477,6 +510,9 @@ mod tests {
 
     #[test]
     fn save_file_does_not_leave_temp_files() -> Result<()> {
+        let _cache_lock = SECRETS_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let codex_home = tempfile::tempdir().expect("tempdir");
         let keyring = Arc::new(MockKeyringStore::default());
         let backend = LocalSecretsBackend::new(codex_home.path().to_path_buf(), keyring);
@@ -510,7 +546,7 @@ mod tests {
 
     #[test]
     fn local_namespaces_write_separate_files() -> Result<()> {
-        let _cache_lock = MCP_OAUTH_CACHE_TEST_LOCK
+        let _cache_lock = SECRETS_CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let codex_home = tempfile::tempdir().expect("tempdir");
@@ -588,76 +624,86 @@ mod tests {
     }
 
     #[test]
-    fn mcp_oauth_cache_reuses_plaintext_and_invalidates_when_ciphertext_changes() -> Result<()> {
-        let _cache_lock = MCP_OAUTH_CACHE_TEST_LOCK
+    fn shared_namespace_caches_reuse_plaintext_and_detect_ciphertext_changes() -> Result<()> {
+        let _cache_lock = SECRETS_CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let codex_home = tempfile::tempdir().expect("tempdir");
-        let keyring = Arc::new(MockKeyringStore::default());
-        let first = LocalSecretsBackend::new_with_namespace(
-            codex_home.path().to_path_buf(),
-            keyring.clone(),
+        for namespace in [
+            LocalSecretsNamespace::ManagedSecrets,
+            LocalSecretsNamespace::CodexAuth,
             LocalSecretsNamespace::McpOAuth,
-        );
-        let second = LocalSecretsBackend::new_with_namespace(
-            codex_home.path().to_path_buf(),
-            keyring,
-            LocalSecretsNamespace::McpOAuth,
-        );
-        let scope = SecretScope::Global;
-        let name = SecretName::new("TEST_SECRET")?;
-        let cached_file = || {
-            Arc::clone(
-                &MCP_OAUTH_CACHE
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .as_ref()
-                    .expect("MCP OAuth credentials should be cached")
-                    .file,
-            )
-        };
+        ] {
+            let codex_home = tempfile::tempdir().expect("tempdir");
+            let keyring = Arc::new(MockKeyringStore::default());
+            let first = LocalSecretsBackend::new_with_namespace(
+                codex_home.path().to_path_buf(),
+                keyring.clone(),
+                namespace,
+            );
+            let second = LocalSecretsBackend::new_with_namespace(
+                codex_home.path().to_path_buf(),
+                keyring,
+                namespace,
+            );
+            let scope = SecretScope::Global;
+            let name = SecretName::new("TEST_SECRET")?;
+            let cached_file = || {
+                Arc::clone(
+                    &first
+                        .decrypted_cache()
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .as_ref()
+                        .expect("credentials should be cached")
+                        .file,
+                )
+            };
 
-        first.set(&scope, &name, "one")?;
-        let (first_cached, second_cached) = std::thread::scope(|threads| {
-            let first_reader = threads.spawn(|| {
-                assert_eq!(first.get(&scope, &name)?, Some("one".to_string()));
-                Ok::<_, anyhow::Error>(cached_file())
-            });
-            let second_reader = threads.spawn(|| {
-                assert_eq!(second.get(&scope, &name)?, Some("one".to_string()));
-                Ok::<_, anyhow::Error>(cached_file())
-            });
-            Ok::<_, anyhow::Error>((
-                first_reader.join().expect("first credential reader")?,
-                second_reader.join().expect("second credential reader")?,
-            ))
-        })?;
-        assert!(Arc::ptr_eq(&first_cached, &second_cached));
-
-        assert_eq!(second.get(&scope, &name)?, Some("one".to_string()));
-        assert!(Arc::ptr_eq(&first_cached, &cached_file()));
-
-        first.set(&scope, &name, "two")?;
-        assert!(
-            MCP_OAUTH_CACHE
+            first.set(&scope, &name, "one")?;
+            let original_ciphertext = fs::read(first.secrets_path())?;
+            // Exercise concurrent cold reads even though saves populate the cache.
+            *first
+                .decrypted_cache()
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .as_ref()
-                .is_none_or(|cached| cached.path != first.secrets_path())
-        );
-        assert_eq!(second.get(&scope, &name)?, Some("two".to_string()));
-        assert!(!Arc::ptr_eq(&first_cached, &cached_file()));
+                .unwrap_or_else(PoisonError::into_inner) = None;
+            let (first_cached, second_cached) = std::thread::scope(|threads| {
+                let first_reader = threads.spawn(|| {
+                    assert_eq!(first.get(&scope, &name)?, Some("one".to_string()));
+                    Ok::<_, anyhow::Error>(cached_file())
+                });
+                let second_reader = threads.spawn(|| {
+                    assert_eq!(second.get(&scope, &name)?, Some("one".to_string()));
+                    Ok::<_, anyhow::Error>(cached_file())
+                });
+                Ok::<_, anyhow::Error>((
+                    first_reader.join().expect("first credential reader")?,
+                    second_reader.join().expect("second credential reader")?,
+                ))
+            })?;
+            assert!(Arc::ptr_eq(&first_cached, &second_cached));
 
-        assert!(first.delete(&scope, &name)?);
-        assert!(
-            MCP_OAUTH_CACHE
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .as_ref()
-                .is_none_or(|cached| cached.path != first.secrets_path())
-        );
-        assert_eq!(second.get(&scope, &name)?, None);
+            assert_eq!(second.get(&scope, &name)?, Some("one".to_string()));
+            assert!(Arc::ptr_eq(&first_cached, &cached_file()));
 
+            first.set(&scope, &name, "two")?;
+            let updated_cached = cached_file();
+            assert!(!Arc::ptr_eq(&first_cached, &updated_cached));
+            assert_eq!(second.get(&scope, &name)?, Some("two".to_string()));
+            assert!(Arc::ptr_eq(&updated_cached, &cached_file()));
+
+            // Another process can replace the file without invalidating this cache.
+            fs::write(first.secrets_path(), &original_ciphertext)?;
+            assert_eq!(second.get(&scope, &name)?, Some("one".to_string()));
+
+            assert!(first.delete(&scope, &name)?);
+            let deleted_cached = cached_file();
+            assert_eq!(second.get(&scope, &name)?, None);
+            assert!(Arc::ptr_eq(&deleted_cached, &cached_file()));
+        }
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "local_cache_tests.rs"]
+mod cache_tests;

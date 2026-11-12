@@ -271,6 +271,7 @@ async fn workspace_roots_allow_file_and_command_writes_in_secondary_root(
             .environment_ready(
                 &selection,
                 EnvironmentConfig {
+                    environment_hooks: Default::default(),
                     allow_login_shell: test.config.permissions.allow_login_shell,
                     workspace_roots: vec![selection.cwd.clone(), secondary_root.clone()],
                     permission_profile: PermissionProfileSnapshot::legacy(
@@ -343,7 +344,7 @@ async fn workspace_roots_allow_file_and_command_writes_in_secondary_root(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workspace_roots_allow_patches_but_protect_metadata_directories() -> Result<()> {
     const PATCH_CONTENTS: &str = "workspace root patch access";
-    const PROTECTED_METADATA_DIRECTORIES: [&str; 3] = [".git", ".agents", ".codex"];
+    const PROTECTED_METADATA_DIRECTORIES: [&str; 4] = [".git", ".agents", ".codex", ".aws"];
 
     skip_if_wine_exec!(
         Ok(()),

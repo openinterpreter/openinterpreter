@@ -28,133 +28,45 @@ pub(crate) enum McpStartupStatus {
     Cancelled,
 }
 
+impl McpStartupStatus {
+    fn is_diagnostic(&self) -> bool {
+        matches!(self, Self::Failed { .. } | Self::Cancelled)
+    }
+}
+
 impl ChatWidget {
-    /// Record one MCP startup update, promoting it into either the active startup
-    /// round or a buffered "next" round.
-    ///
-    /// This path has to deal with lossy app-server delivery. After
-    /// `finish_mcp_startup()` or `finish_mcp_startup_after_lag()`, we briefly
-    /// ignore incoming updates so stale events from the just-finished round do not
-    /// reopen startup. While that guard is active we buffer updates for a possible
-    /// next round, and only reactivate once the buffered set is coherent enough to
-    /// treat as a fresh startup round.
-    fn update_mcp_startup_status(
-        &mut self,
-        server: String,
-        status: McpStartupStatus,
-        complete_when_settled: bool,
-    ) {
-        let mut activated_pending_round = false;
-        let startup_status = if self.mcp_startup_ignore_updates_until_next_start {
-            // Ignore-mode buffers the next plausible round so stale post-finish
-            // updates cannot immediately reopen startup. A fresh `Starting`
-            // update resets the buffer only if we have not already seen a
-            // pending-round `Starting`; this preserves valid interleavings like
-            // `alpha: Starting -> alpha: Ready -> beta: Starting`.
-            if matches!(status, McpStartupStatus::Starting)
-                && !self.mcp_startup_pending_next_round_saw_starting
-            {
-                self.mcp_startup_pending_next_round.clear();
-                self.mcp_startup_allow_terminal_only_next_round = false;
-            }
-            self.mcp_startup_pending_next_round_saw_starting |=
-                matches!(status, McpStartupStatus::Starting);
-            self.mcp_startup_pending_next_round.insert(server, status);
-            let Some(expected_servers) = &self.mcp_startup_expected_servers else {
-                return;
-            };
-            let saw_full_round = expected_servers.is_empty()
-                || expected_servers
-                    .iter()
-                    .all(|name| self.mcp_startup_pending_next_round.contains_key(name));
-            let saw_starting = self
-                .mcp_startup_pending_next_round
-                .values()
-                .any(|state| matches!(state, McpStartupStatus::Starting));
-            if !(saw_full_round
-                && (saw_starting || self.mcp_startup_allow_terminal_only_next_round))
-            {
-                return;
-            }
-
-            // The buffered map now looks like a complete next round, so promote it
-            // to the active round and resume normal completion tracking.
-            self.mcp_startup_ignore_updates_until_next_start = false;
-            self.mcp_startup_allow_terminal_only_next_round = false;
-            self.mcp_startup_pending_next_round_saw_starting = false;
-            activated_pending_round = true;
-            std::mem::take(&mut self.mcp_startup_pending_next_round)
+    /// The server announces eager starts before outcomes. On attach or after lag,
+    /// an outcome can arrive without its corresponding start.
+    fn update_mcp_startup_status(&mut self, server: String, status: McpStartupStatus) {
+        let report_diagnostic = if status.is_diagnostic() {
+            self.mcp_startup_last_diagnostics
+                .insert(server.clone(), status.clone())
+                .as_ref()
+                != Some(&status)
         } else {
-            // Normal path: fold the update into the active round and surface
-            // per-server failures immediately.
-            let mut startup_status = self.mcp_startup_status.take().unwrap_or_default();
-            if let McpStartupStatus::Failed {
-                error,
-                failure_reason,
-            } = &status
-                && startup_status.get(&server) != Some(&status)
-            {
-                self.add_mcp_startup_warning(
-                    vec![error.clone()],
-                    [server.clone()],
-                    *failure_reason,
-                );
-            }
-            startup_status.insert(server, status);
-            startup_status
+            self.mcp_startup_last_diagnostics.remove(&server);
+            false
         };
-        if activated_pending_round {
-            // A promoted buffered round may already contain terminal failures.
-            for (server, state) in &startup_status {
-                if let McpStartupStatus::Failed {
-                    error,
-                    failure_reason,
-                } = state
-                {
-                    self.add_mcp_startup_warning(
-                        vec![error.clone()],
-                        [server.clone()],
-                        *failure_reason,
-                    );
-                }
-            }
+        if report_diagnostic {
+            self.report_mcp_startup_failure(&server, &status);
         }
-        self.mcp_startup_status = Some(startup_status);
-        self.update_task_running_state();
-
-        // App-server-backed startup completes when every expected server has
-        // reported a non-Starting status. Lag handling can force an earlier
-        // settle via `finish_mcp_startup_after_lag()`.
-        if complete_when_settled
-            && let Some(current) = &self.mcp_startup_status
-            && let Some(expected_servers) = &self.mcp_startup_expected_servers
-            && !current.is_empty()
-            && expected_servers
-                .iter()
-                .all(|name| current.contains_key(name))
-            && current
-                .values()
-                .all(|state| !matches!(state, McpStartupStatus::Starting))
-        {
-            let mut failed = Vec::new();
-            let mut cancelled = Vec::new();
-            for (name, state) in current {
-                match state {
-                    McpStartupStatus::Ready => {}
-                    McpStartupStatus::Failed { .. } => failed.push(name.clone()),
-                    McpStartupStatus::Cancelled => cancelled.push(name.clone()),
-                    McpStartupStatus::Starting => {}
-                }
+        if self.mcp_startup_status.is_none() && !matches!(status, McpStartupStatus::Starting) {
+            if report_diagnostic {
+                self.report_mcp_startup_summary([(&server, &status)]);
             }
-            failed.sort();
-            cancelled.sort();
-            self.finish_mcp_startup(failed, cancelled);
             return;
         }
+
+        self.mcp_startup_status
+            .get_or_insert_default()
+            .insert(server, status);
         if let Some(header) = self.mcp_startup_status_header() {
+            self.update_task_running_state();
             self.set_status_header(header);
+            self.request_redraw();
+        } else {
+            self.finish_mcp_startup();
         }
-        self.request_redraw();
     }
 
     pub(super) fn mcp_startup_status_header(&self) -> Option<String> {
@@ -192,15 +104,31 @@ impl ChatWidget {
         })
     }
 
-    pub(crate) fn set_mcp_startup_expected_servers<I>(&mut self, server_names: I)
-    where
-        I: IntoIterator<Item = String>,
-    {
-        self.mcp_startup_expected_servers = Some(server_names.into_iter().collect());
+    fn report_mcp_startup_failure(&mut self, server: &str, status: &McpStartupStatus) {
+        if let McpStartupStatus::Failed {
+            error,
+            failure_reason,
+        } = status
+        {
+            self.add_mcp_startup_warning(vec![error.clone()], [server.to_owned()], *failure_reason);
+        }
     }
 
-    pub(super) fn finish_mcp_startup(&mut self, failed: Vec<String>, cancelled: Vec<String>) {
+    fn report_mcp_startup_summary<'a>(
+        &mut self,
+        outcomes: impl IntoIterator<Item = (&'a String, &'a McpStartupStatus)>,
+    ) {
+        let mut failed = Vec::new();
+        let mut cancelled = Vec::new();
+        for (server, status) in outcomes {
+            match status {
+                McpStartupStatus::Failed { .. } => failed.push(server.clone()),
+                McpStartupStatus::Cancelled => cancelled.push(server.clone()),
+                McpStartupStatus::Starting | McpStartupStatus::Ready => {}
+            }
+        }
         if !cancelled.is_empty() {
+            cancelled.sort();
             self.add_mcp_startup_warning(
                 vec![format!(
                     "MCP startup interrupted. The following servers were not initialized: {}",
@@ -210,24 +138,24 @@ impl ChatWidget {
                 /*failure_reason*/ None,
             );
         }
-        let mut parts = Vec::new();
         if !failed.is_empty() {
-            parts.push(format!("failed: {}", failed.join(", ")));
-        }
-        if !parts.is_empty() {
+            failed.sort();
             self.add_mcp_startup_warning(
-                vec![format!("MCP startup incomplete ({})", parts.join("; "))],
+                vec![format!(
+                    "MCP startup incomplete (failed: {})",
+                    failed.join(", ")
+                )],
                 failed,
                 /*failure_reason*/ None,
             );
         }
+    }
 
+    pub(super) fn finish_mcp_startup(&mut self) {
         let mcp_startup_owned_status = self.status_header_is_mcp_startup_owned();
-        self.mcp_startup_status = None;
-        self.mcp_startup_ignore_updates_until_next_start = true;
-        self.mcp_startup_allow_terminal_only_next_round = false;
-        self.mcp_startup_pending_next_round.clear();
-        self.mcp_startup_pending_next_round_saw_starting = false;
+        if let Some(settled) = self.mcp_startup_status.take() {
+            self.report_mcp_startup_summary(&settled);
+        }
         self.update_task_running_state();
         if self.input_queue.user_turn_pending_start {
             self.bottom_pane.set_task_running(/*running*/ true);
@@ -240,39 +168,11 @@ impl ChatWidget {
     }
 
     pub(crate) fn finish_mcp_startup_after_lag(&mut self) {
-        if self.mcp_startup_ignore_updates_until_next_start {
-            if self.mcp_startup_pending_next_round.is_empty() {
-                self.mcp_startup_pending_next_round_saw_starting = false;
-            }
-            self.mcp_startup_allow_terminal_only_next_round = true;
+        if self.mcp_startup_status.is_some() {
+            self.finish_mcp_startup();
         }
-
-        let Some(current) = &self.mcp_startup_status else {
-            return;
-        };
-
-        let mut failed = Vec::new();
-        let mut cancelled = Vec::new();
-
-        let mut server_names: BTreeSet<String> = current.keys().cloned().collect();
-        if let Some(expected_servers) = &self.mcp_startup_expected_servers {
-            server_names.extend(expected_servers.iter().cloned());
-        }
-
-        for name in server_names {
-            match current.get(&name) {
-                Some(McpStartupStatus::Failed { .. }) => failed.push(name),
-                Some(McpStartupStatus::Cancelled) => cancelled.push(name),
-                Some(McpStartupStatus::Ready | McpStartupStatus::Starting) | None => {}
-            }
-        }
-
-        failed.sort();
-        failed.dedup();
-        cancelled.sort();
-        cancelled.dedup();
-        self.finish_mcp_startup(failed, cancelled);
-        self.mcp_startup_allow_terminal_only_next_round = true;
+        // A missed Starting may have begun a new attempt with the same error.
+        self.mcp_startup_last_diagnostics.clear();
     }
 
     pub(super) fn status_header_is_mcp_startup_owned(&self) -> bool {
@@ -318,11 +218,7 @@ impl ChatWidget {
             },
             McpServerStartupState::Cancelled => McpStartupStatus::Cancelled,
         };
-        self.update_mcp_startup_status(
-            notification.name,
-            status,
-            /*complete_when_settled*/ true,
-        );
+        self.update_mcp_startup_status(notification.name, status);
         if refresh_connector_mentions {
             self.refresh_connector_mentions(/*force_refresh*/ false);
         }

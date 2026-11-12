@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -11,14 +12,32 @@ use codex_protocol::protocol::ThreadHistoryMode;
 
 use crate::ResponseItemEnvelope;
 use crate::RolloutItem;
-use crate::policy::is_persisted_rollout_item;
+use crate::policy::persisted_rollout_item;
 
-const ITEM_BYTES_METRIC: &str = "codex.rollout.persistence.item_bytes";
+const ITEM_BYTES_METRIC: &str = "codex.rollout.persistence.item_bytes_v2";
+const BYTES_REMOVED_METRIC: &str = "codex.rollout.persistence.bytes_removed";
 const APPEND_METRIC: &str = "codex.rollout.persistence.append";
-const TURN_BYTES_METRIC: &str = "codex.rollout.persistence.turn_bytes";
+const TURN_BYTES_METRIC: &str = "codex.rollout.persistence.turn_bytes_v2";
 const MEASUREMENT_ERROR_METRIC: &str = "codex.rollout.persistence.measurement_error";
 const SAMPLE_DENOMINATOR: u64 = 100;
 const SAMPLE_RATE_LABEL: &str = "0.01";
+
+const KIB: f64 = 1_024.0;
+const MIB: f64 = 1_024.0 * KIB;
+
+// Cover the persistence cap while retaining enough range for large items and turns. Values above
+// 64 MiB remain visible in the overflow bucket and histogram sum.
+const ROLLOUT_BYTES_BOUNDARIES: &[f64] = &[
+    KIB,
+    4.0 * KIB,
+    16.0 * KIB,
+    64.0 * KIB,
+    256.0 * KIB,
+    MIB,
+    4.0 * MIB,
+    16.0 * MIB,
+    64.0 * MIB,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PersistenceDecision {
@@ -46,6 +65,7 @@ pub struct RolloutItemMeasurement {
     pub decision: PersistenceDecision,
     pub rollout_item_type: String,
     pub payload_bytes: Option<u64>,
+    pub persisted_payload_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -106,22 +126,28 @@ pub fn measure_and_filter_rollout_items(
     };
 
     for item in items {
-        let kept = is_persisted_rollout_item(item, history_mode);
-        let decision = if kept {
+        let projected = persisted_rollout_item(item, history_mode);
+        let decision = if projected.is_some() {
             PersistenceDecision::Kept
         } else {
             PersistenceDecision::Dropped
         };
         let payload_bytes = serialized_len(item).ok();
+        let persisted_payload_bytes = match projected.as_ref() {
+            Some(Cow::Borrowed(_)) => payload_bytes,
+            Some(Cow::Owned(item)) => serialized_len(item).ok(),
+            None => None,
+        };
         add_to_totals(&mut measurement.pre_filter, payload_bytes);
-        if kept {
-            add_to_totals(&mut measurement.post_filter, payload_bytes);
-            persisted.push(item.clone());
+        if let Some(projected) = projected {
+            add_to_totals(&mut measurement.post_filter, persisted_payload_bytes);
+            persisted.push(projected.into_owned());
         }
         measurement.items.push(RolloutItemMeasurement {
             decision,
             rollout_item_type: rollout_item_type(item),
             payload_bytes,
+            persisted_payload_bytes,
         });
     }
 
@@ -199,7 +225,7 @@ fn finish_turn(
 fn add_item_to_turn(totals: &mut TurnSizeTotals, item: &RolloutItemMeasurement) {
     add_to_totals(&mut totals.pre_filter, item.payload_bytes);
     if item.decision == PersistenceDecision::Kept {
-        add_to_totals(&mut totals.post_filter, item.payload_bytes);
+        add_to_totals(&mut totals.post_filter, item.persisted_payload_bytes);
     }
 }
 
@@ -227,6 +253,7 @@ impl Write for CountingWriter {
 
 fn rollout_item_type(item: &RolloutItem) -> String {
     match item {
+        RolloutItem::DynamicToolsUpdated { .. } => "dynamic_tools_updated".to_string(),
         RolloutItem::SessionMeta(_) => "session_meta".to_string(),
         RolloutItem::ResponseItem(item) => response_item_type(item).to_string(),
         RolloutItem::InterAgentCommunication(_) => "inter_agent_communication".to_string(),
@@ -307,6 +334,26 @@ fn response_item_type(item: &ResponseItemEnvelope) -> &'static str {
     }
 }
 
+fn record_item_bytes(
+    metrics: &MetricsClient,
+    stage: &'static str,
+    item: &RolloutItemMeasurement,
+    payload_bytes: u64,
+) {
+    let _ = metrics.histogram_with_boundaries(
+        ITEM_BYTES_METRIC,
+        saturating_i64(payload_bytes),
+        ROLLOUT_BYTES_BOUNDARIES,
+        &[
+            ("stage", stage),
+            ("decision", item.decision.as_str()),
+            ("rollout_item_type", item.rollout_item_type.as_str()),
+            ("encoding", "rollout_item_json_v1"),
+            ("sample_rate", SAMPLE_RATE_LABEL),
+        ],
+    );
+}
+
 #[derive(Clone)]
 pub struct RolloutPersistenceTelemetry {
     metrics: Option<MetricsClient>,
@@ -340,16 +387,44 @@ impl RolloutPersistenceTelemetry {
 
         for item in &measurement.items {
             if let Some(payload_bytes) = item.payload_bytes {
-                let _ = metrics.histogram(
-                    ITEM_BYTES_METRIC,
-                    saturating_i64(payload_bytes),
-                    &[
-                        ("decision", item.decision.as_str()),
-                        ("rollout_item_type", item.rollout_item_type.as_str()),
-                        ("encoding", "rollout_item_json_v1"),
-                        ("sample_rate", SAMPLE_RATE_LABEL),
-                    ],
-                );
+                record_item_bytes(metrics, "before_projection", item, payload_bytes);
+                let persisted_payload_bytes = match item.persisted_payload_bytes {
+                    Some(persisted_payload_bytes) => {
+                        record_item_bytes(
+                            metrics,
+                            "after_projection",
+                            item,
+                            persisted_payload_bytes,
+                        );
+                        persisted_payload_bytes
+                    }
+                    None if item.decision == PersistenceDecision::Dropped => 0,
+                    None => {
+                        let _ = metrics.counter(
+                            MEASUREMENT_ERROR_METRIC,
+                            /*inc*/ 1,
+                            &[
+                                ("rollout_item_type", item.rollout_item_type.as_str()),
+                                ("phase", "serialize_projection"),
+                            ],
+                        );
+                        continue;
+                    }
+                };
+                let bytes_removed = payload_bytes.saturating_sub(persisted_payload_bytes);
+                if bytes_removed > 0 {
+                    let _ = metrics.histogram_with_boundaries(
+                        BYTES_REMOVED_METRIC,
+                        saturating_i64(bytes_removed),
+                        ROLLOUT_BYTES_BOUNDARIES,
+                        &[
+                            ("decision", item.decision.as_str()),
+                            ("rollout_item_type", item.rollout_item_type.as_str()),
+                            ("encoding", "rollout_item_json_v1"),
+                            ("sample_rate", SAMPLE_RATE_LABEL),
+                        ],
+                    );
+                }
             } else {
                 let _ = metrics.counter(
                     MEASUREMENT_ERROR_METRIC,
@@ -398,12 +473,13 @@ impl RolloutPersistenceTelemetry {
         }
         for turn in turn_update.completed {
             for (stage, totals) in [
-                ("pre_filter", turn.totals.pre_filter),
-                ("post_filter", turn.totals.post_filter),
+                ("before_projection", turn.totals.pre_filter),
+                ("after_projection", turn.totals.post_filter),
             ] {
-                let _ = metrics.histogram(
+                let _ = metrics.histogram_with_boundaries(
                     TURN_BYTES_METRIC,
                     saturating_i64(totals.payload_bytes),
+                    ROLLOUT_BYTES_BOUNDARIES,
                     &[
                         ("stage", stage),
                         ("outcome", turn.outcome.as_str()),

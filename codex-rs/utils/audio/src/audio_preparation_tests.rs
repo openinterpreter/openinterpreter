@@ -1,3 +1,4 @@
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
 use pretty_assertions::assert_eq;
@@ -7,17 +8,30 @@ use super::*;
 #[test]
 fn preparation_canonicalizes_data_urls_and_rejects_remote_urls() {
     let mut items = vec![ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![
             ContentItem::InputAudio {
-                audio_url: "data:audio/x-wav;base64,YXVkaW8=".to_string(),
+                audio: AudioReference::File {
+                    file_id: "file_audio".into(),
+                },
             },
             ContentItem::InputAudio {
-                audio_url: "data:audio/ogg;base64,YXVkaW8=".to_string(),
+                audio: AudioReference::Inline {
+                    audio_url: "data:audio/x-wav;base64,YXVkaW8=".to_string(),
+                },
             },
             ContentItem::InputAudio {
-                audio_url: "https://example.com/audio.mp3".to_string(),
+                audio: AudioReference::Inline {
+                    audio_url: "data:audio/ogg;base64,YXVkaW8=".to_string(),
+                },
+            },
+            ContentItem::InputAudio {
+                audio: AudioReference::Inline {
+                    audio_url: "https://example.com/audio.mp3".to_string(),
+                },
             },
         ],
         phase: None,
@@ -29,14 +43,25 @@ fn preparation_canonicalizes_data_urls_and_rejects_remote_urls() {
     assert_eq!(
         items,
         vec![ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "user".to_string(),
             content: vec![
                 ContentItem::InputAudio {
-                    audio_url: "data:audio/wav;base64,YXVkaW8=".to_string(),
+                    audio: AudioReference::File {
+                        file_id: "file_audio".into(),
+                    }
                 },
                 ContentItem::InputAudio {
-                    audio_url: "data:audio/ogg;base64,YXVkaW8=".to_string(),
+                    audio: AudioReference::Inline {
+                        audio_url: "data:audio/wav;base64,YXVkaW8=".to_string()
+                    }
+                },
+                ContentItem::InputAudio {
+                    audio: AudioReference::Inline {
+                        audio_url: "data:audio/ogg;base64,YXVkaW8=".to_string()
+                    }
                 },
                 ContentItem::InputText {
                     text: "audio content omitted because it could not be processed".to_string(),
@@ -51,14 +76,20 @@ fn preparation_canonicalizes_data_urls_and_rejects_remote_urls() {
 #[test]
 fn preparation_replaces_invalid_message_audio_with_placeholders() {
     let mut items = vec![ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![
             ContentItem::InputAudio {
-                audio_url: "data:audio/wav;base64,%%%".to_string(),
+                audio: AudioReference::Inline {
+                    audio_url: "data:audio/wav;base64,%%%".to_string(),
+                },
             },
             ContentItem::InputAudio {
-                audio_url: "data:audio/flac;base64,YXVkaW8=".to_string(),
+                audio: AudioReference::Inline {
+                    audio_url: "data:audio/flac;base64,YXVkaW8=".to_string(),
+                },
             },
         ],
         phase: None,
@@ -70,6 +101,8 @@ fn preparation_replaces_invalid_message_audio_with_placeholders() {
     assert_eq!(
         items,
         vec![ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "user".to_string(),
             content: vec![
@@ -98,12 +131,12 @@ fn preparation_replaces_only_failed_tool_audio_and_preserves_metadata() {
                 FunctionCallOutputContentItem::InputText {
                     text: "before".to_string(),
                 },
-                FunctionCallOutputContentItem::InputAudio {
-                    audio_url: "data:audio/wav;base64,YXVkaW8=".to_string(),
-                },
-                FunctionCallOutputContentItem::InputAudio {
-                    audio_url: "data:audio/wav,not-base64".to_string(),
-                },
+                FunctionCallOutputContentItem::inline_audio(
+                    "data:audio/wav;base64,YXVkaW8=".to_string(),
+                ),
+                FunctionCallOutputContentItem::inline_audio(
+                    "data:audio/wav,not-base64".to_string(),
+                ),
             ]),
             success: Some(true),
         },
@@ -124,9 +157,9 @@ fn preparation_replaces_only_failed_tool_audio_and_preserves_metadata() {
                     FunctionCallOutputContentItem::InputText {
                         text: "before".to_string(),
                     },
-                    FunctionCallOutputContentItem::InputAudio {
-                        audio_url: "data:audio/wav;base64,YXVkaW8=".to_string(),
-                    },
+                    FunctionCallOutputContentItem::inline_audio(
+                        "data:audio/wav;base64,YXVkaW8=".to_string()
+                    ),
                     FunctionCallOutputContentItem::InputText {
                         text: "audio content omitted because it could not be processed".to_string(),
                     },
@@ -159,5 +192,21 @@ fn preparation_errors_map_to_expected_placeholders() {
 
     for (error, expected) in cases {
         assert_eq!(error.placeholder(), expected);
+    }
+}
+
+#[test]
+fn file_audio_uses_the_measured_length_or_the_full_file_budget() {
+    use std::time::Duration;
+    for (duration, expected) in [
+        (None, 12_000),
+        (Some(Duration::ZERO), 12_000),
+        (Some(Duration::from_nanos(1)), 1),
+        (Some(Duration::from_secs(2)), 20),
+        (Some(Duration::from_millis(2_001)), 21),
+        (Some(Duration::from_secs(20 * 60)), 12_000),
+        (Some(Duration::MAX), 12_000),
+    ] {
+        assert_eq!(super::estimate_file_audio_tokens(duration), expected);
     }
 }

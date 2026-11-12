@@ -4,9 +4,12 @@ members = [
     "aws-auth",
     "analytics",
     "agent-graph-store",
+    "agent-message-board-client",
+    "agent-message-board-host",
     "agent-identity",
     "agent-roles",
     "backend-client",
+    "cloud-client",
     "bwrap",
     "build-info",
     "ansi-escape",
@@ -30,6 +33,7 @@ members = [
     "code-mode-host",
     "code-mode-protocol",
     "code-mode-runtime",
+    "plugin-host",
     "codex-home",
     "cloud-config",
     "cloud-tasks",
@@ -42,21 +46,24 @@ members = [
     "config-schema",
     "context-fragments",
     "shell-command",
-    "shell-escalation",
     "skills",
     "core",
     "core-api",
+    "core-plugin-common",
     "core-plugins",
     "diagnostics",
+    "direct-tool-timing",
     "guardian-context",
     "hooks",
     "history",
     "http-client",
+    "http-headers-helper",
     "secrets",
     "exec",
     "file-system",
     "exec-server-protocol",
     "exec-server",
+    "exec-server-cli",
     "exec-server/tests/support",
     "execpolicy",
     "execpolicy-legacy",
@@ -64,10 +71,12 @@ members = [
     "ext/agent-message-board",
     "ext/connectors",
     "ext/extension-api",
+    "ext/multi-env-copy-file",
     "ext/goal",
     "ext/git-attribution",
     "ext/guardian-reviewer",
     "ext/guardian-v2",
+    "ext/guardian-v3",
     "ext/history-notes",
     "ext/image-generation",
     "ext/items",
@@ -99,11 +108,13 @@ members = [
     "realtime-webrtc",
     "voice-host",
     "protocol",
+    "protocol/tests/support",
     "prompts",
     "rollout",
     "rollout-trace",
     "rmcp-client",
     "responses-api-proxy",
+    "runtime-agent-instance",
     "response-debug-context",
     "sandboxing",
     "stdio-to-uds",
@@ -114,7 +125,9 @@ members = [
     "user-verification",
     "tools",
     "v8-poc",
+    "websocket-auth",
     "websocket-client",
+    "windows-sandbox-rs/tests/support",
     "windows-sandbox-service",
     "worktree",
     "workload-identity",
@@ -124,10 +137,13 @@ members = [
     "utils/cargo-bin",
     "git-utils",
     "utils/cache",
+    "utils/critical-path",
     "utils/git-discovery",
+    "utils/head-tail-buffer",
     "utils/image",
     "utils/json-to-toml",
     "utils/home-dir",
+    "utils/process",
     "utils/pty",
     "utils/readiness",
     "utils/redacted-string",
@@ -136,6 +152,7 @@ members = [
     "utils/cli",
     "utils/elapsed",
     "utils/sandbox-summary",
+    "utils/model-facing-id",
     "utils/sleep-inhibitor",
     "utils/approval-presets",
     "utils/oss",
@@ -204,32 +221,44 @@ codex-cloud-tasks-mock-client = { path = "cloud-tasks-mock-client" }
 codex-code-mode = { path = "code-mode" }
 codex-code-mode-protocol = { path = "code-mode-protocol" }
 codex-code-mode-runtime = { path = "code-mode-runtime" }
+codex-plugin-host = { path = "plugin-host" }
 codex-home = { path = "codex-home" }
 codex-http-client = { path = "http-client" }
+codex-http-headers-helper = { path = "http-headers-helper" }
+codex-websocket-auth = { path = "websocket-auth" }
 codex-websocket-client = { path = "websocket-client" }
 codex-config = { path = "config" }
 codex-connectors = { path = "connectors" }
 codex-agent-extension = { path = "ext/agent" }
+codex-agent-message-board-client = { path = "agent-message-board-client" }
 codex-agent-message-board-extension = { path = "ext/agent-message-board" }
+codex-agent-message-board-host = { path = "agent-message-board-host" }
 codex-connectors-extension = { path = "ext/connectors" }
 codex-context-fragments = { path = "context-fragments" }
 codex-core = { path = "core" }
 codex-core-api = { path = "core-api" }
+codex-core-plugin-common = { path = "core-plugin-common" }
 codex-core-plugins = { path = "core-plugins" }
 codex-core-skills = { path = "core-skills" }
 codex-diagnostics = { path = "diagnostics" }
+codex-direct-tool-timing = { path = "direct-tool-timing" }
 codex-exec = { path = "exec" }
 codex-file-system = { path = "file-system" }
+codex-message-board = { path = "message-board" }
+codex-message-board-mcp = { path = "message-board-mcp" }
 codex-exec-server-protocol = { path = "exec-server-protocol" }
 codex-exec-server = { path = "exec-server" }
+codex-exec-server-cli = { path = "exec-server-cli" }
 codex-exec-server-test-support = { path = "exec-server/tests/support" }
 codex-execpolicy = { path = "execpolicy" }
 codex-extension-api = { path = "ext/extension-api" }
 codex-extension-items = { path = "ext/items" }
+codex-multi-env-copy-file = { path = "ext/multi-env-copy-file" }
 codex-goal-extension = { path = "ext/goal" }
 codex-git-attribution = { path = "ext/git-attribution" }
 codex-guardian-reviewer = { path = "ext/guardian-reviewer" }
 codex-guardian-v2 = { path = "ext/guardian-v2" }
+codex-guardian-v3 = { path = "ext/guardian-v3" }
 codex-history-notes-extension = { path = "ext/history-notes" }
 codex-image-generation-extension = { path = "ext/image-generation" }
 codex-external-agent-migration = { path = "external-agent-migration" }
@@ -268,6 +297,7 @@ codex-model-provider = { path = "model-provider" }
 codex-process-hardening = { path = "process-hardening" }
 codex-product-info = { path = "product-info" }
 codex-protocol = { path = "protocol" }
+codex-protocol-test-support = { path = "protocol/tests/support" }
 codex-prompts = { path = "prompts" }
 codex-queue-extension = { path = "ext/queue" }
 codex-responses-api-proxy = { path = "responses-api-proxy" }
@@ -275,10 +305,10 @@ codex-response-debug-context = { path = "response-debug-context" }
 codex-rmcp-client = { path = "rmcp-client" }
 codex-rollout = { path = "rollout" }
 codex-rollout-trace = { path = "rollout-trace" }
+codex-runtime-agent-instance = { path = "runtime-agent-instance" }
 codex-sandboxing = { path = "sandboxing" }
 codex-secrets = { path = "secrets" }
 codex-shell-command = { path = "shell-command" }
-codex-shell-escalation = { path = "shell-escalation" }
 codex-skills-extension = { path = "ext/skills" }
 codex-skills = { path = "skills" }
 codex-state = { path = "state" }
@@ -296,17 +326,21 @@ codex-utils-audio = { path = "utils/audio" }
 codex-utils-cache = { path = "utils/cache" }
 codex-utils-cargo-bin = { path = "utils/cargo-bin" }
 codex-utils-cli = { path = "utils/cli" }
+codex-utils-critical-path = { path = "utils/critical-path" }
 codex-utils-elapsed = { path = "utils/elapsed" }
 codex-utils-fuzzy-match = { path = "utils/fuzzy-match" }
 codex-utils-git-discovery = { path = "utils/git-discovery" }
+codex-utils-head-tail-buffer = { path = "utils/head-tail-buffer" }
 codex-utils-home-dir = { path = "utils/home-dir" }
 codex-utils-image = { path = "utils/image" }
 codex-utils-json-to-toml = { path = "utils/json-to-toml" }
+codex-utils-model-facing-id = { path = "utils/model-facing-id" }
 codex-utils-oss = { path = "utils/oss" }
 codex-utils-output-truncation = { path = "utils/output-truncation" }
 codex-utils-path = { path = "utils/path-utils" }
 codex-utils-path-uri = { path = "utils/path-uri" }
 codex-utils-plugins = { path = "utils/plugins" }
+codex-utils-process = { path = "utils/process" }
 codex-utils-pty = { path = "utils/pty" }
 codex-utils-redacted-string = { path = "utils/redacted-string" }
 codex-utils-rustls-provider = { path = "utils/rustls-provider" }
@@ -320,6 +354,7 @@ codex-user-verification = { path = "user-verification" }
 codex-v8-poc = { path = "v8-poc" }
 codex-workload-identity = { path = "workload-identity" }
 codex-windows-sandbox = { path = "windows-sandbox-rs" }
+codex-windows-sandbox-test-support = { path = "windows-sandbox-rs/tests/support" }
 core_test_support = { path = "core/tests/common" }
 mcp_test_support = { path = "mcp-server/tests/common" }
 
@@ -331,7 +366,6 @@ allocative = "0.3.3"
 agent-client-protocol = { version = "=0.12.1", features = ["unstable"] }
 ansi-to-tui = "8.0.1"
 anyhow = "1"
-appcontainer_common = { git = "https://github.com/microsoft/mxc", rev = "6cd3d58f05d3447e67109cfb75e042803b843ca4" }
 arboard = { version = "3", features = ["wayland-data-control"] }
 arc-swap = "1.9.0"
 assert_cmd = "2"
@@ -342,6 +376,8 @@ async-stream = "0.3.6"
 aws-config = "1"
 aws-credential-types = "1"
 aws-sigv4 = "1"
+aws-smithy-runtime-api = { version = "1", features = ["client", "http-1x"] }
+aws-smithy-types = { version = "1", features = ["http-body-1-x"] }
 aws-types = "1"
 axum = { version = "0.8", default-features = false }
 base64 = "0.22.1"
@@ -368,7 +404,7 @@ crossbeam-channel = "0.5.15"
 crypto_box = { version = "0.9.1", features = ["seal"] }
 crossterm = "0.29.0"
 ctor = "0.6.3"
-deno_core_icudata = "0.77.0"
+deno_core_icudata = "0.78.0"
 derive_more = "2"
 diffy = "0.4.2"
 dirs = "6"
@@ -380,21 +416,24 @@ ed25519-dalek = { version = "2.2.0", features = ["pkcs8"] }
 encoding_rs = "0.8.35"
 env_logger = "0.11.9"
 eventsource-stream = "0.2.3"
+file-id = "0.2.3"
+flatbuffers = "25"
 flate2 = "1.1.8"
 futures = { version = "0.3", default-features = false }
 gethostname = "1.1.0"
-gix = { version = "0.81.0", default-features = false, features = ["sha1"] }
-gix-url = "0.35.2"
+gix = { version = "0.89.0", default-features = false, features = ["sha1"] }
+gix-url = "0.40.0"
 glob = "0.3"
 globset = "0.4"
 hmac = "0.12.1"
 http = "1.3.1"
 httpdate = "1.0.3"
+hyper-util = { version = "0.1.20", features = ["tokio"] }
 iana-time-zone = "0.1.64"
 icu_decimal = "2.1"
 icu_locale_core = "2.1"
 icu_provider = { version = "2.1", features = ["sync"] }
-ignore = "0.4.23"
+ignore = "0.4.30"
 image = { version = "^0.25.9", default-features = false }
 include_dir = "0.7.4"
 indexmap = "2.12.0"
@@ -409,13 +448,16 @@ lazy_static = "1"
 libc = "0.2.182"
 # Keep SQLx's bundled SQLite on a version containing the WAL-reset corruption fix:
 # https://www.sqlite.org/wal.html#the_wal_reset_bug
-libsqlite3-sys = { version = "0.37", default-features = false }
+# SQLite 3.54 also fixes RUSTSEC-2026-0459 when opening a database with a WAL.
+libsqlite3-sys = { version = "0.39.1", default-features = false }
+linkify = "0.11"
 log = "0.4"
 lru = "0.16.3"
 maplit = "1.0.2"
 memchr = "2.7.6"
 mime_guess = "2.0.5"
 multimap = "0.10.0"
+mxc-sdk = { git = "https://github.com/microsoft/mxc", rev = "b21120168d70befe12356411423266bfef168446" }
 notify = "8.2.0"
 nucleo = { git = "https://github.com/helix-editor/nucleo.git", rev = "4253de9faabb4e5c6d81d946a5e35a90f87347ee" }
 once_cell = "1.20.2"
@@ -484,12 +526,10 @@ symphonia = { version = "0.6.0", default-features = false, features = [
     "ogg",
     "wav",
 ] }
-socket2 = "0.6.1"
-# When bumping sqlx, audit the SQLite constructor deny list in clippy.toml.
-sqlx = { version = "0.9.0", default-features = false, features = [
+# Keep SQLx versions in sync; when bumping, audit the SQLite constructor deny list in clippy.toml.
+sqlx = { version = "=0.9.0", default-features = false, features = [
     "chrono",
     "json",
-    "macros",
     "migrate",
     "runtime-tokio",
     "tls-rustls",
@@ -497,6 +537,10 @@ sqlx = { version = "0.9.0", default-features = false, features = [
     "time",
     "uuid",
 ] }
+# Derives and migration embedding do not need query macros or a host SQLite driver.
+sqlx-macros = { version = "=0.9.0", default-features = false, features = ["derive", "migrate"] }
+# Preserve the target driver's query-description support without building it on the host.
+sqlx-sqlite = { version = "=0.9.0", default-features = false, features = ["offline"] }
 starlark = { version = "0.14.2", default-features = false }
 strum = "0.27.2"
 strum_macros = "0.28.0"
@@ -536,27 +580,43 @@ tree-sitter-powershell = "=0.26.4"
 ts-rs = "11"
 tungstenite = { version = "0.27.0", features = ["deflate", "proxy"] }
 uds_windows = "1.1.0"
+unicode-linebreak = "0.1.5"
+unicode-normalization = "0.1.25"
 unicode-segmentation = "1.12.0"
 unicode-width = "0.2"
 url = "2"
 urlencoding = "2.1"
 uuid = "1"
-v8 = "=150.4.0"
+v8 = "=152.2.0"
 vt100 = "0.16.2"
+vtparse = "0.6.2"
 walkdir = "2.5.0"
 webbrowser = "1.0"
 which = "8"
 whoami = "1.6.1"
 wildmatch = "2.6.1"
 winapi-util = "0.1.11"
-zip = "2.4.2"
+windows-sys = "0.61.2"
+winreg = "0.55.0"
+# Keep the zip 2.x feature set. In zip 9, `bzip2-rs` selects the bzip2-sys
+# backend we already build; the default selects libbz2-rs-sys instead.
+zip = { version = "9.0.0", default-features = false, features = [
+    "aes-crypto",
+    "bzip2-rs",
+    "deflate",
+    "deflate64",
+    "lzma",
+    "time",
+    "xz",
+    "zstd",
+] }
 zstd = "0.13"
 
 wiremock = "0.6"
 zeroize = "1.8.2"
 
-[workspace.lints]
-rust = {}
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(codex_bazel)'] }
 
 [workspace.lints.clippy]
 await_holding_invalid_type = "deny"
@@ -606,9 +666,9 @@ ignored = [
 ]
 
 [profile.dev]
-# Keep line tables/backtraces while avoiding expensive full variable debug info
-# across local dev builds.
-debug = "limited"
+# The test profile inherits dev. Keep source locations in ordinary builds;
+# use CARGO_PROFILE_DEV_DEBUG=full (or CARGO_PROFILE_TEST_DEBUG=full) for locals.
+debug = "line-tables-only"
 
 [profile.dev-small]
 inherits = "dev"
@@ -644,12 +704,17 @@ opt-level = 0
 [patch.crates-io]
 # Uncomment to debug local changes.
 # ratatui = { path = "../../ratatui" }
-crossterm = { git = "https://github.com/openai-oss-forks/crossterm", rev = "45fecb9508105988f42fe6ff0441783ed3717f92" }
-tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
-tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
+crossterm = { git = "https://github.com/openai-oss-forks/crossterm", rev = "ed1cdab335221515706178d68495bba2aed1924f" }
+# SQLx 0.9.0 excludes libsqlite3-sys 0.39. Keep its driver and Core traits on
+# the same reviewed source until a release includes transact-rs/sqlx#4502.
+sqlx-core = { git = "https://github.com/transact-rs/sqlx", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c" }
+sqlx-sqlite = { git = "https://github.com/transact-rs/sqlx", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c" }
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "7447c427513cfe685f236e1ac0513c4ea3dd9c0b" }
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "bc589d684755a8c02da0fc7e58d0861cbfc306f1" }
+v8 = { git = "https://github.com/openai-oss-forks/rusty_v8.git", rev = "90a65f887a0c0f048f3784afbcb320b373c8a2e0" }
 
 # Uncomment to debug local changes.
 # rmcp = { path = "../../rust-sdk/crates/rmcp" }
 
 [patch."ssh://git@github.com/openai-oss-forks/tungstenite-rs.git"]
-tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "bc589d684755a8c02da0fc7e58d0861cbfc306f1" }

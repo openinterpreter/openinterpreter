@@ -45,6 +45,9 @@ mod view_image;
 pub(crate) mod view_image_spec;
 mod wait_for_environment;
 
+use crate::tools::context::ToolEnvironments;
+use crate::tools::context::ToolInvocation;
+use crate::tools::context::ToolPayload;
 use codex_file_system::FileSystemSandboxContext;
 use codex_sandboxing::policy_transforms::materialize_additional_permissions_with_context;
 use codex_sandboxing::policy_transforms::merge_permission_profiles;
@@ -59,7 +62,7 @@ use serde_json::Value;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::function_tool::FunctionCallError;
 use crate::sandboxing::SandboxPermissions;
-use crate::session::session::Session;
+use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnEnvironment;
 pub(crate) use crate::tools::code_mode::CodeModeExecuteHandler;
 pub(crate) use crate::tools::code_mode::CodeModeWaitHandler;
@@ -79,11 +82,13 @@ pub use kimi_code_cron::KimiCodeCronHandler;
 pub use kimi_code_extra::KimiCodeExtraHandler;
 pub use list_available_plugins_to_install::ListAvailablePluginsToInstallHandler;
 pub use mcp::McpHandler;
+pub(crate) use mcp::McpHandlerDefinition;
 pub use mcp_resource::ListMcpResourceTemplatesHandler;
 pub use mcp_resource::ListMcpResourcesHandler;
 pub use mcp_resource::ReadMcpResourceHandler;
 pub use new_context_window::NewContextWindowHandler;
 pub use plan::PlanHandler;
+pub(crate) use request_permissions::PreparedPermissionRequest;
 pub use request_permissions::RequestPermissionsHandler;
 pub use request_plugin_install::RequestPluginInstallHandler;
 pub use request_user_input::RequestUserInputHandler;
@@ -173,24 +178,69 @@ where
     parse_arguments(arguments)
 }
 
-fn resolve_tool_environment<'a>(
+#[derive(Deserialize)]
+pub(crate) struct ToolEnvironmentArgs {
+    pub(crate) environment_id: Option<String>,
+}
+
+fn function_tool_environment<T: serde::de::DeserializeOwned>(
+    invocation: &ToolInvocation,
+    environment_id: impl FnOnce(T) -> Option<String>,
+) -> Result<ToolEnvironments, FunctionCallError> {
+    let ToolPayload::Function { arguments } = &invocation.payload else {
+        return Err(FunctionCallError::Fatal(
+            "expected function arguments for environment selection".to_string(),
+        ));
+    };
+    let environment_id = environment_id(parse_arguments(arguments)?);
+    resolve_tool_environment(
+        &invocation.step_context.environments,
+        environment_id.as_deref(),
+    )
+    .map(ToolEnvironments::single_executor)
+}
+
+pub(crate) fn selected_executor<'a>(
+    environments: &'a ToolEnvironments,
+    snapshot: &'a TurnEnvironmentSnapshot,
+) -> Result<&'a TurnEnvironment, FunctionCallError> {
+    match environments {
+        ToolEnvironments::Arguments(args) if let [(_, env)] = args.as_slice() => Ok(env),
+        // Direct handler callers may supply only the step context.
+        ToolEnvironments::All => resolve_tool_environment(snapshot, /*environment_id*/ None),
+        _ => Err(FunctionCallError::Fatal(
+            "expected one executor for this call".to_string(),
+        )),
+    }
+}
+
+pub(crate) fn resolve_tool_environment<'a>(
     environments: &'a TurnEnvironmentSnapshot,
     environment_id: Option<&str>,
-) -> Result<Option<&'a TurnEnvironment>, FunctionCallError> {
+) -> Result<&'a TurnEnvironment, FunctionCallError> {
     environment_id.map_or_else(
-        || Ok(environments.primary()),
+        || environments.primary(),
         |environment_id| {
             environments
                 .turn_environments()
                 .find(|environment| environment.selection.environment_id == environment_id)
-                .map(Some)
-                .ok_or_else(|| {
-                    FunctionCallError::RespondToModel(format!(
-                        "unknown turn environment id `{environment_id}`"
-                    ))
-                })
         },
-    )
+    ).ok_or_else(|| {
+        if let Some(environment_id) = environment_id
+            && !environments
+                .all_selections()
+                .iter()
+                .any(|selection| selection.environment_id == environment_id)
+        {
+            return FunctionCallError::RespondToModel(format!(
+                "unknown turn environment id `{environment_id}`"
+            ));
+        }
+        FunctionCallError::RespondToModel(
+            "No usable execution environment is available. Wait for an environment to become available before using this tool."
+                .to_string(),
+        )
+    })
 }
 
 /// Validates feature/policy constraints for `with_additional_permissions` and
@@ -251,7 +301,8 @@ pub(crate) fn normalize_and_validate_additional_permissions(
     }
 }
 
-pub(super) struct EffectiveAdditionalPermissions {
+#[derive(Debug)]
+pub(crate) struct EffectiveAdditionalPermissions {
     pub sandbox_permissions: SandboxPermissions,
     pub additional_permissions: Option<AdditionalPermissionProfile>,
     pub permissions_preapproved: bool,
@@ -283,8 +334,8 @@ pub(super) fn implicit_granted_permissions(
     }
 }
 
-pub(super) async fn apply_granted_turn_permissions(
-    session: &Session,
+pub(super) fn apply_granted_turn_permissions(
+    step_context: &StepContext,
     environment: &TurnEnvironment,
     cwd: &PathUri,
     sandbox_permissions: SandboxPermissions,
@@ -299,12 +350,7 @@ pub(super) async fn apply_granted_turn_permissions(
     }
 
     let environment_id = &environment.selection.environment_id;
-    let granted_session_permissions = session.granted_session_permissions(environment_id).await;
-    let granted_turn_permissions = session.granted_turn_permissions(environment_id).await;
-    let granted_permissions = merge_permission_profiles(
-        granted_session_permissions.as_ref(),
-        granted_turn_permissions.as_ref(),
-    );
+    let granted_permissions = step_context.turn.granted_permissions(environment_id);
     let effective_permissions = merge_permission_profiles(
         additional_permissions.as_ref(),
         granted_permissions.as_ref(),

@@ -4,21 +4,25 @@
 //! from JSONL rollouts and mirrors it into a local SQLite database. Backfill
 //! orchestration and rollout scanning live in `codex-core`.
 
+const MIN_SQLITE_VERSION_NUMBER: i32 = 3_054_000;
 const _: () = assert!(
-    libsqlite3_sys::SQLITE_VERSION_NUMBER >= 3_051_003,
-    "bundled SQLite must include the WAL-reset corruption fix",
+    libsqlite3_sys::SQLITE_VERSION_NUMBER >= MIN_SQLITE_VERSION_NUMBER,
+    "bundled SQLite must include the WAL-reset and WAL page-size fixes",
 );
 
 mod audit;
+mod delegated_preview;
 mod extract;
 pub mod log_db;
 mod migrations;
 mod model;
+mod nfs_migration;
 mod paths;
 mod runtime;
 mod sqlite;
 mod telemetry;
 
+pub use log_db::LogWriteFailureReporter;
 pub use model::CreatedProject;
 pub use model::LogEntry;
 pub use model::LogQuery;
@@ -33,16 +37,28 @@ pub use model::QueuedUserSubmissionRecord;
 pub use model::RolloutMigrationCursor;
 pub use model::RolloutMigrationSkippedRollout;
 pub use model::RolloutMigrationState;
+pub use nfs_migration::NfsDbMigration;
+pub use nfs_migration::NfsDbMigrationOutcome;
+pub use runtime::GuardianReviewRecord;
+pub use runtime::MAX_GUARDIAN_REVIEW_BYTES;
+pub use runtime::MAX_GUARDIAN_REVIEW_RECORDS;
+pub use runtime::MAX_GUARDIAN_REVIEW_RECORDS_PER_THREAD;
 /// Preferred entrypoint: owns configuration and metrics.
 pub use runtime::StateRuntime;
 pub use sqlite::SqliteConfig;
+pub use sqlite::SqlitePoolWriteExt;
 
 pub use audit::ThreadStateAuditRow;
+pub use audit::read_thread_rollout_paths;
 pub use audit::read_thread_state_audit_rows;
+pub use delegated_preview::delegated_output_preview;
+pub use extract::GUARDIAN_THREAD_PREVIEW;
+pub use extract::GUARDIAN_THREAD_TITLE;
 /// Low-level storage engine: useful for focused tests.
 ///
 /// Most consumers should prefer [`StateRuntime`].
 pub use extract::apply_rollout_item;
+pub use extract::is_guardian_review_source;
 pub use extract::rollout_item_affects_thread_metadata;
 pub use model::AddThreadAttachmentOutcome;
 pub use model::Anchor;
@@ -81,16 +97,19 @@ pub use runtime::GoalAccountingOutcome;
 pub use runtime::GoalStore;
 pub use runtime::GoalUpdate;
 pub use runtime::MemoryStore;
+pub use runtime::ReadStateOperation;
+pub use runtime::ReadStateUpdate;
 pub use runtime::RemoteControlEnrollmentRecord;
-pub use runtime::RuntimeDbBackup;
 pub use runtime::SqliteIntegrityCheck;
 pub use runtime::SqliteQueueStore;
 pub use runtime::ThreadFilterOptions;
+pub use runtime::ThreadReadState;
 pub use runtime::backup_runtime_db_for_fresh_start;
+pub use runtime::collect_runtime_db_backups;
 pub use runtime::is_sqlite_corruption_error;
 pub use runtime::open_thread_history_db;
+pub use runtime::recovery::RuntimeDbBackup;
 pub use runtime::runtime_db_path_for_corruption_error;
-pub use runtime::sqlite_error_detail_is_corruption;
 pub use runtime::sqlite_error_detail_is_lock;
 pub use runtime::sqlite_integrity_check;
 pub use sqlite::RuntimeDbPath;
@@ -133,6 +152,8 @@ pub const DB_ERROR_METRIC: &str = "codex.db.error";
 pub const DB_METRIC_BACKFILL: &str = "codex.db.backfill";
 /// Metrics on backfill duration. Tags: [status]
 pub const DB_METRIC_BACKFILL_DURATION_MS: &str = "codex.db.backfill.duration_ms";
+/// Confirmed SQLite quick-check corruption findings. Tags: [db]
+pub const DB_CORRUPTION_METRIC: &str = "codex.sqlite.corruption.count";
 /// SQLite initialization attempts. Tags: [status, phase, db, error]
 pub const DB_INIT_METRIC: &str = "codex.sqlite.init.count";
 /// SQLite initialization latency. Tags: [status, phase, db, error]

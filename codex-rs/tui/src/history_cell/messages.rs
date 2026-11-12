@@ -214,7 +214,6 @@ impl HistoryCell for UserHistoryCell {
         if wrapped_images.is_empty() && wrapped_message.is_none() {
             return Vec::new();
         }
-
         let mut lines = vec![HyperlinkLine::new(Line::from("").style(style))];
 
         if !wrapped_images.is_empty() {
@@ -223,7 +222,7 @@ impl HistoryCell for UserHistoryCell {
                 "  ".into(),
                 "  ".into(),
             ));
-            if wrapped_message.is_some() {
+            if !wrapped_message.is_empty() {
                 lines.push(HyperlinkLine::new(Line::from("").style(style)));
             }
         }
@@ -247,8 +246,8 @@ impl HistoryCell for UserHistoryCell {
         lines
     }
 
-    fn transcript_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
-        self.display_hyperlink_lines(width)
+    fn compact_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        self.transcript_hyperlink_lines(width)
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
@@ -501,7 +500,11 @@ impl HistoryCell for AgentMessageCell {
 /// because resolving their local file links depends on filesystem state that can change later.
 #[derive(Debug)]
 pub(crate) struct AgentMarkdownCell {
+    /// Identifies an interrupted reply that can still receive its authoritative completion.
+    pub(crate) interrupted_item: Option<(String, String)>,
+    pub(crate) phase: Option<codex_protocol::models::MessagePhase>,
     markdown_source: String,
+    copy_source: Option<String>,
     cwd: PathBuf,
     inline_visualization_context: Option<crate::inline_visualization::InlineVisualizationContext>,
     rendered_lines: Option<MarkdownRenderCache>,
@@ -509,6 +512,23 @@ pub(crate) struct AgentMarkdownCell {
 }
 
 impl AgentMarkdownCell {
+    pub(crate) fn from_parsed_message(
+        visible_markdown: String,
+        source: String,
+        cwd: &Path,
+        context: Option<crate::inline_visualization::InlineVisualizationContext>,
+        questions: &[codex_protocol::items::AsyncUserInputQuestion],
+    ) -> Self {
+        Self::new_with_inline_visualizations(visible_markdown, cwd, context)
+            .with_questions(questions)
+            .with_copy_source(Some(source))
+    }
+
+    pub(crate) fn with_copy_source(mut self, source: Option<String>) -> Self {
+        self.copy_source = source;
+        self
+    }
+
     /// Create a finalized source-backed assistant message cell.
     ///
     /// `markdown_source` must be the raw source accumulated by the stream controller, not already
@@ -534,7 +554,10 @@ impl AgentMarkdownCell {
             (!crate::inline_visualization::contains_inline_visualization(&markdown_source))
                 .then(MarkdownRenderCache::default);
         Self {
+            interrupted_item: None,
             markdown_source,
+            copy_source: None,
+            phase: None,
             cwd: cwd.to_path_buf(),
             inline_visualization_context,
             rendered_lines,
@@ -553,7 +576,9 @@ impl AgentMarkdownCell {
     }
 }
 
-fn normalize_whitespace_only_hyperlink_lines(mut lines: Vec<HyperlinkLine>) -> Vec<HyperlinkLine> {
+pub(super) fn normalize_whitespace_only_hyperlink_lines(
+    mut lines: Vec<HyperlinkLine>,
+) -> Vec<HyperlinkLine> {
     for line in &mut lines {
         if line
             .line

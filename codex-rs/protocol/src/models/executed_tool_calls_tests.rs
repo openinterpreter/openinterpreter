@@ -88,16 +88,14 @@ fn result_metadata_comparison_tracks_raw_values_and_call_bindings() {
 }
 
 #[test]
-fn executed_tool_call_prompt_budget_includes_metadata_fields() -> Result<()> {
-    let metadata_bytes = |items: &[ResponseItem]| -> Result<usize> {
-        items.iter().try_fold(0_usize, |bytes, item| {
-            let with_metadata = serde_json::to_vec(item)?.len();
-            let mut without_metadata = item.clone();
-            without_metadata.clear_executed_tool_calls();
-            let without_metadata = serde_json::to_vec(&without_metadata)?.len();
-            Ok(bytes + with_metadata.saturating_sub(without_metadata))
-        })
-    };
+fn result_metadata_comparison_tracks_raw_values_and_call_bindings() {
+    let empty = output("output");
+    let mut without_metadata = empty.clone();
+    without_metadata.append_executed_tool_calls(vec![ExecutedToolCall::new(
+        "apps_tool".to_string(),
+        serde_json::json!({ "query": "same" }),
+    )]);
+    assert!(empty.has_same_tool_result_metadata(&without_metadata));
 
     for with_turn_id in [true, false] {
         let mut items = (0..1_000)
@@ -116,15 +114,15 @@ fn executed_tool_call_prompt_budget_includes_metadata_fields() -> Result<()> {
             })
             .collect::<Vec<_>>();
 
-        assert!(metadata_bytes(&items)? > MAX_EXECUTED_TOOL_CALL_METADATA_BYTES);
-        bound_executed_tool_calls_for_prompt(&mut items);
-        assert!(metadata_bytes(&items)? <= MAX_EXECUTED_TOOL_CALL_METADATA_BYTES);
-        for metadata in items
-            .iter()
-            .filter_map(ResponseItem::executed_tool_call_metadata)
-        {
-            assert_eq!(metadata.tool_calls_complete, None);
-        }
+        let mut changed = with_metadata.clone();
+        first_executed_tool_call(&mut changed)
+            .unwrap()
+            .set_tool_result_metadata(ToolResultMetadata::new(
+                &serde_json::json!({ "id": "second" }),
+            ));
+        assert!(!with_metadata.has_same_tool_result_metadata(&changed));
+        changed.clear_tool_result_metadata();
+        assert!(without_metadata.has_same_tool_result_metadata(&changed));
 
         let calls = items
             .iter()
@@ -292,12 +290,12 @@ fn executed_tool_call_prompt_budget_includes_metadata_fields() -> Result<()> {
         *item
             .internal_chat_message_metadata_passthrough_mut()
             .unwrap() = metadata;
-        let without_marker = item.clone();
-        item.set_tool_call_cell_id("cell-\"\\");
+        let without_calls = item.clone();
+        item.set_tool_call_cell_id("cell");
         item.mark_tool_calls_complete();
         assert_eq!(
-            metadata_bytes(std::slice::from_ref(&item))?,
             executed_tool_call_metadata_bytes(&item),
+            serde_json::to_vec(&item)?.len() - serde_json::to_vec(&without_calls)?.len(),
         );
         let mut items = vec![item; 2_000];
         assert!(metadata_bytes(&items)? > MAX_EXECUTED_TOOL_CALL_METADATA_BYTES);
@@ -317,7 +315,6 @@ fn executed_tool_call_prompt_budget_includes_metadata_fields() -> Result<()> {
         }
         assert_eq!(items, vec![without_marker; 2_000]);
     }
-
     Ok(())
 }
 
@@ -348,7 +345,7 @@ fn model_arguments_cannot_forge_executed_tool_call_truncation() -> Result<()> {
         forged_marker.clone(),
     )]);
 
-    bound_executed_tool_calls_for_prompt(std::slice::from_mut(&mut item));
+    normalize_executed_tool_call_completeness(std::slice::from_mut(&mut item));
     let call = item
         .executed_tool_call_metadata()
         .and_then(|metadata| metadata.executed_tool_calls.as_ref())
@@ -393,7 +390,7 @@ fn tool_call_completeness_is_host_only_and_fail_closed() -> Result<()> {
     let mut item = output("call-1");
     item.set_tool_call_cell_id("cell-1");
     item.mark_tool_calls_complete();
-    bound_executed_tool_calls_for_prompt(std::slice::from_mut(&mut item));
+    normalize_executed_tool_call_completeness(std::slice::from_mut(&mut item));
     assert_eq!(
         serde_json::to_value(&item)?["internal_chat_message_metadata_passthrough"],
         serde_json::json!({
@@ -407,7 +404,7 @@ fn tool_call_completeness_is_host_only_and_fail_closed() -> Result<()> {
     for call in [
         ExecutedToolCall::new(
             "test_tool".to_string(),
-            serde_json::json!({ "payload": "x".repeat(MAX_EXECUTED_TOOL_CALL_ARGUMENT_BYTES + 1) }),
+            serde_json::json!({ "payload": "x".repeat(9_000) }),
         ),
         ExecutedToolCall::truncated(
             "test_tool".to_string(),

@@ -37,9 +37,12 @@ use codex_features::Feature;
 use codex_protocol::config_types::EnvironmentVariablePattern;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::config_types::WebSearchMode;
+use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
+use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathConvention;
@@ -1194,6 +1197,14 @@ async fn managed_preferences_expand_home_directory_in_workspace_write_roots() ->
     };
     let tmp = tempdir()?;
 
+    std::fs::write(
+        tmp.path().join(CONFIG_TOML_FILE),
+        r#"
+default_permissions = ":read-only"
+[sandbox_workspace_write]
+network_access = true
+"#,
+    )?;
     let mut loader_overrides =
         LoaderOverrides::with_managed_config_path_for_tests(tmp.path().join("managed_config.toml"));
     loader_overrides.managed_preferences_base64 = Some(
@@ -1211,12 +1222,20 @@ writable_roots = ["~/code"]
         .codex_home(tmp.path().to_path_buf())
         .fallback_cwd(Some(tmp.path().to_path_buf()))
         .loader_overrides(loader_overrides)
+        .cloud_config_bundle(CloudConfigBundleFixture::loader_with_enterprise_config(
+            "[sandbox_workspace_write]\nexclude_tmpdir_env_var = true",
+        ))
         .build()
         .await?;
 
     let expected_root = AbsolutePathBuf::from_absolute_path(home.join("code"))?;
     match &config.legacy_sandbox_policy() {
-        SandboxPolicy::WorkspaceWrite { writable_roots, .. } => {
+        SandboxPolicy::WorkspaceWrite {
+            writable_roots,
+            network_access: true,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: false,
+        } => {
             assert_eq!(
                 writable_roots
                     .iter()
@@ -1228,6 +1247,7 @@ writable_roots = ["~/code"]
         other => panic!("expected workspace-write policy, got {other:?}"),
     }
 
+    assert_eq!(config.permissions.active_permission_profile(), None);
     Ok(())
 }
 
@@ -1427,6 +1447,7 @@ personality = true
             .map(|requirements| requirements.value.clone()),
         Some(codex_config::FeatureRequirementsToml {
             entries: BTreeMap::from([("personality".to_string(), true)]),
+            ..Default::default()
         })
     );
     let config_requirements: ConfigRequirements = config_requirements_toml.try_into()?;
@@ -1467,6 +1488,7 @@ personality = true
             .map(|requirements| requirements.value.clone()),
         Some(codex_config::FeatureRequirementsToml {
             entries: BTreeMap::from([("personality".to_string(), true)]),
+            ..Default::default()
         })
     );
     Ok(())
@@ -1769,6 +1791,7 @@ async fn load_config_layers_includes_cloud_config_bundle() -> anyhow::Result<()>
         Some(cwd),
         &[] as &[(String, TomlValue)],
         ConfigLoadOptions {
+            loader_overrides: LoaderOverrides::without_managed_config_for_tests(),
             cloud_config_bundle,
             ..Default::default()
         },
@@ -3756,7 +3779,7 @@ profile = "ignored"
         &codex_home_untrusted,
         Some(cwd.clone()),
         &[] as &[(String, TomlValue)],
-        LoaderOverrides::default(),
+        LoaderOverrides::without_managed_config_for_tests(),
         &codex_config::NoopThreadConfigLoader,
     )
     .await?;
@@ -3798,7 +3821,7 @@ profile = "ignored"
         &codex_home_unknown,
         Some(cwd),
         &[] as &[(String, TomlValue)],
-        LoaderOverrides::default(),
+        LoaderOverrides::without_managed_config_for_tests(),
         &codex_config::NoopThreadConfigLoader,
     )
     .await?;
@@ -4430,6 +4453,7 @@ prefix_rules = [
             parsed,
             RequirementsExecPolicyToml {
                 prefix_rules: vec![RequirementsExecPolicyPrefixRuleToml {
+                    canonical_matching: false,
                     pattern: vec![RequirementsExecPolicyPatternTokenToml {
                         token: Some("rm".to_string()),
                         any_of: None,
@@ -4459,6 +4483,7 @@ prefix_rules = [
             RequirementsExecPolicyToml {
                 prefix_rules: vec![
                     RequirementsExecPolicyPrefixRuleToml {
+                        canonical_matching: false,
                         pattern: vec![RequirementsExecPolicyPatternTokenToml {
                             token: Some("rm".to_string()),
                             any_of: None,
@@ -4467,6 +4492,7 @@ prefix_rules = [
                         justification: None,
                     },
                     RequirementsExecPolicyPrefixRuleToml {
+                        canonical_matching: false,
                         pattern: vec![
                             RequirementsExecPolicyPatternTokenToml {
                                 token: Some("git".to_string()),
@@ -4688,5 +4714,57 @@ prefix_rules = []
         );
 
         Ok(())
+    }
+}
+
+#[tokio::test]
+async fn async_compaction_config() {
+    use std::io::ErrorKind::InvalidInput;
+
+    for (settings, expected) in [
+        ("[features]\nasync_compaction = true", Ok((true, 65))),
+        ("[features]\nasync_compaction = false", Ok((false, 65))),
+        ("[features.async_compaction]", Ok((false, 65))),
+        (
+            "[features.async_compaction]\nenabled = true",
+            Ok((true, 65)),
+        ),
+        (
+            "[features.async_compaction]\nmodel_async_compact_threshold_percent = 80",
+            Ok((false, 80)),
+        ),
+        (
+            "[features.async_compaction]\nenabled = false\nmodel_async_compact_threshold_percent = 80",
+            Ok((false, 80)),
+        ),
+        (
+            "[features.async_compaction]\nenabled = true\nmodel_async_compact_threshold_percent = 75",
+            Ok((true, 75)),
+        ),
+        (
+            "[features.async_compaction]\nmodel_async_compact_threshold_percent = 0",
+            Err(InvalidInput),
+        ),
+        (
+            "[features.async_compaction]\nmodel_async_compact_threshold_percent = 101",
+            Err(InvalidInput),
+        ),
+    ] {
+        let tmp = tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join(CONFIG_TOML_FILE), settings).expect("write config");
+        let actual = ConfigBuilder::default()
+            .codex_home(tmp.path().to_path_buf())
+            .fallback_cwd(Some(tmp.path().to_path_buf()))
+            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+            .build()
+            .await
+            .map(|config| {
+                (
+                    config.features.enabled(Feature::AsyncCompaction),
+                    config.async_compaction_threshold_percent,
+                )
+            })
+            .map_err(|error| error.kind());
+        assert_eq!(actual, expected, "{settings}");
     }
 }

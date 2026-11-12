@@ -26,6 +26,7 @@ const TRANSIENT_FAILURE_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 /// Exchanges assertions and retains only the current short-lived access token in memory.
 pub struct WorkloadIdentityExchange {
+    network_policy: codex_http_client::NetworkPolicy,
     client: HttpClient,
     completed_attempts: AtomicU64,
     config: WorkloadIdentityConfig,
@@ -61,6 +62,7 @@ impl WorkloadIdentityExchange {
                 .map_err(|_| WorkloadIdentityError::HttpClientConfiguration)
         }?;
         Ok(Self {
+            network_policy: http_client_factory.network_policy().clone(),
             client,
             completed_attempts: AtomicU64::new(0),
             config,
@@ -170,54 +172,59 @@ impl WorkloadIdentityExchange {
     }
 
     async fn exchange_uncached(&self) -> Result<WorkloadIdentityToken, WorkloadIdentityError> {
-        let assertion = read_assertion(&self.config.assertion_file).await?;
-        let body = {
-            let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-            serializer
-                .append_pair("grant_type", JWT_BEARER_GRANT_TYPE)
-                .append_pair("assertion", &assertion)
-                .append_pair("federation_rule_id", &self.config.federation_rule_id);
-            if let Some(context) = &self.config.workload_identity_context {
-                serializer.append_pair("workload_identity_context", context);
-            }
-            serializer.finish()
-        };
-        let response = self
-            .client
-            .post(self.token_url.as_str())
-            .header("content-type", "application/x-www-form-urlencoded")
-            .body(body)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
-            .await
-            .map_err(|_| WorkloadIdentityError::ExchangeUnavailable)?;
-        if !response.status().is_success() {
-            return Err(WorkloadIdentityError::ExchangeRejected(
-                response.status().as_u16(),
-            ));
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-        {
-            return Err(WorkloadIdentityError::InvalidExchangeResponse);
-        }
+        let permit = self.network_policy.acquire(&self.token_url)?;
+        permit
+            .run(async {
+                let assertion = read_assertion(&self.config.assertion_file).await?;
+                let body = {
+                    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+                    serializer
+                        .append_pair("grant_type", JWT_BEARER_GRANT_TYPE)
+                        .append_pair("assertion", &assertion)
+                        .append_pair("federation_rule_id", &self.config.federation_rule_id);
+                    if let Some(context) = &self.config.workload_identity_context {
+                        serializer.append_pair("workload_identity_context", context);
+                    }
+                    serializer.finish()
+                };
+                let response = self
+                    .client
+                    .post(self.token_url.as_str())
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(body)
+                    .timeout(REQUEST_TIMEOUT)
+                    .send()
+                    .await
+                    .map_err(|_| WorkloadIdentityError::ExchangeUnavailable)?;
+                if !response.status().is_success() {
+                    return Err(WorkloadIdentityError::ExchangeRejected(
+                        response.status().as_u16(),
+                    ));
+                }
+                if response
+                    .content_length()
+                    .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+                {
+                    return Err(WorkloadIdentityError::InvalidExchangeResponse);
+                }
 
-        let mut response = response;
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| WorkloadIdentityError::ExchangeUnavailable)?
-        {
-            if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(bytes.len()) {
-                return Err(WorkloadIdentityError::InvalidExchangeResponse);
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        serde_json::from_slice::<TokenExchangeResponse>(&bytes)
-            .map_err(|_| WorkloadIdentityError::InvalidExchangeResponse)?
-            .into_token()
+                let mut response = response;
+                let mut bytes = Vec::new();
+                while let Some(chunk) = response
+                    .chunk()
+                    .await
+                    .map_err(|_| WorkloadIdentityError::ExchangeUnavailable)?
+                {
+                    if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(bytes.len()) {
+                        return Err(WorkloadIdentityError::InvalidExchangeResponse);
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                serde_json::from_slice::<TokenExchangeResponse>(&bytes)
+                    .map_err(|_| WorkloadIdentityError::InvalidExchangeResponse)?
+                    .into_token()
+            })
+            .await?
     }
 }
 
@@ -299,13 +306,32 @@ impl CachedToken {
 #[derive(Clone, PartialEq, Eq)]
 pub struct WorkloadIdentityToken {
     pub access_token: String,
+    pub expires_in: u64,
+    pub metadata: WorkloadIdentityMetadata,
+    version: u64,
+}
+
+/// Product and identity resolved by the federation rule's token exchange.
+#[derive(Clone, PartialEq, Eq)]
+pub enum WorkloadIdentityMetadata {
+    Chatgpt(ChatgptTokenMetadata),
+    Api(ApiTokenMetadata),
+}
+
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+pub struct ApiTokenMetadata {
+    pub api_organization_id: String,
+    pub api_project_id: String,
+    pub user_id: String,
+}
+
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+pub struct ChatgptTokenMetadata {
     pub chatgpt_account_id: String,
     pub chatgpt_account_user_id: String,
     pub chatgpt_plan_type: Option<String>,
-    pub expires_in: u64,
     pub scope: String,
     pub user_id: String,
-    version: u64,
 }
 
 impl WorkloadIdentityToken {
@@ -325,17 +351,25 @@ impl fmt::Debug for WorkloadIdentityToken {
     }
 }
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkloadIdentityProduct {
+    #[default]
+    Chatgpt,
+    Api,
+}
+
 #[derive(Deserialize)]
 struct TokenExchangeResponse {
     access_token: String,
-    chatgpt_account_id: String,
-    chatgpt_account_user_id: String,
-    chatgpt_plan_type: Option<String>,
     expires_in: u64,
     issued_token_type: String,
-    scope: String,
     token_type: String,
-    user_id: String,
+    // Older ChatGPT token endpoints omit the product marker.
+    #[serde(default)]
+    wif_product: WorkloadIdentityProduct,
+    #[serde(flatten)]
+    metadata: serde_json::Value,
 }
 
 impl TokenExchangeResponse {
@@ -346,25 +380,42 @@ impl TokenExchangeResponse {
             || !self.token_type.eq_ignore_ascii_case("bearer")
             || lifetime.is_zero()
             || lifetime > MAX_ACCESS_TOKEN_LIFETIME
-            || self.scope.trim().is_empty()
-            || self.chatgpt_account_id.trim().is_empty()
-            || self.chatgpt_account_user_id.trim().is_empty()
-            || self.user_id.trim().is_empty()
-            || self
-                .chatgpt_plan_type
-                .as_deref()
-                .is_some_and(|plan_type| plan_type.trim().is_empty())
         {
             return Err(WorkloadIdentityError::InvalidExchangeResponse);
         }
+        let metadata = match self.wif_product {
+            WorkloadIdentityProduct::Chatgpt => {
+                let metadata: ChatgptTokenMetadata = serde_json::from_value(self.metadata)
+                    .map_err(|_| WorkloadIdentityError::InvalidExchangeResponse)?;
+                if metadata.scope.trim().is_empty()
+                    || metadata.chatgpt_account_id.trim().is_empty()
+                    || metadata.chatgpt_account_user_id.trim().is_empty()
+                    || metadata.user_id.trim().is_empty()
+                    || metadata
+                        .chatgpt_plan_type
+                        .as_deref()
+                        .is_some_and(|plan_type| plan_type.trim().is_empty())
+                {
+                    return Err(WorkloadIdentityError::InvalidExchangeResponse);
+                }
+                WorkloadIdentityMetadata::Chatgpt(metadata)
+            }
+            WorkloadIdentityProduct::Api => {
+                let metadata: ApiTokenMetadata = serde_json::from_value(self.metadata)
+                    .map_err(|_| WorkloadIdentityError::InvalidExchangeResponse)?;
+                if metadata.api_organization_id.trim().is_empty()
+                    || metadata.api_project_id.trim().is_empty()
+                    || metadata.user_id.trim().is_empty()
+                {
+                    return Err(WorkloadIdentityError::InvalidExchangeResponse);
+                }
+                WorkloadIdentityMetadata::Api(metadata)
+            }
+        };
         Ok(WorkloadIdentityToken {
             access_token: self.access_token,
-            chatgpt_account_id: self.chatgpt_account_id,
-            chatgpt_account_user_id: self.chatgpt_account_user_id,
-            chatgpt_plan_type: self.chatgpt_plan_type,
             expires_in: self.expires_in,
-            scope: self.scope,
-            user_id: self.user_id,
+            metadata,
             version: 0,
         })
     }

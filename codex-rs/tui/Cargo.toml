@@ -81,7 +81,7 @@ codex-utils-sleep-inhibitor = { workspace = true }
 codex-utils-string = { workspace = true }
 color-eyre = { workspace = true }
 crossterm = { workspace = true, features = ["bracketed-paste", "event-stream"] }
-derive_more = { workspace = true, features = ["is_variant"] }
+derive_more = { workspace = true, features = ["debug", "is_variant"] }
 diffy = { workspace = true }
 dirs = { workspace = true }
 dunce = { workspace = true }
@@ -126,10 +126,12 @@ toml_edit = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-syntect = "5"
-two-face = { version = "0.5", default-features = false, features = ["syntect-default-onig"] }
+syntect = { version = "5", default-features = false, features = ["parsing", "plist-load", "regex-onig"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-onig"] }
+unicode-linebreak = { workspace = true }
 unicode-segmentation = { workspace = true }
 unicode-width = { workspace = true }
+vtparse = { workspace = true }
 url = { workspace = true }
 urlencoding = { workspace = true }
 webbrowser = { workspace = true }
@@ -151,7 +153,7 @@ zbus = "4.4.0"
 
 [target.'cfg(windows)'.dependencies]
 which = { workspace = true }
-windows-sys = { version = "0.52", features = [
+windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Security",
@@ -175,6 +177,7 @@ arboard = { workspace = true }
 [dev-dependencies]
 app_test_support = { workspace = true }
 codex-mcp = { workspace = true }
+codex-protocol-test-support = { workspace = true }
 core_test_support = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 assert_matches = { workspace = true }
@@ -182,6 +185,7 @@ chrono = { workspace = true, features = ["serde"] }
 futures = { workspace = true }
 http = { workspace = true }
 insta = { workspace = true }
+opentelemetry_sdk = { workspace = true }
 pretty_assertions = { workspace = true }
 rand = { workspace = true }
 serial_test = { workspace = true }

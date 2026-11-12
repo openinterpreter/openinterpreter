@@ -12,7 +12,7 @@ impl ChatWidget {
         self.add_to_history(history_cell::new_patch_event(changes, &self.config.cwd));
     }
 
-    pub(super) fn on_view_image_tool_call(&mut self, path: LegacyAppPathString) {
+    pub(super) fn on_view_image_tool_call(&mut self, id: String, path: LegacyAppPathString) {
         self.flush_answer_stream_with_separator();
         self.add_to_history(history_cell::new_view_image_tool_call(path));
         self.request_redraw();
@@ -42,7 +42,7 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    pub(super) fn on_file_change_completed(&mut self, item: ThreadItem) {
+    pub(super) fn on_file_change_completed(&mut self, item: ThreadItemPayload) {
         self.defer_or_handle(
             item,
             InterruptManager::push_item_completed,
@@ -50,7 +50,7 @@ impl ChatWidget {
         );
     }
 
-    pub(super) fn on_mcp_tool_call_started(&mut self, item: ThreadItem) {
+    pub(super) fn on_mcp_tool_call_started(&mut self, item: ThreadItemPayload) {
         self.defer_or_handle(
             item,
             InterruptManager::push_item_started,
@@ -58,7 +58,7 @@ impl ChatWidget {
         );
     }
 
-    pub(super) fn on_mcp_tool_call_completed(&mut self, item: ThreadItem) {
+    pub(super) fn on_mcp_tool_call_completed(&mut self, item: ThreadItemPayload) {
         self.defer_or_handle(
             item,
             InterruptManager::push_item_completed,
@@ -105,14 +105,14 @@ impl ChatWidget {
         }
     }
 
-    pub(super) fn on_collab_event(&mut self, cell: PlainHistoryCell) {
+    pub(super) fn on_collab_event(&mut self, cell: impl HistoryCell + 'static) {
         self.flush_answer_stream_with_separator();
         self.add_to_history(cell);
         self.request_redraw();
     }
 
-    pub(super) fn on_collab_agent_tool_call(&mut self, item: ThreadItem) {
-        let ThreadItem::CollabAgentToolCall {
+    pub(super) fn on_collab_agent_tool_call(&mut self, item: ThreadItemPayload) {
+        let ThreadItemPayload::CollabAgentToolCall {
             id, tool, status, ..
         } = &item
         else {
@@ -163,8 +163,8 @@ impl ChatWidget {
         }
     }
 
-    pub(crate) fn handle_file_change_completed_now(&mut self, item: ThreadItem) {
-        let ThreadItem::FileChange { status, .. } = item else {
+    pub(crate) fn handle_file_change_completed_now(&mut self, item: ThreadItemPayload) {
+        let ThreadItemPayload::FileChange { status, .. } = item else {
             return;
         };
         // If the patch was successful, just let the "Edited" block stand.
@@ -174,8 +174,8 @@ impl ChatWidget {
         }
     }
 
-    pub(crate) fn handle_mcp_tool_call_started_now(&mut self, item: ThreadItem) {
-        let ThreadItem::McpToolCall {
+    pub(crate) fn handle_mcp_tool_call_started_now(&mut self, item: ThreadItemPayload) {
+        let ThreadItemPayload::McpToolCall {
             id,
             server,
             tool,
@@ -294,12 +294,47 @@ impl ChatWidget {
         }
     }
 
-    pub(crate) fn handle_queued_item_started_now(&mut self, item: ThreadItem) {
+    /// Preserve pending calls and timers, returning the revisions before and after hydration.
+    pub(crate) fn prepend_active_computer_history(
+        &mut self,
+        older: &dyn HistoryCell,
+        turns: &[Turn],
+    ) -> Option<(u64, u64)> {
+        let previous_revision = self.transcript.active_cell_revision;
+        let active = self.transcript.active_cell.as_mut().and_then(|cell| {
+            cell.as_any_mut()
+                .downcast_mut::<history_cell::ComputerActivityCell>()
+        })?;
+        let older = crate::thread_transcript::older_computer_group(older, active, turns)?;
+        active.prepend(older);
+        self.bump_active_cell_revision();
+        Some((previous_revision, self.transcript.active_cell_revision))
+    }
+
+    /// Reuse only adjacent computer calls; all other active cells form a transcript boundary.
+    fn update_computer_activity(
+        &mut self,
+        update: impl FnOnce(&mut history_cell::ComputerActivityCell),
+    ) {
+        if let Some(cell) = self.transcript.active_cell.as_mut().and_then(|cell| {
+            cell.as_any_mut()
+                .downcast_mut::<history_cell::ComputerActivityCell>()
+        }) {
+            update(cell);
+        } else {
+            self.flush_active_cell();
+            let mut cell = history_cell::ComputerActivityCell::default();
+            update(&mut cell);
+            self.transcript.active_cell = Some(Box::new(cell));
+        }
+    }
+
+    pub(crate) fn handle_queued_item_started_now(&mut self, item: ThreadItemPayload) {
         match item {
-            item @ ThreadItem::CommandExecution { .. } => {
+            item @ ThreadItemPayload::CommandExecution { .. } => {
                 self.handle_command_execution_started_now(item);
             }
-            item @ ThreadItem::McpToolCall { .. } => {
+            item @ ThreadItemPayload::McpToolCall { .. } => {
                 self.handle_mcp_tool_call_started_now(item);
             }
             item @ ThreadItem::DynamicToolCall { .. } => self.handle_dynamic_tool_item_now(item),
@@ -307,9 +342,9 @@ impl ChatWidget {
         }
     }
 
-    pub(crate) fn handle_queued_item_completed_now(&mut self, item: ThreadItem) {
+    pub(crate) fn handle_queued_item_completed_now(&mut self, item: ThreadItemPayload) {
         match item {
-            item @ ThreadItem::CommandExecution { .. } => {
+            item @ ThreadItemPayload::CommandExecution { .. } => {
                 self.handle_command_execution_completed_now(item);
             }
             item @ ThreadItem::FileChange { .. } => self.handle_file_change_completed_now(item),

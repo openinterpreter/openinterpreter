@@ -10,32 +10,49 @@ use rmcp::service::RxJsonRpcMessage;
 use rmcp::service::TxJsonRpcMessage;
 use rmcp::transport::Transport;
 use tokio::io::AsyncBufReadExt;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
-use tokio::process::ChildStdin;
-use tokio::process::ChildStdout;
 use tokio::sync::Mutex;
 use tracing::debug;
 use tracing::warn;
+
+use crate::local_stdio_io::Stdin;
+use crate::local_stdio_io::Stdout;
 
 /// Match the existing executor stdio transport and the production MCP limit.
 pub(crate) const MAX_MCP_STDIO_LINE_BYTES: usize = 8 * 1024 * 1024;
 
 pub(super) struct BoundedStdioTransport {
-    stdin: Arc<Mutex<Option<ChildStdin>>>,
-    stdout: BufReader<ChildStdout>,
+    stdin: Arc<Mutex<Option<Stdin>>>,
+    stdout: BufReader<Stdout>,
     pending_line: Vec<u8>,
     program_name: String,
 }
 
 impl BoundedStdioTransport {
-    pub(super) fn new(stdin: ChildStdin, stdout: ChildStdout, program_name: String) -> Self {
+    pub(super) fn new(stdin: Stdin, stdout: Stdout, program_name: String) -> Self {
         Self {
             stdin: Arc::new(Mutex::new(Some(stdin))),
             stdout: BufReader::new(stdout),
             pending_line: Vec::new(),
             program_name,
         }
+    }
+
+    /// Pass both a partial line and buffered read-ahead to the SDK's legacy codec.
+    pub(super) fn into_legacy_pipes(
+        self,
+    ) -> io::Result<(Box<dyn AsyncRead + Send + Unpin>, Stdin)> {
+        let stdin = self
+            .stdin
+            .try_lock()
+            .map_err(io::Error::other)?
+            .take()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "MCP stdin closed"))?;
+        let stdout = io::Cursor::new(self.pending_line).chain(self.stdout);
+        Ok((Box::new(stdout), stdin))
     }
 
     async fn receive_message(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {

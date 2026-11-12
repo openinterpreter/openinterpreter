@@ -3,6 +3,7 @@ use crate::LoadableToolSpec;
 use crate::ResponsesApiNamespace;
 use crate::ResponsesApiNamespaceTool;
 use crate::ResponsesApiTool;
+use crate::ToolName;
 use crate::ToolSearchSourceInfo;
 use crate::ToolSpec;
 use crate::default_namespace_description;
@@ -166,9 +167,9 @@ fn append_function_search_text(tool: &ResponsesApiTool, parts: &mut Vec<String>)
 
 fn append_schema_search_text(schema: &JsonSchema, parts: &mut Vec<String>) {
     if let Some(description) = &schema.description {
-        push_search_part(parts, description.clone());
+        push_search_part(parts, description.to_string());
     }
-    if let Some(properties) = &schema.properties {
+    if let Some(properties) = schema.properties.as_deref() {
         for (name, schema) in properties {
             push_search_part(parts, name.clone());
             append_schema_search_text(schema, parts);

@@ -30,6 +30,7 @@ use crate::bottom_pane::footer::FooterMode;
 use crate::bottom_pane::footer::GoalStatusIndicator;
 use crate::key_hint::KeyBinding;
 use crate::key_hint::ShortcutHint;
+use crate::style::secondary_text_style;
 use std::time::Duration;
 
 /// Resolved rectangles shared by painting and cursor placement, without retained layout state.
@@ -210,8 +211,11 @@ pub(super) struct FooterState {
     pub(super) collaboration_mode_indicator: Option<CollaborationModeIndicator>,
     pub(super) goal_status_indicator: Option<GoalStatusIndicator>,
     pub(super) ide_context_active: bool,
-    pub(super) status_line_value: Option<Line<'static>>,
-    pub(super) status_line_hyperlink_url: Option<String>,
+    pub(super) status_line_value: Option<FooterContent>,
+    // Measurement bounds and occupied height, shared by layout and cursor placement.
+    pub(super) measured_status_line: std::cell::Cell<Option<(ratatui::layout::Size, u16)>>,
+    pub(super) wrapped_native_status:
+        std::cell::RefCell<Option<super::native_status::WrappedNativeStatus>>,
     pub(super) status_line_enabled: bool,
     pub(super) side_conversation_context_label: Option<String>,
     pub(super) active_agent_label: Option<String>,
@@ -226,6 +230,7 @@ pub(super) struct FooterState {
     pub(super) history_search_key: Option<ShortcutHint>,
     pub(super) reasoning_down_key: Option<ShortcutHint>,
     pub(super) reasoning_up_key: Option<ShortcutHint>,
+    pub(super) toggle_voice_key: Option<ShortcutHint>,
 }
 
 #[derive(Clone, Debug)]
@@ -246,16 +251,6 @@ impl FooterState {
             .checked_add(duration)
             .unwrap_or_else(Instant::now);
         self.flash = Some(FooterFlash { line, expires_at });
-    }
-
-    #[cfg(test)]
-    pub(super) fn status_line_text(&self) -> Option<String> {
-        self.status_line_value.as_ref().map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        })
     }
 }
 

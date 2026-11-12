@@ -1,5 +1,3 @@
-use crate::context::GuardianContextMode;
-use crate::context::GuardianReviewEvidence;
 use crate::function_tool::FunctionCallError;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
@@ -66,7 +64,7 @@ impl RequestUserInputHandler {
             }
         };
 
-        if turn.session_source.is_non_root_agent() {
+        if turn.root_capabilities_restricted {
             return Err(FunctionCallError::RespondToModel(
                 "request_user_input can only be used by the root thread".to_string(),
             ));
@@ -102,6 +100,7 @@ impl RequestUserInputHandler {
                 "failed to serialize {REQUEST_USER_INPUT_TOOL_NAME} response: {err}"
             ))
         })?;
+        // Persist answers even while an older checkpoint needs compatibility review.
         if turn.config.features.enabled(Feature::GuardianApproval) {
             let history = session.conversation_history_snapshot().await;
             session
@@ -151,7 +150,7 @@ impl RequestUserInputHandler {
                             call_id,
                             questions: user_input,
                         },
-                        acceptance_order: accepted.acceptance_order,
+                        acceptance_order: Some(accepted.acceptance_order),
                     })
                     .await;
             }

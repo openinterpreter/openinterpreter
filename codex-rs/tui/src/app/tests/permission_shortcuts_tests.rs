@@ -35,6 +35,7 @@ async fn permission_shortcut_rejections_leave_state_unchanged() -> Result<()> {
             /*log_db*/ None,
             /*state_db*/ None,
             Arc::clone(&app.environment_manager),
+            Default::default(),
             |mut args| {
                 args.experimental_api = experimental_api;
                 codex_app_server_client::InProcessAppServerClient::start(args)
@@ -42,6 +43,7 @@ async fn permission_shortcut_rejections_leave_state_unchanged() -> Result<()> {
         )
         .await?;
         let mut app_server = AppServerSession::new(
+            crate::backend_id::BackendId::new(),
             codex_app_server_client::AppServerClient::InProcess(client),
             crate::app_server_session::ThreadParamsMode::Embedded,
         );

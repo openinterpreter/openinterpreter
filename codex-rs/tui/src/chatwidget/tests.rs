@@ -102,7 +102,7 @@ pub(super) use codex_app_server_protocol::ServerNotification;
 pub(super) use codex_app_server_protocol::SkillMetadata;
 pub(super) use codex_app_server_protocol::SkillSummary;
 pub(super) use codex_app_server_protocol::ThreadClosedNotification;
-pub(super) use codex_app_server_protocol::ThreadItem as AppServerThreadItem;
+pub(super) use codex_app_server_protocol::ThreadItemPayload as AppServerThreadItemPayload;
 pub(super) use codex_app_server_protocol::ToolRequestUserInputOption;
 pub(super) use codex_app_server_protocol::ToolRequestUserInputParams;
 pub(super) use codex_app_server_protocol::ToolRequestUserInputQuestion;
@@ -139,7 +139,6 @@ pub(super) use codex_protocol::approvals::GuardianRiskLevel;
 pub(super) use codex_protocol::approvals::GuardianUserAuthorization;
 pub(super) use codex_protocol::config_types::CollaborationMode;
 pub(super) use codex_protocol::config_types::ModeKind;
-pub(super) use codex_protocol::config_types::Personality;
 pub(super) use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 pub(super) use codex_protocol::config_types::ServiceTier;
 pub(super) use codex_protocol::models::ActivePermissionProfile;
@@ -159,9 +158,6 @@ pub(super) use codex_protocol::plan_tool::StepStatus;
 pub(super) use codex_protocol::plan_tool::UpdatePlanArgs;
 pub(super) use codex_protocol::request_permissions::RequestPermissionProfile;
 pub(super) use codex_protocol::user_input::TextElement;
-pub(super) use codex_terminal_detection::Multiplexer;
-pub(super) use codex_terminal_detection::TerminalInfo;
-pub(super) use codex_terminal_detection::TerminalName;
 pub(super) use codex_utils_absolute_path::AbsolutePathBuf;
 pub(super) use codex_utils_approval_presets::builtin_approval_presets;
 pub(super) use codex_utils_path_uri::LegacyAppPathString;
@@ -259,6 +255,8 @@ pub(crate) mod helpers;
 #[path = "tests/history_projection.rs"]
 mod history_projection;
 mod history_replay;
+#[path = "tests/home_cleanup_tests.rs"]
+mod home_cleanup_tests;
 #[path = "tests/luna_reserve_usage_tests.rs"]
 mod luna_reserve_usage_tests;
 mod mcp_startup;
@@ -277,6 +275,8 @@ mod plan_mode;
 #[path = "tests/plugin_catalog_tests.rs"]
 mod plugin_catalog;
 mod popups_and_settings;
+#[path = "tests/program_status.rs"]
+mod program_status;
 #[path = "tests/rate_limit_recovery_tests.rs"]
 mod rate_limit_recovery_tests;
 #[path = "tests/reasoning_status_tests.rs"]
@@ -289,6 +289,8 @@ mod review_picker_tests;
 #[path = "tests/session_model_selection_tests.rs"]
 mod session_model_selection_tests;
 mod side;
+#[path = "tests/skills_summary_tests.rs"]
+mod skills_summary_tests;
 mod slash_commands;
 #[path = "tests/sparkle_submission_tests.rs"]
 mod sparkle_submission_tests;
@@ -296,6 +298,8 @@ mod sparkle_submission_tests;
 mod startup_submission_tests;
 mod status_and_layout;
 mod status_command_tests;
+#[path = "tests/status_surface_command_tests.rs"]
+mod status_surface_command_tests;
 mod status_surface_previews;
 #[path = "tests/subagent_activity_tests.rs"]
 mod subagent_activity;
@@ -307,6 +311,7 @@ mod usage;
 mod worktree_picker;
 
 pub(crate) use helpers::make_chatwidget_manual_with_sender;
+pub(crate) use helpers::render_bottom_popup;
 pub(crate) use helpers::set_chatgpt_auth;
 pub(crate) use helpers::set_fast_mode_test_catalog;
 pub(super) use helpers::*;

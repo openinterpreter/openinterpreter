@@ -112,7 +112,7 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
             "id": id, "sessionId": id, "preview": "only once", "ephemeral": false,
             "modelProvider": "test-provider", "createdAt": 1, "updatedAt": 2,
             "status": {"type": "idle"}, "cwd": cwd, "cliVersion": "0.0.0", "source": "cli",
-            "turns": [test_turn("accepted", TurnStatus::Completed, vec![ThreadItem::UserMessage {
+            "turns": [test_turn("accepted", TurnStatus::Completed, vec![ThreadItemPayload::UserMessage {
                 id: "input-1".into(), client_id: None, content: vec![UserInput::Text { text: "only once".into(), text_elements: Vec::new() }],
             }])]
         });
@@ -143,9 +143,9 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
                     "thread/list" | "thread/loaded/list" => Some(json!({"result": {"data": [], "nextCursor": null}})),
                     "thread/goal/get" => Some(json!({"result": {"goal": null}})),
                     "turn/start" => {
-                        assert!(!recovered_queue);
+                        assert!(!edit_offline);
                         let params = request.params.as_ref().unwrap();
-                        assert_eq!(params["input"][0]["text"], "fresh follow-up");
+                        assert_eq!(params["input"][0]["text"], if recovered_queue { "old queued input" } else { "fresh follow-up" });
                         assert_eq!(params["approvalPolicy"], if pending_profile { "never" } else { "on-request" });
                         assert_eq!(params["sandboxPolicy"]["type"], if pending_profile { json!(null) } else { json!("readOnly") });
                         assert_eq!(params["collaborationMode"], json!(expected_submitted_mode));
@@ -168,9 +168,10 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
             crate::dynamic_tools_mcp::DynamicToolMcpServer::start(
                 session.request_handle(),
                 codex_app_server_protocol::ThreadStartParams::default(),
+                app.config.features.get().clone(),
                 app.app_event_tx.clone(),
                 app.dynamic_tool_status_updates.clone(),
-                /*managed_requirement*/ None,
+                /*worktrees*/ None,
             )
             .await?,
         ));
@@ -205,7 +206,8 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
             );
         let mut tui = crate::tui::test_support::make_test_tui()?;
         if pending_profile {
-            app.pending_server_profiles.insert(
+            app.runtime_approvals_reviewer_override = Some(ApprovalsReviewer::User);
+            app.agents_overview.requested_permission_profiles.insert(
                 id,
                 PermissionProfileSelection {
                     profile_id: "server-only".into(),
@@ -273,7 +275,9 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
             .unwrap()
             .creating_worktree = true;
         let old_sender = app.app_event_tx.clone();
+        let backend_id = session.backend_id();
         let connected = reconnect(
+            session.backend_id(),
             app.app_server_target.clone(),
             app.config.clone(),
             app.local_settings.clone(),
@@ -323,8 +327,9 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
         );
         assert!(app.agent_navigation.begin_picker_refresh(id).is_some());
         assert!(
-            !app.agent_navigation
+            app.agent_navigation
                 .finish_picker_refresh(id, stale_picker_refresh)
+                .is_none()
         );
         // Let the rebound timer become due without depending on machine uptime.
         tokio::time::pause();
@@ -394,27 +399,26 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
             }
         }
         assert_eq!(history.matches("only once").count(), 1);
-        if recovered_queue {
+        if edit_offline {
             assert!(app.chat_widget.has_queued_follow_up_messages());
             assert!(!app.chat_widget.maybe_send_next_queued_input());
-            if edit_offline {
-                app.handle_tui_event(
-                    &mut tui,
-                    &mut session,
-                    TuiEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
-                )
-                .await?;
-                assert_eq!(
-                    app.chat_widget.composer_text_with_pending(),
-                    "unacknowledged prompt"
-                );
-                assert!(ops.try_recv().is_err());
-            } else {
-                assert_snapshot!(
-                    "restored_conversation",
-                    render_bottom_popup(&app.chat_widget, /*width*/ 80)
-                );
-            }
+            app.handle_tui_event(
+                &mut tui,
+                &mut session,
+                TuiEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+            )
+            .await?;
+            assert_eq!(
+                app.chat_widget.composer_text_with_pending(),
+                "unacknowledged prompt"
+            );
+            assert!(ops.try_recv().is_err());
+        } else if recovered_queue {
+            assert!(!app.chat_widget.has_queued_follow_up_messages());
+            assert_snapshot!(
+                "restored_conversation",
+                render_bottom_popup(&app.chat_widget, /*width*/ 80)
+            );
         } else {
             app.chat_widget
                 .handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
@@ -425,6 +429,9 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
             while let Ok(event) = events.try_recv() {
                 app.handle_event(&mut tui, &mut session, event).await?;
             }
+        }
+        while let Ok(event) = events.try_recv() {
+            app.handle_event(&mut tui, &mut session, event).await?;
         }
         session.shutdown().await?;
         let methods = server.await??;
@@ -440,7 +447,7 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
                 .iter()
                 .filter(|method| *method == "turn/start")
                 .count(),
-            usize::from(!recovered_queue)
+            usize::from(!edit_offline)
         );
     }
     Ok(())
@@ -516,7 +523,7 @@ async fn reconnect_reconciles_offscreen_pending_profile_before_restoring_permiss
                 "thread/read" => json!({"result": {"thread": thread(primary)}}),
                 "turn/start" => {
                     let params = request.params.as_ref().unwrap();
-                    assert_eq!(params["permissions"], "server-only");
+                    assert_eq!(params["permissions"], serde_json::Value::Null);
                     assert_eq!(params["approvalPolicy"], "on-request");
                     assert_eq!(params["sandboxPolicy"], json!(null));
                     json!({"result": {"turn": {"id": "fresh", "items": [], "status": "inProgress"}}})
@@ -533,6 +540,7 @@ async fn reconnect_reconciles_offscreen_pending_profile_before_restoring_permiss
     let mut tui = crate::tui::test_support::make_test_tui()?;
     app.begin_reconnect();
     let connected = reconnect(
+        session.backend_id(),
         app.app_server_target.clone(),
         app.config.clone(),
         app.local_settings.clone(),
@@ -603,27 +611,35 @@ async fn reconnect_exhaustion_and_unknown_initial_thread_stay_offline() -> Resul
     drop(listener);
     tokio::time::pause();
     let start = tokio::time::Instant::now();
-    for id in [Some(ThreadId::new()), None] {
-        assert!(
-            reconnect(
-                app.app_server_target.clone(),
-                app.config.clone(),
-                app.local_settings.clone(),
-                id,
-                /*remote_cwd*/ None,
-                crate::dynamic_tools_mcp::ThreadToolTransport::Dynamic,
-                ReconnectPresentation::Conversation
-            )
-            .await
-            .is_err()
-        );
-    }
-    assert!((15..=65).contains(&start.elapsed().as_secs()));
+    let reconnect_thread = |id| {
+        reconnect(
+            crate::backend_id::BackendId::new(),
+            app.app_server_target.clone(),
+            app.config.clone(),
+            app.local_settings.clone(),
+            id,
+            /*remote_cwd*/ None,
+            crate::dynamic_tools_mcp::ThreadToolTransport::Dynamic,
+            ReconnectPresentation::Conversation,
+        )
+    };
+    assert!(reconnect_thread(None).await.is_err());
+    let error = reconnect_thread(Some(ThreadId::new()))
+        .await
+        .err()
+        .expect("reconnect should time out");
+    assert_eq!(start.elapsed().as_secs(), 120);
     app.begin_reconnect();
     app.chat_widget.reconnect_failed();
     assert_snapshot!(
         "reconnect_failed",
-        render_bottom_popup(&app.chat_widget, /*width*/ 80)
+        format!(
+            "{error}\n{}",
+            super::disconnect::normalize_reconnect_status(&render_bottom_popup(
+                &app.chat_widget,
+                /*width*/ 80
+            ))
+        )
     );
     tokio::time::resume();
     Ok(())
@@ -645,10 +661,13 @@ async fn reconnect_allows_slow_hydration_but_bounds_a_stalled_server() -> Result
             serve_reconnect_requests(
                 tokio_tungstenite::accept_async(stream).await?,
                 move |request| async move {
-                    assert_eq!(request.method, "thread/resume");
-                    tokio::time::pause();
-                    tokio::time::sleep(Duration::from_secs(delay)).await;
-                    tokio::time::resume();
+                    if request.method == "thread/resume" {
+                        tokio::time::pause();
+                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                        tokio::time::resume();
+                    } else {
+                        assert_eq!(request.method, "thread/read");
+                    }
                     Some(json!({"error": {"code": -32600, "message": "thread no longer exists"}}))
                 },
             )
@@ -656,6 +675,7 @@ async fn reconnect_allows_slow_hydration_but_bounds_a_stalled_server() -> Result
         });
         let start = tokio::time::Instant::now();
         let result = reconnect(
+            crate::backend_id::BackendId::new(),
             AppServerTarget::Remote {
                 endpoint: endpoint.clone(),
             },
@@ -727,7 +747,10 @@ async fn reconnect_allows_slow_hydration_but_bounds_a_stalled_server() -> Result
             );
         } else {
             tokio::time::resume();
-            assert!(result.is_err());
+            assert_eq!(
+                result.err().expect("resume should time out").to_string(),
+                "Automatic reconnect timed out while resuming the conversation."
+            );
             assert_eq!(elapsed, 120);
             server.abort();
         }
@@ -742,13 +765,10 @@ pub(super) async fn drain_history(
     events: &mut mpsc::UnboundedReceiver<AppEvent>,
 ) -> Result<String> {
     while let Ok(event) = events.try_recv() {
-        assert!(!matches!(
-            event,
-            AppEvent::CodexOp(AppCommand::UserTurn { .. })
-        ));
         if matches!(
             event,
             AppEvent::InsertHistoryCell(_)
+                | AppEvent::CodexOp(AppCommand::UserTurn { .. })
                 | AppEvent::BeginThreadSwitchHistoryReplayBuffer
                 | AppEvent::EndInitialHistoryReplayBuffer
         ) {

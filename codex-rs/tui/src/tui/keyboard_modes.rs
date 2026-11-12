@@ -8,6 +8,8 @@
 
 use std::fmt;
 use std::io::Write;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use codex_terminal_detection::TerminalName;
 use codex_terminal_detection::terminal_info;
@@ -18,9 +20,10 @@ use crossterm::event::PushKeyboardEnhancementFlags;
 use ratatui::crossterm::execute;
 
 const DISABLE_KEYBOARD_ENHANCEMENT_ENV_VAR: &str = "CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT";
+static REPORTS_KEY_RELEASES: AtomicBool = AtomicBool::new(/*v*/ false);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum VscodeDetection {
+pub(crate) enum VscodeDetection {
     VsCode,
     Other,
     Unknown,
@@ -84,7 +87,7 @@ pub(super) fn running_in_vscode_terminal() -> bool {
     detect_vscode_terminal() == VscodeDetection::VsCode
 }
 
-fn detect_vscode_terminal() -> VscodeDetection {
+pub(crate) fn detect_vscode_terminal() -> VscodeDetection {
     if term_program_is_vscode(std::env::var("TERM_PROGRAM").ok().as_deref()) {
         return VscodeDetection::VsCode;
     }
@@ -206,34 +209,40 @@ fn read_windows_vscode_detection_with_timeout(
 #[path = "windows_term_program_tests.rs"]
 mod windows_term_program_tests;
 
-pub(super) fn enable_keyboard_enhancement(writer: &mut impl Write) {
+/// Restore keyboard reporting and return the settings from the same tmux probe.
+pub(super) fn enable_keyboard_enhancement(writer: &mut impl Write) -> super::tmux::Options {
+    let tmux_options = super::tmux::options();
     if keyboard_enhancement_disabled() {
-        return;
+        set_reports_key_releases(/*reports*/ false);
+        return tmux_options;
     }
 
     let running_in_tmux_session = running_in_tmux_session();
     let tmux_extended_keys_format = if running_in_tmux_session {
-        read_tmux_extended_keys_format()
+        tmux_options.extended_keys_format.as_deref()
     } else {
         None
     };
 
-    let _ = execute!(
+    let flags = keyboard_enhancement_flags(
+        terminal_info().name,
+        running_in_tmux_session,
+        tmux_extended_keys_format,
+    );
+    let result = execute!(
         writer,
         DisableModifyOtherKeys,
-        PushKeyboardEnhancementFlags(keyboard_enhancement_flags(
-            terminal_info().name,
-            running_in_tmux_session,
-            tmux_extended_keys_format.as_deref()
-        ))
+        PushKeyboardEnhancementFlags(flags)
+    );
+    set_reports_key_releases(
+        result.is_ok() && flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES),
     );
 
-    if tmux_should_enable_modify_other_keys_for(
-        running_in_tmux_session,
-        tmux_extended_keys_format.as_deref(),
-    ) {
+    if tmux_should_enable_modify_other_keys_for(running_in_tmux_session, tmux_extended_keys_format)
+    {
         let _ = execute!(writer, EnableModifyOtherKeys);
     }
+    tmux_options
 }
 
 fn keyboard_enhancement_flags(
@@ -257,6 +266,14 @@ fn keyboard_enhancement_flags(
     }
 }
 
+pub(super) fn reports_key_releases() -> bool {
+    REPORTS_KEY_RELEASES.load(Ordering::Relaxed)
+}
+
+pub(super) fn set_reports_key_releases(reports: bool) {
+    REPORTS_KEY_RELEASES.store(reports, Ordering::Relaxed);
+}
+
 fn running_in_tmux_session() -> bool {
     tmux_session_detected(
         std::env::var("TMUX").ok().as_deref(),
@@ -278,48 +295,23 @@ fn tmux_should_enable_modify_other_keys_for(
     running_in_tmux_session && matches!(extended_keys_format, Some("csi-u"))
 }
 
-fn read_tmux_extended_keys_format() -> Option<String> {
-    let executable = codex_utils_path::system_executable("tmux")?;
-    let path = codex_utils_path::system_path().ok()?;
-    for args in [
-        ["display-message", "-p", "#{extended-keys-format}"],
-        ["show-options", "-gqv", "extended-keys-format"],
-    ] {
-        let output = std::process::Command::new(&executable)
-            .env("PATH", &path)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()?;
-
-        if !output.status.success() {
-            continue;
-        }
-
-        if let Some(value) = String::from_utf8(output.stdout)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
-            return Some(value);
-        }
-    }
-
-    None
-}
-
 pub(super) fn restore_keyboard_enhancement_stack(writer: &mut impl Write) {
-    let _ = execute!(writer, PopKeyboardEnhancementFlags, DisableModifyOtherKeys);
+    if execute!(writer, PopKeyboardEnhancementFlags, DisableModifyOtherKeys).is_ok() {
+        set_reports_key_releases(/*reports*/ false);
+    }
 }
 
 pub(super) fn reset_keyboard_reporting_after_exit(writer: &mut impl Write) {
-    let _ = execute!(
+    if execute!(
         writer,
         PopKeyboardEnhancementFlags,
         ResetKeyboardEnhancementFlags,
         DisableModifyOtherKeys
-    );
+    )
+    .is_ok()
+    {
+        set_reports_key_releases(/*reports*/ false);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,7 +359,7 @@ impl Command for EnableModifyOtherKeys {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DisableModifyOtherKeys;
+pub(super) struct DisableModifyOtherKeys;
 
 impl Command for DisableModifyOtherKeys {
     fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {

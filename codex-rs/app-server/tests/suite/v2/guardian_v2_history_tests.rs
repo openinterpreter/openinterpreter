@@ -65,22 +65,17 @@ enum EvidenceSize {
 }
 
 #[derive(Clone, Copy)]
-enum ContextPath {
-    Legacy,
-    ThreadOwned,
-}
-
-#[derive(Clone, Copy)]
 enum CheckpointReuse {
     Enabled,
     Disabled,
+    Independent,
 }
 
 #[derive(Clone, Copy)]
 enum ReviewCheckpoint {
     Valid,
     EmptyContent,
-    IncompatibleReviewer,
+    DifferentReviewerHash,
     UnknownReviewer,
     EmptyReviewerHash,
 }
@@ -121,20 +116,20 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
     const RESTRICTION: &str = "Only publish to a private repository.";
     const EVIDENCE: &str = "repository is private";
     const SUMMARY: &str = "Repository inspection was summarized.";
-    let reuse_parent_compaction = matches!(checkpoint_reuse, CheckpointReuse::Enabled);
+    let reuse_parent_compaction = !matches!(checkpoint_reuse, CheckpointReuse::Disabled);
     let compatible =
         reuse_parent_compaction && parent_hash == Some("matching") && luna_hash == parent_hash;
-    let requires_sync = matches!(context_path, ContextPath::ThreadOwned) && !compatible;
+    let independent = matches!(checkpoint_reuse, CheckpointReuse::Independent);
+    let requires_sync = !compatible && !independent;
     let oversized_instruction = matches!(evidence_size, EvidenceSize::OversizedInstruction);
     let reviewer_hash = match review_checkpoint {
-        ReviewCheckpoint::IncompatibleReviewer => Some("different-reviewer"),
+        ReviewCheckpoint::DifferentReviewerHash => Some("different-reviewer"),
         ReviewCheckpoint::UnknownReviewer => None,
         ReviewCheckpoint::EmptyReviewerHash => Some(""),
         ReviewCheckpoint::Valid | ReviewCheckpoint::EmptyContent => Some("matching"),
     };
-    let reject_sync_checkpoint = matches!(context_path, ContextPath::ThreadOwned)
-        && (!matches!(review_checkpoint, ReviewCheckpoint::Valid)
-            || parent_hash != Some("matching"));
+    // Sync review accepts any hash metadata; only the checkpoint payload must be usable.
+    let reject_sync_checkpoint = matches!(review_checkpoint, ReviewCheckpoint::EmptyContent);
     let answer = match evidence_size {
         EvidenceSize::Normal | EvidenceSize::OversizedInstruction => {
             USER_INPUT_RESTRICTION.to_owned()
@@ -158,14 +153,11 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
     match review_checkpoint {
         ReviewCheckpoint::EmptyContent => checkpoint["encrypted_content"] = json!(""),
         ReviewCheckpoint::Valid
-        | ReviewCheckpoint::IncompatibleReviewer
+        | ReviewCheckpoint::DifferentReviewerHash
         | ReviewCheckpoint::UnknownReviewer
         | ReviewCheckpoint::EmptyReviewerHash => {}
     }
-    let rejects_incomplete_score = matches!(
-        (context_path, evidence_size),
-        (ContextPath::ThreadOwned, EvidenceSize::OversizedAnswer)
-    );
+    let rejects_incomplete_score = matches!(evidence_size, EvidenceSize::OversizedAnswer);
     let classifier = Arc::new(MockResponsesState {
         luna_score: if rejects_incomplete_score || oversized_instruction || requires_sync {
             0.0
@@ -270,11 +262,7 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
     });
     let (mcp_url, mcp_server) = start_mcp_server(/*sensitive_action*/ None).await?;
     let codex_home = TempDir::new()?;
-    let thread_context_enabled = match context_path {
-        ContextPath::Legacy => false,
-        ContextPath::ThreadOwned => true,
-    };
-    let mut mock_config = MockResponsesConfig::new(&responses_url)
+    let mock_config = MockResponsesConfig::new(&responses_url)
         .with_provider_name("OpenAI")
         .with_provider_config("requires_openai_auth = true\nsupports_websockets = false")
         .with_root_config("approvals_reviewer = \"auto_review\"\nmodel_auto_compact_token_limit = 1000000")
@@ -283,11 +271,13 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
         .disable_feature(Feature::EnableRequestCompression)
         .disable_feature(Feature::TokenBudget)
         .with_extra_config(&format!(
-            "[mcp_servers.{TEST_SERVER_NAME}]\nurl = \"{mcp_url}/mcp\"\ndefault_tools_approval_mode = \"prompt\"\n\n[features.guardianv2]\nenabled = true\nthread_context = {thread_context_enabled}\npersist_scores = true\nreuse_parent_compaction = {reuse_parent_compaction}\n\n[features.guardianv2.review_scope]\ncomputer_use_only = false"
+            "[mcp_servers.{TEST_SERVER_NAME}]\nurl = \"{mcp_url}/mcp\"\ndefault_tools_approval_mode = \"prompt\"\n\n[features.guardianv2]\nenabled = true\npersist_scores = true\nreuse_parent_compaction = {reuse_parent_compaction}\n\n[features.guardianv2.review_scope]\ncomputer_use_only = false"
         ));
-    if matches!(context_path, ContextPath::ThreadOwned) {
-        mock_config = mock_config.disable_feature(Feature::GuardianReuseParentCompaction);
-    }
+    let mock_config = if independent {
+        mock_config.disable_feature(Feature::GuardianReuseParentCompaction)
+    } else {
+        mock_config
+    };
     mock_config.write(codex_home.path())?;
     let config = load_default_config_for_test(&codex_home).await;
     let models = [
@@ -415,17 +405,6 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
             .await??;
             let assessment: ItemGuardianApprovalReviewCompletedNotification =
                 serde_json::from_value(notification.params.expect("review completion"))?;
-            let reason = match review_checkpoint {
-                ReviewCheckpoint::EmptyContent => {
-                    "parent compaction checkpoint is unusable for Guardian review"
-                }
-                ReviewCheckpoint::Valid
-                | ReviewCheckpoint::IncompatibleReviewer
-                | ReviewCheckpoint::UnknownReviewer
-                | ReviewCheckpoint::EmptyReviewerHash => {
-                    "parent compaction checkpoint is incompatible with the Guardian review model or its compatibility is unknown"
-                }
-            };
             assert_eq!(
                 assessment.review,
                 GuardianApprovalReview {
@@ -592,16 +571,11 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
                 }));
                 {
                     assert!(sync_text.contains(RESTRICTION));
-                    if matches!(context_path, ContextPath::ThreadOwned) {
-                        assert!(
-                            !sync_text.contains(&expected_output),
-                            "raw tool result must not survive the parent checkpoint"
-                        );
-                    } else if tool_traffic == 0 {
-                        assert!(sync_text.contains(EVIDENCE));
-                        assert!(sync_text.contains(&format!("tool {TEST_TOOL_NAME} result:")));
-                        assert!(sync_text.contains(&expected_output));
-                    }
+                    assert_eq!(
+                        sync_text.contains(&expected_output),
+                        independent,
+                        "only independent review retains raw tool evidence"
+                    );
                     assert!(sync_text.contains(">>> TRANSCRIPT START"));
                     assert!(!sync_text.contains(">>> TRANSCRIPT DELTA START"));
                     // The endpoint receives the original evidence. The returned checkpoint is
@@ -744,13 +718,15 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
 
     app_server.shutdown_gracefully().await?;
     let rollout = std::fs::read_to_string(thread.path.as_ref().expect("saved rollout path"))?;
-    if matches!(context_path, ContextPath::ThreadOwned) {
-        for line in rollout
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        {
-            if line["type"] == "compacted" {
-                assert!(line["payload"]["guardian_history"].is_null());
+    for line in rollout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+    {
+        if line["type"] == "compacted" {
+            let saved_review = &line["payload"]["guardian_history"];
+            assert_eq!(saved_review.is_null(), !independent);
+            if independent {
+                assert!(saved_review.to_string().contains(EVIDENCE));
             }
         }
     }
@@ -763,8 +739,8 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
             .iter()
             .filter(|line| matches!(line.item, RolloutItem::RetainedContext(_)))
             .count(),
-        usize::from(matches!(context_path, ContextPath::ThreadOwned)),
-        "only the enabled path may persist a retained-answer event",
+        1,
+        "verified answers must be persisted",
     );
     for line in &items {
         if let RolloutItem::Compacted(checkpoint) = &line.item {
@@ -785,22 +761,7 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
             }
         }
     }
-    if matches!(context_path, ContextPath::Legacy) {
-        for line in &items {
-            if let RolloutItem::Compacted(checkpoint) = &line.item {
-                assert_eq!(
-                    checkpoint
-                        .retained_context
-                        .as_ref()
-                        .expect("retained context checkpoint")
-                        .verified_answers()
-                        .count(),
-                    0,
-                    "flag-off compaction must not populate retained answers",
-                );
-            }
-        }
-    }
+
     mcp_server.abort();
     responses_server.abort();
     Ok(())

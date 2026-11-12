@@ -37,6 +37,13 @@
         "null"
       ]
     },
+    "serverName": {
+      "description": "Limit discovery to one server. With a thread ID, reuse that thread's MCP connection.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "threadId": {
       "type": [
         "string",

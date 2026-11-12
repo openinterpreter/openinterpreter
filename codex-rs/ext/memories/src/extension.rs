@@ -94,7 +94,7 @@ impl ContextContributor for MemoriesExtension {
                 .map(|instructions| {
                     PromptFragment::developer_policy(
                         instructions,
-                        ContentItemKind("memories.instructions".to_string()),
+                        ContentItemKind(MemoryContextFragment::READ_INSTRUCTIONS_KIND.to_string()),
                     )
                 })
                 .collect()

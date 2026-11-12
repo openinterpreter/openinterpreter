@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::compact::InitialContextInjection;
 use crate::context::world_state::WorldState;
 use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
@@ -8,7 +7,6 @@ use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
-use crate::session::turn_context::TurnContext;
 use codex_analytics::CompactionTrigger;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
@@ -23,7 +21,8 @@ use tokio_util::sync::CancellationToken;
 /// observe the same lifecycle as local or remote compaction.
 pub(crate) async fn run_manual_compact_task(
     sess: Arc<Session>,
-    turn_context: Arc<TurnContext>,
+    step_context: Arc<StepContext>,
+    world_state: Arc<WorldState>,
 ) -> CodexResult<()> {
     sess.emit_turn_started(&turn_context).await;
 
@@ -43,14 +42,8 @@ pub(crate) async fn run_manual_compact_task(
 pub(crate) async fn run_inline_auto_compact_task(
     sess: Arc<Session>,
     step_context: Arc<StepContext>,
-    initial_context_injection: InitialContextInjection,
+    world_state: Arc<WorldState>,
 ) -> CodexResult<()> {
-    let world_state = match initial_context_injection {
-        InitialContextInjection::BeforeLastUserMessage { world_state, .. } => world_state,
-        InitialContextInjection::DoNotInject => {
-            Arc::new(sess.build_world_state_for_step(&step_context).await?)
-        }
-    };
     run_compact_task_inner(&sess, &step_context, world_state, CompactionTrigger::Auto).await
 }
 

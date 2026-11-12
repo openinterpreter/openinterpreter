@@ -24,12 +24,10 @@ use super::discovery::MAX_CONCURRENT_SKILL_LOADS;
 use super::discovery::SkillDiscoveryOptions;
 use super::discovery::SkillMetadataDiscovery;
 use super::discovery::discover_skills;
-use super::metadata::SkillMetadataFile;
-use super::metadata::resolve_dependencies;
-use super::metadata::resolve_policy;
 use super::metadata::sanitize_single_line;
 use super::metadata::validate_len;
 use super::namespace::SkillNamespaceResolver;
+use codex_skills::parse_skill_metadata;
 
 struct ParsedEnvironmentSkill {
     path_to_skills_md: PathUri,
@@ -269,7 +267,7 @@ pub fn load_environment_skills_from_discovery(
             .metadata
             .as_ref()
             .and_then(|metadata| {
-                serde_yaml::from_str::<SkillMetadataFile>(&metadata.contents)
+                parse_skill_metadata(&metadata.contents)
                     .map_err(|error| {
                         tracing::warn!(
                             path = %metadata.path,
@@ -278,12 +276,7 @@ pub fn load_environment_skills_from_discovery(
                     })
                     .ok()
             })
-            .map(|metadata| {
-                (
-                    resolve_dependencies(metadata.dependencies),
-                    resolve_policy(metadata.policy),
-                )
-            })
+            .map(|metadata| (metadata.dependencies, metadata.policy))
             .unwrap_or((None, None));
         let metadata = EnvironmentSkillMetadata {
             path_to_skills_md: skill.instructions.path.clone(),
@@ -367,7 +360,7 @@ async fn read_skill_metadata(
             return (None, None);
         }
     };
-    let parsed: SkillMetadataFile = match serde_yaml::from_str(&contents) {
+    let parsed = match parse_skill_metadata(&contents) {
         Ok(parsed) => parsed,
         Err(error) => {
             tracing::warn!("ignoring {metadata_path}: invalid metadata: {error}");
@@ -375,10 +368,7 @@ async fn read_skill_metadata(
         }
     };
 
-    (
-        resolve_dependencies(parsed.dependencies),
-        resolve_policy(parsed.policy),
-    )
+    (parsed.dependencies, parsed.policy)
 }
 
 fn default_skill_name(path: &PathUri) -> String {

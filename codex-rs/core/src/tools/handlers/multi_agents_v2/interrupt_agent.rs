@@ -1,5 +1,6 @@
 use super::analytics::ToolCallAnalytics;
 use super::*;
+use crate::agent::api::AgentTarget;
 use crate::tools::handlers::multi_agents_spec::create_interrupt_agent_tool_v2;
 use codex_tools::ToolSpec;
 
@@ -57,6 +58,8 @@ async fn handle_interrupt_agent(
         &session,
         &turn,
         SubAgentActivityItem {
+            model: None,
+            reasoning_effort: None,
             id: call_id,
             agent_thread_id: agent_id,
             agent_path,

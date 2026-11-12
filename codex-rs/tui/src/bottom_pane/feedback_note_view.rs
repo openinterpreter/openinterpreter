@@ -37,6 +37,7 @@ use super::popup_consts::accept_cancel_hint_line;
 use super::textarea::TextArea;
 use super::textarea::TextAreaState;
 
+const SAVE_LOCALLY: key_hint::KeyBinding = key_hint::ctrl(KeyCode::Char('s'));
 const FEEDBACK_POLICY_URL: &str = "https://help.openai.com/en/articles/5722486-how-your-data-is-used-to-improve-model-performance";
 const EMPLOYEE_FEEDBACK_FAQ_URL: &str = "https://go/codex-employee-feedback-faq";
 
@@ -52,7 +53,8 @@ pub(crate) struct FeedbackNoteView {
     turn_id: Option<String>,
     app_event_tx: AppEventSender,
     include_logs: bool,
-    feedback_audience: FeedbackAudience,
+    upload_audience: Option<FeedbackAudience>,
+    can_save: bool,
 
     // UI state
     textarea: TextArea,
@@ -73,7 +75,8 @@ impl FeedbackNoteView {
         turn_id: Option<String>,
         app_event_tx: AppEventSender,
         include_logs: bool,
-        feedback_audience: FeedbackAudience,
+        upload_audience: Option<FeedbackAudience>,
+        can_save: bool,
     ) -> Self {
         // The app-server may run on another host. Only its upload response can
         // establish whether a report passcode is required; the TUI's local
@@ -124,7 +127,8 @@ impl FeedbackNoteView {
             turn_id,
             app_event_tx,
             include_logs,
-            feedback_audience,
+            upload_audience,
+            can_save,
             textarea: TextArea::new(),
             textarea_state: RefCell::new(TextAreaState::default()),
             paste_burst: PasteBurst::default(),
@@ -138,7 +142,7 @@ impl FeedbackNoteView {
         }
     }
 
-    fn submit(&mut self) {
+    fn submit(&mut self, destination: FeedbackDestination) {
         let note = self.textarea.text().trim().to_string();
         let reason = if note.is_empty() { None } else { Some(note) };
         self.app_event_tx.send(AppEvent::SubmitFeedback {
@@ -149,6 +153,7 @@ impl FeedbackNoteView {
                 .then(|| SecretReportPasscode::new(std::mem::take(&mut self.passcode_input))),
             turn_id: self.turn_id.clone(),
             include_logs: self.include_logs,
+            destination,
         });
         self.complete = true;
     }
@@ -184,6 +189,11 @@ impl FeedbackNoteView {
             return;
         }
         match key_event {
+            key if SAVE_LOCALLY.is_press(key) => {
+                if self.can_save {
+                    self.submit(FeedbackDestination::LocalZip);
+                }
+            }
             KeyEvent {
                 code: KeyCode::PageUp,
                 ..
@@ -362,6 +372,8 @@ impl Renderable for FeedbackNoteView {
 
         buf.set_style(area, crate::style::user_message_style());
 
+        buf.set_style(area, crate::style::user_message_style());
+
         // Four rows leave room for one intro line; show the disclosure before submission.
         let intro_content = if area.height == 4 {
             IntroContent::DisclosureOnly
@@ -400,11 +412,13 @@ impl Renderable for FeedbackNoteView {
                 buf,
             );
         }
-        let disclosure_url = match self.feedback_audience {
-            FeedbackAudience::OpenAiEmployee => EMPLOYEE_FEEDBACK_FAQ_URL,
-            FeedbackAudience::External => FEEDBACK_POLICY_URL,
-        };
-        mark_underlined_hyperlink(buf, intro_area, disclosure_url);
+        if let Some(audience) = self.upload_audience {
+            let url = match audience {
+                FeedbackAudience::OpenAiEmployee => EMPLOYEE_FEEDBACK_FAQ_URL,
+                FeedbackAudience::External => FEEDBACK_POLICY_URL,
+            };
+            mark_underlined_hyperlink(buf, intro_area, url);
+        }
 
         // Input line
         if input_area.width >= 2 {
@@ -470,13 +484,28 @@ impl Renderable for FeedbackNoteView {
 
         let hint_y = hint_blank_y.saturating_add(hint_spacing);
         if hint_y < area.y.saturating_add(area.height) {
-            Paragraph::new(accept_cancel_hint_line(
-                Some(key_hint::plain(KeyCode::Enter).into()),
-                "to submit",
-                Some(key_hint::plain(KeyCode::Esc).into()),
-                "to cancel",
-            ))
-            .render(
+            let action_line = |save: &str, send: &str| {
+                let mut actions = Vec::new();
+                if self.can_save {
+                    actions.push((SAVE_LOCALLY.display_label(), save.to_owned()));
+                }
+                if self.upload_audience.is_some() {
+                    actions.push((
+                        key_hint::plain(KeyCode::Enter).display_label(),
+                        send.to_owned(),
+                    ));
+                }
+                actions.push((
+                    key_hint::plain(KeyCode::Esc).display_label(),
+                    "cancel".into(),
+                ));
+                super::footer::footer_hint_items_line(&actions)
+            };
+            let mut hints = action_line("save ZIP", "send to OpenAI");
+            if hints.width() > usize::from(area.width) {
+                hints = action_line("save", "send");
+            }
+            Paragraph::new(hints).render(
                 Rect {
                     x: area.x,
                     y: hint_y,
@@ -518,10 +547,11 @@ impl FeedbackNoteView {
             IntroContent::Full => vec![title.bold().into(), "".into()],
             IntroContent::DisclosureOnly => Vec::new(),
         };
-        match self.feedback_audience {
-            FeedbackAudience::OpenAiEmployee => {
+        match self.upload_audience {
+            None => lines.push("Feedback uploads are disabled.".dim().into()),
+            Some(FeedbackAudience::OpenAiEmployee) => {
                 lines.push(
-                    "Your data may be used to improve our models and products"
+                    "Feedback sent to OpenAI may be used to improve our models and products"
                         .bold()
                         .into(),
                 );
@@ -536,6 +566,14 @@ impl FeedbackNoteView {
                 "Learn more".fg(crate::style::accent_color()).underlined(),
                 ".".dim(),
             ])),
+        }
+        if self.can_save {
+            let disclosure = if self.upload_audience.is_some() {
+                "You can also save feedback to a ZIP file, which is not sent to OpenAI."
+            } else {
+                "You can save feedback to a ZIP file, which is not sent to OpenAI."
+            };
+            lines.push(disclosure.dim().into());
         }
         word_wrap_lines(
             lines,
