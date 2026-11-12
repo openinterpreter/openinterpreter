@@ -143,6 +143,20 @@ async fn local_compaction_respects_tool_metadata_state(
     // Passthrough bytes are also excluded from model token estimates.
     assert!(metadata_bytes > 32 * 1024);
 
+    // Freeze the step before changing future thread defaults; manual compaction
+    // receives this same captured request snapshot from CompactTask.
+    let step_context = session
+        .capture_step_context(
+            Arc::clone(&turn),
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await?;
+    let world_state = Arc::new(
+        session
+            .build_world_state_for_step(&step_context, /*new_window*/ true)
+            .await?,
+    );
+
     if !metadata_enabled {
         let expected_config = session.get_config().await;
         let mut config = (*expected_config).clone();
@@ -163,7 +177,8 @@ async fn local_compaction_respects_tool_metadata_state(
     // OpenAI identity keeps the client from removing passthrough for compatibility.
     run_compact_task(
         Arc::clone(&session),
-        turn,
+        step_context,
+        world_state,
         vec![UserInput::Text {
             text: "Summarize the conversation.".to_string(),
             text_elements: Vec::new(),

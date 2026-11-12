@@ -150,7 +150,6 @@ pub(crate) async fn run_compact_task(
     world_state: Arc<WorldState>,
     input: Vec<UserInput>,
 ) -> CodexResult<()> {
-    sess.emit_turn_started(&turn_context).await;
     run_compact_task_inner(
         sess.clone(),
         Arc::clone(&step_context.turn),
