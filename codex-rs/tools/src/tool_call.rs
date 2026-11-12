@@ -8,6 +8,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::with_serialization_allowance;
+use codex_utils_path_uri::PathUri;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;

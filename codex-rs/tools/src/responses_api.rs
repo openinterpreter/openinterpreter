@@ -5,6 +5,7 @@ use crate::ToolOutputSchema;
 use crate::parse_agent_plugin_mcp_tool;
 use crate::parse_dynamic_tool;
 use crate::parse_mcp_tool;
+use crate::mcp_tool::parse_mcp_tool_with_schema_max_bytes;
 use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
 use serde::Deserialize;
