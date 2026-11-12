@@ -583,6 +583,34 @@ impl TryFrom<RawMcpServerConfig> for McpServerConfig {
         let environment_id =
             environment_id.unwrap_or_else(|| DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string());
         let auth = auth.unwrap_or_default();
+        if let Some(oauth) = &oauth
+            && let Some(secret) = &oauth.client_secret
+        {
+            if secret.trim().is_empty() {
+                return Err("oauth.client_secret must not be empty".to_string());
+            }
+            if oauth
+                .client_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty())
+            {
+                return Err("oauth.client_secret requires oauth.client_id".to_string());
+            }
+        }
+        if let Some(oauth) = &oauth
+            && oauth.token_endpoint_auth_method.is_some()
+        {
+            if !matches!(auth, McpServerAuth::EmaAuth) {
+                return Err(
+                    "oauth.token_endpoint_auth_method requires auth = \"ema_auth\"".to_string(),
+                );
+            }
+            if oauth.client_secret.is_none() {
+                return Err(
+                    "oauth.token_endpoint_auth_method requires oauth.client_secret".to_string(),
+                );
+            }
+        }
         if !matches!(auth, McpServerAuth::EmaAuth)
             && oauth
                 .as_ref()
