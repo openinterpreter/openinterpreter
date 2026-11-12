@@ -25,7 +25,7 @@ log = log_path.read_text(encoding="utf-8", errors="replace")
 status = int(sys.argv[2])
 errors = [line.strip() for line in log.splitlines() if re.match(r"^(?:ERROR:|Error in fail:|error:)", line.strip())]
 patterns = (
-    ("patch_failure", r"patch failed|failed to apply patch|hunk \d+ failed|can't find file to patch"),
+    ("patch_failure", r"content_does_not_match_target|patch failed|failed to apply patch|hunk \d+ failed|can't find file to patch"),
     ("stale_lock", r"(?:module\.bazel\.lock|lockfile).*(?:out.of.date|no longer up.to.date|stale|needs? to be updated)|(?:out.of.date|no longer up.to.date|stale).*(?:module\.bazel\.lock|lockfile)"),
     ("extension_failure", r"error evaluating module extension|duplicate crate\.annotation"),
     ("fetch_failure", r"failed to fetch repository|error downloading|fetching repository.*failed"),
