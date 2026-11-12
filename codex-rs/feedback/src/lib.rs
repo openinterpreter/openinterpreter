@@ -31,7 +31,10 @@ use tracing_subscriber::filter::Targets;
 use tracing_subscriber::fmt::writer::MakeWriter;
 use tracing_subscriber::registry::LookupSpan;
 
+mod archive;
+mod daemon_logs;
 pub(crate) mod feedback_diagnostics;
+pub use daemon_logs::daemon_log_attachments;
 mod guardian;
 mod report_upload;
 mod signed_upload;
