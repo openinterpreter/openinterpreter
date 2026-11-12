@@ -170,33 +170,57 @@ impl WebSocketConnector {
         loopback_direct: bool,
     ) -> Result<(WebSocketConnection, Response), WebSocketError> {
         let uri = request.uri().clone();
-        if !request.headers().contains_key(COOKIE)
-            && let Some(cookies) = self.http_client_factory.chatgpt_cookie_header(&uri)
-        {
-            request.headers_mut().insert(COOKIE, cookies);
-        }
-        let result = dialer::connect(
-            request,
-            config,
-            self.tls_config.clone(),
-            proxy_route,
-            self.tcp_nodelay,
-            loopback_direct,
-        )
-        .boxed()
-        .await;
-        // Like HTTP responses, rejected upgrades can also refresh infrastructure cookies.
-        match &result {
-            Ok((_, response)) => self
-                .http_client_factory
-                .store_chatgpt_response_cookies(&uri, response.headers()),
-            Err(WebSocketError::Http(response)) => self
-                .http_client_factory
-                .store_chatgpt_response_cookies(&uri, response.headers()),
-            Err(_) => {}
-        }
-        let (inner, response) = result?;
-        Ok((WebSocketConnection { inner }, response))
+        let url = url::Url::parse(&uri.to_string()).map_err(|_| {
+            WebSocketError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid WebSocket URL",
+            ))
+        })?;
+        let permit = self
+            .http_client_factory
+            .network_policy()
+            .acquire(&url)
+            .map_err(policy_error)?;
+        let connect = async {
+            if !request.headers().contains_key(COOKIE)
+                && let Some(cookies) = self.http_client_factory.chatgpt_cookie_header(&uri)
+            {
+                request.headers_mut().insert(COOKIE, cookies);
+            }
+            let proxy_route = route.await.map_err(WebSocketError::Io)?;
+            let result = dialer::connect(
+                request,
+                config,
+                self.tls_config.clone(),
+                proxy_route,
+                self.tcp_nodelay,
+                loopback_direct,
+            )
+            .boxed()
+            .await;
+            // Like HTTP responses, rejected upgrades can also refresh infrastructure cookies.
+            match &result {
+                Ok((_, response)) => self
+                    .http_client_factory
+                    .store_chatgpt_response_cookies(&uri, response.headers()),
+                Err(WebSocketError::Http(response)) => self
+                    .http_client_factory
+                    .store_chatgpt_response_cookies(&uri, response.headers()),
+                Err(_) => {}
+            }
+            result.map(|(inner, response)| {
+                let routing_affinity = codex_http_client::ChatGptRoutingAffinity::from_response(
+                    &uri,
+                    response.headers(),
+                );
+                (inner, response, routing_affinity)
+            })
+        };
+        let (inner, response, routing_affinity) =
+            permit.run(connect).await.map_err(policy_error)??;
+        let mut connection = WebSocketConnection::new(inner, permit);
+        connection.routing_affinity = routing_affinity;
+        Ok((connection, response))
     }
 }
 
