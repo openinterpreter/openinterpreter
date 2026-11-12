@@ -12,6 +12,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lock-reconciliation-candidate:
+    name: lock reconciliation candidate (review only)
+    if: github.event_name == 'pull_request' && github.head_ref == 'interpreterwork/codex-main-integration-publish-20261112' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@a0b273b48ed29de4470960879e8381ff45632f26 # 1.93.0
+      - name: Generate reviewable workspace lock
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          cd codex-rs
+          cargo update --workspace
+          cargo metadata --locked --format-version 1 > /dev/null
+          git diff --check -- Cargo.lock
+          printf 'source_sha=%s\n' "$(git rev-parse HEAD)" > lock-provenance.txt
+          sha256sum Cargo.lock >> lock-provenance.txt
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: lock-review-${{ github.event.pull_request.head.sha }}
+          path: |
+            codex-rs/Cargo.lock
+            codex-rs/lock-provenance.txt
+          if-no-files-found: error
+
   fmt-build-test:
     name: fmt + build + test
     runs-on: ubuntu-24.04
