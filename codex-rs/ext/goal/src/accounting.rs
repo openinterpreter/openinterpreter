@@ -685,3 +685,46 @@ fn should_clear_active_goal(
         | ThreadGoalStatus::Complete => true,
     }
 }
+
+#[cfg(test)]
+mod interrupted_turn_tests {
+    use super::GoalAccountingState;
+    use codex_protocol::config_types::ModeKind;
+    use codex_protocol::protocol::TokenUsage;
+
+    #[tokio::test]
+    async fn turn_start_permit_serializes_interrupted_turn_evaluation() {
+        let accounting = GoalAccountingState::default();
+        let first = accounting.turn_start_permit().await.unwrap();
+        assert!(accounting.turn_start_lock.try_acquire().is_err());
+        drop(first);
+        let _next = accounting.turn_start_permit().await.unwrap();
+    }
+
+    #[test]
+    fn interrupted_automatic_empty_turns_reach_blocking_threshold() {
+        let accounting = GoalAccountingState::default();
+        for turn in 1..=3 {
+            let turn_id = format!("turn-{turn}");
+            accounting.start_turn(&turn_id, ModeKind::Default, &TokenUsage::default());
+            accounting.mark_turn_goal_active(&turn_id, "goal-1");
+            accounting.mark_goal_continuation(turn_id.clone());
+            accounting
+                .inner()
+                .turns
+                .get_mut(&turn_id)
+                .unwrap()
+                .empty_final = true;
+            accounting.interrupt_turn(&turn_id);
+            assert_eq!(
+                accounting.interrupted_turn_id().as_deref(),
+                Some(turn_id.as_str())
+            );
+            assert_eq!(
+                accounting.empty_response_goal(&turn_id).as_deref(),
+                (turn == 3).then_some("goal-1")
+            );
+            accounting.finish_turn(&turn_id);
+        }
+    }
+}

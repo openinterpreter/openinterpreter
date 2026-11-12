@@ -263,6 +263,13 @@ where
                 tracing::warn!("skipping goal turn accounting: token baseline unavailable");
                 return;
             };
+            let accounting = runtime.accounting_state();
+            // Serialize a new turn's accounting with deferred interrupted-turn evaluation.
+            // Do not await the Goal state permit while holding this permit.
+            let Ok(_turn_start_permit) = accounting.turn_start_permit().await else {
+                tracing::warn!("skipping goal turn accounting: turn-start permit unavailable");
+                return;
+            };
 
             if let Err(err) = self
                 .state_dbs
@@ -409,7 +416,6 @@ where
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
                 return;
             };
-            runtime.accounting_state().reset_empty_responses();
             if !runtime.is_enabled() {
                 runtime.accounting_state().reset_empty_responses();
                 return;
