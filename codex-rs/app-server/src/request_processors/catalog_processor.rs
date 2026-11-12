@@ -182,9 +182,71 @@ impl CatalogRequestProcessor {
         &self,
         params: ModelListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.list_models(params)
+        self.list_models_for_request(params)
             .await
             .map(|response| Some(response.into()))
+    }
+
+    /// Resolve the exact catalog route before either the standard or Interpreter
+    /// model-list RPC performs credential resolution and cache access.
+    async fn list_models_for_request(
+        &self,
+        params: ModelListParams,
+    ) -> Result<ModelListResponse, JSONRPCErrorError> {
+        let (active_config, active_models_manager) = self
+            .model_catalog
+            .current()
+            .await
+            .map_err(|err| config_load_error(&err))?;
+        let (config, models_manager) = match params.model_provider.as_deref() {
+            None => (active_config, active_models_manager),
+            Some(provider_id) => {
+                let config = config_for_provider(&self.config, provider_id)?;
+                if provider_id == active_config.model_provider_id
+                    && config.model_provider == active_config.model_provider
+                {
+                    (active_config, active_models_manager)
+                } else {
+                    // Temporary catalogs must not replace the active provider's disk cache.
+                    let manager = self.thread_manager.temporary_models_manager_for_config(
+                        &config,
+                        &codex_models_manager::manager::ModelCatalogSettings::default(),
+                    );
+                    (config, manager)
+                }
+            }
+        };
+        // Check managed policy before credential resolution, even for a warm cache.
+        if let Some(gateway) = codex_model_provider::create_model_provider(
+            config.model_provider.clone(),
+            Some(Arc::clone(&self.auth_manager)),
+        )
+        .gateway_auth_manager()
+        .map_err(|error| internal_error(error.to_string()))?
+        {
+            self.config_manager
+                .check_thread_model_provider(&config)
+                .await
+                .map_err(|err| config_load_error(&err))?;
+            if let Err(error) = gateway.resolve_access_token().await {
+                let current = self
+                    .config_manager
+                    .load_latest_config(/*fallback_cwd*/ None)
+                    .await
+                    .map_err(|err| config_load_error(&err))?;
+                if current.model_providers.get(&config.model_provider_id)
+                    != Some(&config.model_provider)
+                    || (params.model_provider.is_none()
+                        && current.model_provider_id != config.model_provider_id)
+                {
+                    return Err(invalid_request(
+                        "Model provider settings changed. Restart Codex to apply them, then retry fetching the model list",
+                    ));
+                }
+                return Err(invalid_request(error.to_string()));
+            }
+        }
+        self.list_models(params, config, models_manager).await
     }
 
     pub(crate) async fn interpreter_provider_list(
@@ -213,7 +275,7 @@ impl CatalogRequestProcessor {
         params: InterpreterModelListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         let response = self
-            .list_models(ModelListParams {
+            .list_models_for_request(ModelListParams {
                 cursor: None,
                 limit: None,
                 include_hidden: params.include_hidden,
@@ -340,29 +402,18 @@ impl CatalogRequestProcessor {
             limit,
             cursor,
             include_hidden,
-            model_provider,
+            model_provider: _,
         } = params;
-        let include_hidden = include_hidden.unwrap_or(false);
-        let models = match model_provider {
-            Some(provider_id) => {
-                crate::models::supported_models_for_provider(
-                    self.config.as_ref(),
-                    self.auth_manager.clone(),
-                    provider_id.as_str(),
-                    include_hidden,
-                    self.config.http_client_factory(),
-                )
-                .await
-            }
-            None => {
-                let presets = self
-                    .model_catalog
-                    .list_models(codex_models_manager::manager::RefreshStrategy::OnlineIfUncached)
-                    .await
-                    .map_err(|err| config_load_error(&err))?;
-                supported_models(presets, include_hidden)
-            }
-        };
+        let presets = self
+            .model_catalog
+            .list_models_from_snapshot(
+                config,
+                models_manager,
+                codex_models_manager::manager::RefreshStrategy::OnlineIfUncached,
+            )
+            .await
+            .map_err(|err| config_load_error(&err))?;
+        let models = supported_models(presets, include_hidden.unwrap_or(false));
         let total = models.len();
 
         if total == 0 {
