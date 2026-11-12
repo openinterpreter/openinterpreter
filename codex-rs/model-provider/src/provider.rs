@@ -770,10 +770,32 @@ impl ModelProvider for ConfiguredModelProvider {
         codex_home: PathBuf,
         config_model_catalog: Option<ModelsResponse>,
     ) -> SharedModelsManager {
-        self.models_manager_with_settings(
-            config_model_catalog,
-            ModelCatalogSettings::disk(codex_home),
-        )
+        if let Some(model_catalog) = config_model_catalog {
+            return Arc::new(StaticModelsManager::new(
+                self.auth_manager.clone(),
+                model_catalog,
+                codex_models_manager::ModelOrigin::ExplicitConfig,
+            ));
+        }
+        let endpoint = Arc::new(
+            OpenAiModelsEndpoint::new(
+                self.info.clone(),
+                self.auth_manager.clone(),
+                self.gateway_auth_manager.clone(),
+            )
+            .with_runtime_auth(self.catalog_runtime_auth.clone()),
+        );
+        let manager = OpenAiModelsManager::new_with_base_models_for_provider(
+            codex_home,
+            self.cache_provider_id.clone(),
+            endpoint,
+            self.auth_manager.clone(),
+            bundled_provider_model_infos(&self.info),
+        );
+        match &self.info.model_catalog_url {
+            Some(_) => Arc::new(manager.with_provider_catalog()),
+            None => Arc::new(manager),
+        }
     }
 
     fn models_manager_with_settings(
@@ -863,6 +885,30 @@ mod tests {
     use super::*;
     use crate::auth::AgentIdentitySessionFallback;
     use crate::shared_state::process_shared_state;
+
+    #[test]
+    fn configured_provider_disk_catalog_cache_uses_exact_provider_id() {
+        let home = tempfile::tempdir().expect("cache root");
+        let info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+        let catalog = |id: &str| {
+            create_model_provider_with_cache_id(id.to_string(), info.clone(), None)
+                .models_manager(home.path().to_path_buf(), None)
+        };
+        let first = format!("{:?}", catalog("provider-one"));
+        let second = format!("{:?}", catalog("provider-two"));
+        let encoded = |id: &str| {
+            id.bytes()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .concat()
+        };
+        let first_name = format!("models_cache_{}.json", encoded("provider-one"));
+        let second_name = format!("models_cache_{}.json", encoded("provider-two"));
+        assert!(first.contains(&first_name));
+        assert!(!first.contains(&second_name));
+        assert!(second.contains(&second_name));
+        assert!(!second.contains(&first_name));
+    }
 
     fn provider_info_with_command_auth() -> ModelProviderInfo {
         ModelProviderInfo {
