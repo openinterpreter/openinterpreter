@@ -15,9 +15,26 @@ pub(crate) enum SelectionDescriptionLayout {
     HideWhenNarrow {
         min_description_width: u16,
     },
+    SelectedBelowWhenNarrow {
+        min_description_width: u16,
+    },
 }
 
 impl SelectionDescriptionLayout {
+    fn is_narrow(self, width: u16, desc_col: usize) -> bool {
+        let min_description_width = match self {
+            Self::Columns => return false,
+            Self::HideWhenNarrow {
+                min_description_width,
+            }
+            | Self::SelectedBelowWhenNarrow {
+                min_description_width,
+            } => min_description_width,
+        };
+        let desc_col = desc_col.min(width as usize) as u16;
+        width.saturating_sub(desc_col) < min_description_width
+    }
+
     pub(super) fn should_hide(self, width: u16, desc_col: usize) -> bool {
         let Self::HideWhenNarrow {
             min_description_width,
@@ -49,6 +66,7 @@ fn combined_description(
             if matches!(
                 description_layout,
                 SelectionDescriptionLayout::HideWhenNarrow { .. }
+                    | SelectionDescriptionLayout::SelectedBelowWhenNarrow { .. }
             ) =>
         {
             Some(reason.clone())
@@ -170,4 +188,25 @@ pub(super) fn build_full_line(
         spans.push(description.dim());
     }
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SelectionDescriptionLayout;
+
+    #[test]
+    fn narrow_layouts_keep_hide_and_selected_below_distinct() {
+        let hide = SelectionDescriptionLayout::HideWhenNarrow {
+            min_description_width: 10,
+        };
+        let below = SelectionDescriptionLayout::SelectedBelowWhenNarrow {
+            min_description_width: 10,
+        };
+        assert!(hide.should_hide(20, 12));
+        assert!(hide.should_hide_column(20, 12));
+        assert!(!hide.should_show_selected_below(20, 12));
+        assert!(!below.should_hide(20, 12));
+        assert!(below.should_show_selected_below(20, 12));
+        assert!(!below.should_show_selected_below(25, 12));
+    }
 }

@@ -274,6 +274,10 @@ pub(super) fn request_error(error: RequestError) -> String {
 pub(super) mod tests;
 
 #[cfg(test)]
+#[path = "runtime_auth_tests.rs"]
+mod runtime_auth_tests;
+
+#[cfg(test)]
 #[path = "connection_tests.rs"]
 mod connection_tests;
 

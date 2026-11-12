@@ -25,6 +25,9 @@ const FOCUS_PROBE_INPUT: &str = "focus-palette-24527";
 #[path = "tui_mode_picker_tests.rs"]
 mod tui_mode_picker;
 
+#[path = "external_editor_tests.rs"]
+mod external_editor_tests;
+
 #[test]
 fn focus_gained_with_unanswered_palette_queries_preserves_immediate_input() -> Result<()> {
     let repo_root = codex_utils_cargo_bin::repo_root()?;

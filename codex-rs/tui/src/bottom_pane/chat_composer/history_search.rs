@@ -376,6 +376,40 @@ impl ChatComposer {
         self.sparkle.history_preview = previous;
     }
 
+    /// Apply incoming edits to the saved draft without replacing the visible search preview.
+    pub(in crate::bottom_pane) fn edit_stored_draft(&mut self, edit: impl FnOnce(&mut Self)) {
+        let Some(mut search) = self.history_search.take() else {
+            edit(self);
+            return;
+        };
+        search
+            .preview_draft
+            .get_or_insert_with(|| search.original_draft.clone());
+        let preview = self.snapshot_draft();
+        let preview_vim_history = std::mem::take(&mut self.vim_history);
+        let mut preview_vim_state = VimPersistentState::default();
+        self.draft
+            .textarea
+            .swap_vim_persistent_state(&mut preview_vim_state);
+        self.with_sparkle_history_preview(|composer| composer.restore_draft(search.original_draft));
+        self.draft
+            .textarea
+            .swap_vim_persistent_state(&mut search.original_vim_state);
+        self.vim_history = search.original_vim_history;
+        edit(self);
+        search.original_draft = self.snapshot_draft();
+        search.original_vim_history = std::mem::take(&mut self.vim_history);
+        self.draft
+            .textarea
+            .swap_vim_persistent_state(&mut search.original_vim_state);
+        self.history_search = Some(search);
+        self.with_sparkle_history_preview(|composer| composer.restore_draft(preview));
+        self.draft
+            .textarea
+            .swap_vim_persistent_state(&mut preview_vim_state);
+        self.vim_history = preview_vim_history;
+    }
+
     /// Builds the footer line shown while reverse history search is active.
     ///
     /// The footer displays the query as the editable field and uses the status to decide whether
@@ -703,6 +737,32 @@ mod tests {
         assert!(composer.history_search_active());
         assert!(composer.draft.textarea.is_empty());
         assert_eq!(composer.footer_mode(), FooterMode::HistorySearch);
+    }
+
+    #[test]
+    fn background_draft_edit_preserves_search_preview_until_cancelled() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ false,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ false,
+        );
+        composer.set_text_content("original draft".to_string(), Vec::new(), Vec::new());
+        composer.begin_history_search();
+        assert!(composer.history_search_active());
+        let preview = composer.current_text();
+
+        composer.edit_stored_draft(|draft| {
+            draft.set_text_content("background update".to_string(), Vec::new(), Vec::new());
+        });
+        assert_eq!(composer.current_text(), preview);
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!composer.history_search_active());
+        assert_eq!(composer.current_text(), "background update");
     }
 
     #[test]
