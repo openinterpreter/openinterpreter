@@ -1,4 +1,7 @@
 mod common;
+#[cfg(unix)]
+#[path = "exec_process/shell_snapshot.rs"]
+mod shell_snapshot;
 #[path = "exec_process/windows_sandbox.rs"]
 mod windows_sandbox;
 
