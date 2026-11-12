@@ -308,37 +308,6 @@ async fn legacy_launch_clears_recovery_best_effort() {
         assert_eq!(recovery_file.exists(), snapshot_is_directory);
     }
 }
-
-#[cfg(unix)]
-#[tokio::test]
-async fn legacy_launch_clears_recovery_best_effort() {
-    for snapshot_is_directory in [false, true] {
-        let home = TempDir::new().expect("temp dir");
-        let state_dir = home.path().join("app-server-daemon");
-        std::fs::create_dir_all(&state_dir).expect("state dir");
-        let recovery_file = codex_app_server_transport::daemon_recovery_file_path(home.path());
-        if snapshot_is_directory {
-            std::fs::create_dir(&recovery_file).expect("invalid snapshot directory");
-        } else {
-            std::fs::write(&recovery_file, "{}").expect("pending snapshot");
-        }
-        let backend = PidBackend::new(
-            home.path().join("missing-codex"),
-            state_dir.join("app-server.pid"),
-            /*remote_control_enabled*/ false,
-        );
-
-        let error = backend.start().await.expect_err("missing binary");
-        assert!(
-            error
-                .to_string()
-                .starts_with("failed to spawn detached app-server process using "),
-            "{error:#}"
-        );
-        assert_eq!(recovery_file.exists(), snapshot_is_directory);
-    }
-}
-
 #[tokio::test]
 async fn stale_record_cleanup_preserves_replacement_record() {
     let temp_dir = TempDir::new().expect("temp dir");

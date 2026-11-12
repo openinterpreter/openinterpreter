@@ -2364,7 +2364,7 @@ enum LoginRefreshTrigger {
 #[test_case("/backend-api/wham/accounts/check", LoginRefreshTrigger::AuthStatus; "refresh_during_routing")]
 #[test_case("/backend-api/wham/config/bundle", LoginRefreshTrigger::UnauthorizedConfig; "refresh_during_account_read_requirements")]
 #[tokio::test]
-async fn login_survives_same_owner_token_refresh(
+async fn login_survives_same_owner_token_refresh_with_gated_backend(
     delayed_path: &str,
     refresh_trigger: LoginRefreshTrigger,
 ) -> Result<()> {
@@ -2611,17 +2611,11 @@ async fn login_survives_same_owner_token_refresh(
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum LoginRefreshTrigger {
-    AuthStatus,
-    UnauthorizedConfig,
-}
-
 #[test_case("/backend-api/wham/config/bundle", LoginRefreshTrigger::AuthStatus; "refresh_during_requirements")]
 #[test_case("/backend-api/wham/accounts/check", LoginRefreshTrigger::AuthStatus; "refresh_during_routing")]
 #[test_case("/backend-api/wham/config/bundle", LoginRefreshTrigger::UnauthorizedConfig; "refresh_during_account_read_requirements")]
 #[tokio::test]
-async fn login_survives_same_owner_token_refresh(
+async fn login_survives_same_owner_token_refresh_with_delayed_backend(
     delayed_path: &str,
     refresh_trigger: LoginRefreshTrigger,
 ) -> Result<()> {

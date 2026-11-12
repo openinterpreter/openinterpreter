@@ -864,7 +864,7 @@ async fn thread_resume_restores_startup_and_updated_runtime_workspace_roots() ->
 }
 
 #[tokio::test]
-async fn cold_resume_workspace_roots_honor_owned_snapshot_and_caller_overrides() -> Result<()> {
+async fn cold_resume_read_only_snapshot_honors_roots_and_overrides() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     mock_responses_config(&server.uri()).write(codex_home.path())?;
@@ -1060,7 +1060,7 @@ async fn cold_resume_workspace_roots_validate_foreign_startup_paths() -> Result<
 }
 
 #[tokio::test]
-async fn cold_resume_workspace_roots_honor_owned_snapshot_and_caller_overrides() -> Result<()> {
+async fn cold_resume_workspace_write_snapshot_honors_roots_and_overrides() -> Result<()> {
     let server = responses::start_mock_server().await;
     let response_mock =
         responses::mount_sse_sequence(&server, vec![responses::sse_completed("done"); 3]).await;
@@ -1308,99 +1308,6 @@ async fn resume_and_fork_restore_unnamed_permissions_from_a_legacy_update() -> R
         expected
     );
     assert_eq!((fork.sandbox, fork.active_permission_profile), expected);
-    Ok(())
-}
-
-#[tokio::test]
-async fn cold_resume_workspace_roots_validate_foreign_startup_paths() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
-    let local_cwd = normalized_existing_path(codex_home.path())?.abs();
-    let extra_workspace = TempDir::new()?;
-    let extra_root = normalized_existing_path(extra_workspace.path())?.abs();
-    let extra_root_string = extra_root.to_string_lossy();
-    let unnormalized_extra_root = extra_root
-        .as_path()
-        .join("child")
-        .join("..")
-        .to_string_lossy()
-        .into_owned();
-    let (foreign_cwd, foreign_extra) = if cfg!(windows) {
-        ("/foreign/project", "/foreign/extra")
-    } else {
-        (r"C:\foreign\project", r"C:\foreign\extra")
-    };
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        // Startup metadata uses the app-server host's paths, not executor paths.
-        .without_auto_env()
-        .build_initialized()
-        .await?;
-
-    for (saved_roots, roots_override, expected_roots) in [
-        (
-            vec![
-                foreign_cwd,
-                extra_root_string.as_ref(),
-                unnormalized_extra_root.as_str(),
-            ],
-            None,
-            Some(vec![local_cwd.clone(), extra_root.clone()]),
-        ),
-        (vec![foreign_cwd, foreign_extra], None, None),
-        (
-            vec![foreign_cwd, foreign_extra],
-            Some(Vec::new()),
-            Some(Vec::new()),
-        ),
-    ] {
-        let thread_id = create_fake_rollout(
-            codex_home.path(),
-            "2025-01-05T12-00-00",
-            "2025-01-05T12:00:00Z",
-            "Foreign startup paths",
-            Some("mock_provider"),
-            /*git_info*/ None,
-        )?;
-        let path = rollout_path(codex_home.path(), "2025-01-05T12-00-00", &thread_id);
-        let contents = std::fs::read_to_string(&path)?;
-        let (meta, history) = contents.split_once('\n').expect("rollout metadata line");
-        let mut meta: serde_json::Value = serde_json::from_str(meta)?;
-        meta["payload"]["cwd"] = json!(foreign_cwd);
-        meta["payload"]["runtime_workspace_roots"] = json!(saved_roots);
-        std::fs::write(&path, format!("{meta}\n{history}"))?;
-
-        let resume_id = mcp
-            .send_thread_resume_request(ThreadResumeParams {
-                thread_id: thread_id.clone(),
-                cwd: Some(local_cwd.to_string_lossy().into_owned()),
-                runtime_workspace_roots: roots_override,
-                ..Default::default()
-            })
-            .await?;
-        if let Some(expected_roots) = expected_roots {
-            let ThreadResumeResponse {
-                thread,
-                cwd,
-                runtime_workspace_roots,
-                ..
-            } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
-            assert_eq!(
-                (thread.id, cwd, runtime_workspace_roots),
-                (thread_id, local_cwd.clone(), expected_roots)
-            );
-        } else {
-            let error = timeout(
-                DEFAULT_READ_TIMEOUT,
-                mcp.read_stream_until_error_message(RequestId::Integer(resume_id)),
-            )
-            .await??;
-            assert_eq!(error.error.code, -32602);
-            assert!(error.error.message.contains(foreign_extra));
-            assert!(error.error.message.contains("runtimeWorkspaceRoots"));
-        }
-    }
     Ok(())
 }
 
