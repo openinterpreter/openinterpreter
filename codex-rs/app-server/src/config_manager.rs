@@ -17,6 +17,8 @@ use codex_login::AuthManager;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID;
+use codex_model_provider_info::GCP_PROVIDER_ID;
+use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_model_provider_info::built_in_model_providers;
 use codex_model_provider_info::merge_configured_model_providers;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -34,11 +36,8 @@ use toml::Value as TomlValue;
 use tracing::instrument;
 use tracing::warn;
 
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "Your organization's required model provider settings changed. Restart Codex to apply them; this request was not sent"
-)]
-pub(crate) struct ModelProviderRequirementsChanged;
+#[path = "application_network.rs"]
+pub(crate) mod application_network;
 
 /// Shared app-server entry point for loading effective Codex configuration.
 #[derive(Clone)]
@@ -268,9 +267,27 @@ impl ConfigManager {
     /// Loads system, user, and runtime settings without discovering a project
     /// from the app-server process's working directory.
     pub(crate) async fn load_non_project_config(&self) -> std::io::Result<Config> {
-        let mut manager = self.clone();
-        manager.loader_overrides.ignore_project_config = true;
-        manager.load_latest_config(/*fallback_cwd*/ None).await
+        let mcp_ema_cancellation = self.capture_mcp_ema_cancellation();
+        let policy_load = self.refresh_application_network_policy().await?;
+        let mut config = ConfigBuilder::default()
+            .codex_home(self.codex_home.clone())
+            .cli_overrides(self.current_cli_overrides())
+            .loader_overrides(self.loader_overrides.clone())
+            .strict_config(self.strict_config)
+            .fallback_cwd(Some(self.codex_home.clone()))
+            .cloud_config_bundle(policy_load.cloud_config.clone())
+            .thread_config_loader(Arc::clone(&self.thread_config_loader))
+            .without_project_context()
+            .build()
+            .await?;
+        self.check_application_policy_load(&policy_load)?;
+        self.apply_network_policy(&mut config);
+        self.apply_runtime_feature_enablement(&mut config);
+        self.apply_arg0_paths(&mut config);
+        config.config_layer_stack = config
+            .config_layer_stack
+            .with_mcp_ema_cancellation(mcp_ema_cancellation);
+        Ok(config)
     }
 
     pub(crate) async fn load_latest_config_with_session_layers(
@@ -278,19 +295,19 @@ impl ConfigManager {
         session_layers: &ConfigLayerStack,
         cwd: &Path,
     ) -> std::io::Result<Config> {
-        let refreshed_config = self.load_latest_config(Some(cwd.to_path_buf())).await?;
+        let mcp_ema_cancellation = self.capture_mcp_ema_cancellation();
+        let codex_home = AbsolutePathBuf::from_absolute_path(&self.codex_home)?;
+        let layers = self
+            .load_config_layers_for_cwd(AbsolutePathBuf::from_absolute_path(cwd)?)
+            .await?;
         let mut config = Config::rebuild_with_session_layers(
             session_layers,
             cwd.to_path_buf(),
-            &refreshed_config.config_layer_stack,
-            refreshed_config.codex_home.clone(),
-            refreshed_config
-                .zsh_path
-                .clone()
-                .map(AbsolutePathBuf::try_from)
-                .transpose()?,
+            &layers,
+            codex_home,
         )
         .await?;
+        self.apply_network_policy(&mut config);
         self.apply_runtime_feature_enablement(&mut config);
         self.apply_arg0_paths(&mut config);
         config.config_layer_stack = config
@@ -305,6 +322,7 @@ impl ConfigManager {
         session_layers: &ConfigLayerStack,
         cwd: &Path,
     ) -> std::io::Result<Config> {
+        let mcp_ema_cancellation = self.capture_mcp_ema_cancellation();
         let mut manager = self.clone();
         manager.thread_config_loader = Arc::new(codex_config::NoopThreadConfigLoader);
         let refreshed_layers = manager
@@ -316,11 +334,14 @@ impl ConfigManager {
             cwd.to_path_buf(),
             &refreshed_layers,
             AbsolutePathBuf::from_absolute_path(&self.codex_home)?,
-            /*default_zsh_path*/ None,
         )
         .await?;
+        self.apply_network_policy(&mut config);
         self.apply_runtime_feature_enablement(&mut config);
         self.apply_arg0_paths(&mut config);
+        config.config_layer_stack = config
+            .config_layer_stack
+            .with_mcp_ema_cancellation(mcp_ema_cancellation);
         Ok(config)
     }
 
@@ -329,6 +350,7 @@ impl ConfigManager {
         &self,
         current: &Config,
     ) -> std::io::Result<()> {
+        let policy_load = self.refresh_application_network_policy().await?;
         // Existing threads retain their session route; only managed
         // requirements can invalidate it.
         let requirements = load_managed_requirements_state(
@@ -337,10 +359,11 @@ impl ConfigManager {
             codex_config::ConfigLoadOptions {
                 loader_overrides: self.loader_overrides.clone(),
                 strict_config: self.strict_config,
-                cloud_config_bundle: self.current_cloud_config_bundle(),
+                cloud_config_bundle: policy_load.cloud_config.clone(),
             },
         )
         .await?;
+        self.check_application_policy_load(&policy_load)?;
         let selection_changed = requirements
             .model_provider
             .as_ref()
@@ -354,16 +377,26 @@ impl ConfigManager {
             Some(provider)
                 if matches!(
                     current.model_provider_id.as_str(),
-                    AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID
+                    AMAZON_BEDROCK_PROVIDER_ID
+                        | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID
+                        | GCP_PROVIDER_ID
+                        | OPENAI_PROVIDER_ID
                 ) =>
             {
-                // Bedrock requirements contain overrides of the built-in provider.
-                merge_configured_model_providers(
-                    built_in_model_providers(/*openai_base_url*/ None),
+                // Managed overrides must receive the same built-in defaults as startup config.
+                // OpenAI's inference URL belongs to the retained session, not the catalog override.
+                let mut provider = merge_configured_model_providers(
+                    built_in_model_providers(current.model_provider.base_url.clone()),
                     HashMap::from([(current.model_provider_id.clone(), provider)]),
                 )
                 .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
-                .remove(&current.model_provider_id)
+                .remove(&current.model_provider_id);
+                if current.model_provider_id == GCP_PROVIDER_ID
+                    && let Some(provider) = provider.as_mut()
+                {
+                    apply_default_gcp_auth(provider, &current.cwd);
+                }
+                provider
             }
             Some(provider) => Some(provider),
             None => None,
@@ -374,10 +407,58 @@ impl ConfigManager {
         if selection_changed || definition_changed {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
-                ModelProviderRequirementsChanged,
+                ModelProviderError::ModelProviderPolicyConflict {
+                    model_provider: current.model_provider_id.clone(),
+                    required_model_provider: requirements
+                        .model_provider
+                        .unwrap_or_else(|| current.model_provider_id.clone()),
+                },
             ));
         }
         Ok(())
+    }
+
+    /// Load local policy before auth, then fetch the account's cloud configuration.
+    /// Callers choose their error/recovery policy before initializing any runtimes.
+    pub(crate) async fn load_managed_startup_config(
+        &self,
+        cwd: Option<PathBuf>,
+    ) -> std::io::Result<CloudStartupConfig> {
+        let bootstrap = self.load_startup_config(cwd.clone()).await?.config;
+        let auth =
+            AuthManager::shared_from_config(&bootstrap, /*enable_codex_api_key_env*/ false)
+                .await
+                .map_err(std::io::Error::other)?;
+        self.update_managed_config_loader(auth, &bootstrap);
+        let config = self.load_latest_config(cwd).await;
+        Ok(CloudStartupConfig { bootstrap, config })
+    }
+
+    /// Installs local policy before cloud access; failed policy loads block traffic while
+    /// non-strict startup remains available for configuration repair.
+    pub(crate) async fn load_startup_config(
+        &self,
+        fallback_cwd: Option<PathBuf>,
+    ) -> std::io::Result<StartupConfig> {
+        match self.load_latest_config(fallback_cwd).await {
+            Ok(config) => Ok(StartupConfig {
+                config,
+                used_defaults: false,
+            }),
+            Err(error)
+                if self.strict_config
+                    || crate::is_unsupported_untrusted_approval_policy_error(&error) =>
+            {
+                Err(error)
+            }
+            Err(error) => {
+                warn!(%error, "configuration is unavailable; using default settings");
+                Ok(StartupConfig {
+                    config: self.load_default_config().await?,
+                    used_defaults: true,
+                })
+            }
+        }
     }
 
     pub(crate) async fn load_default_config(&self) -> std::io::Result<Config> {
@@ -543,6 +624,7 @@ impl ConfigManager {
                 cwd: Some(cwd.to_path_buf()),
                 default_permissions: Some(permission_profile),
                 codex_linux_sandbox_exe: self.arg0_paths.codex_linux_sandbox_exe.clone(),
+                main_execve_wrapper_exe: self.arg0_paths.main_execve_wrapper_exe.clone(),
                 ..Default::default()
             },
             Some(cwd.to_path_buf()),
@@ -552,45 +634,6 @@ impl ConfigManager {
             config.validate_windows_mxc_requirement()?;
             Ok(config)
         })
-    }
-
-    /// Reload sources using the task's session flags before materializing config.
-    pub(crate) async fn load_permission_config_for_thread(
-        &self,
-        thread_config: &Config,
-        cwd: AbsolutePathBuf,
-        permission_profile: String,
-    ) -> std::io::Result<Config> {
-        let mut session_flags = TomlValue::Table(Default::default());
-        for layer in thread_config.config_layer_stack.layers_low_to_high() {
-            if matches!(layer.name, codex_config::ConfigLayerSource::SessionFlags) {
-                codex_config::merge_toml_values(&mut session_flags, &layer.config);
-            }
-        }
-        let overrides = session_flags
-            .as_table()
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "session flags must be a table",
-                )
-            })?
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect::<Vec<_>>();
-        self.load_with_cli_overrides(
-            &overrides,
-            /*request_overrides*/ None,
-            ConfigOverrides {
-                cwd: Some(cwd.to_path_buf()),
-                default_permissions: Some(permission_profile),
-                codex_linux_sandbox_exe: self.arg0_paths.codex_linux_sandbox_exe.clone(),
-                main_execve_wrapper_exe: self.arg0_paths.main_execve_wrapper_exe.clone(),
-                ..Default::default()
-            },
-            Some(cwd.to_path_buf()),
-        )
-        .await
     }
 
     #[instrument(level = "trace", skip_all)]
@@ -755,6 +798,10 @@ impl ConfigManager {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "application_network_tests.rs"]
+mod application_network_tests;
 
 #[cfg(test)]
 #[path = "config_manager_provider_tests.rs"]
