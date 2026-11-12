@@ -36,7 +36,7 @@ pub(super) fn envelope_request(
     body: Bytes,
     timeout: Duration,
     kind: EnvelopeKind,
-) -> RouteAwareRequestBuilder {
+) -> RequestBuilder {
     let sentry_options = ClientOptions::default();
     let sentry_auth = dsn.to_auth(Some(sentry_options.user_agent.as_ref()));
     let request = client_pool

@@ -490,9 +490,6 @@ impl FeedbackAttachmentPath {
                     .map(|name| name.to_string_lossy().to_string())
                     .unwrap_or_else(|| "extra-log.log".to_string())
             });
-        if raw_rollout && !filename.ends_with(".zst") {
-            filename.push_str(".zst");
-        }
         let content_type = match Path::new(&filename)
             .extension()
             .and_then(|extension| extension.to_str())
