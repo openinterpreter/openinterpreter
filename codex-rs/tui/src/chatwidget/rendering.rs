@@ -263,6 +263,7 @@ impl ChatWidget {
                     textarea_right_reserve: right_reserve,
                     separate_status_line: command_popup_placement
                         != crate::bottom_pane::CommandPopupPlacement::AboveComposer,
+                    unfocused: false,
                     command_popup_placement,
                     footer,
                 })

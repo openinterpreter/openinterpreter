@@ -718,9 +718,7 @@ impl MultiSelectPickerBuilder {
     where
         F: Fn(&[MultiSelectItem]) -> Option<Line<'static>> + Send + Sync + 'static,
     {
-        self.on_preview_content(move |items| {
-            callback(items).map(|line| FooterContent::HyperlinkLine(line.into()))
-        })
+        self.on_preview_content(move |items| callback(items).map(FooterContent::from))
     }
 
     pub(crate) fn on_preview_content(

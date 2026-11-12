@@ -369,6 +369,8 @@ use super::skill_popup::SkillPopup;
 use super::slash_commands::ServiceTierCommand;
 use super::slash_commands::SlashCommandItem;
 use super::voice_strip::VoiceStrip;
+use crate::bottom_pane::footer_content::FooterContent;
+use crate::bottom_pane::footer_content::StatusLineFocus;
 use crate::history_cell::sanitize_user_text;
 use crate::key_hint::KeyBindingListExt;
 use crate::keymap::EditorKeymap;
@@ -390,13 +392,12 @@ use codex_protocol::user_input::TextElement;
 mod agents_navigation;
 mod attachment_state;
 mod completion_target;
-mod composer_layout;
+pub(super) mod composer_layout;
 mod draft_state;
 mod footer_state;
 mod history_search;
 mod inline_input;
 mod mouse;
-mod native_status;
 mod passive_hints;
 mod paste_input;
 mod popup_state;
@@ -784,8 +785,7 @@ impl ChatComposer {
                 goal_status_indicator: None,
                 ide_context_active: false,
                 status_line_value: None,
-                measured_status_line: Default::default(),
-                wrapped_native_status: Default::default(),
+                status_layout: Default::default(),
                 status_line_enabled: false,
                 side_conversation_context_label: None,
                 active_agent_label: None,
@@ -895,7 +895,7 @@ impl ChatComposer {
             let style = IgnitionStyle::random(self.effort_animation_style);
             self.effort_ignition = Some(EffortIgnition::new(tier, style));
             self.effort_animation_style = Some(style);
-            if let Some(previous) = self.status_surface_content()
+            if let Some(previous) = self.status_surface_content(StatusLineFocus::Focused)
                 && !matches!(previous.as_ref(), FooterContent::Extension { .. })
             {
                 self.effort_status_line_transition = Some(EffortStatusLineTransition::new(
@@ -4821,7 +4821,7 @@ impl ChatComposer {
                 self.render_transcript_footer(transcript_hint_area, buf, footer, warning_area);
             }
             (None, None) if self.shortcuts_above_composer(options) => {
-                let props = self.hint_footer_props();
+                let props = self.hint_footer_props(options);
                 super::shortcut_overlay::render(&props, inset_footer_hint_area(popup_rect), buf);
                 super::shortcut_overlay::close_hint(&props, transcript_hint_area.width)
                     .render(transcript_hint_area, buf);
@@ -4833,7 +4833,7 @@ impl ChatComposer {
                 } else if let Some(line) = self.history_search_footer_line() {
                     render_footer_line(hint_rect, buf, line);
                 } else {
-                    let footer_props = self.hint_footer_props();
+                    let footer_props = self.hint_footer_props(options);
                     let show_cycle_hint = !self.popup_active()
                         && !self.blocks_direct_input
                         && self.draft.input_enabled

@@ -3,15 +3,69 @@
 //! Shortcut help grows above the input, preserving status and close rows below it even when clipped.
 
 use super::*;
+use crate::bottom_pane::footer_content::StatusLineFocus;
+
+use std::borrow::Cow;
 
 impl ChatComposer {
-    pub(super) fn status_surface_height(&self, options: ComposerRenderOptions<'_>) -> u16 {
-        u16::from(options.separate_status_line && self.footer.status_line_enabled)
+    pub(crate) fn set_status_line(&mut self, status_line: Option<FooterContent>) -> bool {
+        if self.footer.status_line_value == status_line {
+            return false;
+        }
+        if matches!(status_line, Some(FooterContent::Extension { .. })) {
+            self.effort_status_line_transition = None;
+        }
+        self.footer.status_layout = Default::default();
+        self.footer.status_line_value = status_line;
+        true
+    }
+
+    pub(crate) fn set_status_line_enabled(&mut self, enabled: bool) -> bool {
+        if self.footer.status_line_enabled == enabled {
+            return false;
+        }
+        self.footer.status_line_enabled = enabled;
+        true
+    }
+
+    pub(crate) fn set_side_conversation_context_label(&mut self, label: Option<String>) -> bool {
+        if self.footer.side_conversation_context_label == label {
+            return false;
+        }
+        self.footer.side_conversation_context_label = label;
+        true
+    }
+
+    pub(super) fn status_surface_height(
+        &self,
+        width: u16,
+        available: u16,
+        options: ComposerRenderOptions<'_>,
+    ) -> u16 {
+        if !options.separate_status_line {
+            return 0;
+        }
+        let focus = options.status_line_focus();
+        let available =
+            if focus == StatusLineFocus::Focused && self.active_status_transition().is_some() {
+                available.min(1)
+            } else {
+                available
+            };
+        let right_width = self
+            .mode_indicator_line(/*show_cycle_hint*/ false)
+            .map_or(0, |line| line.width() as u16);
+        let width = width.saturating_sub(right_width.saturating_add(u16::from(right_width > 0)));
+        self.footer.status_layout.height(
+            self.status_surface_content(focus).as_deref(),
+            width,
+            available,
+        )
     }
 
     pub(super) fn hint_footer_props(&self, options: ComposerRenderOptions<'_>) -> FooterProps {
         let mut props = self.footer_props();
-        if self.status_surface_height(options) > 0 {
+        if options.separate_status_line && props.status_line_enabled {
             props.status_line_enabled = false;
             props.status_line_value = None;
             props.active_agent_label = None;
@@ -19,47 +73,80 @@ impl ChatComposer {
         props
     }
 
-    pub(super) fn render_status_surface(&self, area: Rect, buf: &mut Buffer) {
-        if area.is_empty() {
-            return;
+    pub(super) fn status_surface_content(
+        &self,
+        focus: StatusLineFocus,
+    ) -> Option<Cow<'_, FooterContent>> {
+        if !self.footer.status_line_enabled {
+            return None;
+        }
+        let status = self.footer.status_line_value.as_ref();
+        if matches!(status, Some(FooterContent::Extension { .. }))
+            || self.footer.active_agent_label.is_none()
+            || focus == StatusLineFocus::Unfocused
+        {
+            return status.map(Cow::Borrowed);
         }
         let mut props = self.footer_props();
-        // Persistent context is independent of help, queue, search, and quit modes.
+        // The viewed agent belongs to native status even during a transient composer hint.
         props.mode = FooterMode::ComposerHasDraft;
         props.is_task_running = false;
-        let line = passive_footer_status_line(&props);
-        let right = self.mode_indicator_line(/*show_cycle_hint*/ false);
-        let right_width = right
+        passive_footer_status_line(&props).map(Cow::Owned)
+    }
+
+    fn active_status_transition(&self) -> Option<&EffortStatusLineTransition> {
+        self.effort_status_line_transition
             .as_ref()
-            .map_or(/*default*/ 0, |line| line.width() as u16);
-        let width = max_left_width_for_right(area, right_width)
-            .unwrap_or_else(|| inset_footer_hint_area(area).width);
-        let transition = self
-            .effort_status_line_transition
-            .as_ref()
-            .filter(|transition| !transition.is_finished());
-        let line = if let Some(transition) = transition {
-            transition.render_line(line.as_ref(), width)
-        } else {
-            line
-        };
-        if let Some(line) = line {
-            render_footer_line(
-                area,
-                buf,
-                truncate_line_with_ellipsis_if_overflow(line, usize::from(width)),
-            );
+            .filter(|transition| !transition.is_finished())
+    }
+
+    pub(super) fn render_status_surface(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        options: ComposerRenderOptions<'_>,
+    ) {
+        if area.is_empty() || !options.separate_status_line {
+            return;
         }
+        let focus = options.status_line_focus();
+        let mut content = self.status_surface_content(focus);
+        if focus == StatusLineFocus::Focused
+            && let Some(transition) = self.active_status_transition()
+        {
+            content = transition
+                .render_line(
+                    content.map(|line| line.into_owned().into_hyperlink_line()),
+                    inset_footer_hint_area(area).width,
+                )
+                .map(|frame| Cow::Owned(frame.into()));
+            if let Some(requester) = &self.frame_requester {
+                requester.schedule_frame_in(EFFORT_STATUS_LINE_FRAME_TICK);
+            }
+        }
+        let right = self.mode_indicator_line(/*show_cycle_hint*/ false);
+        let right_width = right.as_ref().map_or(0, |line| line.width() as u16);
+        let content_area = Rect {
+            width: area
+                .width
+                .saturating_sub(right_width.saturating_add(u16::from(right_width > 0))),
+            ..area
+        };
+        self.footer
+            .status_layout
+            .render(content.as_deref(), content_area, buf, focus);
         if let Some(right) = right {
             render_context_right(area, buf, &right);
         }
-        if let Some(url) = self.footer.status_line_hyperlink_url.as_deref() {
-            mark_underlined_hyperlink(buf, area, url);
-        }
-        if transition.is_some()
-            && let Some(frame_requester) = &self.frame_requester
-        {
-            frame_requester.schedule_frame_in(EFFORT_STATUS_LINE_FRAME_TICK);
+    }
+}
+
+impl ComposerRenderOptions<'_> {
+    fn status_line_focus(self) -> StatusLineFocus {
+        if self.unfocused {
+            StatusLineFocus::Unfocused
+        } else {
+            StatusLineFocus::Focused
         }
     }
 }
