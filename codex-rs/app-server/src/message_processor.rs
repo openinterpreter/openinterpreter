@@ -426,8 +426,9 @@ impl MessageProcessor {
         });
         let model_catalog = Arc::new(crate::model_catalog::ModelCatalog::new(
             config_manager.clone(),
+            startup_cwd,
             Arc::clone(&config),
-            thread_manager.get_models_manager(),
+            Arc::clone(&thread_manager),
         ));
         let models_refresh_worker = crate::models_refresh_worker::spawn(&model_catalog);
         let turn_cost_worker =
