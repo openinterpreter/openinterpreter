@@ -450,6 +450,14 @@ async fn worker_compresses_old_active_and_archived_rollouts() -> anyhow::Result<
     let fresh_temp = active_path.with_file_name("rollout-fresh.jsonl.zst.tmp");
     fs::write(&fresh_temp, "fresh temp")?;
 
+    // Pause materialization after restoring the old metadata, before publication.
+    let mut live_temp = tempfile::Builder::new()
+        .prefix(".rollout-materialize-")
+        .tempfile_in(active_path.parent().unwrap())?;
+    live_temp.write_all(b"live materialization")?;
+    access_metadata::copy(&fs::File::open(&active_path)?, live_temp.as_file())?;
+    let source_modified = fs::metadata(&active_path)?.modified()?;
+
     worker::run(home.path().to_path_buf(), Startup).await?;
 
     assert!(!active_path.exists());
