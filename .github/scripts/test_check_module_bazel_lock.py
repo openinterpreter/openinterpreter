@@ -58,7 +58,9 @@ class CheckModuleBazelLockTest(unittest.TestCase):
         self.assertEqual(json.loads(proc.stdout)["class"], "stale_lock")
 
     def test_exact_patch_content_mismatch_classified(self):
-        proc = self.run_check("ERROR: CONTENT_DOES_NOT_MATCH_TARGET in pinned repository")
+        proc = self.run_check(
+            "ERROR: CONTENT_DOES_NOT_MATCH_TARGET in pinned repository"
+        )
         self.assertEqual(proc.returncode, 17)
         self.assertEqual(json.loads(proc.stdout)["class"], "patch_failure")
 
