@@ -620,6 +620,8 @@ pub struct FsOpenParams {
 pub struct WireFsOpenParams {
     handle_id: String,
     path: PathUri,
+    #[serde(default)]
+    mode: FsOpenMode,
     sandbox: Option<WireFileSystemSandboxContext>,
 }
 
@@ -928,7 +930,7 @@ macro_rules! impl_wire_filesystem_request {
 
 impl_wire_filesystem_request! {
     WireFsReadFileParams => FsReadFileParams { path, follow_symlinks },
-    WireFsOpenParams => FsOpenParams { handle_id, path },
+    WireFsOpenParams => FsOpenParams { handle_id, path, mode },
     WireFsWriteFileParams => FsWriteFileParams { path, data_base64, follow_symlinks },
     WireFsCreateDirectoryParams => FsCreateDirectoryParams { path, recursive, follow_symlinks },
     WireFsGetMetadataParams => FsGetMetadataParams { path, follow_symlinks },
@@ -1977,6 +1979,7 @@ mod tests {
         let open = FsOpenParams {
             handle_id: "handle".to_owned(),
             path: path.clone(),
+            mode: super::FsOpenMode::Replace,
             sandbox: Some(sandbox.clone()),
         };
         let capability = CapabilityRootDiscoverRequest {
@@ -1986,6 +1989,18 @@ mod tests {
         };
         let open_wire =
             serde_json::to_value(WireFsOpenParams::from(open.clone())).expect("serialize open");
+        assert_eq!(open_wire["mode"], "replace");
+        let mut legacy_open_wire = open_wire.clone();
+        legacy_open_wire
+            .as_object_mut()
+            .expect("open object")
+            .remove("mode");
+        assert_eq!(
+            serde_json::from_value::<WireFsOpenParams>(legacy_open_wire)
+                .expect("deserialize legacy wire open")
+                .mode,
+            super::FsOpenMode::Read
+        );
         let capability_wire = serde_json::to_value(&capability).expect("serialize capability");
         assert_eq!(
             (
