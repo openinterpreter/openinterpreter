@@ -20,7 +20,7 @@ jobs:
       - name: Validate workflow YAML
         run: |
           set -euo pipefail
-          ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].sort.each { |path| YAML.load_file(path); puts path }'
+          ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].sort.each { |path| YAML.parse_file(path); puts path }'
 
       - name: Validate localized documentation parity
         run: node scripts/check-doc-locales.mjs

@@ -26,9 +26,18 @@ UTILITY_NAME_EXCEPTIONS = {
     "path-utils": "codex-utils-path",
 }
 MANIFEST_FEATURE_EXCEPTIONS = {
+    # Code mode ships V8 by default; preserve the explicit development opt-out
+    # until the Bazel/Cargo feature policy can be reconciled with this runtime.
+    "codex-rs/code-mode-runtime/Cargo.toml": {
+        "default": ("v8-runtime",),
+        "v8-runtime": ("dep:deno_core_icudata", "dep:v8"),
+    },
     "codex-rs/v8-poc/Cargo.toml": {"sandbox": ("v8/v8_enable_sandbox",)},
 }
-OPTIONAL_DEPENDENCY_EXCEPTIONS = set()
+OPTIONAL_DEPENDENCY_EXCEPTIONS = {
+    ("codex-rs/code-mode-runtime/Cargo.toml", "dependencies", "deno_core_icudata"),
+    ("codex-rs/code-mode-runtime/Cargo.toml", "dependencies", "v8"),
+}
 INTERNAL_DEPENDENCY_FEATURE_EXCEPTIONS = {}
 
 
