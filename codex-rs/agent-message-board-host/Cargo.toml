@@ -5,7 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [lib]
-test = false
 doctest = false
 
 [lints]

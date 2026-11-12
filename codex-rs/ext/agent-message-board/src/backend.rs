@@ -2,7 +2,7 @@
 //! Hosts supply membership, clocks and notification delivery through `MessageBoardHost`.
 //! Installation opens no storage; each runtime binds its own host at thread startup.
 
-use crate::extension;
+use crate::extension_v2;
 use crate::local_board_options;
 use crate::mcp;
 use codex_agent_message_board_client::AccessToken;
@@ -50,7 +50,7 @@ pub fn install<C: Sync + 'static, H: MessageBoardHost + Clone + 'static>(
 ) {
     let in_memory_boards = Arc::new(InMemoryMessageBoards::default());
     let mcp_boards = mcp::install_mcp(registry);
-    extension::install(
+    extension_v2::install(
         registry,
         namespace_description,
         tool_namespace,

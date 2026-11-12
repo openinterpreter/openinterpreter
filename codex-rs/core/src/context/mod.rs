@@ -58,7 +58,7 @@ mod user_shell_command;
 mod user_verification_notice;
 pub(crate) mod world_state;
 
-pub(crate) use agent_message_board_notification::AgentMessageBoardNotification;
+pub use agent_message_board_notification::AgentMessageBoardNotification;
 pub(crate) use approved_command_prefix_saved::APPROVED_COMMAND_PREFIX_SAVED_MESSAGE_PREFIX;
 pub(crate) use approved_command_prefix_saved::ApprovedCommandPrefixSaved;
 pub(crate) use approved_command_prefix_saved::SAVED_PREFIX_KIND;

@@ -2,7 +2,7 @@
 //!
 //! The extension owns backend construction, storage and tool registration. This adapter
 //! selects configuration and supplies host capabilities. It never starts or restores
-//! recipients during lookup. Notifications use ordinary agent-message scheduling.
+//! recipients during lookup. Notifications enter only an already-active turn.
 //! Permanent board deletion uses the thread store's existing host cleanup callback.
 
 #![deny(clippy::print_stdout, clippy::print_stderr)]
@@ -16,6 +16,8 @@ use codex_core::CodexThread;
 use codex_core::MULTI_AGENT_V2_NAMESPACE_DESCRIPTION;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
+use codex_core::context::AgentMessageBoardNotification;
+use codex_core::context::ContextualUserFragment;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ThreadStartInput;
 use codex_features::Feature;
@@ -30,8 +32,6 @@ use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
-use codex_protocol::protocol::InterAgentCommunication;
-use codex_protocol::protocol::Op;
 use codex_state::SqliteConfig;
 use codex_thread_store::ThreadStoreError;
 use codex_thread_store::ThreadStoreResult;
@@ -56,7 +56,7 @@ pub fn install_agent_message_board(
             }),
         ))
     });
-    codex_agent_message_board_extension::install(
+    codex_agent_message_board_extension::install_backends(
         registry,
         MULTI_AGENT_V2_NAMESPACE_DESCRIPTION,
         |config: &Config| config.multi_agent_v2.tool_namespace.clone(),
@@ -68,14 +68,15 @@ pub fn install_agent_message_board(
                 config.features.enabled(Feature::AgentMessageBoardMcp) && connection.is_none();
             // Automatic boards need MAv2. In-memory boards and explicit host
             // connections also work for isolated, ephemeral runtimes.
-            if connection.is_none()
-                && ((!config.features.enabled(Feature::AgentMessageBoard) && !mcp)
-                    || !config.features.enabled(Feature::MultiAgentV2)
-                    || (config.ephemeral
-                        && !mcp
-                        && !in_memory
-                        && config.multi_agent_v2.message_board_remote.is_none()))
-            {
+            if !board_backend_enabled(
+                config.features.enabled(Feature::MultiAgentV2),
+                config.features.enabled(Feature::AgentMessageBoard),
+                connection.is_some(),
+                mcp,
+                config.ephemeral,
+                in_memory,
+                config.multi_agent_v2.message_board_remote.is_some(),
+            ) {
                 return None;
             }
             let backend = if mcp {
@@ -104,6 +105,51 @@ pub fn install_agent_message_board(
             ))
         },
     );
+}
+
+fn board_backend_enabled(
+    multi_agent_v2: bool,
+    board: bool,
+    connected: bool,
+    mcp: bool,
+    ephemeral: bool,
+    in_memory: bool,
+    remote: bool,
+) -> bool {
+    multi_agent_v2
+        && (connected || board || mcp)
+        && (connected || !ephemeral || mcp || in_memory || remote)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::board_backend_enabled;
+
+    #[test]
+    fn board_backend_requires_mav2_and_explicit_board_or_connection() {
+        for connected in [false, true] {
+            for mcp in [false, true] {
+                assert!(!board_backend_enabled(
+                    false, true, connected, mcp, false, false, false,
+                ));
+            }
+        }
+        assert!(!board_backend_enabled(
+            true, false, false, false, false, false, false,
+        ));
+        assert!(board_backend_enabled(
+            true, true, false, false, false, false, false,
+        ));
+        assert!(board_backend_enabled(
+            true, false, true, false, true, false, false,
+        ));
+        assert!(board_backend_enabled(
+            true, false, false, true, true, false, false,
+        ));
+        assert!(!board_backend_enabled(
+            true, true, false, false, true, false, false,
+        ));
+    }
 }
 
 /// Removes persisted agent-board data through the thread store's deletion callback.
@@ -229,33 +275,29 @@ impl MessageBoardHost for LocalBoardHost {
                 }
                 Err(error) => return Err(error),
             };
-            let recipient_path = self.registered_path(&recipient).await?;
-            let communication = InterAgentCommunication::new(
-                post.metadata.author.clone(),
-                recipient_path,
-                Vec::new(),
-                post.notification_text(),
-                /*trigger_turn*/ false,
-            );
+            self.registered_path(&recipient).await?;
             // Remote metadata is untrusted. Skip an oversized notice without closing
             // the receiver; the post remains available through the board tools.
             if self.remote_notifications
-                && communication.content.len()
-                    + communication.author.as_str().len()
-                    + communication.recipient.as_str().len()
-                    > 1024
+                && post.text_preview.len() + post.metadata.author.as_str().len() > 1024
             {
                 return Err(CodexErr::InvalidRequest(
                     "remote board notice exceeds the context budget".into(),
                 ));
             }
-            recipient
-                .submit(Op::InterAgentCommunication {
-                    communication,
-                    start_options: Default::default(),
-                })
-                .await?;
-            Ok(NotificationDelivery::Accepted)
+            let notice = AgentMessageBoardNotification::new(
+                post.metadata.message_id,
+                post.metadata.thread_id,
+            );
+            Ok(
+                match recipient
+                    .inject_if_running(vec![ContextualUserFragment::into(notice)])
+                    .await
+                {
+                    Ok(()) => NotificationDelivery::Accepted,
+                    Err(_) => NotificationDelivery::SkippedInactive,
+                },
+            )
         })
     }
 }
