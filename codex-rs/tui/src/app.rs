@@ -207,6 +207,7 @@ mod agents_overview;
 mod agents_overview_actions;
 mod agents_overview_details;
 pub(crate) mod agents_overview_discovery;
+mod agents_overview_selection;
 mod agents_overview_threads;
 mod agents_overview_usage;
 mod agents_overview_view;
