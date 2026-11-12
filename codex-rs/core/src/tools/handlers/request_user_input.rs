@@ -100,19 +100,10 @@ impl RequestUserInputHandler {
                 "failed to serialize {REQUEST_USER_INPUT_TOOL_NAME} response: {err}"
             ))
         })?;
-        // Persist answers even while an older checkpoint needs compatibility review.
+        // Persist host-accepted answers even when an older reviewer checkpoint
+        // still needs compatibility review. The durable answer, not a legacy
+        // thread-local buffer, is the authorization source after resumption.
         if turn.config.features.enabled(Feature::GuardianApproval) {
-            let history = session.conversation_history_snapshot().await;
-            session
-                .services
-                .thread_extension_data
-                .get_or_init(GuardianReviewEvidence::default)
-                .record_user_input(history.as_ref(), &call_id, &questions, &response);
-        }
-        // Capture follows the session flag even while an older checkpoint uses legacy review.
-        if turn.config.features.enabled(Feature::GuardianApproval)
-            && session.guardian_context_mode == GuardianContextMode::ThreadOwned
-        {
             let user_input = questions
                 .iter()
                 .filter_map(|question| {
