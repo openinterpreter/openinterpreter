@@ -893,7 +893,7 @@ impl OpenAiModelsManager {
     ) -> CoreResult<()> {
         let _refresh_guard = self.catalog_source.refresh_lock().await;
         if mode == CatalogLoadMode::Initialize
-            && self.catalog_is_initialized(&self.remote_models.read().await)
+            && self.catalog_is_initialized(&*self.remote_models.read().await)
         {
             return Ok(());
         }
@@ -1089,7 +1089,7 @@ impl OpenAiModelsManager {
     /// Attempt to satisfy the refresh from the cache when it matches the provider and TTL.
     async fn try_load_cache(&self, mode: CatalogLoadMode) -> bool {
         if mode == CatalogLoadMode::Initialize
-            && self.catalog_is_initialized(&self.remote_models.read().await)
+            && self.catalog_is_initialized(&*self.remote_models.read().await)
         {
             return true;
         }

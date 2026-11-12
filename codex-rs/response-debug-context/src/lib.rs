@@ -31,10 +31,6 @@ pub fn extract_response_debug_context_from_headers(
 ) -> ResponseDebugContext {
     let mut context = ResponseDebugContext::default();
 
-    let TransportError::Http { headers, .. } = transport else {
-        return context;
-    };
-
     let extract_header = |name: &str| {
         headers
             .get(name)
