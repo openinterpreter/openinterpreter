@@ -1,6 +1,9 @@
 #[path = "notification_tests.rs"]
 mod notification_tests;
 
+#[path = "network_policy_tests.rs"]
+mod network_policy_tests;
+
 #[path = "compaction_replay_tests.rs"]
 mod compaction_replay_tests;
 

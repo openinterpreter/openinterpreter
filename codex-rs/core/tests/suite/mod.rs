@@ -48,6 +48,8 @@ mod agent_execution;
 mod agent_message_wake;
 mod agent_websocket;
 mod agents_md;
+#[path = "analytics_runtime_auth.rs"]
+mod analytics_runtime_auth;
 mod app_tool_exposure;
 mod apply_patch_cli;
 mod apply_patch_serialization;
