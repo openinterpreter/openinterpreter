@@ -8,40 +8,40 @@ app-server-backed terminal UI.
 
 ## Global Flags
 
-| Flag | Purpose |
-| ---- | ------- |
-| `PROMPT` | Optional initial prompt. |
-| `--image, -i <path[,path...]>` | Attach image files to the initial prompt. |
-| `--model, -m <model>` | Override the configured model. |
-| `--oss` | Use the configured local open source provider. |
-| `--local-provider <provider>` | Use `ollama` or `lmstudio` with `--oss`. |
-| `--profile, -p <name>` | Load a config profile. |
-| `--sandbox, -s <mode>` | Select `read-only`, `workspace-write`, or `danger-full-access`. |
-| `--ask-for-approval, -a <policy>` | Select `untrusted`, `on-request`, or `never`. |
-| `--cd, -C <path>` | Start in another working directory. |
-| `--add-dir <path>` | Add a writable workspace root. |
-| `--search` | Request live web search. |
-| `--enable <feature>` | Enable a feature for this run. |
-| `--disable <feature>` | Disable a feature for this run. |
-| `--config, -c key=value` | Override config for this run. |
-| `--remote <ws-url>` | Connect the TUI to a remote app-server endpoint. |
-| `--remote-auth-token-env <var>` | Read the remote bearer token from an environment variable. |
-| `--no-alt-screen` | Disable alternate-screen TUI mode. |
-| `--yolo` | Bypass approvals and sandboxing. Dangerous. |
+| Flag                              | Purpose                                                         |
+| --------------------------------- | --------------------------------------------------------------- |
+| `PROMPT`                          | Optional initial prompt.                                        |
+| `--image, -i <path[,path...]>`    | Attach image files to the initial prompt.                       |
+| `--model, -m <model>`             | Override the configured model.                                  |
+| `--oss`                           | Use the configured local open source provider.                  |
+| `--local-provider <provider>`     | Use `ollama` or `lmstudio` with `--oss`.                        |
+| `--profile, -p <name>`            | Load a config profile.                                          |
+| `--sandbox, -s <mode>`            | Select `read-only`, `workspace-write`, or `danger-full-access`. |
+| `--ask-for-approval, -a <policy>` | Select `untrusted`, `on-request`, or `never`.                   |
+| `--cd, -C <path>`                 | Start in another working directory.                             |
+| `--add-dir <path>`                | Add a writable workspace root.                                  |
+| `--search`                        | Request live web search.                                        |
+| `--enable <feature>`              | Enable a feature for this run.                                  |
+| `--disable <feature>`             | Disable a feature for this run.                                 |
+| `--config, -c key=value`          | Override config for this run.                                   |
+| `--remote <ws-url>`               | Connect the TUI to a remote app-server endpoint.                |
+| `--remote-auth-token-env <var>`   | Read the remote bearer token from an environment variable.      |
+| `--no-alt-screen`                 | Disable alternate-screen TUI mode.                              |
+| `--yolo`                          | Bypass approvals and sandboxing. Dangerous.                     |
 
 ## Commands
 
-| Command | Purpose |
-| ------- | ------- |
-| `interpreter` | Start the TUI. |
-| `interpreter resume` | Resume an interactive session. |
-| `interpreter fork` | Fork an interactive session. |
-| `interpreter exec` | Run non-interactively. |
-| `interpreter acp` | Run as an Agent Client Protocol agent over stdio. |
+| Command                         | Purpose                                                                       |
+| ------------------------------- | ----------------------------------------------------------------------------- |
+| `interpreter`                   | Start the TUI.                                                                |
+| `interpreter resume`            | Resume an interactive session.                                                |
+| `interpreter fork`              | Fork an interactive session.                                                  |
+| `interpreter exec`              | Run non-interactively.                                                        |
+| `interpreter acp`               | Run as an Agent Client Protocol agent over stdio.                             |
 | `interpreter app-server daemon` | Manage the optional shared [daemon](/docs/daemon) (`start`/`stop`/`restart`). |
-| `interpreter mcp` | Manage MCP server config. |
-| `interpreter mcp-server` | Expose Open Interpreter as an MCP server over stdio. |
-| `interpreter update` | Run the configured installer for the latest release. |
+| `interpreter mcp`               | Manage MCP server config.                                                     |
+| `interpreter mcp-server`        | Expose Open Interpreter as an MCP server over stdio.                          |
+| `interpreter update`            | Run the configured installer for the latest release.                          |
 
 ## Resume
 

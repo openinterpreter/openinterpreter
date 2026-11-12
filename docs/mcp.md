@@ -74,11 +74,11 @@ approval_mode = "approve"
 
 Common modes:
 
-| Mode | Behavior |
-| ---- | -------- |
-| `prompt` | Ask before the tool runs. |
+| Mode      | Behavior                      |
+| --------- | ----------------------------- |
+| `prompt`  | Ask before the tool runs.     |
 | `approve` | Allow the tool automatically. |
-| `auto` | Let the active policy decide. |
+| `auto`    | Let the active policy decide. |
 
 ## Tool Filtering
 

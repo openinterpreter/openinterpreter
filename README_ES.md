@@ -14,8 +14,7 @@
   <a href="LICENSE"><img alt="Licencia" src="https://img.shields.io/badge/License-Apache--2.0-white?style=flat-square" /></a>
 </p>
 
-> [!NOTE]
-> **Hoy: Kimi K3 ya está aquí.** Hemos reimplementado en Rust el harness
+> [!NOTE] > **Hoy: Kimi K3 ya está aquí.** Hemos reimplementado en Rust el harness
 > [Kimi Code](https://www.kimi.com/coding/en) recomendado por el proveedor,
 > para ofrecer el máximo rendimiento de K3 con una interfaz similar a Codex.
 > [**Documentación de Kimi →**](https://www.openinterpreter.com/docs/terminal/kimi-k3?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=kimi_k3_note)

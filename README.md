@@ -12,8 +12,7 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache--2.0-white?style=flat-square" /></a>
 </p>
 
-> [!NOTE]
-> **Today: Kimi K3 is here.** We have reimplemented the provider-recommended
+> [!NOTE] > **Today: Kimi K3 is here.** We have reimplemented the provider-recommended
 > [Kimi Code](https://www.kimi.com/coding/en) harness in Rust, giving you
 > maximum K3 performance with a Codex-like interface.
 > [**Kimi Docs &#8594;**](https://www.openinterpreter.com/docs/terminal/kimi-k3?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=kimi_k3_note)
@@ -142,7 +141,6 @@ Provider and model membership is generated, not maintained as Rust lists. From
 `--provider <provider-id>` to update only selected provider entries. Live model
 sources require the provider credentials documented in the
 [provider docs](https://www.openinterpreter.com/docs/terminal/providers?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=provider_catalog_generation).
-
 
 > [!NOTE]
 > This is the new Rust version of Open Interpreter, based on Codex. Looking for the original Python project? It lives on as a community-maintained fork at [endolith/open-interpreter](https://github.com/endolith/open-interpreter).

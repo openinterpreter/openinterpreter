@@ -14,8 +14,7 @@
   <a href="LICENSE"><img alt="ライセンス" src="https://img.shields.io/badge/License-Apache--2.0-white?style=flat-square" /></a>
 </p>
 
-> [!NOTE]
-> **本日、Kimi K3 が登場しました。** プロバイダーが推奨する
+> [!NOTE] > **本日、Kimi K3 が登場しました。** プロバイダーが推奨する
 > [Kimi Code](https://www.kimi.com/coding/en) ハーネスを Rust で再実装し、
 > Codex ライクなインターフェースで K3 の性能を最大限に引き出せるようにしました。
 > [**Kimi ドキュメント →**](https://www.openinterpreter.com/docs/terminal/kimi-k3?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=kimi_k3_note)
@@ -140,7 +139,6 @@ Open Interpreter には、あらゆるモデルがインターフェースを操
 実行するとホストされている全プロバイダーを更新できます。`--provider
 <provider-id>` を繰り返し指定すれば、選択したプロバイダーのエントリだけを
 更新できます。ライブのモデルソースを利用するには、[プロバイダーのドキュメント](https://www.openinterpreter.com/docs/terminal/providers?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=provider_catalog_generation)に記載されているプロバイダーの認証情報が必要です。
-
 
 > [!NOTE]
 > これは Codex をベースにした Open Interpreter の新しい Rust 版です。オリジナルの Python プロジェクトをお探しですか？ コミュニティによってメンテナンスされているフォーク [endolith/open-interpreter](https://github.com/endolith/open-interpreter) として存続しています。

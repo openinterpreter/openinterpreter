@@ -14,8 +14,7 @@
   <a href="LICENSE"><img alt="许可证" src="https://img.shields.io/badge/License-Apache--2.0-white?style=flat-square" /></a>
 </p>
 
-> [!NOTE]
-> **今天：Kimi K3 正式上线。** 我们使用 Rust 重新实现了服务商推荐的
+> [!NOTE] > **今天：Kimi K3 正式上线。** 我们使用 Rust 重新实现了服务商推荐的
 > [Kimi Code](https://www.kimi.com/coding/en) 智能体框架，
 > 让你在熟悉的 Codex 风格界面中充分发挥 K3 的性能。
 > [**Kimi 文档 →**](https://www.openinterpreter.com/docs/terminal/kimi-k3?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=kimi_k3_note)

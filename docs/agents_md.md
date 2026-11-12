@@ -29,9 +29,9 @@ Edit it down to the rules that should survive across sessions.
 
 Open Interpreter loads:
 
-| Scope | Path |
-| ----- | ---- |
-| Global | `~/.openinterpreter/AGENTS.md` |
+| Scope   | Path                                                                             |
+| ------- | -------------------------------------------------------------------------------- |
+| Global  | `~/.openinterpreter/AGENTS.md`                                                   |
 | Project | `AGENTS.md` files from the repository root down to the current working directory |
 
 More specific files override or supplement broader ones. A file closer to your
@@ -59,16 +59,19 @@ limit is reached.
 # Project Instructions
 
 ## Commands
+
 - `pnpm test` runs unit tests.
 - `pnpm lint` must pass before final changes.
 - Use `pnpm typecheck` after editing TypeScript types.
 
 ## Conventions
+
 - Keep server code under `src/server`.
 - Keep UI components small and colocated with their tests.
 - Prefer existing helpers in `src/lib`.
 
 ## Cautions
+
 - Do not edit generated files under `src/generated`.
 - Ask before changing database migrations.
 ```

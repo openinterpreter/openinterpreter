@@ -18,6 +18,7 @@ files, run commands, review diffs, and resume work later.
     ```powershell
     irm https://www.openinterpreter.com/install.ps1 | iex
     ```
+
   </Step>
   <Step title="Open a project">
     ```bash
@@ -27,6 +28,7 @@ files, run commands, review diffs, and resume work later.
 
     `i` is the short command for `interpreter`; either command starts an
     interactive session.
+
   </Step>
   <Step title="Choose a provider">
     The first run walks you through provider setup. You can sign in with
@@ -34,6 +36,7 @@ files, run commands, review diffs, and resume work later.
     or configure another compatible provider.
 
     You can change providers later with `/model`.
+
   </Step>
   <Step title="Ask for a change">
     Type a concrete request:
@@ -44,6 +47,7 @@ files, run commands, review diffs, and resume work later.
 
     Open Interpreter reads the project, proposes work, edits files, and runs
     commands through the active sandbox and approval settings.
+
   </Step>
   <Step title="Approve actions">
     In the default local workflow, Open Interpreter can work inside the current
@@ -56,32 +60,33 @@ files, run commands, review diffs, and resume work later.
     ```
 
     Resume keeps the prior conversation, context, and working directory.
+
   </Step>
 </Steps>
 
 ## Common first commands
 
-| Task | Command |
-| ---- | ------- |
-| Start the TUI | `i` or `interpreter` |
-| Start with a prompt | `interpreter "explain this repo"` |
-| Run once without the TUI | `interpreter exec "summarize the current diff"` |
-| Continue the last session | `interpreter resume --last` |
-| Review current changes | `/review` or `interpreter exec review --uncommitted` |
-| Choose model/provider | `/model` |
-| Change permissions | `/permissions` |
+| Task                      | Command                                              |
+| ------------------------- | ---------------------------------------------------- |
+| Start the TUI             | `i` or `interpreter`                                 |
+| Start with a prompt       | `interpreter "explain this repo"`                    |
+| Run once without the TUI  | `interpreter exec "summarize the current diff"`      |
+| Continue the last session | `interpreter resume --last`                          |
+| Review current changes    | `/review` or `interpreter exec review --uncommitted` |
+| Choose model/provider     | `/model`                                             |
+| Change permissions        | `/permissions`                                       |
 
 ## Common setup answers
 
-| If you need to… | Go here |
-| --------------- | ------- |
-| Verify your installed version, update, or uninstall | [Install](/docs/install) |
-| Connect Ollama or LM Studio, including a remote local server | [Local models](/docs/models#local-models) |
-| Connect a hosted model provider | [Providers](/docs/providers) |
-| Set an API key or understand where credentials are stored | [Authentication](/docs/authentication) |
-| Configure command, filesystem, and network boundaries | [Sandbox & approvals](/docs/sandbox) |
-| Embed Open Interpreter in an application | [SDK](/docs/sdk) |
-| Build a small local streaming browser chat | [A tiny streaming web chat](/docs/streaming-web-chat) |
+| If you need to…                                              | Go here                                               |
+| ------------------------------------------------------------ | ----------------------------------------------------- |
+| Verify your installed version, update, or uninstall          | [Install](/docs/install)                              |
+| Connect Ollama or LM Studio, including a remote local server | [Local models](/docs/models#local-models)             |
+| Connect a hosted model provider                              | [Providers](/docs/providers)                          |
+| Set an API key or understand where credentials are stored    | [Authentication](/docs/authentication)                |
+| Configure command, filesystem, and network boundaries        | [Sandbox & approvals](/docs/sandbox)                  |
+| Embed Open Interpreter in an application                     | [SDK](/docs/sdk)                                      |
+| Build a small local streaming browser chat                   | [A tiny streaming web chat](/docs/streaming-web-chat) |
 
 ## Next pages
 

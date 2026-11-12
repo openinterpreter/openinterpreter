@@ -24,20 +24,20 @@ interpreter -c harness='"kimi-code"' "solve this task"
 
 ## Harness IDs
 
-| Harness ID | Wire API | Request route | Reference |
-| --- | --- | --- | --- |
-| unset or `""` | `responses` | Responses API | Native Open Interpreter/Codex-compatible surface |
-| unset or `""` | `chat` | Chat Completions compatibility | Generic OpenAI-compatible chat providers |
-| `claude-code` | `responses`, `chat`, or `messages` | Claude Code shaping over the provider transport | [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) full agent surface |
-| `claude-code-bare` | `responses`, `chat`, or `messages` | Claude Code shaping over the provider transport | [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) bare profile |
-| `zcode` | `messages` | Anthropic Messages harness | ZCode-shaped GLM coding-agent surface |
-| `deepseek-tui` | `chat` | Chat harness | [DeepSeek TUI](https://github.com/DeepSeek-TUI/DeepSeek-TUI) / [CodeWhale](https://www.codewhale.ai/) |
-| `kimi-code` | `chat` | Chat harness | Current [Kimi Code](https://www.kimi.com/code/docs/en/) / [GitHub](https://github.com/MoonshotAI/kimi-code) profile |
-| `kimi-cli` | `chat` | Chat harness | Legacy [Kimi CLI](https://moonshotai.github.io/kimi-cli/) / [GitHub](https://github.com/MoonshotAI/kimi-cli) profile |
-| `qwen-code` | `chat` | Chat harness | [Qwen Code](https://qwenlm.github.io/qwen-code-docs/en/cli/index) / [GitHub](https://github.com/QwenLM/qwen-code) |
-| `swe-agent` | `chat` | Chat harness | [SWE-agent](https://swe-agent.com/) / [GitHub](https://github.com/SWE-agent/SWE-agent) |
-| `minimal` | `chat` | Chat harness | Open Interpreter minimal chat-tool surface |
-| any other string | `chat` | Chat Completions compatibility | Custom marker; no built-in harness request builder |
+| Harness ID         | Wire API                           | Request route                                   | Reference                                                                                                            |
+| ------------------ | ---------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| unset or `""`      | `responses`                        | Responses API                                   | Native Open Interpreter/Codex-compatible surface                                                                     |
+| unset or `""`      | `chat`                             | Chat Completions compatibility                  | Generic OpenAI-compatible chat providers                                                                             |
+| `claude-code`      | `responses`, `chat`, or `messages` | Claude Code shaping over the provider transport | [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) full agent surface                            |
+| `claude-code-bare` | `responses`, `chat`, or `messages` | Claude Code shaping over the provider transport | [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) bare profile                                  |
+| `zcode`            | `messages`                         | Anthropic Messages harness                      | ZCode-shaped GLM coding-agent surface                                                                                |
+| `deepseek-tui`     | `chat`                             | Chat harness                                    | [DeepSeek TUI](https://github.com/DeepSeek-TUI/DeepSeek-TUI) / [CodeWhale](https://www.codewhale.ai/)                |
+| `kimi-code`        | `chat`                             | Chat harness                                    | Current [Kimi Code](https://www.kimi.com/code/docs/en/) / [GitHub](https://github.com/MoonshotAI/kimi-code) profile  |
+| `kimi-cli`         | `chat`                             | Chat harness                                    | Legacy [Kimi CLI](https://moonshotai.github.io/kimi-cli/) / [GitHub](https://github.com/MoonshotAI/kimi-cli) profile |
+| `qwen-code`        | `chat`                             | Chat harness                                    | [Qwen Code](https://qwenlm.github.io/qwen-code-docs/en/cli/index) / [GitHub](https://github.com/QwenLM/qwen-code)    |
+| `swe-agent`        | `chat`                             | Chat harness                                    | [SWE-agent](https://swe-agent.com/) / [GitHub](https://github.com/SWE-agent/SWE-agent)                               |
+| `minimal`          | `chat`                             | Chat harness                                    | Open Interpreter minimal chat-tool surface                                                                           |
+| any other string   | `chat`                             | Chat Completions compatibility                  | Custom marker; no built-in harness request builder                                                                   |
 
 ## Reference Projects
 
@@ -63,11 +63,11 @@ surfaces informed the corresponding harness modes:
 
 Harness routing is strict:
 
-| Provider `wire_api` | Compatible harnesses |
-| --- | --- |
-| `responses` | Native Responses, `claude-code`, and `claude-code-bare`. |
-| `chat` | Native chat compatibility, `claude-code`, `claude-code-bare`, `deepseek-tui`, `kimi-code`, `kimi-cli`, `qwen-code`, `swe-agent`, and `minimal`. |
-| `messages` | `claude-code`, `claude-code-bare`, and `zcode`. Native mode is rejected because Messages requires a harness-native transport. |
+| Provider `wire_api` | Compatible harnesses                                                                                                                            |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `responses`         | Native Responses, `claude-code`, and `claude-code-bare`.                                                                                        |
+| `chat`              | Native chat compatibility, `claude-code`, `claude-code-bare`, `deepseek-tui`, `kimi-code`, `kimi-cli`, `qwen-code`, `swe-agent`, and `minimal`. |
+| `messages`          | `claude-code`, `claude-code-bare`, and `zcode`. Native mode is rejected because Messages requires a harness-native transport.                   |
 
 This means an Anthropic-style provider normally needs:
 
@@ -84,12 +84,12 @@ run through generic chat compatibility or through a matching chat harness.
 When the config does not set `harness`, Open Interpreter may infer one from
 the selected provider/model:
 
-| Detected family | Default harness |
-| --- | --- |
-| Anthropic, Claude model ids, Anthropic base URL, or any `messages` provider | `claude-code` |
-| Kimi/Moonshot provider ids, names, base URLs, or model ids | `kimi-code` |
-| Qwen/QwQ/DashScope provider ids, names, base URLs, or model ids | `qwen-code` |
-| DeepSeek provider ids, names, base URLs, or model ids | `claude-code-bare` |
+| Detected family                                                             | Default harness    |
+| --------------------------------------------------------------------------- | ------------------ |
+| Anthropic, Claude model ids, Anthropic base URL, or any `messages` provider | `claude-code`      |
+| Kimi/Moonshot provider ids, names, base URLs, or model ids                  | `kimi-code`        |
+| Qwen/QwQ/DashScope provider ids, names, base URLs, or model ids             | `qwen-code`        |
+| DeepSeek provider ids, names, base URLs, or model ids                       | `claude-code-bare` |
 
 Explicit `harness = "..."` always wins.
 
