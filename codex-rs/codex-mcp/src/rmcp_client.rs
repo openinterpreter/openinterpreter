@@ -1271,11 +1271,21 @@ async fn start_server_task(
     let client_tools: Arc<[ToolInfo]> =
         match (codex_apps_tools_cache_context.as_ref(), fetch_ticket) {
             (Some(context), Some(ticket)) if server_disables_tool_catalog_cache => {
-                context.publish_runtime_if_newest_accepted(ticket, &server_info, tools.clone());
+                context.publish_runtime_if_newest_accepted(
+                    ticket,
+                    &server_info,
+                    tools.clone(),
+                    /*tool_list_meta*/ None,
+                );
                 tools.into()
             }
             (Some(context), Some(ticket)) => context
-                .publish_runtime_if_newest_accepted(ticket, &server_info, tools)
+                .publish_runtime_if_newest_accepted(
+                    ticket,
+                    &server_info,
+                    tools,
+                    /*tool_list_meta*/ None,
+                )
                 .shared_tools(),
             (None, None) => tools.into(),
             _ => unreachable!("Codex Apps fetch ticket requires cache context"),

@@ -99,6 +99,7 @@ pub fn telemetry_api_error_message(error: &ApiError) -> String {
         ApiError::ContentPolicyViolation { .. } => "content policy violation".to_string(),
         ApiError::InvalidRequest { .. }
         | ApiError::InvalidAudioInput { .. }
+        | ApiError::InferenceHookDenied { .. }
         | ApiError::InvalidPrompt { .. } => "invalid request".to_string(),
         ApiError::CyberPolicy { .. } => "cyber policy".to_string(),
         ApiError::BioPolicy { .. } => "bio policy".to_string(),

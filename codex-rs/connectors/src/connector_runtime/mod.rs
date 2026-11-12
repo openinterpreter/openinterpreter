@@ -107,6 +107,8 @@ pub fn connector_runtime_cache_path(codex_home: &Path, auth: Option<&CodexAuth>)
 #[derive(Debug, Clone)]
 pub struct ConnectorRuntimeSnapshot<T> {
     tools: Arc<[T]>,
+    tool_list_meta: Option<Arc<serde_json::Value>>,
+    discovery_scope: Vec<String>,
     refreshed_at: SystemTime,
     generation: u64,
     tools_version: u64,
@@ -381,6 +383,18 @@ impl<T: ConnectorRuntimePayload> ConnectorRuntimeContext<T> {
         };
         let snapshot = Arc::new(ConnectorRuntimeSnapshot {
             tools,
+            tool_list_meta,
+            discovery_scope: self
+                .live_catalog
+                .as_ref()
+                .map(|catalog| {
+                    catalog
+                        .scope
+                        .iter()
+                        .map(|part| persistence::sha1_hex(part))
+                        .collect()
+                })
+                .unwrap_or_default(),
             tools_version,
             refreshed_at: SystemTime::now(),
             generation: ticket.generation,
@@ -431,7 +445,7 @@ impl<T: ConnectorRuntimePayload> ConnectorRuntimeContext<T> {
         server_info: &McpServerInfo,
         tools: Vec<T>,
     ) -> Vec<T> {
-        self.publish_runtime_if_newest_accepted(ticket, server_info, tools)
+        self.publish_runtime_if_newest_accepted(ticket, server_info, tools, None)
             .tools
             .to_vec()
     }

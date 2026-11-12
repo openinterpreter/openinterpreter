@@ -683,6 +683,7 @@ fn live_provider_reuses_equal_tools_only_within_its_scope() {
             context.begin_fetch(ConnectorRuntimeFetchSource::Startup),
             &create_test_server_info("Apps"),
             tools.clone(),
+            /*tool_list_meta*/ None,
         )
     };
     let original = publish(&first);
@@ -704,6 +705,34 @@ fn live_provider_reuses_equal_tools_only_within_its_scope() {
         .with_live_scope("capabilities".into());
     assert!(restarted.current_snapshot().is_some());
     assert!(restarted.subscribe().unwrap().borrow().is_none());
+}
+
+#[test]
+fn runtime_snapshot_retains_discovery_scope_and_tool_list_metadata() {
+    let manager = ConnectorRuntimeManager::<TestTool>::new_without_cache();
+    let context = manager.context(
+        PathBuf::from("unused"),
+        ConnectorRuntimeContextKey::personal(None, None),
+    );
+    let scoped = context.clone().with_live_scope("endpoint-a".into());
+    let metadata = Arc::new(serde_json::json!({"cursor": "next"}));
+    let snapshot = scoped.publish_runtime_if_newest_accepted(
+        scoped.begin_fetch(ConnectorRuntimeFetchSource::Startup),
+        &create_test_server_info("Apps"),
+        vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "search")],
+        Some(Arc::clone(&metadata)),
+    );
+    assert_eq!(snapshot.shared_tool_list_meta(), Some(metadata));
+    assert_eq!(
+        scoped.current_catalog_snapshot().as_ref().map(Arc::as_ptr),
+        Some(Arc::as_ptr(&snapshot))
+    );
+    assert!(
+        context
+            .with_live_scope("endpoint-b".into())
+            .current_catalog_snapshot()
+            .is_none()
+    );
 }
 
 #[test]

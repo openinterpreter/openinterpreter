@@ -241,6 +241,8 @@ pub(crate) fn write_cached_codex_apps_tools_for_test<T>(
 {
     let snapshot = ConnectorRuntimeSnapshot {
         tools: tools.into(),
+        tool_list_meta: None,
+        discovery_scope: Vec::new(),
         refreshed_at: SystemTime::now(),
         generation: 0,
         tools_version: 0,
@@ -273,6 +275,8 @@ where
 {
     let snapshot = ConnectorRuntimeSnapshot {
         tools: tools.into(),
+        tool_list_meta: None,
+        discovery_scope: Vec::new(),
         refreshed_at: SystemTime::now(),
         generation: 0,
         tools_version: 0,
