@@ -3972,6 +3972,7 @@ dependencies = [
  "codex-login",
  "codex-protocol",
  "codex-rollout",
+ "codex-state",
  "flate2",
  "http 1.5.0",
  "httpdate",
@@ -3981,11 +3982,14 @@ dependencies = [
  "sentry",
  "serde_json",
  "sha2 0.10.9",
+ "tar",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "url",
  "wiremock",
+ "zip",
 ]
 
 [[package]]
