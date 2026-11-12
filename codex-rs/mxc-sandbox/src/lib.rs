@@ -2,6 +2,8 @@
 //! a usable process security environment and never enters MXC's ACL fallbacks.
 
 #[cfg(windows)]
+mod availability;
+#[cfg(windows)]
 mod native;
 #[cfg(any(windows, test))]
 mod policy;
@@ -18,6 +20,7 @@ use anyhow::Result;
 use anyhow::ensure;
 use codex_network_proxy::ManagedNetworkSandboxContext;
 use codex_protocol::models::PermissionProfile;
+use codex_windows_sandbox::environment_transport;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -46,6 +49,8 @@ struct MxcCommand {
     sandbox_policy_cwd: PathBuf,
     managed_network: Option<ManagedNetworkSandboxContext>,
     command: Vec<String>,
+    #[serde(default)]
+    default_child_env: bool,
 }
 
 /// Inputs used to build an MXC helper invocation.
@@ -80,6 +85,9 @@ pub fn create_command_args(args: CreateMxcCommandArgsParams<'_>) -> Result<Vec<S
             sandbox_policy_cwd: sandbox_policy_cwd.to_owned(),
             managed_network: managed_network.cloned(),
             command,
+            default_child_env: env
+                .keys()
+                .all(|key| environment_transport::is_key(key.as_ref())),
         },
         env,
     )?;
@@ -97,6 +105,41 @@ pub fn is_available() -> bool {
     {
         false
     }
+}
+
+/// Resolve configured symbols and snapshot deny globs for policy inspection.
+/// Reuses MXC's resolution without adding native grants or protections.
+#[cfg(windows)]
+pub fn prepare_file_system_policy(
+    policy: codex_protocol::permissions::FileSystemSandboxPolicy,
+    env: &HashMap<String, String>,
+    policy_cwd: &codex_utils_absolute_path::AbsolutePathBuf,
+    command_cwd: &Path,
+) -> Result<codex_protocol::permissions::FileSystemSandboxPolicy> {
+    use codex_utils_path_uri::PathUri;
+
+    let env_entries = env
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>();
+    let mut policy = policy::materialize_temporary_paths(policy, &env_entries)?;
+    let denied = codex_windows_sandbox::resolve_windows_deny_read_paths(&policy, policy_cwd)
+        .map_err(anyhow::Error::msg)?;
+    policy = policy.with_expanded_deny_globs(denied);
+    if policy.has_full_disk_write_access() {
+        return Ok(policy);
+    }
+    let volumes = windows::volume_roots(policy_cwd.as_path(), command_cwd)?;
+    let read_volumes = windows::implicit_read_roots(&volumes, policy_cwd.as_path(), command_cwd)?;
+    let volumes = volumes
+        .into_iter()
+        .map(PathUri::from_host_native_path)
+        .collect::<std::io::Result<Vec<_>>>()?;
+    Ok(policy::materialize_volume_roots(
+        policy,
+        &volumes,
+        &read_volumes,
+    )?)
 }
 
 /// Entry point dispatched before ordinary Codex CLI parsing.
