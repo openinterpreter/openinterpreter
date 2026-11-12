@@ -212,7 +212,6 @@ codex-backend-client = { path = "backend-client" }
 codex-build-info = { path = "build-info" }
 codex-chatgpt = { path = "chatgpt" }
 codex-chat-wire-compat = { path = "chat-wire-compat" }
-codex-cli = { path = "cli" }
 codex-client = { path = "codex-client" }
 codex-collaboration-mode-templates = { path = "collaboration-mode-templates" }
 codex-cloud-config = { path = "cloud-config" }
@@ -239,7 +238,6 @@ codex-core = { path = "core" }
 codex-core-api = { path = "core-api" }
 codex-core-plugin-common = { path = "core-plugin-common" }
 codex-core-plugins = { path = "core-plugins" }
-codex-core-skills = { path = "core-skills" }
 codex-diagnostics = { path = "diagnostics" }
 codex-direct-tool-timing = { path = "direct-tool-timing" }
 codex-exec = { path = "exec" }
@@ -359,7 +357,6 @@ core_test_support = { path = "core/tests/common" }
 mcp_test_support = { path = "mcp-server/tests/common" }
 
 # External
-learning_mode_windows = { git = "https://github.com/microsoft/mxc", rev = "6cd3d58f05d3447e67109cfb75e042803b843ca4" }
 wxc_common = { git = "https://github.com/microsoft/mxc", rev = "6cd3d58f05d3447e67109cfb75e042803b843ca4" }
 age = "0.11.1"
 allocative = "0.3.3"
@@ -457,7 +454,6 @@ maplit = "1.0.2"
 memchr = "2.7.6"
 mime_guess = "2.0.5"
 multimap = "0.10.0"
-mxc-sdk = { git = "https://github.com/microsoft/mxc", rev = "b21120168d70befe12356411423266bfef168446" }
 notify = "8.2.0"
 nucleo = { git = "https://github.com/helix-editor/nucleo.git", rev = "4253de9faabb4e5c6d81d946a5e35a90f87347ee" }
 once_cell = "1.20.2"
