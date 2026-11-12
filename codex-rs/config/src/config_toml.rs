@@ -600,6 +600,10 @@ pub struct AutoReviewToml {
     pub circuit_break_action: Option<CircuitBreakAction>,
     /// Additional policy instructions inserted into the guardian prompt.
     pub policy: Option<String>,
+    /// Experimental replacement for history-tool instructions, if enabled.
+    pub experimental_conversation_history_prompt: Option<String>,
+    /// Maximum estimated tokens for each Guardian history-tool response.
+    pub conversation_history_max_output_tokens: Option<NonZeroUsize>,
     /// Experimental full Guardian prompt template containing the tenant policy placeholder.
     pub experimental_policy_template: Option<String>,
 }
@@ -608,8 +612,10 @@ pub struct AutoReviewToml {
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CircuitBreakAction {
+    /// Emit the warning and interrupt without structured error details.
     #[default]
     Default,
+    /// Emit the warning and interruption with structured error details.
     Strict,
 }
 
@@ -845,6 +851,15 @@ pub fn effective_sandbox_mode(
         SandboxMode::ReadOnly
     } else {
         mode
+    }
+}
+
+impl TryFrom<toml::Value> for ConfigToml {
+    type Error = toml::de::Error;
+
+    #[inline(never)]
+    fn try_from(value: toml::Value) -> Result<Self, Self::Error> {
+        value.try_into()
     }
 }
 

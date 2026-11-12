@@ -3,6 +3,7 @@
 use crate::CONFIG_TOML_FILE;
 use crate::ConfigLayerStack;
 use crate::ConfigRequirementsToml;
+use crate::NetworkRequirementsToml;
 use crate::RequirementsLayerEntry;
 use crate::config_toml::ConfigToml;
 use crate::diagnostics::ConfigDiagnosticSource;
@@ -266,12 +267,28 @@ pub(crate) fn ignored_config_warning(
             .as_ref()
             .map(|base_dir| AbsolutePathBufGuard::new(base_dir.as_path()));
         strip_cloud_auth_requirements(&source, &mut value);
+        let permissions_network = value
+            .get("permissions")
+            .and_then(|permissions| permissions.get("network"))
+            .cloned();
         fields.extend(
             ignored_toml_value_fields::<ConfigRequirementsToml>(value)
                 .unwrap_or_default()
                 .into_iter()
                 .map(|path| (format!("requirements ({source})"), path)),
         );
+        if let Some(network) = permissions_network {
+            fields.extend(
+                ignored_toml_value_fields::<NetworkRequirementsToml>(network)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|path| {
+                        let mut full_path = vec!["permissions".to_string(), "network".to_string()];
+                        full_path.extend(path);
+                        (format!("requirements ({source})"), full_path)
+                    }),
+            );
+        }
     }
 
     if fields.is_empty() {
@@ -291,11 +308,20 @@ pub(crate) fn ignored_config_warning(
             .collect::<Vec<_>>()
             .as_slice()
         {
+            ["auto_review", "experimental_denial_reconsideration_prompt"] => {
+                " Remove auto_review.experimental_denial_reconsideration_prompt from config.toml; Guardian retries replay the original request without a reconsideration prompt."
+            }
+            ["auto_review", "experimental_policy_template"] => {
+                " Remove auto_review.experimental_policy_template from config.toml."
+            }
+            ["auto_review", "extra_policy"] => {
+                " To enforce additional Guardian rules, set guardian_extra_policy in managed requirements.toml."
+            }
             ["windows", "sandbox_private_desktop"] => {
                 " Remove windows.sandbox_private_desktop; legacy Windows sandboxes always use a private desktop."
             }
             ["network_proxy"] => {
-                " Use [permissions.<name>.network] for network settings, or [experimental_network] in requirements.toml for enforced network policy."
+                " Use [features.network_proxy] or [permissions.<name>.network] for settings in config.toml, or [network_proxy], [permissions.network], or [experimental_network] for enforced policy in requirements.toml."
             }
             ["allowed_permissions"] => {
                 " Use [allowed_permission_profiles] and default_permissions; the old allowlist is ignored even when both forms are present."
