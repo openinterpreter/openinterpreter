@@ -9,6 +9,7 @@ pub use backend::windows::is_elevated;
 #[cfg(windows)]
 use backend::windows::try_lock_file;
 mod client;
+mod diagnostics;
 mod install_lock;
 mod launch;
 pub use launch::start_with_features;
@@ -43,6 +44,8 @@ use serde::Serialize;
 use settings::DaemonSettings;
 use settings::MAX_SHUTDOWN_GRACE_SECONDS;
 use tokio::time::sleep;
+
+pub use backend::stderr_log::stderr_writer;
 
 const START_POLL_INTERVAL: Duration = Duration::from_millis(50);
 // An older updater can pass background policy to a replacement daemon, so retain
