@@ -1961,6 +1961,8 @@ mod tests {
         let state = NetworkProxyState::from_remote_launch_config(
             RemoteNetworkProxyLaunchConfig::new(proxy_config),
             codex_utils_path_uri::Platform::native(),
+            &codex_network_proxy::RemoteCredentialBrokerCache::default(),
+            &HashMap::new(),
         )
         .expect("build network proxy state");
         let proxy = NetworkProxy::builder()

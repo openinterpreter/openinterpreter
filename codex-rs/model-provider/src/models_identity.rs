@@ -4,6 +4,7 @@
 
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CoreResult;
 use sha2::Digest;
 use sha2::Sha256;
@@ -94,7 +95,11 @@ pub(crate) fn identity_with_credential_fingerprint(
     // Command auth also returns opaque API keys. A changed key may belong to a
     // different account, so only credentials with stable owner metadata can be reused.
     if credential_fingerprint.is_none() && (!has_stable_account || explicit_bearer) {
-        let headers = resolve_provider_auth_sync(auth, provider_info)?.to_auth_headers();
+        let headers = resolve_provider_auth_sync(auth, provider_info)?
+            .to_auth_headers()
+            .map_err(|_| {
+                CodexErr::InvalidRequest("model catalog authentication is unavailable".into())
+            })?;
         api_provider.headers.extend(headers);
     }
     let mut headers: Vec<_> = api_provider.headers.iter().collect();
