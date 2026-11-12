@@ -1,5 +1,8 @@
 //! Exercises board tools through the runtime, including resume and active-only notices.
 
+#[path = "scenarios_agent_message_board_remote.rs"]
+mod remote;
+
 use anyhow::Context;
 use codex_core::TurnInputRequest;
 use codex_features::Feature;

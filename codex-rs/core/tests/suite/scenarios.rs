@@ -77,11 +77,17 @@ mod guardian_sender_context;
 #[path = "scenarios_injected_agent_mail.rs"]
 mod injected_agent_mail;
 
+#[path = "scenarios_incremental_tools_resume.rs"]
+mod incremental_tools_resume;
+
 #[path = "scenarios_shared_instructions.rs"]
 mod shared_instructions;
 
 #[path = "scenarios_tools_namespace_budget.rs"]
 mod tools_namespace_budget;
+
+#[path = "scenarios_turn_input_agent_message.rs"]
+mod turn_input_agent_message;
 
 fn skills_extensions() -> Arc<ExtensionRegistry<Config>> {
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
