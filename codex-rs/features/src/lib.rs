@@ -1065,12 +1065,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::DaemonAutoStart,
         key: "daemon_auto_start",
-        stage: Stage::Experimental {
-            name: "Automatically start the background server",
-            menu_description: "Use the shared local server for new, resumed, and forked sessions. Takes effect next launch.",
-            announcement: "Automatic background server startup can now be enabled from /experimental.",
-        },
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::TranscriptV2,
