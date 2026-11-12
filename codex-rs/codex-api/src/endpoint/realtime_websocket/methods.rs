@@ -1110,28 +1110,29 @@ impl RealtimeWebsocketClient {
         info!("connecting realtime websocket: {ws_url}");
         // Realtime websocket TLS should honor the same custom-CA env vars as the rest of Codex's
         // outbound HTTPS and websocket traffic.
-        let connector = maybe_build_rustls_client_config_with_custom_ca()
-            .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?
-            .map(tokio_tungstenite::Connector::Rustls);
+        let tls_config = maybe_build_rustls_client_config_with_custom_ca()
+            .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?;
         // A fresh Windows install may not have downloaded the server's trusted root yet.
         // Use platform validation only for system trust, preserving custom CA semantics.
         #[cfg(windows)]
-        let connector = match connector {
-            Some(connector) => Some(connector),
-            None => Some(tokio_tungstenite::Connector::Rustls(
+        let tls_config = match tls_config {
+            Some(tls_config) => Some(tls_config),
+            None => Some(
                 codex_http_client::build_windows_platform_tls_config().map_err(|err| {
                     ApiError::Stream(format!("failed to configure websocket TLS: {err}"))
                 })?,
-            )),
+            ),
         };
-        let (stream, response) = tokio_tungstenite::connect_async_tls_with_config(
-            request,
-            Some(websocket_config()),
-            false,
-            connector,
-        )
-        .await
-        .map_err(map_realtime_websocket_connect_error)?;
+        let tls_mode = match tls_config {
+            Some(tls_config) => WebSocketTlsMode::Rustls(tls_config),
+            None => WebSocketTlsMode::TungsteniteDefault,
+        };
+        let connector = WebSocketConnector::new_with_tls_mode(&self.http_client_factory, tls_mode)
+            .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?;
+        let (stream, response) = connector
+            .connect(request, websocket_config())
+            .await
+            .map_err(map_realtime_websocket_connect_error)?;
         info!(
             ws_url = %ws_url,
             status = %response.status(),
