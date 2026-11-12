@@ -8,11 +8,15 @@ mod activity;
 mod bookmark;
 mod composer_gap;
 mod copy_mode;
+#[cfg(test)]
+mod copy_on_select_tests;
 mod disclosure;
 mod follow_control;
 mod footer;
 mod input;
 mod layout;
+#[cfg(test)]
+mod markdown_copy_tests;
 mod mutations;
 mod prompt_header;
 mod search;
@@ -22,10 +26,6 @@ mod snapshot;
 mod text;
 mod turn_details;
 mod turn_tip;
-#[cfg(test)]
-mod copy_on_select_tests;
-#[cfg(test)]
-mod markdown_copy_tests;
 
 use std::sync::Arc;
 

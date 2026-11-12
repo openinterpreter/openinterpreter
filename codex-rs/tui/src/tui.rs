@@ -70,9 +70,9 @@ mod history_tail;
 mod input_boundary;
 #[cfg(unix)]
 mod job_control;
+mod keyboard_modes;
 mod link_pointer;
 mod notification_preview;
-mod keyboard_modes;
 #[cfg(test)]
 #[path = "tui/owned_screen_tests.rs"]
 mod owned_screen_tests;

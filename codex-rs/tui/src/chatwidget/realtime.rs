@@ -2,10 +2,10 @@
 //! Completed captions and both speakers' partials stay bounded across widget replacement.
 //! Interleaved speakers retain separate displays so settled caption text never reanimates.
 
-mod recording_controls;
 mod failure_metrics;
 #[path = "realtime_navigation.rs"]
 mod navigation;
+mod recording_controls;
 mod session_lock;
 mod transcript_replay;
 
