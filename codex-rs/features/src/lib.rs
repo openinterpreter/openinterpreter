@@ -128,6 +128,11 @@ pub enum Feature {
     AppServerWebSocketCompression,
 
     // Experimental
+    /// Advertise enabled environment-backed tools and their shell parameters before the
+    /// executor is ready. Actual execution still requires a usable environment and its policy.
+    StableEnvironmentTools,
+    /// Copy files between explicitly selected execution environments.
+    MultiEnvCopyFile,
     /// Send per-content-entry classifications in internal Responses metadata.
     ContentItemKinds,
     /// Render client-supplied untrusted context as standalone named tool outputs.
@@ -238,6 +243,10 @@ pub enum Feature {
     Collab,
     /// Enable task-path-based multi-agent routing.
     MultiAgentV2,
+    /// Preempt responses and yield foreground code-mode observations on new user input.
+    InstantInterrupt,
+    /// Interrupt upstream inference when a turn is cancelled.
+    InterruptOnCancel,
     /// Enable shared discussion tools for an agent tree.
     AgentMessageBoard,
     /// Removed compatibility flag retained as a no-op.
@@ -415,6 +424,10 @@ pub enum Feature {
     GuardianDenialReconsideration,
     /// Enable Guardian V2 automatic approval reviews.
     GuardianV2,
+    /// Run Decisions alongside Guardian V2 for measurement without changing approvals.
+    GuardianV2DecisionsComparison,
+    /// Enable Guardian V3 integrations.
+    GuardianV3,
     /// Removed compatibility flag for the unused Guardian extension prototype.
     GuardianExt,
     /// Enable persisted thread goals and automatic goal continuation.
@@ -437,6 +450,10 @@ pub enum Feature {
     AuthElicitation,
     /// Offer Amazon Bedrock setup during TUI sign-in onboarding.
     BedrockSetupWizard,
+    /// Offer Google Cloud Vertex AI setup during TUI sign-in onboarding.
+    GcpSetupWizard,
+    /// Offer custom gateway setup during TUI sign-in onboarding.
+    GatewaySetupWizard,
     /// Removed compatibility flag retained as a no-op.
     Personality,
     /// Enable native artifact tools.
