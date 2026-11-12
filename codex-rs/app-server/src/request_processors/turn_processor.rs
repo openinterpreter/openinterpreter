@@ -4,6 +4,7 @@ use codex_agent_extension::AgentInvocation;
 use codex_agent_extension::AgentRun;
 use codex_agent_extension::AgentRunner;
 use codex_app_server_protocol::ImageReference as V2ImageReference;
+use codex_protocol::capabilities::EnvironmentCapabilityRoots;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -12,6 +13,7 @@ use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageReference as CoreImageReference;
 use codex_protocol::protocol::AdditionalContextEntry as CoreAdditionalContextEntry;
 use codex_protocol::protocol::AdditionalContextKind as CoreAdditionalContextKind;
+use codex_protocol::protocol::TurnEnvironmentRequests;
 use codex_protocol::protocol::TurnSettingsUpdate;
 use codex_protocol::protocol::TurnSettingsUpdateOutcome;
 use codex_protocol::turn_input::AnnotatedResponseItem;
@@ -115,7 +117,7 @@ fn map_additional_context(
 
 #[derive(Default)]
 struct ThreadEnvironmentOverride {
-    environments: Option<TurnEnvironmentSelections>,
+    environment_requests: Option<TurnEnvironmentRequests>,
     // Only default-environment updates replace the task's separately persisted root selection.
     runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
 }
@@ -804,9 +806,9 @@ impl TurnRequestProcessor {
         thread: &CodexThread,
         cwd: Option<AbsolutePathBuf>,
         workspace_roots: Option<Vec<AbsolutePathBuf>>,
-        environment_selections: Option<Vec<TurnEnvironmentSelection>>,
+        environment_requests: Option<Vec<TurnEnvironmentRequest>>,
     ) -> ThreadEnvironmentOverride {
-        if cwd.is_none() && workspace_roots.is_none() && environment_selections.is_none() {
+        if cwd.is_none() && workspace_roots.is_none() && environment_requests.is_none() {
             return ThreadEnvironmentOverride::default();
         }
 
@@ -825,9 +827,9 @@ impl TurnRequestProcessor {
                 },
             };
             return ThreadEnvironmentOverride {
-                environments: Some(TurnEnvironmentSelections::new(
+                environment_requests: Some(TurnEnvironmentRequests::new(
                     legacy_fallback_cwd,
-                    environment_selections,
+                    environment_requests,
                 )),
                 ..Default::default()
             };
@@ -847,11 +849,11 @@ impl TurnRequestProcessor {
         };
         let environment_requests = self
             .thread_manager
-            .default_environment_selections(&legacy_fallback_cwd, &workspace_roots);
+            .default_environment_requests(&legacy_fallback_cwd, &workspace_roots);
         ThreadEnvironmentOverride {
-            environments: Some(TurnEnvironmentSelections::new(
+            environment_requests: Some(TurnEnvironmentRequests::new(
                 legacy_fallback_cwd,
-                environment_selections,
+                environment_requests,
             )),
             runtime_workspace_roots: Some(workspace_roots),
         }
@@ -867,7 +869,7 @@ impl TurnRequestProcessor {
             disabled_plugin_ids,
             environment_override:
                 ThreadEnvironmentOverride {
-                    environments,
+                    environment_requests,
                     runtime_workspace_roots,
                 },
             approval_policy,
@@ -923,7 +925,7 @@ impl TurnRequestProcessor {
                     )));
                 };
                 let thread_config = thread.config().await;
-                let cwd = environments.as_ref().map_or_else(
+                let cwd = environment_requests.as_ref().map_or_else(
                     || snapshot.cwd().clone(),
                     |environments| environments.legacy_fallback_cwd.clone(),
                 );
@@ -953,10 +955,22 @@ impl TurnRequestProcessor {
         let effort = effort.map(Some);
 
         if has_any_overrides {
+            // Preview against the current thread's selected roots. The protocol update
+            // remains a request; Core attaches its authoritative retained roots on commit.
+            let selected_roots = EnvironmentCapabilityRoots::collect(
+                thread
+                    .config_snapshot()
+                    .await
+                    .environment_selections()
+                    .iter()
+                    .map(|selection| &selection.selected_capability_roots),
+            );
             thread
                 .preview_thread_settings_overrides(CodexThreadSettingsOverrides {
                     disabled_plugin_ids: disabled_plugin_ids.clone(),
-                    environments: environments.clone(),
+                    environments: environment_requests
+                        .clone()
+                        .map(|requests| requests.select(&selected_roots)),
                     runtime_workspace_roots: runtime_workspace_roots.clone(),
                     approval_policy,
                     approvals_reviewer,
@@ -981,7 +995,7 @@ impl TurnRequestProcessor {
 
         Ok(codex_protocol::protocol::ThreadSettingsOverrides {
             disabled_plugin_ids,
-            environments,
+            environments: environment_requests,
             runtime_workspace_roots,
             profile_workspace_roots,
             approval_policy,
@@ -1008,6 +1022,8 @@ impl TurnRequestProcessor {
         self.ensure_direct_input_allowed(request_id, thread.as_ref())
             .await?;
         let cwd = resolve_request_cwd(params.cwd)?;
+        let environments =
+            resolve_turn_environment_requests(self.thread_manager.as_ref(), params.environments)?;
         let environment_override = self
             .build_environment_override(
                 thread.as_ref(),
