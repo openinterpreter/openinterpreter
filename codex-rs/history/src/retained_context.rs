@@ -267,6 +267,12 @@ impl RetainedContextEvent {
 }
 
 impl RetainedContext {
+    pub fn accepted_file_audio(&self, model: &str, provider: &str) -> Option<&AcceptedFileAudio> {
+        self.accepted_file_audio
+            .as_deref()
+            .filter(|evidence| evidence.model == model && evidence.provider == provider)
+    }
+
     /// Context for the latest delivery still present in this task's retained history.
     pub fn sender_user_messages(&self) -> Option<&SenderUserMessages> {
         self.sender_deliveries.back().map(|entry| &entry.value)
@@ -288,6 +294,7 @@ impl RetainedContext {
         messages.bound();
         let order = self.record_order(metadata.user_input_order);
         self.sender_deliveries.push_back(Ordered {
+            revision: None,
             inherited: false,
             order,
             value: messages,
@@ -671,6 +678,10 @@ impl RetainedContext {
         self.sender_deliveries.retain(|entry| {
             source != RetainedInputSource::Inherited
                 && !turn_ids.contains(&entry.value.receiver_turn_id.as_str())
+        });
+        self.assistant_messages.retain(|message| {
+            (source != RetainedInputSource::Inherited || message.inherited)
+                && !turn_ids.contains(&message.value.turn_id.as_str())
         });
         self.user_messages.retain(|message| {
             (source != RetainedInputSource::Inherited || message.inherited)
