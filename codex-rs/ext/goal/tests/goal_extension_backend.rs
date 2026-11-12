@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::sync::Weak;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use codex_analytics::AnalyticsEventsClient;
@@ -1830,6 +1832,7 @@ async fn managed_goal_document_round_trips_edits_and_rejects_stale_revision() ->
                 token_budget: GoalTokenBudgetUpdate::Keep,
                 max_goal_token_budget: None,
             },
+            std::future::ready(Ok(())),
         )
         .await
         .expect_err("managed Goal objectives must use the document CAS method");
@@ -1906,7 +1909,7 @@ async fn managed_goal_document_round_trips_edits_and_rejects_stale_revision() ->
     );
     assert!(
         service
-            .clear_thread_goal(runtime.as_ref(), thread_id)
+            .clear_thread_goal(runtime.as_ref(), thread_id, std::future::ready(Ok(())))
             .await?
     );
     assert!(
@@ -2049,6 +2052,7 @@ async fn managed_goal_document_full_cas_rejects_stale_status_and_updates_atomica
                 token_budget: GoalTokenBudgetUpdate::Keep,
                 max_goal_token_budget: None,
             },
+            std::future::ready(Ok(())),
         )
         .await?;
 
@@ -2133,11 +2137,13 @@ async fn goal_cas_covers_objective_budget_and_clear_without_stale_effects() -> a
                 token_budget: GoalTokenBudgetUpdate::Set(Some(100)),
                 max_goal_token_budget: None,
             },
+            std::future::ready(Ok(())),
         )
         .await?;
     let first_identity = first.identity();
+    let recorded_user_instructions = Arc::new(AtomicUsize::new(0));
     let updated = service
-        .set_thread_goal_cas(
+        .set_thread_goal_cas_with_user_instruction(
             runtime.as_ref(),
             GoalSetRequest {
                 thread_id,
@@ -2152,8 +2158,16 @@ async fn goal_cas_covers_objective_budget_and_clear_without_stale_effects() -> a
                 mission_revision: first_identity.mission_revision,
                 lifecycle_revision: first_identity.lifecycle_revision,
             },
+            {
+                let recorded = Arc::clone(&recorded_user_instructions);
+                async move {
+                    recorded.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
         )
         .await?;
+    assert_eq!(recorded_user_instructions.load(Ordering::SeqCst), 1);
     assert_eq!(updated.goal.objective, "edited objective");
     assert_eq!(updated.goal.token_budget, Some(200));
     assert_eq!(
@@ -2194,7 +2208,7 @@ async fn goal_cas_covers_objective_budget_and_clear_without_stale_effects() -> a
     ];
     for stale in stale_cases {
         let error = match service
-            .set_thread_goal_cas(
+            .set_thread_goal_cas_with_user_instruction(
                 runtime.as_ref(),
                 GoalSetRequest {
                     thread_id,
@@ -2204,6 +2218,13 @@ async fn goal_cas_covers_objective_budget_and_clear_without_stale_effects() -> a
                     max_goal_token_budget: None,
                 },
                 stale,
+                {
+                    let recorded = Arc::clone(&recorded_user_instructions);
+                    async move {
+                        recorded.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    }
+                },
             )
             .await
         {
@@ -2212,6 +2233,7 @@ async fn goal_cas_covers_objective_budget_and_clear_without_stale_effects() -> a
         };
         assert!(error.to_string().contains("goal_cas_conflict"));
     }
+    assert_eq!(recorded_user_instructions.load(Ordering::SeqCst), 1);
     assert_eq!(
         runtime
             .thread_goals()

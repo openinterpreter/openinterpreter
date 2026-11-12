@@ -3,6 +3,8 @@ use super::thread_input::can_accept_direct_input;
 use super::thread_input::ensure_direct_input_allowed;
 use super::*;
 use crate::error_code::goal_conflict;
+use codex_app_server_protocol::ThreadGoalMutationOrigin;
+use codex_core::context::UserGoalUpdate;
 use codex_goal_extension::GoalCas;
 use codex_goal_extension::GoalDocumentCreateAdmissionState;
 use codex_goal_extension::GoalDocumentCreatePrecondition;
@@ -35,6 +37,7 @@ pub(crate) struct ThreadGoalRequestProcessor {
     state_db: Option<StateDbHandle>,
     goal_service: Arc<GoalService>,
     config_manager: ConfigManager,
+    writer_locks: Arc<WriterLockCoordinator>,
 }
 
 impl ThreadGoalRequestProcessor {
@@ -56,6 +59,7 @@ impl ThreadGoalRequestProcessor {
             state_db,
             goal_service,
             config_manager,
+            writer_locks,
         }
     }
 
@@ -79,6 +83,7 @@ impl ThreadGoalRequestProcessor {
         }
 
         let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
+        let _goal_resume_guard = self.thread_state_manager.lock_goal_resume(thread_id).await;
         let state_db = self
             .state_db_for_materialized_thread(thread_id, GoalAccess::Mutate)
             .await?;
@@ -206,6 +211,7 @@ impl ThreadGoalRequestProcessor {
         }
 
         let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
+        let _goal_resume_guard = self.thread_state_manager.lock_goal_resume(thread_id).await;
         let precondition = match &params.precondition {
             ThreadGoalDocumentCreatePrecondition::Absent { admission_state } => {
                 match admission_state {
@@ -572,6 +578,7 @@ impl ThreadGoalRequestProcessor {
         }
 
         let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
+        let _goal_resume_guard = self.thread_state_manager.lock_goal_resume(thread_id).await;
         let expected = goal_cas_from_params(
             params.expected_goal_id.clone(),
             params.expected_status.clone(),
@@ -633,15 +640,35 @@ impl ThreadGoalRequestProcessor {
             },
             max_goal_token_budget,
         };
+        let record_user_instruction = async {
+            if params.origin == Some(ThreadGoalMutationOrigin::User)
+                && (objective.is_some() || status.is_some())
+            {
+                self.record_user_goal_update(
+                    thread_id,
+                    UserGoalUpdate::Set {
+                        objective: objective.map(str::to_owned),
+                        status,
+                    },
+                )
+                .await?;
+            }
+            Ok(())
+        };
         let outcome = match expected {
             Some(expected) => {
                 self.goal_service
-                    .set_thread_goal_cas(&state_db, goal_request, expected)
+                    .set_thread_goal_cas_with_user_instruction(
+                        &state_db,
+                        goal_request,
+                        expected,
+                        record_user_instruction,
+                    )
                     .await
             }
             None => {
                 self.goal_service
-                    .set_thread_goal(&state_db, goal_request)
+                    .set_thread_goal(&state_db, goal_request, record_user_instruction)
                     .await
             }
         }
@@ -736,6 +763,7 @@ impl ThreadGoalRequestProcessor {
             return Err(invalid_request("goals feature is disabled"));
         }
         let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
+        let _goal_resume_guard = self.thread_state_manager.lock_goal_resume(thread_id).await;
         let expected = goal_cas_from_params(
             params.expected_goal_id.clone(),
             params.expected_status.clone(),
@@ -774,7 +802,7 @@ impl ThreadGoalRequestProcessor {
         } else {
             let cleared = self
                 .goal_service
-                .clear_thread_goal(&state_db, thread_id)
+                .clear_thread_goal(&state_db, thread_id, async { Ok(()) })
                 .await
                 .map_err(goal_service_error)?;
             (

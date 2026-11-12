@@ -354,7 +354,8 @@ impl GoalService {
         request: GoalSetRequest<'_>,
         record_user_instruction: impl Future<Output = Result<(), GoalServiceError>> + Send,
     ) -> Result<GoalSetOutcome, GoalServiceError> {
-        self.set_thread_goal_inner(state_db, request, None).await
+        self.set_thread_goal_inner(state_db, request, None, record_user_instruction)
+            .await
     }
 
     pub async fn set_thread_goal_cas(
@@ -363,7 +364,20 @@ impl GoalService {
         request: GoalSetRequest<'_>,
         expected: GoalCas,
     ) -> Result<GoalSetOutcome, GoalServiceError> {
-        self.set_thread_goal_inner(state_db, request, Some(expected))
+        self.set_thread_goal_inner(state_db, request, Some(expected), async { Ok(()) })
+            .await
+    }
+
+    /// Records user-origin instructions only after a conditional Goal identity matches.
+    /// A stale precondition never appends an instruction to retained history.
+    pub async fn set_thread_goal_cas_with_user_instruction(
+        &self,
+        state_db: &codex_state::StateRuntime,
+        request: GoalSetRequest<'_>,
+        expected: GoalCas,
+        record_user_instruction: impl Future<Output = Result<(), GoalServiceError>> + Send,
+    ) -> Result<GoalSetOutcome, GoalServiceError> {
+        self.set_thread_goal_inner(state_db, request, Some(expected), record_user_instruction)
             .await
     }
 
@@ -372,6 +386,7 @@ impl GoalService {
         state_db: &codex_state::StateRuntime,
         request: GoalSetRequest<'_>,
         expected: Option<GoalCas>,
+        record_user_instruction: impl Future<Output = Result<(), GoalServiceError>> + Send,
     ) -> Result<GoalSetOutcome, GoalServiceError> {
         let GoalSetRequest {
             thread_id,
@@ -417,22 +432,21 @@ impl GoalService {
             tracing::warn!("failed to prepare external goal mutation: {err}");
         }
 
+        let existing_goal = state_db
+            .thread_goals()
+            .get_thread_goal(thread_id)
+            .await
+            .map_err(|err| {
+                GoalServiceError::Internal(format!("failed to read thread goal: {err}"))
+            })?;
+
         if let Some(expected) = expected.as_ref() {
-            let matches = state_db
-                .thread_goals()
-                .get_thread_goal(thread_id)
-                .await
-                .map_err(|err| {
-                    GoalServiceError::Internal(format!(
-                        "failed to read Goal CAS precondition: {err}"
-                    ))
-                })?
-                .is_some_and(|goal| {
-                    goal.goal_id == expected.goal_id
-                        && goal.mission_revision == expected.mission_revision
-                        && goal.lifecycle_revision == expected.lifecycle_revision
-                        && state_status_from_protocol(expected.status) == goal.status
-                });
+            let matches = existing_goal.as_ref().is_some_and(|goal| {
+                goal.goal_id == expected.goal_id
+                    && goal.mission_revision == expected.mission_revision
+                    && goal.lifecycle_revision == expected.lifecycle_revision
+                    && state_status_from_protocol(expected.status) == goal.status
+            });
             if !matches {
                 return Err(GoalServiceError::Conflict(
                     "goal_cas_conflict: goalId/status/missionRevision/lifecycleRevision changed"
@@ -441,24 +455,35 @@ impl GoalService {
             }
         }
 
+        if let Some(existing_goal) = existing_goal.as_ref()
+            && objective.is_some()
+            && state_db
+                .thread_goals()
+                .get_thread_goal_document(thread_id)
+                .await
+                .map_err(|err| {
+                    GoalServiceError::Internal(format!(
+                        "failed to read managed Goal document metadata: {err}"
+                    ))
+                })?
+                .is_some()
+        {
+            return Err(GoalServiceError::InvalidRequest(
+                "managed Goal objectives must be edited with thread/goal/document/set".to_string(),
+            ));
+        }
+        if objective.is_none() && existing_goal.is_none() {
+            return Err(GoalServiceError::InvalidRequest(format!(
+                "cannot update goal for thread {thread_id}: no goal exists"
+            )));
+        }
+
+        // Record only a validated, non-stale user request. A failed recording must not
+        // change Goal state; a later database failure leaves the instruction durable.
+        record_user_instruction.await?;
+
         let (goal, previous_goal) = if let Some(objective) = objective {
             if let Some(existing_goal) = existing_goal.as_ref() {
-                if state_db
-                    .thread_goals()
-                    .get_thread_goal_document(thread_id)
-                    .await
-                    .map_err(|err| {
-                        GoalServiceError::Internal(format!(
-                            "failed to read managed Goal document metadata: {err}"
-                        ))
-                    })?
-                    .is_some()
-                {
-                    return Err(GoalServiceError::InvalidRequest(
-                        "managed Goal objectives must be edited with thread/goal/document/set"
-                            .to_string(),
-                    ));
-                }
                 let previous_goal = PreviousGoalSnapshot::from(existing_goal);
                 let update = codex_state::GoalUpdate {
                     objective: Some(objective.to_string()),
