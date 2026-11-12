@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -500,6 +501,60 @@ fn is_kimi_code_provider(provider: &ModelProviderInfo) -> bool {
         bundled_provider_catalog_entry_for_base_url(base_url)
             .is_some_and(|entry| entry.id == KIMI_CODE_PROVIDER_ID)
     })
+}
+
+/// Bind a request's auth to its captured credential rather than ambient state.
+pub async fn auth_provider_for_request(
+    auth: &CodexAuth,
+    runtime: Option<&(Arc<RuntimeAuthManager>, RuntimeAuthMode)>,
+    headers: &HeaderMap,
+) -> Result<ResolvedProviderAuth, RuntimeAuthError> {
+    observe_auth_selection(runtime.map(|(_, mode)| *mode), "request", async {
+        match runtime {
+            Some((manager, mode)) => {
+                let manager = Arc::clone(manager);
+                let auth = auth.clone();
+                let selection = crate::runtime_auth::resource_selection(headers)?;
+                let selected = crate::runtime_auth::finish_runtime_selection(async move {
+                    manager.auth_for(&auth, &selection).await
+                })
+                .await?;
+                Ok(ResolvedProviderAuth::for_runtime(selected, *mode))
+            }
+            None => {
+                let mut resolved = ResolvedProviderAuth::new(auth_provider_from_auth(auth));
+                resolved.credential = Some(auth.clone());
+                Ok(resolved)
+            }
+        }
+    })
+    .await
+}
+
+/// Record bounded mode and outcome labels without exposing credential material.
+pub(crate) async fn observe_auth_selection<T, E>(
+    mode: Option<RuntimeAuthMode>,
+    operation: &'static str,
+    selection: impl Future<Output = Result<T, E>>,
+) -> Result<T, E> {
+    let started = std::time::Instant::now();
+    let result = selection.await;
+    let mode = match mode {
+        None => "ordinary",
+        Some(RuntimeAuthMode::DualHeader) => "dual_header",
+        Some(RuntimeAuthMode::AssertionOnly) => "assertion_only",
+    };
+    let _ = codex_otel::record_global_operation(
+        "codex.auth.selection",
+        "codex.auth.selection.duration",
+        started.elapsed(),
+        &[
+            ("mode", mode),
+            ("operation", operation),
+            ("outcome", if result.is_ok() { "success" } else { "error" }),
+        ],
+    );
+    result
 }
 
 pub(crate) fn bearer_auth_for_provider(

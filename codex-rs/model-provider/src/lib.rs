@@ -1,6 +1,10 @@
 mod amazon_bedrock;
 mod auth;
 mod bearer_auth_provider;
+mod capabilities;
+mod catalog_factory;
+mod chatgpt_base_url;
+mod client_auth;
 mod combined_auth;
 mod models_endpoint;
 mod models_identity;
@@ -34,13 +38,13 @@ pub use catalog_factory::ModelCatalogFactory;
 pub use chatgpt_base_url::ChatgptBaseUrl;
 pub use chatgpt_base_url::DEFAULT_CHATGPT_BASE_URL;
 pub use client_auth::ClientAuth;
+pub use codex_login::GatewayAuthManager;
 pub use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 pub use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID;
 pub use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
 pub use codex_model_provider_info::GCP_PROVIDER_ID;
 pub use codex_model_provider_info::RemoteCompactionSupport;
 pub use codex_protocol::account::ProviderAccount;
-pub use gateway_auth::GatewayAuthManager;
 pub use provider::ModelProvider;
 pub use provider::ModelProviderFuture;
 pub use provider::ProviderAccountError;
@@ -51,6 +55,19 @@ pub use provider::ProviderUnauthorizedRecovery;
 pub use provider::SharedModelProvider;
 pub use provider::create_model_provider;
 pub use provider::create_model_provider_with_cache_id;
+pub use provider::provider_uses_first_party_auth_path;
+pub use provider::resolve_api_provider;
+pub use request_preparation::prepare_provider_request;
+pub use request_setup::ResolvedProviderRequest;
+pub use request_setup::request_auth_owner;
+pub use request_setup::resolve_request;
+pub use runtime_auth::runtime_auth_for_url;
+pub use runtime_auth::select_runtime_auth_for;
+pub(crate) use runtime_auth::select_runtime_auth_for_source;
+pub use runtime_auth::select_runtime_provider;
+pub use runtime_auth::validate_runtime_destination;
+pub use runtime_auth::validate_runtime_environment;
+pub use runtime_auth::validate_runtime_selectors;
 
 #[cfg(test)]
 #[path = "workspace_routing_tests.rs"]

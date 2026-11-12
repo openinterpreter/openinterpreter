@@ -54,7 +54,11 @@ pub(crate) async fn resolve_request_auth(
                     return Ok(resolved);
                 }
 
-                if let Some(bearer) = bearer_auth_for_provider(&info)? {
+                // The configured Kimi provider may use stored OAuth when its
+                // environment key is absent; defer that case to the async
+                // provider resolver rather than failing before OAuth selection.
+                let bearer = bearer_auth_for_provider(&info).ok().flatten();
+                if let Some(bearer) = bearer {
                     let credential = bearer.token.as_deref().map(CodexAuth::from_api_key);
                     let mut resolved = ResolvedProviderAuth::new(Arc::new(bearer));
                     resolved.credential = credential;
@@ -70,10 +74,14 @@ pub(crate) async fn resolve_request_auth(
                         resolve_provider_auth_for_scope(manager, credential.as_ref(), &info, scope)
                             .await?
                     }
-                    _ => ResolvedProviderAuth::new(resolve_provider_auth(
-                        credential.as_ref(),
-                        &info,
-                    )?),
+                    _ => ResolvedProviderAuth::new(
+                        resolve_provider_auth(
+                            credential.as_ref(),
+                            &info,
+                            manager.as_deref().map(AuthManager::codex_home),
+                        )
+                        .await?,
+                    ),
                 };
                 resolved.credential = credential;
                 Ok(resolved)

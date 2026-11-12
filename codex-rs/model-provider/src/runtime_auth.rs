@@ -19,6 +19,7 @@ use codex_runtime_agent_instance::RuntimeAuthBinding;
 use codex_runtime_agent_instance::RuntimeAuthError;
 use codex_runtime_agent_instance::RuntimeAuthManager;
 use http::HeaderMap;
+use std::future::Future;
 use std::sync::Arc;
 
 /// Select the runtime for the resource scope carried by the model request.

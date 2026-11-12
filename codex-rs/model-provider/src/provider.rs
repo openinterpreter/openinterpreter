@@ -38,9 +38,11 @@ use crate::auth::ResolvedProviderAuth;
 use crate::auth::auth_manager_for_provider;
 use crate::auth::resolve_provider_auth;
 use crate::auth::resolve_provider_auth_for_scope;
+use crate::capabilities::ProviderCapabilities;
 use crate::combined_auth::compose_auth;
 use crate::models_endpoint::OpenAiModelsEndpoint;
 use crate::workspace_routing::WorkspaceRoutingContext;
+use codex_model_provider_info::RemoteCompactionSupport;
 
 pub(crate) fn enforce_managed_residency(provider: &mut Provider) {
     if let Some(requirement) = read_default_client_residency_requirement() {
@@ -48,41 +50,6 @@ pub(crate) fn enforce_managed_residency(provider: &mut Provider) {
             ResidencyRequirement::Us => HeaderValue::from_static("us"),
         };
         provider.headers.insert(RESIDENCY_HEADER_NAME, value);
-    }
-}
-
-/// Remote context-compaction protocols supported by a model provider.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RemoteCompactionSupport {
-    /// The provider does not support remote compaction.
-    Unsupported,
-    /// The provider supports `compaction_trigger` items over the Responses endpoint.
-    V2,
-}
-
-/// Optional provider-backed features that Codex may expose at runtime.
-///
-/// These capabilities are a provider-owned upper bound. Callers can disable
-/// more functionality through normal config, but should not expose a feature
-/// that the active provider marks unsupported here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProviderCapabilities {
-    pub namespace_tools: bool,
-    pub image_generation: bool,
-    pub web_search: bool,
-    pub external_web_access: bool,
-    pub remote_compaction: RemoteCompactionSupport,
-}
-
-impl Default for ProviderCapabilities {
-    fn default() -> Self {
-        Self {
-            namespace_tools: true,
-            image_generation: true,
-            web_search: true,
-            external_web_access: true,
-            remote_compaction: RemoteCompactionSupport::Unsupported,
-        }
     }
 }
 
@@ -219,6 +186,11 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
     /// manager throughout the codebase; that is a larger refactor than this change.
     fn auth_manager(&self) -> Option<Arc<AuthManager>>;
 
+    /// Runtime credential registration bound to this provider's selected owner.
+    fn runtime_auth(&self) -> Option<&(Arc<RuntimeAuthManager>, RuntimeAuthMode)> {
+        None
+    }
+
     /// Returns the gateway credential manager shared with inference and model discovery.
     /// Hosts use this handle for explicit login; configured setup failures remain errors.
     fn gateway_auth_manager(&self) -> std::io::Result<Option<Arc<GatewayAuthManager>>> {
@@ -307,6 +279,57 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
                 redirect_policy,
             })
         })
+    }
+
+    /// Route with the credential captured for this request rather than reading a
+    /// possibly changed session credential after authentication selection.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "serialize discovery and the session's first successful routing transition"
+    )]
+    fn route_responses_api_provider<'a>(
+        &'a self,
+        mut provider: Provider,
+        auth: Option<&'a CodexAuth>,
+        routing_context: &'a WorkspaceRoutingContext,
+    ) -> ModelProviderFuture<'a, codex_protocol::error::Result<ResolvedResponsesProvider>> {
+        Box::pin(async move {
+            let mut redirect_policy = ClientRedirectPolicy::Default;
+            if provider_uses_first_party_auth_path(self.info())
+                && self.info().supports_codex_backend_routes()
+                && let Some(auth) = auth.filter(|auth| auth.is_chatgpt_auth())
+                && let Some(auth_manager) = self.auth_manager()
+            {
+                let mut previously_routed = routing_context.previously_routed.lock().await;
+                if let Some(routing) = auth_manager
+                    .workspace_routing(
+                        auth,
+                        WorkspaceRoutingRequest {
+                            provider_base_url: provider.base_url.clone(),
+                            chatgpt_base_url: routing_context.chatgpt_base_url.clone(),
+                            previously_routed: *previously_routed,
+                            session: routing_context.session.clone(),
+                        },
+                    )
+                    .await?
+                {
+                    crate::workspace_routing::apply_workspace_routing(&mut provider, routing)?;
+                    redirect_policy = ClientRedirectPolicy::Reject;
+                    *previously_routed = true;
+                }
+            }
+            Ok(ResolvedResponsesProvider {
+                provider,
+                redirect_policy,
+            })
+        })
+    }
+
+    fn api_provider_for_auth(
+        &self,
+        auth: Option<&CodexAuth>,
+    ) -> codex_protocol::error::Result<Provider> {
+        resolve_api_provider(self.info(), auth)
     }
 
     /// Returns the provider base URL that will be used at request time.
@@ -472,6 +495,34 @@ pub fn create_model_provider_with_cache_id(
     provider_info: ModelProviderInfo,
     auth_manager: Option<Arc<AuthManager>>,
 ) -> SharedModelProvider {
+    create_model_provider_with_cache_id_and_runtime(
+        cache_provider_id,
+        provider_info,
+        auth_manager,
+        /*runtime_auth*/ None,
+    )
+}
+
+pub(crate) fn create_model_provider_with_runtime(
+    provider_info: ModelProviderInfo,
+    auth_manager: Option<Arc<AuthManager>>,
+    runtime_auth: Option<(Arc<RuntimeAuthManager>, RuntimeAuthMode)>,
+) -> SharedModelProvider {
+    let cache_provider_id = provider_info.name.clone();
+    create_model_provider_with_cache_id_and_runtime(
+        cache_provider_id,
+        provider_info,
+        auth_manager,
+        runtime_auth,
+    )
+}
+
+fn create_model_provider_with_cache_id_and_runtime(
+    cache_provider_id: String,
+    provider_info: ModelProviderInfo,
+    auth_manager: Option<Arc<AuthManager>>,
+    runtime_auth: Option<(Arc<RuntimeAuthManager>, RuntimeAuthMode)>,
+) -> SharedModelProvider {
     if provider_info.is_amazon_bedrock() {
         return Arc::new(AmazonBedrockModelProvider::new(provider_info, auth_manager));
     }
@@ -490,6 +541,7 @@ pub fn create_model_provider_with_cache_id(
         provider_info,
         auth_manager,
         gateway_auth_manager,
+        runtime_auth,
     ))
 }
 
@@ -501,6 +553,8 @@ struct ConfiguredModelProvider {
     auth_manager: Option<Arc<AuthManager>>,
     // Construct eagerly; report setup failures when auth is requested because the factory is infallible.
     gateway_auth_manager: Option<Result<Arc<GatewayAuthManager>, String>>,
+    runtime_auth: Option<(Arc<RuntimeAuthManager>, RuntimeAuthMode)>,
+    catalog_runtime_auth: Option<(Arc<RuntimeAuthManager>, RuntimeAuthMode)>,
 }
 
 impl ConfiguredModelProvider {
@@ -509,12 +563,33 @@ impl ConfiguredModelProvider {
         provider_info: ModelProviderInfo,
         auth_manager: Option<Arc<AuthManager>>,
         gateway_auth_manager: Option<Result<Arc<GatewayAuthManager>, String>>,
+        runtime_auth: Option<(Arc<RuntimeAuthManager>, RuntimeAuthMode)>,
     ) -> Self {
+        // A configured third-party endpoint must never inherit the actor's OpenAI
+        // runtime credentials. Catalog overrides can have a different origin.
+        let runtime_for_destination = |destination: Option<&str>| {
+            runtime_auth.clone().filter(|_| {
+                destination.is_none_or(|url| {
+                    codex_http_client::classify_openai_api_url(url)
+                        != codex_http_client::OpenAiDestination::Other
+                })
+            })
+        };
+        let inference_runtime_auth = runtime_for_destination(provider_info.base_url.as_deref());
+        let catalog_runtime_auth = runtime_for_destination(
+            provider_info
+                .model_catalog_url
+                .as_deref()
+                .map(String::as_str)
+                .or(provider_info.base_url.as_deref()),
+        );
         Self {
             cache_provider_id,
             info: provider_info,
             auth_manager,
             gateway_auth_manager,
+            runtime_auth: inference_runtime_auth,
+            catalog_runtime_auth,
         }
     }
 
@@ -575,6 +650,10 @@ impl ModelProvider for ConfiguredModelProvider {
         self.auth_manager.clone()
     }
 
+    fn runtime_auth(&self) -> Option<&(Arc<RuntimeAuthManager>, RuntimeAuthMode)> {
+        self.runtime_auth.as_ref()
+    }
+
     fn gateway_auth_manager(&self) -> std::io::Result<Option<Arc<GatewayAuthManager>>> {
         self.gateway_auth_manager
             .clone()
@@ -598,54 +677,49 @@ impl ModelProvider for ConfiguredModelProvider {
         })
     }
 
+    fn request_auth(
+        &self,
+        scope: Option<ProviderAuthScope>,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ResolvedProviderAuth>> {
+        Box::pin(self.resolve_auth(scope))
+    }
+
+    fn request_provider_and_auth(
+        &self,
+        scope: Option<ProviderAuthScope>,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<(Provider, ResolvedProviderAuth)>>
+    {
+        Box::pin(async move {
+            let resolved = self.resolve_auth(scope).await?;
+            let provider = self.api_provider_for_auth(resolved.credential.as_ref())?;
+            Ok((provider, resolved))
+        })
+    }
+
     fn api_auth(
         &self,
     ) -> ModelProviderFuture<'_, codex_protocol::error::Result<SharedAuthProvider>> {
         Box::pin(async move {
-            let auth = self.auth().await;
-            let primary = resolve_provider_auth(
-                auth.as_ref(),
-                &self.info,
-                self.auth_manager.as_deref().map(AuthManager::codex_home),
-            )
-            .await?;
-            Ok(compose_auth(
-                &self.info,
-                self.gateway_auth_manager.as_ref(),
-                ResolvedProviderAuth::new(primary),
-            )
-            .await?
-            .auth)
+            Ok(self.resolve_auth(/*scope*/ None).await?.auth)
         })
+    }
+
+    fn compose_auth(
+        &self,
+        resolved: ResolvedProviderAuth,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ResolvedProviderAuth>> {
+        Box::pin(compose_auth(
+            &self.info,
+            self.gateway_auth_manager.as_ref(),
+            resolved,
+        ))
     }
 
     fn api_auth_for_scope(
         &self,
         scope: ProviderAuthScope,
     ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ResolvedProviderAuth>> {
-        Box::pin(async move {
-            let resolved = if provider_uses_first_party_auth_path(&self.info) {
-                let auth = self.auth().await;
-                resolve_provider_auth_for_scope(
-                    self.auth_manager.clone(),
-                    auth.as_ref(),
-                    &self.info,
-                    scope,
-                )
-                .await?
-            } else {
-                let auth = self.auth().await;
-                ResolvedProviderAuth::new(
-                    resolve_provider_auth(
-                        auth.as_ref(),
-                        &self.info,
-                        self.auth_manager.as_deref().map(AuthManager::codex_home),
-                    )
-                    .await?,
-                )
-            };
-            compose_auth(&self.info, self.gateway_auth_manager.as_ref(), resolved).await
-        })
+        Box::pin(self.resolve_auth(Some(scope)))
     }
 
     fn account_state(&self) -> ProviderAccountResult {
