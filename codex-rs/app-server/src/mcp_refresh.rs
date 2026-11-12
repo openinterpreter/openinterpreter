@@ -157,8 +157,8 @@ async fn load_refresh_config(
 ) -> io::Result<Config> {
     config_manager
         .load_latest_config_with_session_layers(
-            &thread_config.config_layer_stack,
-            &thread_config.cwd,
+            &current_config.config_layer_stack,
+            &current_config.cwd,
         )
         .await
 }
@@ -546,6 +546,10 @@ enabled = false
                 SessionSource::Exec,
                 Arc::clone(&environment_manager),
                 thread_extensions(ThreadExtensionDependencies {
+                    sample_responses: Arc::new(
+                        crate::thread_sample::SampleResponseRegistry::default(),
+                    ),
+                    cloud_skill_provider: None,
                     event_sink: Arc::new(NoopExtensionEventSink),
                     auth_manager: auth_manager.clone(),
                     state_db: Some(state_db.clone()),

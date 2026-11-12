@@ -387,6 +387,8 @@ impl MessageProcessor {
                 session_source,
                 environment_manager,
                 thread_extensions(ThreadExtensionDependencies {
+                    sample_responses: Arc::clone(&sample_responses),
+                    cloud_skill_provider: None,
                     event_sink: Arc::clone(&extension_event_sink),
                     auth_manager: auth_manager.clone(),
                     state_db: state_db.clone(),

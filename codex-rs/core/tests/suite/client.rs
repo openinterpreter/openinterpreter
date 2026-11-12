@@ -110,6 +110,63 @@ const INSTALLATION_ID_FILENAME: &str = "installation_id";
 const TEST_WINDOW_ID: &str = "test-thread:0";
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
 
+#[test_case::test_case(false, false)]
+#[test_case::test_case(false, true)]
+#[test_case::test_case(true, false)]
+#[test_case::test_case(true, true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_request_enforces_independent_speed_requirements(
+    fast_enabled: bool,
+    ultrafast_enabled: bool,
+) -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    for (tier, enabled) in [("priority", fast_enabled), ("ultrafast", ultrafast_enabled)] {
+        for configure_at_start in [false, true] {
+            let server = start_mock_server().await;
+            let response_mock = mount_sse_once(&server, sse(vec![ev_completed("done")])).await;
+            let test = test_codex()
+                .with_model("gpt-5.4")
+                .with_model_info_override("gpt-5.4", move |model| {
+                    model.service_tiers = vec![codex_protocol::openai_models::ModelServiceTier {
+                        id: tier.to_string(),
+                        name: tier.to_string(),
+                        description: String::new(),
+                    }];
+                })
+                .with_config(move |config| {
+                    config
+                        .features
+                        .set_enabled(Feature::FastMode, fast_enabled)
+                        .expect("configure Fast mode");
+                    config
+                        .features
+                        .set_enabled(Feature::UltrafastMode, ultrafast_enabled)
+                        .expect("configure Ultra Fast mode");
+                    config.service_tier = configure_at_start.then(|| tier.to_string());
+                })
+                .build_with_auto_env(&server)
+                .await?;
+            if !configure_at_start {
+                core_test_support::submit_thread_settings(
+                    &test.codex,
+                    ThreadSettingsOverrides {
+                        service_tier: Some(Some(tier.to_string())),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+            test.submit_turn("hello").await?;
+            assert_eq!(
+                response_mock.single_request().body_json()["service_tier"].as_str(),
+                enabled.then_some(tier),
+                "tier={tier}, configure_at_start={configure_at_start}",
+            );
+        }
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn responses_request_preserves_flex_without_catalog_support_or_fast_mode()
 -> anyhow::Result<()> {
@@ -1793,6 +1850,7 @@ async fn send_request_with_provider(provider: ModelProviderInfo) {
         /*attestation_provider*/ None,
         config.http_client_factory(),
         config.workspace_routing_context(),
+        Vec::new(),
     );
     let responses_metadata = test_turn_responses_metadata(&client, thread_id);
     let mut client_session = client.new_session();
@@ -3296,6 +3354,7 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
         /*attestation_provider*/ None,
         config.http_client_factory(),
         config.workspace_routing_context(),
+        Vec::new(),
     );
     let responses_metadata = test_turn_responses_metadata(&client, thread_id);
     let mut client_session = client.new_session();
