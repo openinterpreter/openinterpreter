@@ -168,9 +168,11 @@ fn run(
                         .unwrap_or_default(),
                 }
             }
-            Ok(Message::OpenDevices {}) if devices.is_none() && runtime.is_some() && answered => {
+            Ok(Message::OpenDevices { selection })
+                if devices.is_none() && runtime.is_some() && answered =>
+            {
                 phase.set(HelperExitStage::OpenDevices);
-                devices = Some(devices::Devices::open()?);
+                devices = Some(devices::Devices::open(selection)?);
                 Message::DevicesOpened {}
             }
             Ok(Message::SetAudioControls { controls }) => {
@@ -248,7 +250,7 @@ fn run(
                 | Message::Offer { .. }
                 | Message::TransportReady {}
                 | Message::TransportTimedOut {}
-                | Message::OpenDevices {}
+                | Message::OpenDevices { .. }
                 | Message::DevicesOpened {}
                 | Message::AudioControlsApplied {}
                 | Message::AudioState { .. }
