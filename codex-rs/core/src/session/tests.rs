@@ -11476,6 +11476,19 @@ async fn turn_context_item_stores_permission_profile() {
 }
 
 #[tokio::test]
+async fn step_context_item_persists_captured_realtime_and_summary() {
+    let (_session, turn_context) = make_session_and_context().await;
+    let mut step_context = StepContext::for_test(turn_context);
+    let captured = Arc::make_mut(&mut step_context);
+    captured.realtime.active = true;
+    Arc::make_mut(&mut captured.settings).reasoning_summary = ReasoningSummaryConfig::None;
+
+    let item = step_context.to_turn_context_item();
+    assert_eq!(item.realtime_active, Some(true));
+    assert_eq!(item.summary, ReasoningSummaryConfig::None);
+}
+
+#[tokio::test]
 async fn turn_context_item_stores_active_permission_profile() {
     let (_session, mut turn_context) = make_session_and_context().await;
     let active_permission_profile = ActivePermissionProfile::read_only();

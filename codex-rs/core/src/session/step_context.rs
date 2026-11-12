@@ -1,4 +1,4 @@
-//! Request-scoped settings and capabilities, including the durable context snapshot.
+//! Request-scoped settings and capabilities, with live grants bound to the originating turn.
 
 use std::sync::Arc;
 
@@ -18,16 +18,10 @@ use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID;
 use codex_model_provider_info::GCP_PROVIDER_ID;
 use codex_otel::SessionTelemetry;
+use codex_plugin::ExecutorPluginHookSource;
 use codex_protocol::items::ModelInvocationContext;
 use codex_protocol::protocol::TurnContextItem;
-
-/// Inputs for the next step, published together so capture cannot mix versions.
-#[derive(Debug)]
-pub(crate) struct StepInputs {
-    pub(crate) settings: Arc<ResolvedStepSettings>,
-    /// Selection is fixed within this version; attachment startup may still finish.
-    pub(crate) environments: TurnEnvironmentSnapshot,
-}
+use tokio_util::sync::CancellationToken;
 
 /// Request-scoped state that may change between model sampling requests.
 #[derive(Clone)]
@@ -63,9 +57,49 @@ pub(crate) struct StepContext {
 }
 
 impl StepContext {
-    /// Persist the summary captured for this request, even after a live settings update.
+    /// Feature that selects the tool layout of new windows on this route.
+    pub(crate) fn incremental_tools_feature(&self) -> Option<Feature> {
+        if self.settings.model_info.use_responses_lite {
+            Some(Feature::IncrementalTools)
+        } else {
+            match self.turn.config.model_provider_id.as_str() {
+                AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID => {
+                    Some(Feature::IncrementalToolsLegacy)
+                }
+                GCP_PROVIDER_ID => Some(Feature::IncrementalToolsLegacyGcp),
+                _ => None,
+            }
+        }
+    }
+
+    /// Whether new context windows should record tool declarations in history.
+    pub(crate) fn incremental_tools_enabled(&self) -> bool {
+        self.incremental_tools_feature()
+            .is_some_and(|feature| self.turn.config.features.enabled(feature))
+    }
+
+    /// Pairs the step's environments with access using current session and originating-turn grants.
+    pub(crate) fn environments(&self) -> Vec<(&TurnEnvironment, impl EnvironmentAccess + '_)> {
+        self.environments
+            .turn_environments()
+            .map(|environment| (environment, self.fs_accessor(environment)))
+            .collect()
+    }
+
+    pub(crate) fn fs_accessor<'a>(
+        &self,
+        environment: &'a TurnEnvironment,
+    ) -> impl EnvironmentAccess + 'a + use<'a> {
+        let grants = self
+            .turn
+            .granted_permissions(&environment.selection.environment_id);
+        environment.fs_accessor(grants)
+    }
+
+    /// Persist values captured for this request, even after a live settings update.
     pub(crate) fn to_turn_context_item(&self) -> TurnContextItem {
         let mut item = self.turn.to_turn_context_item();
+        item.realtime_active = Some(self.realtime.active);
         item.summary = self.settings.reasoning_summary;
         item
     }
