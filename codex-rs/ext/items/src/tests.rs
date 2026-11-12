@@ -43,7 +43,6 @@ fn image_generation_item_preserves_stable_wire_shape() {
             "result": "cG5n",
             "transparentBackground": null,
             "failure": null,
-            "generationId": null,
         })
     );
     assert_eq!(
@@ -127,7 +126,6 @@ fn image_generation_item_reads_transitional_file_wire_shape() {
             "fileId": "file-1",
             "transparentBackground": null,
             "failure": null,
-            "generationId": null,
         })
     );
 }
@@ -175,7 +173,6 @@ fn image_generation_item_preserves_authoritative_transparency() {
             "result": "cG5n",
             "transparentBackground": true,
             "failure": null,
-            "generationId": null,
         })
     );
     assert_eq!(
