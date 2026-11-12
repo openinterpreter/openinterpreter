@@ -67,27 +67,6 @@ fn code_mode_materializes_mcp_output_schemas() {
 }
 
 #[test]
-fn code_mode_materializes_mcp_output_schemas() {
-    let output = json!({"type": "object", "properties": {"ok": {"type": "boolean"}}});
-    let mut tool = rmcp::model::Tool::new(
-        "lookup_order",
-        "Look up an order",
-        std::sync::Arc::new(rmcp::model::object(json!({"type": "object"}))),
-    );
-    tool.output_schema = Some(std::sync::Arc::new(rmcp::model::object(output.clone())));
-    let parsed =
-        crate::mcp_tool_to_responses_api_tool(&ToolName::plain("lookup_order"), &tool).unwrap();
-    let eager = ResponsesApiTool {
-        output_schema: Some(crate::mcp_call_tool_result_output_schema(output).into()),
-        ..parsed.clone()
-    };
-    assert_eq!(
-        super::collect_code_mode_tool_definitions([&ToolSpec::Function(parsed)]),
-        super::collect_code_mode_tool_definitions([&ToolSpec::Function(eager)]),
-    );
-}
-
-#[test]
 fn code_mode_tool_names_do_not_prefix_the_default_namespace() {
     for tool_name in [
         ToolName::plain("apply_patch"),
