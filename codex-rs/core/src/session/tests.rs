@@ -6949,11 +6949,7 @@ async fn build_initial_context(
 ) -> Vec<ResponseItem> {
     let step_context = StepContext::for_test(Arc::clone(turn_context));
     let world_state = session
-        .build_world_state_for_step(&step_context)
-        .await
-        .expect("world state should build");
-    session
-        .build_initial_context_with_world_state(&step_context, &world_state)
+        .build_world_state_for_step(&step_context, /*new_window*/ true)
         .await
         .expect("world state should build");
     let (updates, _) = session
@@ -11762,7 +11758,12 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
         .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
         .await
         .unwrap();
-    let world_a = Arc::new(session.build_world_state_for_step(&step_a).await.unwrap());
+    let world_a = Arc::new(
+        session
+            .build_world_state_for_step(&step_a, /*new_window*/ true)
+            .await
+            .unwrap(),
+    );
     let retained = crate::compact::InitialContextInjection::BeforeLastUserMessage {
         world_state: Arc::clone(&world_a),
         step_context: Arc::clone(&step_a),
@@ -11792,7 +11793,10 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
         .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
         .await
         .unwrap();
-    let world_b = session.build_world_state_for_step(&step_b).await.unwrap();
+    let world_b = session
+        .build_world_state_for_step(&step_b, /*new_window*/ true)
+        .await
+        .unwrap();
     let initial_b = session
         .build_initial_context_with_world_state(&step_b, &world_b)
         .await;
