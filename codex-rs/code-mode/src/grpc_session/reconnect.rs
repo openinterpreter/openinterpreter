@@ -85,6 +85,14 @@ impl CodeModeSession for ReconnectableSession {
         &'a self,
         request: ExecuteRequest,
         delegate: Arc<dyn CodeModeSessionDelegate>,
+    ) -> CodeModeSessionResultFuture<'a, StartedCell> {
+        self.execute_with_preempt(request, delegate, None)
+    }
+
+    fn execute_with_preempt<'a>(
+        &'a self,
+        request: ExecuteRequest,
+        delegate: Arc<dyn CodeModeSessionDelegate>,
         preempt: Option<CancellationToken>,
     ) -> CodeModeSessionResultFuture<'a, StartedCell> {
         // Capture before polling so queued calls cannot silently cross a runtime reset.
@@ -95,7 +103,10 @@ impl CodeModeSession for ReconnectableSession {
                 delegate,
                 generation: binding.generation,
             });
-            let started = binding.session.execute(request, delegate, preempt).await?;
+            let started = binding
+                .session
+                .execute_with_preempt(request, delegate, preempt)
+                .await?;
             Ok(generation::public_started_cell(binding.generation, started))
         })
     }

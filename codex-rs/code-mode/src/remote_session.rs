@@ -568,6 +568,14 @@ impl CodeModeSession for ProcessOwnedCodeModeSession {
         &'a self,
         request: ExecuteRequest,
         delegate: Arc<dyn CodeModeSessionDelegate>,
+    ) -> CodeModeSessionResultFuture<'a, StartedCell> {
+        self.execute_with_preempt(request, delegate, None)
+    }
+
+    fn execute_with_preempt<'a>(
+        &'a self,
+        request: ExecuteRequest,
+        delegate: Arc<dyn CodeModeSessionDelegate>,
         preempt: Option<CancellationToken>,
     ) -> CodeModeSessionResultFuture<'a, StartedCell> {
         Box::pin(ProcessOwnedCodeModeSession::execute(

@@ -188,13 +188,31 @@ pub trait CodeModeSession: Send + Sync {
         CodeModeOutputTruncation::Client
     }
 
-    /// Executes a cell, yielding its foreground observation if `preempt` is signaled.
-    /// The cell continues running after its observation yields.
+    /// Executes a cell using the ordinary upstream two-argument session contract.
     fn execute<'a>(
         &'a self,
         request: ExecuteRequest,
         delegate: Arc<dyn CodeModeSessionDelegate>,
     ) -> CodeModeSessionResultFuture<'a, StartedCell>;
+
+    /// Optional foreground observation preemption. Implementations with a remote
+    /// transport override this without terminating the underlying running cell.
+    /// A provider without that capability rejects a preempt request instead of
+    /// silently discarding its cancellation contract.
+    fn execute_with_preempt<'a>(
+        &'a self,
+        request: ExecuteRequest,
+        delegate: Arc<dyn CodeModeSessionDelegate>,
+        preempt: Option<CancellationToken>,
+    ) -> CodeModeSessionResultFuture<'a, StartedCell> {
+        if preempt.is_some() {
+            Box::pin(async {
+                Err("code-mode session does not support foreground preemption".into())
+            })
+        } else {
+            self.execute(request, delegate)
+        }
+    }
 
     /// Waits for a cell, yielding the observation if `preempt` is signaled while the cell continues.
     /// Server mode applies the request's output limit; Client mode ignores it.
