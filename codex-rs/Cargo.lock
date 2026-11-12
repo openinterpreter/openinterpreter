@@ -6023,7 +6023,7 @@ version = "0.0.62"
 dependencies = [
  "anyhow",
  "codex-utils-cargo-bin",
- "ctor",
+ "ctor 0.6.3",
  "filedescriptor",
  "lazy_static",
  "libc",
