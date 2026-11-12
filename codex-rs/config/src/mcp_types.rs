@@ -18,6 +18,7 @@ use serde::Serialize;
 use serde::de::Error as SerdeError;
 
 use crate::McpEmaRegistration;
+use crate::McpEmaTokenEndpointAuthMethod;
 use crate::RequirementSource;
 
 /// Effective MCP environment id when config omits `environment_id`.
