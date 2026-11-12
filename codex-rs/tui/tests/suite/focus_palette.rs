@@ -28,6 +28,9 @@ mod tui_mode_picker;
 #[path = "external_editor_tests.rs"]
 mod external_editor_tests;
 
+#[path = "gov_cloud_guidance_tests.rs"]
+mod gov_cloud_guidance_tests;
+
 #[test]
 fn focus_gained_with_unanswered_palette_queries_preserves_immediate_input() -> Result<()> {
     let repo_root = codex_utils_cargo_bin::repo_root()?;
