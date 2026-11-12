@@ -128,8 +128,6 @@ pub enum Feature {
     AppServerWebSocketCompression,
 
     // Experimental
-    /// Automatically start the shared local daemon for eligible interactive launches.
-    DaemonAutoStart,
     /// Send per-content-entry classifications in internal Responses metadata.
     ContentItemKinds,
     /// Render client-supplied untrusted context as standalone named tool outputs.
