@@ -35,8 +35,10 @@ pub fn spawn_anthropic_response_stream(
         telemetry,
     ));
     ResponseStream {
+        routing_affinity: None,
         rx_event,
         upstream_request_id: None,
+        interrupt: None,
     }
 }
 
@@ -264,10 +266,14 @@ async fn process_anthropic_event(
                     );
                     if tx_event
                         .send(Ok(ResponseEvent::OutputItemAdded(ResponseItem::Message {
+                            status: None,
+                            encrypted_content: None,
                             id: None,
                             role: "assistant".to_string(),
                             content: vec![ContentItem::OutputText {
                                 text: String::new(),
+                                annotations: None,
+                                logprobs: None,
                             }],
                             phase: None,
                             internal_chat_message_metadata_passthrough: None,
@@ -386,9 +392,15 @@ async fn process_anthropic_event(
             };
             let item = match block {
                 PendingBlock::Text { text } => ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "assistant".to_string(),
-                    content: vec![ContentItem::OutputText { text }],
+                    content: vec![ContentItem::OutputText {
+                        text,
+                        annotations: None,
+                        logprobs: None,
+                    }],
                     phase: None,
                     internal_chat_message_metadata_passthrough: None,
                 },
@@ -432,6 +444,7 @@ async fn process_anthropic_event(
                 response_id,
                 token_usage,
                 usage_metadata: None,
+                reasoning_removals: None,
                 end_turn: None,
             };
             let _ = tx_event.send(Ok(completed)).await;
@@ -605,6 +618,8 @@ mod tests {
                     content,
                     &vec![ContentItem::OutputText {
                         text: String::new(),
+                        annotations: None,
+                        logprobs: None,
                     }]
                 );
             }
@@ -620,6 +635,8 @@ mod tests {
                     content,
                     &vec![ContentItem::OutputText {
                         text: "READY".to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }]
                 );
             }
@@ -780,6 +797,8 @@ mod tests {
             ResponseItem::Message { content, .. }
                 if content == &vec![ContentItem::OutputText {
                     text: "Checking.".to_string(),
+                    annotations: None,
+                    logprobs: None,
                 }]
         ));
         assert!(matches!(
