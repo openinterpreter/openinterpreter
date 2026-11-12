@@ -1,6 +1,7 @@
 mod audio;
 #[cfg(feature = "v8-runtime")]
 mod callbacks;
+mod event_channel;
 #[cfg(feature = "v8-runtime")]
 mod globals;
 #[cfg(feature = "v8-runtime")]
