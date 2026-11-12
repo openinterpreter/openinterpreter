@@ -34,6 +34,18 @@ use crate::config_types::Verbosity;
 use crate::protocol::MultiAgentVersion;
 
 mod access_programs;
+mod incremental_tools;
+pub use incremental_tools::IncrementalToolMessages;
+#[path = "openai_models/memento_v2.rs"]
+mod memento_v2;
+pub use memento_v2::ContextManagementToolMessages;
+pub use memento_v2::HistoryToolMessages;
+pub use memento_v2::NotesToolMessages;
+mod plugins;
+pub use plugins::GenericPluginMessages;
+pub use plugins::PluginMessages;
+pub use plugins::PluginRecommendationMessages;
+pub use plugins::SelectedPluginMessages;
 #[path = "openai_models/guardian.rs"]
 mod guardian;
 pub use guardian::GuardianModelPolicy;
@@ -47,6 +59,8 @@ mod guardian_v2;
 mod reasoning_effort;
 
 pub use access_programs::ModelAccessPrograms;
+pub use access_programs::SavedDaybreakChoice;
+pub use guardian_v2::AsyncClassifierMode;
 pub use guardian_v2::GuardianV2ModelConfig;
 pub use guardian_v2::GuardianV2TranscriptModelConfig;
 
@@ -707,6 +721,26 @@ pub struct ToolMessages {
     pub send_user_message_async: Option<ToolMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_agent: Option<MultiAgentToolMessages>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_mode: Option<CodeModeToolMessages>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_resources: Option<McpResourceToolMessages>,
+}
+
+/// Plain-text prefixes for Code Mode documentation, ALL_TOOLS, and loaded tool-search namespaces.
+/// Flat indirect entries carry these before any per-function prefix.
+/// Values are trimmed, and selectors for the same final namespace must agree, including empty values.
+/// Empty values add no prefix; unregistered targets are ignored.
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
+pub struct IndirectDescriptionPrefixes {
+    /// Exact rendered namespaces, including `functions` for plain tools.
+    /// Overlap with an MCP server prefix is allowed only when the trimmed values match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespaces: Option<std::collections::BTreeMap<String, String>>,
+    /// Configured MCP server names, before callable namespace normalization.
+    /// Each prefix applies to all namespaces exposed by that server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_servers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// Model-owned messages for a built-in tool.
@@ -716,7 +750,9 @@ pub struct ToolMessage {
     /// text without disabling the tool. Tool-owned runtime guidance is retained.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Complete JSON Schema encoded as a string. Consumed by Multi-Agent V2 tools only.
+    /// Complete JSON Schema encoded as a string. Consumed by Multi-Agent V2 tools, Code Mode wait,
+    /// request_user_input_async (the send_user_message_async catalog key), MCP resource helpers,
+    /// and Memento V2 tools.
     /// Uses the harness's supported schema subset; unrecognized keywords are ignored.
     /// Missing, null, invalid or unsupported structures, or a root without `type: "object"`
     /// retains the harness parameters. Schema semantics must remain API-compatible.
@@ -727,6 +763,7 @@ pub struct ToolMessage {
 }
 
 /// Model-owned descriptions and parameters for Multi-Agent V2 tools, independent of their namespace.
+/// Channel tools consume only the description; their parameter schemas are fixed.
 #[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
 pub struct MultiAgentToolMessages {
     /// Replaces the static description. Missing or null uses the bundled text; an empty string
@@ -743,6 +780,82 @@ pub struct MultiAgentToolMessages {
     pub interrupt_agent: Option<ToolMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_agents: Option<ToolMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_channel: Option<ToolMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub get_channels: Option<ToolMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_threads: Option<ToolMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_posts: Option<ToolMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_thread: Option<ToolMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_post: Option<ToolMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscribe: Option<ToolMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsubscribe: Option<ToolMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post: Option<ToolMessage>,
+}
+
+impl MultiAgentToolMessages {
+    /// Returns the catalog entry for a tool, independently of its runtime namespace.
+    pub fn by_name(&self, name: &str) -> Option<&ToolMessage> {
+        match name {
+            "spawn_agent" => &self.spawn_agent,
+            "send_message" => &self.send_message,
+            "followup_task" => &self.followup_task,
+            "wait_agent" => &self.wait_agent,
+            "interrupt_agent" => &self.interrupt_agent,
+            "list_agents" => &self.list_agents,
+            "create_channel" => &self.create_channel,
+            "get_channels" => &self.get_channels,
+            "list_threads" => &self.list_threads,
+            "search_posts" => &self.search_posts,
+            "read_thread" => &self.read_thread,
+            "read_post" => &self.read_post,
+            "subscribe" => &self.subscribe,
+            "unsubscribe" => &self.unsubscribe,
+            "post" => &self.post,
+            _ => return None,
+        }
+        .as_ref()
+    }
+}
+
+/// Model-owned descriptions and parameters for the built-in MCP resource helpers.
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
+pub struct McpResourceToolMessages {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_mcp_resources: Option<ToolMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_mcp_resource_templates: Option<ToolMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_mcp_resource: Option<ToolMessage>,
+}
+
+/// Model-owned instructions for Code Mode's exec and wait tools.
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
+pub struct CodeModeToolMessages {
+    /// Instructional template supporting `{{ default_exec_yield_time_ms }}` and `{{ image_helper }}`.
+    /// Runtime tool declarations are appended. Unknown placeholders remain literal.
+    /// Exec accepts raw JavaScript; `parameters` is not consumed and its grammar is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec: Option<ToolMessage>,
+    /// Complete description and JSON parameter schema, selected independently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<ToolMessage>,
+    /// Literal guidance appended when deferred nested tools exist.
+    /// Missing or null uses bundled text; an empty string omits the section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_nested_tools_guidance: Option<String>,
+    /// Literal shared TypeScript definitions, emitted when Code Mode Only exposes MCP results.
+    /// Missing or null uses bundled definitions; an empty string omits the section.
+    /// Custom definitions must remain compatible with the generated tool declarations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_typescript_preamble: Option<String>,
 }
 
 /// Model-owned defaults for the context-window token-budget feature.
