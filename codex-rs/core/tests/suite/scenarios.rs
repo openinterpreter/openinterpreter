@@ -120,11 +120,17 @@ mod credential_masking;
 #[path = "scenarios_code_mode_settled_helpers_tests.rs"]
 mod code_mode_settled_helpers;
 
+#[path = "scenarios_command_sessions_tests.rs"]
+mod command_sessions;
+
 #[path = "scenarios_dynamic_tools.rs"]
 mod dynamic_tools;
 
 #[path = "scenarios_exec_tools.rs"]
 mod exec_tools;
+
+#[path = "scenarios_frozen_cloud_skills.rs"]
+mod frozen_cloud_skills;
 
 #[path = "scenarios_guardian_sender_context.rs"]
 mod guardian_sender_context;
@@ -162,6 +168,9 @@ mod host_turn_admission;
 #[path = "scenarios_injected_agent_mail.rs"]
 mod injected_agent_mail;
 
+#[path = "scenarios_indirect_namespace_prefixes.rs"]
+mod indirect_namespace_prefixes;
+
 #[path = "scenarios_mailbox_preemption_tests.rs"]
 mod mailbox_preemption;
 
@@ -176,6 +185,9 @@ mod mcp_ema;
 
 #[path = "scenarios_mcp_resource_messages.rs"]
 mod mcp_resource_messages;
+
+#[path = "scenarios_mcp_sharing.rs"]
+mod mcp_sharing;
 
 #[path = "scenarios_mxc.rs"]
 mod mxc;
