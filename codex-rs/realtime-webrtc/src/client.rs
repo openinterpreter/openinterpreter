@@ -12,6 +12,9 @@ use codex_utils_pty::SpawnedProcess;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
+use crate::AudioDevice;
+use crate::AudioDeviceKind;
+use crate::AudioDeviceSelection;
 use crate::HelperExitStage;
 use crate::Message;
 use crate::encode_frame;

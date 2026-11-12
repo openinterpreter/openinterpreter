@@ -16,6 +16,7 @@ use futures::future::Abortable;
 use tokio::sync::mpsc;
 
 use crate::AudioControls;
+use crate::AudioDeviceSelection;
 use crate::ConnectionError;
 use crate::SessionDescription;
 use crate::VoiceHost;
@@ -164,7 +165,7 @@ impl RealtimeWebrtcSession {
                         .error
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                        Some(failure.to_string());
+                        Some((failure, failure.to_string()));
                 }
             })?;
         let offer_sdp = result
@@ -287,8 +288,8 @@ async fn run(
                 Some(Command::Answer(sdp, complete)) if !connected => {
                     let startup = async {
                         let mut host = report_failure(ConnectionError::Transport, host.apply_answer(sdp).await)?;
-                        host = report_failure(ConnectionError::AudioDevices, host.open_devices().await)?;
-                        let applied = startup_controls(&mut commands, controls, |initial| {
+                        host = report_failure(ConnectionError::AudioDevices, host.open_devices(selection.clone()).await)?;
+                        let applied = startup_controls(commands, controls, |initial| {
                             host.begin_audio_controls(initial)
                         });
                         let applied = report_failure(ConnectionError::AudioControls, applied)?;
@@ -302,7 +303,7 @@ async fn run(
                                 .copied().unwrap_or(ConnectionError::Failed);
                             let _ = complete.send(Err(failure));
                             // This failure is delivered by the startup completion only.
-                            return Ok(());
+                            return std::future::pending().await;
                         }
                     };
                     connected = true;
