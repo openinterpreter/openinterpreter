@@ -212,6 +212,7 @@ pub enum SandboxTransformError {
         source: io::Error,
     },
     MissingLinuxSandboxExecutable,
+    SandboxUnavailable,
     WindowsMxcPreparation(String),
     EnvironmentNetworkProxy(String),
     #[cfg(target_os = "macos")]
@@ -272,7 +273,7 @@ impl std::error::Error for SandboxTransformError {
             Self::InvalidPolicy(source) => Some(source),
             Self::InvalidCommandCwd { source, .. }
             | Self::InvalidSandboxPolicyCwd { source, .. } => Some(source),
-            Self::MissingLinuxSandboxExecutable => None,
+            Self::MissingLinuxSandboxExecutable | Self::SandboxUnavailable => None,
             Self::WindowsMxcPreparation(_) => None,
             Self::EnvironmentNetworkProxy(_) => None,
             #[cfg(target_os = "macos")]
@@ -654,7 +655,11 @@ impl SandboxManager {
                 .map_err(|err| SandboxTransformError::WindowsSandboxPreparation(err.to_string()))?;
             return self.transform_for_direct_spawn_with_codex_home(request, codex_home.as_path());
         }
-        self.transform(request.transform)
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.transform(request.transform)
+                .map(WrappedSandboxCommand::into_command_request)
+        }
     }
 
     #[cfg(target_os = "windows")]
