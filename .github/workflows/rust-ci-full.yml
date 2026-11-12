@@ -167,11 +167,12 @@ jobs:
           target: ${{ matrix.target }}
 
   lint_build:
-    if: ${{ inputs.scope == 'all' }}
-    name: Lint/Build — ${{ matrix.runner }} - ${{ matrix.target }}${{ matrix.profile == 'release' && ' (release)' || '' }}
-    runs-on: ${{ matrix.runs_on || matrix.runner }}
-    timeout-minutes: 30
-    defaults:
+    needs: cargo_voice_inputs
+    if: &lint_build_if ${{ inputs.scope == 'all' }}
+    name: &lint_build_name Lint/Build — ${{ matrix.runner }} - ${{ matrix.target }}${{ matrix.profile == 'release' && ' (release)' || '' }}
+    runs-on: &lint_build_runner ${{ matrix.runs_on || matrix.runner }}
+    timeout-minutes: &lint_build_timeout 30
+    defaults: &lint_build_defaults
       run:
         working-directory: codex-rs
     env: &lint_build_env
