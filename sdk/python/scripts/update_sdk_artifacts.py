@@ -14,6 +14,7 @@ import tempfile
 import types
 import typing
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Sequence, get_args, get_origin
 
@@ -558,7 +559,7 @@ def _normalized_schema_bundle_text(schema_dir: Path) -> str:
     return json.dumps(schema, indent=2, sort_keys=True) + "\n"
 
 
-def generate_v2_all(schema_dir: Path) -> None:
+def generate_v2_all(schema_dir: Path, *, format_output: bool = True) -> None:
     """Regenerate the Pydantic v2 protocol model module from app-server schemas."""
     out_path = sdk_root() / "src" / "openai_codex" / "generated" / "v2_all.py"
     out_dir = out_path.parent
@@ -605,7 +606,6 @@ def generate_v2_all(schema_dir: Path) -> None:
             cwd=sdk_root() if format_output else Path(td),
         )
     _preserve_inline_image_class_names(out_path)
-    _require_nullable_chatgpt_account_email(out_path)
     _preserve_reasoning_effort_enum(out_path)
     _preserve_thread_source_enum(out_path)
     _preserve_open_enum(out_path, "PlanType")
@@ -631,8 +631,8 @@ def _preserve_inline_image_class_names(out_path: Path) -> None:
     out_path.write_text(source)
 
 
-def _require_nullable_chatgpt_account_email(out_path: Path) -> None:
-    """Preserve required-but-nullable email semantics in the generated SDK model."""
+def _add_answer_display_fallback(out_path: Path) -> None:
+    """Keep items readable and restricted when their display instruction is unsupported."""
     source = out_path.read_text()
     header = "class AgentMessageModeration(BaseModel):"
     if source.count(header) != 1:
@@ -1460,7 +1460,7 @@ def generate_types_from_schema_dir(schema_dir: Path, *, format_output: bool = Tr
     # v2_all is the authoritative generated surface.
     generate_v2_all(schema_dir, format_output=format_output)
     generate_notification_registry(schema_dir)
-    generate_public_api_flat_methods()
+    generate_public_api_flat_methods(format_output=format_output)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1474,6 +1474,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--schema-dir",
         type=Path,
         help="App-server JSON schema directory (defaults to tool.codex.codegen.schema-dir)",
+    )
+    generate_types_parser.add_argument(
+        "--no-format",
+        dest="format_output",
+        action="store_false",
+        help="Generate build outputs without running formatters",
     )
 
     stage_sdk_parser = subparsers.add_parser(
@@ -1537,7 +1543,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def default_cli_ops(*, format_output: bool = True) -> CliOps:
     return CliOps(
-        generate_types=generate_types_from_schema_dir,
+        generate_types=(
+            generate_types_from_schema_dir
+            if format_output
+            else partial(generate_types_from_schema_dir, format_output=False)
+        ),
         stage_python_sdk_package=stage_python_sdk_package,
         stage_python_runtime_package=stage_python_runtime_package,
     )
