@@ -23,6 +23,43 @@ use super::selection_row_layout::SelectionDescriptionLayout;
 use super::selection_row_layout::build_full_line;
 use super::selection_row_layout::line_to_owned;
 
+/// Preserve the complete destination when the visible selection label is clipped.
+fn full_hyperlink_row(
+    row: &GenericDisplayRow,
+    line: Line<'static>,
+) -> crate::terminal_hyperlinks::HyperlinkLine {
+    let prefix = row
+        .name_prefix_spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    let text = line.to_string();
+    let visible_name = text.strip_prefix(&prefix).unwrap_or("");
+    let common = row
+        .name
+        .chars()
+        .zip(visible_name.chars())
+        .take_while(|(a, b)| a == b)
+        .map(|(ch, _)| ch)
+        .collect::<String>();
+    let start = crate::width::display_width(&prefix);
+    let end = start + crate::width::display_width(&common);
+    let mut source = crate::terminal_hyperlinks::annotate_web_urls_in_line(line);
+    source
+        .hyperlinks
+        .retain(|link| link.columns.end <= start || link.columns.start >= end);
+    let name = crate::terminal_hyperlinks::annotate_web_urls_in_line(row.name.clone().into());
+    source
+        .hyperlinks
+        .extend(name.hyperlinks.into_iter().filter_map(|link| {
+            let last = (start + link.columns.end).min(end);
+            let first = start + link.columns.start;
+            (first < last).then(|| link.with_columns(first..last))
+        }));
+    source.hyperlinks.sort_by_key(|link| link.columns.start);
+    source
+}
+
 /// Render-ready representation of one row in a selection popup.
 ///
 /// This type contains presentation-focused fields that are intentionally more
@@ -818,6 +855,10 @@ fn measure_rows_height_inner(
     }
     total.max(1)
 }
+
+#[cfg(test)]
+#[path = "selection_row_links_tests.rs"]
+mod selection_row_links_tests;
 
 #[cfg(test)]
 mod tests {

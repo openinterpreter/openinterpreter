@@ -1,4 +1,4 @@
-use super::super::*;
+use super::*;
 
 #[test]
 fn choice_labels_and_descriptions_keep_complete_url_destinations() {
