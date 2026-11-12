@@ -17,6 +17,22 @@ use codex_protocol::models::ImageReference;
 use pretty_assertions::assert_eq;
 
 #[test]
+fn truncate_function_output_preserves_video_when_text_budget_is_exhausted() {
+    let video = FunctionCallOutputContentItem::InputVideo {
+        video_url: "video:fixture".to_string(),
+        id: Some("frame-1".to_string()),
+    };
+    let items = vec![text("omitted"), video.clone()];
+    let output =
+        truncate_function_output_items_with_policy(&items, TruncationPolicy::Bytes(0), |_| 0);
+    assert_eq!(output.first(), Some(&video));
+    assert!(matches!(
+        output.last(),
+        Some(FunctionCallOutputContentItem::InputText { text }) if text.contains("omitted 1 text")
+    ));
+}
+
+#[test]
 fn truncate_mcp_tool_result_borrows_small_result() {
     let result = CallToolResult {
         content: vec![serde_json::json!({

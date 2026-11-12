@@ -361,6 +361,7 @@ fn truncate_output_iter<'a>(
                 }
             }
             FunctionCallOutputContentItem::InputImage { .. }
+            | FunctionCallOutputContentItem::InputVideo { .. }
             | FunctionCallOutputContentItem::EncryptedContent { .. } => true,
             FunctionCallOutputContentItem::InputAudio { audio } => {
                 let token_cost = estimate_audio_token_count(audio);
