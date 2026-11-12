@@ -1848,7 +1848,7 @@ pub(crate) fn normalize_completion_timestamps(
     }
     static COMPLETION_FOOTER: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(
         || {
-            regex_lite::Regex::new(r"(?m)^(?P<indent>[ \t]*)(?P<duration>Worked for (?:<1s|(?:[0-9]+h )?(?:[0-9]+m )?[0-9]+s) • )?(?:[A-Z][a-z]{2} [0-9]{1,2}(?:, [0-9]{4})? at )?[0-9]{1,2}:[0-9]{2}(?: (?:AM|PM))?(?P<padding>[ \t]*)$")
+            regex_lite::Regex::new(r"(?m)^(?P<indent>[ \t]*)(?P<duration>Worked for (?:<1s|(?:[0-9]+h )?(?:[0-9]+m )?[0-9]+s) (?P<separator>[•·]) )?(?:[A-Z][a-z]{2} [0-9]{1,2}(?:, [0-9]{4})? at )?[0-9]{1,2}:[0-9]{2}(?: (?:AM|PM))?(?P<padding>[ \t]*)$")
                 .expect("valid completion footer pattern")
         },
     );
@@ -1856,40 +1856,33 @@ pub(crate) fn normalize_completion_timestamps(
         .replace_all(&value.to_string(), |captures: &regex_lite::Captures<'_>| {
             let indent = &captures["indent"];
             let padding = &captures["padding"];
-            let duration = if captures.name("duration").is_some() {
-                "Worked for [duration] • "
-            } else {
-                ""
-            };
+            let duration = captures
+                .name("separator")
+                .map(|separator| format!("Worked for [duration] {} ", separator.as_str()))
+                .unwrap_or_default();
             format!("{indent}{duration}[completion time]{padding}")
         })
         .into_owned()
 }
 
-/// Normalize timestamps only in structurally identified completion footer cells.
-pub(crate) fn normalize_completion_timestamps(
-    cell: &dyn HistoryCell,
-    value: impl std::fmt::Display,
-) -> String {
-    if !cell.as_any().is::<history_cell::FinalMessageSeparator>() {
-        return value.to_string();
+#[test]
+fn completion_footer_normalization_preserves_both_duration_separators() {
+    let footer = history_cell::FinalMessageSeparator::new(None, None);
+    for (input, expected) in [
+        (
+            "Worked for <1s • 2:32 PM",
+            "Worked for [duration] • [completion time]",
+        ),
+        (
+            "Worked for 1h 2m 3s · Sep 6 at 2:32 PM",
+            "Worked for [duration] · [completion time]",
+        ),
+        ("  14:32  ", "  [completion time]  "),
+    ] {
+        assert_eq!(normalize_completion_timestamps(&footer, input), expected);
     }
-    static COMPLETION_FOOTER: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(
-        || {
-            regex_lite::Regex::new(r"(?m)^(?P<indent>[ \t]*)(?P<duration>Worked for (?:[0-9]+h )?(?:[0-9]+m )?[0-9]+s · )?(?:[A-Z][a-z]{2} [0-9]{1,2}(?:, [0-9]{4})? at )?[0-9]{1,2}:[0-9]{2}(?: (?:AM|PM))?(?P<padding>[ \t]*)$")
-                .expect("valid completion footer pattern")
-        },
+    assert_eq!(
+        normalize_completion_timestamps(&footer, "Other text at 2:32 PM"),
+        "Other text at 2:32 PM"
     );
-    COMPLETION_FOOTER
-        .replace_all(&value.to_string(), |captures: &regex_lite::Captures<'_>| {
-            let indent = &captures["indent"];
-            let padding = &captures["padding"];
-            let duration = if captures.name("duration").is_some() {
-                "Worked for [duration] · "
-            } else {
-                ""
-            };
-            format!("{indent}{duration}[completion time]{padding}")
-        })
-        .into_owned()
 }
