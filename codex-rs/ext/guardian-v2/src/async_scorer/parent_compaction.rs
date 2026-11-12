@@ -66,7 +66,10 @@ fn encrypted_parent_compaction(
     checkpoint: Option<codex_history::CompactionCheckpoint<'_>>,
     max_parent_compaction_tokens: usize,
 ) -> Result<Option<ResponseItem>, ParentCompactionError> {
-    let max_compaction_bytes = TruncationPolicy::Tokens(max_parent_compaction_tokens).byte_budget();
+    // Keep the previous maximum configured wire allowance as a separate hard
+    // bound; the configured token budget measures model cost, not ciphertext.
+    let max_compaction_bytes =
+        TruncationPolicy::Tokens(MAX_MODEL_CONTEXT_ITEM_TOKENS).byte_budget();
     let Some(checkpoint) = checkpoint else {
         return Ok(None);
     };

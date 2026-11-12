@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use codex_config::GuardianPolicyLoader;
 use codex_context_fragments::ContextualUserFragment;
 use codex_context_fragments::RenderedFragment;
@@ -26,6 +28,7 @@ pub(super) const MAX_MODEL_CONTEXT_ITEM_TOKENS: usize = 100_000;
 const DEFAULT_REVIEW_THRESHOLD: f64 = 0.5;
 const LEGACY_REVIEW_THRESHOLD: f64 = 0.8;
 const DEFAULT_MAX_TOOL_CALL_LAG: usize = 2;
+const DEFAULT_ASYNC_CLASSIFIER_CONVERSATION_TOKEN_LIMIT: usize = 100_000;
 pub(crate) const CLASSIFICATION_OUTPUT_INSTRUCTIONS: &str = "Your first output token is the entire classification: `high` for high risk or `low` for low risk. Output that token immediately and nothing else.";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -69,22 +72,25 @@ impl GuardianV2Config {
             None => GuardianV2ConfigToml::default(),
         };
 
+        configured.transcript_mode = Some(config.guardian_transcript_mode);
         let mut resolved = Self::from_overrides(configured.clone())?;
         // Config.features can be changed after loading, including for reviewer threads.
         let legacy = FeatureToml::Config(GuardianV2ConfigToml {
             enabled: Some(config.features.enabled(codex_features::Feature::GuardianV2)),
             ..configured
         });
-        resolved.policy =
-            GuardianPolicyLoader::new(Some(&legacy), config.config_layer_stack.requirements());
+        resolved.policy = GuardianPolicyLoader::new(Some(&legacy));
+        resolved.review_multi_agent_calls = config.guardian_native_multi_agent_history_enabled();
+        resolved.multi_agent_namespace = config.multi_agent_v2.tool_namespace.clone();
         Ok(resolved)
     }
 
     pub(super) fn policy_for_model(
         &self,
         model: Option<&codex_protocol::openai_models::ModelInfo>,
+        requirements: &codex_config::ConfigRequirements,
     ) -> GuardianModelPolicy {
-        self.policy.resolve(model)
+        self.policy.resolve(model, requirements)
     }
 
     pub(crate) fn with_model_defaults(
@@ -168,6 +174,8 @@ impl GuardianV2Config {
         let mut resolved = Self::from_overrides(configured)?;
         resolved.local_overrides = self.local_overrides.clone();
         resolved.policy = self.policy.clone();
+        resolved.review_multi_agent_calls = self.review_multi_agent_calls;
+        resolved.multi_agent_namespace = self.multi_agent_namespace.clone();
         Ok(resolved)
     }
 
@@ -257,13 +265,10 @@ impl GuardianV2Config {
             );
         }
 
-        let policy = GuardianPolicyLoader::new(
-            Some(&FeatureToml::Config(GuardianV2ConfigToml {
-                enabled: Some(true),
-                ..configured.clone()
-            })),
-            &codex_config::ConfigRequirements::default(),
-        );
+        let policy = GuardianPolicyLoader::new(Some(&FeatureToml::Config(GuardianV2ConfigToml {
+            enabled: Some(true),
+            ..configured.clone()
+        })));
         Ok(Self {
             local_overrides: configured.clone(),
             review_multi_agent_calls: false,
@@ -304,10 +309,20 @@ impl GuardianV2Config {
         })
     }
 
-    pub(crate) fn render_classifier_instructions(&self, policy: &str) -> RenderedFragment {
+    pub(crate) fn render_classifier_instructions(
+        &self,
+        policy: &str,
+        extra_policy: &str,
+    ) -> RenderedFragment {
+        // Include both policies before the classifier's existing template substitution and truncation.
+        let policy = match extra_policy.trim() {
+            "" => Cow::Borrowed(policy),
+            extra_policy => Cow::Owned(format!("{policy}\n\n{extra_policy}")),
+        };
         GuardianClassifierInstructions::new(
+            self.transcript.format,
             &self.classifier_instructions,
-            policy,
+            &policy,
             CLASSIFICATION_OUTPUT_INSTRUCTIONS,
             self.max_classifier_instruction_tokens,
         )

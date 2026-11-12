@@ -1,4 +1,5 @@
-//! Emits Guardian metrics with bounded tags and the existing telemetry schema.
+//! Calculates per-review token usage and emits Guardian metrics with bounded tags
+//! and the existing telemetry schema.
 
 use std::time::Duration;
 

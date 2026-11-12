@@ -118,6 +118,7 @@ enum Connection {
 pub(super) struct ConnectionLease {
     pub(super) thread_id: String,
     pub(super) request_kind: RequestMode,
+    pub(super) auth_owner: Option<AuthOwner>,
     connection: Connection,
     pool: Arc<ConnectionPool>,
     _permit: OwnedSemaphorePermit,
@@ -291,8 +292,12 @@ impl ConnectionPool {
                 self.replenish();
                 // Sampling owns the retry budget across both transports.
                 provider.retry.max_attempts = 0;
-                let request_kind = self.responses_request_kind().await;
                 let url = provider.url_for_path("/responses");
+                let redirect_policy = if provider.headers.contains_key(ACCOUNT_ROUTING_HEADER) {
+                    ClientRedirectPolicy::Reject
+                } else {
+                    redirect_policy
+                };
                 let transport = {
                     let mut cached = self
                         .http_transport
@@ -322,7 +327,7 @@ impl ConnectionPool {
                             http_client_factory.clone(),
                             url,
                             ClientRouteClass::Api,
-                            ClientRedirectPolicy::Default,
+                            redirect_policy,
                         )
                         .await
                         .map_err(|error| {
@@ -448,16 +453,10 @@ impl ConnectionPool {
         }
         Ok(headers)
     }
-    async fn responses_request_kind(&self) -> RequestMode {
+    fn responses_request_kind(&self, auth: Option<&CodexAuth>) -> RequestMode {
         let provider = self.config.provider.info();
-        if self
-            .config
-            .provider
-            .auth()
-            .await
-            .as_ref()
-            .is_some_and(CodexAuth::uses_codex_backend)
-            && provider.supports_codex_backend_routes()
+        if auth.is_some_and(CodexAuth::uses_codex_backend)
+            && provider.is_openai()
             && provider.requires_openai_auth
             && provider.env_key.is_none()
             && provider.experimental_bearer_token.is_none()
@@ -467,6 +466,53 @@ impl ConnectionPool {
             RequestMode::GuardianClassifier
         } else {
             RequestMode::Regular
+        }
+    }
+
+    async fn runtime_connection(
+        &self,
+        setup: &ClientSetup,
+    ) -> Result<Option<PooledConnection>, LunaSamplerError> {
+        if setup.runtime_id.is_none() || !self.config.provider.info().supports_websockets {
+            return Ok(None);
+        }
+        if self
+            .retry_after
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some_and(|deadline| Instant::now() < deadline)
+        {
+            return Ok(None);
+        }
+        let Ok(permit) = Arc::clone(&self.sockets).try_acquire_owned() else {
+            return Ok(None);
+        };
+        match self.open_connection_with_setup(permit, setup.clone()).await {
+            Ok(connection) => Ok(Some(connection)),
+            Err(LunaSamplerError::ConnectionTimeout) => {
+                *self
+                    .retry_after
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(Instant::now() + CONNECT_COOLDOWN);
+                Ok(None)
+            }
+            Err(
+                error @ LunaSamplerError::Api(ApiError::Transport(
+                    TransportError::Policy(_) | TransportError::Build(_),
+                )),
+            ) => Err(error),
+            Err(
+                error @ LunaSamplerError::Api(ApiError::Transport(TransportError::Http {
+                    status:
+                        http::StatusCode::UNAUTHORIZED
+                        | http::StatusCode::FORBIDDEN
+                        | http::StatusCode::TOO_MANY_REQUESTS,
+                    ..
+                })),
+            ) => Err(error),
+            // Unsupported upgrades and connection failures can still use HTTP.
+            Err(_) => Ok(None),
         }
     }
 
@@ -495,7 +541,6 @@ impl ConnectionPool {
             auth_changes,
         } = setup;
         let thread_id = ThreadId::new().to_string();
-        let request_kind = self.responses_request_kind().await;
         let mut headers = self.headers(&thread_id, request_kind)?;
         headers.insert(
             "openai-beta",
@@ -504,13 +549,39 @@ impl ConnectionPool {
 
         let provider_info = self.config.provider.info();
         let client = ResponsesWebsocketClient::new(provider, auth);
-        let connect = client.connect(
-            &self.config.http_client_factory,
-            headers,
-            default_headers(),
-            /*turn_state*/ None,
-            /*telemetry*/ None,
-        );
+        let connect = async {
+            let connector = self
+                .websocket_connector
+                .get_or_try_init(|| async {
+                    let factory = self.config.http_client_factory.clone();
+                    tokio::task::spawn_blocking(move || WebSocketConnector::new(&factory))
+                        .await
+                        .map_err(|error| {
+                            ApiError::Stream(format!("websocket TLS setup task failed: {error}"))
+                        })?
+                        .map_err(|error| {
+                            ApiError::Stream(format!("failed to configure websocket TLS: {error}"))
+                        })
+                })
+                .await?;
+            let connector = connector
+                .with_account_binding(http_client_factory.network_policy())
+                .ok_or_else(|| {
+                    ApiError::Transport(TransportError::Build(
+                        "websocket credentials and transport have different account policies"
+                            .into(),
+                    ))
+                })?;
+            client
+                .connect_with_connector(
+                    &connector,
+                    headers,
+                    default_headers(),
+                    /*turn_state*/ None,
+                    /*telemetry*/ None,
+                )
+                .await
+        };
         let started_at = Instant::now();
         let result = tokio::time::timeout(provider_info.websocket_connect_timeout(), connect)
             .await

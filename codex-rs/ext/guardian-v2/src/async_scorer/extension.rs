@@ -16,6 +16,7 @@ use codex_extension_api::SkillInvocationContributor;
 use codex_extension_api::SkillInvocationInput;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadStartInput;
+use codex_extension_api::ThreadStopInput;
 use codex_extension_api::ToolFinishInput;
 use codex_extension_api::ToolLifecycleContributor;
 use codex_extension_api::ToolLifecycleFuture;
@@ -27,6 +28,7 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::has_full_access;
 
 use super::config::GuardianV2Config;
+use super::conversation::ConversationBackend;
 use super::sampler::LunaSampler;
 use super::score::GuardianV2ScoreProgress;
 use super::trusted_skills::TrustedSkillRoots;
@@ -61,21 +63,13 @@ impl ThreadLifecycleContributor<Config> for GuardianV2Extension {
                     return;
                 }
             };
-            let mut policy = guardian_config.policy_for_model(model.as_deref());
-            if let Some(model) = model.as_ref() {
-                input
-                    .config
-                    .config_layer_stack
-                    .requirements()
-                    .constrain_guardian_policy(&mut policy, &model.slug);
-            }
+            let policy = guardian_config.policy_for_model(
+                model.as_deref(),
+                input.config.config_layer_stack.requirements(),
+            );
             let scoring_enabled = policy.scoring_enabled();
-            let sampler_config = super::startup::sampler_config(
-                &input,
-                Arc::clone(&self.auth_manager),
-                self.thread_manager.upgrade(),
-            )
-            .await;
+            let sampler_config =
+                super::startup::sampler_config(&input, self.thread_manager.upgrade()).await;
 
             if scoring_enabled && guardian_config.transcript.include_images {
                 input

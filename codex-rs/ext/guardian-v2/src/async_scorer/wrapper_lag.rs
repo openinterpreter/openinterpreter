@@ -1,6 +1,7 @@
-//! Discounts only an approval's own unscored code-mode wrapper. Missing provenance
-//! keeps the full lag; the bounded history never changes scoring or failure order.
+//! Tracks action order and discounts an approval's own unscored code-mode wrapper.
+//! Missing provenance keeps the full lag; bounded history never changes scoring or failure order.
 //! The score owner's state lock protects this history.
+//! Active nested actions retain their wrapper allowance when expiring pending scores.
 
 use std::collections::VecDeque;
 
@@ -9,11 +10,12 @@ use codex_extension_api::ToolPayload;
 use codex_extension_api::ToolStartInput;
 use codex_protocol::ResponseItemId;
 
-struct ToolStart {
+pub(super) struct ToolStart {
     call_id: String,
-    index: usize,
+    pub(super) index: usize,
     wrapper_item_id: Option<ResponseItemId>,
     parent_wrapper_index: Option<usize>,
+    finished: bool,
 }
 
 #[derive(Default)]
@@ -51,19 +53,42 @@ impl WrapperLag {
             index,
             wrapper_item_id,
             parent_wrapper_index,
+            finished: false,
         });
+    }
+
+    pub(super) fn finish(&mut self, call_id: &str) {
+        if let Some(start) = self
+            .starts
+            .iter_mut()
+            .rev()
+            .find(|start| start.call_id == call_id)
+        {
+            start.finished = true;
+        }
+    }
+
+    pub(super) fn pending_discount(&self, index: usize) -> usize {
+        usize::from(self.starts.iter().any(|start| {
+            !start.finished
+                && start
+                    .parent_wrapper_index
+                    .is_some_and(|parent| parent > index)
+        }))
+    }
+
+    pub(super) fn get(&self, call_id: Option<&str>) -> Option<&ToolStart> {
+        let call_id = call_id?;
+        self.starts
+            .iter()
+            .rev()
+            .find(|start| start.call_id == call_id)
     }
 
     pub(super) fn discount(&self, call_id: Option<&str>, latest_scored: usize) -> usize {
         usize::from(
-            call_id
-                .and_then(|call_id| {
-                    self.starts
-                        .iter()
-                        .rev()
-                        .find(|start| start.call_id == call_id)
-                        .and_then(|start| start.parent_wrapper_index)
-                })
+            self.get(call_id)
+                .and_then(|start| start.parent_wrapper_index)
                 .is_some_and(|parent| parent > latest_scored),
         )
     }

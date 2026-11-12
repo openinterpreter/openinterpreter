@@ -26,8 +26,8 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
         LunaSamplerError::MissingOutput => "missing_output",
         LunaSamplerError::OutputTooLarge => "output_too_large",
         LunaSamplerError::Superseded => "superseded",
-        LunaSamplerError::IncompatibleCompaction => "incompatible_compaction",
         LunaSamplerError::InputTooLarge => "input_too_large",
+        LunaSamplerError::QueueFull => "queue_full",
         LunaSamplerError::Api(error) => match error {
             ApiError::Transport(TransportError::Http { status, .. })
             | ApiError::Api { status, .. } => match status.as_u16() {
@@ -44,18 +44,29 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
             ApiError::Transport(TransportError::RetryLimit) => "retry_limit",
             ApiError::Transport(TransportError::Build(_)) => "request_build_error",
             ApiError::Transport(TransportError::ResponseTooLarge { .. }) => "response_too_large",
-            ApiError::Stream(_) => "stream_error",
+            ApiError::Transport(TransportError::Policy(_)) => "network_policy_denied",
+            ApiError::Stream(_) | ApiError::ContentFilter => "stream_error",
+            ApiError::WebsocketMessageTooLarge => "websocket_message_too_large",
+            ApiError::ResponseIncomplete(_) => "incomplete_response",
             ApiError::ContextWindowExceeded => "context_window_exceeded",
             ApiError::QuotaExceeded => "quota_exceeded",
             ApiError::UsageNotIncluded => "usage_not_included",
             ApiError::SessionBudgetExceeded => "session_budget_exceeded",
             ApiError::Retryable { .. } => "retryable_api_error",
             ApiError::RateLimitExceeded { .. } | ApiError::RateLimit(_) => "rate_limit",
-            ApiError::InvalidRequest { .. } => "invalid_request",
+            ApiError::ModelNotFound { .. } => "model_not_found",
+            ApiError::InvalidRequest { .. }
+            | ApiError::InvalidAudioInput { .. }
+            | ApiError::InvalidPrompt { .. } => "invalid_request",
+            ApiError::AccessProgramNotEnabled { .. } => "access_program_not_enabled",
+            ApiError::ContentPolicyViolation { .. } => "content_policy_violation",
             ApiError::CyberPolicy { .. }
             | ApiError::BioPolicy { .. }
+            | ApiError::InferenceHookDenied { .. }
             | ApiError::MisalignmentPolicyViolation { .. } => "policy_error",
-            ApiError::ServerOverloaded => "server_overloaded",
+            ApiError::ServerOverloaded { .. } => "server_overloaded",
+            ApiError::PolicyCapacityUnavailable { .. } => "policy_capacity_unavailable",
+            ApiError::FlexUnavailable => "flex_unavailable",
         },
     }
 }
