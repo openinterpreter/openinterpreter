@@ -42,7 +42,14 @@ const LOCAL_SECRETS_FILENAME: &str = "local.age";
 const CODEX_AUTH_SECRETS_FILENAME: &str = "codex_auth.age";
 const MCP_OAUTH_SECRETS_FILENAME: &str = "mcp_oauth.age";
 const GATEWAY_OAUTH_SECRETS_FILENAME: &str = "gateway_oauth.age";
-static MCP_OAUTH_CACHE: Mutex<Option<CachedMcpSecrets>> = Mutex::new(None);
+static MCP_OAUTH_CACHE: Mutex<Option<CachedSecrets>> = Mutex::new(None);
+static CODEX_AUTH_CACHE: Mutex<Option<CachedSecrets>> = Mutex::new(None);
+static MANAGED_SECRETS_CACHE: Mutex<Option<CachedSecrets>> = Mutex::new(None);
+
+// Tests that access the shared caches must hold this lock so another test's
+// temporary home cannot evict a snapshot while cache reuse is being asserted.
+#[cfg(test)]
+pub(super) static SECRETS_CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Selects the local encrypted file used by a `LocalSecretsBackend`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
