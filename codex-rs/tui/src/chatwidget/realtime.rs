@@ -4,6 +4,7 @@
 
 mod recording_controls;
 mod failure_metrics;
+#[path = "realtime_navigation.rs"]
 mod navigation;
 mod session_lock;
 mod transcript_replay;

@@ -1,7 +1,22 @@
 //! Model-history and persisted-rollout domain types.
 
+mod heartbeat;
+pub use heartbeat::HEARTBEAT_CONTENT_KIND;
+pub use heartbeat::Heartbeat;
+pub use heartbeat::UserInputOrigin;
+
+mod compaction_resume_metadata;
+pub use codex_protocol::turn_input::TurnAttribution;
+pub use compaction_resume_metadata::CompactionResumeMetadata;
+pub use compaction_resume_metadata::DynamicToolsSnapshot;
+pub use compaction_resume_metadata::PreviousTurnSettings;
+pub use compaction_resume_metadata::resume_multi_agent_version;
+
 mod compaction_checkpoint;
 pub use compaction_checkpoint::CompactionCheckpoint;
+
+mod initialization;
+pub use initialization::HistoryInitialization;
 
 use std::borrow::Borrow;
 use std::ops::Deref;
@@ -128,9 +143,52 @@ pub struct CodexHarnessMetadata {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub inherited_user_message: bool,
 
+    /// Cumulative MCP tools/call attribution checkpoint, never model-visible.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_mcp_attribution_checkpoint"
+    )]
+    pub mcp_attribution: Option<McpAttribution>,
+
+    /// Native search ran during automatic fallback, so its browsing references stay on native.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_search_fallback_used: bool,
+
     /// Sender context captured by the host when this task message was accepted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_user_messages: Option<Box<SenderUserMessages>>,
+}
+
+fn deserialize_mcp_attribution_checkpoint<'de, D>(
+    deserializer: D,
+) -> Result<Option<McpAttribution>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(Some(serde_json::from_value(value).unwrap_or_else(|_| {
+        McpAttribution {
+            status: McpAttributionStatus::AttributionError,
+            error_reason: None,
+            sources: Vec::new(),
+        }
+    })))
+}
+
+impl CodexHarnessMetadata {
+    /// Shortened messages no longer prove complete instruction or review delivery.
+    pub fn mark_retained_sources_incomplete(&mut self) {
+        self.guardian_review_ids.clear();
+        self.guardian_source_order_guidance = false;
+        self.guardian_retained_omissions = None;
+        if let Some(source) = &mut self.retained_source {
+            source.complete = false;
+        }
+        for source in &mut self.guardian_sources {
+            source.complete = false;
+        }
+    }
 }
 
 impl ResponseItemEnvelope {
@@ -499,6 +557,31 @@ fn session_cwd_from_items(items: &[RolloutItem]) -> Option<PathBuf> {
         RolloutItem::SessionMeta(meta_line) => Some(meta_line.meta.cwd.clone()),
         _ => None,
     })
+}
+
+/// Returns the latest catalog, preserving explicit clears and falling back to creation metadata.
+pub fn latest_dynamic_tools(items: &[RolloutItem]) -> Option<&[DynamicToolSpec]> {
+    let metadata = items.iter().find_map(|item| match item {
+        RolloutItem::SessionMeta(meta) => Some(&meta.meta),
+        _ => None,
+    });
+    items
+        .iter()
+        .rev()
+        .find_map(|item| {
+            let (thread_id, tools) = match item {
+                RolloutItem::DynamicToolsUpdated { thread_id, tools } => (thread_id, tools),
+                RolloutItem::Compacted(compacted) => {
+                    let snapshot = compacted.resume_metadata.as_ref()?.dynamic_tools.as_ref()?;
+                    (&snapshot.thread_id, &snapshot.tools)
+                }
+                _ => return None,
+            };
+            metadata
+                .is_none_or(|meta| meta.id == *thread_id)
+                .then_some(tools.as_slice())
+        })
+        .or_else(|| metadata.and_then(|meta| meta.dynamic_tools.as_deref()))
 }
 
 /// Returns a thread's latest plugin selection, with a turn-context fallback.
