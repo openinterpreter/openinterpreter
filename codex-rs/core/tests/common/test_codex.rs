@@ -15,6 +15,7 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use codex_agent_graph_store::AgentGraphStore;
 use codex_analytics::AnalyticsEventsClient;
 use codex_attachment_store::AttachmentStore;
 use codex_config::CloudConfigBundleLoader;
@@ -408,7 +409,8 @@ impl TestAuth {
 pub struct TestCodexBuilder {
     apps_tools_cache: codex_core::CodexAppsToolsCache,
     config_mutators: Vec<Box<ConfigMutator>>,
-    auth: CodexAuth,
+    thread_manager_configurer: Option<Box<dyn FnOnce(ThreadManager) -> ThreadManager + Send>>,
+    auth: TestAuth,
     analytics_events_client: Option<AnalyticsEventsClient>,
     pre_build_hooks: Vec<Box<PreBuildHook>>,
     workspace_setups: Vec<Box<WorkspaceSetup>>,
@@ -423,13 +425,33 @@ pub struct TestCodexBuilder {
     code_mode_host_program: Option<PathBuf>,
     history_mode: Option<ThreadHistoryMode>,
     models_manager: Option<SharedModelsManager>,
+    model_catalog_settings: Option<ModelCatalogSettings>,
     thread_store: Option<Arc<dyn ThreadStore>>,
+    agent_graph_store: Option<Arc<dyn AgentGraphStore>>,
     image_store: Arc<dyn AttachmentStore>,
 }
 
 impl TestCodexBuilder {
+    pub fn with_apps_tools_cache(mut self, cache: codex_core::CodexAppsToolsCache) -> Self {
+        self.apps_tools_cache = cache;
+        self
+    }
+
     pub fn with_thread_store(mut self, thread_store: Arc<dyn ThreadStore>) -> Self {
         self.thread_store = Some(thread_store);
+        self
+    }
+
+    pub fn with_agent_graph_store(mut self, agent_graph_store: Arc<dyn AgentGraphStore>) -> Self {
+        self.agent_graph_store = Some(agent_graph_store);
+        self
+    }
+
+    pub fn with_thread_manager(
+        mut self,
+        configure: impl FnOnce(ThreadManager) -> ThreadManager + Send + 'static,
+    ) -> Self {
+        self.thread_manager_configurer = Some(Box::new(configure));
         self
     }
 
@@ -461,14 +483,6 @@ impl TestCodexBuilder {
 
     pub fn with_model_catalog_settings(mut self, settings: ModelCatalogSettings) -> Self {
         self.model_catalog_settings = Some(settings);
-        self
-    }
-
-    pub fn with_analytics_events_client(
-        mut self,
-        analytics_events_client: AnalyticsEventsClient,
-    ) -> Self {
-        self.analytics_events_client = Some(analytics_events_client);
         self
     }
 
@@ -837,10 +851,21 @@ impl TestCodexBuilder {
         environment_manager: Arc<codex_exec_server::EnvironmentManager>,
     ) -> anyhow::Result<TestCodex> {
         let state_db = codex_core::init_state_db(&config).await;
-        let thread_store = self
-            .thread_store
-            .clone()
-            .unwrap_or_else(|| thread_store_from_config(&config, state_db.clone()));
+        let thread_store = self.thread_store.clone().unwrap_or_else(|| {
+            let sqlite = config.sqlite_config().clone();
+            ThreadStoreBuilder::from_config(&config, state_db.clone())
+                .with_additional_cleanup(move |thread_ids| {
+                    let sqlite = sqlite.clone();
+                    Box::pin(async move {
+                        codex_agent_message_board_host::delete_agent_message_boards(
+                            &sqlite,
+                            &thread_ids,
+                        )
+                        .await
+                    })
+                })
+                .build()
+        });
         let installation_id = resolve_installation_id(&config.codex_home).await?;
         let user_instructions_provider =
             self.user_instructions_provider.clone().unwrap_or_else(|| {
@@ -848,21 +873,30 @@ impl TestCodexBuilder {
                     config.codex_home.clone(),
                 ))
             });
-        let auth_manager = codex_core::test_support::auth_manager_from_auth_with_home(
-            auth.clone(),
-            config.codex_home.to_path_buf(),
-        );
-        let models_manager = self
-            .models_manager
-            .clone()
-            .unwrap_or_else(|| codex_core::build_models_manager(&config, auth_manager.clone()));
+        let auth_manager = self.auth.manager_for_home(config.codex_home.as_path());
         let code_mode_host_program = self
             .code_mode_host_program
             .take()
             .or_else(|| codex_utils_cargo_bin::cargo_bin("codex-code-mode-host").ok());
+        let factory =
+            match &self.models_manager {
+                Some(models) => codex_core::test_support::fixed_model_catalog(Arc::clone(models)),
+                None => Arc::new(self.model_catalog_settings.clone().unwrap_or_else(|| {
+                    ModelCatalogSettings::disk(config.codex_home.to_path_buf())
+                })),
+            };
+        let startup = codex_core::build_startup_models(
+            &config,
+            Arc::clone(&auth_manager),
+            installation_id,
+            factory,
+        );
         let thread_manager = Arc::new_cyclic(|manager| {
             let mut extensions = self.extensions.to_builder();
-            codex_core::install_agent_message_board(&mut extensions, manager.clone());
+            codex_agent_message_board_host::install_agent_message_board(
+                &mut extensions,
+                manager.clone(),
+            );
             if config.features.enabled(Feature::GuardianV2) {
                 codex_guardian_v2::install(&mut extensions, auth_manager.clone(), manager.clone());
             } else {
@@ -870,9 +904,8 @@ impl TestCodexBuilder {
             }
             let thread_manager = ThreadManager::new(
                 &config,
-                auth_manager.clone(),
-                models_manager,
-                codex_core::CodexAppsToolsCache::default(),
+                startup,
+                self.apps_tools_cache.clone(),
                 SessionSource::Exec,
                 Arc::clone(&environment_manager),
                 Arc::new(extensions.build()),
@@ -880,11 +913,16 @@ impl TestCodexBuilder {
                 self.analytics_events_client.clone(),
                 Arc::clone(&self.image_store),
                 Arc::clone(&thread_store),
-                codex_core::local_agent_graph_store_from_state_db(state_db.as_ref()),
-                installation_id,
+                self.agent_graph_store.clone().or_else(|| {
+                    codex_core::local_agent_graph_store_from_state_db(state_db.as_ref())
+                }),
                 /*attestation_provider*/ None,
                 /*external_time_provider*/ self.external_time_provider.clone(),
             );
+            let thread_manager = match self.thread_manager_configurer.take() {
+                Some(configure) => configure(thread_manager),
+                None => thread_manager,
+            };
             if config.features.enabled(Feature::CodeModeHost)
                 && let Some(code_mode_host_program) = code_mode_host_program
             {
@@ -1540,7 +1578,7 @@ pub fn test_codex() -> TestCodexBuilder {
                 .disable(Feature::ShellSnapshot)
                 .expect("test config should allow ShellSnapshot override");
         })],
-        auth: CodexAuth::from_api_key("dummy"),
+        auth: TestAuth::Cached(CodexAuth::from_api_key("dummy")),
         analytics_events_client: None,
         pre_build_hooks: vec![],
         workspace_setups: vec![],
@@ -1556,7 +1594,9 @@ pub fn test_codex() -> TestCodexBuilder {
         // These fixtures exercise legacy-only resume/fork helpers; store-default tests opt out.
         history_mode: Some(ThreadHistoryMode::Legacy),
         models_manager: None,
+        model_catalog_settings: None,
         thread_store: None,
+        agent_graph_store: None,
         image_store: codex_core::passthrough_image_store(),
     }
 }

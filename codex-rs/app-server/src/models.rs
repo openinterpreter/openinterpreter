@@ -32,7 +32,7 @@ pub async fn supported_models_for_provider(
     provider_config.model_provider_id = provider_id.to_string();
     provider_config.model_provider = provider;
     provider_config.codex_home = config.codex_home.join("models-cache").join(provider_id);
-    let models_manager = build_models_manager(&provider_config, auth_manager);
+    let models_manager = build_models_manager(&provider_config, auth_manager, None);
     if codex_product_info::Product::current() == codex_product_info::Product::OpenInterpreter
         && let Some(models) = models_manager.list_models_from_cache_if_present().await
     {

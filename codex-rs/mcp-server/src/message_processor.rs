@@ -3,6 +3,7 @@ use std::sync::Arc;
 use codex_arg0::Arg0DispatchPaths;
 use codex_core::StateDbHandle;
 use codex_core::ThreadManager;
+use codex_core::ThreadStoreBuilder;
 use codex_core::config::Config;
 use codex_exec_server::EnvironmentManager;
 use codex_extension_api::ExtensionRegistryBuilder;
@@ -10,6 +11,7 @@ use codex_home::CodexHomeUserInstructionsProvider;
 use codex_login::AuthManager;
 use codex_login::default_client::USER_AGENT_SUFFIX;
 use codex_login::default_client::get_codex_user_agent;
+use codex_models_manager::manager::ModelCatalogSettings;
 use codex_protocol::protocol::SessionSource;
 use rmcp::model::CallToolRequestParams;
 use rmcp::model::CallToolResult;
@@ -96,23 +98,46 @@ impl MessageProcessor {
                     .enabled(codex_features::Feature::SkillSearch),
             },
         );
-        let thread_manager = Arc::new(ThreadManager::new(
+        let sqlite = config.sqlite_config().clone();
+        let thread_store = ThreadStoreBuilder::from_config(config.as_ref(), state_db.clone())
+            .with_additional_cleanup(move |thread_ids| {
+                let sqlite = sqlite.clone();
+                Box::pin(async move {
+                    codex_agent_message_board_host::delete_agent_message_boards(
+                        &sqlite,
+                        &thread_ids,
+                    )
+                    .await
+                })
+            })
+            .build();
+        let startup = codex_core::build_startup_models(
             config.as_ref(),
-            Arc::clone(&auth_manager),
-            codex_core::build_models_manager(config.as_ref(), auth_manager),
-            codex_core::CodexAppsToolsCache::default(),
-            SessionSource::Mcp,
-            environment_manager,
-            Arc::new(extensions.build()),
-            user_instructions_provider,
-            /*analytics_events_client*/ None,
-            codex_core::passthrough_image_store(),
-            codex_core::thread_store_from_config(config.as_ref(), state_db.clone()),
-            codex_core::local_agent_graph_store_from_state_db(state_db.as_ref()),
+            auth_manager,
             installation_id,
-            /*attestation_provider*/ None,
-            /*external_time_provider*/ None,
-        ));
+            Arc::new(ModelCatalogSettings::disk(config.codex_home.to_path_buf())),
+        );
+        let thread_manager = Arc::new_cyclic(|manager| {
+            codex_agent_message_board_host::install_agent_message_board(
+                &mut extensions,
+                manager.clone(),
+            );
+            ThreadManager::new(
+                config.as_ref(),
+                startup,
+                codex_core::CodexAppsToolsCache::default(),
+                SessionSource::Mcp,
+                environment_manager,
+                Arc::new(extensions.build()),
+                user_instructions_provider,
+                /*analytics_events_client*/ None,
+                codex_core::passthrough_image_store(),
+                thread_store,
+                codex_core::local_agent_graph_store_from_state_db(state_db.as_ref()),
+                /*attestation_provider*/ None,
+                /*external_time_provider*/ None,
+            )
+        });
         Ok(Self {
             outgoing,
             initialized: false,
