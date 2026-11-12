@@ -1127,6 +1127,10 @@ mod metadata_tests;
 mod feedback_event_tests;
 
 #[cfg(test)]
+#[path = "save_rollout_tests.rs"]
+mod save_rollout_tests;
+
+#[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
     use std::fs;
