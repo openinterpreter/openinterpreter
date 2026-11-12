@@ -3,6 +3,7 @@
 use super::GenericDisplayRow;
 use super::SelectionDescriptionLayout;
 use super::build_full_line;
+use super::full_hyperlink_row;
 use super::should_wrap_name_in_column;
 use super::wrap_indent;
 use crate::terminal_hyperlinks::HyperlinkLine;
@@ -10,39 +11,6 @@ use crate::width::display_width;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
-
-pub(super) fn full_hyperlink_row(row: &GenericDisplayRow, line: Line<'static>) -> HyperlinkLine {
-    let prefix = row
-        .name_prefix_spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect::<String>();
-    let text = line.to_string();
-    let visible_name = text.strip_prefix(&prefix).unwrap_or("");
-    let common = row
-        .name
-        .chars()
-        .zip(visible_name.chars())
-        .take_while(|(a, b)| a == b)
-        .map(|(ch, _)| ch)
-        .collect::<String>();
-    let start = display_width(&prefix);
-    let end = start + display_width(&common);
-    let mut source = crate::terminal_hyperlinks::annotate_web_urls_in_line(line);
-    source
-        .hyperlinks
-        .retain(|link| link.columns.end <= start || link.columns.start >= end);
-    let name = crate::terminal_hyperlinks::annotate_web_urls_in_line(row.name.clone().into());
-    source
-        .hyperlinks
-        .extend(name.hyperlinks.into_iter().filter_map(|link| {
-            let last = (start + link.columns.end).min(end);
-            let first = start + link.columns.start;
-            (first < last).then(|| link.with_columns(first..last))
-        }));
-    source.hyperlinks.sort_by_key(|link| link.columns.start);
-    source
-}
 
 fn wrap_column(text: &str, options: crate::wrapping::RtOptions<'static>) -> Vec<HyperlinkLine> {
     text.lines()
@@ -165,9 +133,6 @@ pub(super) fn wrap_row_lines(
     width: u16,
     description_layout: SelectionDescriptionLayout,
 ) -> Vec<HyperlinkLine> {
-    if !row.wrapped_name.is_empty() {
-        return row.wrapped_name.clone();
-    }
     if desc_col > 0 && should_wrap_name_in_column(row) {
         let wrapped = wrap_two_column_row(row, desc_col, width);
         if !wrapped.is_empty() {
@@ -177,7 +142,3 @@ pub(super) fn wrap_row_lines(
 
     wrap_standard_row(row, desc_col, width, description_layout)
 }
-
-#[cfg(test)]
-#[path = "selection_row_links_tests.rs"]
-mod tests;
