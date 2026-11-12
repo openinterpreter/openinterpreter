@@ -200,7 +200,10 @@ pub(crate) struct ReconnectAttempt {
 }
 
 struct OpenNoiseRendezvousConnection {
+    environment_id: String,
     executor_registration_id: String,
+    stream_id: String,
+    handshake_started: Instant,
     connection: JsonRpcConnection,
     pending_tasks: Vec<AbortOnDropHandle<()>>,
     options: ExecServerClientConnectOptions,
@@ -697,7 +700,7 @@ impl ExecServerClient {
             stream,
             NoiseHarnessConnectionArgs {
                 connection_label,
-                environment_id,
+                environment_id: environment_id.clone(),
                 executor_registration_id: executor_registration_id.clone(),
                 identity: harness_identity,
                 responder_public_key: executor_public_key,
@@ -713,7 +716,10 @@ impl ExecServerClient {
             .map(AbortOnDropHandle::new)
             .collect();
         Ok(OpenNoiseRendezvousConnection {
+            environment_id,
             executor_registration_id,
+            stream_id: connection.stream_id,
+            handshake_started: connection.handshake_started,
             connection: connection.connection,
             pending_tasks,
             options: ExecServerClientConnectOptions {
@@ -775,7 +781,7 @@ impl ExecServerClient {
         // startup parent while making its two child operations visible.
         let initialize_timeout = connection.options.initialize_timeout;
         let noise_context = NoiseInitializeContext {
-            executor_registration_id: connection.executor_registration_id,
+            executor_registration_id: connection.executor_registration_id.clone(),
             span: tracing::info_span!(
                 "codex.exec_server.request",
                 otel.kind = "client",
