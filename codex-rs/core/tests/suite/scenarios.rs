@@ -72,14 +72,29 @@ const ONE_PIXEL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ
 #[path = "scenarios_agent_message_board.rs"]
 mod agent_message_board;
 
+#[path = "scenarios_agent_eviction_tests.rs"]
+mod agent_eviction;
+
 #[path = "scenarios_guardian_sender_context.rs"]
 mod guardian_sender_context;
 
 #[path = "scenarios_guardian_heartbeat.rs"]
 mod guardian_heartbeat;
 
+#[path = "scenarios_guardian_reconsideration.rs"]
+mod guardian_reconsideration;
+
+#[path = "host_turn_admission.rs"]
+mod host_turn_admission;
+
 #[path = "scenarios_injected_agent_mail.rs"]
 mod injected_agent_mail;
+
+#[path = "scenarios_mailbox_preemption_tests.rs"]
+mod mailbox_preemption;
+
+#[path = "scenarios_managed_human_approval_tests.rs"]
+mod managed_human_approval;
 
 #[path = "scenarios_incremental_tools_resume.rs"]
 mod incremental_tools_resume;
