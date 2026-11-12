@@ -101,6 +101,7 @@ impl ApplyPatchRuntime {
         );
         Some(FileSystemSandboxContext {
             permissions,
+            sandbox_override: codex_protocol::sandbox::SandboxOverride::NoOverride,
             cwd: attempt.sandbox_cwd.clone(),
             workspace_roots: attempt.workspace_roots.to_vec(),
             user_home_dir: req.turn_environment.user_home_dir.clone(),

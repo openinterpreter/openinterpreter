@@ -995,9 +995,32 @@ impl ExecServerClient {
             .await
     }
 
-    pub async fn fs_open(&self, params: FsOpenParams) -> Result<FsOpenResponse, ExecServerError> {
-        self.call(FS_OPEN_METHOD, &WireFsOpenParams::from(params))
-            .await
+    pub(crate) async fn supports_file_write_streaming(&self) -> Result<bool, ExecServerError> {
+        Ok(self
+            .environment_info()
+            .await?
+            .capabilities
+            .file_write_streaming)
+    }
+
+    /// Returns an owned future so a caller can finish opening after it stops waiting.
+    pub fn fs_open(
+        &self,
+        params: FsOpenParams,
+    ) -> impl Future<Output = Result<FsOpenResponse, ExecServerError>> + Send + 'static {
+        let client = self.clone();
+        async move {
+            // Older executors ignore the mode and could silently return a read-only handle.
+            if params.mode == FsOpenMode::Replace && !client.supports_file_write_streaming().await?
+            {
+                return Err(ExecServerError::Protocol(
+                    "exec-server does not support writable file streams".to_string(),
+                ));
+            }
+            client
+                .call(FS_OPEN_METHOD, &WireFsOpenParams::from(params))
+                .await
+        }
     }
 
     pub async fn fs_read_block(
@@ -1043,6 +1066,21 @@ impl ExecServerClient {
             &WireFsCreateDirectoryParams::from(params),
         )
         .await
+    }
+
+    pub(crate) async fn fs_watch_missing(
+        &self,
+        missing: Vec<codex_utils_path_uri::PathUri>,
+        present: Option<codex_utils_path_uri::PathUri>,
+    ) -> Result<Option<tokio::sync::oneshot::Receiver<()>>, ExecServerError> {
+        if !self.environment_info().await?.capabilities.fs_watch_missing {
+            return Ok(None);
+        }
+        Ok(self
+            .rpc_client()
+            .await?
+            .watch_missing(missing, present)
+            .await?)
     }
 
     pub async fn fs_get_metadata(

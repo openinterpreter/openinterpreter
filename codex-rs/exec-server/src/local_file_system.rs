@@ -132,13 +132,15 @@ impl LocalFileSystem {
     ) -> FileSystemResult<tokio::fs::File> {
         if let Some(sandbox) = sandbox {
             sandbox.validate_file_system_paths_for_current_host()?;
+            let needs_sandbox = match mode {
+                FsOpenMode::Read => sandbox.should_read_from_sandbox(),
+                FsOpenMode::Replace => sandbox.should_write_into_sandbox(),
+            };
+            if needs_sandbox {
+                return self.sandboxed()?.open_file(path, mode, Some(sandbox)).await;
+            }
         }
-        if sandbox.is_some_and(FileSystemSandboxContext::should_read_from_sandbox) {
-            return self.sandboxed()?.open_file_for_read(path, sandbox).await;
-        }
-        self.unsandboxed
-            .open_file_for_read(path, /*sandbox*/ None)
-            .await
+        regular_file::open(path.to_abs_path()?.as_path(), mode).await
     }
 
     async fn canonicalize(
