@@ -4,6 +4,7 @@
 #[cfg(test)]
 #[path = "executed_tool_calls_direct_tests.rs"]
 mod direct_tests;
+mod mcp_attribution;
 mod request_metadata;
 
 use std::collections::HashMap;
@@ -19,11 +20,13 @@ use codex_code_mode::CellId;
 use codex_features::Feature;
 use codex_features::Features;
 use codex_history::InitialHistory;
+use codex_protocol::ResponseItemId;
+use codex_protocol::mcp::McpAttribution;
+use codex_protocol::mcp::McpAttributionSource;
 use codex_protocol::models::ExecutedToolCall;
 use codex_protocol::models::ExecutedToolCallArguments;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::models::bound_executed_tool_calls_for_prompt;
-use codex_protocol::models::bound_executed_tool_calls_for_prompt_prioritizing_recent;
+use codex_protocol::models::ToolResultMetadata;
 use codex_protocol::models::executed_tool_call_metadata_bytes;
 use codex_protocol::models::normalize_executed_tool_call_completeness;
 use codex_protocol::openai_models::ToolMode;
@@ -42,8 +45,6 @@ mod seen_ids;
 
 use seen_ids::SeenIds;
 
-const MAX_EXECUTED_TOOL_CALL_ARGUMENT_BYTES: usize = 8 * 1024;
-const MAX_EXECUTED_TOOL_CALL_FULL_ARGUMENT_BYTES_PER_OUTPUT: usize = 32 * 1024;
 const MAX_PENDING_EXECUTED_TOOL_CALLS: usize = 256;
 // Limits new Direct metadata retained in history and the append-only rollout
 // during one recorder lifetime. A new process cannot recover the exact prior
@@ -60,6 +61,16 @@ pub(crate) struct ExecutedToolCalls {
     state: Arc<Mutex<Option<ExecutedToolCallRecorderState>>>,
     retained_direct_metadata_bytes: Arc<AtomicUsize>,
     pending_direct_calls: Arc<AtomicUsize>,
+    mcp_attribution: mcp_attribution::McpAttributionRecorder,
+}
+
+// Avoid exposing recorded call arguments or result metadata through client Debug output.
+impl std::fmt::Debug for ExecutedToolCalls {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExecutedToolCalls")
+            .finish_non_exhaustive()
+    }
 }
 
 // The tool future owns this reservation, so completion or cancellation releases it.
@@ -84,11 +95,15 @@ impl Drop for DirectCallPermit {
 struct ExecutedToolCallRecorderState {
     // Disabling drops this lifetime, permanently invalidating prepared Direct records.
     recording: Arc<()>,
+    // Full live Direct observations; persisted outputs keep their bounded projection.
+    direct_calls: HashMap<ResponseItemId, ExecutedToolCall>,
     cells: HashMap<CellId, RecordedCell>,
     output_cells: HashMap<String, CellId>,
     retained_calls: HashMap<(std::mem::Discriminant<ResponseItem>, String), RetainedToolCalls>,
     pending_nested_calls: usize,
     seen_ids: SeenIds,
+    // Keep nested IDs separate so this conservative filter cannot change existing completeness.
+    seen_nested_ids: SeenIds,
     can_prove_wait_completion: bool,
     pending_wrapper_origins: HashSet<String>,
 }
@@ -102,7 +117,22 @@ struct RetainedToolCalls {
     runtime_cell_id: Option<CellId>,
     // Invocation IDs stay local and are retained only with their original output's calls.
     call_index_by_id: HashMap<String, usize>,
+    // Track newly backfilled metadata separately from pre-existing observations.
+    truncated_call_index_by_id: HashMap<String, usize>,
+    late_truncated_indices: HashSet<usize>,
     result_metadata_updated: bool,
+}
+
+impl RetainedToolCalls {
+    fn clear_late_truncated_metadata(&mut self) {
+        for index in self.late_truncated_indices.drain() {
+            if let Some(call) = self.calls.get_mut(index) {
+                call.set_tool_result_metadata(ToolResultMetadata::default());
+                self.result_metadata_updated = true;
+            }
+        }
+        self.truncated_call_index_by_id.clear();
+    }
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -130,11 +160,13 @@ impl ExecutedToolCallRecorderState {
         for cell in self.cells.values_mut() {
             if cell.originating_call_id.as_deref() == Some(origin) {
                 cell.completion = CellCompletion::Incomplete;
+                cell.truncated_metadata_binding_valid = false;
             }
         }
         for ((_, output_id), retained) in &mut self.retained_calls {
             if output_id == origin || retained.cell_id.as_deref() == Some(origin) {
                 retained.complete = false;
+                retained.clear_late_truncated_metadata();
             }
         }
     }
@@ -152,10 +184,12 @@ impl ExecutedToolCallRecorderState {
     fn invalidate_cell(&mut self, cell_id: &CellId) {
         if let Some(cell) = self.cells.get_mut(cell_id) {
             cell.completion = CellCompletion::Incomplete;
+            cell.truncated_metadata_binding_valid = false;
         }
         for retained in self.retained_calls.values_mut() {
             if retained.runtime_cell_id.as_ref() == Some(cell_id) {
                 retained.complete = false;
+                retained.clear_late_truncated_metadata();
             }
         }
     }
@@ -167,15 +201,20 @@ impl ExecutedToolCallRecorderState {
             self.output_cells
                 .retain(|_, cell_id| self.cells.contains_key(cell_id));
         }
-        while (self.cells.len() >= MAX_PENDING_EXECUTED_TOOL_CALLS
-            && !self.cells.contains_key(cell_id))
-            || self.pending_nested_calls >= MAX_PENDING_EXECUTED_TOOL_CALLS
-        {
+        loop {
+            let needs_cell_slot = self.cells.len() >= MAX_PENDING_EXECUTED_TOOL_CALLS
+                && !self.cells.contains_key(cell_id);
+            if !needs_cell_slot && self.pending_nested_calls < MAX_PENDING_EXECUTED_TOOL_CALLS {
+                break;
+            }
+
             let output_cells = self.output_cells.values().collect::<HashSet<_>>();
             let finished_cell = self.cells.iter().find_map(|(id, cell)| {
                 // Preserve late records until pressure, and never discard the cell
                 // whose output is about to make those records attachable again.
+                // Empty cells can free cell slots, but not pending-call slots.
                 (id != cell_id
+                    && (needs_cell_slot || !cell.pending_calls.is_empty())
                     && matches!(
                         cell.completion,
                         CellCompletion::Complete | CellCompletion::Incomplete
@@ -224,13 +263,95 @@ impl ExecutedToolCalls {
             }))),
             retained_direct_metadata_bytes: Arc::new(AtomicUsize::new(0)),
             pending_direct_calls: Arc::new(AtomicUsize::new(0)),
+            mcp_attribution: mcp_attribution::McpAttributionRecorder::new(history),
         }
+    }
+
+    pub(crate) fn record_mcp_source(&self, source: McpAttributionSource) {
+        self.mcp_attribution.record(source);
+    }
+
+    pub(crate) fn mcp_attribution_snapshot(&self) -> McpAttribution {
+        self.mcp_attribution.snapshot()
+    }
+
+    pub(crate) fn mcp_attribution_checkpoint(&self, force: bool) -> Option<(McpAttribution, u64)> {
+        self.mcp_attribution.checkpoint(force)
+    }
+
+    pub(crate) fn mark_mcp_attribution_persisted(&self, revision: u64) {
+        self.mcp_attribution.mark_persisted(revision);
+    }
+
+    /// Consult the inventory attached to this exact exec output during actor sampling.
+    /// Pending cells can still produce other outputs and have no per-output inventory yet.
+    pub(crate) fn exec_output_matches(
+        &self,
+        output: &ResponseItem,
+        nested_tool_names: &[String],
+    ) -> bool {
+        let ResponseItem::CustomToolCallOutput { call_id, .. } = output else {
+            return false;
+        };
+        let state = self.lock_state();
+        state
+            .as_ref()
+            .and_then(|state| {
+                state
+                    .retained_calls
+                    .get(&(std::mem::discriminant(output), call_id.clone()))
+            })
+            .is_some_and(|record| {
+                record.complete
+                    && record.cell_id.as_deref() == Some(call_id.as_str())
+                    && record.calls.iter().any(|call| {
+                        nested_tool_names.contains(&call.name)
+                            || nested_tool_names.contains(
+                                &codex_code_mode::normalize_code_mode_identifier(&call.name),
+                            )
+                    })
+            })
     }
 
     fn lock_state(&self) -> MutexGuard<'_, Option<ExecutedToolCallRecorderState>> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A later wait cannot claim a complete inventory if an earlier wire copy
+    /// lost recorded calls or tool names from the same Code Mode cell.
+    pub(crate) fn invalidate_wire_inventory_loss(
+        &self,
+        original: &[ResponseItem],
+        bounded: &[ResponseItem],
+    ) {
+        let mut state = self.lock_state();
+        let Some(state) = state.as_mut() else {
+            return;
+        };
+        // Request bounding clones the same items in the same order; it only edits metadata.
+        for (original, bounded) in original.iter().zip(bounded) {
+            let Some(metadata) = original.executed_tool_call_metadata() else {
+                continue;
+            };
+            let Some(origin) = metadata.cell_id.as_deref() else {
+                continue;
+            };
+            let Some(calls) = metadata
+                .executed_tool_calls
+                .as_deref()
+                .filter(|calls| !calls.is_empty())
+            else {
+                continue;
+            };
+            if bounded
+                .executed_tool_call_metadata()
+                .is_none_or(|bounded| !bounded.has_same_tool_call_inventory(calls))
+            {
+                state.invalidate_origin(origin);
+            }
+        }
     }
 
     /// Called under the session config lock; this never changes execution features.
@@ -270,17 +391,7 @@ impl ExecutedToolCalls {
             return None;
         }
         let permit = self.reserve_direct_call()?;
-        let (mut recorded, _) = recorded_call(call);
-        let argument_bytes = serialized_json_bytes(recorded.arguments()).unwrap_or(usize::MAX);
-        if matches!(recorded.arguments(), ExecutedToolCallArguments::Raw(_))
-            && argument_bytes > MAX_EXECUTED_TOOL_CALL_ARGUMENT_BYTES
-        {
-            recorded = ExecutedToolCall::truncated(
-                recorded.name,
-                argument_bytes,
-                MAX_EXECUTED_TOOL_CALL_ARGUMENT_BYTES,
-            );
-        }
+        let (recorded, _) = recorded_call(call);
         Some((recorded, permit))
     }
 
@@ -303,18 +414,23 @@ impl ExecutedToolCalls {
         &self,
         item: &mut ResponseItem,
         prepared: Option<(ExecutedToolCall, DirectCallPermit)>,
+        item_id_generator: &codex_protocol::ItemIdGenerator,
     ) {
         let Some((call, permit)) = prepared else {
             return;
         };
-        let state = self.lock_state();
-        let Some(state) = state.as_ref() else {
+        let mut state = self.lock_state();
+        let Some(state) = state.as_mut() else {
             return;
         };
         if !permit.recording.ptr_eq(&Arc::downgrade(&state.recording)) {
             return;
         }
-        let complete = matches!(call.arguments(), ExecutedToolCallArguments::Raw(_));
+        crate::session::assign_missing_item_id(item, item_id_generator);
+        if let Some(id) = item.id() {
+            state.direct_calls.insert(id.clone(), call.clone());
+        }
+        let complete = call.has_complete_inventory();
         item.append_executed_tool_calls(vec![call]);
         if complete {
             item.mark_tool_calls_complete();
@@ -322,17 +438,38 @@ impl ExecutedToolCalls {
         let retained = self.retained_direct_metadata_bytes.load(Ordering::Relaxed);
         let available = MAX_RETAINED_DIRECT_METADATA_BYTES.saturating_sub(retained);
         let mut bytes = executed_tool_call_metadata_bytes(item);
+        let original_bytes = bytes;
+        if bytes > available {
+            item.retain_tool_resource_access_or_omit_metadata(bytes - available);
+            bytes = executed_tool_call_metadata_bytes(item);
+        }
+        if bytes > available {
+            item.omit_tool_result_metadata(bytes - available);
+            bytes = executed_tool_call_metadata_bytes(item);
+        }
         if bytes > available {
             item.clear_tool_result_metadata();
             bytes = executed_tool_call_metadata_bytes(item);
         }
         if bytes > available {
             item.clear_executed_tool_calls();
+            metadata_metrics::record_shedding(
+                "direct_retained",
+                original_bytes,
+                executed_tool_call_metadata_bytes(item),
+                codex_otel::global().as_ref(),
+            );
             return;
         }
         // All Direct attachments share the recorder lock, including cloned handles.
         self.retained_direct_metadata_bytes
             .store(retained + bytes, Ordering::Relaxed);
+        metadata_metrics::record_shedding(
+            "direct_retained",
+            original_bytes,
+            bytes,
+            codex_otel::global().as_ref(),
+        );
     }
 
     /// Remember IDs from response items that bypass local tool dispatch.
@@ -409,7 +546,19 @@ impl ExecutedToolCalls {
         let Some(state) = state.as_mut() else {
             return;
         };
-        if !state.cells.contains_key(&cell_id) {
+        let unique_nested_id = state.seen_nested_ids.observe_call_id(&call_id);
+        if !unique_nested_id {
+            for retained in state.retained_calls.values_mut() {
+                if retained.truncated_call_index_by_id.contains_key(&call_id) {
+                    retained.clear_late_truncated_metadata();
+                }
+            }
+        }
+        if state
+            .cells
+            .get(&cell_id)
+            .is_none_or(|cell| cell.dispatch_closed)
+        {
             state.invalidate_cell(&cell_id);
         }
         if state.pending_nested_calls > MAX_PENDING_EXECUTED_TOOL_CALLS
@@ -424,21 +573,23 @@ impl ExecutedToolCalls {
         let at_pending_call_limit = state.pending_nested_calls == MAX_PENDING_EXECUTED_TOOL_CALLS;
         let cell = state.cells.entry(cell_id).or_default();
         let duplicate_call_id = cell.pending_calls.contains_key(&call_id);
-        let max_bytes = MAX_EXECUTED_TOOL_CALL_ARGUMENT_BYTES.min(
-            MAX_EXECUTED_TOOL_CALL_FULL_ARGUMENT_BYTES_PER_OUTPUT
-                .saturating_sub(cell.pending_full_argument_bytes),
-        );
+        if !unique_nested_id || duplicate_call_id {
+            cell.truncated_metadata_binding_valid = false;
+        }
         let call = if at_pending_call_limit {
             ExecutedToolCall::truncated(call.name, original_bytes, /*max_bytes*/ 0)
         } else {
             call
         };
+        let truncated = matches!(
+            call.arguments(),
+            ExecutedToolCallArguments::Truncated { .. }
+        );
+        cell.observed_truncated_call |= truncated;
         cell.completion = if cell.completion == CellCompletion::Recording
             && !duplicate_call_id
-            && !matches!(
-                call.arguments(),
-                ExecutedToolCallArguments::Truncated { .. }
-            ) {
+            && call.has_complete_inventory()
+        {
             CellCompletion::Recording
         } else {
             CellCompletion::Incomplete
@@ -458,7 +609,7 @@ impl ExecutedToolCalls {
         let ToolCallSource::CodeMode { cell_id, .. } = source else {
             return false;
         };
-        let metadata = codex_protocol::models::ToolResultMetadata::new(metadata);
+        let metadata = ToolResultMetadata::new(metadata);
         let has_metadata = metadata.is_some();
         let mut state = self.lock_state();
         let Some(state) = state.as_mut() else {
@@ -472,7 +623,7 @@ impl ExecutedToolCalls {
             call.set_tool_result_metadata(metadata);
             return has_metadata;
         }
-        let Some((retained, index)) = state.retained_calls.values_mut().find_map(|retained| {
+        let retained_call = state.retained_calls.values_mut().find_map(|retained| {
             if retained.runtime_cell_id.as_ref()?.as_str() != cell_id.as_str() {
                 return None;
             }
@@ -495,7 +646,10 @@ impl ExecutedToolCalls {
         let Some((retained, index)) = candidates.next() else {
             return false;
         };
-        // Older retry copies must not overwrite this output's accepted result metadata.
+        if candidates.next().is_some() {
+            return false;
+        }
+        retained.late_truncated_indices.insert(index);
         retained.result_metadata_updated = true;
         retained.calls[index].set_tool_result_metadata(metadata);
         has_metadata
@@ -521,11 +675,22 @@ impl ExecutedToolCalls {
         let unique_origin = state.observe_cell_origin(output_call_id);
         if !unique_cell {
             state.invalidate_cell(cell_id);
+            // A reused runtime ID cannot distinguish the old pending calls or
+            // output mappings from this new execution. Do not attach them to it.
+            if let Some(previous) = state.cells.remove(cell_id) {
+                state.pending_nested_calls = state
+                    .pending_nested_calls
+                    .saturating_sub(previous.pending_calls.len());
+            }
+            state.output_cells.retain(|_, mapped| mapped != cell_id);
         }
         let history_ids_indexed = state.seen_ids.history_ids_indexed();
         state.register_cell(cell_id, output_call_id);
         if let Some(cell) = state.cells.get_mut(cell_id) {
             // Failed indexing must not make a known historical ID look fresh.
+            cell.dispatch_closed = false;
+            cell.truncated_metadata_binding_valid =
+                unique_cell && unique_origin && history_ids_indexed;
             cell.completion = if unique_cell && unique_origin && history_ids_indexed {
                 CellCompletion::Recording
             } else {
@@ -539,7 +704,14 @@ impl ExecutedToolCalls {
         let Some(state) = state.as_mut() else {
             return;
         };
+        // A closed cell may still be referenced by the final wait output. Keep its
+        // original binding while late truncated results remain eligible for backfill.
+        let has_retained_truncated_calls = state.retained_calls.values().any(|retained| {
+            retained.runtime_cell_id.as_ref() == Some(cell_id)
+                && !retained.truncated_call_index_by_id.is_empty()
+        });
         if let Some(cell) = state.cells.get_mut(cell_id) {
+            cell.dispatch_closed = true;
             match cell.completion {
                 CellCompletion::Recording => {
                     // The closed dispatch gate makes this lossless inventory final, even if empty.
@@ -547,7 +719,7 @@ impl ExecutedToolCalls {
                 }
                 CellCompletion::Unobserved | CellCompletion::Incomplete => {
                     // Drop unverified cells only after emitting any partial records.
-                    if cell.pending_calls.is_empty() {
+                    if cell.pending_calls.is_empty() && !has_retained_truncated_calls {
                         state.cells.remove(cell_id);
                     }
                 }
@@ -582,20 +754,16 @@ fn recorded_call(call: &ToolCall) -> (ExecutedToolCall, usize) {
         }
     };
     let name = codex_tools::code_mode_name_for_tool_name(&call.tool_name);
-    let recorded_call = if original_bytes > MAX_EXECUTED_TOOL_CALL_ARGUMENT_BYTES {
-        ExecutedToolCall::truncated(name, original_bytes, MAX_EXECUTED_TOOL_CALL_ARGUMENT_BYTES)
-    } else {
-        let arguments = match &call.payload {
-            ToolPayload::Function { arguments } => serde_json::from_str(arguments)
-                .unwrap_or_else(|_| JsonValue::String(arguments.clone())),
-            ToolPayload::Custom { input } => JsonValue::String(input.clone()),
-            ToolPayload::ToolSearch { arguments } => {
-                serde_json::to_value(arguments).unwrap_or_default()
-            }
-        };
-        ExecutedToolCall::new(name, arguments)
+    let arguments = match &call.payload {
+        ToolPayload::Function { arguments } => {
+            serde_json::from_str(arguments).unwrap_or_else(|_| JsonValue::String(arguments.clone()))
+        }
+        ToolPayload::Custom { input } => JsonValue::String(input.clone()),
+        ToolPayload::ToolSearch { arguments } => {
+            serde_json::to_value(arguments).unwrap_or_default()
+        }
     };
-    (recorded_call, original_bytes)
+    (ExecutedToolCall::new(name, arguments), original_bytes)
 }
 
 fn input_call_id(item: &ResponseItem) -> Option<&str> {
