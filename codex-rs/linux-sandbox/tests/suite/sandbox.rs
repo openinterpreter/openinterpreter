@@ -27,6 +27,12 @@ use std::process::Output;
 use std::time::Duration;
 use tempfile::NamedTempFile;
 
+#[path = "denied_files_tests.rs"]
+mod denied_files_tests;
+#[path = "nested_metadata_tests.rs"]
+mod nested_metadata_tests;
+#[path = "root_metadata_tests.rs"]
+mod root_metadata_tests;
 #[path = "wslg_tests.rs"]
 mod wslg_tests;
 
