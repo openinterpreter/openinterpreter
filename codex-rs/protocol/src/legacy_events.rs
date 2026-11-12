@@ -65,6 +65,7 @@ use crate::protocol::ViewImageToolCallEvent;
 use crate::protocol::WebSearchBeginEvent;
 use crate::protocol::WebSearchEndEvent;
 use crate::user_input::UserInput;
+use codex_extension_items::image_generation::GeneratedImageRef;
 
 /// Converts canonical item lifecycle events back into the legacy raw event stream used by
 /// compatibility consumers that have not migrated to `TurnItem`.
