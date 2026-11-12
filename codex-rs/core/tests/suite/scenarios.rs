@@ -125,8 +125,17 @@ mod guardian_agent_messages;
 #[path = "scenarios_guardian_conversation_history_tests.rs"]
 mod guardian_conversation_history;
 
+#[path = "scenarios_guardian_direct_review.rs"]
+mod guardian_direct_review;
+
+#[path = "scenarios_guardian_direct_mcp.rs"]
+mod guardian_direct_mcp;
+
 #[path = "scenarios_guardian_extra_policy.rs"]
 mod guardian_extra_policy;
+
+#[path = "scenarios_guardian_handoff.rs"]
+mod guardian_handoff;
 
 #[path = "scenarios_guardian_orchestrator_connector.rs"]
 mod guardian_orchestrator_connector;
