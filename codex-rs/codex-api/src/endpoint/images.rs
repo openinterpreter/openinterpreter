@@ -312,6 +312,7 @@ mod tests {
         let (response, _) = client
             .generate(
                 &ImageGenerationRequest {
+                    output: None,
                     prompt: "test".to_string(),
                     background: None,
                     model: "gpt-image-2".to_string(),

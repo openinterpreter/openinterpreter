@@ -469,65 +469,8 @@ pub fn process_responses_event(
             }
         }
         "response.failed" => {
-            if let Some(resp_val) = event.response {
-                let mut response_error = ApiError::Stream("response.failed event received".into());
-                if let Some(error) = resp_val.get("error")
-                    && let Ok(error) = serde_json::from_value::<Error>(error.clone())
-                {
-                    if is_context_window_error(&error) {
-                        response_error = ApiError::ContextWindowExceeded;
-                    } else if is_quota_exceeded_error(&error) {
-                        response_error = ApiError::QuotaExceeded;
-                    } else if is_usage_not_included(&error) {
-                        response_error = ApiError::UsageNotIncluded;
-                    } else if is_cyber_policy_error(&error) {
-                        let message = cyber_policy_message(error.message);
-                        response_error = ApiError::CyberPolicy { message };
-                    } else if error.code.as_deref() == Some("bio_policy") {
-                        let message = error
-                            .message
-                            .filter(|message| !message.trim().is_empty())
-                            .unwrap_or_else(|| {
-                                "This content was flagged for possible biological risk.".to_string()
-                            });
-                        response_error = ApiError::BioPolicy { message };
-                    } else if error.code.as_deref() == Some("misalignment_policy_violation") {
-                        let message = error
-                            .message
-                            .filter(|message| !message.trim().is_empty())
-                            .unwrap_or_else(|| {
-                                "This request was blocked due to a misalignment policy violation."
-                                    .to_string()
-                            });
-                        response_error = ApiError::MisalignmentPolicyViolation {
-                            message,
-                            misalignment: error.misalignment.and_then(|details| {
-                                serde_json::from_value::<MisalignmentErrorDetails>(details).ok()
-                            }),
-                        };
-                    } else if error.code.as_deref() == Some("invalid_prompt") {
-                        let message = error
-                            .message
-                            .unwrap_or_else(|| "Invalid request.".to_string());
-                        response_error = ApiError::InvalidRequest { message };
-                    } else if is_server_overloaded_error(&error) {
-                        response_error = ApiError::ServerOverloaded;
-                    } else {
-                        let delay = try_parse_retry_after(&error);
-                        let message = error.message.unwrap_or_default();
-                        response_error = match error.code.as_deref() {
-                            Some("rate_limit_exceeded" | "slow_down") => {
-                                ApiError::RateLimitExceeded { message, delay }
-                            }
-                            _ => ApiError::Retryable { message, delay },
-                        };
-                    }
-                }
-                return Err(ResponsesEventError::Api(response_error));
-            }
-
-            return Err(ResponsesEventError::Api(ApiError::Stream(
-                "response.failed event received".into(),
+            return Err(ResponsesEventError::Api(parse_failed_response(
+                event.response,
             )));
         }
         "response.completed" | "response.incomplete" => {
@@ -781,80 +724,9 @@ async fn process_sse_with_treatment(
     }
 }
 
-fn try_parse_retry_after(err: &Error) -> Option<Duration> {
-    if !matches!(
-        err.code.as_deref(),
-        Some("rate_limit_exceeded" | "slow_down")
-    ) {
-        return None;
-    }
-
-    let re = rate_limit_regex();
-    if let Some(message) = &err.message
-        && let Some(captures) = re.captures(message)
-    {
-        let seconds = captures.get(1);
-        let unit = captures.get(2);
-
-        if let (Some(value), Some(unit)) = (seconds, unit) {
-            let value = value.as_str().parse::<f64>().ok()?;
-            let unit = unit.as_str().to_ascii_lowercase();
-
-            if unit == "s" || unit.starts_with("second") {
-                return Some(Duration::from_secs_f64(value));
-            } else if unit == "ms" {
-                return Some(Duration::from_millis(value as u64));
-            }
-        }
-    }
-    None
-}
-
-fn is_context_window_error(error: &Error) -> bool {
-    error.code.as_deref() == Some("context_length_exceeded")
-}
-
-fn is_quota_exceeded_error(error: &Error) -> bool {
-    matches!(
-        error.code.as_deref(),
-        Some(
-            "insufficient_quota"
-                | "credit_balance_exhausted"
-                | "organization_spend_limit_exceeded"
-                | "project_spend_limit_exceeded"
-        )
-    )
-}
-
-fn is_usage_not_included(error: &Error) -> bool {
-    error.code.as_deref() == Some("usage_not_included")
-}
-
-fn is_cyber_policy_error(error: &Error) -> bool {
-    error.code.as_deref() == Some("cyber_policy")
-}
-
-fn is_server_overloaded_error(error: &Error) -> bool {
-    error.code.as_deref() == Some("server_is_overloaded")
-}
-
-fn cyber_policy_fallback_message() -> String {
-    "This request has been flagged for possible cybersecurity risk.".to_string()
-}
-
-fn cyber_policy_message(message: Option<String>) -> String {
-    message
-        .filter(|message| !message.trim().is_empty())
-        .unwrap_or_else(cyber_policy_fallback_message)
-}
-
-fn rate_limit_regex() -> &'static regex_lite::Regex {
-    static RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
-    #[expect(clippy::unwrap_used)]
-    RE.get_or_init(|| {
-        regex_lite::Regex::new(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)").unwrap()
-    })
-}
+#[cfg(test)]
+#[path = "responses_error_tests.rs"]
+mod error_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1571,7 +1443,7 @@ mod tests {
 
             assert_eq!(events.len(), 1);
             match (code, &events[0]) {
-                ("invalid_prompt", Err(ApiError::InvalidRequest { message }))
+                ("invalid_prompt", Err(ApiError::InvalidPrompt { message }))
                 | ("bio_policy", Err(ApiError::BioPolicy { message })) => {
                     assert_eq!(message, expected_message);
                 }
@@ -1581,23 +1453,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bio_policy_error_uses_fallback_for_missing_or_blank_message() {
-        for message in [None, Some(""), Some("  ")] {
-            let mut event = json!({
-                "type": "response.failed",
-                "response": { "error": { "code": "bio_policy" } },
-            });
-            if let Some(message) = message {
-                event["response"]["error"]["message"] = json!(message);
+    async fn incomplete_response_retains_partial_output_on_the_error() {
+        let call = json!({
+            "type": "function_call", "status": "incomplete", "id": "fc_attempt",
+            "call_id": "attempt", "name": "unknown", "arguments": "{}",
+        });
+        let terminal = json!({
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_1", "incomplete_details": {"reason": "invalid_recipient"},
+                "output": [{"type": "message", "status": "completed"}, call],
             }
-            let sse = format!("event: response.failed\ndata: {event}\n\n");
-            let events = collect_events(&[sse.as_bytes()]).await;
-            match events.as_slice() {
-                [Err(ApiError::BioPolicy { message })] => assert_eq!(
-                    message,
-                    "This content was flagged for possible biological risk."
-                ),
-                other => panic!("unexpected events: {other:?}"),
+        });
+        let sse = format!("event: response.incomplete\ndata: {terminal}\n\n");
+        let events = collect_events(&[sse.as_bytes()]).await;
+        assert_matches!(events.as_slice(), [Err(ApiError::ResponseIncomplete(error))]
+            if error.reason == "invalid_recipient" && error.partial_output == [call]);
+    }
+
+    #[tokio::test]
+    async fn typed_errors_handle_missing_or_blank_message() {
+        for (code, fallback) in [
+            (
+                "bio_policy",
+                "This content was flagged for possible biological risk.",
+            ),
+            ("invalid_prompt", "Invalid request."),
+        ] {
+            for message in [None, Some(""), Some("  ")] {
+                let mut event = json!({
+                    "type": "response.failed",
+                    "response": { "error": { "code": code } },
+                });
+                if let Some(message) = message {
+                    event["response"]["error"]["message"] = json!(message);
+                }
+                let expected = match (code, message) {
+                    ("invalid_prompt", Some(message)) => message,
+                    _ => fallback,
+                };
+                let sse = format!("event: response.failed\ndata: {event}\n\n");
+                let events = collect_events(&[sse.as_bytes()]).await;
+                match (code, events.as_slice()) {
+                    ("bio_policy", [Err(ApiError::BioPolicy { message })])
+                    | ("invalid_prompt", [Err(ApiError::InvalidPrompt { message })]) => {
+                        assert_eq!(message, expected);
+                    }
+                    other => panic!("unexpected events: {other:?}"),
+                }
             }
         }
     }

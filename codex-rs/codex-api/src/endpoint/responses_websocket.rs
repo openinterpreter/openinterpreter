@@ -6,6 +6,10 @@ use crate::common::ResponseStream;
 use crate::common::ResponsesWsRequest;
 use crate::common::SafetyBufferingTreatment;
 use crate::common::WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY;
+use crate::endpoint::responses_websocket_probe::ResponsesWebsocketClose;
+use crate::endpoint::responses_websocket_probe::ResponsesWebsocketProbe;
+use crate::endpoint::responses_websocket_probe::ResponsesWebsocketProbeError;
+use crate::endpoint::responses_websocket_probe::ResponsesWebsocketProbeFailureStage;
 use crate::error::ApiError;
 use crate::provider::Provider;
 use crate::rate_limits::parse_rate_limit_event;
@@ -458,30 +462,6 @@ pub struct ResponsesWebsocketClient {
     auth: SharedAuthProvider,
 }
 
-/// Close frame information captured by a handshake probe.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResponsesWebsocketClose {
-    /// WebSocket close code returned by the server.
-    pub code: String,
-    /// Human-readable close reason returned by the server.
-    pub reason: String,
-}
-
-/// Result of a handshake-only Responses WebSocket probe.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResponsesWebsocketProbe {
-    /// Redacted by callers before displaying or serializing support reports.
-    pub url: String,
-    /// HTTP status returned by the successful WebSocket upgrade.
-    pub status: StatusCode,
-    /// Whether the server reported reasoning support in the upgrade response.
-    pub reasoning_included: bool,
-    /// Whether the server returned a server-selected model in the upgrade response.
-    pub server_model_present: bool,
-    /// Close frame received immediately after upgrade, when one arrives quickly.
-    pub immediate_close: Option<ResponsesWebsocketClose>,
-}
-
 impl ResponsesWebsocketClient {
     /// Creates a Responses WebSocket client for an already-resolved provider and auth source.
     pub fn new(provider: Provider, auth: SharedAuthProvider) -> Self {
@@ -502,24 +482,16 @@ impl ResponsesWebsocketClient {
         turn_state: Option<Arc<OnceLock<String>>>,
         telemetry: Option<Arc<dyn WebsocketTelemetry>>,
     ) -> Result<ResponsesWebsocketConnection, ApiError> {
-        let ws_url = self
-            .provider
-            .websocket_url_for_path("/responses")
-            .map_err(|err| ApiError::Stream(format!("failed to build websocket URL: {err}")))?;
-
-        let mut headers =
-            merge_request_headers(&self.provider.headers, extra_headers, default_headers);
-        self.auth.add_auth_headers(&mut headers);
-
-        let (stream, _status, server_reasoning_included, server_model) =
-            connect_websocket(ws_url, headers, http_client_factory, turn_state.clone()).await?;
-        Ok(ResponsesWebsocketConnection::new(
-            stream,
-            self.provider.stream_idle_timeout,
-            server_reasoning_included,
-            server_model,
+        let connector = WebSocketConnector::new(http_client_factory)
+            .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?;
+        self.connect_with_connector(
+            &connector,
+            extra_headers,
+            default_headers,
+            turn_state,
             telemetry,
-        ))
+        )
+        .await
     }
 
     /// Opens a WebSocket connection long enough to validate the upgrade response.
@@ -538,8 +510,13 @@ impl ResponsesWebsocketClient {
     ) -> Result<ResponsesWebsocketProbe, ResponsesWebsocketProbeError> {
         let ws_url = self
             .provider
-            .websocket_url_for_path("/responses")
-            .map_err(|err| ApiError::Stream(format!("failed to build websocket URL: {err}")))?;
+            .websocket_url_for_path(RESPONSES_PATH)
+            .map_err(|err| {
+                ResponsesWebsocketProbeError::before_upgrade(
+                    ApiError::Stream(format!("failed to build websocket URL: {err}")),
+                    ResponsesWebsocketProbeFailureStage::Unknown,
+                )
+            })?;
 
         let headers = merge_request_headers(&self.provider.headers, extra_headers, default_headers);
         let headers = self.auth.apply_auth_headers(headers).await.map_err(|err| {
