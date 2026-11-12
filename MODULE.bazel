@@ -539,7 +539,7 @@ crate.annotation(
 # MXC's resource compiler lookup needs an explicit path for Windows GNU targets.
 crate.annotation(
     build_script_deps = [
-        "@crates//:cc-1.2.55",
+        "@crates//:cc-1.4.5",
         "@crates//:winresource-0.1.34",
     ],
     build_script_env = {
