@@ -10,6 +10,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::CodeModeNestedToolCall;
+use crate::CodeModeProcessMetricsSample;
 use crate::ExecuteRequest;
 use crate::RuntimeResponse;
 use crate::TerminateRequest;
@@ -221,6 +222,14 @@ pub trait CodeModeSessionProvider: Send + Sync {
     /// Reports whether this provider can execute code without starting its host.
     fn availability(&self) -> Result<(), String> {
         Ok(())
+    }
+
+    /// Samples an existing host without starting a session. Providers without
+    /// process-metrics support report that explicitly rather than opening one.
+    fn sample_process_metrics(
+        &self,
+    ) -> CodeModeSessionResultFuture<'_, CodeModeProcessMetricsSample> {
+        Box::pin(async { Ok(CodeModeProcessMetricsSample::Unsupported) })
     }
 
     fn create_session(&self) -> CodeModeSessionProviderFuture<'_>;
