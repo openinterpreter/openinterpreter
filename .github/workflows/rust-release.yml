@@ -294,7 +294,6 @@ jobs:
           echo "${target_no_jitter}=1" >> "$GITHUB_ENV"
 
       - name: Configure rusty_v8 artifact overrides and verify checksums
-        if: ${{ matrix.build-system == 'cargo' }}
         uses: ./.github/actions/setup-rusty-v8
         with:
           target: ${{ matrix.target }}
