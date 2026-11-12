@@ -12,6 +12,7 @@ use crate::NetworkProxyAuditMetadata;
 use crate::NetworkProxyConfig;
 use crate::NetworkProxyState;
 use crate::Platform;
+use crate::RemoteCredentialMasking;
 use std::sync::Arc;
 
 #[test]
@@ -96,7 +97,7 @@ async fn round_trip_preserves_supported_effective_settings() {
         );
         assert_eq!(
             proxy
-                .remote_launch_config(DefaultFalse)
+                .remote_launch_config(DefaultFalse, RemoteCredentialMasking::Disabled)
                 .await
                 .unwrap()
                 .proxy
@@ -363,7 +364,7 @@ async fn local_binding_is_resolved_for_each_executor() -> anyhow::Result<()> {
             .await?;
         assert_eq!(
             proxy
-                .remote_launch_config(policy)
+                .remote_launch_config(policy, RemoteCredentialMasking::Disabled)
                 .await
                 .ok()
                 .map(|launch| launch.proxy.allow_local_binding),
