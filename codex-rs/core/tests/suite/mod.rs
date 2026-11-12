@@ -97,6 +97,7 @@ mod fork_thread;
 mod gcp;
 mod git_enrichment;
 mod guardian_authorization;
+mod guardian_authorization_refresh;
 #[path = "guardian_cached_score_tests.rs"]
 mod guardian_cached_score;
 #[path = "guardian_checkpoint_migration_tests.rs"]
