@@ -1,5 +1,5 @@
-//! Captures recorded, uncanceled regular turns using one thread-configured local executor.
-//! Callers must flush the rollout after capture before persisting the snapshot.
+//! Captures interrupted turns for daemon recovery and restores persisted turn attribution.
+//! Callers must flush the rollout after capturing a live turn before persisting its snapshot.
 
 use super::Session;
 use codex_protocol::protocol::EnvironmentConfigState;
@@ -9,6 +9,16 @@ use codex_protocol::protocol::TurnEnvironmentSelection;
 pub(super) struct RecordedTurnInput;
 
 impl Session {
+    pub(crate) async fn recovered_turn_start_options(
+        &self,
+        turn_id: &str,
+    ) -> crate::TurnStartOptions {
+        self.state
+            .lock()
+            .await
+            .recovered_turn_start_options(turn_id)
+    }
+
     /// Captures a regular turn only after its input is recorded. The caller must flush the rollout.
     pub(crate) async fn interrupted_turn(
         &self,
@@ -20,12 +30,12 @@ impl Session {
         }
         let context = &task.turn_context;
         context.extension_data.get::<RecordedTurnInput>()?;
-        let inputs = context.next_step_input.load();
+        let settings = context.next_step_settings.load();
+        let environments = self.services.turn_environments.snapshot_now();
         // Remote identities/configuration are not persisted across daemon restarts.
-        if inputs.environments.environments.len() != 1 {
+        if environments.environments.len() != 1 {
             return None;
         }
-        let environments = inputs.environments.refresh_readiness();
         let environment = environments.single_local_environment()?.selection();
         if environment.config != EnvironmentConfigState::FromThread {
             return None;
@@ -34,9 +44,10 @@ impl Session {
             context.sub_id.clone(),
             crate::TurnStartOptions {
                 final_output_json_schema: context.final_output_json_schema.clone(),
-                service_tier: Some(inputs.settings.service_tier.clone().unwrap_or_else(|| {
+                service_tier: Some(settings.service_tier.clone().unwrap_or_else(|| {
                     codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string()
                 })),
+                prompt_cache_ttl: context.prompt_cache_ttl,
                 cyber_access_program: context.cyber_access_program,
                 ..Default::default()
             },

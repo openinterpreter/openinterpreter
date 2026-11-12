@@ -46,6 +46,7 @@ use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::NetworkPermissions;
 use codex_protocol::models::ResponseInputItem;
+use codex_protocol::network_policy::NetworkPolicyDecisionPayload;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
@@ -804,8 +805,7 @@ async fn network_approval_uses_published_task_authority_within_same_turn(
             .task
             .as_ref()
             .expect("active task");
-        let current = task.turn_context.next_step_input.load_full();
-        let mut settings = Arc::clone(&current.settings);
+        let mut settings = task.turn_context.next_step_settings.load_full();
         update_selected_settings_for_test(Arc::make_mut(&mut settings), |selected| {
             selected
                 .approval_policy
@@ -813,12 +813,7 @@ async fn network_approval_uses_published_task_authority_within_same_turn(
                 .expect("update policy");
             selected.approvals_reviewer = ApprovalsReviewer::User;
         });
-        task.turn_context
-            .next_step_input
-            .store(Arc::new(StepInputs {
-                settings,
-                environments: current.environments.clone(),
-            }));
+        task.turn_context.next_step_settings.store(settings);
     }
     let decision = session
         .services
@@ -1162,25 +1157,23 @@ async fn compaction_initial_context_preserves_separate_guardian_developer_messag
             .await
             .expect("world state should build"),
     );
-    let initial_context_injection = InitialContextInjection::BeforeLastUserMessage {
-        world_state,
-        step_context,
-    };
-
-    let (refreshed, _) =
-        crate::compact::build_compaction_initial_context(&session, &initial_context_injection)
-            .await;
+    let (refreshed, _) = crate::compact::build_compaction_replacement_history(
+        &session,
+        &step_context,
+        &world_state,
+        Vec::new(),
+    )
+    .await;
 
     let developer_messages = refreshed
         .iter()
-        .filter_map(|envelope| match &envelope.item {
+        .map(|item| &item.item)
+        .filter_map(|item| match item {
             ResponseItem::Message { role, content, .. } if role == "developer" => {
                 crate::content_items_to_text(content).map(|text| {
                     (
                         text,
-                        envelope
-                            .item
-                            .executed_tool_call_metadata()
+                        item.executed_tool_call_metadata()
                             .and_then(|metadata| metadata.content_item_kinds.clone()),
                     )
                 })
@@ -1337,6 +1330,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
     let mut thread_extension_init = codex_extension_api::ExtensionDataInit::default();
     thread_extension_init.insert(codex_extension_api::SessionIsolation::Isolated);
     let (session, io) = Session::spawn(SessionSpawnArgs {
+        attached_thread: false,
         startup: None,
         config,
         prompt_cache_key: PromptCacheKey::default(),
@@ -1354,6 +1348,8 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         code_mode_session_provider: Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
         extensions: codex_extension_api::empty_extension_registry(),
         conversation_history: InitialHistory::New,
+        resume_preparation: None,
+        history_initialization: HistoryInitialization::New,
         disabled_plugin_ids: None,
         requested_history_mode: None,
         fork_persistence: ForkPersistence::Copied,
@@ -1364,7 +1360,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         parent_thread_id: None,
         thread_source: None,
         originator: "test_originator".to_string(),
-        agent_control: LocalAgentControl::default(),
+        agent_control: LocalAgentControl::default().into(),
         dynamic_tools: Vec::new(),
         metrics_service_name: None,
         inherited_environments: None,
@@ -1372,8 +1368,9 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         parent_rollout_thread_trace: codex_rollout_trace::ThreadTraceContext::disabled(),
         user_shell_override: None,
         parent_trace: None,
-        environment_selections: Vec::new(),
+        environment_requests: Vec::new(),
         thread_extension_init,
+        turn_extension_init: Default::default(),
         client_mcp_extensions: ClientMcpExtensions::default(),
         reserved_thread_id: None,
         analytics_events_client: None,

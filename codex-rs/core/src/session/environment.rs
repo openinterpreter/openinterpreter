@@ -179,21 +179,8 @@ impl Session {
         updates: &SessionSettingsUpdate,
     ) -> ConstraintResult<SessionConfiguration> {
         let current_environments = &current.environments;
-        if let Some(environments) = &updates.environments
-            && let Some(environment) = environments.environments.iter().find(|environment| {
-                environment.config == EnvironmentConfigState::FromThread
-                    && current_environments.iter().any(|current| {
-                        current.environment_id == environment.environment_id
-                            && current.config != EnvironmentConfigState::FromThread
-                    })
-            })
-        {
-            return Err(ConstraintError::InvalidValue {
-                field_name: "environments",
-                candidate: environment.environment_id.clone(),
-                allowed: "owner-provided environment configuration".to_string(),
-                requirement_source: codex_config::RequirementSource::Unknown,
-            });
+        if let Some(environments) = &updates.environments {
+            ensure_configs_stay_owner_provided(current_environments, &environments.environments)?;
         }
 
         current.apply(updates, current_environments)
@@ -217,20 +204,20 @@ impl Session {
                 let mut environments = configuration.environments.clone();
                 let latest_environments = &state.session_configuration.environments;
                 for environment in &mut environments {
-                    if let Some(latest) = latest_environments.iter().find(|latest| {
-                        latest.environment_id == environment.environment_id
-                            && latest.cwd == environment.cwd
-                            && latest.workspace_roots == environment.workspace_roots
-                    }) {
+                    if let Some(latest) = latest_environments
+                        .iter()
+                        .find(|latest| latest.has_same_workspace(environment))
+                    {
                         environment.config = latest.config.clone();
                     }
                 }
-                if environments != self.services.turn_environments.selections() {
-                    self.services.turn_environments.update_selections(
-                        &environments,
-                        &configuration.inferred_environment_config(),
-                    );
-                }
+                // Apply the saved defaults even if this turn selects the same environments.
+                self.services
+                    .turn_environments
+                    .set_active_thread_defaults(configuration.inferred_environment_config());
+                self.services
+                    .turn_environments
+                    .activate_selections(&environments);
             }
             self.services.turn_environments.snapshot()
         };
@@ -255,6 +242,47 @@ impl Session {
             .await
     }
 
+    /// Installs the original owner's first result through this session's usual configuration checks.
+    pub(super) fn follow_inherited_environment_configurations(
+        self: &Arc<Self>,
+        inherited: &TurnEnvironmentSnapshot,
+        selected: &[TurnEnvironmentSelection],
+    ) {
+        for starting in inherited.starting().filter(|starting| {
+            selected.iter().any(|selection| {
+                selection.has_same_workspace(&starting.selection)
+                    && matches!(selection.config, EnvironmentConfigState::Pending)
+            })
+        }) {
+            let Some(configuration) = starting.owner_configuration() else {
+                continue;
+            };
+            let selection = starting.selection.clone();
+            let session = Arc::downgrade(self);
+            let mut status = self.agent_status.subscribe();
+            drop(tokio::spawn(async move {
+                let result = tokio::select! {
+                    result = configuration => result,
+                    _ = status.wait_for(|status| matches!(status, AgentStatus::Shutdown)) => return,
+                };
+                let Some(session) = session.upgrade() else {
+                    return;
+                };
+                let apply = |result| {
+                    session.update_environment_configuration(
+                        &selection,
+                        result,
+                        ConfigUpdateSource::Inherited,
+                    )
+                };
+                if let Err(error) = apply(result).await {
+                    // Unlike the external owner, no one will retry this child's one-time update.
+                    let _ = apply(Err(error.to_string())).await;
+                }
+            }));
+        }
+    }
+
     /// Records configuration, or a failure to obtain it, for this environment and workspace.
     /// The running turn and future turns may use different environments. Update the matching
     /// selection or selections so work already waiting can still finish, and check successful
@@ -265,19 +293,28 @@ impl Session {
         result: Result<EnvironmentConfig, String>,
         source: ConfigUpdateSource,
     ) -> CodexResult<()> {
-        // Serialize owner callbacks with ordinary thread settings updates.
         let mut state = self.state.lock().await;
         let mut current = self.services.turn_environments.selections();
         let mut future = state.session_configuration.environments.clone();
+        let inherited = matches!(source, ConfigUpdateSource::Inherited);
         let matches = |environment: &TurnEnvironmentSelection| {
-            environment.environment_id == selection.environment_id
-                && environment.cwd == selection.cwd
-                && environment.workspace_roots == selection.workspace_roots
+            environment.has_same_workspace(selection)
+                && (!inherited || matches!(environment.config, EnvironmentConfigState::Pending))
         };
-        let (current_environment, future_environment) = match (
+        let environments = (
             current.iter_mut().find(|environment| matches(environment)),
             future.iter_mut().find(|environment| matches(environment)),
-        ) {
+        );
+        // Ignore the parent's result if neither the running turn nor future turns are still
+        // waiting for this environment's configuration.
+        if inherited && matches!(environments, (None, None)) {
+            return Ok(());
+        }
+        if let Ok(config) = &result {
+            // Return the specific readiness error before applying session-level constraints.
+            validate_environment_config(selection, config, &self.features)?;
+        }
+        let (current_environment, future_environment) = match environments {
             (None, None) => {
                 return Err(CodexErr::InvalidRequest(format!(
                     "environment `{}` is not selected on this thread with the requested workspace",
@@ -296,6 +333,11 @@ impl Session {
             (Some(current), future) => (Some(current), future),
             (None, Some(future)) => (None, Some(future)),
         };
+        let successful = result.is_ok();
+        let config = match result {
+            Ok(config) => EnvironmentConfigState::Ready(config),
+            Err(error) => EnvironmentConfigState::Failed(error),
+        };
         let update_current = current_environment.is_some();
         let update_future = future_environment.is_some();
 
@@ -303,9 +345,9 @@ impl Session {
             environment.config = config.clone();
         }
         if let Some(environment) = future_environment {
-            environment.config = config.clone();
+            environment.config = config;
         }
-        if matches!(config, EnvironmentConfigState::Ready(_)) {
+        if successful {
             let validate = |environments: &[TurnEnvironmentSelection]| {
                 state
                     .session_configuration
@@ -320,14 +362,16 @@ impl Session {
             }
         }
 
+        if update_future {
+            self.services
+                .turn_environments
+                .update_configured_selections(&future);
+        }
         state.session_configuration.environments = future;
         if update_current {
             // Invalidate MCP before installed configuration can wake a waiting turn.
-            self.mark_mcp_runtime_dirty();
-            self.services.turn_environments.update_selections(
-                &current,
-                &state.session_configuration.inferred_environment_config(),
-            );
+            self.mark_mcp_runtime_dirty(McpRefreshReason::CurrentEnvironmentsChanged);
+            self.services.turn_environments.update_selections(&current);
         }
         Ok(())
     }

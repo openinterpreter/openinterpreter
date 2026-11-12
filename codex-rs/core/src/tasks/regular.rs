@@ -4,6 +4,10 @@ use std::sync::Arc;
 
 use codex_async_utils::OrCancelExt;
 use codex_extension_api::TurnStartPhase;
+use codex_protocol::protocol::InternalSessionSource;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
+use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
 
 use crate::client::ModelClientSession;
@@ -53,46 +57,51 @@ impl SessionTask for RegularTask {
         input: Vec<TurnInput>,
         cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
-        let run_turn_span = trace_span!("run_turn");
-        // Extension-owned invariants that protect the mission must be checked
-        // after the task is admitted but before TurnStarted/model execution.
-        // A failed gate records the input for recovery and never hands it to
-        // the model with a narrowed or unverifiable scope.
+        if ctx
+            .config
+            .features
+            .enabled(codex_features::Feature::CriticalPathTiming)
+            && !matches!(
+                ctx.session_source,
+                SessionSource::Internal(InternalSessionSource::MemoryConsolidation)
+                    | SessionSource::SubAgent(SubAgentSource::MemoryConsolidation)
+            )
+        {
+            ctx.turn_timing_state.enable_critical_path();
+        }
+        // Retained owner/Goal invariants are checked after task admission but
+        // before TurnStarted or model execution. A rejected turn records its
+        // input for recovery rather than executing with narrower authority.
         let admission = sess
             .emit_turn_start_gate(&ctx)
             .or_cancel(&cancellation_token)
             .await;
-        match admission {
-            Ok(Ok(())) => {}
+        let admitted = match admission {
+            Ok(Ok(())) => true,
             Ok(Err(error)) => {
                 tracing::warn!(turn_id = %ctx.sub_id, %error, "turn admission gate rejected execution");
-                run_hooks_and_record_inputs(
-                    &sess,
-                    &ctx,
-                    &ctx.capture_current_model_info(),
-                    &input,
-                    PersistContext::Standard,
-                )
-                .await;
-                return Ok(None);
+                false
             }
             Err(_) => {
                 tracing::debug!(turn_id = %ctx.sub_id, "turn admission gate cancelled");
-                run_hooks_and_record_inputs(
-                    &sess,
-                    &ctx,
-                    &ctx.capture_current_model_info(),
-                    &input,
-                    PersistContext::Standard,
-                )
-                .await;
-                return Ok(None);
+                false
             }
+        };
+        if !admitted {
+            let _ = run_hooks_and_record_inputs(
+                &sess,
+                &ctx,
+                &ctx.capture_current_model_info(),
+                &input,
+                PersistContext::Standard,
+            )
+            .await;
+            return Ok(None);
         }
         // Regular turns emit `TurnStarted` inline so first-turn lifecycle does
         // not wait on startup prewarm resolution.
         let prewarmed_client_session = async {
-            sess.emit_turn_started(&ctx).await;
+            sess.emit_turn_started(&ctx, TaskKind::Regular).await;
             // Regular-start contributors run once, after the task is visible and interruptible.
             let prepares_mcp = sess
                 .services
@@ -104,22 +113,29 @@ impl SessionTask for RegularTask {
                         == TurnStartPhase::RegularTaskStart
                         && contributor.requires_mcp_runtime(&sess.services.thread_extension_data)
                 });
-            let preparation = sess
-                .emit_turn_start_lifecycle(
+            let preparation = async {
+                sess.emit_turn_start_lifecycle(
                     &ctx,
                     /*token_usage_at_turn_start*/ None,
                     TurnStartPhase::RegularTaskStart,
                 )
-                .or_cancel(&cancellation_token)
                 .await;
+                if prepares_mcp {
+                    // Resource discovery can overlap the fetch. Wait before reprojection.
+                    sess.wait_for_apps_tool_refresh().await;
+                }
+            }
+            .or_cancel(&cancellation_token)
+            .await;
             // Even cancelled discovery may have cleared the previous account's catalog.
             if prepares_mcp {
-                sess.request_mcp_runtime_reprojection();
+                sess.request_mcp_runtime_reprojection(
+                    McpRefreshReason::TurnStartContributorPreparedMcp,
+                );
             }
             if preparation.is_err() {
                 return SessionStartupPrewarmResolution::Cancelled;
             }
-            sess.set_server_reasoning_included(/*included*/ false).await;
             sess.consume_startup_prewarm_for_regular_turn(&cancellation_token)
                 .await
         }
@@ -127,7 +143,7 @@ impl SessionTask for RegularTask {
         .await;
         let prewarmed_client_session = match prewarmed_client_session {
             SessionStartupPrewarmResolution::Cancelled => {
-                run_hooks_and_record_inputs(
+                let _ = run_hooks_and_record_inputs(
                     &sess,
                     &ctx,
                     &ctx.capture_current_model_info(),

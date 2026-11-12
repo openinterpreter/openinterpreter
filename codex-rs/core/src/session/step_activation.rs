@@ -4,16 +4,17 @@ use super::environment::ensure_configs_stay_owner_provided;
 use super::environment::validate_environment_configs;
 use super::session::Session;
 use super::session::SessionConfiguration;
-use super::step_context::StepInputs;
 use super::step_settings::ResolvedStepSettings;
 use super::step_settings::StepSettingsConstraints;
 use super::step_settings::StepSettingsUpdate;
 use super::turn_context::TurnContext;
 use crate::config::Config;
 use crate::config::ConstraintResult;
+use crate::environment_selection::validate_environment_ids_and_cwds;
 use crate::exec_policy::AllowPrefixRules;
 use codex_features::Feature;
 use codex_prompts::ResolvedModelMessages;
+use codex_protocol::openai_models::CatalogModel;
 use codex_protocol::openai_models::GuardianV2ModelConfig;
 use codex_protocol::openai_models::GuardianV2TranscriptModelConfig;
 use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
@@ -184,7 +185,8 @@ fn check_legacy_model_safety(
     if destination.auto_review_model_override.is_none() {
         let destination_model_messages = ResolvedModelMessages::from_model(destination);
         let destination_auto_review = destination_model_messages.auto_review();
-        let retained_model_messages = retained_models.map(ResolvedModelMessages::from_model);
+        let retained_model_messages =
+            retained_models.map(|model| ResolvedModelMessages::from_model(model));
         let retained_auto_review = retained_model_messages
             .each_ref()
             .map(ResolvedModelMessages::auto_review);
@@ -258,7 +260,7 @@ impl Session {
                             (
                                 Arc::clone(&task.turn_context),
                                 Arc::clone(&task.done),
-                                task.turn_context.next_step_input.load_full(),
+                                task.turn_context.next_step_settings.load_full(),
                             )
                         })
                 })
@@ -306,12 +308,25 @@ impl Session {
             service_tier,
             ..Default::default()
         };
-        // Apply the sparse patch to the captured active base using the shared
-        // settings rules. The task can progress, finish, or be cancelled while
-        // preparation awaits; no publication locks are held here.
-        let prepared = self
-            .prepare_step_settings_activation(&turn_context, &current.settings, &update)
-            .await;
+        // Build the proposed model and reviewer settings.
+        // Apply only the fields the caller supplied to the settings captured above. The task can
+        // progress, finish, or be cancelled while this awaits; we don't hold the update locks here.
+        let prepared = if updates_step_settings {
+            let current_environments = self.services.turn_environments.selections();
+            let proposed = environments.as_deref().unwrap_or(&current_environments);
+            self.prepare_step_settings_activation(&turn_context, &current, &update, proposed)
+                .await
+                .map(Some)
+        } else {
+            Ok(None)
+        };
+
+        // Validate the environment configuration supplied in the update.
+        let environment_config_validation = environments
+            .as_deref()
+            .map(|environments| validate_environment_configs(environments, &self.features));
+
+        // Confirm the task we originally targeted is still running.
         let active = self.active_turn.lock().await;
         let Some(task) = active.as_ref().and_then(|active| active.task.as_ref()) else {
             return TurnSettingsUpdateOutcome::TargetUnavailable;
@@ -321,7 +336,7 @@ impl Session {
         // abandons the update without retrying or applying it to the replacement.
         if !Arc::ptr_eq(&task.done, &task_done)
             || !Arc::ptr_eq(&task.turn_context, &turn_context)
-            || !Arc::ptr_eq(&task.turn_context.next_step_input.load_full(), &current)
+            || !Arc::ptr_eq(&task.turn_context.next_step_settings.load_full(), &current)
             || task.cancellation_token.is_cancelled()
         {
             return TurnSettingsUpdateOutcome::TargetUnavailable;
@@ -365,8 +380,8 @@ impl Session {
             if requires_model_switching {
                 check_legacy_turn_safety(
                     &turn_context,
-                    &current.settings,
-                    &destination,
+                    &current,
+                    candidate_settings,
                     &state.session_configuration.original_config_do_not_use,
                 )?;
             }
@@ -375,14 +390,17 @@ impl Session {
         if let Err(reason) = validation {
             return TurnSettingsUpdateOutcome::Rejected { reason };
         }
-        // Publish the immutable snapshot. Frozen initial settings, existing step
-        // captures, and future thread settings are not changed.
-        task.turn_context
-            .next_step_input
-            .store(Arc::new(StepInputs {
-                settings: Arc::new(destination),
-                environments: current.environments.clone(),
-            }));
+
+        // Save changed settings first. The manager then installs any new environment list before
+        // waking waiting work. The next step cannot read either until we release this lock.
+        if let Some(settings) = updated_settings {
+            task.turn_context
+                .next_step_settings
+                .store(Arc::new(settings));
+        }
+        if environments.is_some() {
+            self.services.turn_environments.update_selections(proposed);
+        }
         TurnSettingsUpdateOutcome::Applied
     }
 
@@ -418,7 +436,7 @@ impl Session {
                 &constraints,
                 self.services.models_manager.as_ref(),
                 &overrides,
-                self.features.enabled(Feature::FastMode),
+                &self.features,
             )
             .await
             .map_err(|error| error.to_string())
