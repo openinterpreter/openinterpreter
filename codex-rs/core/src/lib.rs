@@ -227,6 +227,8 @@ pub use agents_md::LOCAL_AGENTS_MD_FILENAME;
 pub use agents_md::LoadedAgentsMd;
 mod rollout;
 mod rollout_budget;
+mod runtime_auth;
+pub use runtime_auth::build_runtime_auth_manager;
 pub(crate) mod safety;
 mod session_rollout_init_error;
 pub mod shell;
