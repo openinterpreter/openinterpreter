@@ -2,6 +2,8 @@ use super::*;
 use crate::agents_md_manager::AgentsMdManager;
 use crate::context::ContextualUserFragment;
 use crate::context_manager::ContextManager;
+use crate::session::Submission;
+use codex_guardian_reviewer::GuardianReviewResponse;
 use codex_guardian_reviewer::ReviewerRequest;
 use codex_guardian_reviewer::guardian_output_contract_prompt;
 use codex_history::CodexHarnessMetadata;
@@ -9,6 +11,7 @@ use codex_history::ResponseItemEnvelope;
 use codex_models_manager::model_info::model_info_from_slug;
 use codex_prompts::GuardianPolicyInstructions;
 use codex_prompts::ResolvedModelMessages;
+use codex_protocol::TranscriptFormat;
 use codex_protocol::openai_models::AutoReviewMessages;
 use codex_protocol::openai_models::ModelMessages;
 use codex_protocol::protocol::AgentStatus;
@@ -16,6 +19,7 @@ use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol_test_support::ContentItemTestExt;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -85,9 +89,14 @@ async fn run_review_preserves_evidence_during_parent_compaction() {
             .node_repl_auto_review_required,
     )
     .with_node_repl_policy(&params.node_repl_policy);
+    let reviewer_session = Arc::clone(&reviewer.session);
     let manager = prewarm_test_session(&params, reviewer).await;
     // Capture the review context, then compact the parent before the reviewer builds its prompt.
     let prepared = setup::prepare_review(params).await.unwrap();
+    turn.extension_data.insert(super::super::ParentResponse {
+        id: "later-response".to_owned(),
+        routing_affinity: None,
+    });
     let checkpoint: ResponseItem = serde_json::from_value(serde_json::json!({
         "type": "compaction", "id": "cmp_new", "encrypted_content": "new-checkpoint"
     }))
@@ -198,6 +207,9 @@ async fn test_review_session() -> (
             reuse_key,
             state: Mutex::new(GuardianReviewState {
                 conversation: ConversationState::default(),
+                fresh_parent_checkpoint: false,
+                transcript_history_version: 0,
+                transcript_source: None,
                 last_admitted_node_repl_response_sequence: 0,
                 pending_node_repl_evidence_admission: None,
             }),
@@ -269,6 +281,7 @@ async fn test_review_params() -> GuardianReviewSessionParams {
         parent_context: GuardianReviewContext::from(Arc::new(turn)),
         spawn_config,
         node_repl_policy: GuardianNodeReplPolicy::from_messages(ResolvedModelMessages::bundled()),
+        category: GuardianScope::Shell,
         request: GuardianApprovalRequest::ExecCommand {
             id: "shell-1".to_string(),
             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
@@ -290,7 +303,6 @@ async fn test_review_params() -> GuardianReviewSessionParams {
             model_overridden: false,
             model_override: None,
         },
-        compaction_model_hash: None,
         reasoning_summary,
         personality,
         external_cancel: None,
@@ -340,7 +352,7 @@ async fn spawned_guardian_reuse_key_matches_inherited_instructions() {
             ..Default::default()
         },
         /*parent_history_version*/ 0,
-        parent.guardian_context_mode,
+        GuardianContextMode::ThreadOwned,
     );
     let expected_key = GuardianReviewSessionReuseKey {
         user_instructions: latest_global,
@@ -495,12 +507,9 @@ async fn guardian_review_session_config_change_invalidates_cached_session() {
 #[tokio::test]
 async fn encrypted_parent_compaction_requires_original_item_id(mode: GuardianContextMode) {
     let (session, _) = crate::session::tests::make_session_and_context().await;
-    let mut features = session.get_config().await.features.clone();
-    features
-        .set_enabled(Feature::GuardianThreadContext, thread_context_enabled)
-        .expect("context mode");
-    let policy =
-        ReviewContextPolicy::for_context(GuardianContextMode::from_features(&features), &features);
+    let features = session.get_config().await.features.clone();
+
+    let policy = ReviewContextPolicy::for_context(mode, &features);
     let item = ResponseItem::Compaction {
         id: Some(codex_protocol::ResponseItemId::from_server(
             "cmp_guardian_parent_summary".to_string(),
@@ -661,47 +670,15 @@ async fn guardian_review_session_config_resolves_policy_and_template(
         guardian_config.base_instructions,
         Some(
             GuardianPolicyInstructions::new(
+                TranscriptFormat::Line,
                 expected_policy,
+                "",
                 expected_template,
                 guardian_output_contract_prompt(),
             )
             .render()
+            .expect_text()
         )
-    );
-}
-
-#[test]
-fn token_usage_delta_never_reports_negative_usage() {
-    let start = TokenUsage {
-        input_tokens: 10,
-        cached_input_tokens: 8,
-        cache_write_input_tokens: 8,
-        output_tokens: 6,
-        reasoning_output_tokens: 4,
-        total_tokens: 28,
-        codex_rollout_budget_units: None,
-    };
-    let end = TokenUsage {
-        input_tokens: 15,
-        cached_input_tokens: 7,
-        cache_write_input_tokens: 7,
-        output_tokens: 10,
-        reasoning_output_tokens: 2,
-        total_tokens: 34,
-        codex_rollout_budget_units: None,
-    };
-
-    assert_eq!(
-        token_usage_delta(&start, &end),
-        TokenUsage {
-            input_tokens: 5,
-            cached_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 4,
-            reasoning_output_tokens: 0,
-            total_tokens: 6,
-            codex_rollout_budget_units: None,
-        }
     );
 }
 
@@ -1000,7 +977,7 @@ async fn wait_for_guardian_review_timeout_drains_expected_turn_after_stale_termi
         .await
         .expect("interrupt response task should complete");
     assert!(matches!(outcome, GuardianReviewSessionOutcome::TimedOut));
-    assert_eq!(disposition, SessionDisposition::Reusable);
+    assert_eq!(disposition, SessionDisposition::Rollback);
     assert!(!turn_completed);
 }
 
@@ -1043,7 +1020,7 @@ async fn wait_for_guardian_review_cancel_drains_expected_turn_after_stale_termin
         .await
         .expect("interrupt response task should complete");
     assert!(matches!(outcome, GuardianReviewSessionOutcome::Aborted));
-    assert_eq!(disposition, SessionDisposition::Reusable);
+    assert_eq!(disposition, SessionDisposition::Rollback);
     assert!(!turn_completed);
 }
 
@@ -1064,12 +1041,12 @@ async fn interrupt_and_drain_turn_ignores_prior_turn_completion() {
     let result = wait_for_guardian_review(
         &review_session,
         "current-turn",
-        tokio::time::Instant::now(),
+        codex_guardian_reviewer::ReviewDeadline::At(tokio::time::Instant::now()),
         Some(&cancellation),
         &mut GuardianReviewAnalyticsResult::without_session(),
     )
     .await;
-    assert_eq!(result.disposition, SessionDisposition::Reusable);
+    assert_eq!(result.disposition, SessionDisposition::Rollback);
 
     assert!(review_session.io.rx_event.try_recv().is_err());
 }
@@ -1101,4 +1078,140 @@ async fn prewarm_test_session(
     .unwrap();
     pool.prewarm(Arc::new(context), key).await.unwrap();
     pool
+}
+
+#[tokio::test]
+async fn parent_checkpoint_recovery_stops_after_one_restart() {
+    let mut params = test_review_params().await;
+    params.parent_history.replace(vec![
+        serde_json::from_value(serde_json::json!({
+            "type": "compaction", "id": "cmp-parent", "encrypted_content": "parent checkpoint"
+        }))
+        .unwrap(),
+    ]);
+    let spawns = Arc::new(std::sync::atomic::AtomicUsize::default());
+    let observed_spawns = Arc::clone(&spawns);
+    let pool = Arc::new(GuardianReviewSessionManager::new(
+        Arc::new(codex_guardian_reviewer::ReviewerTasks::default()),
+        move |_, key, _, _, _| {
+            let spawns = Arc::clone(&spawns);
+            Box::pin(async move {
+                assert!(
+                    spawns.fetch_add(/*val*/ 1, Ordering::SeqCst) < 2,
+                    "recovery must not loop"
+                );
+                let (mut reviewer, _events, _submissions) = test_review_session().await;
+                reviewer.reuse_key = key;
+                reviewer.state.lock().await.conversation.complete_review(
+                    GuardianTranscriptCursor {
+                        parent_history_version: 0,
+                        transcript_entry_count: 0,
+                    },
+                );
+                // Every attempted reviewer loses its admitted evidence, including
+                // the replacement. The second failure must be returned to the caller.
+                reviewer
+                    .session
+                    .replace_history(Vec::new(), /*reference_context_item*/ None)
+                    .await;
+                Ok(reviewer)
+            })
+        },
+    ));
+    let (outcome, _) = setup::run_guardian_review_session(Arc::clone(&pool), params).await;
+    assert!(matches!(
+        outcome,
+        GuardianReviewSessionOutcome::PromptBuildFailed(_)
+    ));
+    assert_eq!(observed_spawns.load(Ordering::SeqCst), 2);
+    assert!(pool.trunk().await.is_none());
+}
+
+#[tokio::test]
+async fn compaction_and_review_submissions_share_execution_observer() {
+    let (review_session, events, submissions) = test_review_session().await;
+    let child_session = Arc::clone(&review_session.session);
+    let mut params = test_review_params().await;
+    params
+        .spawn_config
+        .features
+        .enable(Feature::TokenBudget)
+        .unwrap();
+    params.spawn_config.model_auto_compact_token_limit = Some(0);
+    params.spawn_config.token_budget = None;
+    let turn = Arc::get_mut(&mut params.parent_context.turn).expect("unshared turn fixture");
+    turn.configured_token_budget = None;
+    turn.use_model_token_budget_defaults = false;
+    let execution = codex_direct_tool_timing::ReviewExecution::default();
+    execution.observe();
+    params.parent_context.review_execution = Some(execution.clone());
+    let review = tokio::spawn(async move {
+        run_review_on_session(
+            &review_session,
+            &params,
+            GuardianReviewSessionKind::TrunkReused,
+            codex_guardian_reviewer::ReviewDeadline::At(
+                tokio::time::Instant::now() + Duration::from_secs(30),
+            ),
+        )
+        .await
+    });
+    let start = std::time::Instant::now();
+    for (index, (left, right)) in [(10, 30), (40, 70)].into_iter().enumerate() {
+        let submission = tokio::time::timeout(Duration::from_secs(10), submissions.recv())
+            .await
+            .expect("child submission deadline")
+            .expect("child submission");
+        if index == 0 {
+            assert!(matches!(submission.op, Op::Compact));
+        } else {
+            let Op::TurnInput { reply, .. } = submission.op else {
+                panic!("expected review input after compaction");
+            };
+            reply
+                .send(Ok(TurnInputSubmission::Started {
+                    root_turn_id: submission.id.clone(),
+                    turn_id: submission.id.clone(),
+                }))
+                .unwrap();
+        }
+        let pending = child_session
+            .services
+            .thread_extension_data
+            .remove::<crate::turn_timing::review_execution::PendingReviewExecution>();
+        let pending = pending.expect("instrumented child");
+        assert_eq!(pending.0, execution);
+        let child_start = start + Duration::from_millis(left);
+        pending.0.started(child_start);
+        pending
+            .0
+            .completed(child_start, start + Duration::from_millis(right));
+        events
+            .send(turn_complete_event(
+                &submission.id,
+                Some("complete"),
+                /*time_to_first_token_ms*/ None,
+            ))
+            .await
+            .unwrap();
+    }
+    let result = review.await.unwrap();
+    assert!(matches!(
+        result.outcome,
+        GuardianReviewSessionOutcome::Completed(Ok(_))
+    ));
+    assert!(
+        child_session
+            .services
+            .thread_extension_data
+            .get::<crate::turn_timing::review_execution::PendingReviewExecution>()
+            .is_none()
+    );
+    execution.seal();
+    let end = start + Duration::from_millis(100);
+    let totals = codex_utils_critical_path::CriticalPath::default()
+        .auto_review(start, end, vec![execution])
+        .durations(start, end);
+    assert_eq!(totals.auto_review, Duration::from_millis(100));
+    assert_eq!(totals.auto_review_overhead, Some(Duration::from_millis(50)));
 }
