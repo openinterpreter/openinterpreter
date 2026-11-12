@@ -31,7 +31,7 @@ pub(in crate::remote_session) struct RemoteSession {
 pub(in crate::remote_session::connection) enum DriverCommand {
     OpenSession {
         session: RemoteSession,
-        limits: CodeModeSessionCellExecutionLimits,
+        options: CodeModeSessionOptions,
         cleanup: SessionCleanup,
         caller_cancellation: CancellationToken,
         response_tx: oneshot::Sender<Result<(), String>>,

@@ -33,7 +33,7 @@ pub(super) struct ReconnectableSession {
 
 struct ReconnectInner {
     provider: GrpcCodeModeSessionProvider,
-    limits: CodeModeSessionCellExecutionLimits,
+    options: CodeModeSessionOptions,
     binding: Mutex<Option<SessionBinding>>,
     // The negotiated mode belongs to the logical session, including after
     // shutdown releases the binding. Never pin a mode from an unpublished open.
@@ -52,12 +52,12 @@ struct SessionBinding {
 impl ReconnectableSession {
     pub(super) fn new(
         provider: GrpcCodeModeSessionProvider,
-        limits: CodeModeSessionCellExecutionLimits,
+        options: CodeModeSessionOptions,
     ) -> Self {
         Self {
             inner: Arc::new(ReconnectInner {
                 provider,
-                limits,
+                options,
                 binding: Mutex::new(None),
                 output_truncation: OnceLock::new(),
                 opening_permit: Semaphore::new(/*permits*/ 1),
@@ -85,16 +85,17 @@ impl CodeModeSession for ReconnectableSession {
         &'a self,
         request: ExecuteRequest,
         delegate: Arc<dyn CodeModeSessionDelegate>,
+        preempt: Option<CancellationToken>,
     ) -> CodeModeSessionResultFuture<'a, StartedCell> {
         // Capture before polling so queued calls cannot silently cross a runtime reset.
         let generation = self.inner.binding().map(|binding| binding.generation);
         Box::pin(async move {
-            let binding = self.inner.get_or_open_binding().await?;
+            let binding = self.inner.binding_for_request(generation).await?;
             let delegate = Arc::new(GenerationDelegate {
                 delegate,
                 generation: binding.generation,
             });
-            let started = binding.session.execute(request, delegate).await?;
+            let started = binding.session.execute(request, delegate, preempt).await?;
             Ok(generation::public_started_cell(binding.generation, started))
         })
     }
@@ -192,13 +193,16 @@ impl ReconnectInner {
             wait_for_watch(binding.session.inner.request_shutdown()).await?;
         }
 
-        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        let generation = self
+            .provider
+            .next_generation
+            .fetch_add(1, Ordering::Relaxed);
         let session = tokio::select! {
             biased;
             _ = self.shutdown_requested.cancelled() => {
                 return Err(SHUTDOWN_ERROR.into());
             }
-            session = self.provider.open_binding(self.limits.clone()) => session?,
+            session = self.provider.open_binding(&self.options, self.output_truncation.get().copied()) => session?,
         };
         let binding = SessionBinding {
             session,

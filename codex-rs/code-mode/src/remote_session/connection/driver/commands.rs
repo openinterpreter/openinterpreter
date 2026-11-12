@@ -32,11 +32,11 @@ impl ConnectionDriver {
         match command {
             DriverCommand::OpenSession {
                 session,
-                limits,
+                options,
                 cleanup,
                 caller_cancellation,
                 response_tx,
-            } => self.open_session(session, limits, cleanup, caller_cancellation, response_tx),
+            } => self.open_session(session, options, cleanup, caller_cancellation, response_tx),
             DriverCommand::Execute {
                 session,
                 request,
@@ -44,7 +44,14 @@ impl ConnectionDriver {
                 caller_cancellation,
                 yield_signal,
                 response_tx,
-            } => self.execute(session, request, delegate, caller_cancellation, response_tx),
+            } => self.execute(
+                session,
+                request,
+                delegate,
+                caller_cancellation,
+                yield_signal,
+                response_tx,
+            ),
             DriverCommand::Wait {
                 session,
                 request,
@@ -73,7 +80,7 @@ impl ConnectionDriver {
     fn open_session(
         &mut self,
         session: RemoteSession,
-        limits: CodeModeSessionCellExecutionLimits,
+        options: CodeModeSessionOptions,
         cleanup: super::cleanup::SessionCleanup,
         caller_cancellation: CancellationToken,
         response_tx: oneshot::Sender<Result<(), String>>,

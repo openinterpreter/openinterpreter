@@ -30,6 +30,7 @@ use self::connection::Connection;
 use self::connection::ConnectionError;
 use self::connection::RemoteSession;
 use self::connection::SessionCleanup;
+use self::delegate::TracedCellDelegate;
 
 mod connection;
 mod delegate;
@@ -85,7 +86,17 @@ impl CodeModeSessionProvider for ProcessOwnedCodeModeSessionProvider {
         &'a self,
         limits: CodeModeSessionCellExecutionLimits,
     ) -> CodeModeSessionProviderFuture<'a> {
-        Box::pin(create_host_session(self.process_host(), limits))
+        self.create_session_with_options(CodeModeSessionOptions {
+            cell_execution_limits: limits,
+            ..CodeModeSessionOptions::default()
+        })
+    }
+
+    fn create_session_with_options<'a>(
+        &'a self,
+        options: CodeModeSessionOptions,
+    ) -> CodeModeSessionProviderFuture<'a> {
+        Box::pin(create_host_session(self.process_host(), options))
     }
 }
 
@@ -110,7 +121,7 @@ async fn create_host_session(
     host: Arc<OwnedCodeModeHost>,
     options: CodeModeSessionOptions,
 ) -> Result<Arc<dyn CodeModeSession>, String> {
-    let session = ProcessOwnedCodeModeSession::with_host(host, limits);
+    let session = ProcessOwnedCodeModeSession::with_host(host, options);
     session.connection().await?;
     Ok(Arc::new(session))
 }
@@ -220,7 +231,9 @@ struct SessionBinding {
 
 struct SessionInner {
     host: Arc<OwnedCodeModeHost>,
-    limits: CodeModeSessionCellExecutionLimits,
+    options: CodeModeSessionOptions,
+    // The first successful open fixes the output policy for all generations of this session.
+    output_truncation: OnceLock<CodeModeOutputTruncation>,
     state: StdMutex<SessionState>,
     shutdown_requested: AtomicBool,
     shutdown_result: StdMutex<Option<ShutdownResultReceiver>>,
@@ -242,11 +255,12 @@ impl ProcessOwnedCodeModeSession {
         )
     }
 
-    fn with_host(host: Arc<OwnedCodeModeHost>, limits: CodeModeSessionCellExecutionLimits) -> Self {
+    fn with_host(host: Arc<OwnedCodeModeHost>, options: CodeModeSessionOptions) -> Self {
         Self {
             inner: Arc::new(SessionInner {
                 host,
-                limits,
+                options,
+                output_truncation: OnceLock::new(),
                 state: StdMutex::new(SessionState::New),
                 shutdown_requested: AtomicBool::new(false),
                 shutdown_result: StdMutex::new(None),
@@ -259,16 +273,8 @@ impl ProcessOwnedCodeModeSession {
         self.inner.connection().await
     }
 
-    pub async fn execute(
-        &self,
-        request: ExecuteRequest,
-        delegate: Arc<dyn CodeModeSessionDelegate>,
-    ) -> Result<StartedCell, String> {
-        let binding = self.connection().await?;
-        binding
-            .connection
-            .execute(binding.remote, request, delegate)
-            .await
+    fn server_output_budget(&self, budget: Option<usize>) -> Option<usize> {
+        budget.filter(|_| self.output_truncation() == CodeModeOutputTruncation::Server)
     }
 
     pub async fn execute(
@@ -369,7 +375,11 @@ impl SessionInner {
         let result = match self.host.connection().await {
             Ok(connection) => {
                 let cleanup = connection
-                    .open_session(remote.clone(), self.limits.clone())
+                    .open_session(
+                        remote.clone(),
+                        self.options.clone(),
+                        &self.output_truncation,
+                    )
                     .await;
                 cleanup.map(|cleanup| SessionBinding {
                     connection,
@@ -558,9 +568,10 @@ impl CodeModeSession for ProcessOwnedCodeModeSession {
         &'a self,
         request: ExecuteRequest,
         delegate: Arc<dyn CodeModeSessionDelegate>,
+        preempt: Option<CancellationToken>,
     ) -> CodeModeSessionResultFuture<'a, StartedCell> {
         Box::pin(ProcessOwnedCodeModeSession::execute(
-            self, request, delegate,
+            self, request, delegate, preempt,
         ))
     }
 

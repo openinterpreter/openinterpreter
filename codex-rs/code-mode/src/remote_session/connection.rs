@@ -350,7 +350,8 @@ impl Connection {
     pub(super) async fn open_session(
         &self,
         session: RemoteSession,
-        limits: CodeModeSessionCellExecutionLimits,
+        mut options: CodeModeSessionOptions,
+        pinned: &OnceLock<CodeModeOutputTruncation>,
     ) -> Result<SessionCleanup, String> {
         if options.cell_execution_limits != CodeModeSessionCellExecutionLimits::default()
             && !self.supports(SESSION_RESOURCE_LIMITS_CAPABILITY)
@@ -375,7 +376,7 @@ impl Connection {
         let (response_tx, response_rx) = oneshot::channel();
         self.send(DriverCommand::OpenSession {
             session,
-            limits,
+            options,
             cleanup: cleanup.clone(),
             caller_cancellation: cancellation.token(),
             response_tx,
@@ -393,6 +394,7 @@ impl Connection {
         session: RemoteSession,
         request: ExecuteRequest,
         delegate: Arc<dyn CodeModeSessionDelegate>,
+        yield_signal: Option<CancellationToken>,
     ) -> Result<StartedCell, String> {
         let yield_signal = self.supported_yield_signal(yield_signal);
         let cancellation = CallerCancellation::new();

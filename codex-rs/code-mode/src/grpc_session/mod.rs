@@ -150,9 +150,12 @@ impl GrpcCodeModeSessionProvider {
     #[tracing::instrument(name = "code_mode.grpc.open_binding", level = "info", skip_all)]
     async fn open_binding(
         &self,
-        limits: CodeModeSessionCellExecutionLimits,
-    ) -> Result<Arc<GrpcCodeModeSession>, String> {
-        let mut client = deadline::startup("transport connection", self.transport.client()).await?;
+        options: &CodeModeSessionOptions,
+        pinned_mode: Option<CodeModeOutputTruncation>,
+    ) -> Result<Arc<GrpcCodeModeSession>, GrpcSessionOpenError> {
+        let client = deadline::startup("transport connection", self.transport.client()).await?;
+        let requested_mode = pinned_mode.unwrap_or(options.output_truncation);
+        let limits = &options.cell_execution_limits;
         let limits = grpc::SessionCellExecutionLimits {
             max_yield_time_ms: limits.max_yield_time_ms,
             max_heap_size_bytes: limits
@@ -260,7 +263,8 @@ impl GrpcCodeModeSessionProvider {
 
         let inner = Arc::new(SessionInner {
             id: opened.session_id,
-            client,
+            output_truncation,
+            route,
             runtime: tokio::runtime::Handle::current(),
             state: Mutex::new(SessionState::with_client(client)),
             wait_slots: Mutex::new(HashMap::new()),
@@ -305,6 +309,13 @@ impl GrpcCodeModeSessionProvider {
 }
 
 impl CodeModeSessionProvider for GrpcCodeModeSessionProvider {
+    fn sample_process_metrics(
+        &self,
+    ) -> CodeModeSessionResultFuture<'_, codex_code_mode_protocol::CodeModeProcessMetricsSample>
+    {
+        Box::pin(process_metrics::sample(self))
+    }
+
     fn create_session(&self) -> CodeModeSessionProviderFuture<'_> {
         self.create_session_with_limits(CodeModeSessionCellExecutionLimits::default())
     }
@@ -313,10 +324,9 @@ impl CodeModeSessionProvider for GrpcCodeModeSessionProvider {
         &'a self,
         limits: CodeModeSessionCellExecutionLimits,
     ) -> CodeModeSessionProviderFuture<'a> {
-        Box::pin(async move {
-            let session = Arc::new(reconnect::ReconnectableSession::new(self.clone(), limits));
-            session.initialize().await?;
-            Ok(session as _)
+        self.create_session_with_options(CodeModeSessionOptions {
+            cell_execution_limits: limits,
+            ..CodeModeSessionOptions::default()
         })
     }
 
@@ -361,8 +371,9 @@ impl CodeModeSession for GrpcCodeModeSession {
         &'a self,
         request: ExecuteRequest,
         delegate: Arc<dyn CodeModeSessionDelegate>,
+        preempt: Option<CancellationToken>,
     ) -> CodeModeSessionResultFuture<'a, StartedCell> {
-        Box::pin(self.inner.execute(request, delegate))
+        Box::pin(self.inner.execute(request, delegate, preempt))
     }
 
     fn wait<'a>(
@@ -393,7 +404,10 @@ impl Drop for GrpcCodeModeSession {
 
 pub(super) struct SessionInner {
     pub(super) id: String,
-    pub(super) client: GrpcClient,
+    output_truncation: CodeModeOutputTruncation,
+    // Affinity belongs to the session: parents and children may share a transport
+    // while being admitted to different hosts. The token is opaque to Codex.
+    route: Option<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>,
     runtime: tokio::runtime::Handle,
     state: Mutex<SessionState>,
     wait_slots: Mutex<HashMap<CellId, Weak<WaitSlot>>>,

@@ -102,8 +102,7 @@ impl DriverHarness {
         self.command_tx
             .send(DriverCommand::OpenSession {
                 session: session.clone(),
-
-                limits: Default::default(),
+                options: CodeModeSessionOptions::default(),
                 cleanup: cleanup.clone(),
                 caller_cancellation: CancellationToken::new(),
                 response_tx,
@@ -314,8 +313,10 @@ async fn open_session_includes_nondefault_cell_execution_limits() {
         .command_tx
         .send(DriverCommand::OpenSession {
             session: session.clone(),
-
-            limits,
+            options: CodeModeSessionOptions {
+                cell_execution_limits: limits,
+                ..CodeModeSessionOptions::default()
+            },
             cleanup: SessionCleanup::new(),
             caller_cancellation: CancellationToken::new(),
             response_tx,
@@ -727,8 +728,7 @@ async fn dropped_open_waiter_shuts_down_committed_session() {
         .command_tx
         .send(DriverCommand::OpenSession {
             session: session.clone(),
-
-            limits: Default::default(),
+            options: CodeModeSessionOptions::default(),
             cleanup,
             caller_cancellation: CancellationToken::new(),
             response_tx: open_tx,

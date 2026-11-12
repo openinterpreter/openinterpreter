@@ -73,6 +73,7 @@ impl SessionInner {
         self: &Arc<Self>,
         request: ExecuteRequest,
         delegate: Arc<dyn CodeModeSessionDelegate>,
+        preempt: Option<CancellationToken>,
     ) -> Result<StartedCell, String> {
         self.require_open()?;
         let execution_id = Uuid::new_v4().to_string();
