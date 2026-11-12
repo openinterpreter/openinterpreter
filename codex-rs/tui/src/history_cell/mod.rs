@@ -12,6 +12,8 @@
 
 mod activity_group;
 pub(crate) use activity_group::ActivityGroup;
+mod delegated_message;
+pub(crate) use delegated_message::DelegatedMessageCell;
 
 use crate::diff_model::FileChange;
 use crate::diff_render::create_diff_summary;

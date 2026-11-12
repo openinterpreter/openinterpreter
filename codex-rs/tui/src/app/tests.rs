@@ -25,6 +25,8 @@ mod backend_banner_fallback_tests;
 mod backend_banner_recovery_tests;
 #[path = "tests/backend_banner_startup_tests.rs"]
 mod backend_banner_startup_tests;
+#[path = "tests/backend_ownership_tests.rs"]
+mod backend_ownership_tests;
 #[path = "tests/background_exit_tests.rs"]
 mod background_exit_tests;
 #[path = "tests/background_task_defaults_tests.rs"]
@@ -35,6 +37,8 @@ mod browsing_pagination_tests;
 mod buffered_replay;
 #[path = "tests/connector_policy.rs"]
 mod connector_policy;
+#[path = "tests/daybreak_tests.rs"]
+mod daybreak_tests;
 #[path = "tests/disconnect_tests.rs"]
 mod disconnect;
 #[path = "tests/external_writer_fork_tests.rs"]

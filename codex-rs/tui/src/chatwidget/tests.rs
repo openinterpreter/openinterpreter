@@ -277,6 +277,10 @@ mod plugin_catalog;
 mod popups_and_settings;
 #[path = "tests/program_status.rs"]
 mod program_status;
+#[path = "tests/question_turn_end_tests.rs"]
+mod question_turn_end_tests;
+#[path = "tests/quick_dials_tests.rs"]
+mod quick_dials_tests;
 #[path = "tests/rate_limit_recovery_tests.rs"]
 mod rate_limit_recovery_tests;
 #[path = "tests/reasoning_status_tests.rs"]
@@ -286,6 +290,8 @@ mod replay_render_tests;
 mod review_mode;
 #[path = "tests/review_picker_tests.rs"]
 mod review_picker_tests;
+#[path = "tests/security_setup_tests.rs"]
+mod security_setup_tests;
 #[path = "tests/session_model_selection_tests.rs"]
 mod session_model_selection_tests;
 mod side;
@@ -303,6 +309,8 @@ mod status_surface_command_tests;
 mod status_surface_previews;
 #[path = "tests/subagent_activity_tests.rs"]
 mod subagent_activity;
+#[path = "tests/terminal_program_status.rs"]
+mod terminal_program_status;
 mod terminal_title;
 #[path = "tests/tool_activity_tests.rs"]
 mod tool_activity_tests;
