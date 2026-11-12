@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::string::String;
 use std::sync::Arc;
@@ -215,7 +216,7 @@ async fn perform_oauth_login_with_browser_output(
         keyring_backend_kind,
         http_context,
         scopes,
-        oauth_client_id,
+        oauth_config,
         OAuthLoginPurpose::Mcp,
         client_registration,
         oauth_resource,
@@ -262,7 +263,7 @@ pub async fn perform_oauth_login_return_url(
         keyring_backend_kind,
         http_context,
         scopes,
-        oauth_client_id,
+        oauth_config,
         OAuthLoginPurpose::Mcp,
         client_registration,
         oauth_resource,
@@ -547,7 +548,7 @@ impl OauthLoginFlow {
         keyring_backend_kind: AuthKeyringBackendKind,
         http_context: OAuthHttpContext,
         scopes: &[String],
-        oauth_client_id: Option<&str>,
+        oauth_config: Option<&McpServerOAuthConfig>,
         purpose: OAuthLoginPurpose,
         client_registration: McpOAuthClientRegistration,
         oauth_resource: Option<&str>,
@@ -609,8 +610,17 @@ impl OauthLoginFlow {
             )?);
         let registered_authorization = if oauth_client_id.is_some() {
             Some(
-                resolve_authorization_manager(server_url, Arc::clone(&oauth_http_client), purpose)
-                    .await?,
+                resolve_authorization_manager(
+                    server_url,
+                    Arc::clone(&oauth_http_client),
+                    purpose,
+                    credentials
+                        .client_secret
+                        .as_ref()
+                        .map(|secret| secret.secret().as_str()),
+                    oauth_config.and_then(|config| config.token_endpoint_auth_method),
+                )
+                .await?,
             )
         } else {
             None
@@ -646,7 +656,25 @@ impl OauthLoginFlow {
         // Port zero asks the OS for a free ephemeral port; the resolved
         // redirect receives that port after the listener has been bound.
         let bind_addr = SocketAddr::new(bind_ip, callback_port.unwrap_or(0));
-        let server = Arc::new(Server::http(bind_addr).map_err(|err| anyhow!(err))?);
+        let bind_deadline = tokio::time::Instant::now() + Duration::from_secs(/*secs*/ 1);
+        let server = loop {
+            match Server::http(bind_addr) {
+                Ok(server) => break Arc::new(server),
+                Err(err)
+                    if is_enterprise_idp
+                        && callback_port.is_some()
+                        && err
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|err| err.kind() == std::io::ErrorKind::AddrInUse)
+                        && tokio::time::Instant::now() < bind_deadline =>
+                {
+                    // tiny_http drops its accept loop asynchronously after Server::drop.
+                    // Only retry the fixed listener bind, never OAuth requests or callbacks.
+                    tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
+                }
+                Err(err) => return Err(anyhow!(err)),
+            }
+        };
         let guard = CallbackServerGuard {
             server: Arc::clone(&server),
         };
@@ -692,6 +720,7 @@ impl OauthLoginFlow {
                 &redirect_uri,
                 &callback_id,
                 oauth_client_id,
+                credentials.client_secret.as_ref(),
                 purpose,
             )
             .await?
@@ -739,6 +768,10 @@ impl OauthLoginFlow {
 
     pub(crate) fn authorization_url(&self) -> String {
         self.auth_url.clone()
+    }
+
+    pub(crate) fn callback_closed(&self) -> impl Future<Output = ()> + Send + 'static {
+        self.callback_closed.clone().cancelled_owned()
     }
 
     async fn finish(self, emit_browser_url: bool) -> Result<()> {
@@ -842,9 +875,17 @@ async fn resolve_authorization_manager(
     server_url: &str,
     http_client: Arc<dyn OAuthHttpClient>,
     purpose: OAuthLoginPurpose,
+    client_secret: Option<&str>,
+    token_endpoint_auth_method: Option<McpEmaTokenEndpointAuthMethod>,
 ) -> Result<(AuthorizationManager, AuthorizationMetadata)> {
     if matches!(purpose, OAuthLoginPurpose::EnterpriseIdp) {
-        return resolve_enterprise_authorization_manager(server_url, http_client).await;
+        return resolve_enterprise_authorization_manager(
+            server_url,
+            http_client,
+            client_secret,
+            token_endpoint_auth_method,
+        )
+        .await;
     }
     let mut auth_manager =
         AuthorizationManager::new_with_oauth_http_client(server_url, http_client).await?;
@@ -862,14 +903,18 @@ async fn start_authorization(
     redirect_uri: &str,
     callback_id: &str,
     oauth_client_id: &str,
+    client_secret: Option<&oauth2::ClientSecret>,
     purpose: OAuthLoginPurpose,
 ) -> Result<PreparedOAuthLogin> {
     let strict_enterprise_idp = matches!(purpose, OAuthLoginPurpose::EnterpriseIdp);
     let authorization_server_issuer = metadata.issuer.clone();
     validate_callback_redirect(redirect_uri, callback_id, callback_mode(&metadata)?)?;
     auth_manager.set_metadata(metadata);
-    let client_config = OAuthClientConfig::new(oauth_client_id, redirect_uri)
+    let mut client_config = OAuthClientConfig::new(oauth_client_id, redirect_uri)
         .with_scopes(scopes.iter().map(|scope| (*scope).to_string()).collect());
+    if let Some(secret) = client_secret {
+        client_config = client_config.with_client_secret(secret.secret());
+    }
     auth_manager.configure_client(client_config)?;
     let auth_url = auth_manager.get_authorization_url(scopes).await?;
     let auth_url = if strict_enterprise_idp {
@@ -1098,7 +1143,10 @@ mod tests {
                 redirect_mode: StreamableHttpRedirectMode::Legacy,
             },
             &[],
-            Some("test-client"),
+            Some(&McpServerOAuthConfig {
+                client_id: Some("test-client".to_string()),
+                ..Default::default()
+            }),
             OAuthLoginPurpose::Mcp,
             McpOAuthClientRegistration::Auto,
             /*oauth_resource*/ None,
@@ -1152,6 +1200,8 @@ mod tests {
                     &format!("{base_url}/mcp"),
                 )),
                 OAuthLoginPurpose::Mcp,
+                /*client_secret*/ None,
+                /*token_endpoint_auth_method*/ None,
             )
             .await
             .expect("resolve pre-registered OAuth metadata");
@@ -1162,6 +1212,7 @@ mod tests {
                 redirect_uri,
                 "configured-client",
                 "eci-prd-pub-codex-123",
+                /*client_secret*/ None,
                 OAuthLoginPurpose::Mcp,
             )
             .await
@@ -1261,6 +1312,8 @@ mod tests {
                     &format!("{issuer}/mcp"),
                 )),
                 OAuthLoginPurpose::Mcp,
+                /*client_secret*/ None,
+                /*token_endpoint_auth_method*/ None,
             )
             .await
             .expect("resolve issuer-aware authorization metadata");
@@ -1271,6 +1324,7 @@ mod tests {
                 redirect_uri,
                 "test-callback",
                 "test-client",
+                /*client_secret*/ None,
                 OAuthLoginPurpose::Mcp,
             )
             .await

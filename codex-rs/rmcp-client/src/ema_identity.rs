@@ -15,6 +15,7 @@ use oauth2::TokenResponse;
 use rmcp::transport::AuthorizationManager;
 use rmcp::transport::auth::AuthorizationMetadata;
 use rmcp::transport::auth::OAuthHttpClient;
+use tracing::instrument::WithSubscriber;
 
 use crate::EmaCredentialLease;
 use crate::EmaErrorDetail;
@@ -134,7 +135,13 @@ pub fn stored_ema_identity_is_usable(
 pub(crate) async fn resolve_ema_idp_authorization_manager(
     issuer: &str,
     http_client: Arc<dyn OAuthHttpClient>,
-) -> Result<(AuthorizationManager, AuthorizationMetadata)> {
+    client_secret: Option<&str>,
+    token_endpoint_auth_method: Option<McpEmaTokenEndpointAuthMethod>,
+) -> Result<(
+    AuthorizationManager,
+    AuthorizationMetadata,
+    EmaClientAuthentication,
+)> {
     validate_ema_oauth_endpoint(issuer, "enterprise IdP issuer")?;
     let mut manager = AuthorizationManager::new_with_oauth_http_client(issuer, http_client)
         .await
@@ -143,22 +150,31 @@ pub(crate) async fn resolve_ema_idp_authorization_manager(
     let resolution = manager
         .resolve_metadata()
         .await
-        .context("failed to discover enterprise IdP authorization metadata")?;
+        .context(EmaErrorDetail::new(
+            "failed to discover enterprise IdP authorization metadata",
+        ))?;
     if !resolution.source.is_discovered() {
-        bail!("enterprise IdP must publish authorization metadata");
+        bail!(EmaErrorDetail::new(
+            "enterprise IdP must publish authorization metadata"
+        ));
     }
     let metadata = resolution.metadata;
     if metadata.issuer.as_deref() != Some(issuer) {
-        bail!("enterprise IdP authorization metadata issuer does not match configuration");
+        bail!(EmaErrorDetail::new(
+            "enterprise IdP authorization metadata issuer does not match configuration"
+        ));
     }
     validate_ema_oauth_endpoint(&metadata.token_endpoint, "enterprise IdP token endpoint")?;
-    validate_ema_public_client_auth(
+
+    let authentication = resolve_ema_client_auth(
         metadata
             .additional_fields
             .get("token_endpoint_auth_methods_supported"),
+        client_secret,
+        token_endpoint_auth_method,
         "enterprise IdP",
     )?;
-    Ok((manager, metadata))
+    Ok((manager, metadata, authentication))
 }
 
 /// Resolve a stored refresh-token subject against the configured enterprise IdP metadata.
@@ -175,7 +191,7 @@ async fn resolve_ema_idp_identity_in<K: KeyringStore + Clone + 'static>(
     if request.issuer.trim().is_empty() || request.client_id.trim().is_empty() {
         bail!("ema_auth requires a non-empty enterprise IdP issuer and client ID");
     }
-    let credentials = request.credentials.credentials();
+    let credentials = request.credentials.credentials.credentials();
     if credentials.url != request.issuer
         || credentials.bound_issuer() != Some(request.issuer)
         || credentials.client_id != request.client_id
@@ -189,9 +205,72 @@ async fn resolve_ema_idp_identity_in<K: KeyringStore + Clone + 'static>(
         request.token_endpoint_auth_method,
         request.http_client,
         request.redirect_mode,
+    )
+    .await
+    .context(EmaErrorDetail::new(
+        "enterprise IdP discovery or validation failed",
+    ))?;
+    let credentials = request.credentials;
+    let credential_lock = RefreshCredentialLock::acquire_for_server(
+        &credentials.credentials.credentials().server_name,
+        request.issuer,
+    )
+    .with_subscriber(tracing::subscriber::NoSubscriber::default())
+    .await
+    .map_err(|_| anyhow!(EmaErrorDetail::new("failed to lock enterprise credentials")))?;
+    let keyring_store = keyring_store.clone();
+    // The worker retains the short read lock if its caller stops waiting for the reread.
+    tokio::task::spawn_blocking(move || {
+        let _credential_lock = credential_lock;
+        let latest = credentials
+            .credentials
+            .load_ema_credentials(&keyring_store)?;
+        let refresh_token = latest
+            .token_response
+            .0
+            .refresh_token()
+            .filter(|token| !token.secret().trim().is_empty())
+            .ok_or_else(|| {
+                ema_reauthentication_required(
+                    "enterprise IdP session has no refresh token; sign in again",
+                )
+            })?;
+        Ok(EmaIdpIdentity {
+            token_endpoint,
+            refresh_token: refresh_token.secret().to_string(),
+            credentials,
+            client_authentication,
+        })
+    })
+    .await
+    .map_err(|_| {
+        anyhow!(EmaErrorDetail::new(
+            "enterprise IdP credential reread task failed"
+        ))
+    })?
+}
+
+async fn resolve_ema_idp_token_endpoint(
+    issuer: &str,
+    client_secret: Option<&str>,
+    token_endpoint_auth_method: Option<McpEmaTokenEndpointAuthMethod>,
+    http_client: Arc<dyn HttpClient>,
+    redirect_mode: StreamableHttpRedirectMode,
+) -> Result<(String, EmaClientAuthentication)> {
+    let client = OAuthHttpClientAdapter::new_with_redirect_mode(
+        http_client,
+        build_default_headers(/*http_headers*/ None, /*env_http_headers*/ None)?,
+        issuer,
+        /*has_configured_headers*/ false,
+        redirect_mode,
     )?;
-    let (_, metadata) =
-        resolve_ema_idp_authorization_manager(request.issuer, Arc::new(client)).await?;
+    let (_, metadata, authentication) = resolve_ema_idp_authorization_manager(
+        issuer,
+        Arc::new(client),
+        client_secret,
+        token_endpoint_auth_method,
+    )
+    .await?;
     for (name, expected) in [
         (
             "identity_chaining_requested_token_types_supported",
@@ -207,32 +286,7 @@ async fn resolve_ema_idp_identity_in<K: KeyringStore + Clone + 'static>(
             );
         }
     }
-    let credential_lock =
-        RefreshCredentialLock::acquire_for_server(&credentials.server_name, &credentials.url)
-            .await?;
-    let snapshot = request.credentials.clone();
-    let keyring_store = keyring_store.clone();
-    // The worker retains the guard even if its caller stops waiting for the reread.
-    tokio::task::spawn_blocking(move || {
-        let latest = snapshot.load_ema_credentials(&keyring_store)?;
-        let refresh_token = latest
-            .token_response
-            .0
-            .refresh_token()
-            .filter(|token| !token.secret().trim().is_empty())
-            .ok_or_else(|| {
-                ema_reauthentication_required(
-                    "enterprise IdP session has no refresh token; sign in again",
-                )
-            })?;
-        Ok(EmaIdpIdentity {
-            token_endpoint: metadata.token_endpoint,
-            refresh_token: refresh_token.secret().to_string(),
-            credential_lock,
-        })
-    })
-    .await
-    .map_err(|_| anyhow!("enterprise IdP credential reread task failed"))?
+    Ok((metadata.token_endpoint, authentication))
 }
 
 #[cfg(test)]

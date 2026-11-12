@@ -320,7 +320,8 @@ impl OAuthPersistor {
                 );
             }
             debug!("adopting new MCP OAuth credentials after a failed refresh");
-            install_tokens_in_manager(manager, &replacement).await?;
+            install_tokens_in_manager(manager, &replacement, self.inner.oauth_config.as_ref())
+                .await?;
             *self.inner.last_credentials.lock().await = Some(replacement);
             return Ok(());
         }
