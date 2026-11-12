@@ -474,7 +474,7 @@ fn create_filesystem_args(
     // to the existing matches we can see before constructing the mount overlay;
     // core tool helpers still evaluate the original patterns directly at read time.
     unreadable_roots.extend(
-        expand_unreadable_globs_with_ripgrep(
+        expand_unreadable_globs(
             &resolved.unreadable_globs,
             cwd,
             options.glob_scan_max_depth.or(resolved.glob_scan_max_depth),
@@ -829,7 +829,9 @@ fn append_daemon_socket_masks(
     Ok(())
 }
 
-fn expand_unreadable_globs_with_ripgrep(
+/// Snapshot deny-glob matches and canonical targets for bubblewrap masks.
+/// Glob overrides are relative to each pattern's static search root.
+pub fn expand_unreadable_globs(
     patterns: &[String],
     cwd: &Path,
     max_depth: Option<usize>,

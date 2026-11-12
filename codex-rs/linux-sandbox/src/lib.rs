@@ -32,6 +32,11 @@ mod seccomp;
 #[cfg(target_os = "linux")]
 mod wslg;
 
+#[cfg(target_os = "linux")]
+pub use bundled_bwrap::find_bundled_bwrap_for_exe;
+#[cfg(target_os = "linux")]
+pub use bwrap::expand_unreadable_globs;
+
 /// Exit status returned when bundled bubblewrap fails digest verification.
 #[cfg(target_os = "linux")]
 pub const BUNDLED_BWRAP_DIGEST_VERIFICATION_FAILURE_EXIT_CODE: i32 = 8;
