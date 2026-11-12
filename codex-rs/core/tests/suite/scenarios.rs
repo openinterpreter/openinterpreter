@@ -77,6 +77,9 @@ const ONE_PIXEL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ
 #[path = "scenarios_agent_message_board.rs"]
 mod agent_message_board;
 
+#[path = "scenarios/catalog_settings.rs"]
+mod catalog_settings;
+
 #[path = "scenarios_agent_eviction_tests.rs"]
 mod agent_eviction;
 
@@ -95,6 +98,18 @@ mod guardian_sender_context;
 #[path = "scenarios_guardian_heartbeat.rs"]
 mod guardian_heartbeat;
 
+#[path = "scenarios_guardian_agent_messages_tests.rs"]
+mod guardian_agent_messages;
+
+#[path = "scenarios_guardian_conversation_history_tests.rs"]
+mod guardian_conversation_history;
+
+#[path = "scenarios_guardian_extra_policy.rs"]
+mod guardian_extra_policy;
+
+#[path = "scenarios_guardian_orchestrator_connector.rs"]
+mod guardian_orchestrator_connector;
+
 #[path = "scenarios_guardian_reconsideration.rs"]
 mod guardian_reconsideration;
 
@@ -110,11 +125,20 @@ mod mailbox_preemption;
 #[path = "scenarios_managed_human_approval_tests.rs"]
 mod managed_human_approval;
 
+#[path = "scenarios_mcp_ema.rs"]
+mod mcp_ema;
+
 #[path = "scenarios_mcp_resource_messages.rs"]
 mod mcp_resource_messages;
 
+#[path = "scenarios_mxc.rs"]
+mod mxc;
+
 #[path = "scenarios_incremental_tools_resume.rs"]
 mod incremental_tools_resume;
+
+#[path = "scenarios_incremental_tools.rs"]
+mod incremental_tools;
 
 #[path = "scenarios_model_instructions.rs"]
 mod model_instructions;
@@ -124,6 +148,12 @@ mod retained_tool_outputs;
 
 #[path = "scenarios_shared_instructions.rs"]
 mod shared_instructions;
+
+#[path = "scenarios_skill_catalog_dedup.rs"]
+mod skill_catalog_dedup;
+
+#[path = "scenarios_strict_3p_cache.rs"]
+mod strict_3p_cache;
 
 #[path = "scenarios_tools_namespace_budget.rs"]
 mod tools_namespace_budget;
