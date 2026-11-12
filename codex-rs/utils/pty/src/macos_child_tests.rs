@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::child::ChildKind;
-use crate::child::macos::*;
+use crate::child::posix::*;
 use pretty_assertions::assert_eq;
 use std::fs;
 use std::os::fd::AsRawFd;
@@ -308,6 +308,7 @@ async fn process_mode_is_preserved_by_both_backends() -> anyhow::Result<()> {
                 // SAFETY: getpgrp only inspects the current process.
                 ProcessMode::Inherit => unsafe { libc::getpgrp() },
                 ProcessMode::NewGroup => pid,
+                ProcessMode::NewSession => unreachable!("the test does not select this mode"),
             };
             // SAFETY: The child is still owned and blocked on its stdin pipe.
             assert_eq!(unsafe { libc::getpgid(pid) }, expected);
