@@ -420,6 +420,8 @@ async fn process_anthropic_event(
                     name,
                     input_json,
                 } => ResponseItem::FunctionCall {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     name,
                     namespace: None,
