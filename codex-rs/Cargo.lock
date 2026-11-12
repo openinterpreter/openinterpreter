@@ -4141,7 +4141,7 @@ dependencies = [
  "opentelemetry_sdk",
  "pretty_assertions",
  "rand 0.9.5",
- "rmcp",
+ "rmcp 3.5.1",
  "serde",
  "serde_json",
  "test-case",
