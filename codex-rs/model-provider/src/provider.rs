@@ -40,6 +40,7 @@ use crate::auth::resolve_provider_auth;
 use crate::auth::resolve_provider_auth_for_scope;
 use crate::capabilities::ProviderCapabilities;
 use crate::combined_auth::compose_auth;
+use crate::gcp::GcpModelProvider;
 use crate::models_endpoint::OpenAiModelsEndpoint;
 use crate::workspace_routing::WorkspaceRoutingContext;
 use codex_model_provider_info::RemoteCompactionSupport;
@@ -525,6 +526,10 @@ fn create_model_provider_with_cache_id_and_runtime(
 ) -> SharedModelProvider {
     if provider_info.is_amazon_bedrock() {
         return Arc::new(AmazonBedrockModelProvider::new(provider_info, auth_manager));
+    }
+    // Vertex owns its command-backed credentials and must not inherit OpenAI runtime auth.
+    if provider_info.is_gcp() {
+        return Arc::new(GcpModelProvider::new(provider_info, auth_manager));
     }
     let gateway_auth_manager = provider_info.gateway_oauth.as_ref().map(|config| {
         provider_info.validate()?;

@@ -8,6 +8,7 @@ mod client_auth;
 mod combined_auth;
 mod gateway_auth;
 mod gateway_export;
+mod gcp;
 mod models_endpoint;
 mod models_identity;
 mod provider;

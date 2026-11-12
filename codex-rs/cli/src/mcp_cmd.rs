@@ -50,6 +50,10 @@ use crate::mcp_login::McpLoginMode;
 use crate::mcp_login::perform_oauth_login_retry_without_scopes;
 use crate::plugin_cmd::load_cli_auth_manager;
 
+#[cfg(test)]
+#[path = "mcp_cmd_tests.rs"]
+mod tests;
+
 /// Subcommands:
 /// - `list`   — list configured servers (with `--json`)
 /// - `get`    — show a single server (with `--json`)

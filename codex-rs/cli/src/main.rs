@@ -56,6 +56,7 @@ static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
 mod cloud_config;
+mod config_override_args;
 mod daemon_install;
 mod daemon_telemetry;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -70,6 +71,7 @@ mod exec_server_args_tests;
 mod marketplace_cmd;
 mod mcp_cmd;
 mod mcp_login;
+mod migrate_nfs_db;
 mod migrate_rollouts;
 mod plugin_cmd;
 mod queue_cmd;
@@ -229,6 +231,9 @@ enum Subcommand {
 
     /// Permanently delete a saved session by id or session name.
     Delete(DeleteCommand),
+
+    /// [experimental] Migrate configured SQLite databases to DELETE mode in place.
+    MigrateNfsDb(migrate_nfs_db::MigrateNfsDbCommand),
 
     /// Unarchive a saved session by id or session name.
     Unarchive(SessionArchiveCommand),
@@ -1131,7 +1136,8 @@ async fn dispatch_cli(
         remote,
         mut interactive,
         subcommand,
-    } = MultitoolCli::parse();
+    } = config_override_args::try_parse_from(std::env::args_os())
+        .unwrap_or_else(|error| error.exit());
     // Retain the launch target through TUI exit, even if a launcher changes selection.
     let daemon_cli_executable = arg0_paths
         .codex_self_exe
@@ -1752,6 +1758,19 @@ async fn dispatch_cli(
             )
             .await?;
             println!("{output}");
+        }
+        Some(Subcommand::MigrateNfsDb(command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "migrate-nfs-db",
+            )?;
+            migrate_nfs_db::run(
+                command,
+                root_config_overrides,
+                loader_overrides_for_profile(interactive.config_profile_v2.as_ref())?,
+            )
+            .await?;
         }
         Some(Subcommand::Unarchive(cmd)) => {
             let output = run_session_archive_cli_command(
@@ -2528,6 +2547,7 @@ fn unsupported_subcommand_name_for_strict_config(
         | Some(Subcommand::Queue(_))
         | Some(Subcommand::Archive(_))
         | Some(Subcommand::Delete(_))
+        | Some(Subcommand::MigrateNfsDb(_))
         | Some(Subcommand::Unarchive(_))
         | Some(Subcommand::Fork(_))
         | Some(Subcommand::Doctor(_)) => None,
@@ -2546,6 +2566,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::Logout(_)) => Some("logout"),
         Some(Subcommand::Completion(_)) => Some("completion"),
         Some(Subcommand::Update) => Some("update"),
+        Some(Subcommand::MigrateNfsDb(_)) => Some("migrate-nfs-db"),
         Some(Subcommand::Cloud(_)) => Some("cloud"),
         Some(Subcommand::Sandbox(_)) => Some("sandbox"),
         Some(Subcommand::Debug(_)) => Some("debug"),
@@ -3025,6 +3046,24 @@ mod tests {
     use codex_protocol::ThreadId;
     use codex_tui::TokenUsage;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn nfs_migration_is_explicit_and_never_a_remote_command() {
+        let cli = MultitoolCli::try_parse_from(["codex", "migrate-nfs-db"])
+            .expect("explicit migration command parses");
+        assert!(matches!(cli.subcommand, Some(Subcommand::MigrateNfsDb(_))));
+        assert!(
+            reject_remote_mode_for_subcommand(
+                Some("unix:///tmp/remote.sock"),
+                None,
+                "migrate-nfs-db"
+            )
+            .is_err()
+        );
+        assert!(
+            reject_remote_mode_for_subcommand(None, Some("TOKEN_ENV"), "migrate-nfs-db").is_err()
+        );
+    }
 
     #[test]
     fn interactive_tui_future_stays_bounded() {
