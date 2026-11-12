@@ -5666,7 +5666,8 @@ async fn session_configuration_apply_preserves_profile_file_system_policy_on_cwd
 
 #[tokio::test]
 async fn session_configuration_apply_permission_profile_preserves_existing_deny_read_entries() {
-    let mut session_configuration = make_session_configuration_for_tests().await;
+    let (session, _turn_context) = make_session_and_context().await;
+    let mut session_configuration = session.state.lock().await.session_configuration.clone();
     let cwd = tempfile::tempdir().expect("create temp dir");
     session_configuration.legacy_fallback_cwd = cwd.path().abs();
 
@@ -5703,13 +5704,13 @@ async fn session_configuration_apply_permission_profile_preserves_existing_deny_
         &requested_file_system_policy,
         NetworkSandboxPolicy::Restricted,
     );
-    let updated = session_configuration
-        .apply(
+    let updated = session
+        .apply_session_settings(
+            &session_configuration,
             &SessionSettingsUpdate {
                 permission_profile: Some(permission_profile),
                 ..Default::default()
             },
-            &[],
         )
         .expect("permission profile update should succeed");
 
@@ -5720,6 +5721,74 @@ async fn session_configuration_apply_permission_profile_preserves_existing_deny_
     assert_eq!(
         updated.file_system_sandbox_policy(&[]),
         expected_file_system_policy
+    );
+}
+
+#[tokio::test]
+async fn session_settings_preview_preserves_legacy_input_and_identity_clearing() {
+    let (session, context) = make_session_and_context().await;
+    let profile = PermissionProfile::read_only();
+    let selected = PermissionProfileSnapshot::active_with_profile_workspace_roots(
+        profile.clone(),
+        ActivePermissionProfile::read_only(),
+        vec![
+            context
+                .initial_environments
+                .primary()
+                .unwrap()
+                .cwd()
+                .clone()
+                .into(),
+        ],
+    );
+    session
+        .state
+        .lock()
+        .await
+        .session_configuration
+        .permission_profile_state
+        .set_permission_profile_snapshot(selected.clone())
+        .unwrap();
+    let canonical = session
+        .update_settings(SessionSettingsUpdate {
+            permission_profile: Some(profile.clone()),
+            profile_workspace_roots: Some(selected.profile_workspace_roots().to_vec()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        canonical.configuration.permission_profile_state.snapshot(),
+        selected
+    );
+
+    let legacy = SessionSettingsUpdate {
+        sandbox_policy: Some(SandboxPolicy::new_read_only_policy()),
+        ..Default::default()
+    };
+    let preview = session.preview_settings(&legacy).await.unwrap();
+    assert_eq!(
+        (
+            preview.permission_profile,
+            preview.active_permission_profile,
+            preview.profile_workspace_roots
+        ),
+        (profile.clone(), None, Vec::new()),
+    );
+    assert_eq!(
+        session
+            .state
+            .lock()
+            .await
+            .session_configuration
+            .permission_profile_state
+            .snapshot(),
+        selected
+    );
+    let committed = session.update_settings(legacy).await.unwrap();
+    assert_eq!(
+        committed.configuration.permission_profile_state.snapshot(),
+        PermissionProfileSnapshot::legacy(profile),
     );
 }
 
