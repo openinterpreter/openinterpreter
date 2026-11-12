@@ -250,6 +250,23 @@ impl PackageLifecycle {
             "logged-in user does not match the recorded sandbox owner"
         );
 
+        let mut pins = Vec::new();
+        if let Some(home) = with_owner_impersonation(token.0, || {
+            crate::installation_record::resolve_restored_home(
+                &record.codex_home,
+                record.runtime.as_ref(),
+                &mut pins,
+            )
+        })? {
+            record.codex_home = home;
+            if let Some(desktop) = &mut record.desktop_installation {
+                // A historical junction cannot grant deletion of its physical target.
+                desktop.created_codex_home = false;
+            }
+            crate::installation_record::save_runtime(&record)?;
+        }
+        drop(setup_lock);
+
         self.register_authenticated_user(
             InstallationRecord {
                 session_id,

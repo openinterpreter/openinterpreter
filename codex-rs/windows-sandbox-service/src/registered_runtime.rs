@@ -43,7 +43,9 @@ mod metadata;
 mod registration_result;
 mod removal;
 
+pub(crate) use metadata::read_acl;
 pub(crate) use metadata::remove as remove_metadata;
+pub(crate) use metadata::write_acl;
 pub(crate) use removal::prepare as prepare_removal;
 pub(crate) use removal::restore_disabled_accounts;
 
