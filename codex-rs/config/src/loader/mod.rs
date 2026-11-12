@@ -681,7 +681,9 @@ fn validate_cli_overrides_strictly(
     base_dir: &Path,
 ) -> io::Result<()> {
     let _guard = AbsolutePathBufGuard::new(base_dir);
-    if let Some(path) = ignored_toml_value_fields::<ConfigToml>(cli_overrides_layer.clone()).first()
+    if let Some(path) = ignored_toml_value_fields::<ConfigToml>(cli_overrides_layer.clone())
+        .unwrap_or_default()
+        .first()
     {
         let ignored_path = path.join(".");
         return Err(io::Error::new(

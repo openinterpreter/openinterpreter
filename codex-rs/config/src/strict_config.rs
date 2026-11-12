@@ -94,19 +94,19 @@ fn config_error_from_ignored_toml_value_fields_for_source<T: DeserializeOwned + 
     }
 }
 
-pub(crate) fn ignored_toml_value_fields<T: DeserializeOwned>(value: TomlValue) -> Vec<Vec<String>> {
+pub(crate) fn ignored_toml_value_fields<T: DeserializeOwned>(
+    value: TomlValue,
+) -> Result<Vec<Vec<String>>, serde_path_to_error::Error<toml::de::Error>> {
     let mut ignored_paths = Vec::new();
-    let result: Result<T, _> = serde_ignored::deserialize(value, |ignored_path| {
+    let mut record_path = |ignored_path: serde_ignored::Path<'_>| {
         let path_segments = ignored_path_segments(&ignored_path);
         if !path_segments.is_empty() {
             ignored_paths.push(path_segments);
         }
-    });
-    if result.is_err() {
-        return Vec::new();
-    }
-
-    ignored_paths
+    };
+    let deserializer = serde_ignored::Deserializer::new(value, &mut record_path);
+    serde_path_to_error::deserialize::<_, T>(deserializer)?;
+    Ok(ignored_paths)
 }
 
 pub(crate) fn unknown_feature_toml_value_field(value: &TomlValue) -> Option<String> {
@@ -233,6 +233,7 @@ pub(crate) fn ignored_config_warning(
     let effective = config.effective_config();
     let unknown_features = unknown_feature_toml_value_path(&effective);
     for path in ignored_toml_value_fields::<ConfigToml>(effective)
+        .unwrap_or_default()
         .into_iter()
         .chain(unknown_features)
     {
@@ -267,6 +268,7 @@ pub(crate) fn ignored_config_warning(
         strip_cloud_auth_requirements(&source, &mut value);
         fields.extend(
             ignored_toml_value_fields::<ConfigRequirementsToml>(value)
+                .unwrap_or_default()
                 .into_iter()
                 .map(|path| (format!("requirements ({source})"), path)),
         );
