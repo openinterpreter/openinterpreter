@@ -1,6 +1,5 @@
 //! Storage-neutral attachment persistence and availability checks.
 
-use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
