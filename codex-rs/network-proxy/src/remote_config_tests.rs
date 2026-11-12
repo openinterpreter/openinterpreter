@@ -78,6 +78,8 @@ async fn round_trip_preserves_supported_effective_settings() {
             NetworkProxyState::from_remote_launch_config(
                 RemoteNetworkProxyLaunchConfig::new(remote),
                 executor_os,
+                &crate::RemoteCredentialBrokerCache::default(),
+                &std::collections::HashMap::new(),
             )
             .unwrap(),
         );
@@ -211,6 +213,8 @@ fn launch_config_materializes_audit_and_execution_attribution() {
             policy_decision_timeout_ms: None,
         },
         Platform::native(),
+        &crate::RemoteCredentialBrokerCache::default(),
+        &std::collections::HashMap::new(),
     )
     .expect("remote launch state");
 
