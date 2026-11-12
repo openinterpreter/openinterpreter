@@ -69,6 +69,7 @@ use core_test_support::skip_if_wine_exec;
 use core_test_support::stdio_server_bin;
 use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::start_streaming_sse_server;
+use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::executor_path_uri;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
@@ -94,6 +95,9 @@ mod catalog_approval_instructions;
 
 #[path = "scenarios_agent_eviction_tests.rs"]
 mod agent_eviction;
+
+#[path = "scenarios_budget_context.rs"]
+mod budget_context;
 
 #[path = "scenarios_context_management_tools.rs"]
 mod context_management_tools;
@@ -187,6 +191,9 @@ mod preparation;
 
 #[path = "scenarios_retained_tool_outputs.rs"]
 mod retained_tool_outputs;
+
+#[path = "scenarios_reserved_spawn.rs"]
+mod reserved_spawn;
 
 #[path = "scenarios_shared_instructions.rs"]
 mod shared_instructions;
