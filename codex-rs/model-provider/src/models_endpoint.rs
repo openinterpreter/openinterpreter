@@ -184,7 +184,13 @@ impl OpenAiModelsEndpoint {
             "codex.remote_models.fetch_update.duration_ms",
             &[("auth_mode", metric_auth_mode)],
         );
-        let identity = crate::models_identity::identity(&self.provider_info, auth.as_ref())?;
+        let identity = crate::models_identity::identity_with_codex_home(
+            &self.provider_info,
+            auth.as_ref(),
+            self.auth_manager
+                .as_ref()
+                .map(|manager| manager.codex_home()),
+        )?;
         let auth_mode = auth.as_ref().map(CodexAuth::auth_mode);
         let mut api_provider = resolve_api_provider(&self.provider_info, auth.as_ref())?;
         if (auth.as_ref().is_some_and(CodexAuth::is_api_key_auth) || self.has_provider_api_key())
@@ -339,7 +345,14 @@ impl ModelsEndpointClient for OpenAiModelsEndpoint {
             .auth_manager
             .as_ref()
             .and_then(|manager| manager.auth_cached());
-        crate::models_identity::identity(&self.provider_info, auth.as_ref()).ok()
+        crate::models_identity::identity_with_codex_home(
+            &self.provider_info,
+            auth.as_ref(),
+            self.auth_manager
+                .as_ref()
+                .map(|manager| manager.codex_home()),
+        )
+        .ok()
     }
 
     fn has_command_auth(&self) -> bool {

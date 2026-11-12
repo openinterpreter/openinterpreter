@@ -9,6 +9,7 @@ use codex_login::default_client::RESIDENCY_HEADER_NAME;
 use codex_login::default_client::ResidencyRequirement;
 use codex_login::default_client::create_client;
 use codex_login::default_client::set_default_client_residency_requirement;
+use codex_model_provider_info::WireApi;
 use codex_models_manager::manager::ModelsManager;
 use codex_models_manager::manager::OpenAiModelsManager;
 use codex_models_manager::manager::RefreshStrategy;
@@ -59,6 +60,66 @@ impl ModelsTransportBuilder for CaptureModelsUrl {
         *self.0.lock().unwrap() = Some(request_url);
         Box::pin(async { Err(std::io::Error::other("transport intentionally unavailable")) })
     }
+}
+
+#[test]
+fn kimi_catalog_identity_tracks_the_auth_managers_saved_credentials() {
+    let home = tempfile::tempdir().expect("Codex home");
+    let auth = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        home.path().to_path_buf(),
+    );
+    let provider = ModelProviderInfo {
+        name: "Kimi For Coding".into(),
+        base_url: Some("https://api.kimi.com/coding/v1".into()),
+        wire_api: WireApi::Chat,
+        requires_openai_auth: false,
+        ..Default::default()
+    };
+    let endpoint = OpenAiModelsEndpoint::new(provider.clone(), Some(auth.clone()), None);
+    let missing = endpoint
+        .identity()
+        .expect("identity without saved credentials");
+
+    let credentials_dir = home.path().join("credentials");
+    std::fs::create_dir_all(&credentials_dir).expect("credentials directory");
+    let credentials_path = credentials_dir.join("kimi-code.json");
+    let save = |access_token: &str| {
+        let credentials = serde_json::json!({
+            "access_token": access_token,
+            "refresh_token": "synthetic-refresh-token",
+            "expires_at": 4_000_000_000_u64,
+            "scope": "scope",
+            "token_type": "Bearer",
+            "expires_in": 600,
+        });
+        std::fs::write(&credentials_path, serde_json::to_vec(&credentials).unwrap())
+            .expect("saved credentials");
+    };
+    save("synthetic-access-token-one");
+    let first = endpoint
+        .identity()
+        .expect("identity with saved credentials");
+    save("synthetic-access-token-two");
+    let second = endpoint
+        .identity()
+        .expect("identity after credential rotation");
+
+    assert_ne!(missing, first);
+    assert_ne!(first, second);
+    for secret in ["synthetic-access-token-one", "synthetic-access-token-two"] {
+        assert!(!first.contains(secret));
+        assert!(!second.contains(secret));
+    }
+    assert_eq!(
+        second,
+        crate::models_identity::identity_with_codex_home(
+            &provider,
+            auth.auth_cached().as_ref(),
+            Some(home.path()),
+        )
+        .expect("fetch identity should agree with cache identity")
+    );
 }
 
 #[tokio::test]
