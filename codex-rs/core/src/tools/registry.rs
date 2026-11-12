@@ -15,6 +15,7 @@ use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolCallState;
+use crate::tools::context::ToolEnvironments;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -460,6 +461,54 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    pub(crate) fn search_info(&self, tool: &RegisteredTool) -> Option<ToolSearchInfo> {
+        let info = tool.runtime.search_info()?;
+        // A runtime may advertise a different search schema or description. Preserve it,
+        // along with its ranking text and source, rather than substituting the normal spec.
+        match self
+            .functions_namespace_function_prefixes
+            .prepare(&tool.runtime.tool_name(), || {
+                info.entry.to_loadable_spec().into()
+            }) {
+            Some(spec) => ToolSearchInfo::from_spec(info.entry.search_text, spec, info.source_info),
+            None => Some(info),
+        }
+    }
+
+    /// Apply catalog prefixes to this step's specs, budgeting only reachable tools.
+    /// The planner supplies the names; this does not change execution or exposure.
+    pub(crate) fn apply_functions_namespace_function_prefixes(
+        &mut self,
+        prefixes: Option<&BTreeMap<String, String>>,
+        available_tools: impl IntoIterator<Item = ToolName>,
+    ) -> Result<(), &'static str> {
+        let prefixes = FunctionsNamespaceFunctionPrefixes::new(prefixes, available_tools)?;
+        for tool in self.tools.values_mut() {
+            tool.model_spec = prefixes
+                .prepare(&tool.runtime.tool_name(), || tool.runtime.spec())
+                .map(Arc::new);
+        }
+        self.functions_namespace_function_prefixes = prefixes;
+        Ok(())
+    }
+
+    fn prepare_tool(
+        &self,
+        runtime: Arc<dyn CoreToolRuntime>,
+        exposure: ToolExposure,
+    ) -> RegisteredTool {
+        let model_spec = self
+            .functions_namespace_function_prefixes
+            .prepare(&runtime.tool_name(), || runtime.spec())
+            .map(Arc::new);
+        RegisteredTool {
+            runtime,
+            exposure,
+            native_review: NativeReview::Disabled,
+            model_spec,
+        }
+    }
+
     pub(crate) fn with_tool_policy(tool_policy: Arc<ToolPolicy>) -> Self {
         Self {
             tool_policy,
@@ -515,6 +564,8 @@ impl ToolRegistry {
         if !self.tool_policy.allows(&tool_name) {
             return;
         }
+        let mut tool = self.prepare_tool(runtime, exposure);
+        tool.native_review = native_review;
         match self.tools.entry(tool_name) {
             Entry::Vacant(entry) => {
                 entry.insert(tool);
@@ -717,7 +768,11 @@ impl ToolRegistry {
         let cancellation_token = invocation.cancellation_token.clone();
         let tool_name = invocation.tool_name.clone();
         let call_id_owned = invocation.call_id.clone();
-        let otel = invocation.step_context.session_telemetry.clone();
+        let otel = invocation
+            .step_context
+            .session_telemetry
+            .clone()
+            .with_product_sku(invocation.turn.config.apps_mcp_product_sku.as_deref());
         // TODO(anp): Reconcile these tags with TurnEnvironment::sandbox_context
         // instead of reporting the thread-wide backend for environment-scoped tools.
         let sandbox_tags = invocation.turn.turn_metadata_state.sandbox_tags;
@@ -792,57 +847,21 @@ impl ToolRegistry {
             return Err(err);
         }
 
-        if let Some(pre_tool_use_payload) = tool.pre_tool_use_payload(&invocation) {
-            match run_pre_tool_use_hooks(
-                &invocation.session,
-                invocation.step_context.as_ref(),
-                invocation.call_id.clone(),
-                &pre_tool_use_payload.tool_name,
-                &pre_tool_use_payload.tool_input,
-            )
-            .await
-            {
-                PreToolUseHookResult::Blocked(message) => {
-                    if tool.is_builtin_control_tool() {
-                        let mut analytics = ControlToolCallGuard::new(&invocation);
-                        analytics.finish(ControlToolCallStatus::Rejected);
-                    }
-                    let err = FunctionCallError::RespondToModel(message);
-                    dispatch_trace.record_failed(&err);
-                    notify_tool_finish_if_unclaimed(
-                        &invocation,
-                        call_state.as_deref(),
-                        ToolCallOutcome::Blocked,
-                    )
-                    .await;
-                    return Err(err);
-                }
-                PreToolUseHookResult::Continue {
-                    updated_input: Some(updated_input),
-                } => match tool.with_updated_hook_input(invocation.clone(), updated_input) {
-                    Ok(updated_invocation) => {
-                        invocation = updated_invocation;
-                    }
-                    Err(err) => {
-                        if tool.is_builtin_control_tool() {
-                            let mut analytics = ControlToolCallGuard::new(&invocation);
-                            analytics.finish(ControlToolCallStatus::Failed);
-                        }
-                        dispatch_trace.record_failed(&err);
-                        notify_tool_finish_if_unclaimed(
-                            &invocation,
-                            call_state.as_deref(),
-                            ToolCallOutcome::Failed {
-                                handler_executed: false,
-                            },
-                        )
-                        .await;
-                        return Err(err);
-                    }
-                },
-                PreToolUseHookResult::Continue {
-                    updated_input: None,
-                } => {}
+        let fail_before_execution = async |invocation: &ToolInvocation, err: FunctionCallError| {
+            let log_payload = tool_log_payload(&invocation.payload, &invocation.source);
+            otel.tool_result_with_tags(
+                &tool_name,
+                &call_id_owned,
+                log_payload.as_ref(),
+                Duration::ZERO,
+                /*success*/ false,
+                &err.to_string(),
+                &tool_result_tags,
+                &extra_trace_fields,
+            );
+            if tool.is_builtin_control_tool() {
+                let mut analytics = ControlToolCallGuard::new(invocation);
+                analytics.finish(ControlToolCallStatus::Failed);
             }
             dispatch_trace.record_failed(&err);
             notify_tool_finish_if_unclaimed(
@@ -971,11 +990,8 @@ impl ToolRegistry {
                 run_post_tool_use_hooks(
                     &invocation.session,
                     invocation.step_context.as_ref(),
-                    post_tool_use_payload.tool_use_id,
-                    post_tool_use_payload.tool_name.name().to_string(),
-                    post_tool_use_payload.tool_name.matcher_aliases().to_vec(),
-                    post_tool_use_payload.tool_input,
-                    post_tool_use_payload.tool_response,
+                    post_tool_use_payload,
+                    &invocation.environments.hook_ids(),
                 )
                 .or_cancel_tool(&cancellation_token)
                 .await?,
@@ -1005,6 +1021,7 @@ impl ToolRegistry {
                 handler_executed: true,
             },
         };
+        drop(invocation_guard);
         notify_tool_finish_if_unclaimed(&invocation, call_state.as_deref(), lifecycle_outcome)
             .await;
 
@@ -1075,12 +1092,7 @@ async fn handle_any_tool(
         result: output,
         post_tool_use_payload,
     };
-    // Capture confirmed delivery before any further await, including post-tool hooks.
-    if let Some(call_state) = call_state
-        && let Some(text) = result.delivered_assistant_message()
-    {
-        let _ = call_state.delivered_assistant_message.set(text);
-    }
+    super::user_messaging::capture_delivery(&result, call_state);
     if result.result.contains_external_context()
         && invocation.turn.config.memories.disable_on_external_context
     {
@@ -1142,7 +1154,6 @@ pub(crate) async fn apply_pre_tool_use(
             Ok(())
         }
     }
-    Ok(result)
 }
 
 fn function_hook_tool_name(invocation: &ToolInvocation) -> HookToolName {

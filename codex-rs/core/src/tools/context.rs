@@ -19,8 +19,8 @@ use codex_tools::ToolName;
 use codex_utils_audio::estimate_tool_audio_tokens;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::truncate_function_output_payload;
-use codex_utils_output_truncation::truncate_text;
 use codex_utils_output_truncation::with_serialization_allowance;
+use codex_utils_path_uri::PathUri;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
@@ -48,6 +48,7 @@ pub type SharedTurnDiffTracker = Arc<Mutex<TurnDiffTracker>>;
 pub(crate) struct ToolCallState {
     pub(crate) terminal_outcome_reached: AtomicBool,
     pub(crate) delivered_assistant_message: OnceLock<String>,
+    pub(crate) invocation: crate::agent::host::InvocationReservation,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -121,15 +122,6 @@ pub struct ToolInvocation {
     pub native_call: Option<Arc<ResponseItem>>,
     /// Captured before PreToolUse and retained across input rewrites.
     pub(crate) environments: ToolEnvironments,
-}
-
-/// Identity of the model call that started a tool invocation, retained across code-mode waits.
-#[derive(Clone)]
-pub(crate) struct ToolCallOrigin {
-    /// Best-effort lookup: invocations without a matching history item still
-    /// retain their known window ID.
-    pub(crate) item_id: Option<ResponseItemId>,
-    pub(crate) window_id: String,
 }
 
 /// Identity of the model call that started a tool invocation, retained across code-mode waits.
@@ -260,7 +252,7 @@ impl McpToolOutput {
         truncate_function_output_payload(
             &mut payload,
             with_serialization_allowance(self.truncation_policy),
-            estimate_audio_token_count,
+            estimate_tool_audio_tokens,
         );
         payload
     }

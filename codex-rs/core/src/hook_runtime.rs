@@ -61,8 +61,12 @@ use tracing::instrument;
 
 use crate::context::ContextualUserFragment;
 use crate::context::HookAdditionalContext;
-use crate::event_mapping::parse_turn_item;
+use crate::environment_selection::TurnEnvironmentSnapshot;
+use crate::event_mapping::is_contextual_user_message_content;
+use crate::event_mapping::user_input_parts;
 use crate::guardian::GuardianReviewContext;
+use crate::hook_environment_executor::with_environment_hooks;
+use crate::hook_environment_executor::with_tool_environment_hooks;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
@@ -315,11 +319,8 @@ pub(crate) async fn run_permission_request_hooks(
 pub(crate) async fn run_post_tool_use_hooks(
     sess: &Arc<Session>,
     step_context: &StepContext,
-    tool_use_id: String,
-    tool_name: String,
-    matcher_aliases: Vec<String>,
-    tool_input: Value,
-    tool_response: Value,
+    payload: PostToolUsePayload,
+    target_environments: &[&str],
 ) -> PostToolUseOutcome {
     let turn_context = &step_context.turn;
     let request = PostToolUseRequest {
@@ -331,11 +332,11 @@ pub(crate) async fn run_post_tool_use_hooks(
         transcript_path: sess.hook_transcript_path().await,
         model: step_context.settings.model_info.slug.clone(),
         permission_mode: hook_permission_mode(step_context.settings.approval_policy()),
-        tool_name,
-        matcher_aliases,
-        tool_use_id,
-        tool_input,
-        tool_response,
+        tool_name: payload.tool_name.name().to_string(),
+        matcher_aliases: payload.tool_name.matcher_aliases().to_vec(),
+        tool_use_id: payload.tool_use_id,
+        tool_input: payload.tool_input,
+        tool_response: payload.tool_response,
     };
     let hooks = with_tool_environment_hooks(
         sess,
@@ -349,48 +350,6 @@ pub(crate) async fn run_post_tool_use_hooks(
     let outcome = hooks.run_post_tool_use(request).await;
     emit_hook_completed_events(sess, turn_context, outcome.hook_events.clone()).await;
     outcome
-}
-
-fn executor_hook_sources_for_step(step_context: &StepContext) -> Vec<ExecutorPluginHookSource> {
-    step_context
-        .executor_capability_discovery
-        .as_deref()
-        .map(|snapshot| {
-            let app_tool_policy =
-                AppToolPolicyEvaluator::new(&step_context.mcp.config().config_layer_stack);
-            executor_plugin_hook_sources(snapshot, |server, tool| {
-                step_context
-                    .mcp
-                    .tool_info(server, tool)
-                    .filter(|tool_info| {
-                        if server != CODEX_APPS_MCP_SERVER_NAME {
-                            return true;
-                        }
-                        let annotations = tool_info.tool.annotations.as_ref();
-                        app_tool_policy
-                            .policy(AppToolPolicyInput {
-                                connector_id: tool_info.connector_id.as_deref(),
-                                link_id: None,
-                                tool_name: &tool_info.tool.name,
-                                tool_title: tool_info.tool.title.as_deref(),
-                                destructive_hint: annotations
-                                    .and_then(|annotations| annotations.destructive_hint),
-                                open_world_hint: annotations
-                                    .and_then(|annotations| annotations.open_world_hint),
-                            })
-                            .enabled
-                    })
-            })
-            .into_iter()
-            .filter(|source| {
-                !step_context
-                    .turn
-                    .disabled_plugin_ids
-                    .contains(&source.plugin_id.as_key())
-            })
-            .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn build_request_metadata(
