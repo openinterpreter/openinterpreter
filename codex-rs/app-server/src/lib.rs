@@ -130,6 +130,11 @@ mod gateway_oauth_notifications;
 mod image_url;
 pub mod in_process;
 mod interpreter_catalog;
+#[cfg(test)]
+mod lib_tests;
+mod log_write_warning;
+#[cfg(unix)]
+mod managed_daemon;
 mod mcp_refresh;
 mod message_processor;
 mod model_catalog;
@@ -814,6 +819,10 @@ pub async fn run_main_with_transport_options(
         runtime_options.install_shutdown_signal_handler && !single_client_mode;
     let managed_daemon = matches!(&transport, AppServerTransport::UnixSocket { .. })
         && runtime_options.managed_daemon;
+    #[cfg(unix)]
+    if managed_daemon {
+        managed_daemon::raise_nofile_limit()?;
+    }
     let mut app_server_client_name_rx = None;
 
     match &transport {

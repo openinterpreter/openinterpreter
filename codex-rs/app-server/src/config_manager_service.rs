@@ -1020,3 +1020,10 @@ fn find_effective_layer(
 #[cfg(test)]
 #[path = "config_manager_service_tests.rs"]
 mod tests;
+
+#[path = "config_manager_service_model_providers.rs"]
+mod model_providers;
+#[path = "config_manager_service_provider_setup.rs"]
+mod provider_setup;
+#[path = "config_manager_service_provider_write.rs"]
+mod provider_write;

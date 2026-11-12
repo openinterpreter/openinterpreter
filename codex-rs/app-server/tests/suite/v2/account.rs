@@ -3992,5 +3992,7 @@ async fn get_account_with_chatgpt_missing_plan_claim_returns_unknown() -> Result
     Ok(())
 }
 
+#[path = "account_enterprise_tests.rs"]
+mod enterprise_tests;
 #[path = "account_workspace_switching.rs"]
 mod workspace_switching;

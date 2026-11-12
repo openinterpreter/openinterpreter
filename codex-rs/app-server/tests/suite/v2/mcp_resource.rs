@@ -123,6 +123,9 @@ use tokio::time::timeout;
 #[path = "mcp_resource/plugin_metadata_refresh.rs"]
 mod plugin_metadata_refresh;
 
+#[path = "mcp_resource/caller_metadata.rs"]
+mod caller_metadata;
+
 pub(super) const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const TEST_RESOURCE_URI: &str = "test://codex/resource";
 pub(super) const TEST_WIDGET_RESOURCE_URI: &str = "ui://widget/checkout-session.html";

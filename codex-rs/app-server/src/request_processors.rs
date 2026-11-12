@@ -605,6 +605,7 @@ mod thread_memory;
 mod thread_processor;
 mod thread_queue_processor;
 mod thread_read_state;
+mod thread_resume_account;
 mod thread_sections;
 mod token_usage_replay;
 mod turn_processor;

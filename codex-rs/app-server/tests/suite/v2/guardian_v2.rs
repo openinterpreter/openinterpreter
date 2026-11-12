@@ -93,6 +93,12 @@ mod code_mode;
 #[path = "guardian_action_budget_tests.rs"]
 mod action_budget;
 
+#[path = "guardian_goal_tests.rs"]
+mod goal_tests;
+
+#[path = "guardian_pending_score_tests.rs"]
+mod pending_score_tests;
+
 const TIMEOUT: Duration = Duration::from_secs(30);
 const MODEL: &str = "mock-model";
 const REQUIRED_MODEL: &str = "protected-model";

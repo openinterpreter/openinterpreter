@@ -24,7 +24,9 @@ mod enterprise_login;
 mod gateway_oauth;
 mod gcp_setup;
 mod rate_limit_resets;
+mod security_setup;
 mod workspace_routing;
+mod workspace_switching;
 
 // Duration before a browser ChatGPT login attempt is abandoned.
 const LOGIN_CHATGPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
