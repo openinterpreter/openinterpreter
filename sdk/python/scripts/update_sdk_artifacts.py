@@ -14,7 +14,6 @@ import tempfile
 import types
 import typing
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Sequence, get_args, get_origin
 

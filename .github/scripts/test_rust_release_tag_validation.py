@@ -14,8 +14,10 @@ WORKFLOW = Path(__file__).resolve().parents[1] / "workflows" / "rust-release.yml
 class ReleaseTagValidationTest(unittest.TestCase):
     def test_tag_version_is_defined_before_comparison(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        gate = workflow.split("      - name: Validate tag matches Cargo.toml version\n", 1)[1]
-        gate = gate.split("          echo \"::endgroup::\"", 1)[0]
+        gate = workflow.split(
+            "      - name: Validate tag matches Cargo.toml version\n", 1
+        )[1]
+        gate = gate.split('          echo "::endgroup::"', 1)[0]
         script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
 
         for ref, version, accepted in (
@@ -32,7 +34,11 @@ class ReleaseTagValidationTest(unittest.TestCase):
                     result = subprocess.run(
                         ["bash", "-c", script],
                         cwd=root,
-                        env={**os.environ, "GITHUB_REF_TYPE": "tag", "GITHUB_REF_NAME": ref},
+                        env={
+                            **os.environ,
+                            "GITHUB_REF_TYPE": "tag",
+                            "GITHUB_REF_NAME": ref,
+                        },
                         capture_output=True,
                         text=True,
                         check=False,
