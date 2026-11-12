@@ -109,12 +109,19 @@ pub fn create_spawn_agent_tool_v2(
     options: SpawnAgentToolOptions,
     description_override: Option<&str>,
 ) -> ToolSpec {
-    let available_models_description = options.expose_spawn_agent_model_overrides.then(|| {
-        spawn_agent_models_description(&options.available_models, options.multi_agent_version)
-    });
-    let inherited_model_guidance = (options.expose_spawn_agent_model_overrides
-        && !options.hide_agent_type_model_reasoning)
-        .then_some(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE);
+    let available_models_description = (!options.model_catalog_in_context
+        && options.expose_spawn_agent_model_overrides)
+        .then(|| {
+            spawn_agent_models_description(&options.available_models, options.multi_agent_version)
+        });
+    let inherited_model_guidance = if options.model_catalog_in_context {
+        options
+            .expose_spawn_agent_model_overrides
+            .then_some(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE_V2)
+    } else {
+        (options.expose_spawn_agent_model_overrides && !options.hide_agent_type_model_reasoning)
+            .then_some(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE)
+    };
     let mut properties = spawn_agent_common_properties_v2(&options.agent_type_description);
     if !options.expose_agent_type {
         properties.remove("agent_type");
@@ -773,21 +780,28 @@ fn spawn_agent_tool_description_v2(
     let model_catalog_guidance = model_catalog_guidance.unwrap_or_default();
     let inherited_model_guidance = inherited_model_guidance.unwrap_or_default();
 
+    let (catalog_prefix, catalog_suffix) = if model_catalog_in_context {
+        (String::new(), format!("\n{model_catalog_guidance}"))
+    } else {
+        let available_models_description = available_models_description.unwrap_or_default();
+        (
+            format!("        {available_models_description}\n"),
+            String::new(),
+        )
+    };
     let tool_description = if let Some(description) = description {
         format!(
             r#"
-        {agent_role_guidance}
-        {description}
-{inherited_model_guidance}"#
+{catalog_prefix}        {description}
+{inherited_model_guidance}{catalog_suffix}"#
         )
     } else {
         format!(
             r#"
-        {agent_role_guidance}
-        Spawns an agent to work on the specified task. If your current task is `/root/task1` and you spawn_agent with task_name "task_3" the agent will have canonical task name `/root/task1/task_3`.
+{catalog_prefix}        Spawns an agent to work on the specified task. If your current task is `/root/task1` and you spawn_agent with task_name "task_3" the agent will have canonical task name `/root/task1/task_3`.
 You are then able to refer to this agent as `task_3` or `/root/task1/task_3` interchangeably. However an agent `/root/task2/task_3` would only be able to communicate with this agent via its canonical name `/root/task1/task_3`.
 The spawned agent will have the same tools as you and the ability to spawn its own subagents.
-{inherited_model_guidance}
+{inherited_model_guidance}{catalog_suffix}
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
 The new agent's canonical task name will be provided to it along with the message.
 

@@ -1632,6 +1632,10 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                                 .multi_agent_v2
                                 .expose_spawn_agent_model_overrides,
                             multi_agent_version: turn_context.multi_agent_version,
+                            model_catalog_in_context: turn_context
+                                .config
+                                .features
+                                .enabled(Feature::ModelCatalogInContext),
                             usage_hint_text: turn_context
                                 .config
                                 .multi_agent_v2

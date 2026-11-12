@@ -54,6 +54,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
             hide_agent_type_model_reasoning: false,
             expose_spawn_agent_model_overrides: true,
             multi_agent_version: MultiAgentVersion::V2,
+            model_catalog_in_context: false,
             usage_hint_text: None,
         },
         /*description_override*/ None,
@@ -156,6 +157,37 @@ fn spawn_agent_catalog_description_preserves_generated_context() {
 }
 
 #[test]
+fn spawn_agent_in_context_catalog_guidance_survives_description_override() {
+    let options = SpawnAgentToolOptions {
+        available_models: vec![model_preset("visible", /*show_in_picker*/ true)],
+        expose_spawn_agent_model_overrides: true,
+        model_catalog_in_context: true,
+        ..Default::default()
+    };
+    let ToolSpec::Function(tool) =
+        create_spawn_agent_tool_v2(options, Some("Configured spawn guidance."))
+    else {
+        panic!("spawn_agent should be a function tool");
+    };
+
+    assert!(tool.description.contains("Configured spawn guidance."));
+    assert!(
+        tool.description
+            .contains(SPAWN_AGENT_MODEL_CATALOG_GUIDANCE)
+    );
+    assert!(
+        tool.description
+            .contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE_V2)
+    );
+    assert!(!tool.description.contains("`visible-model`"));
+    assert!(
+        !tool
+            .description
+            .contains("Spawns an agent to work on the specified task.")
+    );
+}
+
+#[test]
 fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
     let tool = create_spawn_agent_tool_v1(SpawnAgentToolOptions {
         agent_type_description: "role help".to_string(),
@@ -224,6 +256,7 @@ fn spawn_agent_tool_caps_visible_model_summaries() {
             hide_agent_type_model_reasoning: false,
             expose_spawn_agent_model_overrides: true,
             multi_agent_version: MultiAgentVersion::V2,
+            model_catalog_in_context: false,
             usage_hint_text: None,
         },
         /*description_override*/ None,
@@ -263,8 +296,11 @@ fn spawn_agent_tool_caps_reasoning_effort_value_length() {
     );
 }
 
-#[test]
-fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
+#[test_case::test_case(false; "inline_catalog")]
+#[test_case::test_case(true; "context_catalog")]
+fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden(
+    model_catalog_in_context: bool,
+) {
     let tool = create_spawn_agent_tool_v2(
         SpawnAgentToolOptions {
             available_models: vec![model_preset("visible", /*show_in_picker*/ true)],
@@ -273,6 +309,7 @@ fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
             hide_agent_type_model_reasoning: true,
             expose_spawn_agent_model_overrides: true,
             multi_agent_version: MultiAgentVersion::V2,
+            model_catalog_in_context,
             usage_hint_text: None,
         },
         /*description_override*/ None,
@@ -300,6 +337,14 @@ fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
         description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE_V2),
         model_catalog_in_context
     );
+    assert_eq!(
+        description.contains("`visible-model`"),
+        !model_catalog_in_context
+    );
+    assert_eq!(
+        description.contains(SPAWN_AGENT_MODEL_CATALOG_GUIDANCE),
+        model_catalog_in_context
+    );
 }
 
 #[test]
@@ -312,6 +357,7 @@ fn spawn_agent_tool_hides_model_controls_without_override_exposure() {
             hide_agent_type_model_reasoning: true,
             expose_spawn_agent_model_overrides: false,
             multi_agent_version: MultiAgentVersion::V2,
+            model_catalog_in_context: false,
             usage_hint_text: None,
         },
         Some(""),

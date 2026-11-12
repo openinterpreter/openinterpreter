@@ -331,13 +331,20 @@ impl ToolSearchHandler {
         tools
     }
 
-    fn search_output_tools<'a>(
-        &self,
-        results: impl IntoIterator<Item = &'a ToolSearchEntry>,
-    ) -> Result<Vec<LoadableToolSpec>, FunctionCallError> {
-        Ok(coalesce_loadable_tool_specs(
-            results.into_iter().map(ToolSearchEntry::to_loadable_spec),
-        ))
+    fn search(&self, query: &str, limit: usize) -> Vec<LoadableToolSpec> {
+        coalesce_loadable_tool_specs(
+            self.search_entries(query)
+                .take(limit)
+                .map(ToolSearchEntry::to_loadable_spec),
+        )
+    }
+
+    fn search_entries(&self, query: &str) -> impl Iterator<Item = &ToolSearchEntry> + '_ {
+        self.search_scorer
+            .matches(&self.search_embedder.embed(query))
+            .into_iter()
+            .filter_map(|result| self.search_infos.get(result.id))
+            .map(|search_info| &search_info.entry)
     }
 }
 

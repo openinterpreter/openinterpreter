@@ -52,6 +52,7 @@ jobs:
           # Release tags may be stable or prerelease versions.
           [[ "${GITHUB_REF_NAME}" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+(-(alpha(\.[0-9]+){0,2}|beta(\.[0-9]+)?))?$ ]] \
             || { echo "❌  Tag '${GITHUB_REF_NAME}' doesn't match expected format"; exit 1; }
+          tag_ver="${GITHUB_REF_NAME#rust-v}"
 
           # Release tags must match the version in Cargo.toml.
           cargo_ver="$(grep -m1 '^version' codex-rs/Cargo.toml \

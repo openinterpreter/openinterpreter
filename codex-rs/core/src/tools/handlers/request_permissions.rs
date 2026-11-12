@@ -126,37 +126,8 @@ impl RequestPermissionsHandler {
             }
         };
 
-        let environment_args: RequestPermissionsEnvironmentArgs = parse_arguments(&arguments)?;
-        let Some(turn_environment) = resolve_tool_environment(
-            &step_context.environments,
-            environment_args.environment_id.as_deref(),
-        )?
-        else {
-            return Err(FunctionCallError::RespondToModel(
-                "request_permissions requires a primary environment".to_string(),
-            ));
-        };
-        let sandbox_context =
-            turn_environment.sandbox_context(/*additional_permissions*/ None);
-        let context = sandbox_context.policy_context();
-        let mut arguments: Value = parse_arguments(&arguments)?;
-        resolve_permission_path_strings(&mut arguments, &context)?;
-        let mut args: RequestPermissionsArgs =
-            serde_json::from_value(arguments).map_err(|err| {
-                FunctionCallError::RespondToModel(format!(
-                    "failed to parse function arguments: {err}"
-                ))
-            })?;
-        args.permissions =
-            normalize_additional_permissions_with_context(args.permissions.into(), &context)
-                .map(codex_protocol::request_permissions::RequestPermissionProfile::from)
-                .map_err(FunctionCallError::RespondToModel)?;
-        if args.permissions.is_empty() {
-            return Err(FunctionCallError::RespondToModel(
-                "request_permissions requires at least one permission".to_string(),
-            ));
-        }
-
+        let turn_environment = selected_executor(&environments, &step_context.environments)?;
+        let request = PreparedPermissionRequest::parse(&arguments, turn_environment)?;
         let response = session
             .request_permissions_for_environment(
                 &step_context,
