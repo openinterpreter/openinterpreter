@@ -718,16 +718,22 @@ prune_standalone_releases() (
   trap 'exit 1' HUP INT TERM
 
   for candidate in "$releases"/*; do
-    [ -d "$candidate" ] && [ ! -L "$candidate" ] &&
-      [ "$candidate" != "$selected" ] && [ "${candidate##*/}" != "$previous" ] || continue
+    if [ ! -d "$candidate" ] || [ -L "$candidate" ] ||
+      [ "$candidate" = "$selected" ] || [ "${candidate##*/}" = "$previous" ]; then
+      continue
+    fi
     release_is_unused "$candidate" || continue
-    [ -f "$candidate/codex-package.json" ] && [ ! -L "$candidate/codex-package.json" ] || continue
+    if [ ! -f "$candidate/codex-package.json" ] || [ -L "$candidate/codex-package.json" ]; then
+      continue
+    fi
     metadata="$(parse_release_metadata < "$candidate/codex-package.json")" || continue
     version="$(printf '%s\n' "$metadata" | awk -F '\t' '$1 == "version" {print $2}')"
     target="$(printf '%s\n' "$metadata" | awk -F '\t' '$1 == "target" {print $2}')"
     entrypoint="$(printf '%s\n' "$metadata" | awk -F '\t' '$1 == "entrypoint" {print $2}')"
     [ "${candidate##*/}" = "$version-$target" ] && [ "$version" != "latest" ] &&
-      [ "$entrypoint" = "bin/codex" ] && [ -f "$candidate/bin/codex" ] || continue
+      if [ "$entrypoint" != "bin/codex" ] || [ ! -f "$candidate/bin/codex" ]; then
+        continue
+      fi
     validate_version "$version" >/dev/null 2>&1 || continue
     case "$target" in
       aarch64-apple-darwin | x86_64-apple-darwin | aarch64-unknown-linux-musl | x86_64-unknown-linux-musl) ;;

@@ -202,7 +202,7 @@ checksum = "35f0f96ce78e38c3dc6d8948aa8163d06385be74000f3c7a95bf1eef35d3ea32"
 dependencies = [
  "cipher 0.5.2",
  "cpubits",
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
 ]
 
 [[package]]
@@ -2333,7 +2333,7 @@ dependencies = [
  "codex-state",
  "codex-utils-absolute-path",
  "codex-utils-path-uri",
- "http 1.4.0",
+ "http 1.5.0",
  "os_info",
  "pretty_assertions",
  "serde",
@@ -2482,7 +2482,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "pretty_assertions",
- "rmcp 3.2.0",
+ "rmcp 3.5.1",
  "serde",
  "serde_json",
  "serial_test",
@@ -2534,7 +2534,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite 0.28.0",
  "toml 0.9.12+spec-1.1.0",
@@ -2594,7 +2594,7 @@ dependencies = [
  "codex-utils-redacted-string",
  "inventory",
  "pretty_assertions",
- "rmcp 3.2.0",
+ "rmcp 3.5.1",
  "schemars 0.8.22",
  "serde",
  "serde_json",
@@ -3000,7 +3000,7 @@ dependencies = [
  "bytes",
  "codex-http-client",
  "futures",
- "http 1.4.0",
+ "http 1.5.0",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -3008,7 +3008,7 @@ dependencies = [
  "prost",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
  "tonic",
@@ -3122,7 +3122,7 @@ dependencies = [
  "http-body-util",
  "pretty_assertions",
  "prost",
- "rand 0.9.3",
+ "rand 0.9.5",
  "reqwest 0.12.28",
  "serde_json",
  "tokio",
@@ -3437,7 +3437,7 @@ dependencies = [
  "rand 0.9.5",
  "regex-lite",
  "reqwest 0.12.28",
- "rmcp 3.2.0",
+ "rmcp 3.5.1",
  "serde",
  "serde_json",
  "serial_test",
@@ -3500,7 +3500,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3738,7 +3738,7 @@ dependencies = [
  "codex-utils-process",
  "codex-websocket-auth",
  "futures",
- "http 1.4.0",
+ "http 1.5.0",
  "insta",
  "jsonwebtoken",
  "pretty_assertions",
@@ -3747,7 +3747,7 @@ dependencies = [
  "tempfile",
  "tikv-jemallocator",
  "tokio",
- "toml 0.9.11+spec-1.1.0",
+ "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -4286,7 +4286,7 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "sha2 0.10.9",
- "socket2 0.6.3",
+ "socket2 0.6.5",
  "system-configuration",
  "tempfile",
  "thiserror 2.0.20",
@@ -4307,7 +4307,7 @@ dependencies = [
  "anyhow",
  "codex-utils-process",
  "codex-utils-pty",
- "http 1.4.0",
+ "http 1.5.0",
  "serde",
  "serde_json",
  "tokio",
@@ -4365,7 +4365,7 @@ dependencies = [
  "keyring",
  "pretty_assertions",
  "secret-service",
- "security-framework 3.5.1",
+ "security-framework 3.7.0",
  "tracing",
 ]
 
@@ -4385,7 +4385,7 @@ dependencies = [
  "codex-utils-cargo-bin",
  "hickory-proto 0.26.3",
  "ignore",
- "indexmap 2.14.0",
+ "indexmap 2.14.2",
  "landlock",
  "libc",
  "pretty_assertions",
@@ -4498,12 +4498,12 @@ dependencies = [
  "codex-utils-plugins",
  "codex-utils-process",
  "futures",
- "http 1.4.0",
+ "http 1.5.0",
  "insta",
  "lru 0.16.4",
  "pretty_assertions",
  "regex-lite",
- "rmcp 3.2.0",
+ "rmcp 3.5.1",
  "serde",
  "serde_json",
  "sha1 0.10.7",
@@ -4577,7 +4577,7 @@ dependencies = [
  "mcp_test_support",
  "os_info",
  "pretty_assertions",
- "rmcp 3.2.0",
+ "rmcp 3.5.1",
  "schemars 0.8.22",
  "serde",
  "serde_json",
@@ -5108,7 +5108,7 @@ dependencies = [
  "codex-http-client",
  "codex-process-hardening",
  "ctor 0.6.3",
- "http 1.4.0",
+ "http 1.5.0",
  "libc",
  "pretty_assertions",
  "reqwest 0.12.28",
@@ -5152,7 +5152,7 @@ dependencies = [
  "oauth2",
  "opentelemetry_sdk",
  "pretty_assertions",
- "rmcp 3.2.0",
+ "rmcp 3.5.1",
  "serde",
  "serde_json",
  "serial_test",
@@ -5240,13 +5240,13 @@ dependencies = [
  "codex-utils-redacted-string",
  "ed25519-dalek",
  "futures",
- "http 1.4.0",
+ "http 1.5.0",
  "pretty_assertions",
- "rand 0.9.3",
+ "rand 0.9.5",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "tokio",
  "url",
  "uuid",
@@ -5542,7 +5542,7 @@ dependencies = [
  "codex-utils-string",
  "jsonptr",
  "pretty_assertions",
- "rmcp 3.2.0",
+ "rmcp 3.5.1",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -5640,7 +5640,7 @@ dependencies = [
  "ratatui",
  "ratatui-macros",
  "regex-lite",
- "rmcp 3.2.0",
+ "rmcp 3.5.1",
  "semver",
  "serde",
  "serde_json",
@@ -5707,11 +5707,11 @@ dependencies = [
  "objc2-local-authentication",
  "p256",
  "pretty_assertions",
- "security-framework 3.5.1",
+ "security-framework 3.7.0",
  "security-framework-sys",
  "sha2 0.10.9",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "tracing",
 ]
 
@@ -5878,7 +5878,7 @@ dependencies = [
  "schemars 0.8.22",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "tracing",
 ]
 
@@ -6108,7 +6108,7 @@ dependencies = [
  "codex-utils-absolute-path",
  "constant_time_eq 0.3.1",
  "hmac 0.12.1",
- "http 1.4.0",
+ "http 1.5.0",
  "jsonwebtoken",
  "pretty_assertions",
  "serde",
@@ -6856,10 +6856,10 @@ checksum = "3a45ee8994e5307cb4c60cfc1c20bf7263ffb771ddc135c9f768a14bcbc15b09"
 dependencies = [
  "curl-sys",
  "libc",
- "openssl-probe 0.1.6",
+ "openssl-probe 0.2.1",
  "openssl-sys",
  "schannel",
- "socket2 0.6.3",
+ "socket2 0.6.5",
  "windows-sys 0.61.2",
 ]
 
@@ -7136,7 +7136,7 @@ dependencies = [
  "defmt-parser",
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -7145,7 +7145,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e"
 dependencies = [
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -8061,7 +8061,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "54f0d287c53ffd184d04d8677f590f4ac5379785529e5e08b1c8083acdd5c198"
 dependencies = [
  "memchr",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -9280,7 +9280,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c2edb206bf06f3c801f4f6789c696396171558ab9b4c7f1fe3ba4d39b00b0f4"
 dependencies = [
  "gix-error",
- "zlib-rs 0.6.3",
+ "zlib-rs 0.6.7",
 ]
 
 [[package]]
@@ -9728,9 +9728,9 @@ dependencies = [
  "ipnet",
  "jni",
  "once_cell",
- "rand 0.10.1",
+ "rand 0.10.2",
  "ring",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "tinyvec",
  "tracing",
  "url",
@@ -10478,7 +10478,7 @@ version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4250ce6452e92010fdf7268ccc5d14faa80bb12fc741938534c58f16804e03c7"
 dependencies = [
- "hybrid-array 0.4.12",
+ "hybrid-array 0.4.15",
 ]
 
 [[package]]
@@ -11255,7 +11255,7 @@ dependencies = [
  "core_test_support",
  "os_info",
  "pretty_assertions",
- "rmcp 3.2.0",
+ "rmcp 3.5.1",
  "serde_json",
  "shlex 1.3.0",
  "tokio",
@@ -12054,7 +12054,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "709fe137109bd1e8b5a99390f77a7d8b2961dafc1a1c5db8f2e60329ad6d895a"
 dependencies = [
- "bitflags 2.13.1",
+ "bitflags 2.13.2",
  "objc2",
  "objc2-core-foundation",
 ]

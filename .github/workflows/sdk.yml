@@ -5,9 +5,7 @@ on:
   workflow_dispatch:
 jobs:
   python-sdk-installation:
-    runs-on:
-      group: ${{ github.event.repository.name }}-runners
-      labels: ${{ github.event.repository.name }}-linux-x64
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout repository
@@ -39,9 +37,7 @@ jobs:
     # This job builds its CLI with Bazel. Keep it advisory while the BuildBuddy
     # key is revoked; restore blocking behavior once it can run without BuildBuddy.
     continue-on-error: true
-    runs-on:
-      group: ${{ github.event.repository.name }}-runners
-      labels: ${{ github.event.repository.name }}-linux-x64
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment:
       name: bazel
