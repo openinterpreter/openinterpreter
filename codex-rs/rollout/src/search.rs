@@ -259,11 +259,11 @@ async fn scan_compressed_rollout_matches(
         let mut patterns = None;
         for path in paths {
             if let Some(snippet) =
-                first_rollout_content_match_snippet(rollout_file.path(), search_term)
+                first_content_match_snippet(path.as_path(), search_term, &mut patterns)
                     .await
                     .unwrap_or_else(|err| {
                         tracing::warn!(
-                            path = %rollout_file.path().display(),
+                            path = %path.display(),
                             %err,
                             "Failed to search compressed rollout"
                         );
