@@ -4,7 +4,7 @@ use super::TranscriptImages;
 use crate::CollectedContext;
 use crate::ContextPresentation;
 use crate::ContextSection;
-use crate::RenderedTranscript;
+use crate::PreparedTranscript;
 use crate::composition::user_message;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
@@ -27,6 +27,8 @@ fn image(url: &str) -> ContentItem {
 fn image_selection_preserves_source_policy_order_and_both_limits() {
     let history = [
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".into(),
             content: ["first", "second", "third", "fourth"].map(image).to_vec(),
@@ -121,6 +123,8 @@ fn file_images_are_selected_from_history_sources() {
     };
     let history = [
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".into(),
             content: vec![image("first"), file_image.clone()],
@@ -175,6 +179,8 @@ fn file_images_are_selected_from_history_sources() {
             detail: Some(ImageDetail::High),
         });
     let history = [ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".into(),
         content: file_images.to_vec(),
@@ -199,9 +205,9 @@ fn file_images_are_selected_from_history_sources() {
     let context = CollectedContext {
         sections: vec![ContextSection::TranscriptImages(selected)],
     }
-    .compose(
+    .compose_prepared(
         ContextPresentation::Async,
-        RenderedTranscript {
+        PreparedTranscript {
             items: Vec::new(),
             omission_note: None,
             truncations: Vec::new(),

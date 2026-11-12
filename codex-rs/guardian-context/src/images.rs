@@ -2,7 +2,10 @@
 //! Keeps source order and evicts oldest images using the existing count/byte caps.
 //! Byte caps cover inline URLs and file ID strings, not referenced file contents.
 //! Consumers still choose source visibility and model-specific image detail.
+//! Continuations compare prepared image references against their own admitted history.
+//! Sync admission also applies prompt and model-window budgets.
 
+use crate::ComposedContext;
 use crate::ContextSection;
 use crate::SectionContributor;
 use crate::SectionError;
@@ -13,10 +16,49 @@ use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
+use std::borrow::Cow;
+use std::cell::LazyCell;
 use std::collections::VecDeque;
 
 const MAX_TRANSCRIPT_IMAGES: usize = 4;
 const MAX_TRANSCRIPT_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+impl ComposedContext {
+    /// Omits images already present in this conversation, ignoring image detail.
+    /// The host supplies the reference its model will receive (for example, after resizing)
+    /// and may normalize detail or reject an image. The original payload stays unchanged.
+    /// Only admitted history proves delivery; images kept here are not committed yet.
+    pub fn retain_new_images<'a>(
+        &mut self,
+        history: impl IntoIterator<Item = &'a ResponseItem>,
+        mut prepare: impl for<'image> FnMut(
+            &'image ImageReference,
+            &mut Option<ImageDetail>,
+        ) -> Option<Cow<'image, ImageReference>>,
+    ) {
+        // Collect references only when an image needs checking; avoid hashing screenshot bytes.
+        let retained_images = LazyCell::new(|| {
+            let mut images = Vec::new();
+            for item in history {
+                let ResponseItem::Message { content, .. } = item else {
+                    continue;
+                };
+                for item in content {
+                    if let ContentItem::InputImage { image, .. } = item {
+                        images.push(image);
+                    }
+                }
+            }
+            images
+        });
+        self.retain_images(|image, detail| {
+            let Some(prepared) = prepare(image, detail) else {
+                return false;
+            };
+            !retained_images.contains(&prepared.as_ref())
+        });
+    }
+}
 
 /// Request-local image policy and a frozen view of captured REPL screenshots.
 #[derive(Clone, Copy)]
@@ -117,7 +159,6 @@ impl TranscriptImages {
                                 }
                                 FunctionCallOutputContentItem::InputText { .. }
                                 | FunctionCallOutputContentItem::InputAudio { .. }
-                                | FunctionCallOutputContentItem::InputVideo { .. }
                                 | FunctionCallOutputContentItem::EncryptedContent { .. } => {}
                             }
                         }

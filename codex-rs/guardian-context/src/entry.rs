@@ -1,8 +1,8 @@
 //! Structured transcript evidence shared by synchronous and asynchronous Guardian.
 //!
 //! Entry kinds preserve source attribution for consumer-specific retention and
-//! rendering. User text and manual approvals stay complete for admission; other text is
-//! capped during collection, with its original size retained for accounting.
+//! rendering. Both consumers keep originals until request preparation applies caps.
+//! Original sizes remain available for accounting.
 
 /// Semantic role of one parent-conversation transcript entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -70,8 +70,8 @@ impl std::fmt::Debug for TranscriptContent {
 pub struct ConversationTranscriptEntry {
     /// Semantic role used for consumer-specific retention and truncation.
     pub kind: ConversationTranscriptEntryKind,
-    /// Complete authorization evidence, or other text bounded by per-entry limits.
-    pub text: String,
+    /// Original captured evidence, or content bounded during preparation.
+    pub content: TranscriptContent,
     /// Size before truncation, retained for omission and truncation accounting.
     pub original_bytes: usize,
     /// Original source revision and display order, established from host metadata.

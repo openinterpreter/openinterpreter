@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use codex_protocol::models::ExecutedToolCall;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::ReasoningItemContent;
@@ -159,8 +161,8 @@ fn tool_metadata_is_retained_without_changing_retention_size() {
     recorded.mark_tool_calls_complete();
     let mut baseline = TranscriptHistory::default();
     let mut with_metadata = TranscriptHistory::default();
-    baseline.reset([&before, &plain]);
-    with_metadata.reset([&before, &recorded]);
+    baseline.reset([before.clone().into(), plain.clone().into()].iter());
+    with_metadata.reset([before.clone().into(), recorded.clone().into()].iter());
     assert_eq!(
         with_metadata.items().collect::<Vec<_>>(),
         vec![&before, &recorded]

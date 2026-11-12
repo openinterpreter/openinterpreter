@@ -219,15 +219,6 @@ fn registered_transcript_filters_roles_and_preserves_node_repl_tool_attribution(
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
-                text: "ordinary developer context".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        ResponseItem::Message {
-            id: None,
-            role: "developer".to_string(),
-            content: vec![ContentItem::InputText {
                 text: approved_action.clone(),
             }],
             phase: None,
@@ -608,7 +599,7 @@ fn reused_registry_applies_current_history_sources_and_preserves_originals() {
             transcript_items(&sections[0]),
             vec![ConversationTranscriptEntry {
                 kind: ConversationTranscriptEntryKind::User,
-                text: text.clone(),
+                content: crate::TranscriptContent::Text(text.clone()),
                 original_bytes: text.len(),
                 retained_source: None,
             }]
@@ -656,7 +647,7 @@ fn reused_registry_applies_current_history_sources_and_preserves_originals() {
             .expect("transcript collection should succeed");
         let mut expected = vec![ConversationTranscriptEntry {
             kind: ConversationTranscriptEntryKind::User,
-            text: text.clone(),
+            content: crate::TranscriptContent::Text(text.clone()),
             original_bytes: text.len(),
             retained_source: None,
         }];

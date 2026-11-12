@@ -1,7 +1,8 @@
 //! Collects original conversation evidence before consumer-specific preparation.
 //!
 //! Both Guardian consumers receive the same role and tool-source attribution,
-//! with complete user messages and capped non-user entries. Resolved context profiles
+//! with generated compaction summaries attributed to the assistant, complete user
+//! messages. Registry collection preserves originals for both consumers; resolved profiles
 //! apply aggregate retention after the host selects its full/delta slice. Tool outputs with a
 //! call ID retain their generic label when the call is unavailable. Outputs
 //! without a call ID require an explicit name.
@@ -78,7 +79,7 @@ impl Default for ConversationTranscriptOptions {
 /// Per-entry caps resolved by the caller for the current review.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TranscriptEntryLimits {
-    /// Cap for assistant and plaintext reasoning entries; user and manual approvals stay complete.
+    /// Profile cap for assistant and plaintext reasoning; user/approval policy is applied separately.
     pub message_tokens: usize,
     /// Cap for tool calls and ordinary tool outputs.
     pub tool_tokens: usize,
@@ -143,8 +144,8 @@ impl SectionContributor for ConversationTranscriptSection {
 
 /// Extracts original transcript entries without composing other context sections.
 ///
-/// Entries preserve conversation order and role/tool attribution. Non-user
-/// limits apply during collection; context profiles own aggregate retention.
+/// Entries preserve conversation order and role/tool attribution. Context
+/// preparation applies entry limits and aggregate retention.
 pub fn collect_transcript(
     history: &dyn SectionHistory,
     config: &ConversationTranscriptConfig,
@@ -431,23 +432,9 @@ fn collect_transcript_for_review(
             continue;
         }
         let original_bytes = text.len();
-        let text = match &kind {
-            ConversationTranscriptEntryKind::User | ConversationTranscriptEntryKind::Developer => {
-                text
-            }
-            ConversationTranscriptEntryKind::Assistant
-            | ConversationTranscriptEntryKind::ProtectedAssistant
-            | ConversationTranscriptEntryKind::Reasoning => {
-                truncate_text(&text, config.entry_limits.message_tokens)
-            }
-            ConversationTranscriptEntryKind::ToolCall(_)
-            | ConversationTranscriptEntryKind::ToolOutput(_) => {
-                truncate_text(&text, config.entry_limits.tool_tokens)
-            }
-            ConversationTranscriptEntryKind::NodeReplToolOutput(_) => {
-                truncate_text(&text, config.entry_limits.node_repl_output_tokens)
-            }
-        };
+        let scheduled = codex_history::UserInputOrigin::from_message(item)
+            == codex_history::UserInputOrigin::Heartbeat;
+        let heartbeat = codex_history::Heartbeat::from_message(item).map(Into::into);
         entries.push(ConversationTranscriptEntry {
             retained_source: retained_context.and_then(|context| {
                 let source = source.filter(|source| {
@@ -479,7 +466,14 @@ fn collect_transcript_for_review(
                 )
             }),
             kind,
-            text,
+            content: if scheduled {
+                TranscriptContent::ScheduledMessage(crate::entry::ScheduledTranscriptMessage {
+                    text,
+                    heartbeat,
+                })
+            } else {
+                TranscriptContent::Text(text)
+            },
             original_bytes,
         });
     }
