@@ -5,6 +5,39 @@ use std::collections::HashMap;
 use std::path::Path;
 
 #[test]
+fn requirements_disable_keeps_explicit_and_enterprise_auth_rejections() {
+    let source = RequirementSource::EnterpriseManaged {
+        id: "policy".into(),
+        name: "Cloud policy".into(),
+    };
+    let mut server: McpServerConfig =
+        toml::from_str("url = 'https://example.com/mcp'").expect("valid MCP server");
+    assert!(
+        serde_json::to_value(&server)
+            .expect("serialize")
+            .get("auth")
+            .is_none()
+    );
+
+    server.enabled = false;
+    server.disable_by_requirements(source.clone());
+    assert_eq!(
+        server.disabled_reason,
+        Some(McpServerDisabledReason::ExplicitAndRequirements {
+            source: source.clone()
+        })
+    );
+
+    server.disabled_reason = Some(McpServerDisabledReason::EmaRegistration);
+    server.disable_by_requirements(source);
+    assert!(!server.enabled);
+    assert_eq!(
+        server.disabled_reason,
+        Some(McpServerDisabledReason::EmaRegistration)
+    );
+}
+
+#[test]
 fn app_tool_approval_restrictions_never_weaken_either_policy() {
     use AppToolApproval::Approve;
     use AppToolApproval::Auto;

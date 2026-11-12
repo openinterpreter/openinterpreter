@@ -7,7 +7,9 @@ use crate::LoaderOverrides;
 use crate::RequirementsLayerEntry;
 use crate::compose_requirements;
 use codex_file_system::ExecutorFileSystem;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use std::io;
+use std::path::Path;
 use toml::Value;
 
 /// Local application sources captured without waiting for a cloud request.
@@ -27,8 +29,37 @@ impl LocalApplicationRequirements {
         if self.ignore_managed {
             return Ok(None);
         }
+        if !cloud.enterprise_managed.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cloud application requirements require an explicit Codex home base directory",
+            ));
+        }
+        self.compose_layers(Vec::new())
+    }
+
+    /// Composes cloud requirements against the same Codex home as normal config loading.
+    pub fn compose_with_cloud_base_dir(
+        &self,
+        cloud: CloudRequirementsTomlBundle,
+        codex_home: &Path,
+    ) -> io::Result<Option<ApplicationRequirementsToml>> {
+        if self.ignore_managed {
+            return Ok(None);
+        }
+        let base_dir = AbsolutePathBuf::from_absolute_path(codex_home)?;
+        self.compose_layers(cloud.into_layers(&base_dir))
+    }
+
+    fn compose_layers(
+        &self,
+        cloud_layers: Vec<RequirementsLayerEntry>,
+    ) -> io::Result<Option<ApplicationRequirementsToml>> {
+        if self.ignore_managed {
+            return Ok(None);
+        }
         let mut layers = self.system.clone().into_iter().collect::<Vec<_>>();
-        for layer in cloud.into_layers() {
+        for layer in cloud_layers {
             layers.extend(application_layer(layer)?);
         }
         layers.extend(self.mdm.clone());
@@ -85,18 +116,68 @@ pub async fn load_local_application_requirements(
 }
 
 fn application_layer(layer: RequirementsLayerEntry) -> io::Result<Option<RequirementsLayerEntry>> {
-    let (source, mut value, _base_dir) = layer.into_raw_parts()?;
+    let (source, mut value, base_dir) = layer.into_raw_parts()?;
     let Some(application) = value
         .as_table_mut()
         .and_then(|table| table.remove("application"))
     else {
         return Ok(None);
     };
-    Ok(Some(RequirementsLayerEntry::from_toml_value(
+    let entry = RequirementsLayerEntry::from_toml_value(
         source,
         Value::Table(toml::map::Map::from_iter([(
             "application".into(),
             application,
         )])),
-    )))
+    );
+    Ok(Some(match base_dir {
+        Some(base_dir) => entry.with_base_dir(base_dir),
+        None => entry,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CloudRequirementsFragment;
+
+    #[test]
+    fn cloud_application_policy_requires_explicit_home_and_retains_layer_base() {
+        let codex_home = tempfile::tempdir().expect("Codex home");
+        let cloud = CloudRequirementsTomlBundle {
+            enterprise_managed: vec![CloudRequirementsFragment {
+                id: "policy".to_string(),
+                name: "Cloud policy".to_string(),
+                contents: "[application.network.domains]\n\"allowed.example\" = \"allow\""
+                    .to_string(),
+            }],
+        };
+        let local = LocalApplicationRequirements::default();
+        assert_eq!(
+            local.compose(cloud.clone()).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        let application = local
+            .compose_with_cloud_base_dir(cloud, codex_home.path())
+            .expect("valid cloud policy")
+            .expect("network policy");
+        assert_eq!(application.network.expect("network").domains.len(), 1);
+
+        let base_dir = AbsolutePathBuf::from_absolute_path(codex_home.path()).expect("home");
+        let layer = RequirementsLayerEntry::from_toml(
+            crate::RequirementSource::EnterpriseManaged {
+                id: "policy".into(),
+                name: "Cloud policy".into(),
+            },
+            "[application.network]",
+        )
+        .with_base_dir(base_dir.clone());
+        let retained = application_layer(layer)
+            .expect("parse application policy")
+            .expect("application layer");
+        assert_eq!(
+            retained.into_raw_parts().expect("raw parts").2,
+            Some(base_dir)
+        );
+    }
 }

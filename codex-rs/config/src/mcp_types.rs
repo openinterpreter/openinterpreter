@@ -62,6 +62,8 @@ pub enum McpServerDisabledReason {
     Unknown,
     /// The server was disabled by config requirements from the given source.
     Requirements { source: RequirementSource },
+    /// An explicit disable is also denied by requirements.
+    ExplicitAndRequirements { source: RequirementSource },
     /// Enterprise authorization was rejected for this registration, not its name.
     EmaRegistration,
 }
@@ -242,7 +244,7 @@ pub struct McpServerConfig {
     pub transport: McpServerTransportConfig,
 
     /// Authentication flow, including an explicit no-fallback EMA mode.
-    #[serde(default, skip_serializing_if = "McpServerAuth::is_default")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub auth: McpServerAuth,
 
     /// Effective environment id for where Codex should start this MCP server.
@@ -328,6 +330,10 @@ impl McpServerConfig {
             Some(McpServerDisabledReason::Requirements { .. }) => false,
             Some(McpServerDisabledReason::ExplicitAndRequirements { .. }) => true,
             Some(McpServerDisabledReason::Unknown) | None => !self.enabled,
+            Some(McpServerDisabledReason::EmaRegistration) => {
+                self.enabled = false;
+                return;
+            }
         };
         self.enabled = false;
         self.disabled_reason = Some(if explicitly_disabled {

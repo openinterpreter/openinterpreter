@@ -253,6 +253,7 @@ fn model_provider_to_proto(
         env_key_instructions,
         experimental_bearer_token: experimental_bearer_token.map(RedactedString::into_inner),
         auth: auth.map(model_provider_auth_to_proto),
+        credential_file: credential_file.map(|path| path.to_string_lossy().into_owned()),
         capabilities: capabilities.map(|capabilities| proto::ModelProviderCapabilities {
             cyber_access_programs: capabilities.cyber_access_programs,
         }),

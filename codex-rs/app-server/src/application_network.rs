@@ -79,11 +79,12 @@ impl ConfigManager {
         let result = async {
             let cloud_snapshot = cloud_config.get_snapshot().await;
             let cloud = cloud_snapshot.bundle.clone().map_err(io::Error::other)?;
-            let application = local_sources.compose(
+            let application = local_sources.compose_with_cloud_base_dir(
                 cloud
                     .as_ref()
                     .map(|bundle| bundle.requirements_toml.clone())
                     .unwrap_or_default(),
+                self.codex_home(),
             )?;
             Ok::<_, io::Error>((
                 destination_policy(application.as_ref()),
