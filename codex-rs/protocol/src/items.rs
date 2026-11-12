@@ -20,6 +20,7 @@ use crate::models::ContentItemMetadata;
 use crate::models::FunctionCallOutputBody;
 use crate::models::ImageDetail;
 use crate::models::ImageReference;
+use crate::models::InternalChatMessageMetadataPassthrough;
 use crate::models::MessagePhase;
 use crate::models::ResponseItem;
 use crate::models::WebSearchAction;

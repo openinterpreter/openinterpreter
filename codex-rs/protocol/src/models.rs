@@ -1013,14 +1013,6 @@ pub enum AudioReference {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
-#[serde(untagged)]
-#[ts(untagged)]
-pub enum ImageReference {
-    Inline { image_url: String },
-    File { file_id: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentMessageInputContent {
     InputText { text: String },
@@ -1098,6 +1090,12 @@ pub struct InternalChatMessageMetadataPassthrough {
     #[schemars(skip)]
     #[ts(skip)]
     pub content_item_kinds: Option<Vec<ContentItemKind>>,
+    /// Positional source attribution for `content`; missing historical entries are Unknown.
+    #[serde_as(deserialize_as = "serde_with::DefaultOnError")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub content_item_metadata: Option<Vec<ContentItemMetadata>>,
     // Ignore input values so requests and rollout reloads cannot fake tool call records.
     // A resumed thread can record new calls, but cannot prove old calls from this payload.
     /// Host-owned Code Mode cell shared by its `exec` and subsequent `wait` outputs.
@@ -2349,9 +2347,9 @@ impl ResponseInputItem {
                         )],
                     }
                 }
-                UserInput::Audio { audio_url } => {
+                UserInput::Audio { audio } => {
                     audio_index += 1;
-                    vec![ContentItem::InputAudio { audio_url }]
+                    vec![ContentItem::InputAudio { audio }]
                 }
                 UserInput::LocalAudio { path } => {
                     audio_index += 1;
@@ -2671,108 +2669,6 @@ impl CallToolResult {
     pub fn into_function_call_output_payload(self) -> FunctionCallOutputPayload {
         self.as_function_call_output_payload()
     }
-}
-
-fn convert_mcp_content_to_items(
-    contents: &[serde_json::Value],
-) -> Vec<FunctionCallOutputContentItem> {
-    const CODEX_ENCRYPTED_CONTENT_META_KEY: &str = "codex/encryptedContent";
-    const CODEX_IMAGE_DETAIL_META_KEY: &str = "codex/imageDetail";
-
-    #[derive(serde::Deserialize)]
-    #[serde(tag = "type")]
-    enum McpContent {
-        #[serde(rename = "text")]
-        Text {
-            text: String,
-            #[serde(rename = "_meta", default)]
-            meta: Option<serde_json::Value>,
-        },
-        #[serde(rename = "image")]
-        Image {
-            data: String,
-            #[serde(rename = "mimeType", alias = "mime_type")]
-            mime_type: Option<String>,
-            #[serde(rename = "_meta", default)]
-            meta: Option<serde_json::Value>,
-        },
-        #[serde(rename = "audio")]
-        Audio {
-            data: String,
-            #[serde(rename = "mimeType", alias = "mime_type")]
-            mime_type: Option<String>,
-            #[serde(rename = "_meta", default)]
-            _meta: Option<serde_json::Value>,
-        },
-        #[serde(other)]
-        Unknown,
-    }
-
-    let mut items = Vec::with_capacity(contents.len());
-
-    for content in contents {
-        let item = match serde_json::from_value::<McpContent>(content.clone()) {
-            Ok(McpContent::Text { text, meta }) => {
-                if meta
-                    .as_ref()
-                    .and_then(|meta| meta.get(CODEX_ENCRYPTED_CONTENT_META_KEY))
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-                {
-                    FunctionCallOutputContentItem::EncryptedContent {
-                        encrypted_content: text,
-                    }
-                } else {
-                    FunctionCallOutputContentItem::InputText { text }
-                }
-            }
-            Ok(McpContent::Image {
-                data,
-                mime_type,
-                meta,
-            }) => {
-                let image_url = if data.starts_with("data:") {
-                    data
-                } else {
-                    let mime_type = mime_type.unwrap_or_else(|| "application/octet-stream".into());
-                    format!("data:{mime_type};base64,{data}")
-                };
-                FunctionCallOutputContentItem::InputImage {
-                    image: ImageReference::Inline { image_url },
-                    detail: meta
-                        .as_ref()
-                        .and_then(serde_json::Value::as_object)
-                        .and_then(|meta| meta.get(CODEX_IMAGE_DETAIL_META_KEY))
-                        .and_then(serde_json::Value::as_str)
-                        .and_then(|detail| match detail {
-                            "auto" => Some(ImageDetail::Auto),
-                            "low" => Some(ImageDetail::Low),
-                            "high" => Some(ImageDetail::High),
-                            "original" => Some(ImageDetail::Original),
-                            _ => None,
-                        })
-                        .or(Some(DEFAULT_IMAGE_DETAIL)),
-                }
-            }
-            Ok(McpContent::Audio {
-                data, mime_type, ..
-            }) => {
-                let audio_url = if data.starts_with("data:") {
-                    data
-                } else {
-                    let mime_type = mime_type.unwrap_or_else(|| "application/octet-stream".into());
-                    format!("data:{mime_type};base64,{data}")
-                };
-                FunctionCallOutputContentItem::InputAudio { audio_url }
-            }
-            Ok(McpContent::Unknown) | Err(_) => FunctionCallOutputContentItem::InputText {
-                text: serde_json::to_string(content).unwrap_or_else(|_| "<content>".to_string()),
-            },
-        };
-        items.push(item);
-    }
-
-    items
 }
 
 // Implement Display so callers can treat the payload like a plain string when logging or doing
