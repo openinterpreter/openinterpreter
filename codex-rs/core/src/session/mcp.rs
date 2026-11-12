@@ -22,7 +22,7 @@ use codex_mcp::ElicitationReviewRequest;
 use codex_mcp::ElicitationReviewer;
 use codex_mcp::ElicitationReviewerHandle;
 use codex_mcp::MCP_TOOL_CODEX_APPS_META_KEY;
-use codex_prompts::ResolvedModelMessages;
+use codex_otel::auth_storage::AuthStorageOriginator;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -122,6 +122,12 @@ impl Session {
                 /*skill_turn*/ None,
             )
             .await;
+        if inventory_changed {
+            self.mark_mcp_runtime_dirty(McpRefreshReason::ExecutorCapabilityInventoryChanged);
+        }
+        if discovery_recovered {
+            self.mark_mcp_runtime_dirty(McpRefreshReason::ExecutorCapabilityDiscoveryRecovered);
+        }
         let mcp_projection =
             self.services
                 .mcp_manager
@@ -140,6 +146,7 @@ impl Session {
                     },
                     &ready_selected_capability_roots,
                     executor_capability_discovery.as_deref(),
+                    executor_capability_discovery_v2.as_deref(),
                 )
                 .await;
         let mcp_config = self
@@ -171,10 +178,9 @@ impl Session {
         )
         .with_connection_pool(self.services.mcp_manager.connection_pool())
         .with_selected_environments(
-            environment_selections.into(),
+            environments.all_selections().into(),
             environments.ready_environment_handles(),
-        );
-        (mcp_config, runtime_context)
+        )
     }
 
     pub(crate) async fn runtime_mcp_servers(
@@ -204,7 +210,7 @@ impl Session {
                 &environment_selections,
                 &environments.ready_environment_handles(),
             ) {
-                self.mark_mcp_runtime_dirty();
+                self.mark_mcp_runtime_dirty(McpRefreshReason::EnvironmentBindingsChanged);
             }
             let auth = self.services.auth_manager.auth_cached();
             if !self
@@ -219,6 +225,10 @@ impl Session {
                 return;
             };
             let auth = self.services.auth_manager.auth().await;
+            // Capture after claiming the refresh so a new invalidation cannot be consumed
+            // with the environment snapshot taken before its permissions changed.
+            let environments = self.services.turn_environments.snapshot().await;
+            let environment_selections = environments.all_selections();
             let desired = self.latest_mcp_desired_state(auth, environments).await;
             let selected_capability_roots = self
                 .resolve_selected_capability_roots_for_step(&desired.environments)
@@ -879,8 +889,7 @@ impl Session {
             error!("MCP runtime refresh semaphore closed");
             return;
         };
-        let auth = self.services.auth_manager.auth().await;
-        let disabled_plugin_ids = {
+        {
             let mut state = self.state.lock().await;
             let mut config = (*state.session_configuration.original_config_do_not_use).clone();
             let mut servers = config.mcp_servers.get().clone();
@@ -892,21 +901,51 @@ impl Session {
                 return;
             }
             state.session_configuration.original_config_do_not_use = Arc::new(config);
-            state.active_disabled_plugin_ids.clone()
-        };
+        }
+        // Claim after config mutation, before capturing the state this forced refresh handles.
+        let mut refresh_invalidation = self
+            .mcp_refresh
+            .claim_forced(self.thread_id, McpRefreshReason::SkillMcpDependenciesAdded);
+        let auth = self.services.auth_manager.auth().await;
         let ready_selected_capability_roots = self
             .services
             .mcp_runtime
             .current_ready_selected_capability_roots();
         let environments = self.services.turn_environments.snapshot().await;
-        let environment_selections = environments.all_selections();
-        let mut desired = self.latest_mcp_desired_state(auth, environments).await;
-        desired.config = Arc::new(refresh_config.clone());
-        let executor_capability_discovery = self
-            .executor_capability_discovery_for_step(
-                refresh_config,
+        // Adding MCP dependencies preserves the published root selection.
+        let mut captured_environments = environments.captured_environments();
+        for root in &ready_selected_capability_roots {
+            let CapabilityRootLocation::Environment { environment_id, .. } = &root.location;
+            // A previously published root must not reconnect an environment absent from this capture.
+            captured_environments
+                .entry(environment_id.clone())
+                .or_insert(None);
+        }
+        let selected_capability_roots = self
+            .services
+            .turn_environments
+            .environment_manager()
+            .resolve_selected_capability_roots(
                 &ready_selected_capability_roots,
+                &captured_environments,
+            )
+            .await;
+        let environment_selections = environments.all_selections();
+        let desired = self.latest_mcp_desired_state(auth, environments).await;
+        let (executor_capability_discovery_v2, _) = self
+            .executor_capability_discovery_for_step_v2(
+                &desired.config,
                 &desired.environments,
+                /*skill_turn*/ None,
+            )
+            .await;
+        let (executor_capability_discovery, _) = self
+            .executor_capability_discovery_for_step(
+                &desired.config,
+                &selected_capability_roots,
+                &desired.environments,
+                executor_capability_discovery_v2.as_deref(),
+                /*skill_turn*/ None,
             )
             .await;
         let mcp_projection = self
@@ -921,9 +960,9 @@ impl Session {
                         .services
                         .mcp_runtime
                         .current_auth_matches(desired.auth.as_ref()),
-                    session_source: &turn_context.session_source,
-                    originator: &turn_context.originator,
-                    disabled_plugin_ids: &disabled_plugin_ids,
+                    session_source: &desired.session_source,
+                    originator: &desired.originator,
+                    disabled_plugin_ids: &desired.disabled_plugin_ids,
                     environments: McpEnvironmentScope::Selected(&environment_selections),
                 },
                 &ready_selected_capability_roots,
@@ -1328,67 +1367,6 @@ fn plugin_install_elicitation_telemetry_metadata(
         tool_type: metadata_owned_string(meta, TOOL_SUGGESTION_TOOL_TYPE_KEY)?,
         tool_id: metadata_owned_string(meta, TOOL_SUGGESTION_TOOL_ID_KEY)?,
         tool_name: metadata_owned_string(meta, MCP_ELICITATION_TOOL_NAME_KEY)?,
-    })
-}
-
-fn mcp_elicitation_request_id(id: &RequestId) -> String {
-    match id {
-        rmcp::model::NumberOrString::String(value) => value.to_string(),
-        rmcp::model::NumberOrString::Number(value) => value.to_string(),
-    }
-}
-
-fn mcp_elicitation_response_from_guardian_decision(
-    decision: ReviewDecision,
-    model_info: &ModelInfo,
-) -> ElicitationResponse {
-    match decision {
-        ReviewDecision::Approved
-        | ReviewDecision::ApprovedForSession
-        | ReviewDecision::ApprovedMcpPolicyAmendment
-        | ReviewDecision::ApprovedExecpolicyAmendment { .. }
-        | ReviewDecision::NetworkPolicyAmendment { .. } => ElicitationResponse {
-            action: ElicitationAction::Accept,
-            content: Some(serde_json::json!({})),
-            meta: Some(mcp_elicitation_auto_meta()),
-        },
-        ReviewDecision::Denied { rejection } => mcp_elicitation_decline_with_message(rejection),
-        ReviewDecision::TimedOut => mcp_elicitation_decline_with_message(
-            ResolvedModelMessages::from_model(model_info)
-                .auto_review()
-                .timeout_instructions
-                .to_string(),
-        ),
-        ReviewDecision::Abort => ElicitationResponse {
-            action: ElicitationAction::Cancel,
-            content: None,
-            meta: Some(mcp_elicitation_auto_meta()),
-        },
-    }
-}
-
-fn mcp_elicitation_decline_with_message(message: String) -> ElicitationResponse {
-    ElicitationResponse {
-        action: ElicitationAction::Decline,
-        content: None,
-        meta: Some(serde_json::json!({
-            MCP_ELICITATION_DECLINE_MESSAGE_KEY: message,
-            MCP_ELICITATION_APPROVALS_REVIEWER_KEY: ApprovalsReviewer::AutoReview,
-        })),
-    }
-}
-
-fn mcp_elicitation_decline_without_message() -> ElicitationResponse {
-    ElicitationResponse {
-        action: ElicitationAction::Decline,
-        content: None,
-        meta: Some(mcp_elicitation_auto_meta()),
-    }
-}
-
-fn mcp_elicitation_auto_meta() -> serde_json::Value {
-    serde_json::json!({
-        MCP_ELICITATION_APPROVALS_REVIEWER_KEY: ApprovalsReviewer::AutoReview,
     })
 }
 

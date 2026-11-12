@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::config::Config;
+use crate::mcp_tool_exposure::SharedMcpDefinitions;
 use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use codex_config::McpServerConfig;
 use codex_config::types::PluginsConfigToml;
@@ -240,16 +241,7 @@ impl McpManager {
             context = context.with_selected_environments(environments);
         }
         self.runtime_config_with_context(
-            McpServerContributionContext::for_step(
-                config,
-                thread_init,
-                thread_store,
-                identity.originator,
-                ready_selected_capability_roots,
-                executor_capability_discovery,
-            )
-            .with_session_source(identity.session_source)
-            .with_auth_changed(identity.auth_changed),
+            context,
             Some(identity.originator),
             identity.environments,
             identity.disabled_plugin_ids,
@@ -446,48 +438,29 @@ impl McpManager {
                         }
                         overlays.push(OrderedMcpOverlay::Set(Box::new(registration)));
                     }
-                    McpServerContribution::SelectedPlugin { ref plugin_id, .. }
-                        if disabled_plugin_ids.contains(plugin_id) => {}
-                    McpServerContribution::SelectedPlugin {
-                        name,
-                        plugin_id,
-                        plugin_display_name,
-                        selection_order,
-                        config,
-                        protocol_mode,
-                    } => {
-                        let mut registration = McpServerRegistration::from_hosted_apps(
-                            contributor.id(),
-                            contribution_order,
-                            *config,
-                        );
-                        if let Some(protocol_mode) = protocol_mode {
-                            registration = registration.with_protocol_mode(protocol_mode);
-                        }
-                        overlays.push(OrderedMcpOverlay::Set(Box::new(registration)));
-                    }
                     McpServerContribution::HostedPluginConnectors {
                         plugin_id,
                         plugin_display_name,
                         connector_ids,
                     } => {
-                        if disabled_plugin_ids.contains(&plugin_id) {
-                            disabled_plugin_roots.push(selected_root_id);
-                        } else {
-                            selected_plugin_available = true;
-                            selected_plugins.push(SelectedPluginIdentity {
-                                selected_root_id,
-                                plugin_id: plugin_id.clone(),
-                            });
-                        }
-                        if !connector_ids.is_empty() {
-                            selected_plugin_connector_sources.push(
-                                PluginConnectorSource::from_connector_ids(
-                                    plugin_id,
-                                    plugin_display_name,
-                                    connector_ids.into_iter().map(AppConnectorId),
-                                ),
-                            );
+                        if config.features.enabled(Feature::Plugins) {
+                            if !disabled_plugin_ids.contains(&plugin_id) {
+                                selected_plugins.push(SelectedPluginIdentity {
+                                    selected_root_id: None,
+                                    plugin_id: CatalogPluginIdentity::Remote {
+                                        remote_plugin_id: plugin_id.clone(),
+                                    },
+                                });
+                            }
+                            if !connector_ids.is_empty() {
+                                selected_plugin_connector_sources.push(
+                                    PluginConnectorSource::from_connector_ids(
+                                        plugin_id,
+                                        plugin_display_name,
+                                        connector_ids.into_iter().map(AppConnectorId),
+                                    ),
+                                );
+                            }
                         }
                     }
                     McpServerContribution::Remove { name } => {
