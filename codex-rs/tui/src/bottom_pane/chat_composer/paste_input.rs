@@ -1,4 +1,6 @@
 //! Classify and integrate composer pastes and capture raw paste tabs before completion or submission.
+//! Multiline paste on a `> ` line continues that Markdown quote, then leaves the cursor in
+//! the next block. Search queries and shell input remain literal.
 
 use super::*;
 use crate::bottom_pane::paste_burst::FlushResult;
@@ -130,6 +132,24 @@ impl ChatComposer {
         }
         let started_vim_edit = self.begin_direct_vim_edit();
         let elements_before = self.draft.textarea.element_payloads();
+        // Resolve the target before editing: a selected range is replaced from its start,
+        // not from a cursor that may have moved past the selected quote prefix.
+        let target = self.draft.textarea.edit_target();
+        let before_cursor = &self.draft.textarea.text()[..target.start()];
+        let current_line = before_cursor.rsplit('\n').next().unwrap_or_default();
+        let is_blockquote = self.config.blockquote_paste_enabled
+            && !self.is_bang_shell_command()
+            && current_line.starts_with("> ")
+            && pasted.contains('\n');
+        let pasted = if is_blockquote {
+            let pasted = pasted
+                .strip_suffix('\n')
+                .filter(|pasted| !pasted.is_empty())
+                .unwrap_or(pasted.as_ref());
+            std::borrow::Cow::Owned(pasted.replace('\n', "\n> "))
+        } else {
+            pasted
+        };
         let char_count = pasted.chars().count();
         if char_count > LARGE_PASTE_CHAR_THRESHOLD {
             let placeholder = self.next_large_paste_placeholder(char_count);
@@ -145,6 +165,10 @@ impl ChatComposer {
             self.draft.textarea.insert_str_at(cursor, " ");
         } else {
             self.insert_str(&pasted);
+        }
+        if is_blockquote {
+            let textarea = &mut self.draft.textarea;
+            textarea.insert_str_at(textarea.cursor(), "\n\n");
         }
         self.draft.paste_burst.clear_after_explicit_paste();
         self.reconcile_deleted_elements(elements_before);
@@ -191,3 +215,7 @@ impl ChatComposer {
         false
     }
 }
+
+#[cfg(test)]
+#[path = "blockquote_paste_tests.rs"]
+mod blockquote_paste_tests;
