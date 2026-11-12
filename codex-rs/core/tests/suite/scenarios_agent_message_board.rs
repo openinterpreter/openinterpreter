@@ -1,5 +1,7 @@
 //! Exercises board tools through the runtime, including resume and active-only notices.
 
+#[path = "scenarios_agent_message_board_http.rs"]
+mod http;
 #[path = "scenarios_agent_message_board_remote.rs"]
 mod remote;
 
