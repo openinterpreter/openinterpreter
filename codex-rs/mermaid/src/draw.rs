@@ -19,11 +19,14 @@ pub(super) fn render(graph: &Graph, max_width: usize) -> Result<Vec<Vec<Span>>, 
         .nodes
         .iter()
         .map(|node| {
-            let mut lines = vec![if node.shape == Shape::Decision {
-                format!("◇ {}", node.label)
-            } else {
-                node.label.clone()
-            }];
+            let mut lines = node
+                .label
+                .split('\n')
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if node.shape == Shape::Decision {
+                lines[0].insert_str(0, "◇ ");
+            }
             if !node.members.is_empty() {
                 lines.push("─".repeat(node.label.width()));
                 lines.extend(node.members.iter().cloned());

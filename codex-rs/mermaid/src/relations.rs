@@ -24,6 +24,9 @@ pub(super) fn parse(header: &str, body: &[&str]) -> Result<Graph, RenderError> {
                 let member = if er {
                     attribute(line)?
                 } else {
+                    if line.contains(['{', '}']) {
+                        return Err(RenderError::Unsupported);
+                    }
                     check_label(line)?;
                     line.to_owned()
                 };
@@ -128,6 +131,12 @@ pub(super) fn parse(header: &str, body: &[&str]) -> Result<Graph, RenderError> {
             let mut target_tip = '─';
             for (token, tip) in [("|>", '◁'), (">", '◄'), ("*", '◆'), ("o", '◇')] {
                 if let Some(after) = rest.strip_prefix(token) {
+                    // A longer identifier wins over the single-letter aggregation token.
+                    if token == "o"
+                        && after.starts_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
+                    {
+                        continue;
+                    }
                     target_tip = tip;
                     rest = after;
                     break;
@@ -143,6 +152,10 @@ pub(super) fn parse(header: &str, body: &[&str]) -> Result<Graph, RenderError> {
             .filter(|text| !text.starts_with("::"))
         {
             let label = label.trim();
+            // ER quotes delimit a token; keep fallback until that grammar is normalized.
+            if er && label.contains('"') {
+                return Err(RenderError::Unsupported);
+            }
             check_label(label)?;
             label.to_owned()
         } else if !rest.is_empty() || er {
@@ -199,6 +212,9 @@ fn attribute(line: &str) -> Result<String, RenderError> {
     let name = identifier(&mut rest)?;
     let (keys, comment) = if let Some((keys, comment)) = rest.trim().split_once('"') {
         let comment = comment.strip_suffix('"').ok_or(RenderError::Unsupported)?;
+        if comment.contains('"') {
+            return Err(RenderError::Unsupported);
+        }
         check_label(comment)?;
         (keys.trim(), Some(comment))
     } else {
