@@ -131,12 +131,6 @@ const MEMORIES_V2_DB: RuntimeDbSpec = RuntimeDbSpec {
     ..MEMORIES_DB
 };
 
-const MEMORIES_V2_DB: RuntimeDbSpec = RuntimeDbSpec {
-    label: "memories v2 DB",
-    filename: "memories_v2_1.sqlite",
-    ..MEMORIES_DB
-};
-
 const QUEUE_DB: RuntimeDbSpec = RuntimeDbSpec {
     label: "queue DB",
     filename: QUEUE_DB_FILENAME,
