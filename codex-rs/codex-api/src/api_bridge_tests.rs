@@ -126,6 +126,7 @@ fn map_api_error_distinguishes_capacity_from_slow_down() {
             status: http::StatusCode::SERVICE_UNAVAILABLE,
             url: None,
             headers: None,
+            retry_after: None,
             body: Some(
                 serde_json::json!({"error": {"code": code, "message": "retry later"}}).to_string(),
             ),
@@ -279,6 +280,7 @@ fn map_api_error_maps_http_and_wrapped_websocket_bio_policy() {
                 status: http::StatusCode::BAD_REQUEST,
                 url: None,
                 headers: None,
+                retry_after: None,
                 body: Some(body.to_string()),
             }));
 
