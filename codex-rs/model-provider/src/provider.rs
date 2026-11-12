@@ -531,9 +531,7 @@ fn create_model_provider_with_cache_id_and_runtime(
         let manager = auth_manager
             .as_ref()
             .ok_or_else(|| "gateway_oauth requires auth runtime configuration".to_string())?;
-        crate::shared_state::process_shared_state()
-            .gateway_auth(config, &manager.runtime_config())
-            .map_err(|_| "failed to create provider OAuth HTTP client".to_string())
+        GatewayAuthManager::new(&provider_info, config, manager).map(Arc::new)
     });
     let auth_manager = auth_manager_for_provider(auth_manager, &provider_info);
     Arc::new(ConfiguredModelProvider::new(
@@ -659,6 +657,17 @@ impl ModelProvider for ConfiguredModelProvider {
             .clone()
             .transpose()
             .map_err(std::io::Error::other)
+    }
+
+    fn recover_from_unauthorized(
+        &self,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ProviderUnauthorizedRecovery>> {
+        Box::pin(async {
+            let Some(gateway) = self.gateway_auth_manager()? else {
+                return Ok(ProviderUnauthorizedRecovery::NotConfigured);
+            };
+            Ok(gateway.prepare_retry().await)
+        })
     }
 
     fn supports_attestation(&self) -> bool {

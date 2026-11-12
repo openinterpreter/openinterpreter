@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::ProviderUnauthorizedRecovery;
 use crate::gateway_export::GatewayExport;
 use codex_login::AuthManager;
-use codex_login::GatewayAuthError;
+use codex_login::OAuthSessionError;
 use codex_login::OAuthSessionManager;
 use codex_model_provider_info::GatewayOAuthConfig;
 use codex_model_provider_info::ModelProviderInfo;
@@ -89,13 +89,13 @@ impl GatewayAuthManager {
 fn gateway_auth_error(error: std::io::Error) -> CodexErr {
     if let Some(login_error) = error
         .get_ref()
-        .and_then(|source| source.downcast_ref::<GatewayAuthError>())
+        .and_then(|source| source.downcast_ref::<OAuthSessionError>())
     {
         return match login_error {
-            GatewayAuthError::LoginRequired => {
+            OAuthSessionError::LoginRequired => {
                 CodexErrorDetails::GatewayLoginRequired(login_error.to_string()).into()
             }
-            GatewayAuthError::LoginInProgress => CodexErr::InvalidRequest(login_error.to_string()),
+            OAuthSessionError::LoginInProgress => CodexErr::InvalidRequest(login_error.to_string()),
         };
     }
     // Issuer errors may echo arbitrary credentials from configured URLs. Keep the

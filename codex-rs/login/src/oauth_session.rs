@@ -127,6 +127,11 @@ struct OAuthSessionCache {
 }
 
 impl OAuthSessionManager {
+    /// Immutable settings identifying the grant observed by status listeners.
+    pub fn config(&self) -> &OAuthSessionConfig {
+        &self.state.config
+    }
+
     /// Creates an OAuth session using the configured credential store and the caller's HTTP policy.
     /// Token grants never follow redirects or include primary-provider credentials or request logs.
     pub fn new(
