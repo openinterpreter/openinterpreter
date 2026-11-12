@@ -20,9 +20,7 @@ use std::sync::mpsc as std_mpsc;
 #[cfg(feature = "v8-runtime")]
 use std::thread;
 
-use crate::TaskFailureHandler;
 use crate::session_runtime::OutputItem;
-use crate::v8_init::ensure_v8_initialized;
 use codex_code_mode_protocol::CodeModeToolKind;
 #[cfg(feature = "v8-runtime")]
 use codex_code_mode_protocol::EnabledToolMetadata;

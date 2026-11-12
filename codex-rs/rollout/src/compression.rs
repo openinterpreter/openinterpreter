@@ -23,12 +23,6 @@ pub(crate) use path_metadata::existing_rollout_with_metadata_sync;
 use read_metrics::ReadFailureSource;
 use read_metrics::ReadMetrics;
 
-mod error_metrics;
-mod read_metrics;
-
-use error_metrics::FailureMetric;
-use read_metrics::ReadMetrics;
-
 const COMPRESSED_SUFFIX: &str = ".zst";
 const MAX_NOT_FOUND_RETRIES: usize = 3;
 const OPEN_ROLLOUT_LINE_READER_RETRY_DELAY: Duration = Duration::from_millis(50);
