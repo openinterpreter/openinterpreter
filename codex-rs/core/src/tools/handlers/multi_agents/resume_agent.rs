@@ -169,27 +169,3 @@ impl ToolOutput for ResumeAgentResult {
         tool_output_code_mode_result(self, "resume_agent")
     }
 }
-
-async fn try_resume_closed_agent(
-    session: &Arc<Session>,
-    turn: &Arc<TurnContext>,
-    receiver_thread_id: ThreadId,
-    child_depth: i32,
-) -> Result<(), FunctionCallError> {
-    let config =
-        build_agent_resume_config(turn.as_ref()).map_err(FunctionCallError::RespondToModel)?;
-    Box::pin(session.services.agent_control.resume_agent_from_rollout(
-        config,
-        receiver_thread_id,
-        thread_spawn_source(
-            session.thread_id(),
-            &turn.session_source,
-            child_depth,
-            /*agent_role*/ None,
-            /*task_name*/ None,
-        )?,
-    ))
-    .await
-    .map(|_| ())
-    .map_err(|err| collab_agent_error(receiver_thread_id, err))
-}

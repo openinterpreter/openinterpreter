@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent::api::AgentTarget;
 use crate::agent::child_config::build_agent_resume_config;
 use crate::agent::control::render_input_preview;
 use crate::tools::handlers::multi_agents_spec::create_send_input_tool_v1;
@@ -50,14 +51,13 @@ impl Handler {
         let prompt = render_input_preview(&input_items);
         let local_agent_control = session
             .services
-            .agent_control
-            .get_agent_metadata(receiver_thread_id);
-        if receiver_agent.is_some() {
+            .local_agent_runtime
+            .control(session.session_id());
+        let receiver_agent = local_agent_control.get_agent_metadata(receiver_thread_id);
+        let residency_pin = if receiver_agent.is_some() {
             let resume_config = build_agent_resume_config(turn.as_ref())
                 .map_err(FunctionCallError::RespondToModel)?;
-            session
-                .services
-                .agent_control
+            local_agent_control
                 .ensure_v2_agent_loaded(resume_config, receiver_thread_id, /*parent*/ None)
                 .await
                 .map_err(|err| collab_agent_error(receiver_thread_id, err))?
