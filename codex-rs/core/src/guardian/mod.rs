@@ -190,8 +190,6 @@ use approval_request::guardian_assessment_action;
 #[cfg(test)]
 use codex_guardian_reviewer::GuardianReviewOutcome;
 #[cfg(test)]
-use codex_guardian_reviewer::GuardianReviewOutcome;
-#[cfg(test)]
 use prompt::GuardianPromptMode;
 #[cfg(test)]
 use prompt::GuardianTranscriptCursor;
