@@ -748,27 +748,6 @@ crate.annotation(
     ],
 )
 
-# The musl CLI's allocator needs declared native tools and consistent header flags.
-crate.annotation(
-    build_script_env = {
-        "MAKE": "$${pwd}/$(MAKE)",
-        "NM": "$${pwd}/$(execpath @llvm//tools:llvm-nm)",
-        "RANLIB": "$${pwd}/$(execpath @llvm//tools:llvm-ranlib)",
-    },
-    build_script_toolchains = ["@rules_foreign_cc//toolchains:current_make_toolchain"],
-    build_script_tools = [
-        "@llvm//tools:llvm-nm",
-        "@llvm//tools:llvm-ranlib",
-        "@rules_foreign_cc//toolchains:current_make_toolchain",
-    ],
-    crate = "tikv-jemalloc-sys",
-    patch_args = ["-p1"],
-    patches = [
-        "//patches:tikv-jemalloc-sys_make_env.patch",
-        "//patches:tikv-jemalloc-sys_dependency_flags.patch",
-    ],
-)
-
 inject_repo(crate, "rules_foreign_cc")
 
 crate.annotation(
