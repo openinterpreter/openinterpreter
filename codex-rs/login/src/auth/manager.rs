@@ -1,4 +1,15 @@
 mod workspace_routing;
+mod workspace_switching;
+pub use workspace_switching::WorkspaceLogin;
+pub use workspace_switching::WorkspaceSwitch;
+
+#[path = "account_grant.rs"]
+mod account_grant;
+pub use account_grant::AccountOAuthGrant;
+pub use account_grant::AccountOAuthGrantLease;
+pub use account_grant::AccountOAuthGrantRevision;
+use account_grant::same_account_grant;
+use account_grant::same_account_login;
 
 use chrono::Utc;
 use http::StatusCode;
@@ -69,10 +80,10 @@ use crate::default_client::create_default_auth_client;
 use crate::oauth::ErrorBodyLimit;
 use crate::oauth::OAuthClient;
 use crate::oauth::OAuthError;
+use crate::oauth::RefreshReason;
 use crate::oauth::RefreshTokenGrant;
 use crate::oauth::TokenEncoding;
 use crate::oauth::TokenEndpoint;
-use crate::oauth::TokenErrorDetail;
 use crate::outbound_proxy::AuthRouteConfig;
 use crate::token_data::AccountOAuthProvenance;
 use crate::token_data::TokenData;
@@ -1801,15 +1812,13 @@ async fn request_chatgpt_token_refresh(
     client: &HttpClient,
     refresh_reason: RefreshReason,
 ) -> Result<RefreshResponse, RefreshTokenError> {
-    let client_id = oauth_client_id();
-    let endpoint = refresh_token_endpoint();
     let oauth = OAuthClient::new(
         client,
         TokenEndpoint {
-            url: &endpoint,
-            client_id: &client_id,
+            url: endpoint,
+            client_id,
             encoding: TokenEncoding::Json,
-            timeout: None,
+            timeout: Some(Duration::from_secs(45)),
             error_body_limit: ErrorBodyLimit::Unlimited,
         },
     );
@@ -1817,18 +1826,22 @@ async fn request_chatgpt_token_refresh(
         .refresh(RefreshTokenGrant {
             refresh_token: &refresh_token,
             resource: None,
+            refresh_reason: Some(refresh_reason),
         })
         .await
     {
         Ok(response) => Ok(response),
         Err(OAuthError::Rejected(rejection)) => {
+            if let Some(codex_http_client::HttpError::Policy(denied)) = rejection.body_read_error {
+                return Err(denied.into());
+            }
             let status = rejection.status;
-            let detail = &rejection.detail;
-            tracing::error!(%status, ?detail, "Failed to refresh token");
-            let code = detail.error_code();
+            // The IdP controls the response body and may echo credential material.
+            tracing::error!(%status, "Failed to refresh token");
+            let code = rejection.detail.error_code();
             let is_invalid_grant_bad_request = status == StatusCode::BAD_REQUEST
                 && code.is_some_and(|code| code.eq_ignore_ascii_case("invalid_grant"));
-            let failed = classify_refresh_token_failure(code, detail, is_invalid_grant_bad_request);
+            let failed = classify_refresh_token_failure(code, is_invalid_grant_bad_request);
             if status == StatusCode::UNAUTHORIZED
                 || failed.reason != RefreshTokenFailedReason::Other
                 || is_invalid_grant_bad_request
@@ -1836,11 +1849,12 @@ async fn request_chatgpt_token_refresh(
                 Err(RefreshTokenError::Permanent(failed))
             } else {
                 Err(RefreshTokenError::Transient(std::io::Error::other(
-                    format!("Failed to refresh token: {status}: {detail}"),
+                    format!("Failed to refresh token: {status}"),
                 )))
             }
         }
-        Err(error @ (OAuthError::Transport(_) | OAuthError::InvalidResponse)) => {
+        Err(OAuthError::Transport(error)) => Err(error.into()),
+        Err(error @ OAuthError::InvalidResponse) => {
             Err(RefreshTokenError::Transient(std::io::Error::other(error)))
         }
     }
@@ -1848,7 +1862,6 @@ async fn request_chatgpt_token_refresh(
 
 fn classify_refresh_token_failure(
     code: Option<&str>,
-    detail: &TokenErrorDetail,
     is_invalid_grant_bad_request: bool,
 ) -> RefreshTokenFailedError {
     let normalized_code = code.map(str::to_ascii_lowercase);
@@ -1860,10 +1873,7 @@ fn classify_refresh_token_failure(
     };
 
     if reason == RefreshTokenFailedReason::Other && !is_invalid_grant_bad_request {
-        tracing::warn!(
-            backend_detail = ?detail,
-            "Encountered unknown response while refreshing token"
-        );
+        tracing::warn!("Encountered unknown response while refreshing token");
     }
 
     let message = match reason {
@@ -3836,3 +3846,7 @@ mod change_state_tests;
 #[cfg(test)]
 #[path = "account_user_id_tests.rs"]
 mod account_user_id_tests;
+
+#[cfg(test)]
+#[path = "source_tests.rs"]
+mod source_tests;
