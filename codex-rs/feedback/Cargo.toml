@@ -22,6 +22,7 @@ mime_guess = { workspace = true }
 sentry = { version = "0.46" }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+tar = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 tracing = { workspace = true }

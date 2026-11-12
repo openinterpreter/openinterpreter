@@ -47,13 +47,15 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn unloaded_compressed_rollout_is_included_as_jsonl_attachment() {
+fn unloaded_compressed_rollout_is_included_in_bounded_archive() {
     let fixture = Fixture::new();
     // The app-server supplies the DB's logical .jsonl path without loading this thread.
     let paths = [fixture.attachment()];
     let snapshot = CodexFeedback::new().snapshot(/*session_id*/ None);
+    let headers = sentry::protocol::Envelope::new().headers().clone();
     let attachments = snapshot
         .feedback_attachments(
+            &headers,
             /*include_logs*/ false,
             &[],
             &paths,
@@ -61,21 +63,22 @@ fn unloaded_compressed_rollout_is_included_as_jsonl_attachment() {
         )
         .collect::<Result<Vec<_>>>()
         .unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].filename, "rollouts.tar.gz");
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(
+        attachments[0].buffer.as_slice(),
+    ));
+    let mut entries = archive.entries().unwrap();
+    let mut entry = entries.next().unwrap().unwrap();
     assert_eq!(
-        attachments
-            .iter()
-            .map(|attachment| (
-                attachment.filename.as_str(),
-                attachment.content_type.as_deref(),
-                attachment.buffer.as_slice(),
-            ))
-            .collect::<Vec<_>>(),
-        vec![(
-            fixture.plain.file_name().unwrap().to_str().unwrap(),
-            Some("text/plain"),
-            JSONL
-        )]
+        entry.path().unwrap().as_ref(),
+        std::path::Path::new(fixture.plain.file_name().unwrap())
     );
+    let mut contents = Vec::new();
+    std::io::Read::read_to_end(&mut entry, &mut contents).unwrap();
+    assert_eq!(contents, JSONL);
+    drop(entry);
+    assert!(entries.next().is_none());
     assert!(
         !fixture.plain.exists(),
         "feedback must not materialize the durable rollout"

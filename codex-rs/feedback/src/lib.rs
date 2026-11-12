@@ -37,6 +37,7 @@ pub(crate) mod feedback_diagnostics;
 pub use daemon_logs::daemon_log_attachments;
 mod guardian;
 mod report_upload;
+mod rollout_archive;
 mod signed_upload;
 mod upload;
 pub use feedback_diagnostics::FEEDBACK_DIAGNOSTICS_ATTACHMENT_FILENAME;
@@ -941,9 +942,66 @@ impl FeedbackSnapshot {
     ) -> impl Iterator<Item = Result<sentry::protocol::Attachment>> + 'a {
         use sentry::protocol::Attachment;
 
-        // Priority: logs, generated attachments (doctor report), connectivity diagnostics,
-        // then files in caller order. Measure each file’s envelope independently;
-        // the size limit applies per request, not to the sum of all files.
+        // Partition metadata without reading files before the event is accepted. Keep
+        // generated diagnostics first, then rollouts, then remaining files in caller order.
+        let (rollouts, diagnostics_attachments): (Vec<_>, Vec<_>) =
+            extra_attachments.into_iter().partition(|attachment| {
+                codex_rollout::rollout_id_from_path(Path::new(&attachment.filename)).is_some()
+            });
+        let (rollout_paths, diagnostic_paths): (Vec<_>, Vec<_>) =
+            extra_attachment_paths.iter().partition(|attachment| {
+                codex_rollout::rollout_id_from_path(&attachment.path).is_some()
+            });
+        let has_rollouts = !rollouts.is_empty() || !rollout_paths.is_empty();
+        let archive = has_rollouts
+            .then_some((rollout_paths, rollouts))
+            .into_iter()
+            .flat_map(move |(paths, rollouts)| {
+                let archive =
+                    tempfile::tempdir()
+                        .map_err(anyhow::Error::from)
+                        .and_then(|directory| {
+                            let output_path = directory.path().join("rollouts.tar.gz");
+                            let Some(archive) = rollout_archive::archive_rollouts(
+                                &output_path,
+                                paths.iter().copied(),
+                                &rollouts,
+                                MAX_DECODED_UPLOAD_BYTES,
+                            )?
+                            else {
+                                return Ok(None);
+                            };
+                            let attachment = archive
+                                .read_attachment(MAX_DECODED_UPLOAD_BYTES)?
+                                .context("rollout archive is missing or exceeds the size limit")?;
+                            // Measure framing without copying the archive. Account for the extra
+                            // decimal digits when the empty attachment's length becomes nonzero.
+                            let mut envelope =
+                                sentry::protocol::Envelope::new().with_headers(headers.clone());
+                            envelope.add_item(Attachment {
+                                filename: attachment.filename.clone(),
+                                content_type: attachment.content_type.clone(),
+                                ..Default::default()
+                            });
+                            let mut framing = Vec::new();
+                            envelope.to_writer(&mut framing)?;
+                            let archive_bytes = attachment.buffer.len();
+                            let envelope_bytes = framing.len()
+                                + archive_bytes
+                                + archive_bytes.checked_ilog10().unwrap_or(0) as usize;
+                            anyhow::ensure!(
+                                envelope_bytes <= MAX_DECODED_UPLOAD_BYTES,
+                                "rollout archive envelope exceeds the size limit"
+                            );
+                            Ok(Some(attachment))
+                        });
+                rollout_archive::with_individual_fallback(
+                    archive,
+                    paths,
+                    rollouts,
+                    MAX_DECODED_UPLOAD_BYTES,
+                )
+            });
         let logs = include_logs.then(|| self.log_attachment(logs_override));
         let diagnostics = self
             .feedback_diagnostics_attachment_text(include_logs)
@@ -957,7 +1015,8 @@ impl FeedbackSnapshot {
             .chain(diagnostics_attachments)
             .chain(diagnostics)
             .map(Ok)
-            .chain(extra_attachment_paths.iter().map(|attachment_path| {
+            .chain(archive)
+            .chain(diagnostic_paths.into_iter().map(|attachment_path| {
                 attachment_path
                     .read_attachment(MAX_DECODED_UPLOAD_BYTES)?
                     .context("feedback attachment is not a regular file or exceeds the size limit")
@@ -1883,6 +1942,7 @@ mod tests {
 
     #[test]
     fn feedback_attachments_gate_connectivity_diagnostics() {
+        let headers = sentry::protocol::Envelope::new().headers().clone();
         let extra_filename = format!("codex-feedback-extra-{}.jsonl", ThreadId::new());
         let extra_path = std::env::temp_dir().join(&extra_filename);
         let extra_attachment_path = FeedbackAttachmentPath {
@@ -1901,6 +1961,7 @@ mod tests {
 
         let attachments_with_diagnostics = snapshot_with_diagnostics
             .feedback_attachments(
+                &headers,
                 /*include_logs*/ true,
                 &[FeedbackAttachment {
                     filename: DOCTOR_REPORT_ATTACHMENT_FILENAME.to_string(),
@@ -1946,7 +2007,13 @@ mod tests {
         let attachments_without_diagnostics = CodexFeedback::new()
             .snapshot(/*session_id*/ None)
             .with_feedback_diagnostics(FeedbackDiagnostics::default())
-            .feedback_attachments(/*include_logs*/ true, &[], &[], Some(vec![1]))
+            .feedback_attachments(
+                &headers,
+                /*include_logs*/ true,
+                &[],
+                &[],
+                Some(vec![1]),
+            )
             .collect::<Result<Vec<_>>>()
             .unwrap();
 
@@ -1963,6 +2030,7 @@ mod tests {
 
     #[test]
     fn path_backed_attachments_use_binary_content_types() {
+        let headers = sentry::protocol::Envelope::new().headers().clone();
         let suffix = ThreadId::new();
         let gzip_filename = format!("codex-desktop-app-logs-{suffix}.tar.gz");
         let unknown_filename = format!("codex-feedback-extra-{suffix}.binunknown");
@@ -1976,6 +2044,7 @@ mod tests {
         let attachments = CodexFeedback::new()
             .snapshot(/*session_id*/ None)
             .feedback_attachments(
+                &headers,
                 /*include_logs*/ false,
                 &[],
                 &[
