@@ -25,8 +25,8 @@ cargo_build_script(
     edition = "2021",
     links = "openssl",
     pkg_name = "openssl-sys",
-    rustc_env = {"CARGO_PKG_VERSION": "0.9.118"},
-    version = "0.9.118",
+    rustc_env = {"CARGO_PKG_VERSION": "0.9.117"},
+    version = "0.9.117",
     deps = [
         "@crates//:cc-1.4.5",
         "@crates//:pkg-config-0.3.34",
@@ -42,7 +42,7 @@ rust_library(
     data = ["@openssl//:gen_dir"],
     edition = "2021",
     package_metadata = ["openssl-sys_package_metadata"],
-    version = "0.9.118",
+    version = "0.9.117",
     deps = [
         "build_script",
         "@crates//:libc-0.2.189",
