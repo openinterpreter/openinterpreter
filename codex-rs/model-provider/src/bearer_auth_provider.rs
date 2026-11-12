@@ -21,7 +21,7 @@ impl BearerAuthProvider {
         Self {
             token: Some(token),
             account_id: None,
-            is_fedramp_account: false,
+            is_fedramp_account,
             token_header_name: None,
             use_bearer_prefix: true,
         }
@@ -127,6 +127,32 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("true")
         );
+    }
+
+    #[test]
+    fn api_key_constructor_preserves_fedramp_routing_without_exposing_token() {
+        for (key, expected_fedramp) in [
+            ("sk-proj-fedramp-synthetic", true),
+            ("sk-svcacct-fedramp-synthetic", true),
+            ("sk-proj-synthetic", false),
+        ] {
+            let auth = BearerAuthProvider::new(key.to_string());
+            let mut headers = HeaderMap::new();
+            auth.add_auth_headers(&mut headers)
+                .expect("valid test API key");
+            assert_eq!(
+                headers
+                    .get("X-OpenAI-Fedramp")
+                    .and_then(|v| v.to_str().ok()),
+                expected_fedramp.then_some("true")
+            );
+            assert_eq!(
+                headers[http::header::AUTHORIZATION]
+                    .to_str()
+                    .expect("ASCII test API key"),
+                format!("Bearer {key}")
+            );
+        }
     }
 
     #[test]
