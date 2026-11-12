@@ -8,6 +8,7 @@ use crate::state::TaskKind;
 use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskResult;
 use codex_features::Feature;
+use codex_history::SenderUserMessages;
 use codex_protocol::AgentPath;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
@@ -30,6 +31,20 @@ use pretty_assertions::assert_eq;
 use test_case::test_case;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
+
+#[test]
+fn captured_sender_evidence_is_bound_to_accepted_turn() {
+    let captured = SenderUserMessages {
+        receiver_turn_id: String::new(),
+        receiver_message_id: "delivery-1".to_owned(),
+        text: "retained instructions".to_owned(),
+    };
+    let bound = bind_sender_messages_to_turn(&captured, "accepted-turn-2");
+    assert_eq!(bound.receiver_turn_id, "accepted-turn-2");
+    assert_eq!(bound.receiver_message_id, "delivery-1");
+    assert_eq!(bound.text, captured.text);
+    assert_eq!(captured.receiver_turn_id, "");
+}
 
 #[derive(Clone, Copy)]
 struct NeverEndingTask {
