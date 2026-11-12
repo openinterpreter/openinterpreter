@@ -1684,32 +1684,39 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
         assert!(!configured_model.additional_speed_tiers.is_empty());
         assert!(!configured_model.service_tiers.is_empty());
 
-        let provider = create_model_provider(
+        let mut gov_provider = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
+        gov_provider.base_url =
+            Some("https://bedrock-mantle.us-gov-west-1.api.aws/openai/v1".to_string());
+        for provider_info in [
             ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
-            /*auth_manager*/ None,
-        );
-        let manager = provider.models_manager(
-            test_codex_home(),
-            Some(ModelsResponse {
-                models: vec![configured_model],
-            }),
-        );
+            ModelProviderInfo::create_amazon_bedrock_runtime_provider(/*aws*/ None),
+            gov_provider,
+        ] {
+            let provider = create_model_provider(provider_info, /*auth_manager*/ None);
+            let configured_catalog = ModelsResponse {
+                models: vec![configured_model.clone()],
+            };
+            for manager in [
+                provider.models_manager(test_codex_home(), Some(configured_catalog.clone())),
+                provider.models_manager_without_cache(Some(configured_catalog.clone())),
+            ] {
+                let catalog = manager
+                    .raw_model_catalog(
+                        RefreshStrategy::Online,
+                        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+                    )
+                    .await;
 
-        let catalog = manager
-            .raw_model_catalog(
-                RefreshStrategy::Online,
-                HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
-            )
-            .await;
-
-        assert_eq!(catalog.models.len(), 1);
-        assert_eq!(catalog.models[0].slug, "gpt-5.5");
-        assert_eq!(
-            catalog.models[0].additional_speed_tiers,
-            Vec::<String>::new()
-        );
-        assert_eq!(catalog.models[0].service_tiers, Vec::new());
-        assert_eq!(catalog.models[0].default_service_tier, None);
+                assert_eq!(catalog.models.len(), 1);
+                assert_eq!(catalog.models[0].slug, "gpt-5.5");
+                assert_eq!(
+                    catalog.models[0].additional_speed_tiers,
+                    Vec::<String>::new()
+                );
+                assert_eq!(catalog.models[0].service_tiers, Vec::new());
+                assert_eq!(catalog.models[0].default_service_tier, None);
+            }
+        }
     }
 
     #[tokio::test]
