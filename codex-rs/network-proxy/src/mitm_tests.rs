@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 
 use crate::CredentialProviderConfig;
 use crate::config::NetworkProxyConfig;
