@@ -13,6 +13,28 @@ const STARTUP_BLOCKED: &[u8] = b"voice startup blocked\n";
 const CHILD_ENV: &str = "CODEX_VOICE_WATCHDOG_TEST_CHILD";
 
 #[test]
+fn device_listing_replies_with_enumerated_devices_without_opening_streams() {
+    for kind in [AudioDeviceKind::Input, AudioDeviceKind::Output] {
+        let listed = vec![AudioDevice {
+            name: "fixture-audio".into(),
+            channels: 2,
+            is_default: true,
+        }];
+        let reply = device_list_reply(kind, |requested| {
+            assert_eq!(requested, kind);
+            Ok(listed.clone())
+        })
+        .unwrap();
+        assert_eq!(reply, Message::DeviceList { devices: listed });
+    }
+    let error = device_list_reply(AudioDeviceKind::Input, |_| {
+        Err(io::Error::other("device enumeration failed"))
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "device enumeration failed");
+}
+
+#[test]
 fn queued_privacy_controls_and_close_precede_capture_service() {
     for message in [
         Message::SetAudioControls {
