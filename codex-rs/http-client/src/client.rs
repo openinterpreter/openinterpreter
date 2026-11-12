@@ -50,24 +50,6 @@ impl std::fmt::Debug for TransportClient {
 
 impl HttpClient {
     pub fn new(inner: reqwest::Client) -> Self {
-        Self::from_parts(inner, RequestLogging::Enabled)
-    }
-
-    /// Creates a client that suppresses request URL and response-header diagnostics.
-    ///
-    /// Use this for endpoints whose URLs or headers may contain credentials that are redacted by
-    /// the caller above the HTTP transport boundary.
-    pub fn new_without_request_logging(inner: reqwest::Client) -> Self {
-        Self::from_parts(inner, RequestLogging::Disabled)
-    }
-
-    /// Suppresses URL and response-header diagnostics while preserving this client's routing.
-    pub fn without_request_logging(mut self) -> Self {
-        self.request_logging = RequestLogging::Disabled;
-        self
-    }
-
-    pub(crate) fn from_parts(inner: reqwest::Client, request_logging: RequestLogging) -> Self {
         Self {
             backend: HttpClientBackend::Direct(TransportClient {
                 inner,

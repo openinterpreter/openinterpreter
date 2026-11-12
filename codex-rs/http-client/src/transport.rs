@@ -1,8 +1,11 @@
-//! Shared HTTP transport with optional limits on complete response bodies.
+//! Shared HTTP transport for fixed clients and route-aware pools, with optional response limits.
 //!
 //! Each request's limit applies to observed body bytes, including unsuccessful responses;
 //! declared content lengths are only an additional early-rejection check.
 
+use crate::HttpResponse;
+use crate::RouteAwareClientPool;
+use crate::RouteAwareRequestError;
 use crate::client::HttpClient;
 use crate::client::HttpClientBackend;
 use crate::error::TransportError;
@@ -114,9 +117,11 @@ impl ReqwestTransport {
         }
     }
 
-    fn map_error(err: reqwest::Error) -> TransportError {
+    fn map_error(err: crate::HttpError) -> TransportError {
         let err = err.without_url();
-        if err.is_connect() {
+        if let crate::HttpError::Policy(denied) = err {
+            TransportError::Policy(denied)
+        } else if err.is_connect() {
             TransportError::Connection(err.without_url())
         } else if err.is_timeout() {
             TransportError::Timeout
@@ -172,10 +177,10 @@ impl HttpTransport for ReqwestTransport {
 
         let url = req.url.clone();
         let response_body_limit_bytes = req.response_body_limit_bytes;
-        let builder = self.build(req)?;
-        let resp = builder.send().await.map_err(Self::map_error)?;
+        let resp = self.send(req).await?;
         let status = resp.status();
         let headers = resp.headers().clone();
+        let retry_after = RetryAfter::from_headers(&headers);
         let bytes = match response_body_limit_bytes {
             Some(max_bytes) => bounded_response_bytes(resp, max_bytes).await,
             None => resp.bytes().await.map_err(Self::map_error),
@@ -183,9 +188,13 @@ impl HttpTransport for ReqwestTransport {
         if !status.is_success() {
             let body = match bytes {
                 Ok(bytes) => String::from_utf8(bytes.to_vec()).ok(),
-                Err(error @ TransportError::ResponseTooLarge { .. }) => return Err(error),
+                Err(
+                    error @ (TransportError::ResponseTooLarge { .. } | TransportError::Policy(_)),
+                ) => return Err(error),
                 // Keep bounded diagnostic-body failures from hiding HTTP auth/retry status.
                 Err(_) if response_body_limit_bytes.is_some() => None,
+                // TODO(anp): Preserve retry advice on body failures without changing their
+                // network/timeout classification to HTTP status handling.
                 Err(error) => return Err(error),
             };
             return Err(TransportError::Http {
@@ -208,11 +217,11 @@ impl HttpTransport for ReqwestTransport {
 
         let url = req.url.clone();
         let response_body_limit_bytes = req.response_body_limit_bytes;
-        let builder = self.build(req)?;
-        let resp = builder.send().await.map_err(Self::map_error)?;
+        let resp = self.send(req).await?;
         let status = resp.status();
         let headers = resp.headers().clone();
         if !status.is_success() {
+            let retry_after = RetryAfter::from_headers(&headers);
             let body = match response_body_limit_bytes {
                 Some(max_bytes) => match bounded_response_bytes(resp, max_bytes).await {
                     Ok(bytes) => {
@@ -222,11 +231,17 @@ impl HttpTransport for ReqwestTransport {
                         *buffered.headers_mut() = headers.clone();
                         reqwest::Response::from(buffered).text().await.ok()
                     }
-                    Err(error @ TransportError::ResponseTooLarge { .. }) => return Err(error),
+                    Err(
+                        error @ (TransportError::ResponseTooLarge { .. }
+                        | TransportError::Policy(_)),
+                    ) => return Err(error),
                     // A failed diagnostic body must not hide HTTP auth or retry semantics.
                     Err(_) => None,
                 },
-                None => resp.text().await.ok(),
+                None => match resp.text().await {
+                    Err(crate::HttpError::Policy(denied)) => return Err(denied.into()),
+                    body => body.ok(),
+                },
             };
             return Err(TransportError::Http {
                 status,
@@ -252,7 +267,7 @@ impl HttpTransport for ReqwestTransport {
 }
 
 fn bounded_response_stream(
-    response: reqwest::Response,
+    response: HttpResponse,
     max_bytes: usize,
 ) -> Result<ByteStream, TransportError> {
     if response
@@ -282,8 +297,8 @@ fn bounded_response_stream(
     Ok(Box::pin(stream))
 }
 
-async fn bounded_response_bytes(
-    response: reqwest::Response,
+pub async fn bounded_response_bytes(
+    response: HttpResponse,
     max_bytes: usize,
 ) -> Result<Bytes, TransportError> {
     let mut stream = bounded_response_stream(response, max_bytes)?;

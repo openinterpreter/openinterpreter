@@ -11,7 +11,6 @@ use std::time::Duration;
 use http::HeaderMap;
 use http::Method;
 use http::StatusCode;
-use http::header::CONTENT_TYPE;
 use reqwest::IntoUrl;
 
 use crate::BuildRouteAwareHttpClientError;
@@ -25,6 +24,9 @@ use crate::OutboundProxyPolicy;
 use crate::OutboundProxyRoute;
 use crate::RequestBuilder;
 use crate::RouteFailureClass;
+use crate::client::HttpClientBackend;
+use crate::client::TransportClient;
+use crate::client_builder::ProxyRouting;
 use crate::tls_backend_fallback::RustlsClientCache;
 
 const MAX_CACHED_ROUTES: usize = 16;
@@ -218,6 +220,13 @@ impl RouteAwareClientPool {
     pub fn with_outbound_proxy_policy(mut self, policy: OutboundProxyPolicy) -> Self {
         self.http_client_factory = self.http_client_factory.with_outbound_proxy_policy(policy);
         self
+    }
+
+    /// Exposes the ordinary request builder while sending through this policy-aware pool.
+    pub fn into_client(self) -> HttpClient {
+        HttpClient {
+            backend: HttpClientBackend::Routed(Arc::new(self)),
+        }
     }
 
     /// Creates a pool with the shared default HTTP transport settings.
@@ -479,7 +488,7 @@ impl RouteAwareClientPool {
     where
         U: IntoUrl,
     {
-        RouteAwareRequestBuilder::new(self.clone(), method, url)
+        RequestBuilder::routed(Arc::new(self.clone()), method, url)
     }
 
     async fn client_for_url_with_resolver<F, Fut>(

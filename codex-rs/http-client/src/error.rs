@@ -32,6 +32,22 @@ pub enum TransportError {
     ResponseTooLarge { max_bytes: usize },
 }
 
+impl TransportError {
+    /// Returns retry advice captured when this error response arrived.
+    pub fn retry_after(&self) -> Option<RetryAfter> {
+        match self {
+            Self::Http { retry_after, .. } => *retry_after,
+            Self::Policy(_)
+            | Self::RetryLimit
+            | Self::Timeout
+            | Self::Connection(_)
+            | Self::Network(_)
+            | Self::Build(_)
+            | Self::ResponseTooLarge { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum StreamError {
     #[error("stream failed: {0}")]

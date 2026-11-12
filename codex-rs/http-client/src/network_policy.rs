@@ -197,11 +197,45 @@ impl NetworkPolicy {
         }
     }
 
+    /// Narrows a bootstrap client's existing local policy to exact endpoint URLs.
+    /// This cannot grant access to a destination denied by the underlying policy.
+    pub fn restrict_to_endpoints(mut self, endpoints: BTreeSet<Url>) -> Self {
+        self.endpoints = Some(Arc::new(match &self.endpoints {
+            Some(existing) => existing.intersection(&endpoints).cloned().collect(),
+            None => endpoints,
+        }));
+        self
+    }
+
     /// Binds a content client to the current account so retained credentials cannot
     /// be used after another workspace's policy has been installed.
     pub fn for_current_account(mut self) -> Self {
         self.account = self.state.as_ref().map(|state| lock_state(state).account);
         self
+    }
+
+    /// Bind a caller's restrictions to a captured credential policy without widening either.
+    /// Different managed controllers or account bindings cannot authorize the same request.
+    pub fn with_account_binding(mut self, credentials: &Self) -> Option<Self> {
+        if let Some(state) = &credentials.state {
+            if let Some(caller) = &self.state {
+                if !Arc::ptr_eq(caller, state) {
+                    return None;
+                }
+            } else {
+                self.state = Some(Arc::clone(state));
+            }
+        }
+        if let (Some(caller), Some(credentials)) = (self.account, credentials.account)
+            && caller != credentials
+        {
+            return None;
+        }
+        self.account = self.account.or(credentials.account);
+        if let Some(endpoints) = &credentials.endpoints {
+            self = self.restrict_to_endpoints(endpoints.as_ref().clone());
+        }
+        Some(self)
     }
 
     /// Whether this transport participates in the application policy lifecycle.
