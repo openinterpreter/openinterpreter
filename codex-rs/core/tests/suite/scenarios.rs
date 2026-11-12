@@ -80,11 +80,23 @@ mod agent_message_board;
 #[path = "scenarios/catalog_settings.rs"]
 mod catalog_settings;
 
+#[path = "scenarios_catalog_approval_instructions_tests.rs"]
+mod catalog_approval_instructions;
+
 #[path = "scenarios_agent_eviction_tests.rs"]
 mod agent_eviction;
 
 #[path = "scenarios_context_management_tools.rs"]
 mod context_management_tools;
+
+#[path = "scenarios_content_filter.rs"]
+mod content_filter;
+
+#[path = "scenarios_credential_masking.rs"]
+mod credential_masking;
+
+#[path = "scenarios_code_mode_settled_helpers_tests.rs"]
+mod code_mode_settled_helpers;
 
 #[path = "scenarios_dynamic_tools.rs"]
 mod dynamic_tools;
@@ -143,6 +155,9 @@ mod incremental_tools;
 #[path = "scenarios_model_instructions.rs"]
 mod model_instructions;
 
+#[path = "scenarios_provider_capabilities.rs"]
+mod provider_capabilities;
+
 #[path = "scenarios_retained_tool_outputs.rs"]
 mod retained_tool_outputs;
 
@@ -160,6 +175,9 @@ mod tools_namespace_budget;
 
 #[path = "scenarios_web_search.rs"]
 mod web_search;
+
+#[path = "scenarios_world_state_prefix_tests.rs"]
+mod world_state_prefix;
 
 #[path = "scenarios_turn_input_agent_message.rs"]
 mod turn_input_agent_message;
