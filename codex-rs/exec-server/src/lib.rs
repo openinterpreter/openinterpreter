@@ -40,6 +40,10 @@ mod remote_process;
 mod resolved_capability;
 mod rpc;
 mod rpc_server_requests;
+mod rpc_timing;
+mod runtime_options;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod sandbox_integrity;
 mod sandbox_selection;
 mod sandboxed_file_open;
 mod sandboxed_file_system;

@@ -560,6 +560,26 @@ fn map_remote_error(error: ExecServerError) -> io::Error {
     }
 }
 
+/// Best-effort remote handle cleanup may outlive a cancelled transfer.
+struct FileWriteRegistration {
+    client: ExecServerClient,
+    handle_id: String,
+    active: bool,
+    runtime: tokio::runtime::Handle,
+}
+
+impl Drop for FileWriteRegistration {
+    fn drop(&mut self) {
+        if self.active {
+            let client = self.client.clone();
+            let handle_id = self.handle_id.clone();
+            self.runtime.spawn(async move {
+                let _ = client.fs_close(FsCloseParams { handle_id }).await;
+            });
+        }
+    }
+}
+
 #[cfg(all(test, any(unix, windows)))]
 #[path = "remote_file_system_path_uri_tests.rs"]
 mod path_uri_tests;

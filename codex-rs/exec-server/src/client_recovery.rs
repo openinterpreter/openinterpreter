@@ -413,10 +413,27 @@ impl Inner {
         );
         let mut registry_retry_attempt = 0;
         let last_error = loop {
-            match timeout_at(deadline, self.resume_once(&session_id)).await {
+            let mut stage = "transport";
+            let result = match timeout_at(
+                attach_deadline,
+                self.resume_once(&session_id, &mut stage),
+            )
+            .await
+            {
                 Ok(Ok((rpc_client, _attempt, executor_registration_id))) => {
-                    if self.install_recovered_client(rpc_client, executor_registration_id) {
-                        return;
+                    stage = "process_replay";
+                    match timeout_at(deadline, self.recover_processes(&rpc_client)).await {
+                        Ok(Ok(())) => {
+                            if self.install_recovered_client(rpc_client, executor_registration_id) {
+                                return;
+                            }
+                            Ok(())
+                        }
+                        Ok(Err(error)) => Err(error),
+                        Err(_) => {
+                            record_deadline(stage, "recovery_deadline");
+                            break format!("recovery timed out after {SESSION_RECOVERY_TIMEOUT:?}");
+                        }
                     }
                 }
                 Ok(Err(error)) => Err(error),
@@ -520,6 +537,7 @@ impl Inner {
     async fn resume_once(
         self: &Arc<Self>,
         session_id: &str,
+        stage: &mut &'static str,
     ) -> Result<
         (
             Arc<RpcClient>,
@@ -553,7 +571,6 @@ impl Inner {
             .initialize_rpc(&rpc_client, options, noise_context)
             .await?;
 
-        self.recover_processes(&rpc_client).await?;
         Ok((rpc_client, attempt_permit, executor_registration_id))
     }
 

@@ -297,7 +297,15 @@ fn snapshot_size_limit_counts_state_and_environment_before_filtering() {
         r#set: HashMap::new(),
         include_only: Vec::new(),
     };
-    assert!(parse_snapshot(ShellType::Bash, oversized.as_bytes(), Some(&policy)).is_err());
+    assert!(
+        parse_snapshot(
+            ShellType::Bash,
+            oversized.as_bytes(),
+            Some(&policy),
+            SnapshotReplay::Environment,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -386,8 +394,13 @@ fn snapshot_caches_only_unmanaged_proxy_state() {
         ),
     ] {
         let output = format!("# Snapshot file\n\0\0\0{exports}");
-        let snapshot = parse_snapshot(ShellType::Bash, output.as_bytes(), /*env_policy*/ None)
-            .expect("snapshot should parse");
+        let snapshot = parse_snapshot(
+            ShellType::Bash,
+            output.as_bytes(),
+            /*env_policy*/ None,
+            SnapshotReplay::Environment,
+        )
+        .expect("snapshot should parse");
 
         assert_eq!(snapshot.environment, expected);
     }

@@ -23,7 +23,7 @@ use codex_shell_command::shell_detect::ShellType;
 use codex_shell_command::shell_snapshot::CapturedSnapshot;
 use codex_shell_command::shell_snapshot::SnapshotCaptureOptions;
 use codex_shell_command::shell_snapshot::SnapshotStartup;
-use codex_shell_command::shell_snapshot::snapshot_capture_script;
+use codex_shell_command::shell_snapshot::snapshot_source_capture_script;
 use codex_utils_path_uri::PathUri;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -45,8 +45,10 @@ use crate::telemetry::ExecServerTelemetry;
 
 const MAX_CACHED_SNAPSHOTS: usize = 16;
 const MAX_SNAPSHOT_BYTES: usize = 512 * 1024;
+const MAX_FILE_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 // Capture also includes quoted export records and an optional pre-startup environment.
 const MAX_SNAPSHOT_CAPTURE_BYTES: usize = 8 * MAX_SNAPSHOT_BYTES;
+const MAX_FILE_SNAPSHOT_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SNAPSHOT_ENV_VALUE_BYTES: usize = 60 * 1024;
 const MAX_SNAPSHOT_SCOPE_BYTES: usize = 256;
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -385,11 +387,12 @@ async fn capture_snapshot(
     shell_type: ShellType,
     credential_brokers: &RemoteCredentialBrokerCache,
 ) -> CaptureResult {
-    let script = snapshot_capture_script(
+    let proxy = prepared.credential_snapshot_proxy(params);
+    let mut script = snapshot_source_capture_script(
         shell_type,
         SnapshotCaptureOptions {
             startup: SnapshotStartup::Interactive,
-            declarations: false,
+            declarations: proxy.is_some(),
             environment: true,
         },
     )
@@ -399,6 +402,16 @@ async fn capture_snapshot(
             invalid_params("unsupported shell snapshot script".to_string()),
         )
     })?;
+    if proxy.is_some() {
+        // Readonly exports cannot be restored after the global zshenv runs again.
+        script.push_str(
+            r#"
+for __codex_snapshot_key in ${(f)"$(builtin typeset +x)"}; do
+  case "${(tP)__codex_snapshot_key}" in *readonly*) exit 74 ;; esac
+done
+"#,
+        );
+    }
     if proxy.is_some() {
         // Readonly exports cannot be restored after the global zshenv runs again.
         script.push_str(
@@ -487,7 +500,7 @@ done
     let capture = async {
         let mut output = Vec::new();
         stdout
-            .take((MAX_SNAPSHOT_CAPTURE_BYTES + 1) as u64)
+            .take((capture_limit + 1) as u64)
             .read_to_end(&mut output)
             .await
             .map_err(|err| {
@@ -496,11 +509,11 @@ done
                     internal_error(format!("cannot read shell snapshot: {err}")),
                 )
             })?;
-        if output.len() > MAX_SNAPSHOT_CAPTURE_BYTES {
+        if output.len() > capture_limit {
             return Err((
                 "too_large",
                 internal_error(format!(
-                    "shell snapshot capture exceeds {MAX_SNAPSHOT_CAPTURE_BYTES} bytes"
+                    "shell snapshot capture exceeds {capture_limit} bytes"
                 )),
             ));
         }
@@ -527,13 +540,50 @@ done
             )
         })??;
 
-    parse_snapshot(shell_type, &output, params.env_policy.as_ref())
+    let marker = format!("\0{SOURCE_MARKER}\0");
+    let marker_end = output
+        .windows(marker.len())
+        .position(|part| part == marker.as_bytes())
+        .map(|index| index + marker.len())
+        .ok_or_else(|| {
+            (
+                "invalid_capture",
+                internal_error("missing snapshot source probe".to_string()),
+            )
+        })?;
+    let (flag, captured) = output[marker_end..].split_at_checked(2).ok_or_else(|| {
+        (
+            "invalid_capture",
+            internal_error("incomplete snapshot source probe".to_string()),
+        )
+    })?;
+    let replay = if flag == b"1\0" {
+        SnapshotReplay::File
+    } else {
+        if output.len() > MAX_SNAPSHOT_CAPTURE_BYTES {
+            return Err((
+                "capture_too_large",
+                internal_error(format!(
+                    "shell snapshot capture exceeds {MAX_SNAPSHOT_CAPTURE_BYTES} bytes"
+                )),
+            ));
+        }
+        SnapshotReplay::Environment
+    };
+    let snapshot = if let Some(proxy) = proxy {
+        credentials::prepare(params, captured, replay, proxy, credential_brokers).await?
+    } else {
+        parse_snapshot(shell_type, captured, params.env_policy.as_ref(), replay)?
+    };
+    child.preserve_helpers();
+    Ok(snapshot)
 }
 
 fn parse_snapshot(
     shell_type: ShellType,
     output: &[u8],
     env_policy: Option<&ExecEnvPolicy>,
+    replay: SnapshotReplay,
 ) -> CaptureResult {
     let captured = CapturedSnapshot::parse(shell_type, output).ok_or_else(|| {
         (
@@ -542,10 +592,22 @@ fn parse_snapshot(
         )
     })?;
     let state = captured.render_state();
-    if state.len().saturating_add(captured.environment.len()) > MAX_SNAPSHOT_BYTES {
+    if captured.environment.len() > MAX_SNAPSHOT_BYTES {
         return Err((
             "too_large",
-            internal_error(format!("shell snapshot exceeds {MAX_SNAPSHOT_BYTES} bytes")),
+            internal_error(format!(
+                "shell snapshot environment exceeds {MAX_SNAPSHOT_BYTES} bytes"
+            )),
+        ));
+    }
+    let state_limit = match replay {
+        SnapshotReplay::File => MAX_FILE_SNAPSHOT_BYTES,
+        SnapshotReplay::Environment => MAX_SNAPSHOT_BYTES - captured.environment.len(),
+    };
+    if state.len() > state_limit {
+        return Err((
+            "too_large",
+            internal_error(format!("shell snapshot state exceeds {state_limit} bytes")),
         ));
     }
 
@@ -575,7 +637,12 @@ fn parse_snapshot(
     environment.remove("OLDPWD");
     environment.retain(|name, _| !shell_environment::is_non_inheritable_env_var(name));
 
-    Ok(ShellSnapshot { state, environment })
+    Ok(ShellSnapshot {
+        prewarmed: false,
+        state,
+        file_source: matches!(replay, SnapshotReplay::File),
+        environment,
+    })
 }
 
 #[cfg(test)]

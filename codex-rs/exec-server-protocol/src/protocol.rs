@@ -729,6 +729,27 @@ pub struct FsGetMetadataParams {
     pub sandbox: Option<FileSystemSandboxContext>,
 }
 
+/// One unsandboxed metadata observation per connection. A newer id supersedes the prior watch.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsWatchMissingParams {
+    pub watch_id: u64,
+    pub missing: Vec<PathUri>,
+    pub present: Option<PathUri>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsWatchMissingResponse {
+    pub watching: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsMissingChangedNotification {
+    pub watch_id: u64,
+}
+
 /// Filesystem RPC wire request with legacy optional sandbox policy cwd.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2138,6 +2159,25 @@ mod tests {
         assert_eq!(
             (unknown.sandbox_type, unsandboxed.sandbox_type),
             (None, Some(ProcessSandboxType::None))
+        );
+    }
+
+    #[test]
+    fn missing_path_watch_wire_uses_camel_case_and_preserves_watch_identity() {
+        let request: FsWatchMissingParams = serde_json::from_value(serde_json::json!({
+            "watchId": 17,
+            "missing": [],
+            "present": null,
+        }))
+        .expect("watch request should deserialize");
+        assert_eq!(request.watch_id, 17);
+        assert!(request.missing.is_empty());
+        let notification = FsMissingChangedNotification {
+            watch_id: request.watch_id,
+        };
+        assert_eq!(
+            serde_json::to_value(notification).expect("notification should serialize"),
+            serde_json::json!({"watchId": 17})
         );
     }
 }
