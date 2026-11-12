@@ -75,6 +75,7 @@ mod client_websockets;
 mod cloud_config;
 mod code_mode;
 mod code_mode_elicitation;
+mod code_mode_model_messages;
 mod codex_apps_protocol;
 mod codex_delegate;
 mod collaboration_instructions;
@@ -88,6 +89,7 @@ mod cyber_exec_policy;
 mod daybreak_access;
 mod deprecation_notice;
 mod direct_tool_metadata;
+mod dynamic_tool_cancellation;
 mod exec;
 mod exec_policy;
 #[cfg(not(target_os = "windows"))]
@@ -104,8 +106,11 @@ mod guardian_cached_score;
 mod guardian_checkpoint_migration;
 mod reasoning_replay_metrics;
 // Uses the same command-approval harness as guardian_review below.
+mod builtin_model_catalog;
 mod canonical_plugin_connectors;
+mod critical_path_runtime;
 mod gateway_auth;
+mod guardian_connector_trust;
 #[cfg(not(target_os = "windows"))]
 mod guardian_context_budget;
 mod guardian_history;
@@ -152,6 +157,7 @@ mod mcp_user_verification;
 mod model_overrides;
 #[path = "model_provider_requirements_tests.rs"]
 mod model_provider_requirements;
+mod model_request;
 mod model_runtime_selectors;
 mod model_switching;
 mod model_visible_layout;
@@ -269,5 +275,6 @@ mod windows_sandbox;
 mod workspace_roots;
 mod worktree_trust;
 
+mod executor_discovery_v2;
 #[path = "guardian_sender_messages_tests.rs"]
 mod guardian_sender_messages;

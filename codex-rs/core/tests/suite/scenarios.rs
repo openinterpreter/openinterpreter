@@ -32,6 +32,7 @@ use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::items::AgentMessageDelivery;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ImageReference;
+use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
@@ -74,11 +75,17 @@ mod agent_message_board;
 #[path = "scenarios_guardian_sender_context.rs"]
 mod guardian_sender_context;
 
+#[path = "scenarios_guardian_heartbeat.rs"]
+mod guardian_heartbeat;
+
 #[path = "scenarios_injected_agent_mail.rs"]
 mod injected_agent_mail;
 
 #[path = "scenarios_incremental_tools_resume.rs"]
 mod incremental_tools_resume;
+
+#[path = "scenarios_model_instructions.rs"]
+mod model_instructions;
 
 #[path = "scenarios_retained_tool_outputs.rs"]
 mod retained_tool_outputs;
@@ -88,6 +95,9 @@ mod shared_instructions;
 
 #[path = "scenarios_tools_namespace_budget.rs"]
 mod tools_namespace_budget;
+
+#[path = "scenarios_web_search.rs"]
+mod web_search;
 
 #[path = "scenarios_turn_input_agent_message.rs"]
 mod turn_input_agent_message;
