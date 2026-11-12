@@ -844,7 +844,7 @@ fn responses_request_preserves_result_metadata_above_previous_aggregate_budget()
 }
 
 #[test]
-fn websocket_incremental_reuse_tracks_raw_result_metadata() -> anyhow::Result<()> {
+fn websocket_incremental_reuse_filters_raw_result_metadata_before_matching() -> anyhow::Result<()> {
     let provider = ModelProviderInfo {
         include_internal_metadata: false,
         ..ModelProviderInfo::create_openai_provider(Some("https://api.openai.com/v1".to_string()))

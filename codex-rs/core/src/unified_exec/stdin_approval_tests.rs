@@ -250,38 +250,6 @@ async fn readable_snapshot_does_not_require_stdin_approval() -> anyhow::Result<(
     Ok(())
 }
 
-#[tokio::test]
-async fn readable_snapshot_does_not_require_stdin_approval() -> anyhow::Result<()> {
-    let (_session, turn) = make_session_and_context().await;
-    let mut environment = turn
-        .initial_environments
-        .primary()
-        .expect("environment")
-        .clone();
-    environment.config_mut().permission_profile =
-        PermissionProfileSnapshot::legacy(PermissionProfile::read_only());
-    let snapshot = turn.config.cwd.join("shell-snapshot.sh");
-    let grant = crate::shell_snapshot::snapshot_read_permissions(
-        &snapshot,
-        &environment.permission_profile_with_workspace_roots(),
-        environment.cwd(),
-    );
-    assert_eq!(grant, None);
-    let permissions = TerminalPermissions::for_launch(
-        &environment,
-        &turn,
-        TerminalSandboxSource::Native,
-        SandboxPermissions::UseDefault,
-        /*additional_permissions*/ None,
-        grant.as_ref(),
-    );
-    assert_eq!(
-        permissions.review_requirement(&permissions.policy, environment.permission_profile()),
-        Ok(SandboxPermissions::UseDefault)
-    );
-    Ok(())
-}
-
 #[test_case::test_case(TerminalSandboxSource::Native, SandboxType::None, SandboxPermissions::RequireEscalated; "native_disabled_sandbox_needs_review_when_enabled")]
 #[test_case::test_case(TerminalSandboxSource::Executor, SandboxType::None, SandboxPermissions::UseDefault; "executor_keeps_its_restricted_token_default")]
 #[test_case::test_case(TerminalSandboxSource::Native, SandboxType::WindowsMxc, SandboxPermissions::UseDefault; "native_mxc_ignores_legacy_level_changes")]

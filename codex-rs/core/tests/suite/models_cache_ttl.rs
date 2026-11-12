@@ -67,7 +67,9 @@ const DIFFERENT_VERSION_MODEL: &str = "codex-test-different-version";
 #[test_case::test_case(true; "expired_cache")]
 #[test_case::test_case(false; "disabled_cache")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn guardian_reused_reviewer_avoids_stale_catalog_lookup(with_cache: bool) -> Result<()> {
+async fn guardian_reused_reviewer_avoids_stale_catalog_lookup_with_cache_variants(
+    with_cache: bool,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = MockServer::start().await;

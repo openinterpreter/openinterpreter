@@ -201,7 +201,7 @@ async fn sender_context_follows_its_delivery_through_checkpoint_and_rollback() {
 }
 
 #[tokio::test]
-async fn recorded_questions_share_queued_input_order_across_resume() {
+async fn recorded_questions_share_queued_input_order_in_thread_owned_context() {
     let (mut session, turn) = make_session_and_context().await;
     session.guardian_context_mode = GuardianContextMode::ThreadOwned;
     session.state.lock().await.history = ContextManager::with_guardian_context_mode(
@@ -282,7 +282,7 @@ async fn recorded_questions_share_queued_input_order_across_resume() {
 }
 
 #[tokio::test]
-async fn sender_context_follows_its_delivery_through_checkpoint_and_rollback() {
+async fn sender_context_survives_thread_owned_checkpoint_and_rollback() {
     let (mut session, turn_context) = make_session_and_context().await;
     session.guardian_context_mode = GuardianContextMode::ThreadOwned;
     let mut live = ContextManager::with_guardian_context_mode(

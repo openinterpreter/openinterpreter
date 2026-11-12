@@ -366,7 +366,7 @@ fn user_message(text: &str) -> ResponseItem {
 }
 
 #[tokio::test]
-async fn default_turn_context_assigns_missing_response_item_ids() {
+async fn default_turn_context_assigns_missing_agent_and_additional_tools_ids() {
     let (session, turn_context) = make_session_and_context().await;
     let items = [
         user_message("hello"),
