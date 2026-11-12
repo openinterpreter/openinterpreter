@@ -74,6 +74,7 @@ mod client;
 mod client_websockets;
 mod cloud_config;
 mod code_mode;
+mod code_mode_agent_message_tests;
 mod code_mode_elicitation;
 mod code_mode_model_messages;
 mod codex_apps_protocol;
