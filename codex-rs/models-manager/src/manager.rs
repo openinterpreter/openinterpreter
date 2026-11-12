@@ -30,8 +30,6 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::sync::MutexGuard;
@@ -52,6 +50,14 @@ const DEFAULT_PROVIDER_CACHE_ID: &str = "openai";
 /// manager owns refresh policy, cache behavior, and catalog merging; it calls
 /// this endpoint only when it decides a remote refresh should happen.
 pub trait ModelsEndpointClient: fmt::Debug + Send + Sync {
+    /// Construct an independently authenticated and partitioned endpoint for a known caller.
+    fn for_originator(
+        &self,
+        _originator: ModelCatalogOriginator,
+    ) -> Option<Arc<dyn ModelsEndpointClient>> {
+        None
+    }
+
     /// Opaque identity of the current provider and credentials, without resolving auth.
     ///
     /// Must change when account, email, plan, provider, or API credentials change.
@@ -143,6 +149,32 @@ pub struct RefreshedModelCatalog {
 
 /// Coordinates model discovery plus cached metadata on disk.
 pub trait ModelsManager: fmt::Debug + Send + Sync {
+    fn for_originator(&self, _originator: &str) -> Option<SharedModelsManager> {
+        None
+    }
+
+    fn ensure_initialized(
+        &self,
+        _http_client_factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'_, ()> {
+        Box::pin(std::future::ready(()))
+    }
+
+    fn refresh_originator_catalogs(
+        &self,
+        _http_client_factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'_, ()> {
+        Box::pin(std::future::ready(()))
+    }
+
+    fn model_catalog_updates(&self) -> Option<watch::Receiver<()>> {
+        None
+    }
+
+    fn refreshed_model_catalog(&self) -> Option<Arc<[ModelInfo]>> {
+        None
+    }
+
     /// Supply startup API-key discovery policy; live changes require a new session.
     /// Static catalogs ignore this setting.
     fn set_api_key_model_discovery_enabled(&self, _enabled: bool) {}
@@ -197,15 +229,6 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
 
     /// Best-effort refresh when the in-memory catalog belongs to different credentials.
     /// Static catalogs need no refresh. Failures follow the catalog's fallback policy.
-    fn refresh_after_auth_change(
-        &self,
-        _http_client_factory: HttpClientFactory,
-    ) -> ModelsManagerFuture<'_, ()> {
-        Box::pin(std::future::ready(()))
-    }
-
-    /// Best-effort refresh when the in-memory catalog belongs to different credentials.
-    /// Static catalogs need no refresh. Failures leave the existing cache/default fallback.
     fn refresh_after_auth_change(
         &self,
         _http_client_factory: HttpClientFactory,
@@ -383,13 +406,16 @@ impl ModelCatalogSettings {
 /// OpenAI-compatible model manager backed by bundled models, cache, and `/models`.
 #[derive(Debug)]
 pub struct OpenAiModelsManager {
-    remote_models: RwLock<ModelsCacheEntry>,
+    remote_models: RwLock<CatalogState>,
     base_models: Vec<ModelInfo>,
     /// Whether generated provider models should be refined with OI compatibility metadata.
     enrich_with_compatibility_catalog: bool,
-    cache: Option<Arc<dyn ModelsCache>>,
+    settings: ModelCatalogSettings,
     endpoint_client: SharedModelsEndpointClient,
-    api_key_model_discovery_enabled: AtomicBool,
+    catalog_source: CatalogSource,
+    originator_managers: std::sync::Mutex<HashMap<ModelCatalogOriginator, SharedModelsManager>>,
+    refreshed: std::sync::Mutex<Option<RefreshedModelCatalog>>,
+    catalog_updates: watch::Sender<()>,
     auth_manager: Option<Arc<AuthManager>>,
 }
 
@@ -456,10 +482,9 @@ impl OpenAiModelsManager {
         auth_manager: Option<Arc<AuthManager>>,
         base_models: Vec<ModelInfo>,
     ) -> Self {
-        let cache_path = model_cache_path(&codex_home, &provider_id);
-        Self::new_with_optional_cache(
-            Some(Arc::new(FileModelsCache::new(
-                cache_path,
+        Self::with_settings(
+            ModelCatalogSettings::with_cache(Arc::new(FileModelsCache::new(
+                model_cache_path(&codex_home, &provider_id),
                 DEFAULT_MODEL_CACHE_TTL,
             ))),
             endpoint_client,
@@ -482,8 +507,8 @@ impl OpenAiModelsManager {
         auth_manager: Option<Arc<AuthManager>>,
         base_models: Vec<ModelInfo>,
     ) -> Self {
-        Self::new_with_optional_cache(
-            /*cache*/ None,
+        Self::with_settings(
+            ModelCatalogSettings::default(),
             endpoint_client,
             auth_manager,
             base_models,
@@ -499,7 +524,12 @@ impl OpenAiModelsManager {
         endpoint_client: Arc<dyn ModelsEndpointClient>,
         auth_manager: Option<Arc<AuthManager>>,
     ) -> Self {
-        Self::new_with_optional_cache(Some(cache), endpoint_client, auth_manager, Vec::new())
+        Self::with_settings(
+            ModelCatalogSettings::with_cache(cache),
+            endpoint_client,
+            auth_manager,
+            Vec::new(),
+        )
     }
 
     pub fn with_settings(
@@ -513,21 +543,23 @@ impl OpenAiModelsManager {
         } else {
             (apply_compatibility_catalog(base_models), true)
         };
-        let remote_models = base_models.clone();
+        let (catalog_updates, _) = watch::channel(());
         Self {
-            remote_models: RwLock::new(ModelsCacheEntry {
+            remote_models: RwLock::new(CatalogState::bundled(ModelsCacheEntry {
                 fetched_at: Utc::now(),
                 etag: None,
                 client_version: Some(crate::client_version_to_whole()),
                 identity: endpoint_client.identity(),
-                models: remote_models,
-            }),
+                models: base_models.clone(),
+            })),
             base_models,
             enrich_with_compatibility_catalog,
-            cache,
-            api_key_model_discovery_enabled: AtomicBool::new(false),
+            settings,
             endpoint_client,
             catalog_source: CatalogSource::Default,
+            originator_managers: std::sync::Mutex::new(HashMap::new()),
+            refreshed: std::sync::Mutex::new(None),
+            catalog_updates,
             auth_manager,
         }
     }
@@ -568,12 +600,7 @@ impl StaticModelsManager {
 }
 
 impl ModelsManager for OpenAiModelsManager {
-    fn set_api_key_model_discovery_enabled(&self, enabled: bool) {
-        self.api_key_model_discovery_enabled
-            .store(enabled, Ordering::SeqCst);
-    }
-
-    fn raw_model_catalog(
+    fn model_catalog_with_origins(
         &self,
         refresh_strategy: RefreshStrategy,
         http_client_factory: HttpClientFactory,
@@ -587,7 +614,7 @@ impl ModelsManager for OpenAiModelsManager {
                 error!("failed to refresh available models: {err}");
             }
             let state = self.remote_models.read().await;
-            state.model_catalog(self.models_for_entry(&state.entry))
+            state.model_catalog(self.models_for_entry(&state))
         })
     }
 
@@ -607,7 +634,8 @@ impl ModelsManager for OpenAiModelsManager {
             .cache
             .as_ref()
             .and_then(|cache| cache.for_originator(originator));
-        let mut manager = Self::with_settings(settings, endpoint, self.auth_manager.clone());
+        let mut manager =
+            Self::with_settings(settings, endpoint, self.auth_manager.clone(), Vec::new());
         if matches!(self.catalog_source, CatalogSource::ExplicitProvider(_)) {
             manager = manager.with_provider_catalog();
         }
@@ -618,6 +646,58 @@ impl ModelsManager for OpenAiModelsManager {
 
     fn set_api_key_model_discovery_enabled(&self, enabled: bool) {
         self.settings.set_api_key_model_discovery_enabled(enabled);
+    }
+
+    fn model_catalog_updates(&self) -> Option<watch::Receiver<()>> {
+        Some(self.catalog_updates.subscribe())
+    }
+
+    fn refreshed_model_catalog(&self) -> Option<Arc<[ModelInfo]>> {
+        let refreshed = self
+            .refreshed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        refreshed.as_ref().and_then(|snapshot| {
+            (self.endpoint_client.identity().as_deref() == Some(snapshot.identity.as_str()))
+                .then(|| Arc::clone(&snapshot.models))
+        })
+    }
+
+    fn ensure_initialized(
+        &self,
+        http_client_factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'_, ()> {
+        Box::pin(async move {
+            if let Err(err) = self
+                .load_models(CatalogLoadMode::Initialize, &http_client_factory)
+                .await
+            {
+                error!("failed to initialize model catalog: {err}");
+            }
+        })
+    }
+
+    fn refresh_originator_catalogs(
+        &self,
+        http_client_factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'_, ()> {
+        Box::pin(async move {
+            let managers: Vec<_> = self
+                .originator_managers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .values()
+                .cloned()
+                .collect();
+            for manager in managers {
+                manager
+                    .model_catalog_with_origins(
+                        RefreshStrategy::Online,
+                        http_client_factory.clone(),
+                    )
+                    .await;
+            }
+        })
     }
 
     fn refresh_after_auth_change(
@@ -651,41 +731,11 @@ impl ModelsManager for OpenAiModelsManager {
         })
     }
 
-    fn refresh_after_auth_change(
-        &self,
-        http_client_factory: HttpClientFactory,
-    ) -> ModelsManagerFuture<'_, ()> {
-        Box::pin(async move {
-            let refresh = async {
-                // Resolve lazy command credentials before comparing catalog identities.
-                if !self.should_refresh_models().await {
-                    return Ok(());
-                }
-                let identity = self.endpoint_client.identity();
-                if identity.is_some() && self.remote_models.read().await.identity == identity {
-                    return Ok(());
-                }
-                self.refresh_available_models(
-                    RefreshStrategy::OnlineIfUncached,
-                    &http_client_factory,
-                )
-                .await
-            };
-            // Include auth resolution and cache access in the best-effort deadline.
-            if !matches!(
-                tokio::time::timeout(Duration::from_secs(/*secs*/ 5), refresh).await,
-                Ok(Ok(()))
-            ) {
-                tracing::warn!("model catalog refresh after auth change failed or timed out");
-            }
-        })
-    }
-
     fn list_models_from_cache_if_present(
         &self,
     ) -> ModelsManagerFuture<'_, Option<Vec<ModelPreset>>> {
         Box::pin(async move {
-            if !self.try_load_cache().await {
+            if !self.try_load_cache(CatalogLoadMode::Initialize).await {
                 return None;
             }
             Some(self.build_available_models(self.get_remote_models().await))
@@ -695,8 +745,10 @@ impl ModelsManager for OpenAiModelsManager {
     fn get_remote_models(&self) -> ModelsManagerFuture<'_, Vec<ModelInfo>> {
         Box::pin(async move {
             let entry = self.remote_models.read().await;
-            if entry.identity.is_some() && entry.identity == self.endpoint_client.identity() {
-                entry.models.clone()
+            if entry.entry.identity.is_some()
+                && entry.entry.identity == self.endpoint_client.identity()
+            {
+                entry.entry.models.clone()
             } else {
                 self.base_models.clone()
             }
@@ -706,8 +758,10 @@ impl ModelsManager for OpenAiModelsManager {
     fn try_get_remote_models(&self) -> Result<Vec<ModelInfo>, TryLockError> {
         let entry = self.remote_models.try_read()?;
         Ok(
-            if entry.identity.is_some() && entry.identity == self.endpoint_client.identity() {
-                entry.models.clone()
+            if entry.entry.identity.is_some()
+                && entry.entry.identity == self.endpoint_client.identity()
+            {
+                entry.entry.models.clone()
             } else {
                 self.base_models.clone()
             },
@@ -727,7 +781,7 @@ impl ModelsManager for OpenAiModelsManager {
         Box::pin(async move {
             let remote = {
                 let entry = self.remote_models.read().await;
-                let selected = self.models_for_entry(&entry.entry);
+                let selected = self.models_for_entry(&entry);
                 let models = match &selected {
                     SelectedCatalog::CurrentSnapshot(models)
                     | SelectedCatalog::Fallback(models) => models,
@@ -773,8 +827,10 @@ impl OpenAiModelsManager {
     }
 
     /// Selects the catalog available under the current provider and auth identity.
-    fn models_for_entry<'a>(&self, entry: &'a ModelsCacheEntry) -> SelectedCatalog<'a> {
-        if !self.api_key_discovery_disabled()
+    fn models_for_entry<'a>(&self, state: &'a CatalogState) -> SelectedCatalog<'a> {
+        let entry = &state.entry;
+        if !(self.supports_api_key_discovery() && !self.settings.api_key_model_discovery_enabled())
+            && entry.fetched_at != DateTime::<Utc>::MIN_UTC
             && entry.identity.is_some()
             && entry.identity == self.endpoint_client.identity()
         {
@@ -789,13 +845,18 @@ impl OpenAiModelsManager {
     async fn refresh_if_new_etag(&self, etag: String, http_client_factory: HttpClientFactory) {
         let (identity, current_etag) = {
             let entry = self.remote_models.read().await;
-            (entry.identity.clone(), entry.etag.clone())
+            (
+                (entry.entry.fetched_at != DateTime::<Utc>::MIN_UTC)
+                    .then(|| entry.entry.identity.clone())
+                    .flatten(),
+                entry.entry.etag.clone(),
+            )
         };
         if let Some(identity) = identity
             && Some(&identity) == self.endpoint_client.identity().as_ref()
             && current_etag.as_deref() == Some(etag.as_str())
         {
-            if let Some(cache) = self.cache.as_ref()
+            if let Some(cache) = self.settings.cache.as_ref()
                 && let Err(err) = cache
                     .refresh_ttl(&crate::client_version_to_whole(), &identity, &etag)
                     .await
@@ -804,7 +865,6 @@ impl OpenAiModelsManager {
             }
             return;
         }
-        drop(refresh_guard);
         if let Err(err) = self
             .refresh_available_models(RefreshStrategy::Online, &http_client_factory)
             .await
@@ -819,13 +879,31 @@ impl OpenAiModelsManager {
         refresh_strategy: RefreshStrategy,
         http_client_factory: &HttpClientFactory,
     ) -> CoreResult<()> {
+        self.load_models(
+            CatalogLoadMode::Refresh(refresh_strategy),
+            http_client_factory,
+        )
+        .await
+    }
+
+    async fn load_models(
+        &self,
+        mode: CatalogLoadMode,
+        http_client_factory: &HttpClientFactory,
+    ) -> CoreResult<()> {
+        let _refresh_guard = self.catalog_source.refresh_lock().await;
+        if mode == CatalogLoadMode::Initialize
+            && self.catalog_is_initialized(&self.remote_models.read().await)
+        {
+            return Ok(());
+        }
         // API-key discovery must be enabled and supported before reusing a remote catalog.
         // Otherwise even a matching cache from an earlier run would bypass bundled-only behavior.
         // Command-auth providers retain their existing discovery behavior.
         if self.uses_api_key_auth()
             && !self.endpoint_client.has_command_auth()
             && (!self.endpoint_client.supports_api_key_models()
-                || !self.api_key_model_discovery_enabled.load(Ordering::SeqCst))
+                || !self.settings.api_key_model_discovery_enabled())
         {
             return Ok(());
         }
@@ -841,52 +919,104 @@ impl OpenAiModelsManager {
             }
             return Ok(());
         }
-        match refresh_strategy {
-            RefreshStrategy::Offline => {
-                self.try_load_cache().await;
+        match mode {
+            CatalogLoadMode::Refresh(RefreshStrategy::InMemory) => Ok(()),
+            CatalogLoadMode::Refresh(RefreshStrategy::Offline) => {
+                self.try_load_cache(mode).await;
                 Ok(())
             }
-            RefreshStrategy::OnlineIfUncached => {
-                if self.try_load_cache().await {
+            CatalogLoadMode::Initialize
+            | CatalogLoadMode::Refresh(RefreshStrategy::OnlineIfUncached) => {
+                if self.try_load_cache(mode).await {
                     return Ok(());
                 }
                 self.fetch_and_update_models(http_client_factory).await
             }
-            RefreshStrategy::Online => self.fetch_and_update_models(http_client_factory).await,
+            CatalogLoadMode::Refresh(RefreshStrategy::Online) => {
+                self.fetch_and_update_models(http_client_factory).await
+            }
         }
     }
 
     async fn fetch_and_update_models(
         &self,
         http_client_factory: &HttpClientFactory,
-        mode: CatalogLoadMode,
     ) -> CoreResult<()> {
         let client_version = crate::client_version_to_whole();
         let ModelsEndpointResponse {
             models,
             etag,
             identity,
-        } = self
+        } = match self
             .endpoint_client
             .list_models(&client_version, http_client_factory.clone())
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                if Self::is_access_rejection(&err) {
+                    self.invalidate_catalog().await;
+                }
+                return Err(err);
+            }
+        };
         if Some(&identity) != self.endpoint_client.identity().as_ref() {
             return Ok(());
         }
+        let refreshed_models: Arc<[ModelInfo]> = models.clone().into();
         let entry = ModelsCacheEntry {
             fetched_at: Utc::now(),
             etag,
             client_version: Some(client_version),
-            identity: Some(identity),
+            identity: Some(identity.clone()),
             models,
         };
-        if let Some(cache) = self.cache.as_ref()
+        if let Some(cache) = self.settings.cache.as_ref()
             && let Err(err) = cache.store(&entry).await
         {
             error!("failed to write models cache: {err}");
         }
-        self.apply_remote_models(entry).await;
+        if self.apply_remote_models(entry).await {
+            *self
+                .refreshed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(RefreshedModelCatalog {
+                identity,
+                models: refreshed_models,
+            });
+            self.catalog_updates.send_replace(());
+        }
         Ok(())
+    }
+
+    fn is_access_rejection(err: &codex_protocol::error::CodexErr) -> bool {
+        matches!(err.details(), CodexErrorDetails::UnexpectedStatus(response)
+            if matches!(response.status.as_u16(), 401 | 403))
+            || matches!(
+                err.details(),
+                CodexErrorDetails::RefreshTokenFailed(_)
+                    | CodexErrorDetails::GatewayLoginRequired(_)
+            )
+    }
+
+    async fn invalidate_catalog(&self) {
+        let invalidated = {
+            let mut state = self.remote_models.write().await;
+            state.entry.fetched_at = DateTime::<Utc>::MIN_UTC;
+            state.initialized = false;
+            state.provider_model_ids.clear();
+            state.entry.models.clear();
+            state.entry.clone()
+        };
+        *self
+            .refreshed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        if let Some(cache) = self.settings.cache.as_ref()
+            && let Err(err) = cache.store(&invalidated).await
+        {
+            error!("failed to invalidate models cache: {err}");
+        }
     }
 
     fn supports_api_key_discovery(&self) -> bool {
@@ -915,6 +1045,11 @@ impl OpenAiModelsManager {
         if entry.identity != self.endpoint_client.identity() {
             return false;
         }
+        let provider_ids = entry
+            .models
+            .iter()
+            .map(|model| model.slug.clone())
+            .collect();
         // Visible ChatGPT and OpenAI API-key catalogs are authoritative.
         let remote_only = entry
             .models
@@ -943,12 +1078,21 @@ impl OpenAiModelsManager {
             }
             entry.models = models;
         }
-        *current = entry;
+        *current = CatalogState {
+            entry,
+            provider_model_ids: provider_ids,
+            initialized: true,
+        };
         true
     }
 
     /// Attempt to satisfy the refresh from the cache when it matches the provider and TTL.
     async fn try_load_cache(&self, mode: CatalogLoadMode) -> bool {
+        if mode == CatalogLoadMode::Initialize
+            && self.catalog_is_initialized(&self.remote_models.read().await)
+        {
+            return true;
+        }
         let Some(cache) = self.settings.cache.as_ref() else {
             return false;
         };

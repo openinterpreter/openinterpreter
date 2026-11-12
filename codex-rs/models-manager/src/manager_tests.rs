@@ -16,6 +16,7 @@ use codex_login::ExternalAuth;
 use codex_login::ExternalAuthRefreshContext;
 use codex_login::TokenData;
 use codex_protocol::auth::AuthMode;
+use codex_protocol::error::CodexErr;
 use codex_protocol::openai_models::ModelAccessPrograms;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -100,7 +101,7 @@ fn assert_models_contain(actual: &[ModelInfo], expected: &[ModelInfo]) {
 struct TestModelsEndpoint {
     has_command_auth: bool,
     uses_codex_backend: bool,
-    responses: Mutex<VecDeque<Vec<ModelInfo>>>,
+    responses: Mutex<VecDeque<CoreResult<Vec<ModelInfo>>>>,
     etag: Option<String>,
     fetch_count: AtomicUsize,
     observed_proxy_policy: Mutex<Option<OutboundProxyPolicy>>,
@@ -202,10 +203,8 @@ impl TestModelsEndpoint {
     fn new(responses: Vec<Vec<ModelInfo>>) -> Arc<Self> {
         Arc::new(Self {
             uses_codex_backend: true,
-            responses: Mutex::new(responses.into()),
-            etag: None,
-            fetch_count: AtomicUsize::new(0),
-            observed_proxy_policy: Mutex::new(None),
+            responses: Mutex::new(responses.into_iter().map(Ok).collect()),
+            ..Self::default()
         })
     }
 
@@ -220,9 +219,7 @@ impl TestModelsEndpoint {
         Arc::new(Self {
             has_command_auth: true,
             responses: Mutex::new(responses.into()),
-            etag: None,
-            fetch_count: AtomicUsize::new(0),
-            observed_proxy_policy: Mutex::new(None),
+            ..Self::default()
         })
     }
 
@@ -244,7 +241,7 @@ impl TestModelsEndpoint {
             .lock()
             .expect("responses lock should not be poisoned")
             .pop_front()
-            .unwrap_or_default();
+            .unwrap_or(Ok(Vec::new()))?;
         Ok(ModelsEndpointResponse {
             models,
             etag: self.etag.clone(),
@@ -1228,7 +1225,7 @@ async fn refresh_available_models_keeps_merging_for_custom_api_auth() {
     let endpoint = Arc::new(TestModelsEndpoint {
         has_command_auth: true,
         uses_codex_backend: false,
-        responses: Mutex::new(vec![remote_models.clone()].into()),
+        responses: Mutex::new(vec![Ok(remote_models.clone())].into()),
         etag: None,
         fetch_count: AtomicUsize::new(0),
         observed_proxy_policy: Mutex::new(None),
@@ -1536,7 +1533,7 @@ async fn online_refresh_updates_access_programs_with_unchanged_etag() {
     let endpoint = Arc::new(TestModelsEndpoint {
         has_command_auth: false,
         uses_codex_backend: true,
-        responses: Mutex::new(responses.into()),
+        responses: Mutex::new(responses.into_iter().map(Ok).collect()),
         etag: Some("stable-catalog-etag".to_string()),
         fetch_count: AtomicUsize::new(0),
         observed_proxy_policy: Mutex::new(None),
