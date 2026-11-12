@@ -2,14 +2,18 @@
 
 from pathlib import Path
 import hashlib
+import io
 import json
+import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from build_winget_package import prepare_winget_package
+from codex_package.archive import write_archive, resolve_zstd_command
 from codex_package.layout import build_package_dir
 from codex_package.layout import prepare_package_dir
 from codex_package.layout import validate_package_dir
@@ -20,6 +24,76 @@ from codex_package.targets import default_target
 
 
 class PackageLayoutTest(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "MSVC symbols are separate PDB files")
+    def test_strip_policy_preserves_inputs_and_runs_packaged_executables(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "input-executable"
+            # System executables may already be stripped. Compile with debug
+            # information so a no-op strip cannot pass this regression test.
+            subprocess.run(
+                ["cc", "-g", "-O0", "-x", "c", "-", "-o", str(source)],
+                input=r"""#include <stdio.h>
+int main(void) {
+    fputs("package-ok", stdout);
+    return 0;
+}
+""",
+                text=True,
+                check=True,
+                capture_output=True,
+            )
+            original = source.read_bytes()
+            target = default_target()
+            for mode in ("auto", "all", "none"):
+                with self.subTest(mode=mode):
+                    package = root / mode
+                    command = [
+                        sys.executable,
+                        str(
+                            Path(__file__).resolve().parents[1]
+                            / "build_codex_package.py"
+                        ),
+                        "--target",
+                        target,
+                        "--cargo-profile",
+                        "release",
+                        "--package-dir",
+                        str(package),
+                        "--strip",
+                        mode,
+                    ]
+                    flags = [
+                        "--entrypoint-bin",
+                        "--code-mode-host-bin",
+                        "--exec-server-bin",
+                        "--rg-bin",
+                    ]
+                    if "linux" in target:
+                        flags.append("--bwrap-bin")
+                    for flag in flags:
+                        command.extend((flag, str(source)))
+                    if mode != "all":
+                        # Preserved prebuilt inputs must not even need a strip tool.
+                        command.extend(("--strip-tool", str(root / "absent-strip")))
+                    subprocess.run(command, check=True, capture_output=True)
+                    for name in ("codex", "codex-code-mode-host", "codex-exec-server"):
+                        executable = package / "bin" / name
+                        self.assertEqual(
+                            subprocess.check_output([str(executable)]),
+                            b"package-ok",
+                        )
+                        if mode != "all":
+                            self.assertEqual(executable.read_bytes(), original)
+                        else:
+                            self.assertLess(executable.stat().st_size, len(original))
+                    self.assertEqual(source.read_bytes(), original)
+                    self.assertEqual((package / "codex-path/rg").read_bytes(), original)
+                    if "linux" in target:
+                        self.assertEqual(
+                            (package / "codex-resources/bwrap").read_bytes(), original
+                        )
+
     def test_open_interpreter_package_contains_interpreter_alias_and_code_mode_host(
         self,
     ) -> None:
@@ -29,8 +103,8 @@ class PackageLayoutTest(unittest.TestCase):
                 entrypoint_bin=touch_executable(root / "interpreter"),
                 managed_codex_bin=None,
                 code_mode_host_bin=touch_executable(root / "codex-code-mode-host"),
+                exec_server_bin=touch_executable(root / "codex-exec-server"),
                 rg_bin=touch_executable(root / "rg"),
-                zsh_bin=None,
                 bwrap_bin=touch_executable(root / "bwrap"),
                 codex_command_runner_bin=None,
                 codex_windows_sandbox_setup_bin=None,
@@ -49,7 +123,6 @@ class PackageLayoutTest(unittest.TestCase):
                 package_dir,
                 PACKAGE_VARIANTS["open-interpreter"],
                 TARGET_SPECS["x86_64-unknown-linux-musl"],
-                include_zsh=False,
             )
 
             self.assertEqual(
