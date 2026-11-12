@@ -17,6 +17,7 @@ use codex_config::types::McpServerConfig;
 use codex_context_fragments::AnsweredQuestion;
 use codex_context_fragments::ContextualUserFragment;
 use codex_core::StartThreadOptions;
+use codex_core::TurnInput;
 use codex_core::TurnInputRequest;
 use codex_core::config::Config;
 use codex_exec_server::EnvironmentManager;
@@ -36,10 +37,13 @@ use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::AgentMessageDelivery;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ImageReference;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ToolMessage;
 use codex_protocol::openai_models::ToolMode;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
 use codex_skills_extension::ExecutorSkillProvider;
 use codex_skills_extension::SkillProviders;
@@ -54,6 +58,8 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_custom_tool_call;
 use core_test_support::responses::ev_function_call_with_namespace;
+use core_test_support::responses::ev_message_item_added;
+use core_test_support::responses::ev_output_text_delta;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
@@ -76,6 +82,9 @@ const ONE_PIXEL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ
 
 #[path = "scenarios_agent_message_board.rs"]
 mod agent_message_board;
+
+#[path = "scenarios_audio_file_tests.rs"]
+mod audio_file;
 
 #[path = "scenarios/catalog_settings.rs"]
 mod catalog_settings;
@@ -134,6 +143,9 @@ mod injected_agent_mail;
 #[path = "scenarios_mailbox_preemption_tests.rs"]
 mod mailbox_preemption;
 
+#[path = "scenarios_multi_environment_mcp.rs"]
+mod multi_environment_mcp;
+
 #[path = "scenarios_managed_human_approval_tests.rs"]
 mod managed_human_approval;
 
@@ -157,6 +169,12 @@ mod model_instructions;
 
 #[path = "scenarios_provider_capabilities.rs"]
 mod provider_capabilities;
+
+#[path = "scenarios_partial_answers.rs"]
+mod partial_answers;
+
+#[path = "scenarios_preparation.rs"]
+mod preparation;
 
 #[path = "scenarios_retained_tool_outputs.rs"]
 mod retained_tool_outputs;
