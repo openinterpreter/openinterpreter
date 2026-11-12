@@ -81,6 +81,12 @@ use tokio::sync::oneshot;
 
 const ONE_PIXEL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 
+fn compaction_output(value: &str) -> serde_json::Value {
+    json!({"type": "response.output_item.done", "item": {
+        "type": "compaction", "encrypted_content": value
+    }})
+}
+
 #[path = "scenarios_agent_message_board.rs"]
 mod agent_message_board;
 
@@ -101,6 +107,9 @@ mod budget_context;
 
 #[path = "scenarios_context_management_tools.rs"]
 mod context_management_tools;
+
+#[path = "scenarios_compaction_tests.rs"]
+mod compaction;
 
 #[path = "scenarios_content_filter.rs"]
 mod content_filter;
