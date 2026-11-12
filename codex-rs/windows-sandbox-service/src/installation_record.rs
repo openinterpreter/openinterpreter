@@ -3,7 +3,6 @@
 use std::ffi::OsString;
 use std::io;
 use std::os::windows::ffi::OsStringExt;
-use std::os::windows::io::OwnedHandle;
 use std::path::Path;
 use std::path::PathBuf;
 use std::ptr;
@@ -81,7 +80,7 @@ pub(crate) fn save(mut record: InstallationRecord) -> Result<InstallationRecord>
 pub(crate) fn resolve_restored_home(
     saved: &Path,
     runtime: Option<&RuntimeRegistration>,
-    pins: &mut Vec<OwnedHandle>,
+    pins: &mut Vec<crate::ipc::OwnedHandle>,
 ) -> Result<Option<PathBuf>> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem as fs;
