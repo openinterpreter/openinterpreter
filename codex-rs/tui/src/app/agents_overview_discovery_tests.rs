@@ -1,12 +1,17 @@
 //! Demand-driven discovery, cursor retry, and visible Show more behavior.
 
 use super::*;
+use crate::app::agents_overview::tests::overview_thread;
 use crate::app::agents_overview_discovery::AgentsOverviewDiscovery;
 use crate::app_event::AgentsOverviewAction;
 use crate::app_server_session::ThreadParamsMode;
+use codex_app_server_client::AppServerClient;
+use codex_app_server_client::CloudClient;
 use codex_app_server_client::CloudOperation;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCMessage;
+use codex_app_server_protocol::SessionSource;
+use codex_app_server_protocol::ThreadStatus;
 use futures::SinkExt;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;

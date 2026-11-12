@@ -1,8 +1,8 @@
 //! Regression coverage for wide hook selection styling and URL-preserving detail truncation.
 
-use super::super::tests::hook;
-use super::super::tests::render_buffer;
-use super::super::tests::render_lines;
+use super::tests::hook;
+use super::tests::render_buffer;
+use super::tests::render_lines;
 use super::*;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;

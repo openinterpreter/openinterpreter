@@ -754,6 +754,10 @@ fn config_source_label(source: HookSource) -> &'static str {
 }
 
 #[cfg(test)]
+#[path = "hooks_browser_render_tests.rs"]
+mod render_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::app_event::AppEvent;
