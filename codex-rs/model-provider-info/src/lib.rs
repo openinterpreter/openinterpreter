@@ -826,6 +826,10 @@ other non-default provider fields are not supported"
         self.name == AMAZON_BEDROCK_RUNTIME_PROVIDER_NAME
     }
 
+    pub fn is_gcp(&self) -> bool {
+        self.name == GCP_PROVIDER_NAME
+    }
+
     pub fn is_anthropic_provider(&self) -> bool {
         self.name.eq_ignore_ascii_case("anthropic")
             || self
