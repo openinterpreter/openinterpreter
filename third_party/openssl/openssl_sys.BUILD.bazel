@@ -6,7 +6,7 @@ package(default_visibility = ["//visibility:public"])
 
 package_metadata(
     name = "openssl-sys_package_metadata",
-    purl = "pkg:cargo/openssl-sys@0.9.118",
+    purl = "pkg:cargo/openssl-sys@0.9.117",
 )
 
 # Deliberately omit vendored/openssl-src: the native library belongs to @openssl.

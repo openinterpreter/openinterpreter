@@ -557,15 +557,15 @@ http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "ht
 http_archive(
     name = "openssl_sys_bazel",
     build_file = "//third_party/openssl:openssl_sys.BUILD.bazel",
-    sha256 = "19c413d6ec9ebaf5e1c829d355cb3e9f783778d700f135be0921d52fce3c60ae",
-    strip_prefix = "openssl-sys-0.9.118",
+    sha256 = "b47e7e6bb2c38cd930d25a23b40fa52e068c10e85f3e03a7f5ba5aaca5713695",
+    strip_prefix = "openssl-sys-0.9.117",
     type = "tar.gz",
-    urls = ["https://static.crates.io/crates/openssl-sys/openssl-sys-0.9.118.crate"],
+    urls = ["https://static.crates.io/crates/openssl-sys/openssl-sys-0.9.117.crate"],
 )
 
 override_repo(
     crate,
-    **{"crates__openssl-sys-0.9.118": "openssl_sys_bazel"}
+    **{"crates__openssl-sys-0.9.117": "openssl_sys_bazel"}
 )
 
 codex_release_archive = use_repo_rule("//bazel/extensions:codex_release_archive.bzl", "codex_release_archive")
