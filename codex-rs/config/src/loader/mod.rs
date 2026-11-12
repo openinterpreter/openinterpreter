@@ -525,6 +525,19 @@ pub async fn load_config_layers_state(
             );
     config_layer_stack.is_projectless = is_projectless;
     config_layer_stack.project_trust = project_trust;
+    if config_layer_stack.layers_low_to_high().any(|layer| {
+        matches!(
+            layer.name,
+            ConfigLayerSource::User { .. } | ConfigLayerSource::Project { .. }
+        ) && layer
+            .config
+            .get("features")
+            .and_then(|features| features.get("multi_agent"))
+            .and_then(TomlValue::as_bool)
+            .is_some()
+    }) {
+        startup_warnings.push("`[features].multi_agent` is deprecated. It still controls the V1 fallback. `[agents].enabled = false` disables subagent tools even when the model selects a subagent version, unless `[features].multi_agent_v2` is enabled.".to_string());
+    }
     startup_warnings.extend(ignored_config_warning(
         &config_layer_stack,
         &requirements_layers,
@@ -683,7 +696,9 @@ fn validate_cli_overrides_strictly(
     let _guard = AbsolutePathBufGuard::new(base_dir);
     if let Some(path) = ignored_toml_value_fields::<ConfigToml>(cli_overrides_layer.clone())
         .unwrap_or_default()
-        .first()
+        .into_iter()
+        .chain(unknown_tui_toml_value_path(cli_overrides_layer))
+        .next()
     {
         let ignored_path = path.join(".");
         return Err(io::Error::new(
@@ -1365,7 +1380,18 @@ fn sanitize_project_config(
         {
             ignored_keys.push("features.shell_snapshot".to_string());
         }
-        for key in ["respect_system_proxy", "system_proxy_fallback"] {
+        if let Some(multi_agent) = features
+            .get_mut("multi_agent_v2")
+            .and_then(TomlValue::as_table_mut)
+            && multi_agent.remove("message_board_remote").is_some()
+        {
+            ignored_keys.push("features.multi_agent_v2.message_board_remote".to_string());
+        }
+        for key in [
+            "respect_system_proxy",
+            "system_proxy_fallback",
+            "credential_masking",
+        ] {
             if features.remove(key).is_some() {
                 ignored_keys.push(format!("features.{key}"));
             }
@@ -1690,7 +1716,7 @@ pub async fn find_project_root(
         .unwrap_or_else(|| cwd.clone()))
 }
 
-async fn discover_project_root(
+pub async fn discover_project_root(
     fs: &dyn ExecutorFileSystem,
     cwd: &AbsolutePathBuf,
     project_root_markers: &[String],
