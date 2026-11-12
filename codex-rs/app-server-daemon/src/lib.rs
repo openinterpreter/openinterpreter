@@ -17,6 +17,7 @@ mod managed_install;
 mod prepare_install;
 pub use prepare_install::InstallRequest;
 pub use prepare_install::update_from_cli;
+mod release_pruning;
 mod remote_control_client;
 mod settings;
 pub mod telemetry;
@@ -594,6 +595,20 @@ impl Daemon {
                 != Some(managed_codex_bin)
         {
             return Ok(RestartIfRunningOutcome::AlreadyCurrent);
+        }
+        // Prune only after readiness, with the lifecycle lock still held, and
+        // recheck the selected package while holding the installer lock too.
+        if package_root.ends_with("app-server-daemon")
+            && let Ok(_install_lock) = install_lock::acquire_install_lock(package_root).await
+            && let Ok(current_bin) = self.current_managed_codex_bin()
+            && managed_install::resolved_managed_codex_bin(&current_bin)
+                .await
+                .ok()
+                .as_deref()
+                == Some(managed_codex_bin)
+            && let Err(error) = release_pruning::prune(self, package_root, &settings).await
+        {
+            tracing::debug!(%error, "skipped daemon release pruning");
         }
         Ok(outcome)
     }

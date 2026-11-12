@@ -90,6 +90,35 @@ pub(crate) fn record_selection(root: &Path, previous: Option<&Path>) -> Result<(
     Ok(())
 }
 
+fn selection_matches_history(
+    selected: &Path,
+    releases: &Path,
+    current: &Path,
+    history: &str,
+) -> Result<bool> {
+    let previous = history
+        .lines()
+        .nth(1)
+        .context("missing previous selection")?;
+    let name = selected
+        .file_name()
+        .context("missing selection")?
+        .to_string_lossy();
+    Ok(selected.parent() == Some(releases)
+        && history == format!("{name}\n{previous}\n{}\n", selection_identity(current)?)
+        && (previous.is_empty()
+            || Path::new(previous)
+                .file_name()
+                .and_then(|name| name.to_str())
+                == Some(previous)))
+}
+
+fn protected_release(path: &Path, selected: &Path, previous: &str, caller: &Path) -> bool {
+    path == selected
+        || path.file_name().is_some_and(|name| name == previous)
+        || caller.starts_with(path)
+}
+
 /// Only ordinary files/directories can belong to a release. Linux device IDs alone
 /// cannot distinguish same-device bind mounts; missing procfs disables pruning.
 fn owned_mount(path: &Path) -> Result<u64> {
@@ -155,15 +184,8 @@ pub(crate) async fn prune(daemon: &Daemon, root: &Path, settings: &DaemonSetting
         .lines()
         .nth(1)
         .context("missing previous selection")?;
-    let name = selected
-        .file_name()
-        .context("missing selection")?
-        .to_string_lossy();
     anyhow::ensure!(
-        selected.parent() == Some(releases.as_path())
-            && history == format!("{name}\n{previous}\n{}\n", selection_identity(&current)?)
-            && (previous.is_empty()
-                || Path::new(previous).file_name().and_then(|n| n.to_str()) == Some(previous)),
+        selection_matches_history(&selected, &releases, &current, &history)?,
         "invalid or stale daemon selection"
     );
     let paths = daemon.current_installation()?.backend_paths(settings);
@@ -190,9 +212,7 @@ pub(crate) async fn prune(daemon: &Daemon, root: &Path, settings: &DaemonSetting
     'releases: for entry in std::fs::read_dir(&releases)? {
         let entry = entry?;
         let path = entry.path();
-        if path == selected
-            || entry.file_name() == previous
-            || caller.starts_with(&path)
+        if protected_release(&path, &selected, previous, &caller)
             || !owned_mount(&path).is_ok_and(|id| id == mount)
         {
             continue;
@@ -248,4 +268,66 @@ pub(crate) async fn prune(daemon: &Daemon, root: &Path, settings: &DaemonSetting
         std::fs::remove_dir_all(retired.keep())?;
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn selection_history_rejects_retarget_and_away_and_back() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let releases = root.join("releases");
+        let selected = releases.join("1.0.0-linux");
+        let previous = releases.join("0.9.0-linux");
+        std::fs::create_dir_all(&selected)?;
+        std::fs::create_dir_all(&previous)?;
+        let current = root.join("current");
+        symlink(&selected, &current)?;
+        record_selection(root, Some(&previous))?;
+        let history = std::fs::read_to_string(root.join("selection-history"))?;
+        assert!(selection_matches_history(
+            &selected, &releases, &current, &history
+        )?);
+
+        // A link selected away and then back has identical target text but a
+        // different filesystem identity; stale history cannot authorize pruning.
+        let replacement = root.join("replacement");
+        symlink(&selected, &replacement)?;
+        std::fs::rename(replacement, &current)?;
+        assert!(!selection_matches_history(
+            &selected, &releases, &current, &history
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn mount_and_active_executable_guards_retain_unsafe_entries() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let releases = temp.path().join("releases");
+        let selected = releases.join("selected");
+        let previous = releases.join("previous");
+        let active = releases.join("active");
+        let candidate = releases.join("candidate");
+        for path in [&selected, &previous, &active, &candidate] {
+            std::fs::create_dir_all(path)?;
+        }
+        let caller = active.join("bin/codex");
+        assert!(protected_release(&selected, &selected, "previous", &caller));
+        assert!(protected_release(&previous, &selected, "previous", &caller));
+        assert!(protected_release(&active, &selected, "previous", &caller));
+        assert!(!protected_release(
+            &candidate, &selected, "previous", &caller
+        ));
+
+        // Links (including redirected directory entries) are never owned
+        // package mounts and therefore cannot be followed during retirement.
+        let redirected = releases.join("redirected");
+        symlink(&candidate, &redirected)?;
+        assert!(owned_mount(&redirected).is_err());
+        assert_eq!(owned_mount(&candidate)?, owned_mount(&releases)?);
+        Ok(())
+    }
 }
