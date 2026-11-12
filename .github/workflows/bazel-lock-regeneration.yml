@@ -60,13 +60,23 @@ jobs:
           cache-scope: bazel-lock-review
 
       - name: Generate candidate and verify it under error mode
+        id: candidate
         shell: bash
         run: |
           set -euo pipefail
           ./.github/scripts/run_bazel_with_buildbuddy.py mod deps --lockfile_mode=update
           ./.github/scripts/run_bazel_with_buildbuddy.py mod deps --lockfile_mode=error
+          if git diff --quiet -- MODULE.bazel.lock; then
+            # An already-reconciled lock is a successful no-op, not an
+            # artifact to package as though it changed.
+            [[ -z "$(git status --porcelain)" ]]
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Bind candidate to source and package review artifact
+        if: steps.candidate.outputs.changed == 'true'
         shell: bash
         env:
           WORKFLOW_RUN_ID: ${{ github.run_id }}
@@ -80,6 +90,7 @@ jobs:
             --output-dir "$RUNNER_TEMP/bazel-lock-review"
 
       - name: Upload review-only candidate (never commit or publish)
+        if: steps.candidate.outputs.changed == 'true'
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: bazel-lock-review-${{ env.EXPECTED_SOURCE_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
