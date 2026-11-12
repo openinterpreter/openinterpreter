@@ -1393,6 +1393,13 @@ fn find_first_non_existent_component(target_path: &Path) -> Option<PathBuf> {
 #[path = "bwrap_wslg_tests.rs"]
 mod wslg_tests;
 
+// Retain the additional fork policy/namespace regressions alongside the
+// upstream inline tests. Several similarly named cases exercise distinct
+// mount ordering and deny-glob failure modes.
+#[cfg(test)]
+#[path = "bwrap_tests.rs"]
+mod fork_policy_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
