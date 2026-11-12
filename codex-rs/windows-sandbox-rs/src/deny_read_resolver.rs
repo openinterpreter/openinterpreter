@@ -3,6 +3,7 @@ use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::ReadDenyMatcher;
+use codex_protocol::permissions::ResolvedFileSystemPermissions;
 use codex_protocol::permissions::windows_deny_read_glob_scan;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use ignore::overrides::OverrideBuilder;
@@ -192,7 +193,7 @@ fn glob_scan_plan(pattern: &str, configured_max_depth: Option<usize>) -> GlobSca
     GlobScanPlan {
         root: PathBuf::from(scan.root),
         max_depth: scan.max_depth,
-        globs: vec![ripgrep_glob(scan.pattern_suffix)],
+        globs: vec![file_filter_glob(scan.pattern_suffix)],
     }
 }
 
