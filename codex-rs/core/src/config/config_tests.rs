@@ -7271,6 +7271,43 @@ async fn responses_websocket_features_do_not_change_wire_api() -> std::io::Resul
 }
 
 #[tokio::test]
+async fn provider_wire_override_preserves_harness_and_upstream_config() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        harness: Some("claude-code".to_string()),
+        harness_guidance: Some(false),
+        model_supports_reasoning_summaries: Some(true),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides {
+            wire_api: Some(WireApi::Messages),
+            ..Default::default()
+        },
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider.wire_api, WireApi::Messages);
+    assert_eq!(config.harness.as_deref(), Some("claude-code"));
+    assert!(!config.harness_guidance);
+    assert_eq!(config.model_supports_reasoning_summaries, Some(true));
+    assert_eq!(
+        config
+            .to_models_manager_config()
+            .model_supports_reasoning_summaries,
+        Some(true)
+    );
+    assert_eq!(
+        config.async_compaction_threshold_percent,
+        super::DEFAULT_ASYNC_COMPACTION_THRESHOLD_PERCENT
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn config_honors_explicit_file_oauth_store_mode() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
