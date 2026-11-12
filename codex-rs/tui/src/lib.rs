@@ -241,6 +241,10 @@ mod terminal_probe;
 mod terminal_size_telemetry;
 mod terminal_title;
 mod terminal_visualization_instructions;
+#[cfg(test)]
+mod test_backend;
+#[cfg(test)]
+mod test_support;
 mod text_formatting;
 mod text_selection;
 mod theme_picker;
