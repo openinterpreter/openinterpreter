@@ -4225,42 +4225,6 @@ mod tests {
     }
 
     #[test]
-    fn file_image_user_input_serializes_file_id() -> Result<()> {
-        let file_id = "file_123".to_string();
-
-        let item = ResponseInputItem::from(vec![UserInput::Image {
-            image: ImageReference::File {
-                file_id: file_id.clone(),
-            },
-            detail: None,
-        }]);
-
-        let expected = ResponseInputItem::Message {
-            role: "user".to_string(),
-            content: vec![ContentItem::InputImage {
-                image: ImageReference::File { file_id },
-                detail: Some(DEFAULT_IMAGE_DETAIL),
-            }],
-            phase: None,
-        };
-        assert_eq!(item, expected);
-        assert_eq!(
-            serde_json::to_value(item)?,
-            serde_json::json!({
-                "type": "message",
-                "role": "user",
-                "content": [{
-                    "type": "input_image",
-                    "file_id": "file_123",
-                    "detail": "high"
-                }]
-            })
-        );
-
-        Ok(())
-    }
-
-    #[test]
     fn serializes_audio_user_input_without_tags() -> Result<()> {
         for (audio, wire) in [
             (

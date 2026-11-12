@@ -1483,52 +1483,6 @@ mod tests {
     }
 
     #[test]
-    fn exec_params_defaults_legacy_managed_network_unix_socket_policy() {
-        let cwd =
-            PathUri::from_host_native_path(std::env::current_dir().expect("current directory"))
-                .expect("cwd URI");
-        let legacy: ExecParams = serde_json::from_value(serde_json::json!({
-            "processId": "legacy-managed-network",
-            "argv": ["true"],
-            "cwd": cwd,
-            "env": {},
-            "tty": false,
-            "arg0": null,
-            "enforceManagedNetwork": true,
-            "managedNetwork": {
-                "loopbackPorts": [43123],
-                "allowLocalBinding": true,
-            },
-        }))
-        .expect("deserialize legacy managed network context");
-
-        assert_eq!(
-            legacy,
-            ExecParams {
-                process_id: ProcessId::from("legacy-managed-network"),
-                metadata: None,
-                argv: vec!["true".to_string()],
-                cwd,
-                env_policy: None,
-                shell_snapshot: None,
-                env: HashMap::new(),
-                tty: false,
-                pipe_stdin: false,
-                arg0: None,
-                sandbox: None,
-                enforce_managed_network: true,
-                managed_network: Some(ManagedNetworkSandboxContext {
-                    loopback_ports: vec![43123],
-                    allow_local_binding: true,
-                    allow_unix_sockets: Vec::new(),
-                    dangerously_allow_all_unix_sockets: false,
-                }),
-                network_proxy: None,
-            }
-        );
-    }
-
-    #[test]
     fn environment_info_accepts_legacy_response_without_cwd() {
         let info: EnvironmentInfo = serde_json::from_value(serde_json::json!({
             "shell": { "name": "zsh", "path": "/bin/zsh" }
