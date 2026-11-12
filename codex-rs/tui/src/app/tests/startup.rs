@@ -2181,7 +2181,7 @@ async fn cloud_switch_wait_applies_navigation_before_polling_terminal_input() ->
 }
 
 #[tokio::test]
-async fn windows_sandbox_config_refresh_uses_connected_server() -> Result<()> {
+async fn windows_sandbox_permissions_popup_uses_recovered_connected_server() -> Result<()> {
     let (mut app, mut events, _ops) = make_test_app_with_channels().await;
     let (server, requests, proxy) = start_recording_remote_app_server(&app.config).await?;
     std::fs::write(

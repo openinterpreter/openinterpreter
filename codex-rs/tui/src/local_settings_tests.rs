@@ -161,7 +161,7 @@ fast_default_opt_out = true
 }
 
 #[tokio::test]
-async fn system_motion_suppresses_animations_without_changing_saved_preferences()
+async fn strict_local_settings_load_preserves_resolved_preferences_and_legacy_warnings()
 -> anyhow::Result<()> {
     use crate::motion::MotionMode;
 

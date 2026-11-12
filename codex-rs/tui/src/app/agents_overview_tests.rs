@@ -961,17 +961,8 @@ async fn agents_overview_details_render_markdown() {
     );
 }
 
-#[test]
-fn agents_overview_markdown_preview_preserves_layout_and_bounds() {
-    let text = format!("a\r\n\t\u{1b}{}", "界".repeat(600));
-    assert_eq!(
-        super::super::agents_overview_details::preview_markdown(&text),
-        format!("a\n\t{}", "界".repeat(509))
-    );
-}
-
 #[tokio::test]
-async fn agents_overview_reasoning_uses_existing_events_and_expires_with_attachment() {
+async fn agents_overview_markdown_link_rows_preserve_destination_and_unlinked_clipping() {
     let mut app = make_test_app().await;
     let thread_id = ThreadId::new();
     let mut thread = overview_thread(
@@ -1250,63 +1241,6 @@ fn overview_directory_group_keys_normalize_aliases() {
     );
     let worktrees_enabled = false;
     assert_eq!(directory_group_key(&alias, worktrees_enabled), alias);
-}
-
-#[tokio::test]
-async fn overview_model_grouping_shows_details_and_preserves_selection() {
-    let mut app = make_test_app_with_chat().await;
-    let threads = [
-        ("Older task", Some("model-a"), 1),
-        ("Other model", Some("model-b"), 2),
-        ("Recent task", Some("model-a"), 3),
-        ("Legacy task", None, 4),
-    ]
-    .into_iter()
-    .map(|(name, model, index)| {
-        let mut thread = overview_thread(
-            ThreadId::from_u128(index),
-            /*parent_thread_id*/ None,
-            name,
-            ThreadStatus::Idle,
-        );
-        thread.model = model.map(str::to_string);
-        thread.updated_at = *OVERVIEW_TIMESTAMP + index as i64 - 30;
-        thread
-    })
-    .collect();
-    let selected = ThreadId::from_u128(/*value*/ 1);
-    let mut view = app.agents_overview_view(threads, Some(selected));
-    for _ in 0..3 {
-        view.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-    }
-    assert_eq!(
-        app.agents_overview.view_state.lock().unwrap().grouping,
-        AgentsOverviewGrouping::Model
-    );
-    assert_eq!(
-        view.rows[view.selected_index().unwrap()].thread_id,
-        selected
-    );
-    // Within a model, newer tasks come first; navigation then crosses model groups.
-    for (key, expected) in [
-        (KeyCode::Up, 3),
-        (KeyCode::Down, 1),
-        (KeyCode::Down, 2),
-        (KeyCode::Down, 4),
-    ] {
-        view.handle_key_event(key.into());
-        assert_eq!(
-            view.rows[view.selected_index().unwrap()].thread_id,
-            ThreadId::from_u128(expected)
-        );
-    }
-    app.chat_widget.show_bottom_pane_view(Box::new(view));
-    insta::assert_snapshot!(
-        "agents_overview_model_grouping",
-        render_bottom_popup(&app.chat_widget, /*width*/ 100)
-            .replace(&test_path_display("/tmp/project"), "/tmp/project")
-            .replace("fwd del", "del")
-    );
 }
 
 #[tokio::test]

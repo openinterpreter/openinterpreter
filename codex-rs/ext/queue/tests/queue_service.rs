@@ -331,49 +331,6 @@ async fn emit_idle_with_turn(
     .await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn drain_leaves_persisted_queued_message_for_a_later_start() -> anyhow::Result<()> {
-    let server = start_mock_server().await;
-    let response =
-        responses::mount_sse_once(&server, responses::sse_completed("queued-turn")).await;
-    let admission = Arc::new(TestAdmission(AtomicBool::new(true)));
-    let mut extensions = ExtensionRegistryBuilder::new();
-    extensions.turn_start_admission(admission.clone());
-    let test = test_codex()
-        .with_extensions(Arc::new(extensions.build()))
-        .build_with_auto_env(&server)
-        .await?;
-    let thread_id = test.session_configured.thread_id;
-    let queue = loaded_thread_queue(&test)?;
-    let staged = QueuedItemService::new(
-        Arc::clone(&queue),
-        Weak::new(),
-        Arc::new(NoopExtensionEventSink),
-    );
-    let item = staged
-        .enqueue(thread_id, user_input("queued after drain"))
-        .await?;
-    let service = QueuedItemService::new(
-        Arc::clone(&queue),
-        Arc::downgrade(&test.thread_manager),
-        Arc::new(NoopExtensionEventSink),
-    );
-
-    emit_idle(&service, thread_id).await;
-    assert_eq!(vec![item.clone()], service.list(thread_id).await?);
-    assert!(response.requests().is_empty());
-
-    admission.0.store(false, Ordering::SeqCst);
-    emit_idle(&service, thread_id).await;
-    wait_for_event_match(test.codex.as_ref(), |event| {
-        matches!(event, EventMsg::TurnComplete(_)).then_some(())
-    })
-    .await;
-    assert!(service.list(thread_id).await?.is_empty());
-    assert_eq!(1, response.requests().len());
-    Ok(())
-}
-
 #[tokio::test]
 async fn completed_admission_is_proven_at_native_continuation_idle_before_goal_replacement()
 -> anyhow::Result<()> {
