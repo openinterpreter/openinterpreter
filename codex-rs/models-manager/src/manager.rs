@@ -81,6 +81,16 @@ pub trait ModelsEndpointClient: fmt::Debug + Send + Sync {
         false
     }
 
+    /// A gateway OAuth session may fetch only a catalog on its own origin.
+    fn supports_gateway_catalog(&self) -> bool {
+        false
+    }
+
+    /// Identify API-key authentication using the endpoint's provider routing.
+    fn uses_api_key_auth(&self, login: Option<AuthMode>) -> bool {
+        self.has_provider_api_key() || login == Some(AuthMode::ApiKey)
+    }
+
     /// Fetches the latest remote model catalog and optional ETag.
     fn list_models<'a>(
         &'a self,
@@ -1026,16 +1036,17 @@ impl OpenAiModelsManager {
     }
 
     fn uses_api_key_auth(&self) -> bool {
-        self.endpoint_client.has_provider_api_key()
-            || self
-                .auth_manager
+        self.endpoint_client.uses_api_key_auth(
+            self.auth_manager
                 .as_ref()
-                .is_some_and(|auth_manager| auth_manager.auth_mode() == Some(AuthMode::ApiKey))
+                .and_then(|auth_manager| auth_manager.auth_mode()),
+        )
     }
 
     async fn should_refresh_models(&self) -> bool {
         self.endpoint_client.uses_codex_backend().await
             || self.endpoint_client.has_command_auth()
+            || self.endpoint_client.supports_gateway_catalog()
             || self.supports_api_key_discovery()
     }
 

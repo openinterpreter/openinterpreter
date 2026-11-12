@@ -4797,6 +4797,7 @@ dependencies = [
 name = "codex-model-provider"
 version = "0.0.62"
 dependencies = [
+ "anyhow",
  "base64 0.22.1",
  "chrono",
  "codex-agent-identity",
@@ -4814,6 +4815,7 @@ dependencies = [
  "codex-response-debug-context",
  "codex-runtime-agent-instance",
  "codex-secrets",
+ "codex-utils-process",
  "codex-utils-redacted-string",
  "codex-utils-rustls-provider",
  "http 1.5.0",

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
@@ -313,6 +314,23 @@ impl AuthProvider for UnauthenticatedAuthProvider {
 
 pub fn unauthenticated_auth_provider() -> SharedAuthProvider {
     Arc::new(UnauthenticatedAuthProvider)
+}
+
+/// Route default OpenAI endpoints using the credential actually selected for
+/// this provider, not an unrelated ambient login.
+pub(crate) fn uses_fedramp_api_key(
+    auth: Option<&CodexAuth>,
+    provider: &ModelProviderInfo,
+) -> codex_protocol::error::Result<bool> {
+    if !provider.is_openai() || provider.has_command_auth() {
+        return Ok(false);
+    }
+    if let Some(auth) = bearer_auth_for_provider(provider)? {
+        return Ok(auth.is_fedramp_account);
+    }
+    Ok(provider.requires_openai_auth
+        && matches!(auth, Some(CodexAuth::ApiKey(_)))
+        && auth.is_some_and(CodexAuth::is_fedramp_account))
 }
 
 /// Returns the provider-scoped auth manager when this provider uses command-backed auth.
