@@ -382,7 +382,10 @@ async fn recorder_refreshes_without_changing_execution_features_or_claiming_miss
             .features
             .set_enabled(Feature::ExecutedToolCallMetadata, enabled)
             .expect("test feature must be configurable");
-        session.refresh_runtime_config(next_config.clone()).await;
+        let expected_config = session.get_config().await;
+        session
+            .refresh_runtime_config(expected_config, next_config.clone())
+            .await;
         assert_eq!(calls.lock_state().is_some(), enabled);
         // A legacy file reload has no new rollout snapshot and must keep this setting.
         session.reload_user_config_layer().await;
@@ -439,7 +442,10 @@ async fn recorder_refreshes_without_changing_execution_features_or_claiming_miss
         nested.set_tool_result_metadata(ToolResultMetadata::new(&json!({})));
         if enabled {
             // Reapplying an enabled config must preserve pending calls and their metadata.
-            session.refresh_runtime_config(next_config.clone()).await;
+            let expected_config = session.get_config().await;
+            session
+                .refresh_runtime_config(expected_config, next_config.clone())
+                .await;
         }
         calls.finish_cell_recording(&cell);
         let mut prompt = vec![exec_input(&origin), exec_output(&origin)];
