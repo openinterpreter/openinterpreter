@@ -1,10 +1,10 @@
 use codex_protocol::models::AudioReference;
+use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseInputItem;
-use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_utils_path_uri::PathUri;
 use serde_json::Value as JsonValue;
 
