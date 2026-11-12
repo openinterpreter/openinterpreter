@@ -428,15 +428,16 @@ async fn exec_server_env_keeps_command_native_and_carries_sandbox_context() {
     assert_eq!(
         request.exec_server_sandbox,
         Some(codex_exec_server::FileSystemSandboxContext {
+            sandbox_override: SandboxOverride::NoOverride,
             permissions: exec_server_permissions.clone(),
             cwd: cwd_uri.clone(),
             workspace_roots: vec![cwd_uri.clone()],
             user_home_dir: None,
             temporary_directories: None,
             windows_sandbox_selection: if cfg!(windows) {
-                codex_file_system::WindowsSandboxSelection::RestrictedToken
-            } else {
                 codex_file_system::WindowsSandboxSelection::Disabled
+            } else {
+                codex_file_system::WindowsSandboxSelection::RestrictedToken
             },
             windows_sandbox_proxy_settings_mode: None,
             use_legacy_landlock: false,

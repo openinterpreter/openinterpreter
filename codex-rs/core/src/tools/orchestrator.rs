@@ -234,12 +234,37 @@ impl ToolOrchestrator {
 
         // 2) First attempt under the selected sandbox.
         let unsandboxed_allowed = unsandboxed_execution_allowed(&file_system_sandbox_policy);
-        let sandbox_override = if unsandboxed_allowed {
-            sandbox_override_for_first_attempt(
-                tool.sandbox_permissions(req),
-                &requirement,
-                &file_system_sandbox_policy,
-            )
+        let sandbox_override = sandbox_override_for_first_attempt(
+            tool.sandbox_permissions(req),
+            &requirement,
+            &file_system_sandbox_policy,
+            /*already_approved*/ initial_approval_source.is_some(),
+        );
+        let (escalated_profile, writable_root_metadata) = if sandbox_override
+            == SandboxOverride::EscalatedSandboxWithRestrictions
+        {
+            let context = environment.sandbox_context(/*additional_permissions*/ None);
+            let policy_context = context.policy_context();
+            let baseline = permission_profile.file_system_sandbox_policy();
+            let file_system = baseline.for_approved_command(&policy_context);
+            let writable_root_metadata = file_system_root(&policy_context).is_some_and(|root| {
+                file_system.can_write_path(&root, &policy_context)
+                    && PROTECTED_METADATA_PATH_NAMES.iter().any(|name| {
+                        root.join_descendant(name)
+                            .is_ok_and(|path| file_system.can_write_path(&path, &policy_context))
+                    })
+            });
+            let escalated_profile = (file_system != baseline
+                && file_system
+                    != baseline.materialize_project_roots_with_path_uris(workspace_roots))
+            .then(|| {
+                PermissionProfile::from_runtime_permissions_with_enforcement(
+                    permission_profile.enforcement(),
+                    &file_system,
+                    permission_profile.network_sandbox_policy(),
+                )
+            });
+            (escalated_profile, writable_root_metadata)
         } else {
             (None, false)
         };
@@ -275,8 +300,9 @@ impl ToolOrchestrator {
             .or(escalated_profile.as_ref())
             .unwrap_or(&permissions);
         let network_approval_spec = tool.network_approval_spec(req, tool_ctx);
-        // Offline owner attachments stay offline unless approved command permissions grant
-        // networking. Existing enabled controller proxies remain independently authoritative.
+        // An explicit owner proxy requirement permits filtered egress, like an enabled
+        // controller proxy. Traffic-only owner policies stay offline unless command
+        // permissions grant networking.
         // Preserve this baseline even when escalation skips the execution proxy, so retained
         // terminals still record that their launch bypassed network restrictions.
         let managed_network_active = if owner_network_policy {
@@ -286,6 +312,10 @@ impl ToolOrchestrator {
                 .network
                 .as_ref()
                 .is_some_and(NetworkProxySpec::enabled)
+                || sandbox_config
+                    .network_policy
+                    .as_ref()
+                    .is_some_and(|policy| policy.requires_proxy)
                 || (network_approval_spec.is_some()
                     || tool
                         .sandbox_permissions(req)
