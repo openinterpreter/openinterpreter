@@ -10,9 +10,21 @@ import unittest
 
 
 SCRIPT = Path(__file__).with_name("verify_bazel_lock_regeneration.py")
+WORKFLOW = SCRIPT.parent.parent / "workflows/bazel-lock-regeneration.yml"
 
 
 class LockCandidateTest(unittest.TestCase):
+    def test_new_workflow_has_scoped_pr_bootstrap_and_source_binding(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("pull_request:", workflow)
+        self.assertIn("github.event.pull_request.number == 1981", workflow)
+        self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", workflow)
+        self.assertIn("github.event.pull_request.head.ref == 'interpreterwork/codex-main-integration-publish-20261112'", workflow)
+        self.assertIn("github.event.pull_request.head.sha || inputs.source_sha", workflow)
+        self.assertIn('[[ "$(git rev-parse HEAD)" == "$EXPECTED_SOURCE_SHA" ]]', workflow)
+        self.assertIn("--lockfile_mode=error", workflow)
+        self.assertNotIn("git push", workflow)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

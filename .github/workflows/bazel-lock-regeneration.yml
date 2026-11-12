@@ -1,6 +1,13 @@
 name: Bazel lock reconciliation candidate (review only)
 
 on:
+  # A newly introduced workflow_dispatch file is not registered until it
+  # exists on default. Run this review-only job from the scoped source PR.
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+    paths:
+      - .github/workflows/bazel-lock-regeneration.yml
   workflow_dispatch:
     inputs:
       source_sha:
@@ -14,30 +21,33 @@ permissions:
 jobs:
   generate:
     name: Generate review-only MODULE.bazel.lock
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.number == 1981 && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'interpreterwork/codex-main-integration-publish-20261112') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     environment:
       name: bazel
       deployment: false
+    env:
+      EXPECTED_SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.source_sha }}
     steps:
       - name: Require exact dispatch source
         shell: bash
-        env:
-          EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
           [[ "$EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$GITHUB_SHA" == "$EXPECTED_SOURCE_SHA" ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$GITHUB_SHA" == "$EXPECTED_SOURCE_SHA" ]]
+          else
+            [[ "$GITHUB_EVENT_NAME" == pull_request ]]
+          fi
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ env.EXPECTED_SOURCE_SHA }}
           persist-credentials: false
 
       - name: Check source identity
         shell: bash
-        env:
-          EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
           [[ "$(git rev-parse HEAD)" == "$EXPECTED_SOURCE_SHA" ]]
@@ -59,7 +69,6 @@ jobs:
       - name: Bind candidate to source and package review artifact
         shell: bash
         env:
-          EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
           WORKFLOW_RUN_ID: ${{ github.run_id }}
           WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
@@ -73,7 +82,7 @@ jobs:
       - name: Upload review-only candidate (never commit or publish)
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: bazel-lock-review-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: bazel-lock-review-${{ env.EXPECTED_SOURCE_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/bazel-lock-review/
           if-no-files-found: error
           retention-days: 7
