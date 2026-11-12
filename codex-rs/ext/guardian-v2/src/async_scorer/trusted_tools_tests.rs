@@ -38,11 +38,11 @@ fn mcp_tool(server: &str, connector_id: Option<&str>) -> Result<McpToolInfo> {
     }))?)
 }
 
-fn expected_context(tool: &McpToolInfo, source: &Path) -> codex_guardian_context::TrustedTool {
-    codex_guardian_context::TrustedTool {
-        server: tool.server_name.clone(),
+fn expected_context(tool: &McpToolInfo, source: &Path) -> TrustedTool {
+    TrustedTool {
+        server: tool.server_name().to_owned(),
         connector_id: tool.connector_id.clone(),
-        source: source.display().to_string(),
+        source: TrustedToolSource::UserConfiguration(source.display().to_string()),
     }
 }
 

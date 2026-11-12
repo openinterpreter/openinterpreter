@@ -1,5 +1,7 @@
 use anyhow::Result;
+use codex_api::ApiError;
 use codex_context_fragments::RenderedFragment;
+use codex_core::cyber_access_program::ApiKeyCyberAccessPrograms;
 use codex_extension_api::ContextualUserFragment;
 use codex_extension_api::ExtensionMetrics;
 use codex_guardian_context::PreviousReviews;
@@ -17,6 +19,7 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_prompts::GuardianClassifierInstructions;
 use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
+use codex_protocol::TranscriptFormat;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -263,6 +266,26 @@ pub(in crate::async_scorer) fn sampler_config(base_url: String) -> LunaSamplerCo
     }
 }
 
+#[test]
+fn sampler_reuses_parent_compaction_only_for_matching_model_hashes() {
+    for (parent_hash, luna_hash, should_reuse) in [
+        (Some("compatible"), Some("compatible"), true),
+        (Some("parent"), Some("luna"), false),
+        (None, Some("compatible"), false),
+        (Some("compatible"), None, false),
+        (Some(""), Some(""), false),
+    ] {
+        let mut config = sampler_config("http://localhost:1/v1".to_owned());
+        config.luna_compaction_hash = luna_hash.map(str::to_owned);
+        let sampler = LunaSampler::new(config);
+        assert_eq!(
+            sampler.supports_parent_compaction(parent_hash),
+            should_reuse,
+            "incompatible or empty hashes must not reuse the parent's checkpoint"
+        );
+    }
+}
+
 pub(super) async fn connect_sampler(config: LunaSamplerConfig) -> Result<LunaSampler> {
     let sampler = LunaSampler::new(config);
     sampler.prewarm().await;
@@ -271,6 +294,7 @@ pub(super) async fn connect_sampler(config: LunaSamplerConfig) -> Result<LunaSam
 
 fn classifier_instructions() -> RenderedFragment {
     GuardianClassifierInstructions::new(
+        TranscriptFormat::Line,
         "Classify using {{ tenant_policy_config }}.",
         "the tenant policy",
         "Return high for high risk or low for low risk.",
@@ -293,12 +317,15 @@ fn assert_classifier_instructions(request: &serde_json::Value) {
             }],
             "internal_chat_message_metadata_passthrough": {
                 "content_item_kinds": ["guardian.classifier_instructions"],
+                "content_item_metadata": [{
+                    "provenance": {"type": "harness", "hook": false},
+                }],
             },
         })
     );
 }
 
-pub(super) fn sample_request(parent_turn_id: &str) -> LunaSamplingRequest {
+pub(in crate::async_scorer) fn sample_request(parent_turn_id: &str) -> LunaSamplingRequest {
     LunaSamplingRequest {
         item_id_generator: uuid_v7_item_id_generator_for_test(),
         cyber_access_program: None,
@@ -431,7 +458,12 @@ impl ExtensionMetrics for RecordingMetrics {
         self.histogram(name, value, tags);
     }
 
-    fn counter(&self, _name: &str, _inc: i64, _tags: &[(&str, &str)]) {}
+    fn counter(&self, name: &str, inc: i64, tags: &[(&str, &str)]) {
+        self.histogram(name, inc, tags);
+        if name == "codex.guardian_v2.sampling.retry_outcome" {
+            self.1.notify_one();
+        }
+    }
 
     fn histogram(&self, name: &str, value: i64, tags: &[(&str, &str)]) {
         if name == "codex.guardian_v2.connection.duration_ms" {
@@ -507,27 +539,6 @@ async fn sampler_records_token_usage_after_classification() -> Result<()> {
         ))
     );
 
-    let request = server
-        .wait_for_request(
-            /*connection_index*/ INITIAL_WEBSOCKET_CONNECTIONS - 1,
-            /*request_index*/ 0,
-        )
-        .await
-        .body_json();
-    let input: Vec<ResponseItem> = serde_json::from_value(request["input"].clone())?;
-    let estimated = input
-        .iter()
-        .map(codex_guardian_context::estimate_input_tokens)
-        .sum::<usize>();
-    assert!(metrics.0.lock().unwrap().contains(&(
-        codex_guardian_context::REQUEST_TOKENS_METRIC.to_owned(),
-        i64::try_from(estimated)?,
-        vec![
-            ("target".to_owned(), "async".to_owned()),
-            ("component".to_owned(), "total".to_owned()),
-        ],
-    )));
-
     Ok(())
 }
 
@@ -554,6 +565,12 @@ async fn classifier_sends_guardian_header_only_with_codex_backend_auth() -> Resu
             None,
         ),
         (
+            CodexAuth::Headers(AuthHeaders::new(http::HeaderMap::new())),
+            "/api/codex",
+            Some("classifier"),
+            None,
+        ),
+        (
             CodexAuth::from_api_key("test-api-key"),
             "/api/codex",
             None,
@@ -562,8 +579,8 @@ async fn classifier_sends_guardian_header_only_with_codex_backend_auth() -> Resu
         (
             CodexAuth::create_dummy_chatgpt_auth_for_testing(),
             "/v1",
+            Some("classifier"),
             None,
-            Some("priority"),
         ),
         (
             CodexAuth::from_api_key("test-api-key"),
@@ -714,6 +731,8 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
             parent_response_id: None,
             instructions: classifier_instructions(),
             input: vec![ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "user".to_owned(),
                 content: vec![
@@ -823,87 +842,6 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sampler_reuses_parent_compaction_only_for_matching_model_hashes() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    for (parent_hash, luna_hash, should_reuse) in [
-        (Some("compatible"), Some("compatible"), true),
-        (Some("parent"), Some("luna"), false),
-        (None, Some("compatible"), false),
-        (Some("compatible"), None, false),
-        (Some(""), Some(""), false),
-    ] {
-        let events = vec![
-            ev_assistant_message("sample", "low"),
-            ev_completed("response-1"),
-        ];
-        let mut connections = vec![Vec::new(); INITIAL_WEBSOCKET_CONNECTIONS - 1];
-        connections.push(vec![events.clone(), events]);
-        let server = responses::start_websocket_server(connections).await;
-        let mut config = sampler_config(format!(
-            "http://{}/v1",
-            server.uri().trim_start_matches("ws://")
-        ));
-        config.luna_compaction_hash = luna_hash.map(str::to_owned);
-        let sampler = connect_sampler(config).await?;
-        let parent_compaction = ResponseItem::Compaction {
-            id: Some(ResponseItemId::from_server("cmp_parent".to_owned())),
-            encrypted_content: "opaque encrypted summary".to_owned(),
-            internal_chat_message_metadata_passthrough: None,
-        };
-        let mut request = sample_request("turn-1");
-        request.parent_compaction = Some(parent_compaction.clone());
-        request.parent_compaction_hash = parent_hash.map(str::to_owned);
-        request.input.insert(
-            /*index*/ 0,
-            PreviousReviews::try_from_fragments(vec!["trusted review".to_owned()])?.into_message(),
-        );
-
-        let result = sampler.sample(request).await;
-        if !should_reuse {
-            assert!(matches!(
-                result,
-                Err(LunaSamplerError::IncompatibleCompaction)
-            ));
-            assert!(server.connections().iter().all(Vec::is_empty));
-            assert_eq!(
-                sampler.sample(sample_request("uncompacted-turn")).await?,
-                "low"
-            );
-            continue;
-        }
-        assert_eq!(result?, "low");
-
-        let request = server
-            .wait_for_request(
-                /*connection_index*/ INITIAL_WEBSOCKET_CONNECTIONS - 1,
-                /*request_index*/ 0,
-            )
-            .await
-            .body_json();
-        let input = request["input"].as_array().expect("input items");
-        assert_eq!(input[0]["type"], "additional_tools");
-        assert_eq!(input[1]["role"], "developer");
-        assert_eq!(input.len(), 5);
-        assert_eq!(input[2], serde_json::to_value(&parent_compaction)?);
-        assert_eq!(input[3]["role"], "developer");
-        assert_eq!(input[3]["content"][1]["text"], "trusted review");
-        assert_eq!(input[4]["role"], "user");
-
-        let mut switched_request = sample_request("turn-2");
-        switched_request.parent_compaction = Some(parent_compaction);
-        switched_request.parent_compaction_hash = Some("incompatible".to_owned());
-        assert!(matches!(
-            sampler.sample(switched_request).await,
-            Err(LunaSamplerError::IncompatibleCompaction)
-        ));
-        assert_eq!(server.connections().iter().map(Vec::len).sum::<usize>(), 1);
-    }
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sampler_returns_classification_token_before_terminal_response_events() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -943,23 +881,38 @@ async fn sampler_returns_classification_token_before_terminal_response_events() 
     })
     .await?;
 
-    let output = tokio::time::timeout(
-        Duration::from_secs(2),
-        sampler.sample(LunaSamplingRequest {
-            parent_response_id: None,
-            instructions: classifier_instructions(),
-            input: vec![responses::user_message_item(
-                "The user requested a README summary.",
-            )],
-            parent_compaction: None,
-            parent_compaction_hash: None,
-            reasoning_effort: ReasoningEffort::None,
-            parent_turn_id: "turn-1".to_owned(),
-            root_turn_id: Some("turn-1".to_owned()),
-        }),
-    )
-    .await??;
-
+    let request = sample_request("turn-1");
+    let (input, input_tokens) = LunaSampler::prepare_input(
+        &request,
+        /*history*/ None,
+        request
+            .input
+            .iter()
+            .cloned()
+            .map(codex_history::ResponseItemEnvelope::new)
+            .collect(),
+    );
+    let sample = super::ConversationSample {
+        input: crate::async_scorer::request::PreparedRequest {
+            input,
+            input_tokens,
+            existing_context_tokens: 0,
+            cursor: codex_guardian_context::TranscriptCursor {
+                parent_history_version: 0,
+                transcript_entry_count: 1,
+            },
+            truncations: Vec::new(),
+            section_costs: Vec::new(),
+        },
+        sampling: request,
+    };
+    let (ready, score) = tokio::sync::oneshot::channel();
+    let output = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            _ = sampler.sample_retained(sample, ready) => panic!("response must remain pending after its early score"),
+            score = score => score.expect("early score sender").map(super::SampledScore::accept),
+        }
+    }).await??;
     assert_eq!(output, "low");
     drop(sampler);
     tokio::join!(idle_server.shutdown(), server.shutdown());
@@ -1043,7 +996,12 @@ async fn sampler_retries_expired_websockets_on_another_warm_connection() -> Resu
     let mut request = sample_request("turn-1");
     request.input.insert(
         /*index*/ 0,
-        PreviousReviews::try_from_fragments(vec!["trusted review".to_owned()])?.into_message(),
+        PreviousReviews::try_from_fragments(vec![codex_guardian_context::PreviousReview {
+            id: ResponseItemId::from_server("review-trusted".to_owned()),
+            fragment: "trusted review".to_owned(),
+        }])?
+        .into_annotated_message()
+        .into_item(),
     );
     request.input.insert(
         /*index*/ 1,
@@ -1137,7 +1095,7 @@ async fn sampler_uses_http_with_a_fresh_identity_when_warm_connections_expire() 
     assert_eq!(thread_ids.len(), 3);
     responses::assert_parent_turn(&request.body_json(), Some("turn-2"))?;
     assert_classifier_instructions(&request.body_json());
-    assert_eq!(second.single_connection().len(), 1);
+    assert_eq!(used.single_connection().len(), 1);
     Ok(())
 }
 

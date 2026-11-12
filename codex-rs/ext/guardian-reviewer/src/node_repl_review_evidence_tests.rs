@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use codex_protocol::models::ImageReference;
 use codex_protocol::user_input::UserInput;
 use codex_protocol_test_support::ContentItemTestExt;
@@ -33,15 +35,6 @@ fn file_image_input(file_id: &str) -> UserInput {
     }
 }
 
-fn file_image_input(file_id: &str) -> UserInput {
-    UserInput::Image {
-        image: ImageReference::File {
-            file_id: file_id.to_string(),
-        },
-        detail: None,
-    }
-}
-
 fn rendered_text<'a>(items: impl IntoIterator<Item = &'a UserInput>) -> String {
     items
         .into_iter()
@@ -62,7 +55,10 @@ fn evidence_snapshots_keep_response_order_and_escape_closing_markers() {
     let first = evidence
         .snapshot_since(/*reviewed_sequence*/ 0)
         .expect("completed responses should produce evidence");
-    let body = first.context(NodeReplReviewEvidenceMode::TextOnly).body();
+    let body = first
+        .context(NodeReplReviewEvidenceMode::TextOnly)
+        .body()
+        .expect_text();
     assert_eq!(first.sequence, 2);
     assert!(body.find("first") < body.find("second"));
     assert!(body.contains("<\\/node_repl_review_evidence>second"));
@@ -78,6 +74,7 @@ fn evidence_snapshots_keep_response_order_and_escape_closing_markers() {
         !delta
             .context(NodeReplReviewEvidenceMode::TextOnly)
             .body()
+            .expect_text()
             .contains("first")
     );
     assert!(evidence.snapshot_since(/*reviewed_sequence*/ 2).is_none());
@@ -91,7 +88,8 @@ fn evidence_bounds_visible_text_and_marks_empty_completed_responses() {
         .snapshot_since(/*reviewed_sequence*/ 0)
         .expect("empty successful responses should produce evidence")
         .context(NodeReplReviewEvidenceMode::TextOnly)
-        .render();
+        .render()
+        .expect_text();
     assert!(empty.contains("completed without visible text"));
     let snapshot = "page-middle".repeat(2_000);
     evidence.record("js", "cell", "snapshot", vec![text_input(&snapshot)]);
@@ -99,7 +97,8 @@ fn evidence_bounds_visible_text_and_marks_empty_completed_responses() {
         .snapshot_since(/*reviewed_sequence*/ 1)
         .expect("large DOM snapshots should produce evidence")
         .context(NodeReplReviewEvidenceMode::TextOnly)
-        .render();
+        .render()
+        .expect_text();
     assert!(full.contains(&snapshot));
     evidence.record(
         "js",
@@ -117,7 +116,8 @@ fn evidence_bounds_visible_text_and_marks_empty_completed_responses() {
     );
     let rendered = oversized
         .context(NodeReplReviewEvidenceMode::TextOnly)
-        .render();
+        .render()
+        .expect_text();
     assert!(rendered.contains("start"));
     assert!(rendered.contains("end"));
     assert!(rendered.contains("<truncated omitted_approx_tokens="));
@@ -193,36 +193,6 @@ fn file_backed_images_are_retained_but_omitted_from_guardian_views() {
 }
 
 #[test]
-fn file_backed_images_are_retained_but_omitted_from_guardian_views() {
-    let evidence = NodeReplReviewEvidence::default();
-    let file_id = format!("file_{}", "x".repeat(4_096));
-    let items = vec![text_input("visible"), file_image_input(&file_id)];
-
-    evidence.record("browser", "cell", "file", items.clone());
-
-    let snapshot = evidence.snapshot_since(/*reviewed_sequence*/ 0).unwrap();
-    assert_eq!(snapshot.responses.len(), 1);
-    assert_eq!(snapshot.responses[0].items, items);
-    assert!(snapshot.responses[0].has_images());
-    assert!(snapshot.responses[0].retained_bytes() >= file_id.len());
-    assert_eq!(evidence.images(), Vec::new());
-
-    let rendered = snapshot
-        .context(NodeReplReviewEvidenceMode::Multimodal)
-        .render_inputs();
-    assert!(rendered_text(&rendered).contains("visible"));
-    assert!(!rendered.iter().any(|item| {
-        matches!(
-            item,
-            UserInput::Image {
-                image: ImageReference::File { .. },
-                ..
-            }
-        )
-    }));
-}
-
-#[test]
 fn evidence_evicts_complete_oldest_responses_and_rejects_oversized_items() {
     let evidence = NodeReplReviewEvidence::default();
     let max = NodeReplReviewEvidence::MAX_RETAINED_BYTES;
@@ -237,7 +207,8 @@ fn evidence_evicts_complete_oldest_responses_and_rejects_oversized_items() {
     let retained = evidence.snapshot_since(/*reviewed_sequence*/ 0).unwrap();
     let body = retained
         .context(NodeReplReviewEvidenceMode::TextOnly)
-        .body();
+        .body()
+        .expect_text();
     for expected in ["earlier", "recent", "oversized text"] {
         assert!(body.contains(expected));
     }
@@ -263,9 +234,11 @@ fn mixed_evidence_bounds_headers_and_empty_response_placeholders() {
 
         let fragment = evidence.snapshot_since(/*reviewed_sequence*/ 0).unwrap();
         let text = rendered_text(
-            &fragment
+            fragment
                 .context(NodeReplReviewEvidenceMode::Multimodal)
-                .render_inputs(),
+                .render_inputs()
+                .iter()
+                .map(|item| &item.content),
         );
         assert!(text.len() <= MAX_RENDERED_BYTES);
         assert!(text.contains("node_repl_responses="));
