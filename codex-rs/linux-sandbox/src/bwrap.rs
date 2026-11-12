@@ -328,7 +328,6 @@ fn create_bwrap_flags(
         args: filesystem_args,
         preserved_files,
         synthetic_mount_targets,
-        protected_create_targets,
     } = create_filesystem_args(file_system_sandbox_policy, sandbox_policy_cwd, options)?;
     let normalized_command_cwd = normalize_command_cwd_for_bwrap(command_cwd);
     let mut args = Vec::new();
@@ -413,7 +412,11 @@ fn create_filesystem_args(
             .mask_wslg_distro
             .then_some(Path::new(WSLG_DISTRO_ROOT)),
     )?;
-    let unreadable_globs = file_system_sandbox_policy.get_unreadable_globs_with_cwd(cwd);
+    // The fork rejects alternate host mount aliases before constructing the
+    // namespace, then masks the authenticated socket directory on each bind.
+    let daemon_directories = BTreeSet::from([daemon_directory]);
+    let resolved = file_system_sandbox_policy
+        .resolve_for_enforcement(cwd, FileSystemPolicyProjection::LinuxMounts)?;
     // Bubblewrap requires bind mount targets to exist. Skip missing writable
     // roots so mixed-platform configs can keep harmless paths for other
     // environments without breaking Linux command startup.
@@ -472,11 +475,9 @@ fn create_filesystem_args(
     // core tool helpers still evaluate the original patterns directly at read time.
     unreadable_roots.extend(
         expand_unreadable_globs_with_ripgrep(
-            &unreadable_globs,
+            &resolved.unreadable_globs,
             cwd,
-            options
-                .glob_scan_max_depth
-                .or(file_system_sandbox_policy.glob_scan_max_depth),
+            options.glob_scan_max_depth.or(resolved.glob_scan_max_depth),
         )?
         .into_iter()
         .map(AbsolutePathBuf::into_path_buf),
@@ -484,7 +485,7 @@ fn create_filesystem_args(
     unreadable_roots.sort();
     unreadable_roots.dedup();
 
-    let mut args = if file_system_sandbox_policy.has_full_disk_read_access() {
+    let mut args = if resolved.has_full_disk_read_access {
         // Read-only root, then mount a minimal device tree.
         // In bubblewrap (`bubblewrap.c`, `SETUP_MOUNT_DEV`), `--dev /dev`
         // creates the standard minimal nodes: null, zero, full, random,
@@ -557,14 +558,14 @@ fn create_filesystem_args(
                 args.push("--ro-bind".to_string());
                 args.push(path_to_string(&mount_root));
                 args.push(path_to_string(&mount_root));
-                append_daemon_socket_mask(&mut args, &mount_root, &daemon_directory)?;
+                append_daemon_socket_masks(&mut args, &mount_root, &daemon_directories)?;
             }
         }
 
         args
     };
     if args[0] == "--ro-bind" {
-        append_daemon_socket_mask(&mut args, Path::new("/"), &daemon_directory)?;
+        append_daemon_socket_masks(&mut args, Path::new("/"), &daemon_directories)?;
     }
     let mut bwrap_args = BwrapArgs {
         args,
@@ -622,10 +623,25 @@ fn create_filesystem_args(
         }
 
         let mount_root = symlink_target.as_deref().unwrap_or(root);
-        bwrap_args.args.push("--bind".to_string());
-        bwrap_args.args.push(path_to_string(mount_root));
-        bwrap_args.args.push(path_to_string(mount_root));
-        append_daemon_socket_mask(&mut bwrap_args.args, mount_root, &daemon_directory)?;
+        // Rebinding a root alias would undo masks already applied to `/`.
+        let redundant_root_alias =
+            binds_file_system_root && root != Path::new("/") && mount_root == Path::new("/");
+        if !redundant_root_alias {
+            bwrap_args.args.push("--bind".to_string());
+            bwrap_args.args.push(path_to_string(mount_root));
+            bwrap_args.args.push(path_to_string(mount_root));
+            if mount_root == Path::new("/") {
+                // Recreate minimal device nodes shadowed by the root bind.
+                bwrap_args.args.extend([
+                    "--dev".to_string(),
+                    "/dev".to_string(),
+                    "--bind-try".to_string(),
+                    "/dev/shm".to_string(),
+                    "/dev/shm".to_string(),
+                ]);
+            }
+            append_daemon_socket_masks(&mut bwrap_args.args, mount_root, &daemon_directories)?;
+        }
 
         let mut read_only_subpaths: Vec<PathBuf> = writable_root
             .read_only_subpaths
@@ -765,31 +781,6 @@ fn create_filesystem_args(
     Ok(bwrap_args)
 }
 
-fn append_protected_create_targets_for_writable_root(
-    bwrap_args: &mut BwrapArgs,
-    protected_metadata_names: &[String],
-    root: &Path,
-    symlink_target: Option<&Path>,
-    read_only_subpaths: &[PathBuf],
-) {
-    for name in protected_metadata_names {
-        let mut path = root.join(name);
-        if let Some(target) = symlink_target
-            && let Ok(relative_path) = path.strip_prefix(root)
-        {
-            path = target.join(relative_path);
-        }
-        if read_only_subpaths.iter().any(|subpath| subpath == &path) || path.exists() {
-            continue;
-        }
-        bwrap_args
-            .protected_create_targets
-            .push(ProtectedCreateTarget::missing(&path));
-    }
-
-    Ok(bwrap_args)
-}
-
 fn append_metadata_path_masks_for_writable_root(
     read_only_subpaths: &mut Vec<PathBuf>,
     root: &Path,
@@ -805,27 +796,35 @@ fn append_metadata_path_masks_for_writable_root(
 
 // Mask immediately after every bind that exposes the directory, before policy
 // deny masks can hide its parent. Use the mount destination for read-root aliases.
-fn append_daemon_socket_mask(
+fn append_daemon_socket_masks(
     args: &mut Vec<String>,
     mount_root: &Path,
-    daemon_directory: &Path,
+    daemon_directories: &BTreeSet<PathBuf>,
 ) -> Result<()> {
     let source = fs::canonicalize(mount_root)?;
-    if source.starts_with(daemon_directory) {
-        return Err(CodexErr::Fatal(
-            "app-server socket directory cannot be a sandbox mount root".to_string(),
-        ));
-    }
-    if let Ok(relative) = daemon_directory.strip_prefix(source) {
-        let destination = path_to_string(&mount_root.join(relative));
-        args.extend([
-            "--perms".to_string(),
-            "000".to_string(),
-            "--tmpfs".to_string(),
-            destination.clone(),
-            "--remount-ro".to_string(),
-            destination,
-        ]);
+    for daemon_directory in daemon_directories {
+        if source.starts_with(daemon_directory) {
+            return Err(CodexErr::Fatal(
+                "app-server socket directory cannot be a sandbox mount root".to_string(),
+            ));
+        }
+        if let Ok(relative) = daemon_directory.strip_prefix(&source) {
+            let destination = mount_root
+                .join(relative)
+                .to_str()
+                .ok_or_else(|| {
+                    CodexErr::Fatal("app-server socket mask path must be valid UTF-8".to_string())
+                })?
+                .to_string();
+            args.extend([
+                "--perms".to_string(),
+                "000".to_string(),
+                "--tmpfs".to_string(),
+                destination.clone(),
+                "--remount-ro".to_string(),
+                destination,
+            ]);
+        }
     }
     Ok(())
 }
@@ -1130,11 +1129,7 @@ fn append_read_only_subpath_args(
         bwrap_args.args.push("--ro-bind".to_string());
         bwrap_args.args.push(path_to_string(subpath));
         bwrap_args.args.push(path_to_string(subpath));
-        append_daemon_socket_mask(
-            &mut bwrap_args.args,
-            subpath,
-            &codex_uds::shared_daemon_socket_directory()?,
-        )?;
+        append_daemon_socket_masks(&mut bwrap_args.args, subpath, daemon_directories)?;
     }
     Ok(())
 }
@@ -1927,10 +1922,6 @@ mod tests {
             synthetic_mount_target_paths(&args),
             vec![workspace.join(".codex"), dot_git, workspace.join(".agents")],
         );
-        assert!(
-            protected_create_target_paths(&args).is_empty(),
-            "missing child .git should be mount protected before command execution",
-        );
     }
 
     #[cfg(unix)]
@@ -1963,10 +1954,6 @@ mod tests {
         assert_eq!(
             synthetic_mount_target_paths(&args),
             vec![workspace.join(".codex"), dot_git, workspace.join(".agents")],
-        );
-        assert!(
-            protected_create_target_paths(&args).is_empty(),
-            "symlinked missing child .git should be mount protected before command execution",
         );
     }
 
@@ -2058,11 +2045,6 @@ mod tests {
         assert!(synthetic_targets.contains(&PathBuf::from(&dot_git)));
         assert!(synthetic_targets.contains(&PathBuf::from(&dot_agents)));
         assert!(synthetic_targets.contains(&PathBuf::from(&dot_codex)));
-        assert_eq!(
-            protected_create_target_paths(&args),
-            Vec::<PathBuf>::new(),
-            "missing protected metadata paths should fail at creation time through read-only mounts",
-        );
     }
 
     #[test]
@@ -2863,13 +2845,6 @@ mod tests {
 
     fn synthetic_mount_target_paths(args: &BwrapArgs) -> Vec<PathBuf> {
         args.synthetic_mount_targets
-            .iter()
-            .map(|target| target.path().to_path_buf())
-            .collect()
-    }
-
-    fn protected_create_target_paths(args: &BwrapArgs) -> Vec<PathBuf> {
-        args.protected_create_targets
             .iter()
             .map(|target| target.path().to_path_buf())
             .collect()

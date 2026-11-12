@@ -24,6 +24,7 @@ use crate::launcher::initialize_bwrap_launcher;
 use crate::launcher::preferred_bwrap_supports_argv0;
 use crate::proxy_routing::activate_proxy_routes_in_netns;
 use crate::proxy_routing::prepare_host_proxy_route_spec;
+use crate::seccomp::apply_sandbox_policies_to_current_thread;
 use codex_network_proxy::ManagedNetworkSandboxContext;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::PermissionProfile;
@@ -144,7 +145,7 @@ pub fn run_main() -> ! {
         no_proc,
         inherit_pid_namespace,
         command,
-    } = LandlockCommand::parse();
+    } = LinuxSandboxCommand::parse();
     let allow_network_for_proxy = managed_network.is_some();
 
     if command.is_empty() {
@@ -276,7 +277,8 @@ pub fn run_main() -> ! {
             (None, Vec::new())
         };
         let options = BwrapOptions {
-            mount_proc: !no_proc,
+            mount_proc: !no_proc && !inherit_pid_namespace,
+            inherit_pid_namespace,
             network_mode: bwrap_network_mode(network_sandbox_policy, allow_network_for_proxy),
             mask_wsl_interop: !file_system_sandbox_policy.has_full_disk_write_access()
                 && Path::new(WSL_INTEROP_DIR).is_dir(),
@@ -399,6 +401,10 @@ fn run_bwrap_with_proc_fallback(
     proxy_controls: Vec<File>,
 ) -> ! {
     let command_cwd = command_cwd.unwrap_or(sandbox_policy_cwd);
+
+    // The synthetic preflight policy omits writable roots. Select the trusted
+    // launcher against the effective policy before running that preflight.
+    initialize_bwrap_launcher(file_system_sandbox_policy, sandbox_policy_cwd);
 
     if options.mount_proc
         && !preflight_proc_mount_support(options)
