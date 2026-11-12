@@ -70,6 +70,8 @@ pub(super) mod root_handoff;
 
 #[path = "guardian_heartbeat_authorization.rs"]
 mod heartbeat;
+#[path = "guardian_subagent_notification_tests.rs"]
+mod notifications;
 #[path = "guardian_pending_root_delivery.rs"]
 mod pending_root_delivery;
 
