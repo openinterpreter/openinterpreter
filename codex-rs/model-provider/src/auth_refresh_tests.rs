@@ -261,3 +261,103 @@ async fn check_concurrent_refresh(trigger: RefreshTrigger) {
     );
     server.verify().await;
 }
+
+#[derive(Clone, Copy)]
+enum RefreshFailure {
+    Transient,
+    Permanent,
+    Policy,
+}
+
+struct FailingRefreshAuth {
+    auth: tokio::sync::watch::Receiver<CodexAuth>,
+    barrier: Barrier,
+    failure: RefreshFailure,
+}
+
+impl ExternalAuth for FailingRefreshAuth {
+    fn resolve(&self) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
+        Box::pin(async { Ok(self.auth.borrow().clone()) })
+    }
+
+    fn refresh(
+        &self,
+        _context: codex_login::ExternalAuthRefreshContext,
+    ) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
+        Box::pin(async {
+            self.barrier.wait().await;
+            self.barrier.wait().await;
+            Err(std::io::Error::other("refresh service unavailable"))
+        })
+    }
+
+    fn classify_error(&self, error: std::io::Error) -> RefreshTokenError {
+        match self.failure {
+            RefreshFailure::Transient => RefreshTokenError::Transient(error),
+            RefreshFailure::Permanent => {
+                RefreshTokenFailedError::new(RefreshTokenFailedReason::Other, error.to_string())
+                    .into()
+            }
+            RefreshFailure::Policy => {
+                RefreshTokenError::Policy(codex_http_client::NetworkPolicyDenied::Revoked)
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_refresh_retries_only_with_newer_same_account_credentials() {
+    for failure in [
+        RefreshFailure::Transient,
+        RefreshFailure::Permanent,
+        RefreshFailure::Policy,
+    ] {
+        for (token, account, changed) in [
+            ("Bearer old", "account", false),
+            ("Bearer new", "account", true),
+            ("Bearer new", "other-account", false),
+        ] {
+            let initial = CodexAuth::Headers(AuthHeaders::new(HeaderMap::from_iter([
+                (
+                    http::header::AUTHORIZATION,
+                    HeaderValue::from_static("Bearer old"),
+                ),
+                (
+                    http::HeaderName::from_static("chatgpt-account-id"),
+                    HeaderValue::from_static("account"),
+                ),
+            ])));
+            let (updates, auth) = tokio::sync::watch::channel(initial.clone());
+            let external = Arc::new(FailingRefreshAuth {
+                auth,
+                barrier: Barrier::new(2),
+                failure,
+            });
+            let manager = AuthManager::from_auth_for_testing(initial.clone());
+            manager.set_external_auth(external.clone()).await.unwrap();
+            let provider = auth_provider_from_auth_manager(manager.clone(), &initial);
+            let rejected = provider.to_auth_headers().expect("initial auth headers");
+            let recovery = provider.refresh_after_unauthorized(rejected);
+            let concurrent_update = async {
+                external.barrier.wait().await;
+                updates.send_replace(CodexAuth::Headers(AuthHeaders::new(HeaderMap::from_iter(
+                    [
+                        (http::header::AUTHORIZATION, HeaderValue::from_static(token)),
+                        (
+                            http::HeaderName::from_static("chatgpt-account-id"),
+                            HeaderValue::from_static(account),
+                        ),
+                    ],
+                ))));
+                manager.reload().await;
+                external.barrier.wait().await;
+            };
+            let (retry, ()) = tokio::join!(recovery, concurrent_update);
+            assert_eq!(retry, changed && !matches!(failure, RefreshFailure::Policy));
+            if matches!(failure, RefreshFailure::Permanent) && token == "Bearer old" {
+                // A late rejection cannot reuse a credential known to have failed.
+                assert!(!provider.refresh_after_unauthorized(HeaderMap::new()).await);
+            }
+        }
+    }
+}

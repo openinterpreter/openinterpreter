@@ -867,6 +867,8 @@ impl ModelProvider for ConfiguredModelProvider {
 mod tests {
     use std::future::Future;
     use std::num::NonZeroU64;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use std::task::Context;
     use std::task::Waker;
 
@@ -1126,6 +1128,80 @@ mod tests {
                 .expect("runtime base URL should resolve"),
             Some("https://example.test/v1".to_string())
         );
+        let (api_provider, _) = provider
+            .request_provider_and_auth(/*scope*/ None)
+            .await
+            .expect("configured provider should resolve");
+        assert_eq!(api_provider.base_url, "https://example.test/v1");
+    }
+
+    struct RotatingApiKeyAuth(AtomicUsize);
+
+    impl codex_login::ExternalAuth for RotatingApiKeyAuth {
+        fn resolve(&self) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
+            Box::pin(async move {
+                let key = if self.0.fetch_add(1, Ordering::SeqCst).is_multiple_of(2) {
+                    "sk-proj-fedramp-synthetic-test-key"
+                } else {
+                    "commercial-key"
+                };
+                Ok(CodexAuth::from_api_key(key))
+            })
+        }
+
+        fn refresh(
+            &self,
+            _context: codex_login::ExternalAuthRefreshContext,
+        ) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
+            self.resolve()
+        }
+    }
+
+    #[tokio::test]
+    async fn request_provider_and_auth_pairs_each_rotating_credential_with_its_route() {
+        let home = tempfile::tempdir().expect("test auth home");
+        let auth = AuthManager::from_auth_for_testing_with_home(
+            CodexAuth::from_api_key("initial-key"),
+            home.path().to_path_buf(),
+        );
+        let provider = create_model_provider(
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            Some(auth.clone()),
+        );
+        let rotating = Arc::new(RotatingApiKeyAuth(AtomicUsize::new(0)));
+        auth.set_external_auth(rotating.clone())
+            .await
+            .expect("external auth should install");
+
+        for _ in 0..4 {
+            let reads_before = rotating.0.load(Ordering::SeqCst);
+            let (api_provider, resolved) = provider
+                .request_provider_and_auth(/*scope*/ None)
+                .await
+                .expect("request should resolve");
+            assert_eq!(rotating.0.load(Ordering::SeqCst), reads_before + 1);
+            let headers = resolved.auth.to_auth_headers().expect("auth headers");
+            let token = headers[http::header::AUTHORIZATION]
+                .to_str()
+                .expect("authorization header");
+            let fedramp = token == "Bearer sk-proj-fedramp-synthetic-test-key";
+            assert!(fedramp || token == "Bearer commercial-key");
+            assert_eq!(
+                api_provider.base_url,
+                if fedramp {
+                    "https://gov.api.openai.com/v1"
+                } else {
+                    "https://api.openai.com/v1"
+                }
+            );
+            assert_eq!(
+                headers
+                    .get("X-OpenAI-Fedramp")
+                    .and_then(|value| value.to_str().ok()),
+                fedramp.then_some("true")
+            );
+        }
+        assert_eq!(provider.info().base_url, None);
     }
 
     #[test]
