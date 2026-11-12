@@ -10,6 +10,7 @@ use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::symlink;
 use std::os::unix::process::ExitStatusExt;
 use std::ptr;
