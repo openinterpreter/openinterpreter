@@ -1859,21 +1859,6 @@ impl ChatComposer {
         self.current_text_elements()
     }
 
-    pub(crate) fn draft_snapshot(&self) -> ComposerDraftSnapshot {
-        ComposerDraftSnapshot {
-            text: self.current_text(),
-            cursor: self.current_cursor(),
-            text_elements: self.text_elements(),
-            local_images: self.local_images(),
-            remote_image_urls: self.remote_image_urls(),
-            mention_bindings: self.mention_bindings(),
-            pending_pastes: self.pending_pastes(),
-            startup_local_history: self.history.startup_local_history().to_vec(),
-            last_composer_activity_at: None,
-            sparkle_draft: self.sparkle.draft.get(),
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn local_image_paths(&self) -> Vec<PathBuf> {
         self.attachments.local_image_paths()

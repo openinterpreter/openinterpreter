@@ -11,6 +11,7 @@
 //! composer-visible state. It deliberately does not decide which history entries
 //! match, how duplicate results are skipped, or when persistent history should be fetched; those
 //! traversal invariants stay with `ChatComposerHistory`.
+
 //!
 //! A search session starts idle with an empty footer query, so opening Ctrl+R never previews the
 //! latest history entry by itself. Typing or pasting a query restarts traversal from newest to oldest,
@@ -18,6 +19,9 @@
 //! preview as an editable draft, and `Esc` or Ctrl+C restores the exact draft that existed before
 //! search started. Buffered keys are integrated before that snapshot without reclassifying them as
 //! an explicit paste. Only accepting a nonempty preview dismisses any unused Astra sparkle opportunity.
+
+#[path = "history_search_draft.rs"]
+mod history_search_draft;
 
 use std::ops::Range;
 
@@ -376,40 +380,6 @@ impl ChatComposer {
         self.sparkle.history_preview = previous;
     }
 
-    /// Apply incoming edits to the saved draft without replacing the visible search preview.
-    pub(in crate::bottom_pane) fn edit_stored_draft(&mut self, edit: impl FnOnce(&mut Self)) {
-        let Some(mut search) = self.history_search.take() else {
-            edit(self);
-            return;
-        };
-        search
-            .preview_draft
-            .get_or_insert_with(|| search.original_draft.clone());
-        let preview = self.snapshot_draft();
-        let preview_vim_history = std::mem::take(&mut self.vim_history);
-        let mut preview_vim_state = VimPersistentState::default();
-        self.draft
-            .textarea
-            .swap_vim_persistent_state(&mut preview_vim_state);
-        self.with_sparkle_history_preview(|composer| composer.restore_draft(search.original_draft));
-        self.draft
-            .textarea
-            .swap_vim_persistent_state(&mut search.original_vim_state);
-        self.vim_history = search.original_vim_history;
-        edit(self);
-        search.original_draft = self.snapshot_draft();
-        search.original_vim_history = std::mem::take(&mut self.vim_history);
-        self.draft
-            .textarea
-            .swap_vim_persistent_state(&mut search.original_vim_state);
-        self.history_search = Some(search);
-        self.with_sparkle_history_preview(|composer| composer.restore_draft(preview));
-        self.draft
-            .textarea
-            .swap_vim_persistent_state(&mut preview_vim_state);
-        self.vim_history = preview_vim_history;
-    }
-
     /// Builds the footer line shown while reverse history search is active.
     ///
     /// The footer displays the query as the editable field and uses the status to decide whether
@@ -759,6 +729,7 @@ mod tests {
             draft.set_text_content("background update".to_string(), Vec::new(), Vec::new());
         });
         assert_eq!(composer.current_text(), preview);
+        assert_eq!(composer.draft_snapshot().text, "background update");
 
         let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!composer.history_search_active());
