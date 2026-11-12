@@ -192,7 +192,11 @@ fn helper() -> Result<()> {
                 stage = Stage::Devices;
                 Message::TransportReady {}
             }
-            Message::OpenDevices {} if stage == Stage::Devices => {
+            Message::OpenDevices { selection } if stage == Stage::Devices => {
+                fs::write(
+                    root.join("input-selection"),
+                    serde_json::to_vec(&selection)?,
+                )?;
                 if root.join("fail-devices").exists() {
                     anyhow::bail!("synthetic private device diagnostic");
                 }

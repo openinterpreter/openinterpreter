@@ -84,8 +84,11 @@ fn startup_controls_meters_and_helper_loss() -> Result<()> {
         error.is_some()
     })?;
     assert_eq!(
-        error.as_deref(),
-        Some("voice audio session stopped unexpectedly")
+        error,
+        Some((
+            codex_realtime_webrtc::ConnectionError::AudioSession,
+            "voice audio session stopped unexpectedly".into()
+        ))
     );
     assert_eq!(handle.take_error(), None);
     Ok(())
@@ -140,14 +143,16 @@ fn device_failure_reaches_startup_completion_without_duplicate_error() -> Result
     fs::write(root.join("fail-devices"), [])?;
     fs::write(root.join("release"), [])?;
     let (_abort, registration) = AbortHandle::new_pair();
-    let started = RealtimeWebrtcSession::start(registration)?;
+    let started = RealtimeWebrtcSession::start(registration, AudioDeviceSelection::default())?;
     assert_eq!(
         started.handle.apply_answer_sdp("synthetic-answer".into()),
         Err(codex_realtime_webrtc::ConnectionError::AudioDevices)
     );
+    started.handle.set_microphone_muted(/*muted*/ true)?;
+    assert_eq!(started.handle.take_error(), None);
+    started.handle.close();
     #[cfg(unix)]
     common::wait_for_helper_reaped(&root)?;
-    assert_eq!(started.handle.take_error(), None);
     Ok(())
 }
 
@@ -160,7 +165,8 @@ fn runtime_failure_reaches_offer_caller_without_native_error_text() -> Result<()
     };
     fs::write(root.join("fail-initialization"), [])?;
     let (_abort, registration) = AbortHandle::new_pair();
-    let error = RealtimeWebrtcSession::start(registration).unwrap_err();
+    let error =
+        RealtimeWebrtcSession::start(registration, AudioDeviceSelection::default()).unwrap_err();
     assert_eq!(
         error.downcast_ref::<codex_realtime_webrtc::ConnectionError>(),
         Some(&codex_realtime_webrtc::ConnectionError::RuntimeInitialization)
@@ -171,5 +177,28 @@ fn runtime_failure_reaches_offer_caller_without_native_error_text() -> Result<()
     );
     #[cfg(unix)]
     common::wait_for_helper_reaped(&root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn device_discovery_does_not_start_capture() -> Result<()> {
+    let Some(root) = common::package("device_discovery_does_not_start_capture")? else {
+        return Ok(());
+    };
+    let package = codex_install_context::InstallContext::current()
+        .package_layout
+        .as_ref()
+        .unwrap();
+    let mut host = codex_realtime_webrtc::VoiceHost::connect(package, common::BUILD_COMMIT).await?;
+    assert_eq!(
+        host.list_devices(AudioDeviceKind::Input).await?,
+        vec![codex_realtime_webrtc::AudioDevice {
+            name: "Interface".into(),
+            channels: 16,
+            is_default: true,
+        }]
+    );
+    host.close().await?;
+    assert!(!root.join("initializing").exists());
     Ok(())
 }
