@@ -263,7 +263,7 @@ async fn raw_auth_client_does_not_log_sensitive_request_or_response_data() {
     let endpoint = format!(
         "http://auth-user:password-secret-value@{authority}/token?client_secret=query-secret-value"
     );
-    let client = build_raw_auth_reqwest_client(
+    let client = create_raw_auth_client(
         &endpoint,
         &crate::test_support::transport_default_auth_route_config(),
     )
@@ -296,7 +296,7 @@ async fn raw_auth_client_does_not_log_sensitive_request_or_response_data() {
     let unresponsive_endpoint = format!(
         "http://auth-user:failure-password-secret-value@{unresponsive_addr}/token?client_secret=failure-query-secret-value"
     );
-    let unresponsive_client = build_raw_auth_reqwest_client(
+    let unresponsive_client = create_raw_auth_client(
         &unresponsive_endpoint,
         &crate::test_support::transport_default_auth_route_config(),
     )

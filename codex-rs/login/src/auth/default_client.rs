@@ -11,8 +11,8 @@ use codex_http_client::HttpClientBuilder;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
 pub use codex_http_client::RequestBuilder as CodexRequestBuilder;
-use codex_http_client::build_reqwest_client_with_custom_ca;
-use codex_http_client::with_chatgpt_cloudflare_cookie_store;
+use codex_http_client::ReqwestTransport;
+use codex_http_client::RouteAwareClientPool;
 use codex_terminal_detection::user_agent;
 use http::HeaderMap;
 use http::HeaderValue;
@@ -252,17 +252,6 @@ pub fn create_client_without_request_logging() -> HttpClient {
     build_default_client(default_http_client_builder().without_request_logging())
 }
 
-/// Builds the legacy reqwest client used by compatibility transports.
-pub fn build_reqwest_client() -> reqwest::Client {
-    let builder = with_chatgpt_cloudflare_cookie_store(
-        reqwest::Client::builder().default_headers(default_headers()),
-    );
-    build_reqwest_client_with_custom_ca(builder).unwrap_or_else(|err| {
-        tracing::warn!(%err, "failed to build default reqwest client");
-        reqwest::Client::new()
-    })
-}
-
 /// Builds the default Codex HTTP client for a concrete outbound route.
 ///
 /// When route-aware proxy handling is disabled, or the client is running inside the Codex
@@ -274,10 +263,53 @@ pub fn create_client_for_route(
     route_class: ClientRouteClass,
     redirect_policy: ClientRedirectPolicy,
 ) -> Result<HttpClient, BuildRouteAwareHttpClientError> {
+    let legacy_fallback = redirect_policy == ClientRedirectPolicy::Default
+        || !http_client_factory.protects_sensitive_headers();
     let builder = match redirect_policy {
         ClientRedirectPolicy::Default => default_http_client_builder(),
         ClientRedirectPolicy::Reject => default_http_client_builder().without_redirects(),
     };
+    create_client_for_route_with_builder(
+        http_client_factory,
+        request_url,
+        route_class,
+        builder,
+        legacy_fallback,
+    )
+}
+
+fn create_client_for_route_with_builder(
+    http_client_factory: &HttpClientFactory,
+    request_url: &str,
+    route_class: ClientRouteClass,
+    builder: HttpClientBuilder,
+    legacy_fallback: bool,
+) -> Result<HttpClient, BuildRouteAwareHttpClientError> {
+    if http_client_factory.network_policy().is_managed()
+        || http_client_factory.protects_sensitive_headers()
+        || !legacy_fallback
+    {
+        let mut pool = codex_http_client::RouteAwareClientPool::with_builder(
+            http_client_factory.clone(),
+            route_class,
+            builder,
+        );
+        if is_sandboxed() {
+            pool = if legacy_fallback {
+                pool.with_legacy_direct_proxy_and_custom_ca_fallback()
+            } else {
+                pool.with_direct_proxy()
+            };
+        } else if legacy_fallback
+            && matches!(
+                http_client_factory.outbound_proxy_policy(),
+                OutboundProxyPolicy::ReqwestDefault
+            )
+        {
+            pool = pool.with_legacy_custom_ca_fallback();
+        }
+        return Ok(pool.into_client());
+    }
     if matches!(
         http_client_factory.outbound_proxy_policy(),
         OutboundProxyPolicy::ReqwestDefault
@@ -308,17 +340,56 @@ pub async fn create_client_for_route_async(
     route_class: ClientRouteClass,
     redirect_policy: ClientRedirectPolicy,
 ) -> std::io::Result<HttpClient> {
+    let legacy_fallback = redirect_policy == ClientRedirectPolicy::Default
+        || !http_client_factory.protects_sensitive_headers();
+    create_client_for_route_async_with_builder(
+        http_client_factory,
+        request_url,
+        route_class,
+        move || match redirect_policy {
+            ClientRedirectPolicy::Default => default_http_client_builder(),
+            ClientRedirectPolicy::Reject => default_http_client_builder().without_redirects(),
+        },
+        legacy_fallback,
+    )
+    .await
+}
+
+/// Builds a routed default client without request URL or response-header diagnostics.
+pub async fn create_client_for_route_without_request_logging_async(
+    http_client_factory: HttpClientFactory,
+    request_url: String,
+    route_class: ClientRouteClass,
+) -> std::io::Result<HttpClient> {
+    create_client_for_route_async_with_builder(
+        http_client_factory,
+        request_url,
+        route_class,
+        || default_http_client_builder().without_request_logging(),
+        /*legacy_fallback*/ true,
+    )
+    .await
+}
+
+async fn create_client_for_route_async_with_builder(
+    http_client_factory: HttpClientFactory,
+    request_url: String,
+    route_class: ClientRouteClass,
+    builder: impl FnOnce() -> HttpClientBuilder + Send + 'static,
+    legacy_fallback: bool,
+) -> std::io::Result<HttpClient> {
     let permit = ROUTE_AWARE_CLIENT_BUILD_PERMIT
         .acquire()
         .await
         .map_err(std::io::Error::other)?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        create_client_for_route(
+        create_client_for_route_with_builder(
             &http_client_factory,
             &request_url,
             route_class,
-            redirect_policy,
+            builder(),
+            legacy_fallback,
         )
         .map_err(std::io::Error::from)
     })
@@ -396,14 +467,14 @@ fn build_default_client(builder: HttpClientBuilder) -> HttpClient {
     }
 }
 
-/// Builds a raw reqwest client for an auth endpoint without Codex default headers.
-pub(crate) fn build_raw_auth_reqwest_client(
+/// Builds an HTTP client for an auth endpoint without Codex default headers.
+pub(crate) fn create_raw_auth_client(
     endpoint: &str,
     auth_route_config: &AuthRouteConfig,
-) -> Result<reqwest::Client, BuildRouteAwareHttpClientError> {
+) -> Result<HttpClient, BuildRouteAwareHttpClientError> {
     auth_route_config
-        .http_client_factory()
-        .build_reqwest_client(reqwest::Client::builder(), endpoint, ClientRouteClass::Auth)
+        .authentication_factory(endpoint)
+        .build_client_without_request_logging(endpoint, ClientRouteClass::Auth)
 }
 
 /// Builds the default Codex HTTP client wrapper for an auth endpoint.
