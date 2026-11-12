@@ -62,6 +62,7 @@ use codex_http_client::HttpClient;
 use codex_http_client::HttpClientBuilder;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
+use codex_otel::auth_storage::AuthStorageOriginator;
 use codex_protocol::auth::AuthMode;
 use codex_utils_template::Template;
 use serde_json::Value as JsonValue;
@@ -201,6 +202,7 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
         &pkce,
         &state,
         opts.forced_chatgpt_workspace_id.as_deref(),
+        opts.workspace_login.as_ref(),
     )?;
 
     if opts.open_browser {
@@ -446,17 +448,7 @@ async fn process_request(
                         obtain_api_key(&client, &opts.issuer, &opts.client_id, &tokens.id_token)
                             .await
                             .ok();
-                    if let Err(err) = persist_tokens_async(
-                        &opts.codex_home,
-                        api_key.clone(),
-                        tokens.id_token.clone(),
-                        tokens.access_token.clone(),
-                        tokens.refresh_token.clone(),
-                        opts.cli_auth_credentials_store_mode,
-                        opts.auth_keyring_backend_kind,
-                    )
-                    .await
-                    {
+                    if let Err(err) = persist_tokens_async(opts, api_key.clone(), &tokens).await {
                         eprintln!("Persist error: {err}");
                         return login_error_response(
                             "Sign-in completed but credentials could not be saved locally.",
@@ -592,6 +584,7 @@ fn build_authorize_url(
     pkce: &PkceCodes,
     state: &str,
     forced_chatgpt_workspace_ids: Option<&[String]>,
+    workspace_login: Option<&WorkspaceLogin>,
 ) -> io::Result<String> {
     let originator = originator().value;
     let workspace_ids = forced_chatgpt_workspace_ids.map(|ids| ids.join(","));
@@ -602,6 +595,15 @@ fn build_authorize_url(
     ];
     if let Some(workspace_ids) = workspace_ids.as_deref() {
         extra_parameters.push(("allowed_workspace_id", workspace_ids));
+    }
+    if let Some(login) = workspace_login {
+        extra_parameters.push(("current_workspace_id", &login.workspace_id));
+        if let Some(email) = &login.email {
+            extra_parameters.push(("login_hint", email));
+        }
+        if let Some(connection) = &login.connection {
+            extra_parameters.push(("connection", connection));
+        }
     }
     build_authorization_url(AuthorizationRequest {
         endpoint: &format!("{issuer}/oauth/authorize"),
@@ -718,7 +720,7 @@ pub(crate) async fn exchange_code_for_tokens(
     auth_route_config: &AuthRouteConfig,
 ) -> io::Result<(ExchangedTokens, HttpClient)> {
     let token_endpoint = format!("{}/oauth/token", issuer.trim_end_matches('/'));
-    let factory = auth_route_config.http_client_factory();
+    let factory = auth_route_config.authentication_factory(&token_endpoint);
     let allows_fallback = factory.allows_system_proxy_fallback();
     let redirect_observed = Arc::new(AtomicBool::new(false));
     let mut builder = HttpClientBuilder::new().without_request_logging();
@@ -736,7 +738,7 @@ pub(crate) async fn exchange_code_for_tokens(
         "starting oauth token exchange"
     );
     let (mut client, mut result) = send_code_exchange_request(
-        factory,
+        &factory,
         builder.clone(),
         &token_endpoint,
         client_id,
@@ -776,7 +778,6 @@ pub(crate) async fn exchange_code_for_tokens(
             }
             warn!(
                 status = %rejection.status,
-                detail = ?rejection.detail,
                 "oauth token exchange returned non-success status"
             );
             Err(io::Error::other(rejection.to_string()))
