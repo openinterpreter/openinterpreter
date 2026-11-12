@@ -2,6 +2,7 @@
 //! Lifecycle and admission decisions stay with callers. Persist ownership before deployment;
 //! retain profiles until Windows completes, or pending resources until service exit on shutdown.
 
+use std::os::windows::fs::MetadataExt;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::io::OwnedHandle;
 use std::sync::atomic::AtomicBool;
@@ -39,6 +40,7 @@ use crate::package_lifecycle::with_owner_impersonation;
 
 mod known_folder;
 mod metadata;
+mod registration_result;
 mod removal;
 
 pub(crate) use metadata::remove as remove_metadata;
@@ -136,13 +138,13 @@ pub(crate) fn provision(
             cleanup_logon_pending: false,
             account,
             user_sid: profile.user_sid.clone(),
-            alias_path: Some(alias_path),
+            alias_path: Some(alias_path.clone()),
         });
-        profiles.push((profile, installed.contains(full_name)));
+        profiles.push((profile, installed.contains(full_name), alias_path));
     }
     let receipt_current = record.runtime()?.ready_for_package(&full_name.to_string())
         && record.runtime()?.accounts == accounts
-        && profiles.iter().all(|(_, installed)| *installed);
+        && profiles.iter().all(|(_, installed, _)| *installed);
     // Both exact SIDs are durable before either package registration or metadata grant.
     // An idempotent setup check must not temporarily revoke a valid launch receipt.
     record.runtime_mut()?.accounts = accounts;
@@ -150,7 +152,7 @@ pub(crate) fn provision(
         record.runtime_mut()?.ready_package = None;
         crate::installation_record::save_runtime(record)?;
     }
-    for (mut profile, installed) in profiles {
+    for (mut profile, installed, alias_path) in profiles {
         if !installed {
             let operation = with_owner_impersonation(profile.token.as_raw_handle() as _, || {
                 Ok(PackageManager::new()?.RegisterPackageByFullNameAsync(
@@ -162,7 +164,7 @@ pub(crate) fn provision(
             // As with provisioning, retain the request's resources until Windows finishes.
             // A client timeout or an unreadable status cannot safely release the profile.
             let mut status_error_logged = false;
-            loop {
+            let status = loop {
                 if shutdown.load(Ordering::Acquire) {
                     // The typed error bypasses all response conversion and cleanup. Keep the
                     // in-flight operation and its profile alive until this own-process service exits.
@@ -171,8 +173,12 @@ pub(crate) fn provision(
                 }
                 match operation.Status() {
                     Ok(AsyncStatus::Started) => {}
-                    Ok(AsyncStatus::Completed | AsyncStatus::Canceled | AsyncStatus::Error) => {
-                        break;
+                    Ok(
+                        status @ (AsyncStatus::Completed
+                        | AsyncStatus::Canceled
+                        | AsyncStatus::Error),
+                    ) => {
+                        break status;
                     }
                     status => {
                         if !status_error_logged {
@@ -187,8 +193,27 @@ pub(crate) fn provision(
                     }
                 }
                 std::thread::sleep(Duration::from_millis(50));
-            }
-            operation.GetResults()?.ExtendedErrorCode()?.ok()?;
+            };
+            registration_result::RegistrationResult::read(&operation, status).check(|| {
+                let alias_present = with_owner_impersonation(profile.token.as_raw_handle() as _, || {
+                    Ok(std::fs::symlink_metadata(&alias_path)?.file_attributes()
+                        & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+                        != 0)
+                });
+                if !matches!(alias_present, Ok(true)) {
+                    return false;
+                }
+                PackageManager::new()
+                    .and_then(|manager| manager.FindUsers(full_name))
+                    .is_ok_and(|users| {
+                        users.into_iter().any(|user| {
+                            user.UserSecurityId().is_ok_and(|sid| sid == profile.user_sid.as_str())
+                                && user.InstallState().is_ok_and(|state| {
+                                    state == windows::Management::Deployment::PackageInstallState::Installed
+                                })
+                        })
+                    })
+            })?;
             ensure!(
                 registered_packages(&profile.user_sid, &family)?.contains(full_name),
                 "runtime registration completed without the expected package"
@@ -236,7 +261,7 @@ fn validate_account_sid(account: &RuntimeAccountRegistration) -> Result<()> {
     Ok(())
 }
 
-fn validate_record(record: &InstallationRecord) -> Result<()> {
+pub(crate) fn validate_record(record: &InstallationRecord) -> Result<()> {
     let runtime = record.runtime()?;
     ensure!(
         runtime.accounts.len() <= 2,
@@ -251,7 +276,7 @@ fn validate_record(record: &InstallationRecord) -> Result<()> {
     Ok(())
 }
 
-fn registered_packages(user_sid: &str, family: &str) -> Result<Vec<HSTRING>> {
+pub(crate) fn registered_packages(user_sid: &str, family: &str) -> Result<Vec<HSTRING>> {
     let packages = PackageManager::new()?.FindPackagesByUserSecurityIdPackageFamilyName(
         &HSTRING::from(user_sid),
         &HSTRING::from(family),
@@ -299,7 +324,7 @@ fn load_profile(
     })
 }
 
-fn validate_target(
+pub(crate) fn validate_target(
     token: HANDLE,
     account: SandboxRuntimeAccount,
     expected_sid: Option<&str>,

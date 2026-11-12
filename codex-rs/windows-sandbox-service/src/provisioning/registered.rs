@@ -1,11 +1,16 @@
 //! The registered-Core setup transaction: admit, provision, register, then publish readiness.
 
+use std::os::windows::io::AsRawHandle;
 use std::sync::atomic::AtomicBool;
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::ensure;
+use codex_windows_sandbox::SandboxAccountCredentialMismatch;
 use codex_windows_sandbox::SandboxProvisioningResponse;
+use codex_windows_sandbox::SandboxRuntimeAccount;
+use codex_windows_sandbox::logon_existing_sandbox_account;
+use codex_windows_sandbox::sandbox_secrets_dir;
 
 use crate::ipc::ProvisioningRequest;
 use codex_windows_sandbox::string_from_sid_bytes;
@@ -86,6 +91,23 @@ pub(super) fn run(
             setup_complete &= codex_windows_sandbox::local_user_flags(account)?
                 .is_some_and(|flags| flags & (UF_ACCOUNTDISABLE | UF_PASSWORD_EXPIRED) == 0);
         }
+        if setup_complete && !request.refresh_only {
+            setup_complete = !credentials_need_repair(
+                &installation,
+                |account| {
+                    crate::package_lifecycle::with_owner_impersonation(identity.token.0, || {
+                        let mut pins = Vec::new();
+                        crate::ipc::pin_existing_ancestors(
+                            &sandbox_secrets_dir(&identity.codex_home),
+                            &mut pins,
+                        )?;
+                        logon_existing_sandbox_account(&identity.codex_home, account)
+                    })
+                    .with_context(|| format!("check registered sandbox account {account:?}"))
+                },
+                crate::registered_runtime::registered_packages,
+            )?;
+        }
         if !setup_complete {
             // Account state can change outside our setup lock; refresh must never repair it.
             ensure!(
@@ -127,3 +149,62 @@ pub(super) fn run(
     );
     Ok(SandboxProvisioningResponse::Ok)
 }
+
+fn credentials_need_repair(
+    installation: &InstallationRecord,
+    mut logon: impl FnMut(SandboxRuntimeAccount) -> Result<std::os::windows::io::OwnedHandle>,
+    mut registered_packages: impl FnMut(&str, &str) -> Result<Vec<windows::core::HSTRING>>,
+) -> Result<bool> {
+    crate::registered_runtime::validate_record(installation)?;
+    let runtime = installation.runtime()?;
+    let mut needs_repair = false;
+    for account in [
+        SandboxRuntimeAccount::Offline,
+        SandboxRuntimeAccount::Online,
+    ] {
+        match logon(account) {
+            Ok(token) => {
+                let expected = runtime
+                    .accounts
+                    .iter()
+                    .find(|entry| entry.account == account);
+                crate::registered_runtime::validate_target(
+                    token.as_raw_handle() as _,
+                    account,
+                    expected.map(|entry| entry.user_sid.as_str()),
+                )?;
+            }
+            Err(error) if error.is::<SandboxAccountCredentialMismatch>() => needs_repair = true,
+            Err(error) => return Err(error),
+        }
+    }
+    if needs_repair {
+        for account in [
+            SandboxRuntimeAccount::Offline,
+            SandboxRuntimeAccount::Online,
+        ] {
+            let sid = codex_windows_sandbox::resolve_sid(account.username())?;
+            let sid = string_from_sid_bytes(&sid).map_err(anyhow::Error::msg)?;
+            if let Some(entry) = runtime
+                .accounts
+                .iter()
+                .find(|entry| entry.account == account)
+            {
+                ensure!(
+                    sid == entry.user_sid,
+                    "managed runtime account was replaced"
+                );
+            } else {
+                ensure!(
+                    registered_packages(&sid, &runtime.package_family)?.is_empty(),
+                    "sandbox account has a runtime registration not owned by this service"
+                );
+            }
+        }
+    }
+    Ok(needs_repair)
+}
+
+#[cfg(test)]
+#[path = "registered_tests.rs"]
+mod tests;
