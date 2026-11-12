@@ -3959,3 +3959,7 @@ impl WebsocketTelemetry for ApiTelemetry {
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "client_chat_transport_tests.rs"]
+mod chat_transport_tests;

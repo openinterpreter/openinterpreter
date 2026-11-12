@@ -144,6 +144,7 @@ fn test_model_client_with_thread_id(
         codex_model_provider::WorkspaceRoutingContext::new(
             "https://chatgpt.com/backend-api".into(),
         ),
+        /*request_contributors*/ Vec::new(),
     )
 }
 
@@ -2152,6 +2153,7 @@ fn model_client_with_counting_attestation(
         codex_model_provider::WorkspaceRoutingContext::new(
             "https://chatgpt.com/backend-api".into(),
         ),
+        /*request_contributors*/ Vec::new(),
     );
     (model_client, attestation_calls)
 }
