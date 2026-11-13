@@ -5863,7 +5863,7 @@ async fn thread_resume_rejoins_running_paginated_thread_with_initial_page() -> R
             let started: ItemStartedNotification =
                 primary.read_notification("item/started").await?;
             if started.turn_id == running_turn.id
-                && matches!(started.item, ThreadItem::UserMessage { .. })
+                && matches!(started.item.payload, ThreadItemPayload::UserMessage { .. })
             {
                 return Ok::<(), anyhow::Error>(());
             }

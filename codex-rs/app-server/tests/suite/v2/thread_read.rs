@@ -291,7 +291,8 @@ async fn thread_read_preserves_file_id_from_completed_turn() -> Result<()> {
     let ThreadReadResponse {
         thread: loaded_thread,
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(read_id)).await??;
-    let ThreadItem::UserMessage { content, .. } = &loaded_thread.turns[0].items[0] else {
+    let ThreadItemPayload::UserMessage { content, .. } = &loaded_thread.turns[0].items[0].payload
+    else {
         panic!("expected completed turn to start with a user message");
     };
     assert_eq!(content, &vec![image.clone()]);
@@ -312,7 +313,9 @@ async fn thread_read_preserves_file_id_from_completed_turn() -> Result<()> {
     let ThreadReadResponse {
         thread: restarted_thread,
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(read_id)).await??;
-    let ThreadItem::UserMessage { content, .. } = &restarted_thread.turns[0].items[0] else {
+    let ThreadItemPayload::UserMessage { content, .. } =
+        &restarted_thread.turns[0].items[0].payload
+    else {
         panic!("expected persisted turn to start with a user message");
     };
     assert_eq!(content, &vec![image]);

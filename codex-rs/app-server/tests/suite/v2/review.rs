@@ -378,14 +378,14 @@ async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<(
     assert_eq!(turn.items_view, TurnItemsView::NotLoaded);
     assert_eq!(
         turn.items,
-        vec![ThreadItem::UserMessage {
+        vec![ThreadItem::untimed(ThreadItemPayload::UserMessage {
             id: turn.id.clone(),
             client_id: None,
             content: vec![V2UserInput::Text {
                 text: expected_prompt.clone(),
                 text_elements: Vec::new(),
             }],
-        }]
+        })]
     );
     assert_ne!(
         review_thread_id, thread_id,

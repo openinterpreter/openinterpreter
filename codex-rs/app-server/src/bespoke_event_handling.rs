@@ -1456,6 +1456,7 @@ async fn start_command_execution_item(
     outgoing: &ThreadScopedOutgoingMessageSender,
     thread_state: &Arc<Mutex<ThreadState>>,
 ) -> bool {
+    let started_at_ms = now_unix_timestamp_ms();
     let first_start = thread_state
         .lock()
         .await
@@ -1473,9 +1474,9 @@ async fn start_command_execution_item(
                 command,
                 cwd,
                 process_id: None,
-                source: CommandExecutionSource::Agent,
+                source,
                 status: CommandExecutionStatus::InProgress,
-                command_actions: details.command_actions.clone(),
+                command_actions,
                 aggregated_output: None,
                 exit_code: None,
                 duration_ms: None,
@@ -2570,12 +2571,12 @@ mod tests {
         let msg = recv_broadcast_notification(&mut rx).await?;
         match msg {
             ServerNotification::ItemStarted(payload) => {
-                assert_eq!(payload.item.started_at_ms, Some(1_000));
+                assert!(payload.item.started_at_ms.is_some());
                 assert_eq!(payload.thread_id, conversation_id.to_string());
                 assert_eq!(payload.turn_id, "turn-1");
                 assert_eq!(
-                    payload.item,
-                    ThreadItem::CommandExecution {
+                    payload.item.payload,
+                    ThreadItemPayload::CommandExecution {
                         model_context: None,
                         id: "cmd-1".to_string(),
                         plugin_id: completion_item.plugin_id.clone(),
