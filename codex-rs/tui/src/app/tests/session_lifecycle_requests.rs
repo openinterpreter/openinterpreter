@@ -1132,7 +1132,7 @@ async fn complete_managed_worktree_creation(
             .await?
             .ok_or_else(|| color_eyre::eyre::eyre!("worktree creation event channel closed"))?;
         if matches!(event, AppEvent::ManagedWorktreeCreated(_)) {
-            app.handle_event(tui, server, event).await?;
+            crate::boxed_future!(app.handle_event(tui, server, event)).await?;
             if let Some(created) = app.pending_managed_worktree_created.take() {
                 app.finish_managed_worktree(*created).await;
             }
@@ -4650,14 +4650,14 @@ model_reasoning_effort = "low"
     );
     let mut browser_entries = Vec::new();
     requests.lock().expect("request recorder lock").clear();
-    app.handle_event(
+    crate::boxed_future!(app.handle_event(
         &mut tui,
         &mut server,
         AppEvent::StartManagedWorktree {
             mode: ManagedWorktreeMode::Fork,
             name: None,
         },
-    )
+    ))
     .await?;
     complete_managed_worktree_creation(&mut app, &mut tui, &mut server, &mut events).await?;
     assert_eq!(app.chat_widget.thread_id(), Some(original));
@@ -4723,14 +4723,14 @@ terminal_visualization_instructions = true
     )?;
     app.config = app.rebuild_config_for_cwd(source.clone()).await?;
     requests.lock().expect("request recorder lock").clear();
-    app.handle_event(
+    crate::boxed_future!(app.handle_event(
         &mut tui,
         &mut server,
         AppEvent::StartManagedWorktree {
             mode: ManagedWorktreeMode::Fork,
             name: None,
         },
-    )
+    ))
     .await?;
     complete_managed_worktree_creation(&mut app, &mut tui, &mut server, &mut events).await?;
     assert_eq!(app.chat_widget.thread_id(), Some(original));
@@ -4747,14 +4747,14 @@ terminal_visualization_instructions = true
         owner: crate::worktree_browser::Owner::None,
     });
     while events.try_recv().is_ok() {}
-    app.handle_event(
+    crate::boxed_future!(app.handle_event(
         &mut tui,
         &mut server,
         AppEvent::StartManagedWorktree {
             mode: ManagedWorktreeMode::New,
             name: None,
         },
-    )
+    ))
     .await?;
     assert_eq!(app.chat_widget.thread_id(), Some(original));
     drain_managed_worktree_start(&mut app, &mut server).await;
@@ -4782,11 +4782,11 @@ terminal_visualization_instructions = true
         .cwd
         .clone();
     app.primary_thread_id = Some(ThreadId::new());
-    app.handle_event(
+    crate::boxed_future!(app.handle_event(
         &mut tui,
         &mut server,
         AppEvent::ManagedWorktreeCreated(created),
-    )
+    ))
     .await?;
     let created = app
         .pending_managed_worktree_created
@@ -4822,14 +4822,14 @@ terminal_visualization_instructions = true
         requests.lock().expect("request recorder lock").clear();
         let previous = app.chat_widget.thread_id();
         let previous_rollout = app.chat_widget.rollout_path().expect("previous rollout");
-        app.handle_event(
+        crate::boxed_future!(app.handle_event(
             &mut tui,
             &mut server,
             AppEvent::StartManagedWorktree {
                 mode,
                 name: Some(format!("{mode:?} worktree")),
             },
-        )
+        ))
         .await?;
         complete_managed_worktree_creation(&mut app, &mut tui, &mut server, &mut events).await?;
         let replacement = app.chat_widget.thread_id().expect("replacement thread");
@@ -5000,11 +5000,11 @@ terminal_visualization_instructions = true
         .set_turns(vec![completed]);
     for mode in [ManagedWorktreeMode::Fork, ManagedWorktreeMode::New] {
         requests.lock().expect("request recorder lock").clear();
-        app.handle_event(
+        crate::boxed_future!(app.handle_event(
             &mut tui,
             &mut server,
             AppEvent::StartManagedWorktree { mode, name: None },
-        )
+        ))
         .await?;
         drain_managed_worktree_start(&mut app, &mut server).await;
         let is_new = mode == ManagedWorktreeMode::New;

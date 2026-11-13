@@ -749,7 +749,7 @@ async fn inactive_voice_replay_is_bounded_and_discarded_with_its_thread() {
             .contains_key(&ids[16])
     );
     assert!(!app.realtime_replay_order.contains(&ids[16]));
-    app.reset_thread_event_state();
+    app.reset_thread_event_state().await;
     assert!(app.pending_realtime_transcript_replay.is_empty());
     assert!(app.pending_realtime_speech_replay.is_empty());
     assert!(app.realtime_replay_order.is_empty());

@@ -1107,6 +1107,15 @@ impl App {
                 Ok(true)
             }
             AppCommand::RunUserShellCommand { command } => {
+                if app_server.thread_params_mode()
+                    == crate::app_server_session::ThreadParamsMode::Cloud
+                {
+                    self.chat_widget.reject_user_shell_command(
+                        "Shell commands starting with ! are unavailable in Cloud conversations."
+                            .into(),
+                    );
+                    return Ok(true);
+                }
                 app_server
                     .thread_shell_command(thread_id, command.to_string())
                     .await?;
@@ -1737,7 +1746,11 @@ impl App {
             self.chat_widget.set_token_info(/*info*/ None);
         }
         match presentation {
-            ThreadAttachPresentation::Fresh | ThreadAttachPresentation::SessionLineage => {
+            ThreadAttachPresentation::Fresh
+            | ThreadAttachPresentation::FreshAfterClear
+            | ThreadAttachPresentation::FreshWithDraft
+            | ThreadAttachPresentation::SessionLineage
+            | ThreadAttachPresentation::SessionLineageAfterClear => {
                 self.chat_widget.handle_thread_session(session);
             }
         }
