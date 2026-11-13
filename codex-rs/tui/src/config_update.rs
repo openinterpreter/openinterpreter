@@ -446,6 +446,29 @@ pub(crate) async fn write_skill_enabled(
 #[path = "config_update_tests.rs"]
 mod tests;
 
+/// Settings and layer kinds used by the TUI; ignore server-native paths and origins.
+#[derive(serde::Deserialize)]
+pub(crate) struct EffectiveConfig {
+    pub config: codex_app_server_protocol::Config,
+    pub layers: Option<Vec<JsonValue>>,
+}
+
+pub(crate) async fn read_effective_config_with_layers(
+    request_handle: &AppServerRequestHandle,
+    cwd: String,
+) -> Result<EffectiveConfig> {
+    request_handle
+        .request_typed(ClientRequest::ConfigRead {
+            request_id: RequestId::String(format!("tui-config-read-{}", Uuid::new_v4())),
+            params: ConfigReadParams {
+                include_layers: true,
+                cwd: Some(cwd),
+            },
+        })
+        .await
+        .wrap_err("config/read failed in TUI")
+}
+
 /// Read effective server settings, retaining compatibility with servers without config/read.
 pub(crate) async fn read_effective_config_if_supported(
     request_handle: AppServerRequestHandle,
