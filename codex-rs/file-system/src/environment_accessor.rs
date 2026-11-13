@@ -20,6 +20,7 @@ use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::Arc;
 use std::sync::Weak;
+use tokio::sync::oneshot;
 
 /// Filesystem operations authorized by the environment that supplied this borrowed accessor.
 ///
@@ -28,6 +29,16 @@ use std::sync::Weak;
 pub trait EnvironmentAccess: Send + Sync {
     /// Identifies the filesystem and captured permissions without granting access to either.
     fn cache_key(&self) -> EnvironmentAccessKey;
+
+    /// Watches a previously observed set of missing paths. Accessors that cannot
+    /// prove the observation is unrestricted should leave this unsupported.
+    fn watch_missing(
+        &self,
+        _missing: Vec<PathUri>,
+        _present: Option<PathUri>,
+    ) -> ExecutorFileSystemFuture<'_, Option<oneshot::Receiver<()>>> {
+        Box::pin(async { Ok(None) })
+    }
 
     fn canonicalize<'a>(&'a self, path: &'a PathUri) -> ExecutorFileSystemFuture<'a, PathUri>;
 
@@ -134,6 +145,14 @@ impl PartialEq for EnvironmentAccessKey {
 
 impl Eq for EnvironmentAccessKey {}
 
+impl EnvironmentAccessKey {
+    /// Compares filesystem identity only; the caller must still authorize every
+    /// read with its current accessor, not with this cache key.
+    pub fn same_file_system(&self, other: &Self) -> bool {
+        self.file_system.ptr_eq(&other.file_system)
+    }
+}
+
 impl Hash for EnvironmentAccessKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.file_system.as_ptr().cast::<()>().hash(state);
@@ -186,6 +205,22 @@ impl<'environment> FileSystemEnvironmentAccessor<'environment> {
 impl EnvironmentAccess for FileSystemEnvironmentAccessor<'_> {
     fn cache_key(&self) -> EnvironmentAccessKey {
         self.key.clone()
+    }
+
+    fn watch_missing(
+        &self,
+        missing: Vec<PathUri>,
+        present: Option<PathUri>,
+    ) -> ExecutorFileSystemFuture<'_, Option<oneshot::Receiver<()>>> {
+        if self
+            .key
+            .sandbox
+            .as_ref()
+            .is_some_and(|context| context.should_read_from_sandbox())
+        {
+            return Box::pin(async { Ok(None) });
+        }
+        self.file_system.watch_missing(missing, present)
     }
 
     fn canonicalize<'a>(&'a self, path: &'a PathUri) -> ExecutorFileSystemFuture<'a, PathUri> {

@@ -47,6 +47,33 @@ use crate::HostSkillsService;
 use crate::loader::MAX_CONCURRENT_ROOT_SCANS;
 use crate::loader::load_and_merge_host_skill_roots;
 
+#[test]
+fn access_keys_match_filesystem_identity_without_granting_permissions() {
+    let root = PathUri::from_abs_path(&absolute(std::env::temp_dir()));
+    let unrestricted = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
+    let read_only = FileSystemEnvironmentAccessor::new(
+        &LOCAL_FS,
+        FileSystemSandboxContext::from_permission_profile(PermissionProfile::read_only(), root),
+    );
+    let different_file_system: Arc<dyn ExecutorFileSystem> = Arc::new(BlockingMetadataFileSystem {
+        inner: Arc::clone(&LOCAL_FS),
+        calls: Arc::new(BlockingMetadataCalls::default()),
+    });
+    let different = FileSystemEnvironmentAccessor::unrestricted(&different_file_system);
+
+    assert_ne!(unrestricted.cache_key(), read_only.cache_key());
+    assert!(
+        unrestricted
+            .cache_key()
+            .same_file_system(&read_only.cache_key())
+    );
+    assert!(
+        !unrestricted
+            .cache_key()
+            .same_file_system(&different.cache_key())
+    );
+}
+
 struct BlockingMetadataFileSystem {
     inner: Arc<dyn ExecutorFileSystem>,
     calls: Arc<BlockingMetadataCalls>,

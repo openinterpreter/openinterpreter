@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use codex_exec_server::EnvironmentAccess;
+use codex_exec_server::EnvironmentAccessExt;
 use codex_exec_server::EnvironmentAccessKey;
-use codex_exec_server::FileSystemEnvironmentAccessor;
 use codex_exec_server::GetMetadataOptions;
 use codex_exec_server::ReadFileOptions;
 use codex_protocol::protocol::SkillScope;
@@ -151,10 +151,7 @@ async fn load_skills_under_root(
     Arc<HashMap<PathUri, PathUri>>,
     Vec<SkillError>,
 ) {
-    let file_system = skill_root.file_system.as_ref();
-    // TODO(anp): Bind discovery to turn permissions when host skill roots accept an accessor;
-    // until then, keep using the same unrestricted filesystem that supplied the root.
-    let discovery_access = FileSystemEnvironmentAccessor::unrestricted(&skill_root.file_system);
+    let file_system = skill_root.file_system;
     let plugin_identity = skill_root.plugin_identity();
     let plugin_root = match skill_root.plugin_root() {
         Some(plugin_root) => Some(canonicalize_for_skill_identity(file_system, plugin_root).await),
@@ -172,7 +169,7 @@ async fn load_skills_under_root(
         warnings,
         error,
     } = discover_skills(
-        &discovery_access,
+        file_system,
         &PathUri::from_abs_path(root),
         SkillDiscoveryOptions {
             directory_symlinks,
