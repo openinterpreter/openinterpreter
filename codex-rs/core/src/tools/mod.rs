@@ -24,6 +24,7 @@ pub(crate) mod spec_plan;
 pub(crate) mod tool_dispatch_trace;
 mod tool_namespaces_info;
 mod user_messaging;
+pub(crate) use user_messaging::record_confirmed_code_mode_send;
 
 use std::borrow::Cow;
 

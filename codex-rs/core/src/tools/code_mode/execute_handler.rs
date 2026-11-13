@@ -16,6 +16,7 @@ use super::PUBLIC_TOOL_NAME;
 use super::handle_runtime_response;
 use super::is_exec_tool_name;
 use super::output::CodeModeToolOutput;
+use super::prepare_code_mode_tool_definitions;
 use super::telemetry::CodeModeToolCallGuard;
 use super::telemetry::trace_id;
 
@@ -50,6 +51,11 @@ impl CodeModeExecuteHandler {
             turn: Arc::clone(&step_context.turn),
         };
         let mut enabled_tools = Vec::with_capacity(self.nested_tool_specs.len());
+        let code_mode_input_schema_max_bytes = step_context
+            .turn
+            .config
+            .code_mode
+            .tool_input_schema_max_bytes;
         for (spec, cached_runtime) in &self.nested_tool_specs {
             let definitions = prepare_code_mode_tool_definitions(
                 cached_runtime.as_deref(),

@@ -281,7 +281,7 @@ impl RequestPluginInstallHandler {
                 .await;
         }
 
-        if elicitation.sent {
+        if response.is_some() {
             let tool_type = match tool_type {
                 DiscoverableToolType::Connector => "connector",
                 DiscoverableToolType::Plugin => "plugin",

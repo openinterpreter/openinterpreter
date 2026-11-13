@@ -2,6 +2,7 @@ use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::context::SharedTurnDiffTracker;
+use crate::tools::format_exec_output_str;
 use crate::tools::sandboxing::ToolError;
 use codex_analytics::ArtifactOperation;
 use codex_analytics::ArtifactOperationLifecycle;
