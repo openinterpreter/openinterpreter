@@ -374,7 +374,7 @@ impl UnifiedExecProcess {
         .unwrap_or(false)
     }
 
-    pub(crate) fn sandbox_type(&self) -> SandboxType {
+    pub(crate) fn sandbox_type(&self) -> Option<SandboxType> {
         self.sandbox_type
     }
 
