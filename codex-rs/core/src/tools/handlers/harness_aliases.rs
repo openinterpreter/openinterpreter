@@ -2739,7 +2739,7 @@ fn response_content_text(content: &[ContentItem]) -> Option<String> {
     let text = content
         .iter()
         .filter_map(|item| match item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
                 Some(text.as_str())
             }
             _ => None,

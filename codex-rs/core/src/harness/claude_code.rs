@@ -372,7 +372,7 @@ fn first_non_contextual_user_text(prompt: &Prompt) -> Option<&str> {
             if role == "user" && !is_contextual_user_message_content(content) =>
         {
             content.iter().find_map(|content_item| match content_item {
-                ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
                     Some(text.as_str())
                 }
                 ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
@@ -967,7 +967,7 @@ fn trim_trailing_horizontal_whitespace_per_line(content: &str) -> String {
 
 fn map_message_content_item(item: &ContentItem) -> Option<AnthropicContentBlock> {
     match item {
-        ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+        ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
             Some(AnthropicContentBlock::Text {
                 text: text.clone(),
                 cache_control: None,
@@ -3342,6 +3342,8 @@ mod tests {
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "TURN1_DONE".to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 
@@ -3622,6 +3624,8 @@ mod tests {
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: format!("Finished search batch {index}."),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 
@@ -3755,6 +3759,8 @@ mod tests {
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: format!("Found CHECKPOINT_{:02}. Continuing.", index - 1),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 
@@ -4253,6 +4259,8 @@ mod tests {
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "DONE".to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 

@@ -1711,7 +1711,7 @@ fn plain_text_content(content: &[ContentItem]) -> Option<String> {
     let text = content
         .iter()
         .filter_map(|item| match item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text),
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => Some(text),
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
         })
         .cloned()
@@ -1886,6 +1886,8 @@ mod tests {
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "{\"analysis\":\"Inspect\",\"plan\":\"pwd\",\"commands\":[{\"keystrokes\":\"pwd\\n\",\"duration\":0.1}]}".to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 
@@ -1980,6 +1982,8 @@ mod tests {
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "Summary so far".to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 
@@ -2031,6 +2035,8 @@ mod tests {
                     content: vec![ContentItem::OutputText {
                         text: "```json\n{\"analysis\":\"Summary\",\"plan\":\"Ask\",\"commands\":[{\"keystrokes\":\"git status\\n\",\"duration\":0.1}]}\n```"
                             .to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 
@@ -2071,6 +2077,8 @@ mod tests {
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "Summary so far".to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 
@@ -2134,6 +2142,8 @@ mod tests {
                     content: vec![ContentItem::OutputText {
                         text: "```json\n{\"analysis\":\"Run tests\",\"commands\":[]}\n```"
                             .to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 

@@ -578,7 +578,9 @@ fn plain_text_content(content: &[ContentItem]) -> Option<String> {
     for item in content {
         match item {
             ContentItem::InputText { text: item_text }
-            | ContentItem::OutputText { text: item_text } => {
+            | ContentItem::OutputText {
+                text: item_text, ..
+            } => {
                 if !text.is_empty() {
                     text.push('\n');
                 }
@@ -725,6 +727,8 @@ mod tests {
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "I will run pwd.\n\n```bash\npwd\n```".to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 
@@ -809,6 +813,8 @@ mod tests {
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: "I forgot the tool.".to_string(),
+                    annotations: None,
+                    logprobs: None,
                 }],
                 phase: None,
 
@@ -870,6 +876,8 @@ mod tests {
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: "Running pwd.".to_string(),
+                    annotations: None,
+                    logprobs: None,
                 }],
                 phase: None,
 

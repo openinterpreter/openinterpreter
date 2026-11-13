@@ -538,7 +538,7 @@ fn plain_text_content(content: &[ContentItem]) -> Option<String> {
     let text = content
         .iter()
         .filter_map(|item| match item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text),
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => Some(text),
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
         })
         .cloned()
@@ -843,6 +843,8 @@ mod tests {
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "<function=bash>bad</function>".to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 
@@ -863,6 +865,8 @@ mod tests {
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "DISCUSSION\n```bash\nls\n```".to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 

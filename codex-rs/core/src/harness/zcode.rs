@@ -251,7 +251,9 @@ fn replace_last_user_text(items: &mut [ResponseItem], text: &str) {
         }
         for content_item in content.iter_mut().rev() {
             if let ContentItem::InputText { text: item_text }
-            | ContentItem::OutputText { text: item_text } = content_item
+            | ContentItem::OutputText {
+                text: item_text, ..
+            } = content_item
             {
                 *item_text = text.to_string();
                 return;
@@ -867,7 +869,7 @@ fn build_tool_result_content(body: &FunctionCallOutputBody) -> AnthropicToolResu
 
 fn map_message_content_item(item: &ContentItem) -> Option<AnthropicContentBlock> {
     match item {
-        ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+        ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
             Some(AnthropicContentBlock::Text {
                 text: text.clone(),
                 cache_control: None,
@@ -1798,6 +1800,8 @@ mod tests {
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "Summary of Turn 5:\n\nZCODE_WEB_GAME_TURN_5_DONE".to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
                     internal_chat_message_metadata_passthrough: None,
@@ -1995,6 +1999,8 @@ mod tests {
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
                 text: "done".to_string(),
+                annotations: None,
+                logprobs: None,
             }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
@@ -2156,6 +2162,8 @@ mod tests {
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: format!("progress {index}"),
+                    annotations: None,
+                    logprobs: None,
                 }],
                 phase: None,
                 internal_chat_message_metadata_passthrough: None,
@@ -2399,6 +2407,8 @@ mod tests {
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: "Continuing from the agent report.".to_string(),
+                    annotations: None,
+                    logprobs: None,
                 }],
                 phase: None,
                 internal_chat_message_metadata_passthrough: None,
@@ -2510,6 +2520,8 @@ mod tests {
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: "Done.".to_string(),
+                    annotations: None,
+                    logprobs: None,
                 }],
                 phase: None,
                 internal_chat_message_metadata_passthrough: None,
@@ -2587,6 +2599,8 @@ mod tests {
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: "Done.".to_string(),
+                    annotations: None,
+                    logprobs: None,
                 }],
                 phase: None,
                 internal_chat_message_metadata_passthrough: None,
@@ -2659,6 +2673,8 @@ mod tests {
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
                 text: "Read done.".to_string(),
+                annotations: None,
+                logprobs: None,
             }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,

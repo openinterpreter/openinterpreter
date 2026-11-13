@@ -4,6 +4,7 @@ use crate::event_mapping::is_contextual_dev_fragment;
 use crate::event_mapping::is_contextual_user_message_content;
 use codex_chat_wire_compat::ToolKinds;
 use codex_chat_wire_compat::ToolOutputKind;
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
@@ -789,19 +790,29 @@ fn kimi_image_content_part(image: &ImageReference) -> Value {
     }
 }
 
+fn kimi_audio_content_part(audio: &AudioReference) -> Value {
+    match audio {
+        AudioReference::Inline { audio_url } => json!({
+            "type": "input_audio",
+            "audio_url": audio_url,
+        }),
+        AudioReference::File { file_id } => json!({
+            "type": "file",
+            "file": { "file_id": file_id },
+        }),
+    }
+}
+
 fn convert_message_parts(content: &[ContentItem]) -> Vec<Value> {
     content
         .iter()
         .map(|item| match item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => json!({
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => json!({
                 "type": "text",
                 "text": text,
             }),
             ContentItem::InputImage { image, .. } => kimi_image_content_part(image),
-            ContentItem::InputAudio { audio_url } => json!({
-                "type": "input_audio",
-                "audio_url": audio_url,
-            }),
+            ContentItem::InputAudio { audio } => kimi_audio_content_part(audio),
         })
         .collect()
 }
@@ -810,7 +821,7 @@ fn convert_user_message_parts(content: &[ContentItem], options: MessageBuildOpti
     content
         .iter()
         .map(|item| match item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
                 let text = if options.trim_user_message_trailing_newlines {
                     text.trim_end_matches('\n')
                 } else {
@@ -822,10 +833,7 @@ fn convert_user_message_parts(content: &[ContentItem], options: MessageBuildOpti
                 })
             }
             ContentItem::InputImage { image, .. } => kimi_image_content_part(image),
-            ContentItem::InputAudio { audio_url } => json!({
-                "type": "input_audio",
-                "audio_url": audio_url,
-            }),
+            ContentItem::InputAudio { audio } => kimi_audio_content_part(audio),
         })
         .collect()
 }
@@ -909,10 +917,7 @@ fn kimi_output_content_item(item: &FunctionCallOutputContentItem) -> Value {
                 "id": id,
             }
         }),
-        FunctionCallOutputContentItem::InputAudio { audio_url } => json!({
-            "type": "input_audio",
-            "audio_url": audio_url,
-        }),
+        FunctionCallOutputContentItem::InputAudio { audio } => kimi_audio_content_part(audio),
         FunctionCallOutputContentItem::EncryptedContent { .. } => json!({
             "type": "text",
             "text": "<system>Tool returned encrypted content.</system>",
@@ -1053,7 +1058,7 @@ fn collect_developer_instruction_text(items: &[ResponseItem]) -> String {
                 let trimmed = text.trim();
                 (!trimmed.is_empty()).then_some(trimmed)
             }
-            ContentItem::OutputText { text } => {
+            ContentItem::OutputText { text, .. } => {
                 let trimmed = text.trim();
                 (!trimmed.is_empty()).then_some(trimmed)
             }
@@ -1418,17 +1423,22 @@ fn collect_entries(dir: &Path, max_width: usize) -> (Vec<(String, bool)>, usize)
 
 #[cfg(test)]
 mod tests {
+    use super::MessageBuildOptions;
     use super::build_messages;
     use super::build_request;
     use super::build_system_prompt;
     use super::builtin_kimi_skill_listing;
+    use super::convert_message_parts;
+    use super::convert_user_message_parts;
     use super::discover_skills_in_root;
     use super::format_kimi_skills_for_prompt;
     use super::kimi_image_content_part;
+    use super::kimi_output_content_item;
     use super::kimi_skill_roots;
     use super::load_kimi_agents_md;
     use super::parse_kimi_skill_frontmatter;
     use crate::client_common::Prompt;
+    use codex_protocol::models::AudioReference;
     use codex_protocol::models::BaseInstructions;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::FunctionCallOutputContentItem;
@@ -1445,6 +1455,43 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use std::fs;
+
+    #[test]
+    fn kimi_audio_references_keep_inline_payloads_and_file_ids_in_every_content_path() {
+        let inline = AudioReference::Inline {
+            audio_url: "data:audio/wav;base64,abc".to_string(),
+        };
+        let file = AudioReference::File {
+            file_id: "audio_file_123".to_string(),
+        };
+        let expected = vec![
+            json!({"type": "input_audio", "audio_url": "data:audio/wav;base64,abc"}),
+            json!({"type": "file", "file": {"file_id": "audio_file_123"}}),
+        ];
+        let message = vec![
+            ContentItem::InputAudio {
+                audio: inline.clone(),
+            },
+            ContentItem::InputAudio {
+                audio: file.clone(),
+            },
+        ];
+        assert_eq!(convert_message_parts(&message), expected);
+        assert_eq!(
+            convert_user_message_parts(&message, MessageBuildOptions::kimi_cli()),
+            expected
+        );
+        assert_eq!(
+            [inline, file]
+                .map(
+                    |audio| kimi_output_content_item(&FunctionCallOutputContentItem::InputAudio {
+                        audio,
+                    })
+                )
+                .to_vec(),
+            expected
+        );
+    }
 
     #[test]
     fn kimi_user_messages_trim_trailing_newline() {
@@ -2182,6 +2229,8 @@ mod tests {
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: "done".to_string(),
+                    annotations: None,
+                    logprobs: None,
                 }],
                 phase: None,
 
@@ -2225,6 +2274,8 @@ mod tests {
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: String::new(),
+                    annotations: None,
+                    logprobs: None,
                 }],
                 phase: None,
 
@@ -2376,6 +2427,8 @@ mod tests {
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: "I'll check whether R is available.".to_string(),
+                    annotations: None,
+                    logprobs: None,
                 }],
                 phase: None,
 
@@ -2831,6 +2884,8 @@ mod tests {
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: "done".to_string(),
+                    annotations: None,
+                    logprobs: None,
                 }],
                 phase: None,
 
