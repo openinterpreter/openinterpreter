@@ -1,3 +1,4 @@
+use crate::ConfigRefreshOutcome;
 use crate::WithTurnExtensionData;
 use crate::agent::AgentStatus;
 use crate::agent::api::AgentControl;

@@ -24,6 +24,15 @@ pub enum SpawnAgentForkMode {
     LastNTurns(usize),
 }
 
+/// Origin of a child program choice, retained so a parent-turn choice can be
+/// revalidated for the child's own provider and account.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SpawnProgramSource {
+    #[default]
+    Explicit,
+    ParentTurn,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct SpawnAgentOptions {
     pub fork_parent_spawn_call_id: Option<String>,
@@ -34,8 +43,10 @@ pub struct SpawnAgentOptions {
     pub turn_trigger: Option<String>,
     pub root_turn_id: Option<String>,
     pub environments: Option<Vec<TurnEnvironmentSelection>>,
+    pub disabled_plugin_ids: Option<Vec<String>>,
     pub multi_agent_v2_usage_hints: Option<ResolvedMultiAgentV2UsageHints>,
     pub cyber_access_program: Option<CyberAccessProgram>,
+    pub cyber_access_program_source: SpawnProgramSource,
 }
 
 /// Identity and status observed from a loaded agent, without a handle to its runtime.
