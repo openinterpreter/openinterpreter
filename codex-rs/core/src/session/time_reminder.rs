@@ -134,7 +134,7 @@ impl Session {
             let mut state = self.state.lock().await;
             let failure = (
                 turn_context.sub_id.clone(),
-                state.auto_compact_window_ids().window_id,
+                state.auto_compact_window_ids().window_id.clone(),
             );
             // A compacted window may no longer contain the earlier notice.
             if state.current_time_reminder.last_clock_failure.as_ref() == Some(&failure) {

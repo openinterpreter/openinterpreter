@@ -548,6 +548,8 @@ mod tests {
                             supports_standalone_web_search: true,
                             project_id: None,
                             location: None,
+                            credential_file: None,
+                            capabilities: None,
                         }],
                         features: HashMap::from([
                             ("plugins".to_string(), false),

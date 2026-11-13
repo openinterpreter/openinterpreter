@@ -85,7 +85,7 @@ async fn assert_partial_results(provider: &dyn CodeModeSessionProvider) {
                 ),
                 yield_time_ms: Some(/*value*/ 10),
                 max_output_tokens: None,
-            }, delegate.clone(), /*preempt*/ None)
+            }, delegate.clone())
             .await
             .expect("start cell");
         let cell_id = started.cell_id.clone();

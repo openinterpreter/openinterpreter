@@ -3521,6 +3521,7 @@ impl Config {
             service_tier: service_tier_override,
             codex_self_exe,
             codex_linux_sandbox_exe,
+            default_zsh_path: _,
             main_execve_wrapper_exe: _,
             base_instructions,
             developer_instructions,

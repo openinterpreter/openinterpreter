@@ -1,7 +1,7 @@
 //! Bounded reviewer notice for evidence omitted by the aggregate input budget.
 
 use super::ContextualUserFragment;
-use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::{ContentItem, ContentItemKind, input_text};
 
 /// Identifies incomplete evidence without implying additional authority.
 pub struct GuardianBudgetOmission;
@@ -26,7 +26,9 @@ impl ContextualUserFragment for GuardianBudgetOmission {
         )
     }
 
-    fn body(&self) -> String {
-        "Conversation evidence, tool descriptions, or images were omitted or shortened to fit the review input budget. User instructions and prior approvals may be incomplete where marked. Do not infer authorization from missing evidence or treat a partial grant as overriding an omitted restriction.".to_owned()
+    fn body(&self) -> ContentItem {
+        input_text(
+            "Conversation evidence, tool descriptions, or images were omitted or shortened to fit the review input budget. User instructions and prior approvals may be incomplete where marked. Do not infer authorization from missing evidence or treat a partial grant as overriding an omitted restriction.",
+        )
     }
 }

@@ -1,9 +1,7 @@
 use super::ContextualUserFragment;
 use codex_prompts::ResolvedModelMessages;
 use codex_protocol::config_types::MultiAgentMode;
-use codex_protocol::models::ContentItem;
-use codex_protocol::models::ContentItemKind;
-use codex_protocol::models::input_text;
+use codex_protocol::models::{ContentItem, ContentItemKind, input_text};
 use codex_protocol::protocol::MULTI_AGENT_MODE_CLOSE_TAG;
 use codex_protocol::protocol::MULTI_AGENT_MODE_OPEN_TAG;
 
@@ -42,15 +40,15 @@ impl ContextualUserFragment for MultiAgentModeInstructions {
         (MULTI_AGENT_MODE_OPEN_TAG, MULTI_AGENT_MODE_CLOSE_TAG)
     }
 
-    fn body(&self) -> String {
+    fn body(&self) -> ContentItem {
         // `effective_multi_agent_mode` carries configured and catalog overrides as `Custom`.
         // The other variants explicitly select bundled text.
         let bundled = ResolvedModelMessages::bundled().multi_agent();
-        match &self.multi_agent_mode {
+        let body = match &self.multi_agent_mode {
             MultiAgentMode::Custom(hint_text) => hint_text.as_str(),
             MultiAgentMode::ExplicitRequestOnly => bundled.explicit.text(),
             MultiAgentMode::Proactive => bundled.proactive.text(),
-        }
-        .to_owned()
+        };
+        input_text(body.to_owned())
     }
 }

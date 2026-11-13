@@ -20,6 +20,8 @@ use tempfile::tempdir;
 
 #[test]
 fn legacy_speed_denial_is_normalized_without_changing_other_fragments() {
+    let base_dir = crate::AbsolutePathBuf::try_from(std::env::temp_dir())
+        .expect("absolute requirements base directory");
     for (id, contents, expected_ultrafast) in [
         (
             "rbac-fast-mode",
@@ -37,7 +39,7 @@ fn legacy_speed_denial_is_normalized_without_changing_other_fragments() {
                     contents: contents.to_string(),
                 }],
             }
-            .into_layers(),
+            .into_layers(&base_dir),
         )
         .expect("valid cloud requirements")
         .expect("requirements layer")
@@ -57,6 +59,8 @@ fn legacy_speed_denial_is_normalized_without_changing_other_fragments() {
 
 #[test]
 fn enterprise_speed_override_still_takes_precedence_over_legacy_baseline() {
+    let base_dir = crate::AbsolutePathBuf::try_from(std::env::temp_dir())
+        .expect("absolute requirements base directory");
     let requirements = compose_requirements(
         CloudRequirementsTomlBundle {
             enterprise_managed: vec![
@@ -72,7 +76,7 @@ fn enterprise_speed_override_still_takes_precedence_over_legacy_baseline() {
                 },
             ],
         }
-        .into_layers(),
+        .into_layers(&base_dir),
     )
     .expect("valid cloud requirements")
     .expect("requirements layers")

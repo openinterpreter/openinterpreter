@@ -1,7 +1,7 @@
 //! Fixed-size discussion notices. Post text is fetched through bounded tools.
 
 use super::ContextualUserFragment;
-use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::{ContentItem, ContentItemKind, input_text};
 use uuid::Uuid;
 
 pub struct AgentMessageBoardNotification {
@@ -35,11 +35,11 @@ impl ContextualUserFragment for AgentMessageBoardNotification {
             "</agent_message_board_notification>",
         )
     }
-    fn body(&self) -> String {
-        format!(
+    fn body(&self) -> ContentItem {
+        input_text(format!(
             "\nNew post {} in discussion {}. Use read_post or read_thread to read it.\n",
             self.message_id, self.thread_id
-        )
+        ))
     }
 }
 
@@ -52,7 +52,9 @@ mod tests {
         let message_id = Uuid::from_u128(1);
         let thread_id = Uuid::from_u128(2);
         let notice = AgentMessageBoardNotification::new(message_id, thread_id);
-        let body = notice.body();
+        let ContentItem::InputText { text: body } = notice.body() else {
+            panic!("expected text notice");
+        };
         assert!(body.contains(&message_id.to_string()));
         assert!(body.contains(&thread_id.to_string()));
         assert!(body.contains("Use read_post or read_thread"));

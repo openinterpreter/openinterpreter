@@ -4,7 +4,6 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -65,7 +64,6 @@ pub(super) async fn resolve(session: &Session, mut file_ids: BTreeSet<String>) {
                 .image_store
                 .resolve(ResolveRequest {
                     file_id: &id,
-                    tags: HashMap::new(),
                     download_url_ttl: None,
                 })
                 .await;

@@ -72,4 +72,39 @@ async fn inline_store_cannot_resolve_file_references() {
         .expect_err("inline store cannot resolve file references");
 
     assert_eq!(error.kind(), AttachmentStoreErrorKind::NotFound);
+    assert!(!InlineAttachmentStore.is_resolvable("file_123").await);
+}
+
+/// A transient backend error cannot prove the user's attachment has disappeared.
+#[tokio::test]
+async fn transient_resolve_error_does_not_discard_attachment() {
+    struct UnavailableStore;
+    impl AttachmentStore for UnavailableStore {
+        fn upload(&self, request: UploadRequest) -> UploadFuture<'_> {
+            InlineAttachmentStore.upload(request)
+        }
+
+        fn resolve<'a>(&'a self, _request: ResolveRequest<'a>) -> ResolveFuture<'a> {
+            Box::pin(async {
+                Err(AttachmentStoreError::new(
+                    AttachmentStoreErrorKind::Backend,
+                    "temporarily unavailable",
+                ))
+            })
+        }
+    }
+
+    assert!(UnavailableStore.is_resolvable("file_123").await);
+}
+
+#[test]
+fn audio_duration_metadata_round_trips() {
+    let metadata = FormatSpecificMetadata::Audio(AudioMetadata {
+        duration_ms: Some(30_000),
+    });
+    let serialized = serde_json::to_string(&metadata).expect("serialize audio duration");
+    assert_eq!(
+        serde_json::from_str::<FormatSpecificMetadata>(&serialized).expect("decode audio duration"),
+        metadata
+    );
 }

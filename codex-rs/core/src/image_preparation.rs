@@ -167,6 +167,8 @@ pub(crate) async fn prepare_response_items(
                 call_id, output, ..
             } => {
                 prepare_tool_output(
+                    thread_id,
+                    ephemeral,
                     output,
                     call_id.as_deref(),
                     resize_notice_mode,
@@ -180,6 +182,8 @@ pub(crate) async fn prepare_response_items(
                 call_id, output, ..
             } => {
                 prepare_tool_output(
+                    thread_id,
+                    ephemeral,
                     output,
                     Some(call_id.as_str()),
                     resize_notice_mode,
@@ -215,6 +219,8 @@ pub(crate) async fn prepare_response_items(
 }
 
 async fn prepare_tool_output(
+    thread_id: &str,
+    ephemeral: bool,
     output: &mut FunctionCallOutputPayload,
     item_id: Option<&str>,
     resize_notice_mode: ImageResizeNoticeMode,
@@ -226,6 +232,8 @@ async fn prepare_tool_output(
     let resized_images = prepare_tool_output_content(
         content,
         ImageOrigin {
+            thread_id,
+            ephemeral,
             message_role: None,
             item_id,
         },
