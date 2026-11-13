@@ -1,4 +1,6 @@
 use crate::agent::types::AgentMetadata;
+use crate::config::Config;
+use crate::environment_selection::TurnEnvironmentSnapshot;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::AgentErrorContext;

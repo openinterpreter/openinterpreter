@@ -80,6 +80,7 @@ pub(crate) async fn run_codex_thread_interactive(
         .responses_websocket_enabled();
 
     let conversation_history = initial_history.unwrap_or(InitialHistory::New);
+    let history_initialization = HistoryInitialization::from_history(&conversation_history);
     let forked_from_thread_id = conversation_history.forked_from_id();
     let instructions = parent_session.inherited_instructions().await;
     let session_source = SessionSource::SubAgent(subagent_source.clone());
@@ -91,8 +92,13 @@ pub(crate) async fn run_codex_thread_interactive(
     };
     let mut thread_extension_init = codex_extension_api::ExtensionDataInit::default();
     thread_extension_init.insert(isolation);
-    let (session, io) = Session::spawn(SessionSpawnArgs {
-        startup: None,
+    let runtime = parent_session.services.local_agent_runtime.clone();
+    let startup = Arc::new(SessionStartup::default());
+    startup.hold_membership(runtime.admit_session(Some(parent_session.thread_id))?);
+    let startup_guard = SessionStartupGuard::new(Arc::clone(&startup));
+    let spawn_result = Session::spawn(SessionSpawnArgs {
+        attached_thread: false,
+        startup: Some(Arc::clone(&startup)),
         config,
         prompt_cache_key: parent_session
             .services
@@ -115,6 +121,8 @@ pub(crate) async fn run_codex_thread_interactive(
         code_mode_session_provider: parent_session.services.code_mode_service.session_provider(),
         extensions,
         conversation_history,
+        resume_preparation: None,
+        history_initialization,
         disabled_plugin_ids: None,
         requested_history_mode: None,
         fork_persistence: ForkPersistence::Copied,
@@ -138,8 +146,13 @@ pub(crate) async fn run_codex_thread_interactive(
         inherited_exec_policy: Some(Arc::clone(&parent_session.services.exec_policy)),
         parent_rollout_thread_trace: codex_rollout_trace::ThreadTraceContext::disabled(),
         parent_trace: None,
-        environment_selections: parent_environments.to_selections(),
+        environment_requests: parent_environments
+            .to_selections()
+            .into_iter()
+            .map(TurnEnvironmentSelection::into_request)
+            .collect(),
         thread_extension_init,
+        turn_extension_init: Default::default(),
         client_mcp_extensions: parent_session.services.client_mcp_extensions.clone(),
         reserved_thread_id: None,
         analytics_events_client: Some(parent_session.services.analytics_events_client.clone()),
@@ -164,6 +177,8 @@ pub(crate) async fn run_codex_thread_interactive(
             return Err(error.into());
         }
     };
+    startup.release_membership();
+    startup_guard.disarm();
     let thread_config = session.thread_config_snapshot().await;
     let client_metadata = parent_session.app_server_client_metadata().await;
     emit_subagent_session_started(

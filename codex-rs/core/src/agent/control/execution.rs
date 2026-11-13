@@ -4,6 +4,7 @@
 use super::LocalAgentControl;
 use crate::agent::types::AgentExecutionGuard;
 use crate::codex_thread::CodexThread;
+use codex_protocol::error::AgentErrorContext;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;

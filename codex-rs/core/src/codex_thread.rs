@@ -18,6 +18,8 @@ use crate::session::session::Session;
 use crate::session::startup_prewarm::PrewarmInput;
 use crate::session::step_settings::StepSettingsUpdate;
 use crate::thread_startup_metadata::ThreadStartupMetadata;
+use chrono::DateTime;
+use chrono::Utc;
 use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
 use codex_exec_server::SelectedCapabilityRootsStatus;
@@ -184,6 +186,7 @@ pub use codex_guardian_reviewer::GuardianRootSnapshot;
 pub struct CodexThread {
     pub(crate) session: Arc<Session>,
     pub(crate) io: SessionIo,
+    pub(crate) residency_gate: Arc<RwLock<()>>,
     // Registration source controls live access and lifecycle hooks. Managed Guardian
     // reviewers keep their existing subagent identity inside the session.
     pub(crate) session_source: SessionSource,
@@ -402,7 +405,8 @@ impl CodexThread {
         if contributors.is_empty() {
             return;
         }
-        let config = self.config().await;
+        let (config, history_initialization, history_mode) =
+            self.session.thread_ready_config().await;
         for contributor in contributors {
             contributor
                 .on_thread_ready(codex_extension_api::ThreadReadyInput {
@@ -861,7 +865,7 @@ impl CodexThread {
         } = overrides;
         SessionSettingsUpdate {
             requested_approvals_reviewer,
-            turn_extension_init,
+            turn_extension_init: None,
             step_settings: StepSettingsUpdate {
                 model,
                 effort,

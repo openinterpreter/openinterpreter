@@ -9,10 +9,10 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 
 use super::GuardianApprovalRequest;
 use super::GuardianReviewContext;
-use crate::context::GuardianPermissionContext;
 use crate::session::turn_context::TurnEnvironment;
 use crate::tools::context::ToolEnvironments;
 use crate::tools::context::ToolInvocation;
+use codex_guardian_context::PermissionContext as GuardianPermissionContext;
 
 // Bound both JSON and permission evidence without restricting manual approvals.
 const MAX_GUARDIAN_ENVIRONMENT_ID_BYTES: usize = 256;
