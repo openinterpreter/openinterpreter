@@ -414,7 +414,7 @@ impl Session {
         let executor_capability_discovery =
             step_context
                 .extension_data
-                .get::<codex_exec_server_protocol::ExecutorCapabilityDiscoverySnapshot>();
+                .get::<codex_exec_server::ExecutorCapabilityDiscoverySnapshot>();
         let previous_world_state = self.state.lock().await.history.world_state_checkpoint();
         for contributor in self.services.extensions.context_contributors() {
             for section in contributor
