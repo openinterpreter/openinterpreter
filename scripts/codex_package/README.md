@@ -54,6 +54,11 @@ copy a release archive as if it were an executable. Supply a verified,
 platform-matched upstream binary through the release job and retain its version
 and digest in that job's provenance. Package metadata records the staged
 `codex-resources/llama.cpp/llama-server[.exe]` path.
+For a local build, pass the platform-matched binary to
+`scripts/build-interpreter-release.sh --llama-server-bin /path/to/llama-server`.
+The archive assembler also accepts `--llama-server-bin`; release automation
+must supply a pinned, verified binary for each target before selecting the
+`open-interpreter` bundle. No executable is fetched implicitly at install time.
 
 ## Source-built artifacts
 

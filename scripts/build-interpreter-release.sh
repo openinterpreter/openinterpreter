@@ -9,6 +9,7 @@ Options:
   --target <target>        Rust target triple (defaults to host platform)
   --install-dir <dir>      Visible bin directory for shims
   --home <dir>             Open Interpreter home directory
+  --llama-server-bin <path>  Verified llama-server executable for the target
   -j, --jobs <N>           Number of parallel Cargo build jobs (default: 1)
   -h, --help               Show this help message
 
@@ -24,6 +25,7 @@ target=""
 install_dir="${OPEN_INTERPRETER_INSTALL_DIR:-${CODEX_INSTALL_DIR:-$HOME/.local/bin}}"
 interpreter_home="${INTERPRETER_HOME:-$HOME/.openinterpreter}"
 build_jobs="${CARGO_BUILD_JOBS:-1}"
+llama_server_bin="${OPEN_INTERPRETER_LLAMA_SERVER_BIN:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -51,6 +53,14 @@ while [[ $# -gt 0 ]]; do
       interpreter_home="${2:?--home requires a value}"
       shift 2
       ;;
+    --llama-server-bin=*)
+      llama_server_bin="${1#*=}"
+      shift
+      ;;
+    --llama-server-bin)
+      llama_server_bin="${2:?--llama-server-bin requires a value}"
+      shift 2
+      ;;
     --jobs=*|-j=*)
       build_jobs="${1#*=}"
       shift
@@ -75,6 +85,11 @@ if [[ ! "$build_jobs" =~ ^[1-9][0-9]*$ ]]; then
   echo "Cargo build jobs must be a positive integer: $build_jobs" >&2
   exit 1
 fi
+if [[ -z "$llama_server_bin" || ! -f "$llama_server_bin" || ! -x "$llama_server_bin" ]]; then
+  echo "Supply an executable, platform-matched --llama-server-bin before building" >&2
+  exit 1
+fi
+llama_server_bin="$(cd -- "$(dirname -- "$llama_server_bin")" && pwd -P)/$(basename -- "$llama_server_bin")"
 
 # Resolve paths to absolute locations so relative CLI arguments work safely.
 mkdir -p "$install_dir" "$interpreter_home"
@@ -151,6 +166,7 @@ fi
   cd "$repo_root"
   package_args=(
     --variant open-interpreter
+    --llama-server-bin "$llama_server_bin"
     --cargo-profile release
     --package-dir "$staging_dir"
     --force
