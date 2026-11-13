@@ -10,7 +10,7 @@ trap 'exit 143' TERM
 # A repository/patch fetch failure and a genuinely stale lockfile share this
 # step. Keep Bazel's exact fail-closed check, but make its diagnostic bounded
 # so a large dependency log cannot hide the actionable error.
-if "${repo_root}/.github/scripts/run_bazel_with_buildbuddy.py" mod deps --lockfile_mode=error >"${log}" 2>&1; then
+if "${repo_root}/.github/scripts/run_bazel.py" mod deps --lockfile_mode=error >"${log}" 2>&1; then
   echo 'MODULE.bazel.lock verified'
 else
   status=$?

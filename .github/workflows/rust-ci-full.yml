@@ -18,6 +18,10 @@ env:
   # better network/proxy behavior and matches Cargo's own suggested fallback.
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
+env:
+  CODEX_BAZEL_GCS_BUCKET: ${{ secrets.CODEX_BAZEL_GCS_BUCKET }}
+  CODEX_BAZEL_GCS_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.CODEX_BAZEL_GCS_WORKLOAD_IDENTITY_PROVIDER }}
+
 jobs:
   # --- CI that doesn't need specific targets ---------------------------------
   general:
@@ -104,6 +108,9 @@ jobs:
 
   argument_comment_lint_prebuilt:
     if: ${{ inputs.scope == 'all' }}
+    permissions:
+      contents: read
+      id-token: write
     name: Argument comment lint - ${{ matrix.name }}
     runs-on: ${{ matrix.runs_on || matrix.runner }}
     # A cold Bazel build of the prebuilt lint can exceed 30 minutes on each
@@ -141,6 +148,7 @@ jobs:
       deployment: false
     permissions:
       contents: read
+      id-token: write
     timeout-minutes: 120
     strategy:
       fail-fast: false

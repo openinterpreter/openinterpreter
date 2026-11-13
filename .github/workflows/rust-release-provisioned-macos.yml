@@ -11,6 +11,11 @@ name: Provisioned macOS CLI candidate
 
 on:
   workflow_call:
+    inputs:
+      build-systems:
+        description: Release build systems selected during tag validation, as a JSON array.
+        type: string
+        default: '["cargo"]'
 
 permissions:
   contents: read
@@ -32,6 +37,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        build-system: ${{ fromJSON(inputs.build-systems) }}
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
     env:
       TARGET: ${{ matrix.target }}
@@ -129,6 +135,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        build-system: ${{ fromJSON(inputs.build-systems) }}
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
     env:
       TARGET: ${{ matrix.target }}

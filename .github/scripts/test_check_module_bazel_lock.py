@@ -21,7 +21,7 @@ class CheckModuleBazelLockTest(unittest.TestCase):
         script.parent.mkdir()
         shutil.copy2(CHECK, script)
         self.script = script
-        runner = root / ".github/scripts/run_bazel_with_buildbuddy.py"
+        runner = root / ".github/scripts/run_bazel.py"
         runner.parent.mkdir(parents=True)
         runner.write_text(
             "#!/usr/bin/env bash\n"
