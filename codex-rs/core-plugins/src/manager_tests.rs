@@ -4791,6 +4791,43 @@ enabled = false
         .unwrap();
 
     assert!(outcome.plugin.disabled_skill_paths.is_empty());
+
+    write_file(
+        &tmp.path().join(CONFIG_TOML_FILE),
+        r#"[features]
+plugins = true
+
+[[skills.config]]
+name = "enabled-plugin:sample-search"
+enabled = false
+
+[plugins."enabled-plugin@debug"]
+enabled = true
+"#,
+    );
+    let config = load_config(tmp.path(), &repo_root).await;
+    let outcome = test_plugins_manager(tmp.path().to_path_buf())
+        .read_plugin_for_config(
+            &config,
+            &PluginReadRequest {
+                plugin_name: "enabled-plugin".to_string(),
+                marketplace_path: AbsolutePathBuf::try_from(
+                    repo_root.join(".agents/plugins/marketplace.json"),
+                )
+                .unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome.plugin.disabled_skill_paths,
+        HashSet::from([
+            std::fs::canonicalize(plugin_root.join("skills/sample-search/SKILL.md"))
+                .unwrap()
+                .abs()
+        ])
+    );
+    assert!(!PluginCapabilitySummary::from(outcome.plugin).has_skills);
 }
 
 #[tokio::test]

@@ -607,9 +607,10 @@ struct ConfiguredPluginStates {
 impl From<PluginDetail> for PluginCapabilitySummary {
     fn from(value: PluginDetail) -> Self {
         let has_skills = value.skills.iter().any(|skill| {
-            !value
-                .disabled_skill_paths
-                .contains(&skill.path_to_skills_md)
+            skill
+                .path_to_skills_md
+                .to_abs_path()
+                .is_ok_and(|path| !value.disabled_skill_paths.contains(&path))
         });
         Self {
             config_name: value.id,
@@ -2923,7 +2924,7 @@ impl PluginsManager {
             resolved_skills
                 .skills
                 .iter()
-                .any(|skill| skill.path_to_skills_md == path)
+                .any(|skill| skill.path_to_skills_md == PathUri::from(path.clone()))
                 .then_some(path)
         });
         let plugin_data_root = self.store.plugin_data_root(&plugin_id);
@@ -2988,7 +2989,19 @@ impl PluginsManager {
             installed: plugin.installed,
             enabled: plugin.enabled,
             skills: resolved_skills.skills,
-            disabled_skill_paths: resolved_skills.disabled_skill_paths,
+            // Detail consumers use native paths. A URI that cannot round-trip
+            // to a native path must not silently lose its disabled policy.
+            disabled_skill_paths: resolved_skills
+                .disabled_skill_paths
+                .into_iter()
+                .map(|path| {
+                    path.to_abs_path().map_err(|_| {
+                        MarketplaceError::InvalidPlugin(
+                            "invalid disabled plugin skill path".to_string(),
+                        )
+                    })
+                })
+                .collect::<Result<_, _>>()?,
             onboarding_skill,
             hooks,
             apps,
