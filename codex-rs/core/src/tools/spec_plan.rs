@@ -1004,7 +1004,7 @@ fn code_mode_tools<'a>(
             | ToolSpec::LocalShell {}
             | ToolSpec::ImageGeneration { .. }
             | ToolSpec::WebSearch { .. } => {
-                continue;
+                return None;
             }
         };
         if !codex_code_mode::is_code_mode_nested_tool(&code_mode_name) {
