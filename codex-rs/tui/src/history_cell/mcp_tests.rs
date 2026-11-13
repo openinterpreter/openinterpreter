@@ -12,7 +12,7 @@ const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z
 fn mcp_inventory_connection_states() {
     use McpServerConnectionStatus as Status;
 
-    let statuses = [
+    let mut statuses = [
         ("unknown", None),
         ("starting", Some(Status::Starting)),
         ("failed", Some(Status::Failed)),
@@ -24,6 +24,7 @@ fn mcp_inventory_connection_states() {
     ]
     .into_iter()
     .map(|(name, runtime_status)| McpServerStatus {
+        environment_id: None,
         server_capabilities: None,
         name: name.to_string(),
         runtime_status,
@@ -37,6 +38,12 @@ fn mcp_inventory_connection_states() {
         auth_status: McpAuthStatus::Unknown,
     })
     .collect::<Vec<_>>();
+    for environment in ["env-a", "env-b"] {
+        let mut status = statuses[0].clone();
+        status.name = "notes".to_string();
+        status.environment_id = Some(environment.to_string());
+        statuses.push(status);
+    }
     let cell =
         new_mcp_tools_output_from_statuses(&statuses, McpServerStatusDetail::ToolsAndAuthOnly);
     let rendered = cell
@@ -140,6 +147,7 @@ fn mcp_preview_shares_one_limit_across_blocks_and_preserves_transcript() {
     let mut cell = new_active_mcp_tool_call(
         "call-preview".into(),
         McpInvocation {
+            environment_id: None,
             server: "search".into(),
             tool: "lookup".into(),
             arguments: Some(json!({"title": "Search query"})),
@@ -194,6 +202,7 @@ fn code_mode_output_shares_a_row_budget_across_blocks() {
     let mut cell = new_active_mcp_tool_call(
         "browser-call".to_string(),
         McpInvocation {
+            environment_id: None,
             server: "node_repl".to_string(),
             tool: "js".to_string(),
             arguments: Some(json!({"title": "Inspect page", "code": "await tab.snapshot()"})),
@@ -237,6 +246,7 @@ fn code_mode_output_preserves_trailing_failure_diagnostics_in_transcript() {
     let mut cell = new_active_mcp_tool_call(
         "browser-error".to_string(),
         McpInvocation {
+            environment_id: None,
             server: "node_repl".to_string(),
             tool: "js".to_string(),
             arguments: Some(json!({"title": "Inspect page"})),
@@ -295,6 +305,7 @@ fn code_mode_output_row_budget_applies_after_wrapping_and_to_errors() {
             let mut cell = new_active_mcp_tool_call(
                 "browser-call".to_string(),
                 McpInvocation {
+                    environment_id: None,
                     server: server.to_string(),
                     tool: "js".to_string(),
                     arguments: Some(json!({"title": "Inspect"})),
@@ -404,6 +415,7 @@ fn code_mode_preserves_text_fields_on_nontext_and_unknown_blocks() {
     let mut cell = new_active_mcp_tool_call(
         "call-code-mode".to_string(),
         McpInvocation {
+            environment_id: None,
             server: "node_repl".to_string(),
             tool: "js".to_string(),
             arguments: Some(json!({"title": "Inspect results"})),
@@ -490,6 +502,7 @@ fn code_mode_preserves_text_fields_on_nontext_and_unknown_blocks() {
     let mut cua_cell = new_active_mcp_tool_call(
         "call-cua-repl".to_string(),
         McpInvocation {
+            environment_id: None,
             server: "cua_repl".to_string(),
             tool: "js".to_string(),
             arguments: None,
@@ -534,6 +547,7 @@ fn titled_image_call_keeps_error_and_full_title_when_narrow() {
     let mut cell = new_active_mcp_tool_call(
         "call".into(),
         McpInvocation {
+            environment_id: None,
             server: "node_repl".into(),
             tool: "js".into(),
             arguments: Some(json!({"title": title})),
@@ -601,6 +615,7 @@ fn code_mode_transcript_preserves_long_code_and_indentation_across_wrapping() {
     let mut cell = new_active_mcp_tool_call(
         "call-code".to_owned(),
         McpInvocation {
+            environment_id: None,
             server: "node_repl".to_owned(),
             tool: "js".to_owned(),
             arguments: None,
@@ -629,6 +644,7 @@ fn mcp_result_preview_preserves_source_text_and_excludes_tree_gutters() {
     let mut cell = new_active_mcp_tool_call(
         "call-mcp".to_owned(),
         McpInvocation {
+            environment_id: None,
             server: "docs".to_owned(),
             tool: "read".to_owned(),
             arguments: None,

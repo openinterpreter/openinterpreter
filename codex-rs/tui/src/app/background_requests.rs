@@ -48,6 +48,7 @@ impl App {
         app_server: &AppServerSession,
         request_id: String,
         name: String,
+        environment_id: Option<String>,
         thread_id: ThreadId,
     ) {
         let request_handle = app_server.request_handle();
@@ -57,6 +58,7 @@ impl App {
                 .request_typed(ClientRequest::McpServerOauthLogin {
                     request_id: RequestId::String(request_id.clone()),
                     params: McpServerOauthLoginParams {
+                        environment_id,
                         name,
                         thread_id: Some(thread_id.to_string()),
                         client_registration: None,
@@ -841,6 +843,7 @@ pub(super) async fn fetch_all_mcp_server_statuses(
             .request_typed(ClientRequest::McpServerStatusList {
                 request_id,
                 params: ListMcpServerStatusParams {
+                    environment_id: None,
                     cursor: cursor.clone(),
                     limit: Some(100),
                     detail: Some(detail),
@@ -1686,6 +1689,7 @@ mod tests {
     fn mcp_inventory_maps_prefix_tool_names_by_server() {
         let statuses = vec![
             McpServerStatus {
+                environment_id: None,
                 server_capabilities: None,
                 tools_error: None,
                 name: "docs".to_string(),
@@ -1711,6 +1715,7 @@ mod tests {
                 auth_status: codex_app_server_protocol::McpAuthStatus::Unsupported,
             },
             McpServerStatus {
+                environment_id: None,
                 server_capabilities: None,
                 tools_error: None,
                 name: "disabled".to_string(),

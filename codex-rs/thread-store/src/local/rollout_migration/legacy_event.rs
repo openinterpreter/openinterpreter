@@ -201,6 +201,7 @@ pub(super) fn completed_item(
                 TurnItem::McpToolCall(McpToolCallItem {
                     id: event.call_id.clone(),
                     server: event.invocation.server.clone(),
+                    environment_id: event.invocation.environment_id.clone(),
                     tool: event.invocation.tool.clone(),
                     arguments: event
                         .invocation

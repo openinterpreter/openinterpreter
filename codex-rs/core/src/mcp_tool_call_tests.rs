@@ -986,6 +986,7 @@ fn custom_mcp_tool_question_offers_session_remember_and_always_allow() {
 fn custom_servers_support_session_and_persistent_approval() {
     let invocation = McpInvocation {
         server: "custom_server".to_string(),
+        environment_id: None,
         tool: "run_action".to_string(),
         arguments: None,
     };
@@ -1036,6 +1037,7 @@ fn custom_servers_support_session_and_persistent_approval() {
 fn codex_apps_connectors_support_persistent_approval() {
     let invocation = McpInvocation {
         server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
+        environment_id: None,
         tool: "calendar/list_events".to_string(),
         arguments: None,
     };
@@ -1584,6 +1586,7 @@ async fn mcp_tool_call_item_includes_app_identity() {
         "call-plugin",
         McpInvocation {
             server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
+            environment_id: None,
             tool: "echo".to_string(),
             arguments: None,
         },
@@ -2094,6 +2097,7 @@ fn approval_elicitation_meta_merges_session_and_always_persist_for_custom_server
 fn guardian_mcp_review_request_includes_invocation_metadata() {
     let invocation = McpInvocation {
         server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
+        environment_id: None,
         tool: "browser_navigate".to_string(),
         arguments: Some(serde_json::json!({
             "url": "https://example.com",
@@ -2135,6 +2139,7 @@ fn guardian_mcp_review_request_includes_invocation_metadata() {
 fn guardian_mcp_review_request_includes_annotations_when_present() {
     let invocation = McpInvocation {
         server: "custom_server".to_string(),
+        environment_id: None,
         tool: "dangerous_tool".to_string(),
         arguments: None,
     };
@@ -2182,6 +2187,7 @@ fn guardian_mcp_review_request_includes_annotations_when_present() {
 fn guardian_mcp_review_request_ignores_untrusted_connected_account_email() {
     let invocation = McpInvocation {
         server: "custom_server".to_string(),
+        environment_id: None,
         tool: "dangerous_tool".to_string(),
         arguments: None,
     };
@@ -2949,6 +2955,7 @@ async fn approve_mode_skips_when_annotations_do_not_require_approval() {
     let turn_context = Arc::new(turn_context);
     let invocation = McpInvocation {
         server: "custom_server".to_string(),
+        environment_id: None,
         tool: "read_only_tool".to_string(),
         arguments: None,
     };
@@ -3032,6 +3039,7 @@ async fn guardian_mode_skips_auto_when_annotations_do_not_require_approval() {
     let turn_context = Arc::new(turn_context);
     let invocation = McpInvocation {
         server: "custom_server".to_string(),
+        environment_id: None,
         tool: "read_only_tool".to_string(),
         arguments: None,
     };
@@ -3092,6 +3100,7 @@ async fn permission_request_hook_allows_mcp_tool_call() {
     let turn_context = Arc::new(turn_context);
     let invocation = McpInvocation {
         server: "memory".to_string(),
+        environment_id: None,
         tool: "create_entities".to_string(),
         arguments: Some(serde_json::json!({
             "entities": [{
@@ -3190,6 +3199,7 @@ async fn permission_request_hook_uses_hook_tool_name_without_metadata() {
     let turn_context = Arc::new(turn_context);
     let invocation = McpInvocation {
         server: "memory".to_string(),
+        environment_id: None,
         tool: "create_entities".to_string(),
         arguments: Some(serde_json::json!({ "entities": [] })),
     };
@@ -3266,6 +3276,7 @@ async fn permission_request_hook_runs_after_remembered_mcp_approval() {
     );
     let invocation = McpInvocation {
         server: "memory".to_string(),
+        environment_id: None,
         tool: "create_entities".to_string(),
         arguments: Some(serde_json::json!({ "entities": [] })),
     };
@@ -3382,6 +3393,7 @@ async fn strict_auto_review_forces_guardian_for_mcp_policy_skip(
     let turn_context = Arc::new(turn_context);
     let invocation = McpInvocation {
         server: "custom_server".to_string(),
+        environment_id: None,
         tool: "dangerous_tool".to_string(),
         arguments: Some(serde_json::json!({ "calendar_id": "primary" })),
     };
@@ -3473,6 +3485,7 @@ async fn assert_mcp_user_approval_persistence(
     *session.active_turn.lock().await = Some(ActiveTurn::default());
     let invocation = McpInvocation {
         server: "memory".to_string(),
+        environment_id: None,
         tool: "create_entities".to_string(),
         arguments: Some(serde_json::json!({ "entities": [] })),
     };
@@ -3565,6 +3578,7 @@ async fn prompt_mode_waits_for_approval_when_annotations_do_not_require_approval
     }
     let invocation = McpInvocation {
         server: "custom_server".to_string(),
+        environment_id: None,
         tool: "read_only_tool".to_string(),
         arguments: None,
     };
@@ -3632,6 +3646,7 @@ async fn full_access_mode_skips_mcp_tool_approval_for_all_approval_modes() {
     let turn_context = Arc::new(turn_context);
     let invocation = McpInvocation {
         server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
+        environment_id: None,
         tool: "dangerous_tool".to_string(),
         arguments: Some(serde_json::json!({ "id": 1 })),
     };
@@ -3693,6 +3708,7 @@ async fn approve_mode_skips_guardian_in_every_permission_mode() {
 
     let invocation = McpInvocation {
         server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
+        environment_id: None,
         tool: "dangerous_tool".to_string(),
         arguments: Some(serde_json::json!({ "id": 1 })),
     };
@@ -3777,6 +3793,7 @@ async fn approval_metadata_is_released_when_the_invocation_future_is_dropped() {
     let (session, _) = crate::session::tests::make_session_and_context().await;
     let invocation = McpInvocation {
         server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
+        environment_id: None,
         tool: "write_record".to_string(),
         arguments: Some(serde_json::json!({"value": 42})),
     };

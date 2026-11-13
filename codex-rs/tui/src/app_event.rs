@@ -1234,6 +1234,7 @@ pub(crate) enum AppEvent {
 
     StartMcpLogin {
         name: String,
+        environment_id: Option<String>,
         thread_id: ThreadId,
     },
 

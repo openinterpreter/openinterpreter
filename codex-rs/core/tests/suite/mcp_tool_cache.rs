@@ -21,6 +21,7 @@ use codex_extension_api::McpServerContributionContext;
 use codex_extension_api::McpServerContributor;
 use codex_features::Feature;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
+use codex_mcp::McpServerKey;
 use codex_protocol::mcp::McpServerConnectionStatus;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
@@ -244,6 +245,7 @@ async fn mcp_calls_stay_bound_to_each_thread() -> anyhow::Result<()> {
             end.invocation,
             McpInvocation {
                 server: SERVER_NAME.to_string(),
+                environment_id: None,
                 tool: "echo".to_string(),
                 arguments: Some(json!({ "message": call_id })),
             }
@@ -834,7 +836,7 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
         second_thread
             .mcp_connection_statuses(&mcp_config)
             .await
-            .get(SERVER_NAME),
+            .get(&McpServerKey::unscoped(SERVER_NAME)),
         Some(&McpServerConnectionStatus::NotStarted),
     );
     assert_eq!(
@@ -1015,11 +1017,17 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
         filtered_thread
             .mcp_connection_statuses(&mcp_config)
             .await
-            .get(SERVER_NAME),
+            .get(&McpServerKey::unscoped(SERVER_NAME)),
         Some(&McpServerConnectionStatus::NotStarted),
     );
     let result = filtered_thread
-        .call_mcp_tool(SERVER_NAME, "cwd", Some(json!({})), /*meta*/ None)
+        .call_mcp_tool(
+            SERVER_NAME,
+            /*environment_id*/ None,
+            "cwd",
+            Some(json!({})),
+            /*meta*/ None,
+        )
         .await?;
     assert_ne!(result.is_error, Some(true));
     let filtered_pid = wait_for_new_pid(fs.as_ref(), &pid_file, Some(&second_pid)).await?;
@@ -1219,7 +1227,7 @@ async fn cached_stdio_negotiates_sharing_on_first_use() -> anyhow::Result<()> {
             thread
                 .mcp_connection_statuses(&config)
                 .await
-                .get(SERVER_NAME),
+                .get(&McpServerKey::unscoped(SERVER_NAME)),
             Some(&McpServerConnectionStatus::NotStarted)
         );
     }
@@ -1229,6 +1237,7 @@ async fn cached_stdio_negotiates_sharing_on_first_use() -> anyhow::Result<()> {
         let result = thread
             .call_mcp_tool(
                 SERVER_NAME,
+                /*environment_id*/ None,
                 "echo",
                 Some(json!({"message":"identify process"})),
                 /*meta*/ None,
@@ -1256,7 +1265,7 @@ async fn cached_stdio_negotiates_sharing_on_first_use() -> anyhow::Result<()> {
         legacy_sibling
             .mcp_connection_statuses(&config)
             .await
-            .get(SERVER_NAME),
+            .get(&McpServerKey::unscoped(SERVER_NAME)),
         Some(&McpServerConnectionStatus::NotStarted)
     );
     let legacy = &processes[0];

@@ -946,6 +946,7 @@ mod tests {
             pending.note_server_request(&ServerRequest::McpServerElicitationRequest {
                 request_id: AppServerRequestId::Integer(12),
                 params: McpServerElicitationRequestParams {
+                    environment_id: None,
                     thread_id: "thread-1".to_string(),
                     turn_id: Some("turn-1".to_string()),
                     server_name: "example".to_string(),
@@ -1093,6 +1094,7 @@ mod tests {
             pending.note_server_request(&ServerRequest::McpServerElicitationRequest {
                 request_id: AppServerRequestId::Integer(12),
                 params: McpServerElicitationRequestParams {
+                    environment_id: None,
                     thread_id: "thread-1".to_string(),
                     turn_id: Some("turn-1".to_string()),
                     server_name: "example".to_string(),
