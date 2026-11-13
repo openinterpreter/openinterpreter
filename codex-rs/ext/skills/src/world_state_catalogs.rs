@@ -1,5 +1,7 @@
 //! Renders prepared step catalogs without performing discovery or changing tool readiness.
 
+use serde::Deserialize;
+use serde::Serialize;
 use std::sync::Arc;
 
 use codex_extension_api::ContextualUserFragment;
@@ -24,6 +26,7 @@ use crate::render_observability::CatalogSurface;
 use crate::render_observability::record_catalog_render;
 use crate::state::EmittedCatalogBudgetWarnings;
 use crate::state::HostSkillsCatalogInWorldState;
+use crate::state::SkillsThreadState;
 use crate::step_state::CatalogStatus;
 use crate::step_state::SkillToolAuthoritySelector;
 use crate::step_state::SkillsStepState;
@@ -108,6 +111,7 @@ impl<'a> CatalogRenderingContext<'a> {
         input: WorldStateContributionInput<'a>,
     ) -> Option<Self> {
         let thread_state = input.thread_store.get::<SkillsThreadState>()?;
+        let step_state = input.step_store.get::<SkillsStepState>()?;
         let config = thread_state.config();
         let include_usage = input.model_info.include_skills_usage_instructions;
         let context_window = input.model_info.resolved_context_window();

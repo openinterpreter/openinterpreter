@@ -61,15 +61,18 @@ pub(crate) async fn resolve_skill_roots<'a>(
     host: &'a dyn EnvironmentAccess,
     config_layer_stack: &ConfigLayerStack,
     cwd: &AbsolutePathBuf,
+    project_markers: Option<&dyn EnvironmentAccess>,
     home_dir: Option<&AbsolutePathBuf>,
     plugin_skill_roots: Vec<PluginSkillRoot>,
     extra_skill_roots: Vec<AbsolutePathBuf>,
-) -> Vec<HostSkillRoot> {
+    empty_remote_roots: Option<&Mutex<EmptyRemoteRootsCache>>,
+) -> Vec<HostSkillRoot<'a>> {
     resolve_skill_roots_with_home_dir(
         repository_file_system,
         host,
         config_layer_stack,
         cwd,
+        project_markers,
         home_dir,
         plugin_skill_roots,
         extra_skill_roots,
