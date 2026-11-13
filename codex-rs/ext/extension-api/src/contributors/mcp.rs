@@ -213,12 +213,6 @@ pub enum McpServerContribution {
         config: Box<McpServerConfig>,
         protocol_mode: crate::McpProtocolMode,
     },
-    /// Registers the controller-owned Apps server under its reserved name.
-    HostedApps {
-        config: Box<McpServerConfig>,
-        /// Overrides the HTTP protocol mode, or uses the hosted Apps default when absent.
-        protocol_mode: Option<crate::McpProtocolMode>,
-    },
     /// Attributes Apps connectors to an account-hosted plugin. Plugins from executor folders must
     /// use `McpServerContributor::selected_plugins`, even if they only provide Apps connectors.
     HostedPluginConnectors {

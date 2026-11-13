@@ -49,6 +49,7 @@ pub use thread_lifecycle::ThreadReadyInput;
 pub use thread_lifecycle::ThreadResumeInput;
 pub use thread_lifecycle::ThreadStartInput;
 pub use thread_lifecycle::ThreadStopInput;
+pub use tool_lifecycle::CodeModeCellTiming;
 pub use tool_lifecycle::CommandStartInput;
 pub use tool_lifecycle::McpToolContext;
 pub use tool_lifecycle::McpToolResultInput;
