@@ -180,6 +180,7 @@ impl From<ThreadHistoryTurnMetadata> for Turn {
     fn from(value: ThreadHistoryTurnMetadata) -> Self {
         Self {
             id: value.turn_id,
+            root_turn_id: value.root_turn_id,
             items: Vec::new(),
             items_view: TurnItemsView::NotLoaded,
             error: value.error,
@@ -1609,6 +1610,7 @@ impl ThreadHistoryBuilder {
         PendingTurn {
             id,
             root_turn_id: None,
+            has_generated_id,
             items: Vec::new(),
             item_index: TurnItemIndex::default(),
             evictable_agent_item: None,
@@ -1938,7 +1940,8 @@ impl TurnItemIndex {
 struct PendingTurn {
     id: String,
     root_turn_id: Option<String>,
-    items: Vec<ThreadItem>,
+    has_generated_id: bool,
+    items: Vec<ThreadItemPayload>,
     item_index: TurnItemIndex,
     evictable_agent_item: Option<usize>,
     item_times: HashMap<String, ItemTimes>,
@@ -1986,7 +1989,11 @@ impl PendingTurn {
     fn snapshot(&self, items_view: TurnItemsView) -> Turn {
         Turn {
             id: self.id.clone(),
-            items: items_view.project_items(&self.items),
+            root_turn_id: self.root_turn_id.clone(),
+            items: items_view.project_items(&history_items_with_times(
+                self.items.clone(),
+                &self.item_times,
+            )),
             items_view,
             error: self.error.clone(),
             status: self.status.clone(),

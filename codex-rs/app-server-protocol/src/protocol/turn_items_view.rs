@@ -1,6 +1,7 @@
 //! Projects a turn's items without copying payloads excluded by the requested view.
 
 use super::v2::ThreadItem;
+use super::v2::ThreadItemPayload;
 use super::v2::TurnItemsView;
 
 impl TurnItemsView {
@@ -12,11 +13,11 @@ impl TurnItemsView {
             Self::Summary => {
                 let first_user_message = items
                     .iter()
-                    .find(|item| matches!(item, ThreadItem::UserMessage { .. }));
+                    .find(|item| matches!(item.payload, ThreadItemPayload::UserMessage { .. }));
                 let final_agent_message = items
                     .iter()
                     .rev()
-                    .find(|item| matches!(item, ThreadItem::AgentMessage { .. }));
+                    .find(|item| matches!(item.payload, ThreadItemPayload::AgentMessage { .. }));
                 match (first_user_message, final_agent_message) {
                     (Some(user_message), Some(agent_message))
                         if user_message.id() != agent_message.id() =>
