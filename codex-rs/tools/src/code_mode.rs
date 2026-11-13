@@ -43,6 +43,10 @@ pub fn augment_tool_spec_for_code_mode(
                             description: tool.description.clone(),
                             kind: CodeModeToolKind::Function,
                             input_schema: serde_json::to_value(&tool.parameters).ok(),
+                            input_schema_max_bytes: Some(effective_input_schema_max_bytes(
+                                tool.parameters.mcp_input_schema_max_bytes,
+                                code_mode_input_schema_max_bytes,
+                            )),
                             output_schema: tool
                                 .output_schema
                                 .as_ref()
@@ -167,6 +171,10 @@ fn code_mode_tool_definitions_for_spec(
                 description: tool.description.clone(),
                 kind: CodeModeToolKind::Function,
                 input_schema: serde_json::to_value(&tool.parameters).ok(),
+                input_schema_max_bytes: Some(effective_input_schema_max_bytes(
+                    tool.parameters.mcp_input_schema_max_bytes,
+                    code_mode_input_schema_max_bytes,
+                )),
                 output_schema: tool.output_schema.as_ref().map(ToolOutputSchema::to_value),
             }]
         }
@@ -194,6 +202,10 @@ fn code_mode_tool_definitions_for_spec(
                         description: tool.description.clone(),
                         kind: CodeModeToolKind::Function,
                         input_schema: serde_json::to_value(&tool.parameters).ok(),
+                        input_schema_max_bytes: Some(effective_input_schema_max_bytes(
+                            tool.parameters.mcp_input_schema_max_bytes,
+                            code_mode_input_schema_max_bytes,
+                        )),
                         output_schema: tool.output_schema.as_ref().map(ToolOutputSchema::to_value),
                     }
                 }
