@@ -192,6 +192,8 @@ impl<C: Sync> ExtensionRegistry<C> {
                 context_contributors: self.context_contributors.clone(),
                 mcp_server_contributors: self.mcp_server_contributors.clone(),
                 turn_input_contributors: self.turn_input_contributors.clone(),
+                model_request_contributors: self.model_request_contributors.clone(),
+                message_observers: self.message_observers.clone(),
                 tool_contributors: self.tool_contributors.clone(),
                 tool_lifecycle_contributors: self.tool_lifecycle_contributors.clone(),
                 turn_item_contributors: self.turn_item_contributors.clone(),
