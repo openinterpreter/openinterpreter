@@ -434,6 +434,7 @@ impl SessionConfiguration {
         }
     }
 
+    /// Applies fields normalized against this configuration at admission.
     pub(super) fn apply(
         &self,
         updates: &SessionSettingsUpdate,

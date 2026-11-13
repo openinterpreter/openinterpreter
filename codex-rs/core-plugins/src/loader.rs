@@ -527,56 +527,13 @@ pub(crate) fn refresh_non_curated_plugin_cache(
     additional_roots: &[AbsolutePathBuf],
     configured_plugin_keys: &[String],
 ) -> Result<bool, String> {
-    collapse_non_curated_cache_refresh(refresh_non_curated_plugin_cache_detailed(
-        codex_home,
-        additional_roots,
-        configured_plugin_keys,
-        PluginGitMode::Automatic,
-    ))
-}
-
-pub(crate) fn refresh_non_curated_plugin_cache_detailed(
-    codex_home: &Path,
-    additional_roots: &[AbsolutePathBuf],
-    configured_plugin_keys: &[String],
-    git_mode: PluginGitMode,
-) -> Result<NonCuratedCacheRefreshOutcome, String> {
-    refresh_non_curated_plugin_cache_with_mode(
+    collapse_non_curated_cache_refresh(refresh_non_curated_plugin_cache_with_mode(
         codex_home,
         additional_roots,
         configured_plugin_keys.iter().map(String::as_str),
         NonCuratedCacheRefreshMode::IfVersionChanged,
-        git_mode,
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn refresh_non_curated_plugin_cache_force_reinstall(
-    codex_home: &Path,
-    additional_roots: &[AbsolutePathBuf],
-    configured_plugin_keys: &[String],
-) -> Result<bool, String> {
-    collapse_non_curated_cache_refresh(refresh_non_curated_plugin_cache_force_reinstall_detailed(
-        codex_home,
-        additional_roots,
-        configured_plugin_keys,
         PluginGitMode::Automatic,
     ))
-}
-
-pub(crate) fn refresh_non_curated_plugin_cache_force_reinstall_detailed(
-    codex_home: &Path,
-    additional_roots: &[AbsolutePathBuf],
-    configured_plugin_keys: &[String],
-    git_mode: PluginGitMode,
-) -> Result<NonCuratedCacheRefreshOutcome, String> {
-    refresh_non_curated_plugin_cache_with_mode(
-        codex_home,
-        additional_roots,
-        configured_plugin_keys.iter().map(String::as_str),
-        NonCuratedCacheRefreshMode::ForceReinstall,
-        git_mode,
-    )
 }
 
 pub(crate) fn refresh_non_curated_plugin_cache_with_mode<'a>(

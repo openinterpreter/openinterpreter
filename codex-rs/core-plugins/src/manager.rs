@@ -44,7 +44,6 @@ use crate::loader::materialize_marketplace_plugin_source;
 use crate::loader::plugin_capability_summary_from_root;
 use crate::loader::plugin_is_eligible_for_target_marketplace;
 use crate::loader::refresh_curated_plugin_cache;
-use crate::loader::refresh_non_curated_plugin_cache_force_reinstall_detailed;
 use crate::loader::refresh_non_curated_plugin_cache_with_mode;
 use crate::loader::remote_installed_plugins_to_config;
 use crate::manifest::PluginManifestFormat;
@@ -165,6 +164,20 @@ const REMOTE_INSTALLED_PLUGIN_SYNC_WAIT_TIMEOUT: Duration = Duration::from_secs(
 const LOADED_PLUGINS_CACHE_CAPACITY: usize = 8;
 
 type EffectivePluginsChangedCallback = Arc<dyn Fn(EffectivePluginsChange) + Send + Sync + 'static>;
+
+/// Plugin refresh runs on a background OS thread. Capture the caller's Tokio runtime
+/// so the worker can notify open chats there when their plugins change.
+fn plugin_change_callback_for_worker(
+    notify: EffectivePluginsChangedCallback,
+) -> EffectivePluginsChangedCallback {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return notify;
+    };
+    Arc::new(move |change| {
+        let notify = Arc::clone(&notify);
+        runtime.spawn(async move { notify(change) });
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct PluginsConfigInput {
@@ -452,7 +465,9 @@ struct NonCuratedPluginSource {
 
 #[derive(Default)]
 struct NonCuratedCacheRefreshState {
-    // Keep the configured-list request while it runs so another list can reuse it.
+    // Refreshes configured plugins for the list, including ones that still need to be installed.
+    // Keep this request while it runs so a matching list can reuse it. If a different list
+    // replaces it, the worker finishes its current pass before handling the newer one.
     pending_configured_plugins_refresh: Option<NonCuratedCacheRefreshRequest>,
     last_refreshed: Option<NonCuratedCacheRefreshRequest>,
     in_flight: bool,
@@ -3145,17 +3160,15 @@ impl PluginsManager {
             ));
         }
         if !outcome.upgraded_roots.is_empty() {
-            let mut configured_plugin_keys = configured_plugins_from_stack(
+            let configured_plugins = configured_plugins_from_stack(
                 &config.config_layer_stack,
                 self.codex_home.as_path(),
-            )
-            .into_keys()
-            .collect::<Vec<_>>();
-            configured_plugin_keys.sort_unstable();
-            match refresh_non_curated_plugin_cache_force_reinstall_detailed(
+            );
+            match refresh_non_curated_plugin_cache_with_mode(
                 self.codex_home.as_path(),
                 &outcome.upgraded_roots,
-                &configured_plugin_keys,
+                configured_plugins.keys().map(String::as_str),
+                NonCuratedCacheRefreshMode::ForceReinstall,
                 mode,
             ) {
                 Ok(refresh_outcome) => {
@@ -3408,7 +3421,7 @@ impl PluginsManager {
                     && state
                         .last_refreshed
                         .as_ref()
-                        .is_some_and(|last_refreshed| last_refreshed.covers_sources_for(&request)))
+                        .is_some_and(|last| last.covers_sources_for(&request)))
             {
                 return;
             }
@@ -3452,18 +3465,7 @@ impl PluginsManager {
             return;
         }
         let on_effective_plugins_changed =
-            on_effective_plugins_changed.map(|on_effective_plugins_changed| {
-                let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-                    return on_effective_plugins_changed;
-                };
-                let callback: EffectivePluginsChangedCallback = Arc::new(move |change| {
-                    let on_effective_plugins_changed = Arc::clone(&on_effective_plugins_changed);
-                    runtime.spawn(async move {
-                        on_effective_plugins_changed(change);
-                    });
-                });
-                callback
-            });
+            on_effective_plugins_changed.map(plugin_change_callback_for_worker);
         let manager = Arc::clone(self);
         let codex_home = self.codex_home.clone();
         if let Err(err) = std::thread::Builder::new()

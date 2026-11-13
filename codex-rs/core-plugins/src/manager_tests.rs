@@ -10,7 +10,6 @@ use crate::loader::load_plugin_skill_inventory;
 use crate::loader::load_plugins_from_layer_stack;
 use crate::loader::plugin_capability_summary_from_root;
 use crate::loader::refresh_non_curated_plugin_cache;
-use crate::loader::refresh_non_curated_plugin_cache_force_reinstall;
 use crate::marketplace::MarketplacePluginInstallPolicy;
 use crate::remote::REMOTE_GLOBAL_MARKETPLACE_NAME;
 use crate::remote::REMOTE_WORKSPACE_MARKETPLACE_NAME;
@@ -7135,12 +7134,15 @@ enabled = true
     );
 
     assert!(
-        refresh_non_curated_plugin_cache_force_reinstall(
+        refresh_non_curated_plugin_cache_with_mode(
             tmp.path(),
             &[AbsolutePathBuf::try_from(repo_root).unwrap()],
-            &["sample-plugin@debug".to_string()],
+            ["sample-plugin@debug"],
+            NonCuratedCacheRefreshMode::ForceReinstall,
+            PluginGitMode::Automatic,
         )
         .expect("cache refresh should reinstall unchanged local version")
+        .cache_refreshed
     );
 
     assert_eq!(
