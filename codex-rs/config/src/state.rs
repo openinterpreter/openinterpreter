@@ -5,7 +5,6 @@ use crate::format_config_layer_source;
 
 use super::fingerprint::record_origins;
 use super::fingerprint::version_for_toml;
-use super::key_aliases::normalize_key_aliases;
 use super::key_aliases::normalized_with_key_aliases;
 use super::merge::merge_toml_values;
 use crate::CloudConfigBundleLoader;
@@ -652,7 +651,7 @@ impl ConfigLayerStack {
     pub fn effective_config(&self) -> TomlValue {
         let mut merged = TomlValue::Table(toml::map::Map::new());
         for layer in self.layers_low_to_high() {
-            merge_toml_values(&mut merged, &layer.config);
+            merge_toml_values(&mut merged, &layer.name.effective_values(&layer.config));
         }
         if let Some(requirements) = &self.model_provider_requirements {
             crate::model_provider_requirements::apply(&mut merged, requirements);
@@ -683,7 +682,8 @@ impl ConfigLayerStack {
         let mut provider_paths = vec!["features.network_proxy.credentials.".to_string()];
 
         for layer in self.layers_low_to_high() {
-            let config = normalized_with_key_aliases(&layer.config, &[]);
+            let config =
+                normalized_with_key_aliases(&layer.name.effective_values(&layer.config), &[]);
             if let Some(profiles) = config.get("profiles").and_then(TomlValue::as_table) {
                 provider_paths.extend(
                     profiles
@@ -700,7 +700,14 @@ impl ConfigLayerStack {
             );
         }
 
-        if let Some(layer) = self.layers_low_to_high().next_back() {
+        let needs_effective_origin = |path: &str| {
+            path == "tui.status_line_provider"
+                || path.starts_with("tui.status_line_provider.")
+                || provider_paths.iter().any(|prefix| path.starts_with(prefix))
+        };
+        if origins.keys().any(|path| needs_effective_origin(path))
+            && let Some(layer) = self.layers_low_to_high().next_back()
+        {
             let effective = self.effective_config();
             let mut effective_origins = HashMap::new();
             record_origins(
@@ -711,8 +718,7 @@ impl ConfigLayerStack {
                 &include,
             );
             origins.retain(|path, _| {
-                !provider_paths.iter().any(|prefix| path.starts_with(prefix))
-                    || effective_origins.contains_key(path)
+                !needs_effective_origin(path) || effective_origins.contains_key(path)
             });
         }
 
