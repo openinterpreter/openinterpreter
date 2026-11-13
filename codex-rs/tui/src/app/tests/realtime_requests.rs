@@ -85,9 +85,9 @@ async fn remote_voice_start_routes_v3_offer_and_effective_preference() -> Result
     for (capabilities, expected_voice) in [
         (HistoryCapabilities::Current, Some("juniper")),
         (HistoryCapabilities::ConfigReadUnsupported(-32601), None),
-        (HistoryCapabilities::Current, Some("cove")),
-        (HistoryCapabilities::VoiceCatalogCustom, Some("maple")),
-        (HistoryCapabilities::VoiceCatalogUnavailable, Some("cove")),
+        (HistoryCapabilities::Current, None),
+        (HistoryCapabilities::VoiceCatalogCustom, None),
+        (HistoryCapabilities::VoiceCatalogUnavailable, None),
         (HistoryCapabilities::ConfigReadUnknownVoice, None),
     ] {
         check_remote_voice_start(capabilities, expected_voice).await?;
@@ -1848,7 +1848,8 @@ async fn remote_voice_picker_uses_server_catalog_and_falls_back_when_unavailable
             &app.chat_widget,
             /*width*/ 80,
         );
-        assert_eq!(popup.contains("1. maple (current)"), expected_catalog);
+        assert_eq!(popup.contains("1. maple"), expected_catalog);
+        assert!(!popup.contains("(current)"));
         assert_eq!(popup.contains("  3. spruce"), !expected_catalog);
         if expected_catalog {
             insta::assert_snapshot!("remote_voice_picker_server_default", popup);

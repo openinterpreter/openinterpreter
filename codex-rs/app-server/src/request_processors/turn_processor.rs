@@ -13,6 +13,7 @@ use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageReference as CoreImageReference;
 use codex_protocol::protocol::AdditionalContextEntry as CoreAdditionalContextEntry;
 use codex_protocol::protocol::AdditionalContextKind as CoreAdditionalContextKind;
+use codex_protocol::protocol::RealtimeConversationVersion;
 use codex_protocol::protocol::TurnEnvironmentRequests;
 use codex_protocol::protocol::TurnSettingsUpdate;
 use codex_protocol::protocol::TurnSettingsUpdateOutcome;
@@ -1333,6 +1334,23 @@ impl TurnRequestProcessor {
         else {
             return Ok(None);
         };
+        let voice = match params.voice {
+            Some(voice) => Some(Some(voice)),
+            None if !attaches_existing_call
+                && params.version == Some(RealtimeConversationVersion::V3) =>
+            {
+                let current = thread.config().await;
+                let latest = Box::pin(self.config_manager.load_latest_config_with_session_layers(
+                    &current.config_layer_stack,
+                    &current.cwd,
+                ))
+                .await
+                .map_err(|error| config_load_error(&error))?;
+                // Preserve a cleared preference instead of inheriting the thread's old voice.
+                Some(latest.realtime.voice)
+            }
+            None => None,
+        };
         self.submit_core_op(
             request_id,
             thread.as_ref(),
@@ -1382,7 +1400,7 @@ impl TurnRequestProcessor {
                     }
                 }),
                 version: params.version,
-                voice: params.voice,
+                voice,
             }),
         )
         .await

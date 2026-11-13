@@ -10,17 +10,14 @@ use codex_protocol::protocol::RealtimeVoicesList;
 use uuid::Uuid;
 
 /// Unknown voices belong to newer servers; omit the override instead of blocking audio.
-/// An unset preference explicitly selects the V1/V3 server default, not a stale thread preference.
-fn configured_voice(
-    config: &codex_app_server_protocol::Config,
-    default_voice: RealtimeVoice,
-) -> Result<Option<RealtimeVoice>> {
+/// An unset preference selects the call destination's default at serialization.
+fn configured_voice(config: &codex_app_server_protocol::Config) -> Result<Option<RealtimeVoice>> {
     let value = config
         .additional
         .get("realtime")
         .and_then(|realtime| realtime.get("voice"));
     match value {
-        None | Some(serde_json::Value::Null) => Ok(Some(default_voice)),
+        None | Some(serde_json::Value::Null) => Ok(None),
         Some(value @ serde_json::Value::String(_)) => {
             Ok(serde_json::from_value(value.clone()).ok())
         }
@@ -51,7 +48,6 @@ impl App {
     pub(super) async fn effective_realtime_voice(
         &self,
         app_server: &AppServerSession,
-        voices: &RealtimeVoicesList,
     ) -> Result<Option<RealtimeVoice>> {
         // Session setup installs the active conversation cwd for both server modes.
         let config = crate::config_update::read_effective_config_if_supported(
@@ -61,14 +57,14 @@ impl App {
         .await?;
         config
             .as_ref()
-            .map(|config| configured_voice(config, voices.default_v1))
+            .map(configured_voice)
             .transpose()
             .map(Option::flatten)
     }
 
     pub(super) async fn open_realtime_settings(&mut self, app_server: &AppServerSession) {
         let voices = self.realtime_voices(app_server).await;
-        match self.effective_realtime_voice(app_server, &voices).await {
+        match self.effective_realtime_voice(app_server).await {
             Ok(voice) => self.chat_widget.open_realtime_settings(voice, voices),
             Err(error) => self
                 .chat_widget
@@ -91,11 +87,10 @@ impl App {
         .await
         {
             Ok(response) => {
-                let voices = self.realtime_voices(app_server).await;
                 let effective = crate::config_update::read_effective_config_if_supported(
                     app_server.request_handle(), &self.chat_widget.config_ref().cwd,
                 ).await.and_then(|config| match config.as_ref() {
-                    Some(config) => configured_voice(config, voices.default_v1),
+                    Some(config) => configured_voice(config),
                     None if response.status == codex_app_server_protocol::WriteStatus::OkOverridden => Err(color_eyre::eyre::eyre!("the saved voice is overridden, but this server cannot read effective settings")),
                     None => Ok(Some(voice)),
                 });
