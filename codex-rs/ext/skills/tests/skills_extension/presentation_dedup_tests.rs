@@ -115,6 +115,8 @@ async fn cloud_preference_preserves_aliases_reads_and_executor_fallback() -> Tes
                 &registry,
                 if ready { &roots } else { &[] },
                 WorldStateContributionInput {
+                    ready_selected_capability_roots: &[],
+                    executor_capability_discovery: None,
                     previous_world_state: Some(&previous),
                     model_info: &model_info,
                     thread_id: codex_protocol::ThreadId::new(),

@@ -211,6 +211,8 @@ impl MergeHarness {
             &self.registry,
             &self.roots,
             WorldStateContributionInput {
+                ready_selected_capability_roots: &[],
+                executor_capability_discovery: None,
                 previous_world_state: None,
                 step_store,
                 model_info: &catalog_model_info(),

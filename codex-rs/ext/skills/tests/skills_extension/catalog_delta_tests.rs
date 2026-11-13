@@ -312,6 +312,8 @@ async fn render_catalogs_for_step(
         &registry,
         &roots,
         WorldStateContributionInput {
+            ready_selected_capability_roots: &[],
+            executor_capability_discovery: None,
             previous_world_state: Some(previous),
             step_store: &step_store,
             model_info: &ModelInfo {

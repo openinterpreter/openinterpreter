@@ -102,6 +102,8 @@ async fn config_reload_during_preparation_applies_to_next_step_but_reads_still_c
                 &registry,
                 &roots,
                 WorldStateContributionInput {
+                    ready_selected_capability_roots: &[],
+                    executor_capability_discovery: None,
                     previous_world_state: None,
                     step_store: store,
                     model_info: &model_info,

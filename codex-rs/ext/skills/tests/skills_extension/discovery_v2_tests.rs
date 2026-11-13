@@ -241,6 +241,8 @@ async fn v2_steps_refresh_metadata_and_preserve_separate_environments() -> TestR
                 &registry,
                 &[],
                 WorldStateContributionInput {
+                    ready_selected_capability_roots: &[],
+                    executor_capability_discovery: None,
                     previous_world_state: None,
                     step_store: &step_store,
                     model_info: &catalog_model_info(),

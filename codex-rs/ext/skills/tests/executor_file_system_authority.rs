@@ -35,6 +35,7 @@ use codex_exec_server::WalkEntry;
 use codex_exec_server::WalkEntryKind;
 use codex_exec_server::WalkOptions;
 use codex_exec_server::WalkOutcome;
+#[cfg(windows)]
 use codex_exec_server::WindowsSandboxSelection;
 use codex_exec_server::WriteFileOptions;
 use codex_extension_api::AccessedSelectedCapabilityRoot;
@@ -52,7 +53,6 @@ use codex_skills_extension::catalog::SkillAuthority;
 use codex_skills_extension::catalog::SkillCatalog;
 use codex_skills_extension::catalog::SkillCatalogEntry;
 use codex_skills_extension::catalog::SkillPackageId;
-use codex_skills_extension::catalog::SkillProviderError;
 #[cfg(windows)]
 use codex_skills_extension::catalog::SkillReadResult;
 use codex_skills_extension::catalog::SkillResourceId;
@@ -357,12 +357,10 @@ async fn skill_loading_and_reads_use_the_supplied_executor_file_system() {
     );
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn windows_executor_skill_read_requires_a_requested_sandbox() {
-    let provider = ExecutorSkillProvider::new_with_restriction_product(
-        Arc::new(EnvironmentManager::default_for_tests()),
-        /*restriction_product*/ None,
-    );
+    let provider = ExecutorSkillProvider::new_with_restriction_product(None);
     let mut sandbox = FileSystemSandboxContext::from_permission_profile(
         PermissionProfile::from_runtime_permissions(
             &FileSystemSandboxPolicy::restricted(Vec::new()),
@@ -371,35 +369,35 @@ async fn windows_executor_skill_read_requires_a_requested_sandbox() {
         PathUri::parse("file:///C:/skill").expect("Windows resource cwd"),
     );
     sandbox.windows_sandbox_selection = WindowsSandboxSelection::Disabled;
-    let access = FileSystemEnvironmentAccessor::new(&file_system, sandbox);
+    let access = FileSystemEnvironmentAccessor::new(&LOCAL_FS, sandbox.clone());
+    let resource = SkillResourceId::environment(
+        "skill://windows-root/C:/skill/SKILL.md",
+        "local",
+        PathUri::parse("file:///C:/skill/SKILL.md").expect("Windows skill path"),
+    );
     let error = provider
         .read(SkillReadRequest {
             authority: SkillAuthority::new(SkillSourceKind::Executor, "windows-root"),
             package: SkillPackageId("skill://windows-root/C:/skill".into()),
             resource: resource.clone(),
-            resolved_executor_roots: Vec::new(),
-            sandbox: Some(sandbox.clone()),
-            host_snapshot: None,
-            mcp_resources: None,
+            context: SkillReadContext::Executor { fs: &access },
         })
         .await
         .expect_err("disabled Windows sandbox must fail closed");
-    assert_eq!(
-        error.message,
-        "executor skill resource requires an unavailable filesystem sandbox"
+    assert!(
+        error
+            .message
+            .starts_with("failed to read executor skill resource")
     );
 
     sandbox.windows_sandbox_selection = WindowsSandboxSelection::Mxc;
+    let access = FileSystemEnvironmentAccessor::new(&LOCAL_FS, sandbox);
     let error = provider
         .read(SkillReadRequest {
-            _lifetime: PhantomData,
             authority: SkillAuthority::new(SkillSourceKind::Executor, "windows-root"),
             package: SkillPackageId("skill://windows-root/C:/skill".into()),
             resource,
-            resolved_executor_roots: Vec::new(),
-            sandbox: Some(sandbox),
-            host_snapshot: None,
-            mcp_resources: None,
+            context: SkillReadContext::Executor { fs: &access },
         })
         .await
         .expect_err("synthetic Windows resource should not be readable");
@@ -409,7 +407,6 @@ async fn windows_executor_skill_read_requires_a_requested_sandbox() {
             .starts_with("failed to read executor skill resource"),
         "{error:?}"
     );
-    std::fs::remove_dir_all(test_root)
 }
 
 #[tokio::test]
