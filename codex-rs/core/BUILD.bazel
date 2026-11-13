@@ -2,7 +2,12 @@ load("//:defs.bzl", "codex_rust_crate")
 
 codex_rust_crate(
     name = "core",
-    compile_data = glob(["assets/**"]),
+    compile_data = glob([
+        "assets/**",
+        "src/harness/**/*.md",
+        "src/harness/**/*.json",
+        "src/tools/handlers/kimi_code_skills/*.md",
+    ]),
     crate_name = "codex_core",
     crate_srcs = glob(["src/**/*.rs"]) + [
         "//codex-rs/ext/guardian-v2:src/sync_reviewer/reviewer_config.rs",
