@@ -22,6 +22,7 @@ use crate::thread_spawn::ThreadSpawnResult;
 use codex_history::InitialHistory;
 use codex_protocol::AgentPath;
 use codex_protocol::SessionId;
+use codex_protocol::capabilities::EnvironmentCapabilityRoots;
 use codex_protocol::error::AgentErrorContext;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
@@ -82,11 +83,22 @@ async fn prepare_spawn_inputs(
     };
     thread_options
         .thread_extension_init
-        .insert(snapshot.selected_capability_roots());
+        .insert(EnvironmentCapabilityRoots::collect(
+            snapshot
+                .iter()
+                .map(|selection| &selection.selected_capability_roots),
+        ));
     thread_options
         .thread_extension_init
         .insert(HostToolInvocationLookup);
-    thread_options.inherited_environments = options.environments;
+    thread_options.environments = options.environments.map(|selections| {
+        selections
+            .into_iter()
+            .map(|selection| selection.into_request())
+            .collect()
+    });
+    thread_options.inherited_environments =
+        Some(parent.session.inherited_environment_snapshot().await);
     let client_metadata = parent.session.app_server_client_metadata().await;
     let inheritance = PreparedChildInheritance {
         instructions,

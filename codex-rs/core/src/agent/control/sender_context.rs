@@ -16,9 +16,9 @@ use codex_thread_store::LoadThreadHistoryParams;
 use codex_utils_output_truncation::TruncationPolicy;
 use std::time::Duration;
 
-use super::LocalAgentControl;
+use super::LocalAgentRuntime;
 
-impl LocalAgentControl {
+impl LocalAgentRuntime {
     pub(crate) async fn capture_sender_user_messages(
         &self,
         item: &ResponseItem,

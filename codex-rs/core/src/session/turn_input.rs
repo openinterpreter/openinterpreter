@@ -1120,7 +1120,7 @@ async fn capture_sender_user_messages(
     // turn is bound after admission in pending_turn_input.
     session
         .services
-        .agent_control
+        .local_agent_runtime
         .capture_sender_user_messages(item, session.thread_id, "")
         .await
 }

@@ -317,6 +317,19 @@ pub struct LoadedAgentsMd {
 }
 
 impl LoadedAgentsMd {
+    /// Host child startup inherits the two instruction scopes independently.
+    pub(crate) fn user_instructions_text(&self) -> Option<&str> {
+        self.user_instructions
+            .as_ref()
+            .map(|entry| entry.text.as_str())
+    }
+
+    pub(crate) fn thread_instructions_text(&self) -> Option<&str> {
+        self.thread_instructions
+            .as_ref()
+            .map(|entry| entry.text.as_str())
+    }
+
     /// Creates loaded instructions containing one user-level AGENTS.md entry.
     pub fn new_user(contents: String, path: AbsolutePathBuf) -> Self {
         if contents.trim().is_empty() {

@@ -5,6 +5,7 @@ use super::LocalAgentRuntime;
 use crate::agent::types::AgentMetadata;
 use crate::session_prefix::format_subagent_context_line;
 use crate::thread_manager::ThreadManagerState;
+use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::AgentErrorContext;
 use codex_protocol::error::CodexErr;
@@ -13,6 +14,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 impl LocalAgentRuntime {
+    pub(crate) fn agent_id_for_path(&self, path: &AgentPath) -> Option<ThreadId> {
+        self.registry.agent_id_for_path(path)
+    }
+
     pub(crate) fn register_session_root(
         &self,
         current_thread_id: ThreadId,

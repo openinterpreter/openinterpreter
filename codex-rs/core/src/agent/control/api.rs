@@ -52,9 +52,7 @@ impl AgentControl for LocalAgentControl {
             if let Ok(thread_id) = ThreadId::from_string(target) {
                 return Ok(thread_id);
             }
-            self.runtime
-                .resolve_agent_reference(caller, source, target)
-                .await
+            self.resolve_agent_reference(caller, source, target).await
         })
     }
 

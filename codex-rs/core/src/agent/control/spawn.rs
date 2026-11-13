@@ -716,13 +716,9 @@ impl LocalAgentControl {
             .runtime
             .registry
             .reserve_spawn_slot(reservation_max_threads)?;
-        let inherited_environments = match &options.environments {
-            Some(environments) => Some(environments.clone()),
-            None => {
-                self.inherited_environments_for_source(&state, session_source.as_ref())
-                    .await
-            }
-        };
+        let inherited_environments = self
+            .inherited_environments_for_source(&state, session_source.as_ref())
+            .await;
         // Omitted plugin choices follow the parent even when no history is copied.
         // Explicit choices, including an empty list, belong to the spawning turn.
         let mut disabled_plugin_ids = options.disabled_plugin_ids.clone();
@@ -767,10 +763,13 @@ impl LocalAgentControl {
         let mut start_options = StartThreadOptions {
             session_source: session_source.clone(),
             thread_source: session_source.as_ref().map(|_| ThreadSource::Subagent),
-            environments: options
-                .environments
-                .as_ref()
-                .map(TurnEnvironmentSnapshot::inheritable_requests),
+            environments: options.environments.as_ref().map(|selections| {
+                selections
+                    .iter()
+                    .cloned()
+                    .map(|selection| selection.into_request())
+                    .collect()
+            }),
             inherited_environments,
             disabled_plugin_ids,
             ..StartThreadOptions::new(config.clone())

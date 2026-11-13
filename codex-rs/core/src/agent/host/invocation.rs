@@ -230,11 +230,11 @@ pub(crate) async fn prepare(
         Ok(PreparedChildContext {
             originator: turn.originator.clone(),
             user_instructions: instructions
-                .and_then(|md| md.user_instructions.as_ref())
-                .map(|entry| entry.text.clone()),
+                .and_then(|md| md.user_instructions_text())
+                .map(str::to_owned),
             thread_instructions: instructions
-                .and_then(|md| md.thread_instructions.as_ref())
-                .map(|entry| entry.text.clone()),
+                .and_then(|md| md.thread_instructions_text())
+                .map(str::to_owned),
             cwd,
             environments: step.inherited_environments.inheritable_requests(),
             selected_capability_roots: step.inherited_environments.selected_capability_roots(),
