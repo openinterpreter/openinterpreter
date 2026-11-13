@@ -11,6 +11,26 @@ use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 
 impl Session {
+    pub(super) async fn emit_turn_start_gate(
+        self: &Arc<Self>,
+        turn_context: &TurnContext,
+    ) -> Result<(), String> {
+        let collaboration_mode = turn_context.collaboration_mode();
+        for contributor in self.services.extensions.turn_lifecycle_contributors() {
+            contributor
+                .turn_start_gate(codex_extension_api::TurnStartInput {
+                    turn_id: turn_context.sub_id.as_str(),
+                    collaboration_mode: &collaboration_mode,
+                    token_usage_at_turn_start: None,
+                    session_store: &self.services.session_extension_data,
+                    thread_store: &self.services.thread_extension_data,
+                    turn_store: turn_context.extension_data.as_ref(),
+                })
+                .await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn emit_turn_start_lifecycle(
         self: &Arc<Self>,
         turn_context: &TurnContext,
@@ -53,6 +73,15 @@ impl Session {
     }
 
     pub(crate) async fn emit_thread_idle_lifecycle_if_idle(&self, cause: ThreadIdleCause) {
+        self.emit_thread_idle_lifecycle_if_idle_for_turn(cause, None)
+            .await;
+    }
+
+    pub(crate) async fn emit_thread_idle_lifecycle_if_idle_for_turn(
+        &self,
+        cause: ThreadIdleCause,
+        turn_id: Option<&str>,
+    ) {
         let cause = {
             let active_turn = self.active_turn.lock().await;
             if active_turn.is_some() {
@@ -72,6 +101,7 @@ impl Session {
             contributor
                 .on_thread_idle(codex_extension_api::ThreadIdleInput {
                     cause,
+                    turn_id,
                     session_store: &self.services.session_extension_data,
                     thread_store: &self.services.thread_extension_data,
                 })

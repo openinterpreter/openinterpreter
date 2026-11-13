@@ -1528,6 +1528,10 @@ impl AppServerSession {
                     objective,
                     status,
                     token_budget,
+                    expected_goal_id: None,
+                    expected_status: None,
+                    expected_mission_revision: None,
+                    expected_lifecycle_revision: None,
                 },
             })
             .await
@@ -1544,6 +1548,10 @@ impl AppServerSession {
                 request_id,
                 params: ThreadGoalClearParams {
                     thread_id: thread_id.to_string(),
+                    expected_goal_id: None,
+                    expected_status: None,
+                    expected_mission_revision: None,
+                    expected_lifecycle_revision: None,
                 },
             })
             .await
