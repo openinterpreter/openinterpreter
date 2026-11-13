@@ -516,6 +516,7 @@ fn http_status(error: &TransportError) -> Option<http::StatusCode> {
         | TransportError::Network(_)
         | TransportError::Build(_)
         | TransportError::ResponseTooLarge { .. } => None,
+        TransportError::Policy(_) => None,
     }
 }
 
