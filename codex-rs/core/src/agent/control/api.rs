@@ -12,6 +12,7 @@ use crate::agent::api::AgentTurnOutcome;
 use crate::agent::api::DeliveryReceipt;
 use crate::agent::api::SendRequest;
 use crate::agent::api::SpawnRequest;
+use crate::agent::api::StatusSubscription;
 use crate::agent::types::AgentExecutionGuard;
 use crate::agent::types::LiveAgent;
 use crate::agent::types::MessageDeliveryMode;
@@ -28,6 +29,8 @@ use codex_protocol::error::Result;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TokenUsage;
+use codex_protocol::protocol::TokenUsageInfo;
+use codex_rollout::RolloutItem;
 use codex_rollout_trace::ThreadTraceContext;
 use futures::future::BoxFuture;
 use std::collections::HashSet;
@@ -263,6 +266,34 @@ impl AgentControl for LocalAgentControl {
             // Stable sorting preserves alphabetical order within each group.
             agent_paths.sort_by_key(|path| !loaded_paths.contains(path));
             agent_paths
+        })
+    }
+
+    fn subscribe_status(&self, agent: ThreadId) -> BoxFuture<'_, Result<StatusSubscription>> {
+        Box::pin(async move {
+            self.runtime.ensure_agent_known(agent)?;
+            LocalAgentControl::subscribe_status(self, agent).await
+        })
+    }
+
+    fn agent_result_history(
+        &self,
+        agent: ThreadId,
+    ) -> BoxFuture<'_, Result<(Option<TokenUsageInfo>, Vec<RolloutItem>)>> {
+        Box::pin(async move {
+            self.runtime.ensure_agent_known(agent)?;
+            let manager = self.runtime.upgrade()?;
+            let thread = manager.get_thread(agent).await?;
+            let usage = thread.token_usage_info().await;
+            let history = thread
+                .load_history(/*include_archived*/ false)
+                .await
+                .map_err(|err| {
+                    CodexErr::Fatal(format!(
+                        "failed to read agent {agent} result history: {err}"
+                    ))
+                })?;
+            Ok((usage, history.items))
         })
     }
 

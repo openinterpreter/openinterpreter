@@ -25,6 +25,7 @@ use codex_core::RolloutBudgetReminder;
 use codex_core::SendRequest;
 use codex_core::SpawnRequest;
 use codex_core::StartThreadOptions;
+use codex_core::StatusSubscription;
 use codex_core::ThreadConfigSnapshot;
 use codex_core::TurnInput;
 use codex_core::TurnInputRequest;
@@ -240,6 +241,23 @@ impl AgentControl for TestAgentControl {
 
     fn child_agent_paths(&self, _parent: ThreadId) -> BoxFuture<'_, Vec<AgentPath>> {
         Box::pin(async { Vec::new() })
+    }
+
+    fn subscribe_status(&self, _agent: ThreadId) -> BoxFuture<'_, CodexResult<StatusSubscription>> {
+        panic!("unexpected agent status subscription")
+    }
+
+    fn agent_result_history(
+        &self,
+        _agent: ThreadId,
+    ) -> BoxFuture<
+        '_,
+        CodexResult<(
+            Option<codex_protocol::protocol::TokenUsageInfo>,
+            Vec<RolloutItem>,
+        )>,
+    > {
+        panic!("unexpected agent result history read")
     }
 
     fn check_turn_admission(

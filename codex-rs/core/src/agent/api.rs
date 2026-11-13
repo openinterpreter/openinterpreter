@@ -23,8 +23,10 @@ use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TokenUsage;
+use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::turn_input::TurnStartOptions;
 use codex_protocol::user_input::UserInput;
+use codex_rollout::RolloutItem;
 use codex_rollout_trace::ThreadTraceContext;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
@@ -115,6 +117,15 @@ pub trait AgentControl: Send + Sync {
     /// children come first, alphabetically within each group; an unknown parent yields none.
     /// This reads existing membership without registering the parent or loading children.
     fn child_agent_paths(&self, parent: ThreadId) -> BoxFuture<'_, Vec<AgentPath>>;
+
+    /// Observe a loaded child's initial status and subsequent updates without a lost wakeup.
+    fn subscribe_status(&self, agent: ThreadId) -> BoxFuture<'_, Result<StatusSubscription>>;
+
+    /// Read a known child's usage and persisted rollout for harness result accounting.
+    fn agent_result_history(
+        &self,
+        agent: ThreadId,
+    ) -> BoxFuture<'_, Result<(Option<TokenUsageInfo>, Vec<RolloutItem>)>>;
 
     /// Check capacity before accepting work. This advisory check does not reserve a slot.
     fn check_turn_admission(
