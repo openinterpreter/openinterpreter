@@ -220,13 +220,7 @@ fn validate_bundled_base_url(base_url: &str) -> Result<(), String> {
 }
 
 pub fn local_model_spec(model: &str) -> Option<&'static LocalModelSpec> {
-    LOCAL_MODEL_SPECS.iter().find(|spec| {
-        spec.id == model
-            || spec
-                .id
-                .strip_suffix(":Q4_K_M")
-                .is_some_and(|without_quant| without_quant == model)
-    })
+    LOCAL_MODEL_SPECS.iter().find(|spec| spec.id == model)
 }
 
 pub fn local_model_description(model: &str) -> Option<String> {
@@ -730,6 +724,13 @@ mod tests {
         let model = &LOCAL_MODEL_SPECS[1];
         let body = json!({"data": [{"id": format!("/models/{}", model.filename)}]});
         assert_eq!(classify_loaded_model(&body, model), LocalServerState::Ready);
+    }
+
+    #[test]
+    fn model_selection_requires_the_exact_catalog_identifier() {
+        let model = &LOCAL_MODEL_SPECS[1];
+        assert_eq!(local_model_spec(model.id), Some(model));
+        assert!(local_model_spec(model.id.strip_suffix(":Q4_K_M").unwrap()).is_none());
     }
 
     #[test]
