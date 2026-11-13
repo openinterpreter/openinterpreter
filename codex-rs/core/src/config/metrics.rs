@@ -18,7 +18,7 @@ pub(crate) fn legacy_multi_agent_disabled_sources(stack: &ConfigLayerStack) -> V
                 .and_then(toml::Value::as_bool)
                 == Some(false)
         })
-        .map(|layer| match layer.name {
+        .map(|layer| match &layer.name {
             ConfigLayerSource::User { .. } => "user",
             ConfigLayerSource::System { .. } => "system",
             ConfigLayerSource::Project { .. } => "project",
