@@ -92,7 +92,11 @@ fn plugin_skills_to_info<'a>(
                 }
             }),
             path: Some(skill.path_to_skills_md.clone().into()),
-            enabled: !disabled_skill_paths.contains(&skill.path_to_skills_md),
+            // A URI that cannot become a native path cannot safely bypass a disabled rule.
+            enabled: skill
+                .path_to_skills_md
+                .to_abs_path()
+                .is_ok_and(|path| !disabled_skill_paths.contains(&path)),
         })
         .collect()
 }
