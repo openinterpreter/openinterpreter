@@ -43,9 +43,6 @@ const SERVICE_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 mod group_change;
 mod refresh_retry;
 
-mod group_change;
-mod refresh_retry;
-
 impl WindowsSandboxProvisioningSettings {
     /// Derives the full firewall settings using the same environment handling as elevated setup.
     pub fn from_environment(
@@ -293,6 +290,7 @@ fn read_response(
 }
 
 fn connect(deadline: Instant) -> anyhow::Result<Option<File>> {
+    let startup_deadline = deadline.min(Instant::now() + SERVICE_STARTUP_TIMEOUT);
     let pipe_name = crate::windows_sandbox_service_pipe_name()?;
     let open_pipe = || {
         OpenOptions::new()
@@ -395,6 +393,22 @@ fn query_service_status() -> anyhow::Result<Services::SERVICE_STATUS_PROCESS> {
         return Err(io::Error::last_os_error()).context("query sandbox provisioning service");
     }
     Ok(status)
+}
+
+fn open_service(access: u32) -> anyhow::Result<ServiceHandle> {
+    let manager = ServiceHandle(unsafe {
+        Services::OpenSCManagerW(ptr::null(), ptr::null(), Services::SC_MANAGER_CONNECT)
+    });
+    if manager.0.is_null() {
+        return Err(io::Error::last_os_error()).context("open service control manager");
+    }
+    let service_name = crate::to_wide(crate::windows_sandbox_service_name()?);
+    let service =
+        ServiceHandle(unsafe { Services::OpenServiceW(manager.0, service_name.as_ptr(), access) });
+    if service.0.is_null() {
+        return Err(io::Error::last_os_error()).context("open sandbox provisioning service");
+    }
+    Ok(service)
 }
 
 struct ServiceHandle(SC_HANDLE);

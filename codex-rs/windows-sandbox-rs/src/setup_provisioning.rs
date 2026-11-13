@@ -32,6 +32,7 @@ use crate::sandbox_bin_dir;
 use crate::sandbox_dir;
 use crate::sandbox_secrets_dir;
 use crate::set_local_user_flags;
+use crate::setup_acl_error::{WriteAclOperation, record_acl_failure};
 use crate::setup_error_path;
 use crate::setup_log_writer;
 use crate::string_from_sid_bytes;
@@ -940,7 +941,7 @@ fn lock_sandbox_bin_dir(payload: &Payload, sandbox_group_sid: &[u8]) -> Result<(
         GRANT_ACCESS,
         FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
         FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE | WRITE_DAC,
-        DaclInheritance::Protected,
+        DirectoryAcl::ApplyProtected,
         payload.mode,
     )
     .map_err(|err| {

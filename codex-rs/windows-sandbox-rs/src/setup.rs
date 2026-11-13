@@ -360,6 +360,9 @@ fn run_setup_refresh_inner(
         allow_local_binding: offline_proxy_settings.allow_local_binding,
         otel: None,
         real_user: crate::runtime_ownership::current_setup_user()?,
+        user_profile: std::env::var_os("USERPROFILE")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
         mode: SetupMode::Full,
         runtime,
         refresh_only: true,

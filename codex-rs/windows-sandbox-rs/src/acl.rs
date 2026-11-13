@@ -64,6 +64,7 @@ use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
 use windows_sys::Win32::Storage::FileSystem::VOLUME_NAME_NONE;
 use windows_sys::Win32::Storage::FileSystem::WRITE_DAC;
 use windows_sys::Win32::Storage::FileSystem::WRITE_OWNER;
+use windows_sys::Win32::System::SystemServices::MAXIMUM_ALLOWED;
 const SE_KERNEL_OBJECT: u32 = 6;
 const OBJECT_INHERIT_ACE_FLAG: u8 = 0x01;
 const INHERIT_ONLY_ACE: u8 = 0x08;

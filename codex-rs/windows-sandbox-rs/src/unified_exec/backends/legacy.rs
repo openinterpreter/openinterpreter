@@ -107,7 +107,7 @@ fn spawn_legacy_process(
     };
     let (pi, job, output_join, writer_handle, hpc, conpty_owner, desktop) = if tty {
         let (pi, mut conpty) =
-            spawn_conpty_process_as_user(token, command, cwd, env_map, launch_desktop)?;
+            spawn_conpty_process_as_user(h_token, command, cwd, env_map, launch_desktop)?;
         let job = conpty
             .job()
             .ok_or_else(|| anyhow::anyhow!("spawned ConPTY is missing its process job"))?;
@@ -121,7 +121,7 @@ fn spawn_legacy_process(
         (pi, job, output_join, writer_handle, hpc, Some(conpty), None)
     } else {
         let pipe_handles = spawn_process_with_pipes(
-            token,
+            h_token,
             command,
             cwd,
             env_map,
