@@ -791,7 +791,7 @@ impl CodexThread {
         &self,
         overrides: CodexThreadSettingsOverrides,
     ) -> ConstraintResult<ThreadConfigSnapshot> {
-        let updates = self.thread_settings_update(overrides);
+        let updates = Self::thread_settings_update(overrides);
         self.session.preview_settings(&updates).await
     }
 
@@ -828,7 +828,7 @@ impl CodexThread {
         &self,
         settings: CodexThreadSettingsOverrides,
     ) -> ConstraintResult<()> {
-        let updates = self.thread_settings_update(settings);
+        let updates = Self::thread_settings_update(settings);
         let commit = self.session.update_settings(updates).await?;
         if let Some(accepted) = commit.host_acceptance {
             let _ = accepted.await;
@@ -925,6 +925,8 @@ impl CodexThread {
         max_wait_ms: Option<u32>,
     ) -> BackgroundTerminalStatus {
         self.session
+            .services
+            .unified_exec_manager
             .read_background_terminal_status(turn_id, item_id, native_process_id, max_wait_ms)
             .await
     }
@@ -982,7 +984,7 @@ impl CodexThread {
     /// Record raw Responses API items without starting a new turn.
     pub async fn inject_response_items(&self, items: Vec<ResponseItem>) -> CodexResult<()> {
         self.inject_response_items_for_turn(items).await?;
-        self.checkpoint_preparation().await?;
+        self.session.flush_rollout().await?;
         Ok(())
     }
 
@@ -1142,7 +1144,7 @@ impl CodexThread {
 
     /// Returns the active turn's reviewer, including live updates, or the thread default.
     pub async fn approvals_reviewer_for_turn(&self, turn_id: &str) -> ApprovalsReviewer {
-        if let Some((turn, inputs, _)) = self
+        if let Some((turn, inputs, _, _)) = self
             .session
             .active_turn_context_and_strict_auto_review()
             .await
