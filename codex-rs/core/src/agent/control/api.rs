@@ -285,6 +285,12 @@ impl AgentControl for LocalAgentControl {
             let manager = self.runtime.upgrade()?;
             let thread = manager.get_thread(agent).await?;
             let usage = thread.token_usage_info().await;
+            // Terminal status can arrive before queued rollout writes are durable.
+            thread.flush_rollout().await.map_err(|err| {
+                CodexErr::Fatal(format!(
+                    "failed to flush agent {agent} result history: {err}"
+                ))
+            })?;
             let history = thread
                 .load_history(/*include_archived*/ false)
                 .await
