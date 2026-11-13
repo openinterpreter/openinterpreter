@@ -1,5 +1,6 @@
 use crate::agent::api::AgentControl;
 use crate::agent_communication::PENDING_MAILBOX_MESSAGES;
+use crate::agent_communication::PendingAgentMessage;
 use crate::state::ActiveTurn;
 use crate::state::MailboxDeliveryPhase;
 use crate::state::TurnState;
@@ -52,7 +53,7 @@ pub enum TurnInput {
     // Preserve the existing serialized format while carrying injection API metadata
     // through the in-memory queue.
     ResponseItem(#[serde(with = "turn_input_response_item")] ResponseItemEnvelope),
-    InterAgentCommunication(crate::PendingAgentMessage),
+    InterAgentCommunication(PendingAgentMessage),
 }
 
 mod turn_input_response_item {
@@ -136,7 +137,7 @@ pub(crate) struct InputQueue {
 }
 
 pub(crate) struct PendingMailboxCommunication {
-    pub(crate) communication: crate::PendingAgentMessage,
+    pub(crate) communication: PendingAgentMessage,
     start_options: TurnStartOptions,
     _diagnostics_guard: GaugeGuard,
 }
@@ -209,7 +210,7 @@ impl InputQueue {
 
     pub(crate) async fn enqueue_mailbox_communication(
         &self,
-        communication: crate::PendingAgentMessage,
+        communication: PendingAgentMessage,
         start_options: TurnStartOptions,
     ) {
         let mut pending = self.mailbox_pending_mails.lock().await;

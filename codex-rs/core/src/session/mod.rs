@@ -3,6 +3,7 @@ pub(crate) mod startup;
 use crate::McpRefreshReason;
 use crate::PromptCacheKey;
 use crate::WithTurnExtensionData;
+use crate::agent_communication::PendingAgentMessage;
 use crate::runtime_auth::RuntimeAuthSlot;
 use codex_login::AuthOwner;
 use std::collections::BTreeMap;
@@ -255,6 +256,7 @@ pub(crate) use file_audio::FileAudioDurations;
 mod approved_plan;
 mod code_mode_warning;
 mod config_refresh;
+pub use config_refresh::ConfigRefreshOutcome;
 pub(crate) mod context_window;
 mod daemon_recovery;
 mod environment;
@@ -4729,7 +4731,7 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         model_info: &ModelInfo,
-        communication: impl Into<crate::PendingAgentMessage>,
+        communication: impl Into<PendingAgentMessage>,
     ) {
         let communication = communication.into();
         let response_item = Self::inter_agent_history_item(&communication, &turn_context.config);

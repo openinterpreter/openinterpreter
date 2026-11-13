@@ -15,6 +15,7 @@ use crate::exec_policy::ExecPolicyManager;
 use crate::kimi_cron::KimiCronService;
 use crate::mcp::McpManager;
 use crate::mcp_tool_exposure::McpHandlerCache;
+use crate::runtime_auth::RuntimeAuthSlot;
 use crate::tools::ExecutedToolCalls;
 use crate::tools::code_mode::CodeModeService;
 use crate::tools::handlers::ToolSearchHandlerCache;

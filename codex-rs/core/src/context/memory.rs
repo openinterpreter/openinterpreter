@@ -1,7 +1,9 @@
 //! Typed, bounded v2 memory context.
 
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::truncate_text;
 
@@ -27,17 +29,14 @@ impl ContextualUserFragment for MemoryContextFragment {
             .to_string(),
         )
     }
-    fn requires_separate_message(&self) -> bool {
-        true
-    }
     fn markers(&self) -> (&'static str, &'static str) {
         Self::type_markers()
     }
     fn type_markers() -> (&'static str, &'static str) {
         ("", "")
     }
-    fn body(&self) -> String {
+    fn body(&self) -> ContentItem {
         let (Self::ReadInstructions(text) | Self::ExtractionEvidence(text)) = self;
-        truncate_text(text, TruncationPolicy::Bytes(8_900))
+        input_text(truncate_text(text, TruncationPolicy::Bytes(8_900)))
     }
 }

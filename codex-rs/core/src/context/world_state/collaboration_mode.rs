@@ -11,6 +11,7 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 use codex_protocol::protocol::COLLABORATION_MODE_CLOSE_TAG;
 use codex_protocol::protocol::COLLABORATION_MODE_OPEN_TAG;
 use serde::Deserialize;

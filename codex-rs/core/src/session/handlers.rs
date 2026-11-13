@@ -1,11 +1,14 @@
 use super::Submission;
+use crate::AgentTreeShutdownFailure;
 use crate::McpRefreshReason;
 use crate::WithTurnExtensionData;
+use crate::agent_communication::PendingAgentMessage;
 use crate::realtime_conversation::handle_audio as handle_realtime_conversation_audio;
 use crate::realtime_conversation::handle_close as handle_realtime_conversation_close;
 use crate::realtime_conversation::handle_speech as handle_realtime_conversation_speech;
 use crate::realtime_conversation::handle_start as handle_realtime_conversation_start;
 use crate::realtime_conversation::handle_text as handle_realtime_conversation_text;
+use crate::thread_manager::thread_store_error_kind;
 use async_channel::Receiver;
 use codex_features::Feature;
 use codex_otel::set_parent_from_w3c_trace_context;
@@ -26,6 +29,8 @@ use crate::tasks::CompactTask;
 use crate::tasks::UserShellCommandMode;
 use crate::tasks::UserShellCommandTask;
 use crate::tasks::execute_user_shell_command;
+use codex_protocol::approvals::ExecApprovalKind;
+use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::Event;
@@ -80,7 +85,7 @@ pub async fn realtime_conversation_list_voices(sess: &Session, sub_id: String) {
 pub async fn inter_agent_communication(
     sess: &Arc<Session>,
     sub_id: String,
-    communication: crate::PendingAgentMessage,
+    communication: PendingAgentMessage,
     start_options: codex_protocol::turn_input::TurnStartOptions,
 ) {
     let trigger_turn = communication.trigger_turn;
@@ -337,7 +342,7 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
             .await
             .into_iter()
             .map(|mail| mail.communication)
-            .filter(crate::PendingAgentMessage::is_terminal_result)
+            .filter(PendingAgentMessage::is_terminal_result)
             .collect();
         if !pending.is_empty() && sess.live_thread().is_some() {
             let turn_id = {
@@ -544,7 +549,7 @@ pub(super) async fn submission_loop(
                                 if let Op::InterAgentCommunication { communication, start_options } = sub.op
                                     && sub.message_delivery.as_ref().is_some_and(crate::agent_communication::MessageDelivery::awaits_result_write)
                                 {
-                                    let mail = crate::PendingAgentMessage::new(communication, sub.message_delivery);
+                                    let mail = PendingAgentMessage::new(communication, sub.message_delivery);
                                     inter_agent_communication(&sess, sub.id, mail, start_options).await;
                                 }
                             }
@@ -809,7 +814,7 @@ pub(super) async fn submission_loop(
                     start_options,
                 } => {
                     let communication =
-                        crate::PendingAgentMessage::new(communication, sub.message_delivery);
+                        PendingAgentMessage::new(communication, sub.message_delivery);
                     inter_agent_communication(&sess, sub.id.clone(), communication, start_options)
                         .await;
                     false

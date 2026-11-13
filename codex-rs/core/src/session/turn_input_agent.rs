@@ -2,10 +2,10 @@
 //! Acceptance means queued by Core; the recipient can consume the input in a later turn.
 //! Follow-ups retain the recipient's settings and pass turn-start metadata to native delivery.
 
-use crate::PendingAgentMessage;
 use crate::WithTurnExtensionData;
 use crate::agent::types::AgentMessage;
 use crate::agent::types::MessageDeliveryMode;
+use crate::agent_communication::PendingAgentMessage;
 use crate::session::handlers;
 use crate::session::session::Session;
 use codex_protocol::error::Result as CodexResult;

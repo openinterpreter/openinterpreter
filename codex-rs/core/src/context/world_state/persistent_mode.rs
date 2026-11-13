@@ -10,6 +10,7 @@ use crate::context::ContextualUserFragment;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::input_text;
+use codex_protocol::openai_models::ReasoningEffort;
 use serde::Deserialize;
 use serde::Serialize;
 

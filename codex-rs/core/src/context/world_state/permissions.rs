@@ -4,6 +4,7 @@ use super::PreviousSectionState;
 use super::SectionTransition;
 use super::WorldStateHash;
 use super::WorldStateSection;
+use super::WorldStateUpdate;
 use crate::context::ApprovedCommandPrefixSaved;
 use crate::context::ContextualUserFragment;
 use crate::context::PermissionsInstructions;

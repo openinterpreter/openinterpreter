@@ -3,7 +3,6 @@
 use crate::McpRefreshReason;
 use std::sync::Arc;
 
-use crate::ConfigRefreshOutcome;
 use crate::config::Config;
 use crate::config::Constrained;
 use crate::config::RuntimeConfigRefresh;
@@ -12,6 +11,14 @@ use codex_config::CloudConfigBundleBindingStatus;
 use codex_config::McpServerAuth;
 use codex_features::Feature;
 use tracing::warn;
+
+/// Result of a runtime configuration publication attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigRefreshOutcome {
+    Published,
+    Rejected,
+    Stale,
+}
 
 impl Session {
     pub(crate) async fn disable_mcp_enterprise_auth(&self) {

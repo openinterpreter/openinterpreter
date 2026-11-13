@@ -16,6 +16,7 @@ mod guardian_approved_action;
 mod guardian_assistant_context;
 mod guardian_budget_omission;
 mod guardian_context_mode;
+pub use guardian_context_mode::GuardianContextMode;
 mod guardian_conversation_history;
 pub use guardian_budget_omission::GuardianBudgetOmission;
 mod guardian_followup_review_reminder;

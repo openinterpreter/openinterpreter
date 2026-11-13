@@ -9,6 +9,18 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 
+/// File-backed audio must use typed turn input so its attachment is prepared
+/// before the item enters the model-visible history. Reject the entire batch
+/// before recording any item when this validation fails.
+pub(crate) fn validate_injected_response_item(item: &ResponseItem) -> CodexResult<()> {
+    if item.file_audio_ids().next().is_some() {
+        return Err(CodexErr::InvalidRequest(
+            "file-backed audio requires typed turn input".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl Session {
     /// Returns the input if there is no active turn to inject into.
     #[expect(

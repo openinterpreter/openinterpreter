@@ -244,7 +244,7 @@ impl StepSettings {
         &self,
         models_manager: &dyn ModelsManager,
         overrides: &ModelInfoOverrides,
-    ) -> ModelInfo {
+    ) -> CatalogModel {
         let config = overrides.models_manager_config(self.personality);
         models_manager
             .get_model_info(self.collaboration_mode.model(), &config)

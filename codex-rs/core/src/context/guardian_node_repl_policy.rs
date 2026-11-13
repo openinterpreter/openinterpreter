@@ -1,6 +1,8 @@
 use super::ContextualUserFragment;
 use codex_prompts::ResolvedModelMessages;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GuardianNodeReplPolicy {
