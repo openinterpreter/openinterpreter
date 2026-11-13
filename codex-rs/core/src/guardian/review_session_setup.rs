@@ -48,7 +48,7 @@ impl PreparedGuardianContext {
             context_policy::root_review_version(context_policy, &parent).await;
         let parent_compaction = context_policy.parent_compaction(history.annotated_items())?;
         let mut instructions = parent.inherited_instructions().await;
-        context.capture_project_instructions(&parent).await;
+        context.capture_project_instructions(&parent).await?;
         instructions.project_snapshot = context.project_instructions.clone();
         let mut key = GuardianReviewSessionReuseKey::from_spawn_config(
             &config,

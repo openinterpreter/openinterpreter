@@ -3,6 +3,7 @@
 
 use super::super::runtime::validate;
 use super::*;
+use crate::agent::api::AgentControl;
 use crate::codex_thread::GuardianAuthorizationVersion;
 use codex_config::config_toml::CircuitBreakAction;
 use codex_guardian_reviewer::ReviewDeadline;
@@ -132,7 +133,12 @@ impl ReviewHost for super::super::runtime::ReviewRuntime {
             Ok(request) => request.clone(),
             Err(decision) => return Err(decision),
         };
-        context.capture_project_instructions(&session).await;
+        if let Err(error) = context.capture_project_instructions(&session).await {
+            tracing::warn!(%error, "Guardian project instruction capture failed");
+            return Err(ReviewDecision::denied(
+                "Guardian project instructions could not be captured",
+            ));
+        }
         let model_context = context.model_context();
         let turn = Arc::clone(context.turn());
         let GuardianReviewOptions {

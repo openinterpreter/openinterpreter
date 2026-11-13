@@ -112,14 +112,18 @@ pub(crate) struct GuardianReviewContext {
 
 impl GuardianReviewContext {
     /// Keep the issuing instructions across retries even if a later turn selects other environments.
-    async fn capture_project_instructions(&mut self, session: &crate::session::session::Session) {
+    async fn capture_project_instructions(
+        &mut self,
+        session: &crate::session::session::Session,
+    ) -> codex_protocol::error::Result<()> {
         if self.project_instructions.is_none() {
             self.project_instructions = session
                 .services
                 .agents_md_manager
                 .project_snapshot(&self.turn.config, &self.environments)
-                .await;
+                .await?;
         }
+        Ok(())
     }
 
     pub(crate) fn model_context(&self) -> ModelInvocationContext {
