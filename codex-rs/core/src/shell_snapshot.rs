@@ -7,6 +7,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use crate::StateDbHandle;
+use crate::exec_env::CODEX_TOOL_CALL_ID_ENV_VAR;
 use crate::rollout::list::find_thread_path_by_id_str;
 use crate::shell::Shell;
 use crate::shell::ShellType;

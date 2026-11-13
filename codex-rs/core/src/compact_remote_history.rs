@@ -5,6 +5,8 @@ use crate::context::ContextualUserFragment;
 use crate::context::ImageResizeNotice;
 use crate::context_manager::ContextManager;
 use crate::context_manager::estimate_item_token_count;
+use crate::context_manager::estimate_item_token_count_with_audio;
+use crate::session::FileAudioDurations;
 use crate::session::turn_context::TurnContext;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::BaseInstructions;

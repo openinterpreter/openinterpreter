@@ -88,6 +88,7 @@ pub(crate) async fn handle_response_stream_error(
     let Some(delay) = err.retry_delay(retry_count) else {
         return Err(err);
     };
+    let retry_after = err.retry_after();
 
     if turn_context
         .config

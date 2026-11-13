@@ -124,6 +124,8 @@ impl ImagePreparationError {
 }
 
 pub(crate) async fn prepare_response_items(
+    thread_id: &str,
+    ephemeral: bool,
     items: &mut Vec<ResponseItem>,
     mode: ImagePreparationMode,
     resize_notice_mode: ImageResizeNoticeMode,

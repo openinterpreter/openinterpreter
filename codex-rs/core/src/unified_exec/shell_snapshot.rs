@@ -25,6 +25,7 @@ use crate::exec_env::inject_session_env;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::shell::ShellType;
+use crate::tools::handlers::unified_exec::preparation::PreparedExecCommand;
 use crate::tools::sandboxing::executor_windows_sandbox_selection;
 
 impl Session {

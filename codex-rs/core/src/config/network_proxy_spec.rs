@@ -24,8 +24,10 @@ use codex_network_proxy::managed_proxy_ports;
 use codex_network_proxy::normalize_host;
 use codex_network_proxy::validate_policy_against_constraints;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::protocol::AskForApproval;
 use codex_utils_path_uri::Platform;
 use std::collections::HashSet;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -322,7 +324,6 @@ impl NetworkProxySpec {
                 permission_profile,
             )?,
         };
-        spec.config.allow_local_binding = Some(local_binding_policy.resolve(&spec.config));
         policy.apply_to(&mut spec.config);
         spec.config.allow_local_binding =
             Some(routed_binding.unwrap_or_default().resolve(&spec.config));
