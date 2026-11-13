@@ -3513,6 +3513,20 @@ fn record_items_omits_audio_that_exceeds_the_output_budget() {
 }
 
 #[test]
+fn video_function_output_counts_its_reference_in_context_estimate() {
+    let video_url = "ms://file-123";
+    let output =
+        FunctionCallOutputBody::ContentItems(vec![FunctionCallOutputContentItem::InputVideo {
+            video_url: video_url.to_string(),
+            id: Some("clip-1".to_string()),
+        }]);
+    assert_eq!(
+        estimate_function_output_bytes(&output, &FileAudioDurations::default()),
+        text_bytes(video_url)
+    );
+}
+
+#[test]
 fn non_base64_image_urls_use_image_estimates() {
     let message_item = ResponseItem::Message {
         status: None,

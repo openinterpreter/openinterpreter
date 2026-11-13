@@ -1621,6 +1621,9 @@ fn estimate_function_output_bytes(
                 FunctionCallOutputContentItem::InputImage { image, detail } => {
                     estimate_image_reference_bytes(image, *detail)
                 }
+                FunctionCallOutputContentItem::InputVideo { video_url, .. } => {
+                    text_bytes(video_url)
+                }
                 FunctionCallOutputContentItem::InputAudio { audio } => {
                     estimate_audio_reference_bytes(audio, audio_durations)
                 }
