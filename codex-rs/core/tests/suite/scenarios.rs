@@ -105,6 +105,9 @@ mod agent_eviction;
 #[path = "scenarios_budget_context.rs"]
 mod budget_context;
 
+#[path = "scenarios_catalog_apps_instructions_tests.rs"]
+mod catalog_apps_instructions;
+
 #[path = "scenarios_context_management_tools.rs"]
 mod context_management_tools;
 

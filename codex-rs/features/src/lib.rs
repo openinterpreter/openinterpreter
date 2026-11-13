@@ -255,6 +255,8 @@ pub enum Feature {
     SpawnCsv,
     /// Enable apps.
     Apps,
+    /// Use Apps usage instructions from the selected model's catalog entry.
+    CatalogAppsInstructions,
     /// Route first-party ChatGPT requests through PSP.
     Psp,
     /// Enable MCP apps.
@@ -1573,6 +1575,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "apps",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::CatalogAppsInstructions,
+        key: "catalog_apps_instructions",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::Psp,
