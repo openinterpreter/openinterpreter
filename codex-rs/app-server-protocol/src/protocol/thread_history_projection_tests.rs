@@ -84,7 +84,7 @@ fn projects_failed_turn_completion_as_snapshot() {
 
     let changes = project(RolloutItem::EventMsg(EventMsg::TurnComplete(
         TurnCompleteEvent {
-            root_turn_id: None,
+            root_turn_id: Some("root-turn".to_string()),
             turn_id: "turn-1".to_string(),
             last_agent_message: None,
             error: Some(error),
@@ -100,7 +100,7 @@ fn projects_failed_turn_completion_as_snapshot() {
         ThreadHistoryChangeSet {
             changed_turns: vec![ThreadHistoryTurnMetadata {
                 turn_id: "turn-1".to_string(),
-                root_turn_id: None,
+                root_turn_id: Some("root-turn".to_string()),
                 status: TurnStatus::Failed,
                 error: Some(TurnError {
                     misalignment: None,
@@ -264,7 +264,7 @@ fn projects_identified_turn_aborts() {
         ThreadHistoryChangeSet {
             changed_turns: vec![ThreadHistoryTurnMetadata {
                 turn_id: "turn-1".to_string(),
-                root_turn_id: None,
+                root_turn_id: Some("root-turn".to_string()),
                 status: TurnStatus::Interrupted,
                 error: None,
                 started_at: Some(10),
