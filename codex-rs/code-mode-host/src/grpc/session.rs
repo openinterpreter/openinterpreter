@@ -237,9 +237,9 @@ impl GrpcSession {
             });
             Self {
                 id,
-                runtime: Arc::new(InProcessCodeModeSession::with_task_failure_handler(
-                    failure_handler,
-                    limits,
+                runtime: Arc::new(InProcessCodeModeSession::with_options(
+                    options,
+                    Some(failure_handler),
                 )),
                 closed,
                 state: Mutex::new(SessionState::default()),

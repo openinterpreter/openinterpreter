@@ -603,9 +603,9 @@ impl HostState {
         });
         sessions.insert(
             session_id,
-            Arc::new(InProcessCodeModeSession::with_task_failure_handler(
-                task_failure_handler,
-                cell_execution_limits,
+            Arc::new(InProcessCodeModeSession::with_options(
+                options,
+                Some(task_failure_handler),
             )),
         );
         Ok(())
