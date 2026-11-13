@@ -2289,6 +2289,7 @@ dependencies = [
  "caseless",
  "chrono",
  "codex-agent-message-board-client",
+ "codex-attachment-store",
  "codex-config",
  "codex-extension-api",
  "codex-features",
