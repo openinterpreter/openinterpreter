@@ -1,12 +1,13 @@
 //! Retain dynamic tool state in either renderer; the app emits only finished rows to terminal history.
 
 use super::*;
+use codex_app_server_protocol::ThreadItemPayload;
 
 impl ChatWidget {
     pub(super) fn on_dynamic_tool_item(&mut self, item: ThreadItem) {
         let started = matches!(
             &item,
-            ThreadItem::DynamicToolCall {
+            ThreadItemPayload::DynamicToolCall {
                 status: codex_app_server_protocol::DynamicToolCallStatus::InProgress,
                 ..
             }
@@ -25,7 +26,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_dynamic_tool_item_now(&mut self, item: ThreadItem) {
-        let ThreadItem::DynamicToolCall { id, .. } = &item else {
+        let ThreadItemPayload::DynamicToolCall { id, .. } = &item else {
             return;
         };
         let id = id.clone();

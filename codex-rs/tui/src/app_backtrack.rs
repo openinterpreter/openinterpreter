@@ -547,12 +547,12 @@ pub(crate) fn backtrack_revert_before_turn_id(
                     &previous.items
                 };
                 is_hidden_nested_review_turn(previous, turn)
-                    && previous_items
-                        .iter()
-                        .any(|item| matches!(item, ThreadItem::EnteredReviewMode { .. }))
-                    && previous_items
-                        .iter()
-                        .any(|item| matches!(item, ThreadItem::ExitedReviewMode { .. }))
+                    && previous_items.iter().any(|item| {
+                        matches!(item.payload, ThreadItemPayload::EnteredReviewMode { .. })
+                    })
+                    && previous_items.iter().any(|item| {
+                        matches!(item.payload, ThreadItemPayload::ExitedReviewMode { .. })
+                    })
             });
         let first_item = if turn_index == start_turn {
             start_item
@@ -563,10 +563,10 @@ pub(crate) fn backtrack_revert_before_turn_id(
         // therefore must not change the transcript's review visibility or prompt ordinals.
         let mut user_messages_in_turn = turn.items[..first_item]
             .iter()
-            .filter(|item| matches!(item, ThreadItem::UserMessage { .. }))
+            .filter(|item| matches!(item.payload, ThreadItemPayload::UserMessage { .. }))
             .count();
         for item in &turn.items[first_item..] {
-            let content = match item {
+            let content = match &item.payload {
                 ThreadItemPayload::EnteredReviewMode { .. } => {
                     review_mode = true;
                     continue;
@@ -816,7 +816,7 @@ mod tests {
     #[test]
     fn backtrack_revert_before_turn_id_resolves_first_and_later_prompts() {
         let mut hidden = turn("hidden", TurnStatus::Completed, /*user_messages*/ 1);
-        let ThreadItem::UserMessage { content, .. } = &mut hidden.items[0] else {
+        let ThreadItemPayload::UserMessage { content, .. } = &mut hidden.items[0].payload else {
             unreachable!()
         };
         *content = vec![UserInput::Text {

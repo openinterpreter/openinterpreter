@@ -1029,7 +1029,8 @@ async fn prompt_edit_stops_streaming_without_submitting_queued_input() {
 
     let retained_turn = AppServerTurn {
         items: vec![
-            AppServerThreadItem::AgentMessage {
+            AppServerThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: "retained-response".to_string(),
                 text: "retained response".to_string(),
                 phase: Some(MessagePhase::FinalAnswer),
@@ -1037,7 +1038,7 @@ async fn prompt_edit_stops_streaming_without_submitting_queued_input() {
                 delivery: None,
                 questions: None,
             },
-            AppServerThreadItem::UserMessage {
+            AppServerThreadItemPayload::UserMessage {
                 id: "voice-steer".to_string(),
                 client_id: None,
                 content: vec![UserInput::Text {
@@ -1046,7 +1047,8 @@ async fn prompt_edit_stops_streaming_without_submitting_queued_input() {
                     text_elements: Vec::new(),
                 }],
             },
-            AppServerThreadItem::AgentMessage {
+            AppServerThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: "private-commentary".to_string(),
                 text: "hidden voice commentary".to_string(),
                 phase: Some(MessagePhase::Commentary),
@@ -1054,7 +1056,10 @@ async fn prompt_edit_stops_streaming_without_submitting_queued_input() {
                 delivery: None,
                 questions: None,
             },
-        ],
+        ]
+        .into_iter()
+        .map(ThreadItem::untimed)
+        .collect(),
         ..app_server_turn(
             "retained-turn",
             AppServerTurnStatus::Completed,
@@ -1364,7 +1369,7 @@ async fn replayed_mcp_tool_call_stays_active_until_completion() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let _ = drain_insert_history(&mut rx);
 
-    let mut item = AppServerThreadItem::McpToolCall {
+    let mut item = AppServerThreadItemPayload::McpToolCall {
         id: "mcp-1".to_string(),
         server: "copilot-bridge".to_string(),
         tool: "copilot".to_string(),
@@ -1390,7 +1395,7 @@ async fn replayed_mcp_tool_call_stays_active_until_completion() {
     assert!(active.contains("Calling"));
     assert!(!active.contains("MCP tool call completed without a result"));
 
-    if let AppServerThreadItem::McpToolCall { status, .. } = &mut item {
+    if let AppServerThreadItemPayload::McpToolCall { status, .. } = &mut item {
         *status = codex_app_server_protocol::McpToolCallStatus::Completed;
     }
     chat.on_mcp_tool_call_completed(item);

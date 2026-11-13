@@ -18,7 +18,7 @@ async fn image_result_live_and_replay_render_in_the_owning_call() {
             chat.replay_thread_item(item.clone(), "turn-1".into(), ReplayKind::ThreadSnapshot);
         } else {
             let mut started = item.clone();
-            if let AppServerThreadItem::McpToolCall { status, result, .. } = &mut started {
+            if let AppServerThreadItemPayload::McpToolCall { status, result, .. } = &mut started {
                 *status = codex_app_server_protocol::McpToolCallStatus::InProgress;
                 *result = None;
             }

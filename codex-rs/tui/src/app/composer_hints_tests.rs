@@ -41,6 +41,7 @@ async fn usage_notice_preserves_composer_geometry_and_restores_tip_on_recovery()
                     thread_id: ThreadId::new().to_string(),
                     turn: Turn {
                         id: "turn".into(),
+                        root_turn_id: None,
                         items_view: TurnItemsView::Full,
                         items: Vec::new(),
                         status: TurnStatus::InProgress,
@@ -343,6 +344,7 @@ async fn running_turn_dismisses_announcement_across_thread_resets() {
             thread_id: ThreadId::new().to_string(),
             turn: codex_app_server_protocol::Turn {
                 id: "active-turn".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: codex_app_server_protocol::TurnStatus::InProgress,

@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::thread_transcript::tools::McpHistory;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_utils_path_uri::LegacyAppPathString;
 
 impl ChatWidget {
@@ -337,7 +338,9 @@ impl ChatWidget {
             item @ ThreadItemPayload::McpToolCall { .. } => {
                 self.handle_mcp_tool_call_started_now(item);
             }
-            item @ ThreadItem::DynamicToolCall { .. } => self.handle_dynamic_tool_item_now(item),
+            item @ ThreadItemPayload::DynamicToolCall { .. } => {
+                self.handle_dynamic_tool_item_now(item)
+            }
             _ => {}
         }
     }
@@ -347,10 +350,18 @@ impl ChatWidget {
             item @ ThreadItemPayload::CommandExecution { .. } => {
                 self.handle_command_execution_completed_now(item);
             }
-            item @ ThreadItem::FileChange { .. } => self.handle_file_change_completed_now(item),
-            item @ ThreadItem::McpToolCall { .. } => self.handle_mcp_tool_call_completed_now(item),
-            item @ ThreadItem::DynamicToolCall { .. } => self.handle_dynamic_tool_item_now(item),
-            item @ ThreadItem::SubAgentActivity { .. } => self.handle_sub_agent_activity_now(item),
+            item @ ThreadItemPayload::FileChange { .. } => {
+                self.handle_file_change_completed_now(item)
+            }
+            item @ ThreadItemPayload::McpToolCall { .. } => {
+                self.handle_mcp_tool_call_completed_now(item)
+            }
+            item @ ThreadItemPayload::DynamicToolCall { .. } => {
+                self.handle_dynamic_tool_item_now(item)
+            }
+            item @ ThreadItemPayload::SubAgentActivity { .. } => {
+                self.handle_sub_agent_activity_now(item)
+            }
             _ => {}
         }
     }

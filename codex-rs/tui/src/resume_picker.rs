@@ -7651,6 +7651,7 @@ session_picker_view = "dense"
 
         thread.turns.push(codex_app_server_protocol::Turn {
             id: String::from("turn-2"),
+            root_turn_id: None,
             items: Vec::new(),
             status: codex_app_server_protocol::TurnStatus::Failed,
             error: Some(codex_app_server_protocol::TurnError {

@@ -5,11 +5,12 @@ use crate::test_support::PathBufExt;
 use crate::test_support::test_path_buf;
 use crate::thread_transcript::RawReasoningVisibility;
 use crate::thread_transcript::thread_items_to_transcript_cells;
+use codex_app_server_protocol::ThreadItemPayload;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
-fn item(status: DynamicToolCallStatus, output: Option<&str>) -> ThreadItem {
-    ThreadItem::DynamicToolCall {
+fn item(status: DynamicToolCallStatus, output: Option<&str>) -> ThreadItemPayload {
+    ThreadItemPayload::DynamicToolCall {
         id: "dynamic-1".to_string(),
         namespace: Some("example".to_string()),
         tool: "inspect".to_string(),

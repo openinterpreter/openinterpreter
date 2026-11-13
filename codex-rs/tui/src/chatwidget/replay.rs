@@ -5,6 +5,7 @@
 //! state: keep its trailing reasoning provisional until live events identify the next item.
 
 use super::*;
+use codex_app_server_protocol::ThreadItemPayload;
 
 impl ChatWidget {
     /// Restores the active typed reasoning item after a thread switch or session refresh.
@@ -51,16 +52,14 @@ impl ChatWidget {
             }
             ServerNotification::ReasoningTextDelta(delta) => (&delta.turn_id, &delta.item_id),
             ServerNotification::ReasoningSummaryPartAdded(part) => (&part.turn_id, &part.item_id),
-            ServerNotification::ItemCompleted(
-                codex_app_server_protocol::ItemCompletedNotification {
-                    turn_id,
-                    item: ThreadItem::Reasoning { id, .. },
-                    ..
-                },
-            ) => (turn_id, id),
+            ServerNotification::ItemCompleted(completed)
+                if let ThreadItemPayload::Reasoning { id, .. } = &completed.item.payload =>
+            {
+                (&completed.turn_id, id)
+            }
             ServerNotification::ItemStarted(item)
                 if resumed_turn_id == item.turn_id
-                    && !matches!(item.item, ThreadItem::UserMessage { .. })
+                    && !matches!(item.item.payload, ThreadItemPayload::UserMessage { .. })
                     && self.status_state.reasoning_item_id.as_deref() != Some(item.item.id()) =>
             {
                 // A new item closes a trailing snapshot that was already complete at resume.
@@ -78,11 +77,13 @@ impl ChatWidget {
             codex_app_server_protocol::ItemStartedNotification {
                 thread_id: self.thread_id.map(|id| id.to_string()).unwrap_or_default(),
                 turn_id: turn_id.clone(),
-                item: ThreadItem::Reasoning {
-                    id: item_id.clone(),
-                    summary: Vec::new(),
-                    content: Vec::new(),
-                },
+                item: codex_app_server_protocol::ThreadItem::untimed(
+                    ThreadItemPayload::Reasoning {
+                        id: item_id.clone(),
+                        summary: Vec::new(),
+                        content: Vec::new(),
+                    },
+                ),
                 started_at_ms: 0,
             },
             /*parts*/ None,
@@ -136,7 +137,7 @@ impl ChatWidget {
                 ..
             } = turn;
             let delegated = items.iter().any(|item| {
-                matches!(item, ThreadItem::UserMessage { content, .. }
+                matches!(&item.payload, ThreadItemPayload::UserMessage { content, .. }
                     if realtime::realtime_delegation_input(content).is_some())
             });
             if matches!(status, TurnStatus::InProgress) {
@@ -151,47 +152,52 @@ impl ChatWidget {
             let trailing_reasoning_id = (status == TurnStatus::InProgress)
                 .then(|| items.last())
                 .flatten()
-                .and_then(|item| match item {
-                    ThreadItem::Reasoning { id, .. } => Some(id.clone()),
+                .and_then(|item| match &item.payload {
+                    ThreadItemPayload::Reasoning { id, .. } => Some(id.clone()),
                     _ => None,
                 });
             let mut replaying_delegation = false;
             for item in items {
-                if matches!(&item, ThreadItem::UserMessage { content, .. }
+                if matches!(&item.payload, ThreadItemPayload::UserMessage { content, .. }
                     if realtime::realtime_delegation_input(content).is_some())
                 {
                     replaying_delegation = true;
                 }
                 // Voice can steer a typed turn already in progress. Its earlier
                 // commentary and reasoning still belong to the typed request.
-                if replaying_delegation && realtime::is_private_realtime_agent_item(&item) {
+                if replaying_delegation && realtime::is_private_realtime_agent_item(&item.payload) {
                     continue;
                 }
-                if hidden_nested_review_turn && matches!(item, ThreadItem::UserMessage { .. }) {
+                if hidden_nested_review_turn
+                    && matches!(item.payload, ThreadItemPayload::UserMessage { .. })
+                {
                     continue;
                 }
                 if trailing_reasoning_id.as_deref() == Some(item.id())
-                    && let ThreadItem::Reasoning {
-                        id,
-                        summary,
-                        content,
-                    } = item
+                    && let ThreadItemPayload::Reasoning {
+                        summary, content, ..
+                    } = &item.payload
                 {
+                    let parts = (summary.clone(), content.clone());
+                    let mut started_item = item.clone();
+                    if let ThreadItemPayload::Reasoning {
+                        summary, content, ..
+                    } = &mut started_item.payload
+                    {
+                        summary.clear();
+                        content.clear();
+                    }
                     self.restore_active_reasoning_item(
                         codex_app_server_protocol::ItemStartedNotification {
                             thread_id: self.thread_id.map(|id| id.to_string()).unwrap_or_default(),
                             turn_id: turn_id.clone(),
-                            item: ThreadItem::Reasoning {
-                                id,
-                                summary: Vec::new(),
-                                content: Vec::new(),
-                            },
-                            started_at_ms: 0,
+                            item: started_item,
+                            started_at_ms: item.started_at_ms.unwrap_or(0),
                         },
-                        Some((summary, content)),
+                        Some(parts),
                     );
                 } else {
-                    self.replay_thread_item(item, turn_id.clone(), replay_kind);
+                    self.replay_thread_item(item.payload, turn_id.clone(), replay_kind);
                 }
             }
             let status = if hidden_nested_review_turn {
@@ -249,7 +255,7 @@ impl ChatWidget {
     ) {
         match item {
             // Snapshots contain the completed item, without the live start that renders its diff.
-            ThreadItem::FileChange {
+            ThreadItemPayload::FileChange {
                 changes,
                 status: codex_app_server_protocol::PatchApplyStatus::Completed,
                 ..
@@ -303,7 +309,8 @@ impl ChatWidget {
             } => {
                 if self.complete_realtime_delegated_agent_item(
                     &turn_id,
-                    &ThreadItem::AgentMessage {
+                    &ThreadItemPayload::AgentMessage {
+                        moderation: None,
                         id: id.clone(),
                         text: text.clone(),
                         phase: phase.clone(),
@@ -345,8 +352,8 @@ impl ChatWidget {
                     from_replay,
                 );
             }
-            ThreadItem::Plan { text, .. } => self.on_plan_item_completed(text),
-            ThreadItem::Reasoning {
+            ThreadItemPayload::Plan { text, .. } => self.on_plan_item_completed(text),
+            ThreadItemPayload::Reasoning {
                 id,
                 summary,
                 content,
@@ -476,9 +483,9 @@ impl ChatWidget {
                 reasoning_effort,
                 agents_states,
             }),
-            item @ ThreadItem::SubAgentActivity { .. } => self.on_sub_agent_activity(item),
-            item @ ThreadItem::DynamicToolCall { .. } => self.on_dynamic_tool_item(item),
-            ThreadItem::Sleep(_) => {}
+            item @ ThreadItemPayload::SubAgentActivity { .. } => self.on_sub_agent_activity(item),
+            item @ ThreadItemPayload::DynamicToolCall { .. } => self.on_dynamic_tool_item(item),
+            ThreadItemPayload::Sleep(_) => {}
         }
 
         if matches!(replay_kind, Some(ReplayKind::ThreadSnapshot)) && turn_id.is_empty() {

@@ -2421,6 +2421,7 @@ pub(crate) mod tests {
     use codex_app_server_protocol::AskForApproval;
     use codex_app_server_protocol::ClientRequest;
     use codex_app_server_protocol::RequestId;
+    use codex_app_server_protocol::ThreadItemPayload;
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadStartResponse;
     use codex_config::config_toml::ProjectConfig;
@@ -3881,8 +3882,8 @@ requires_openai_auth = {requires_openai_auth}
                         .flat_map(|turn| &turn.items)
                         .any(|item| {
                             matches!(
-                                item,
-                                codex_app_server_protocol::ThreadItem::UserMessage { .. }
+                                &item.payload,
+                                codex_app_server_protocol::ThreadItemPayload::UserMessage { .. }
                             )
                         })
                 );

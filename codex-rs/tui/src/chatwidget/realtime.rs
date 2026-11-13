@@ -21,7 +21,8 @@ use crate::bottom_pane::VoiceStripState;
 use crate::history_cell;
 use crate::key_hint::KeyBindingListExt;
 use crate::motion::MotionMode;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload as ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::UserInput;
 use codex_features::Feature;
 use codex_protocol::ThreadId;
@@ -220,10 +221,10 @@ pub(crate) fn realtime_delegation_input(items: &[UserInput]) -> Option<&str> {
 }
 
 pub(crate) fn is_private_realtime_agent_item(item: &ThreadItem) -> bool {
-    if matches!(item, ThreadItem::Reasoning { .. }) {
+    if matches!(item, ThreadItemPayload::Reasoning { .. }) {
         return true;
     }
-    let ThreadItem::AgentMessage { text, phase, .. } = item else {
+    let ThreadItemPayload::AgentMessage { text, phase, .. } = item else {
         return false;
     };
     let text = text.trim_start();
@@ -795,7 +796,7 @@ impl ChatWidget {
         item: &ThreadItem,
         from_replay: bool,
     ) -> bool {
-        let ThreadItem::AgentMessage {
+        let ThreadItemPayload::AgentMessage {
             id: item_id,
             text,
             phase,
@@ -879,7 +880,7 @@ impl ChatWidget {
     }
 
     pub(super) fn speak_completed_realtime_delegation(&mut self, turn_id: &str, item: &ThreadItem) {
-        let ThreadItem::AgentMessage {
+        let ThreadItemPayload::AgentMessage {
             id: item_id, text, ..
         } = item
         else {
@@ -953,7 +954,7 @@ impl ChatWidget {
             .iter_mut()
             .position(|pending| {
                 pending.turn_id == turn_id
-                    && matches!(&pending.item, ThreadItem::AgentMessage { id, .. } if id == item_id)
+                    && matches!(&pending.item, ThreadItemPayload::AgentMessage { id, .. } if id == item_id)
                     && pending.state == PendingSpeechState::AwaitingTurn
             });
         let index = match index {
@@ -1177,7 +1178,7 @@ impl ChatWidget {
         self.realtime_conversation.pending_speech.retain(|pending| {
             pending.turn_id != turn_id
                 || pending.state != PendingSpeechState::AwaitingTurn
-                || !matches!(&pending.item, ThreadItem::AgentMessage { id, .. } if id == item_id)
+                || !matches!(&pending.item, ThreadItemPayload::AgentMessage { id, .. } if id == item_id)
         });
     }
 
@@ -1449,7 +1450,7 @@ impl ChatWidget {
                             !delivery.captioned
                                 && delivery.input_generation == caption_generation
                                 && delivery.state != PendingSpeechState::AwaitingTurn
-                                && matches!(&delivery.item, ThreadItem::AgentMessage { text: answer, .. }
+                                && matches!(&delivery.item, ThreadItemPayload::AgentMessage { text: answer, .. }
                                     if answer.trim().strip_prefix("[FINAL]").unwrap_or(answer.trim())
                                         .split_whitespace().eq(text.split_whitespace()))
                         })

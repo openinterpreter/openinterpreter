@@ -1,19 +1,22 @@
 //! Pagination boundaries preserve grouped item rendering and attach completion metadata once.
 
 use super::*;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::TurnItemsView;
 use pretty_assertions::assert_eq;
 
 fn turn(id: &str, status: TurnStatus, item_ids: &[&str]) -> Turn {
     Turn {
         id: id.to_string(),
+        root_turn_id: None,
         items: item_ids
             .iter()
-            .map(|id| ThreadItem::UserMessage {
+            .map(|id| ThreadItemPayload::UserMessage {
                 id: id.to_string(),
                 client_id: None,
                 content: Vec::new(),
             })
+            .map(ThreadItem::untimed)
             .collect(),
         items_view: TurnItemsView::Summary,
         status,

@@ -1,4 +1,6 @@
 use super::*;
+use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use pretty_assertions::assert_eq;
 
 fn user_verification_server_request(thread_id: ThreadId, request_id: i64) -> ServerRequest {
@@ -242,15 +244,17 @@ async fn inactive_thread_user_verification_preserves_foreground_stream() -> Resu
         ServerNotification::ItemCompleted(codex_app_server_protocol::ItemCompletedNotification {
             thread_id: foreground_thread_id.to_string(),
             turn_id: "turn-foreground".to_string(),
+            content_token_count: None,
             completed_at_ms: 0,
-            item: ThreadItem::AgentMessage {
+            item: ThreadItem::untimed(ThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: "message-foreground".to_string(),
                 text: "The foreground answer continues.".to_string(),
                 phase: None,
                 memory_citation: None,
                 delivery: None,
                 questions: None,
-            },
+            }),
         }),
         /*replay_kind*/ None,
     );

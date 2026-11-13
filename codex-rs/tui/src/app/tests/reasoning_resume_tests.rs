@@ -4,6 +4,8 @@ use super::*;
 use crate::chatwidget::tests::helpers::render_bottom_popup;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
+use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 
 #[tokio::test]
 async fn resumed_reasoning_without_start_accepts_deltas_and_completion() {
@@ -15,7 +17,7 @@ async fn resumed_reasoning_without_start_accepts_deltas_and_completion() {
                 let session = test_thread_session(thread_id, app.config.cwd.to_path_buf());
                 let items = snapshot_item_id
                     .into_iter()
-                    .map(|id| ThreadItem::Reasoning {
+                    .map(|id| ThreadItemPayload::Reasoning {
                         id: id.into(),
                         summary: vec![
                             if id == "previous" {
@@ -75,14 +77,15 @@ async fn resumed_reasoning_without_start_accepts_deltas_and_completion() {
                     ServerNotification::ItemCompleted(ItemCompletedNotification {
                         thread_id: thread_id.to_string(),
                         turn_id: "turn".into(),
+                        content_token_count: None,
                         completed_at_ms: 0,
-                        item: ThreadItem::Reasoning {
+                        item: ThreadItem::untimed(ThreadItemPayload::Reasoning {
                             id: "reasoning".into(),
                             summary: vec![
                                 "**Inspecting**\nSnapshot paragraph.\nCompleted paragraph.".into(),
                             ],
                             content: Vec::new(),
-                        },
+                        }),
                     }),
                     /*replay_kind*/ None,
                 );
@@ -126,7 +129,7 @@ async fn resumed_trailing_reasoning_is_kept_when_no_more_reasoning_arrives() {
             vec![test_turn(
                 "turn",
                 TurnStatus::InProgress,
-                vec![ThreadItem::Reasoning {
+                vec![ThreadItemPayload::Reasoning {
                     id: "finished".into(),
                     summary: vec!["**Inspecting**\nSaved paragraph.".into()],
                     content: Vec::new(),
@@ -141,11 +144,11 @@ async fn resumed_trailing_reasoning_is_kept_when_no_more_reasoning_arrives() {
                         thread_id: thread_id.to_string(),
                         turn_id: "turn".into(),
                         started_at_ms: 0,
-                        item: ThreadItem::Reasoning {
+                        item: ThreadItem::untimed(ThreadItemPayload::Reasoning {
                             id: "next".into(),
                             summary: Vec::new(),
                             content: Vec::new(),
-                        },
+                        }),
                     },
                 ),
                 /*replay_kind*/ None,

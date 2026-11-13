@@ -4,6 +4,8 @@ mod command_center;
 use super::super::agents_overview_view::AgentsOverviewGrouping;
 use super::*;
 use crate::chatwidget::tests::helpers::normalize_agent_center_snapshot;
+use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 
 #[tokio::test]
 async fn overview_worktree_creation_busy_state() {
@@ -918,15 +920,17 @@ async fn agents_overview_details_render_markdown() {
         &ServerNotification::ItemCompleted(codex_app_server_protocol::ItemCompletedNotification {
             thread_id: thread.id.clone(),
             turn_id: "turn".into(),
+            content_token_count: None,
             completed_at_ms: 0,
-            item: ThreadItem::AgentMessage {
+            item: ThreadItem::untimed(ThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: "answer".into(),
                 text: message.into(),
                 phase: None,
                 memory_citation: None,
                 delivery: None,
                 questions: None,
-            },
+            }),
         }),
     );
     let view = app.agents_overview_view(vec![thread.clone()], Some(thread_id));

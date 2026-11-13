@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::style::accent_color;
+use codex_app_server_protocol::ThreadItemPayload;
 
 impl ChatWidget {
     /// Offer the flourish only for a successful primary thread/start without initial work.
@@ -345,20 +346,20 @@ impl ChatWidget {
         for turn in retained_turns {
             let mut replaying_delegation = false;
             for item in &turn.items {
-                if matches!(item, ThreadItem::UserMessage { content, .. }
+                if matches!(&item.payload, ThreadItemPayload::UserMessage { content, .. }
                     if realtime::realtime_delegation_input(content).is_some())
                 {
                     replaying_delegation = true;
                 }
-                if replaying_delegation && realtime::is_private_realtime_agent_item(item) {
+                if replaying_delegation && realtime::is_private_realtime_agent_item(&item.payload) {
                     continue;
                 }
-                let (markdown, source) = match item {
-                    ThreadItem::AgentMessage { text, .. } => (
+                let (markdown, source) = match &item.payload {
+                    ThreadItemPayload::AgentMessage { text, .. } => (
                         parse_assistant_markdown(text, self.config.cwd.as_path()).visible_markdown,
                         text,
                     ),
-                    ThreadItem::Plan { text, .. } => (text.clone(), text),
+                    ThreadItemPayload::Plan { text, .. } => (text.clone(), text),
                     _ => continue,
                 };
                 if !markdown.trim().is_empty() {

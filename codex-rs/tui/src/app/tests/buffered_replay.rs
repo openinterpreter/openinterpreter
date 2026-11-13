@@ -6,6 +6,8 @@ use crate::chatwidget::tests::helpers::render_bottom_popup;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
+use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use pretty_assertions::assert_eq;
 
 fn delta(thread: &str, turn: &str, item: &str) -> ServerNotification {
@@ -222,7 +224,7 @@ fn buffered_replay_keeps_unfinished_and_unrelated_deltas_in_order() {
 #[test]
 fn evicted_voice_delegation_marker_still_suppresses_private_replay() {
     let mut store = ThreadEventStore::new(/*capacity*/ 2);
-    let voice_request = ThreadItem::UserMessage {
+    let voice_request = ThreadItemPayload::UserMessage {
         id: "user".into(),
         client_id: None,
         content: vec![codex_app_server_protocol::UserInput::Text {
@@ -235,22 +237,24 @@ fn evicted_voice_delegation_marker_still_suppresses_private_replay() {
             thread_id: "thread".into(),
             turn_id: "voice-turn".into(),
             started_at_ms: 0,
-            item: voice_request.clone(),
+            item: ThreadItem::untimed(voice_request.clone()),
         },
     ));
     store.push_notification(delta("thread", "voice-turn", "reasoning"));
     let private = ServerNotification::ItemCompleted(ItemCompletedNotification {
         thread_id: "thread".into(),
         turn_id: "voice-turn".into(),
+        content_token_count: None,
         completed_at_ms: 0,
-        item: ThreadItem::AgentMessage {
+        item: ThreadItem::untimed(ThreadItemPayload::AgentMessage {
+            moderation: None,
             id: "reasoning".into(),
             text: "[ANALYSIS] private".into(),
             phase: None,
             memory_citation: None,
             delivery: None,
             questions: None,
-        },
+        }),
     });
     store.push_notification(private.clone());
     assert!(store.snapshot().events.is_empty());
@@ -287,12 +291,13 @@ fn evicted_voice_delegation_marker_still_suppresses_private_replay() {
         ServerNotification::ItemCompleted(ItemCompletedNotification {
             thread_id: "thread".into(),
             turn_id: "voice-turn".into(),
+            content_token_count: None,
             completed_at_ms: 0,
-            item: ThreadItem::Reasoning {
+            item: ThreadItem::untimed(ThreadItemPayload::Reasoning {
                 id: "reasoning".into(),
                 summary: vec!["private summary".into()],
                 content: vec!["private raw reasoning".into()],
-            },
+            }),
         }),
     ] {
         store.push_notification(notification);
@@ -302,7 +307,8 @@ fn evicted_voice_delegation_marker_still_suppresses_private_replay() {
     let mut resumed = ThreadEventStore::new(/*capacity*/ 1);
     resumed.set_turns(vec![Turn {
         id: "voice-turn".into(),
-        items: vec![voice_request],
+        root_turn_id: None,
+        items: vec![ThreadItem::untimed(voice_request)],
         items_view: codex_app_server_protocol::TurnItemsView::Summary,
         status: TurnStatus::InProgress,
         error: None,
@@ -328,12 +334,12 @@ fn evicted_voice_delegation_marker_still_suppresses_private_replay() {
 
 #[test]
 fn saved_voice_turn_suppresses_reasoning_without_hiding_typed_reasoning() {
-    let reasoning = ThreadItem::Reasoning {
+    let reasoning = ThreadItemPayload::Reasoning {
         id: "reasoning".into(),
         summary: vec!["private summary".into()],
         content: vec!["private raw reasoning".into()],
     };
-    let voice_request = ThreadItem::UserMessage {
+    let voice_request = ThreadItemPayload::UserMessage {
         id: "voice-request".into(),
         client_id: None,
         content: vec![codex_app_server_protocol::UserInput::Text {
@@ -341,9 +347,10 @@ fn saved_voice_turn_suppresses_reasoning_without_hiding_typed_reasoning() {
             text_elements: Vec::new(),
         }],
     };
-    let turn = |id: &str, items| Turn {
+    let turn = |id: &str, items: Vec<ThreadItemPayload>| Turn {
         id: id.into(),
-        items,
+        root_turn_id: None,
+        items: items.into_iter().map(ThreadItem::untimed).collect(),
         items_view: codex_app_server_protocol::TurnItemsView::Full,
         status: TurnStatus::Completed,
         error: None,
@@ -367,7 +374,8 @@ fn saved_voice_turn_suppresses_reasoning_without_hiding_typed_reasoning() {
 
 #[test]
 fn snapshot_keeps_typed_output_before_voice_handoff_in_the_same_turn() {
-    let commentary = |id: &str, text: &str| ThreadItem::AgentMessage {
+    let commentary = |id: &str, text: &str| ThreadItemPayload::AgentMessage {
+        moderation: None,
         id: id.into(),
         text: text.into(),
         phase: Some(codex_protocol::models::MessagePhase::Commentary),
@@ -375,7 +383,7 @@ fn snapshot_keeps_typed_output_before_voice_handoff_in_the_same_turn() {
         memory_citation: None,
         delivery: None,
     };
-    let marker = ThreadItem::UserMessage {
+    let marker = ThreadItemPayload::UserMessage {
         id: "voice".into(),
         client_id: None,
         content: vec![codex_app_server_protocol::UserInput::Text {
@@ -388,7 +396,11 @@ fn snapshot_keeps_typed_output_before_voice_handoff_in_the_same_turn() {
     let mut store = ThreadEventStore::new(/*capacity*/ 8);
     store.set_turns(vec![Turn {
         id: "shared".into(),
-        items: vec![typed.clone(), marker.clone(), private.clone()],
+        root_turn_id: None,
+        items: vec![typed.clone(), marker.clone(), private.clone()]
+            .into_iter()
+            .map(ThreadItem::untimed)
+            .collect(),
         items_view: codex_app_server_protocol::TurnItemsView::Full,
         status: TurnStatus::InProgress,
         error: None,
@@ -402,12 +414,19 @@ fn snapshot_keeps_typed_output_before_voice_handoff_in_the_same_turn() {
                 thread_id: "thread".into(),
                 turn_id: "shared".into(),
                 completed_at_ms: 0,
-                item,
+                item: ThreadItem::untimed(item),
+                content_token_count: None,
             },
         ));
     }
     let snapshot = store.snapshot();
-    assert_eq!(snapshot.turns[0].items, vec![typed.clone(), marker]);
+    assert_eq!(
+        snapshot.turns[0].items,
+        vec![typed.clone(), marker]
+            .into_iter()
+            .map(ThreadItem::untimed)
+            .collect::<Vec<_>>()
+    );
     let completed = snapshot
         .events
         .into_iter()
@@ -419,12 +438,19 @@ fn snapshot_keeps_typed_output_before_voice_handoff_in_the_same_turn() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(completed, vec![typed, snapshot.turns[0].items[1].clone()]);
+    assert_eq!(
+        completed,
+        vec![
+            ThreadItem::untimed(typed),
+            snapshot.turns[0].items[1].clone()
+        ]
+    );
 }
 
 #[test]
 fn snapshot_keeps_typed_item_completed_after_voice_handoff() {
-    let typed = ThreadItem::AgentMessage {
+    let typed = ThreadItemPayload::AgentMessage {
+        moderation: None,
         id: "typed".into(),
         text: "Typed commentary completed late".into(),
         phase: Some(codex_protocol::models::MessagePhase::Commentary),
@@ -432,7 +458,8 @@ fn snapshot_keeps_typed_item_completed_after_voice_handoff() {
         memory_citation: None,
         delivery: None,
     };
-    let private = ThreadItem::AgentMessage {
+    let private = ThreadItemPayload::AgentMessage {
+        moderation: None,
         id: "private".into(),
         text: "Voice-private commentary".into(),
         phase: Some(codex_protocol::models::MessagePhase::Commentary),
@@ -440,7 +467,7 @@ fn snapshot_keeps_typed_item_completed_after_voice_handoff() {
         memory_citation: None,
         delivery: None,
     };
-    let marker = ThreadItem::UserMessage {
+    let marker = ThreadItemPayload::UserMessage {
         id: "voice".into(),
         client_id: None,
         content: vec![codex_app_server_protocol::UserInput::Text {
@@ -455,7 +482,7 @@ fn snapshot_keeps_typed_item_completed_after_voice_handoff() {
                 thread_id: "thread".into(),
                 turn_id: "shared".into(),
                 started_at_ms: 0,
-                item,
+                item: ThreadItem::untimed(item),
             },
         ));
     }
@@ -465,7 +492,8 @@ fn snapshot_keeps_typed_item_completed_after_voice_handoff() {
                 thread_id: "thread".into(),
                 turn_id: "shared".into(),
                 completed_at_ms: 0,
-                item,
+                item: ThreadItem::untimed(item),
+                content_token_count: None,
             },
         ));
     }
@@ -481,7 +509,7 @@ fn snapshot_keeps_typed_item_completed_after_voice_handoff() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(completed, vec![typed]);
+    assert_eq!(completed, vec![ThreadItem::untimed(typed)]);
 }
 
 #[tokio::test]
@@ -493,7 +521,7 @@ async fn evicted_voice_marker_survives_widget_snapshot_for_late_reasoning() {
             thread_id: thread_id.to_string(),
             turn_id: "voice-turn".into(),
             started_at_ms: 0,
-            item: ThreadItem::UserMessage {
+            item: ThreadItem::untimed(ThreadItemPayload::UserMessage {
                 id: "user".into(),
                 client_id: None,
                 content: vec![codex_app_server_protocol::UserInput::Text {
@@ -501,7 +529,7 @@ async fn evicted_voice_marker_survives_widget_snapshot_for_late_reasoning() {
                         .into(),
                     text_elements: Vec::new(),
                 }],
-            },
+            }),
         },
     ));
     store.push_notification(delta(&thread_id.to_string(), "voice-turn", "private"));
@@ -532,12 +560,13 @@ async fn evicted_voice_marker_survives_widget_snapshot_for_late_reasoning() {
         ServerNotification::ItemCompleted(ItemCompletedNotification {
             thread_id: thread_id.to_string(),
             turn_id: "voice-turn".into(),
+            content_token_count: None,
             completed_at_ms: 0,
-            item: ThreadItem::Reasoning {
+            item: ThreadItem::untimed(ThreadItemPayload::Reasoning {
                 id: "late-reasoning".into(),
                 summary: vec!["private after switch".into()],
                 content: Vec::new(),
-            },
+            }),
         }),
         /*replay_kind*/ None,
     );
@@ -549,15 +578,17 @@ async fn evicted_voice_marker_survives_widget_snapshot_for_late_reasoning() {
         ServerNotification::ItemCompleted(ItemCompletedNotification {
             thread_id: thread_id.to_string(),
             turn_id: "voice-turn".into(),
+            content_token_count: None,
             completed_at_ms: 0,
-            item: ThreadItem::AgentMessage {
+            item: ThreadItem::untimed(ThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: "private-commentary".into(),
                 text: "[COMMENTARY] private after switch".into(),
                 phase: None,
                 memory_citation: None,
                 delivery: None,
                 questions: None,
-            },
+            }),
         }),
         /*replay_kind*/ None,
     );

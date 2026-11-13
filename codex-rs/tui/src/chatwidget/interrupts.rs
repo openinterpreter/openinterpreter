@@ -210,7 +210,7 @@ mod tests {
     }
 
     fn command_execution(call_id: &str) -> ThreadItem {
-        ThreadItem::CommandExecution {
+        ThreadItemPayload::CommandExecution {
             model_context: None,
             id: call_id.to_string(),
             command: "true".to_string(),

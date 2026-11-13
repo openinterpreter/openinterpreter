@@ -3,6 +3,7 @@ use crate::chatwidget::ThreadUsageOutcome;
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_protocol::AccountUpdatedNotification;
 use codex_app_server_protocol::AuthMode;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadUsage;
 use codex_protocol::account::PlanType;
 use pretty_assertions::assert_eq;
@@ -281,7 +282,7 @@ async fn terminal_reflow_rebases_pending_status_update_to_new_width() -> Result<
     app.insert_history_cell(
         &mut tui,
         Box::new(
-            history_cell::DynamicToolCallCell::from_item(ThreadItem::DynamicToolCall {
+            history_cell::DynamicToolCallCell::from_item(ThreadItemPayload::DynamicToolCall {
                 id: "pending-tool".into(),
                 namespace: None,
                 tool: "lookup".into(),

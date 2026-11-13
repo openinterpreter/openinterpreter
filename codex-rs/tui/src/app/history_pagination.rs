@@ -14,6 +14,8 @@ use crate::pager_overlay::TranscriptHistoryState;
 use crate::thread_transcript::RawReasoningVisibility;
 use crate::thread_transcript::thread_items_to_transcript_cells;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadItemsListResponse;
 
 #[path = "history_completion.rs"]
@@ -158,13 +160,13 @@ impl App {
         let user_items = turns
             .iter()
             .flat_map(|turn| turn.items.iter())
-            .filter(|item| matches!(item, ThreadItem::UserMessage { .. }))
+            .filter(|item| matches!(item.payload, ThreadItemPayload::UserMessage { .. }))
             .map(|item| (item.id().to_string(), item.clone()))
             .collect::<Vec<_>>();
         let projected_user_cells = thread_items_to_transcript_cells(
             Some(thread_id),
             cwd,
-            user_items.iter().map(|(_, item)| item.clone()),
+            user_items.iter().map(|(_, item)| item.payload.clone()),
             visibility,
             Some(&self.config),
         );
@@ -233,7 +235,7 @@ impl App {
                 cells.extend(thread_items_to_transcript_cells(
                     Some(thread_id),
                     cwd,
-                    visible.iter().cloned(),
+                    visible.iter().map(|item| item.payload.clone()),
                     visibility,
                     Some(&self.config),
                 ));
@@ -368,10 +370,12 @@ fn hidden_review_item_ids(turns: &[Turn]) -> HashSet<&str> {
                 crate::app_backtrack::is_hidden_nested_review_turn(previous, turn)
             });
         for item in &turn.items {
-            match item {
-                ThreadItem::EnteredReviewMode { .. } => review_mode = true,
-                ThreadItem::ExitedReviewMode { .. } => review_mode = false,
-                ThreadItem::UserMessage { .. } if review_mode || hidden_nested_review_turn => {
+            match &item.payload {
+                ThreadItemPayload::EnteredReviewMode { .. } => review_mode = true,
+                ThreadItemPayload::ExitedReviewMode { .. } => review_mode = false,
+                ThreadItemPayload::UserMessage { .. }
+                    if review_mode || hidden_nested_review_turn =>
+                {
                     hidden.insert(item.id());
                 }
                 _ => {}

@@ -20,6 +20,7 @@ use codex_app_server_client::AppServerEvent;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadSource;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnStatus;

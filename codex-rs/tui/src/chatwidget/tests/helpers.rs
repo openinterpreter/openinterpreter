@@ -649,11 +649,13 @@ pub(super) fn handle_agent_reasoning_started(chat: &mut ChatWidget, id: impl Int
                 .clone()
                 .unwrap_or_else(|| "turn-1".to_string()),
             started_at_ms: 0,
-            item: AppServerThreadItem::Reasoning {
-                id: id.into(),
-                summary: Vec::new(),
-                content: Vec::new(),
-            },
+            item: codex_app_server_protocol::ThreadItem::untimed(
+                AppServerThreadItemPayload::Reasoning {
+                    id: id.into(),
+                    summary: Vec::new(),
+                    content: Vec::new(),
+                },
+            ),
         }),
         /*replay_kind*/ None,
     );
@@ -985,7 +987,7 @@ pub(super) fn begin_exec_with_source(
         .into_iter()
         .map(|parsed| AppServerCommandAction::from_core_with_cwd(parsed, &chat.config.cwd))
         .collect();
-    let item = AppServerThreadItem::CommandExecution {
+    let item = AppServerThreadItemPayload::CommandExecution {
         model_context: None,
         id: call_id.to_string(),
         command: codex_shell_command::parse_command::shlex_join(&command),
@@ -1011,7 +1013,7 @@ pub(super) fn begin_unified_exec_startup(
     raw_cmd: &str,
 ) -> AppServerThreadItemPayload {
     let command = vec!["bash".to_string(), "-lc".to_string(), raw_cmd.to_string()];
-    let item = AppServerThreadItem::CommandExecution {
+    let item = AppServerThreadItemPayload::CommandExecution {
         model_context: None,
         id: call_id.to_string(),
         command: codex_shell_command::parse_command::shlex_join(&command),
@@ -1251,7 +1253,7 @@ pub(super) fn end_exec(
     };
     handle_exec_end(
         chat,
-        AppServerThreadItem::CommandExecution {
+        AppServerThreadItemPayload::CommandExecution {
             model_context: None,
             id,
             command,
