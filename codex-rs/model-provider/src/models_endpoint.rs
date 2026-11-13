@@ -226,8 +226,7 @@ impl OpenAiModelsEndpoint {
             .map_err(map_api_error)?,
             None => ModelsClient::<ReqwestTransport>::request_url(&api_provider, client_version),
         };
-        let auth_telemetry = auth_header_telemetry(api_auth.as_ref())
-            .map_err(|error| map_api_error(error.into()))?;
+        let auth_telemetry = auth_header_telemetry(api_auth.as_ref());
         let agent_identity_telemetry = if let Some(CodexAuth::AgentIdentity(auth)) = auth.as_ref() {
             Some(agent_identity_telemetry(auth))
         } else {

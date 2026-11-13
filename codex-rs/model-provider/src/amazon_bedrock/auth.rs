@@ -115,9 +115,13 @@ pub(super) async fn resolve_auth_method(
                             .to_string(),
                     )
                 })?;
-            let context = AwsAuthContext::load_with_credentials_provider(config, credential_export)
-                .await
-                .map_err(aws_auth_error_to_codex_error)?;
+            let context = AwsAuthContext::load_with_credentials_provider(
+                config,
+                credential_export,
+                http_client_factory.clone(),
+            )
+            .await
+            .map_err(aws_auth_error_to_codex_error)?;
             Ok(BedrockAuthMethod::AwsSdkAuth { context })
         }
         BedrockAuthSource::ManagedBearerToken => {

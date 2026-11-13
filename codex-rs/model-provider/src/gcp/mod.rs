@@ -129,7 +129,12 @@ impl ModelProvider for GcpModelProvider {
                         .to_string(),
                 )
             })?;
-            resolve_provider_auth(Some(&auth), &self.info)
+            resolve_provider_auth(
+                Some(&auth),
+                &self.info,
+                self.auth_manager.as_deref().map(AuthManager::codex_home),
+            )
+            .await
         })
     }
 

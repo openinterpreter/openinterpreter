@@ -56,6 +56,26 @@ pub struct FeedbackUploadResponse {
     pub prompt_hash: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct FeedbackSaveParams {
+    #[serde(flatten)]
+    pub feedback: FeedbackUploadParams,
+    /// Absolute, previously unused ZIP path on the app-server host.
+    /// The caller owns this file, including after a disconnected RPC.
+    pub save_path: LegacyAppPathString,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct FeedbackSaveResponse {
+    pub saved_path: LegacyAppPathString,
+    pub thread_id: String,
+    pub prompt_hash: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::FeedbackUploadParams;

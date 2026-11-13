@@ -460,6 +460,21 @@ pub enum ImageReference {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(untagged)]
+#[ts(untagged)]
+#[ts(export_to = "v2/")]
+pub enum AudioReference {
+    Inline {
+        url: String,
+    },
+    File {
+        #[serde(rename = "fileId")]
+        #[ts(rename = "fileId")]
+        file_id: String,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "camelCase")]
 #[ts(tag = "type")]
 #[ts(export_to = "v2/")]

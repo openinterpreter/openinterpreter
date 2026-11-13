@@ -134,6 +134,13 @@ pub struct UserVerificationDeleteParams {}
 #[ts(export_to = "v2/")]
 pub struct UserVerificationDeleteResponse {}
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum UserVerificationBiometricType {
+    Fingerprint,
+}
+
 /// Local signing primitive, independent of any pending elicitation.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

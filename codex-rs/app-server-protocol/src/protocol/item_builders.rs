@@ -96,7 +96,7 @@ pub fn build_file_change_end_item(payload: &PatchApplyEndEvent) -> ThreadItemPay
 pub fn build_command_execution_begin_item(payload: &ExecCommandBeginEvent) -> ThreadItemPayload {
     let presentation =
         CommandExecutionPresentation::from_raw(&payload.command, &payload.parsed_cmd, &payload.cwd);
-    ThreadItem::CommandExecution {
+    ThreadItemPayload::CommandExecution {
         model_context: None,
         id: payload.call_id.clone(),
         plugin_id: payload.plugin_id.clone(),
@@ -123,7 +123,7 @@ pub fn build_command_execution_end_item(payload: &ExecCommandEndEvent) -> Thread
     let presentation =
         CommandExecutionPresentation::from_raw(&payload.command, &payload.parsed_cmd, &payload.cwd);
 
-    ThreadItem::CommandExecution {
+    ThreadItemPayload::CommandExecution {
         model_context: None,
         id: payload.call_id.clone(),
         plugin_id: payload.plugin_id.clone(),
