@@ -26,7 +26,6 @@ use serde_json::Value as JsonValue;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::TaskFailureHandler;
 use crate::cell_actor::take_completed_event;
 use crate::output::OutputCollector;
 use crate::session_runtime as runtime;
@@ -37,7 +36,7 @@ const MIN_YIELD_TIME_FOR_GRACE: Duration = Duration::from_secs(10);
 
 pub struct InProcessCodeModeSession {
     runtime: SessionRuntime,
-    cell_execution_limits: CodeModeSessionCellExecutionLimits,
+    options: CodeModeSessionOptions,
 }
 
 impl InProcessCodeModeSession {
@@ -46,12 +45,24 @@ impl InProcessCodeModeSession {
     }
 
     pub fn with_limits(cell_execution_limits: CodeModeSessionCellExecutionLimits) -> Self {
-        Self {
-            runtime: SessionRuntime::new(),
-            cell_execution_limits: CodeModeSessionCellExecutionLimits {
-                max_heap_size_bytes: None,
-                ..cell_execution_limits
+        Self::with_options(
+            CodeModeSessionOptions {
+                cell_execution_limits,
+                ..CodeModeSessionOptions::default()
             },
+            /*task_failure_handler*/ None,
+        )
+    }
+
+    pub fn with_options(
+        mut options: CodeModeSessionOptions,
+        task_failure_handler: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    ) -> Self {
+        // Heap limits are not enforced by the embedded runtime.
+        options.cell_execution_limits.max_heap_size_bytes = None;
+        Self {
+            runtime: SessionRuntime::new_with_task_failure_handler(task_failure_handler),
+            options,
         }
     }
 
@@ -59,13 +70,13 @@ impl InProcessCodeModeSession {
         task_failure_handler: Arc<dyn Fn(String) + Send + Sync>,
         cell_execution_limits: CodeModeSessionCellExecutionLimits,
     ) -> Self {
-        Self {
-            runtime: SessionRuntime::new_with_task_failure_handler(Some(task_failure_handler)),
-            cell_execution_limits: CodeModeSessionCellExecutionLimits {
-                max_heap_size_bytes: None,
-                ..cell_execution_limits
+        Self::with_options(
+            CodeModeSessionOptions {
+                cell_execution_limits,
+                ..CodeModeSessionOptions::default()
             },
-        }
+            Some(task_failure_handler),
+        )
     }
 
     pub async fn execute(
@@ -79,7 +90,7 @@ impl InProcessCodeModeSession {
         let started = self
             .runtime
             .execute(
-                runtime_request(request),
+                runtime_request(request, output_truncation),
                 runtime::ObserveMode::YieldAfter(self.resolve_yield_timeout(yield_time_ms)),
                 Arc::new(ProtocolDelegate { delegate }),
             )

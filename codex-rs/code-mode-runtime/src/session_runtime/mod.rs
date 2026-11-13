@@ -280,8 +280,7 @@ impl<D: SessionRuntimeDelegate> CellHost for RuntimeCellHost<D> {
     async fn commit_completion(
         &self,
         stored_value_writes: HashMap<String, Arc<JsonValue>>,
-        event: CellEvent,
-        pending_initial_yield_items: Option<Vec<OutputItem>>,
+        event: impl FnOnce() -> CellEvent + Send,
         cell_state: Arc<CellState>,
     ) -> CompletionCommit {
         let cancellation_token = cell_state.cancellation_token();

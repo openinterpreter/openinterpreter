@@ -13,7 +13,6 @@ use tokio_util::sync::CancellationToken;
 use super::send_cell_event;
 use crate::session_runtime::CellEvent;
 use crate::session_runtime::Observation;
-use crate::session_runtime::OutputItem;
 use crate::session_runtime::ToolKind;
 use crate::session_runtime::ToolName;
 
@@ -56,8 +55,7 @@ pub(crate) trait CellHost: Send + Sync + 'static {
     fn commit_completion(
         &self,
         stored_value_writes: HashMap<String, Arc<JsonValue>>,
-        event: CellEvent,
-        pending_initial_yield_items: Option<Vec<OutputItem>>,
+        event: impl FnOnce() -> CellEvent + Send,
         cell_state: Arc<CellState>,
     ) -> impl Future<Output = CompletionCommit> + Send;
 

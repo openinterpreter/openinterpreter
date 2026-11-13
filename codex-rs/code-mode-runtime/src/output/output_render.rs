@@ -185,6 +185,7 @@ fn into_code_mode_output(item: FunctionCallOutputContentItem) -> OutputItem {
             audio: AudioReference::Inline { audio_url },
         } => OutputItem::InputAudio { audio_url },
         FunctionCallOutputContentItem::EncryptedContent { .. }
+        | FunctionCallOutputContentItem::InputVideo { .. }
         | FunctionCallOutputContentItem::InputAudio {
             audio: AudioReference::File { .. },
         }
