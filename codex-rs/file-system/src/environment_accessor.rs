@@ -6,6 +6,7 @@ use crate::ExecutorFileSystem;
 use crate::ExecutorFileSystemFuture;
 use crate::FileMetadata;
 use crate::FileSystemReadStream;
+use crate::FileSystemResult;
 use crate::FileSystemSandboxContext;
 use crate::GetMetadataOptions;
 use crate::ReadDirectoryEntry;
@@ -14,7 +15,9 @@ use crate::RemoveOptions;
 use crate::WalkOptions;
 use crate::WalkOutcome;
 use crate::WriteFileOptions;
+use bytes::Bytes;
 use codex_utils_path_uri::PathUri;
+use futures::stream::BoxStream;
 use std::fmt;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -36,7 +39,7 @@ pub trait EnvironmentAccess: Send + Sync {
         &self,
         _missing: Vec<PathUri>,
         _present: Option<PathUri>,
-    ) -> ExecutorFileSystemFuture<'_, Option<oneshot::Receiver<()>>> {
+    ) -> ExecutorFileSystemFuture<'static, Option<oneshot::Receiver<()>>> {
         Box::pin(async { Ok(None) })
     }
 
@@ -60,6 +63,13 @@ pub trait EnvironmentAccess: Send + Sync {
         contents: Vec<u8>,
         options: WriteFileOptions,
     ) -> ExecutorFileSystemFuture<'a, ()>;
+
+    /// Stream a replacement under the captured environment's write permissions.
+    fn write_file_stream<'a>(
+        &'a self,
+        path: &'a PathUri,
+        contents: BoxStream<'a, FileSystemResult<Bytes>>,
+    ) -> ExecutorFileSystemFuture<'a, u64>;
 
     fn create_directory<'a>(
         &'a self,
@@ -211,7 +221,7 @@ impl EnvironmentAccess for FileSystemEnvironmentAccessor<'_> {
         &self,
         missing: Vec<PathUri>,
         present: Option<PathUri>,
-    ) -> ExecutorFileSystemFuture<'_, Option<oneshot::Receiver<()>>> {
+    ) -> ExecutorFileSystemFuture<'static, Option<oneshot::Receiver<()>>> {
         if self
             .key
             .sandbox
@@ -220,7 +230,14 @@ impl EnvironmentAccess for FileSystemEnvironmentAccessor<'_> {
         {
             return Box::pin(async { Ok(None) });
         }
-        self.file_system.watch_missing(missing, present)
+        // Keep the exact filesystem alive only while registering the observation;
+        // the opaque key cannot grant access to a different filesystem or sandbox.
+        match self.key.file_system.upgrade() {
+            Some(file_system) => {
+                Box::pin(async move { file_system.watch_missing(missing, present).await })
+            }
+            None => Box::pin(async { Ok(None) }),
+        }
     }
 
     fn canonicalize<'a>(&'a self, path: &'a PathUri) -> ExecutorFileSystemFuture<'a, PathUri> {
@@ -253,6 +270,15 @@ impl EnvironmentAccess for FileSystemEnvironmentAccessor<'_> {
     ) -> ExecutorFileSystemFuture<'a, ()> {
         self.file_system
             .write_file(path, contents, options, self.key.sandbox.as_deref())
+    }
+
+    fn write_file_stream<'a>(
+        &'a self,
+        path: &'a PathUri,
+        contents: BoxStream<'a, FileSystemResult<Bytes>>,
+    ) -> ExecutorFileSystemFuture<'a, u64> {
+        self.file_system
+            .write_file_stream(path, contents, self.key.sandbox.as_deref())
     }
 
     fn create_directory<'a>(
