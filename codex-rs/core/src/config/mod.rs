@@ -2790,6 +2790,8 @@ pub struct ConfigOverrides {
     /// Explicit absolute runtime workspace roots for this session. When set,
     /// this is the full runtime root list rather than an additive override.
     pub workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    /// Retired shell backend override, retained for callers rebuilding a session.
+    pub default_zsh_path: Option<AbsolutePathBuf>,
 }
 
 fn dedupe_absolute_paths(paths: &mut Vec<AbsolutePathBuf>) {

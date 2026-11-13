@@ -34,7 +34,10 @@ pub(crate) fn legacy_multi_agent_disabled_sources(stack: &ConfigLayerStack) -> V
 }
 
 pub(crate) fn emit_session_start_metrics(config: &Config, telemetry: &SessionTelemetry) {
-    config.features.emit_metrics(telemetry);
+    // Registry keys are static and bounded; never use arbitrary config values as metric labels.
+    for feature in config.features.enabled_features() {
+        telemetry.counter("codex.feature.enabled", 1, &[("feature", feature.key())]);
+    }
     #[cfg(windows)]
     crate::windows_system_config::emit_namespace_squatting_probe();
 }

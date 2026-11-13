@@ -102,6 +102,8 @@ pub enum Feature {
     AnalyticsPlanHistory,
     /// Discover model catalogs for OpenAI API-key authentication.
     ApiKeyModelDiscovery,
+    /// Permit API-key providers to use supported cyber access programs.
+    ApiKeyCyberAccessPrograms,
     /// Deprecated no-op; use `tui.fullscreen_transcript` instead.
     TranscriptV2,
     // Stable.
@@ -243,6 +245,16 @@ pub enum Feature {
     Collab,
     /// Enable task-path-based multi-agent routing.
     MultiAgentV2,
+    /// Use dynamic tool declarations for V2 subagent sessions.
+    MultiAgentV2DynamicTools,
+    /// Start an idle agent turn when new inter-agent mail arrives.
+    WakeOnAgentMessages,
+    /// Deliver new mailbox messages at a model request boundary instead of preempting sampling.
+    DeferMailboxPreemption,
+    /// Give each subagent its selected execution environment.
+    SubagentThreadEnvironments,
+    /// Include model catalog information in incremental context.
+    ModelCatalogInContext,
     /// Preempt responses and yield foreground code-mode observations on new user input.
     InstantInterrupt,
     /// Interrupt upstream inference when a turn is cancelled.
@@ -267,6 +279,18 @@ pub enum Feature {
     CodexAppsMcp20260728,
     /// Let RMCP coordinate OAuth refresh through the configured credential store.
     McpOAuthRefreshCoordination,
+    /// Share eligible local MCP server connections between sessions.
+    McpConnectionSharing,
+    /// Start local stdio MCP servers only when first needed.
+    McpLazyStdioStartup,
+    /// Expose MCP servers from additional execution environments.
+    MultiEnvironmentMcp,
+    /// Notify clients when the available MCP tool list changes.
+    McpToolListChanged,
+    /// Discover app resources before the normal MCP connection path completes.
+    AppsEarlyResourceDiscovery,
+    /// Propagate Daybreak programs into eligible helper sessions.
+    DaybreakProgramPropagation,
     /// Enable enterprise refresh-token authorization for configured MCP resources.
     UseXaa,
     /// Removed compatibility flag for the legacy Apps MCP path override.
@@ -1501,6 +1525,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::ApiKeyCyberAccessPrograms,
+        key: "api_key_cyber_access_programs",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::EnableRequestCompression,
         key: "enable_request_compression",
         stage: Stage::Stable,
@@ -1550,6 +1580,36 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::MultiAgentV2,
         key: "multi_agent_v2",
         stage: Stage::Stable,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::MultiAgentV2DynamicTools,
+        key: "multi_agent_v2_dynamic_tools",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::WakeOnAgentMessages,
+        key: "wake_on_agent_messages",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::DeferMailboxPreemption,
+        key: "defer_mailbox_preemption",
+        stage: Stage::UnderDevelopment,
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::SubagentThreadEnvironments,
+        key: "subagent_thread_environments",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::ModelCatalogInContext,
+        key: "model_catalog_in_context",
+        stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
     FeatureSpec {
@@ -1611,6 +1671,42 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "mcp_oauth_refresh_coordination",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::McpConnectionSharing,
+        key: "mcp_connection_sharing",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::McpLazyStdioStartup,
+        key: "mcp_lazy_stdio_startup",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::MultiEnvironmentMcp,
+        key: "multi_environment_mcp",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::McpToolListChanged,
+        key: "mcp_tool_list_changed",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::AppsEarlyResourceDiscovery,
+        key: "apps_early_resource_discovery",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::DaybreakProgramPropagation,
+        key: "daybreak_program_propagation",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::UseXaa,

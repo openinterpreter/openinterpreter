@@ -38,6 +38,9 @@ pub struct ToolRegistryConfigToml {
 pub struct CodeModeConfigToml {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// Maximum bytes of each nested tool's input schema included in code mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_input_schema_max_bytes: Option<NonZeroUsize>,
     /// Default yield timeout for code-mode exec calls, in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_exec_yield_time_ms: Option<u64>,

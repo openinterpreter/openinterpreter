@@ -196,6 +196,8 @@ pub enum WindowsSandboxModeToml {
 #[schemars(deny_unknown_fields)]
 pub struct WindowsToml {
     pub sandbox: Option<WindowsSandboxModeToml>,
+    /// Whether the MXC sandbox may be selected, including through preference fallback.
+    pub allow_mxc: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, JsonSchema)]
@@ -962,9 +964,33 @@ pub struct Tui {
     pub raw_output_mode: bool,
 
     /// Own the fullscreen transcript, including scrolling, selection, and search.
-    /// Defaults to `false`; alternate-screen restrictions take precedence.
-    #[serde(default)]
+    /// Defaults to `true`; alternate-screen restrictions take precedence.
+    #[serde(default = "default_true")]
     pub fullscreen_transcript: bool,
+
+    /// Collapse details of completed turns in the fullscreen transcript.
+    #[serde(default)]
+    pub collapse_turn_details: bool,
+
+    /// Preferred sidebar width as a percentage of the terminal width.
+    pub sidebar_width_percent: Option<u8>,
+
+    /// Positive multiplier for scrolling the fullscreen transcript.
+    #[serde(default, deserialize_with = "crate::tui_mouse_scroll::deserialize")]
+    #[schemars(schema_with = "crate::tui_mouse_scroll::schema")]
+    pub mouse_scroll_speed: Option<f64>,
+
+    /// Copy mouse selections on release, according to the terminal-specific policy.
+    #[serde(default)]
+    pub copy_on_select: CopyOnSelect,
+
+    /// Clear a selection after copying it.
+    #[serde(default)]
+    pub copy_on_select_clear_selection: bool,
+
+    /// Control right-click paste for the fullscreen transcript.
+    #[serde(default)]
+    pub right_click_paste: RightClickPaste,
 
     /// Controls whether the TUI uses the terminal's alternate screen buffer.
     ///
