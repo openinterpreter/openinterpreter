@@ -13,7 +13,6 @@ import type { ComputerUseRequirements } from "./ComputerUseRequirements";
 import type { FeedbackRequirements } from "./FeedbackRequirements";
 import type { InAppBrowserRequirements } from "./InAppBrowserRequirements";
 import type { ModelsRequirements } from "./ModelsRequirements";
-import type { OtelRequirements } from "./OtelRequirements";
 import type { ResidencyRequirement } from "./ResidencyRequirement";
 import type { SandboxMode } from "./SandboxMode";
 import type { WindowsSandboxImplementation } from "./WindowsSandboxImplementation";

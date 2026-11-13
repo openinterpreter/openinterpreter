@@ -216,6 +216,16 @@ pub trait ThreadLifecycleContributor<C: Sync>: Send + Sync {
 /// extension-private turn state. The host exposes stable identifiers and
 /// extension stores instead of core runtime objects.
 pub trait TurnLifecycleContributor: Send + Sync {
+    /// Refresh extension-owned catalogs immediately before an active model step.
+    /// Return true only when the extension changed its MCP projection so the host
+    /// can reconcile the runtime without conflating it with turn startup.
+    fn refresh_catalog_for_step<'a>(
+        &'a self,
+        _input: CatalogRefreshInput<'a>,
+    ) -> ExtensionFuture<'a, bool> {
+        Box::pin(std::future::ready(false))
+    }
+
     /// Selects the start phase using the current thread policy. Disabled callbacks
     /// may retain the default phase and return without doing any work.
     fn turn_start_phase(&self, _thread_store: &ExtensionData) -> TurnStartPhase {

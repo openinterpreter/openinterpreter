@@ -18,7 +18,12 @@ environmentId?: string | null,
 /**
  * Current thread-runtime connection state; null when unavailable or the configuration changed.
  */
-runtimeStatus: McpServerConnectionStatus | null, pluginId: string | null, serverInfo: McpServerInfo | null,
+runtimeStatus: McpServerConnectionStatus | null, pluginId: string | null,
+/**
+ * HTTP origin of the effective configured endpoint, including plugin servers.
+ * Excludes credentials, path, query, and fragment; null for non-HTTP transports.
+ */
+httpOrigin: string | null, serverInfo: McpServerInfo | null,
 /**
  * Capabilities advertised by the initialized MCP server; null when unavailable.
  */

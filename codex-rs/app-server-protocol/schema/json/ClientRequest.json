@@ -1330,6 +1330,13 @@
             "null"
           ]
         },
+        "reportPasscode": {
+          "description": "Dedicated submission secret; never include this in the feedback reason or tags.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "savePath": {
           "allOf": [
             {
@@ -2754,7 +2761,7 @@
           ]
         },
         "modelProvider": {
-          "description": "Optional provider id to list models for instead of the active provider.",
+          "description": "List models for this configured provider instead of the app-server default.",
           "type": [
             "string",
             "null"
@@ -5206,7 +5213,6 @@
       "type": "object"
     },
     "ThreadGoalMutationOrigin": {
-      "description": "Distinguishes explicit user actions from automatic goal lifecycle mutations.",
       "enum": [
         "user",
         "automatic"
@@ -6524,6 +6530,13 @@
             }
           ],
           "description": "@deprecated `friendly` and `pragmatic` no longer select a style. Changing this does not rewrite the thread's existing instructions."
+        },
+        "rootTurnId": {
+          "description": "ID of the first turn in the chain of work that led to this new turn.\n\nWhen setting `parentTurnId`, set this to the parent turn's `rootTurnId` when known. This keeps descendant work attributed to the original turn. If omitted, the new turn becomes its own root. Ignored when this request adds input to an active turn.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "sandboxPolicy": {
           "anyOf": [

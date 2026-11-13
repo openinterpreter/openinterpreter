@@ -7,7 +7,6 @@
   },
   "properties": {
     "promptHash": {
-      "description": "Same prompt hash as feedback/upload; null when prompt metadata is absent.",
       "type": [
         "string",
         "null"

@@ -64,8 +64,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./.github/scripts/run_bazel_with_buildbuddy.py mod deps --lockfile_mode=update
-          ./.github/scripts/run_bazel_with_buildbuddy.py mod deps --lockfile_mode=error
+          ./.github/scripts/run_bazel.py mod deps --lockfile_mode=update
+          ./.github/scripts/run_bazel.py mod deps --lockfile_mode=error
           if git diff --quiet -- MODULE.bazel.lock; then
             # An already-reconciled lock is a successful no-op, not an
             # artifact to package as though it changed.

@@ -154,6 +154,145 @@
       ],
       "type": "string"
     },
+    "AccountSecuritySetupAction": {
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "url"
+      ],
+      "type": "object"
+    },
+    "AccountSecuritySetupNotice": {
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "action": {
+          "$ref": "#/definitions/AccountSecuritySetupAction"
+        },
+        "description": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "userId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "action",
+        "description",
+        "title",
+        "userId"
+      ],
+      "type": "object"
+    },
+    "AccountSession": {
+      "properties": {
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "imageUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isActive": {
+          "type": "boolean"
+        },
+        "lastUsedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "selectedWorkspaceAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "userId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspaces": {
+          "items": {
+            "$ref": "#/definitions/AccountSessionWorkspace"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "isActive",
+        "lastUsedAt",
+        "sessionId",
+        "workspaces"
+      ],
+      "type": "object"
+    },
+    "AccountSessionWorkspace": {
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "imageUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountSessionWorkspaceKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "accountId"
+      ],
+      "type": "object"
+    },
+    "AccountSessionWorkspaceKind": {
+      "enum": [
+        "personal",
+        "workspace"
+      ],
+      "type": "string"
+    },
     "AccountTokenUsageDailyBucket": {
       "properties": {
         "startDate": {
@@ -6790,16 +6929,6 @@
             }
           ]
         },
-        "otel": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/OtelRequirements"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "sqliteHome": {
           "type": [
             "string",
@@ -8438,6 +8567,13 @@
             "null"
           ]
         },
+        "reportPasscode": {
+          "description": "Dedicated submission secret; never include this in the feedback reason or tags.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "savePath": {
           "allOf": [
             {
@@ -8473,7 +8609,6 @@
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
         "promptHash": {
-          "description": "Same prompt hash as feedback/upload; null when prompt metadata is absent.",
           "type": [
             "string",
             "null"
@@ -12587,9 +12722,6 @@
             }
           ]
         },
-        "toolListMeta": {
-          "description": "Opaque `_meta` from the first page of the corresponding MCP tool catalog. Null when unavailable."
-        },
         "tools": {
           "additionalProperties": {
             "$ref": "#/definitions/Tool"
@@ -13198,7 +13330,7 @@
           ]
         },
         "modelProvider": {
-          "description": "Optional provider id to list models for instead of the active provider.",
+          "description": "List models for this configured provider instead of the app-server default.",
           "type": [
             "string",
             "null"
@@ -13859,238 +13991,6 @@
         }
       ],
       "title": "Nullable_GetAccountTokenUsageParams"
-    },
-    "OtelExporter": {
-      "oneOf": [
-        {
-          "enum": [
-            "none",
-            "statsig"
-          ],
-          "type": "string"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "otlp-http": {
-              "properties": {
-                "endpoint": {
-                  "type": "string"
-                },
-                "headers": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
-                  "description": "Header names are retained; values are redacted by the server.",
-                  "type": "object"
-                },
-                "protocol": {
-                  "$ref": "#/definitions/OtelHttpProtocol"
-                },
-                "tls": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/definitions/OtelTlsConfig"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                }
-              },
-              "required": [
-                "endpoint",
-                "headers",
-                "protocol"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "otlp-http"
-          ],
-          "title": "OtlpHttpOtelExporter",
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "otlp-grpc": {
-              "properties": {
-                "endpoint": {
-                  "type": "string"
-                },
-                "headers": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
-                  "description": "Header names are retained; values are redacted by the server.",
-                  "type": "object"
-                },
-                "tls": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/definitions/OtelTlsConfig"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                }
-              },
-              "required": [
-                "endpoint",
-                "headers"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "otlp-grpc"
-          ],
-          "title": "OtlpGrpcOtelExporter",
-          "type": "object"
-        }
-      ]
-    },
-    "OtelHttpProtocol": {
-      "enum": [
-        "binary",
-        "json"
-      ],
-      "type": "string"
-    },
-    "OtelRequirements": {
-      "properties": {
-        "environment": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "exporter": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/OtelExporter"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "log_agent_responses": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "log_guardian_assessments": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "log_sse_deltas": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "log_user_prompt": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "metrics_exporter": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/OtelExporter"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "span_attributes": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "type": [
-            "object",
-            "null"
-          ]
-        },
-        "tool_result": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/OtelToolResultLogConfig"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "trace_exporter": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/OtelExporter"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "tracestate": {
-          "additionalProperties": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
-          },
-          "type": [
-            "object",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
-    "OtelTlsConfig": {
-      "properties": {
-        "ca-certificate": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "client-certificate": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "client-private-key": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
-    "OtelToolResultLogConfig": {
-      "properties": {
-        "max_bytes": {
-          "format": "uint",
-          "minimum": 0.0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "max_bytes"
-      ],
-      "type": "object"
     },
     "OverriddenMetadata": {
       "properties": {
@@ -21876,6 +21776,13 @@
       "title": "ThreadGoalGetResponse",
       "type": "object"
     },
+    "ThreadGoalMutationOrigin": {
+      "enum": [
+        "user",
+        "automatic"
+      ],
+      "type": "string"
+    },
     "ThreadGoalRevision": {
       "properties": {
         "goalId": {
@@ -22865,14 +22772,6 @@
                 }
               ],
               "default": null
-            },
-            "generationId": {
-              "default": null,
-              "description": "Image generation identifier for the generated image, when provided by the image backend.",
-              "type": [
-                "string",
-                "null"
-              ]
             },
             "id": {
               "type": "string"
@@ -24581,28 +24480,6 @@
       },
       "type": "object"
     },
-    "ThreadSectionChangedNotification": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "description": "Broadcast after a successful move into, within, or out of a section.",
-      "properties": {
-        "sectionId": {
-          "description": "Destination section, or `null` when the thread was removed from its section.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "threadId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "sectionId",
-        "threadId"
-      ],
-      "title": "ThreadSectionChangedNotification",
-      "type": "object"
-    },
     "ThreadSectionCreateParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "description": "Parameters for creating an independently persisted thread section.",
@@ -26303,6 +26180,13 @@
             }
           ],
           "description": "@deprecated `friendly` and `pragmatic` no longer select a style. Changing this does not rewrite the thread's existing instructions."
+        },
+        "rootTurnId": {
+          "description": "ID of the first turn in the chain of work that led to this new turn.\n\nWhen setting `parentTurnId`, set this to the parent turn's `rootTurnId` when known. This keeps descendant work attributed to the original turn. If omitted, the new turn becomes its own root. Ignored when this request adds input to an active turn.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "sandboxPolicy": {
           "anyOf": [

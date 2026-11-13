@@ -18,8 +18,4 @@ limit?: number | null,
 /**
  * When true, include models that are hidden from the default picker list.
  */
-includeHidden?: boolean | null,
-/**
- * Optional provider id to list models for instead of the active provider.
- */
-modelProvider?: string | null, };
+includeHidden?: boolean | null, };

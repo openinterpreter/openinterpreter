@@ -4,7 +4,11 @@
 import type { ThreadGoalMutationOrigin } from "./ThreadGoalMutationOrigin";
 import type { ThreadGoalStatus } from "./ThreadGoalStatus";
 
-export type ThreadGoalSetParams = { threadId: string, objective?: string | null, status?: ThreadGoalStatus | null, tokenBudget?: number | null,
+export type ThreadGoalSetParams = { threadId: string,
+/**
+ * Missing provenance does not supply user authorization.
+ */
+origin?: ThreadGoalMutationOrigin | null, objective?: string | null, status?: ThreadGoalStatus | null, tokenBudget?: number | null,
 /**
  * All four expected fields are required together for an atomic Goal CAS
  * when an existing Goal is being changed. Objective and token-budget edits

@@ -8,4 +8,8 @@ export type FeedbackSaveParams = {
  * Absolute, previously unused ZIP path on the app-server host.
  * The caller owns this file, including after a disconnected RPC.
  */
-savePath: LegacyAppPathString, classification: string, reason?: string | null, threadId?: string | null, includeLogs?: boolean, extraLogFiles?: Array<string> | null, tags?: { [key in string]?: string } | null, };
+savePath: LegacyAppPathString, classification: string, reason?: string | null,
+/**
+ * Dedicated submission secret; never include this in the feedback reason or tags.
+ */
+reportPasscode?: string | null, threadId?: string | null, includeLogs?: boolean, extraLogFiles?: Array<string> | null, tags?: { [key in string]?: string } | null, };

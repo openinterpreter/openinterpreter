@@ -17,8 +17,6 @@ env:
   # dependencies with nested submodules. Use the system git CLI, which has
   # better network/proxy behavior and matches Cargo's own suggested fallback.
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-
-env:
   CODEX_BAZEL_GCS_BUCKET: ${{ secrets.CODEX_BAZEL_GCS_BUCKET }}
   CODEX_BAZEL_GCS_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.CODEX_BAZEL_GCS_WORKLOAD_IDENTITY_PROVIDER }}
 

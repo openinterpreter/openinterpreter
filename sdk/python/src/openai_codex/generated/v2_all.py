@@ -52,6 +52,30 @@ class AccountRoutingOverride(Enum):
     us_cr = "us_cr"
 
 
+class AccountSecuritySetupAction(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    label: str
+    url: str
+
+
+class AccountSecuritySetupNotice(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    account_id: Annotated[str, Field(alias="accountId")]
+    action: AccountSecuritySetupAction
+    description: str
+    title: str
+    user_id: Annotated[str, Field(alias="userId")]
+
+
+class AccountSessionWorkspaceKind(Enum):
+    personal = "personal"
+    workspace = "workspace"
+
+
 class AccountTokenUsageDailyBucket(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -2072,6 +2096,13 @@ class GetAccountRateLimitsParams(BaseModel):
     ] = None
 
 
+class GetAccountSecuritySetupResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    notice: AccountSecuritySetupNotice | None = None
+
+
 class GetAccountTokenUsageParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -3109,7 +3140,7 @@ class ModelListParams(BaseModel):
         str | None,
         Field(
             alias="modelProvider",
-            description="Optional provider id to list models for instead of the active provider.",
+            description="List models for this configured provider instead of the app-server default.",
         ),
     ] = None
 
@@ -3384,32 +3415,6 @@ class NullableGetAccountTokenUsageParams(RootModel[GetAccountTokenUsageParams | 
     root: Annotated[
         GetAccountTokenUsageParams | None, Field(title="Nullable_GetAccountTokenUsageParams")
     ]
-
-
-class OtelExporterValue(Enum):
-    none = "none"
-    statsig = "statsig"
-
-
-class OtelHttpProtocol(Enum):
-    binary = "binary"
-    json = "json"
-
-
-class OtelTlsConfig(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    ca_certificate: Annotated[str | None, Field(alias="ca-certificate")] = None
-    client_certificate: Annotated[str | None, Field(alias="client-certificate")] = None
-    client_private_key: Annotated[str | None, Field(alias="client-private-key")] = None
-
-
-class OtelToolResultLogConfig(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    max_bytes: Annotated[int, Field(ge=0)]
 
 
 class PatchApplyStatus(Enum):
@@ -5809,6 +5814,11 @@ class ThreadGoalGetParams(BaseModel):
     thread_id: Annotated[str, Field(alias="threadId")]
 
 
+class ThreadGoalMutationOrigin(Enum):
+    user = "user"
+    automatic = "automatic"
+
+
 class ThreadGoalStatus(Enum):
     active = "active"
     paused = "paused"
@@ -6104,13 +6114,6 @@ class FileIdThreadItem(BaseModel):
         ),
     ] = None
     failure: ImageGenerationFailure | None = None
-    generation_id: Annotated[
-        str | None,
-        Field(
-            alias="generationId",
-            description="Image generation identifier for the generated image, when provided by the image backend.",
-        ),
-    ] = None
     id: str
     input_images: Annotated[
         list[ImageGenerationInputImage] | None,
@@ -6146,13 +6149,6 @@ class ResultThreadItem(BaseModel):
         ),
     ] = None
     failure: ImageGenerationFailure | None = None
-    generation_id: Annotated[
-        str | None,
-        Field(
-            alias="generationId",
-            description="Image generation identifier for the generated image, when provided by the image backend.",
-        ),
-    ] = None
     id: str
     input_images: Annotated[
         list[ImageGenerationInputImage] | None,
@@ -6770,20 +6766,6 @@ class ThreadSectionAppearance(BaseModel):
     )
     color: str | None = None
     icon: str | None = None
-
-
-class ThreadSectionChangedNotification(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    section_id: Annotated[
-        str | None,
-        Field(
-            alias="sectionId",
-            description="Destination section, or `null` when the thread was removed from its section.",
-        ),
-    ]
-    thread_id: Annotated[str, Field(alias="threadId")]
 
 
 class ThreadSectionCreateParams(BaseModel):
@@ -7475,14 +7457,6 @@ class WriteStatus(Enum):
     ok_overridden = "okOverridden"
 
 
-class AccountSecuritySetupNotice(RootModel[Any]):
-    root: Any
-
-
-class ThreadGoalMutationOrigin(RootModel[Any]):
-    root: Any
-
-
 class ChatgptAccount(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -7513,6 +7487,16 @@ class AccountLoginCompletedNotification(BaseModel):
         DesktopOnboardingEntrypoint | None, Field(alias="onboardingEntrypoint")
     ] = None
     success: bool
+
+
+class AccountSessionWorkspace(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    account_id: Annotated[str, Field(alias="accountId")]
+    image_url: Annotated[str | None, Field(alias="imageUrl")] = None
+    kind: AccountSessionWorkspaceKind | None = None
+    name: str | None = None
 
 
 class AccountUpdatedNotification(BaseModel):
@@ -9127,6 +9111,13 @@ class FeedbackSaveParams(BaseModel):
     extra_log_files: Annotated[list[str] | None, Field(alias="extraLogFiles")] = None
     include_logs: Annotated[bool | None, Field(alias="includeLogs")] = None
     reason: str | None = None
+    report_passcode: Annotated[
+        str | None,
+        Field(
+            alias="reportPasscode",
+            description="Dedicated submission secret; never include this in the feedback reason or tags.",
+        ),
+    ] = None
     save_path: Annotated[
         LegacyAppPathString,
         Field(
@@ -9142,13 +9133,7 @@ class FeedbackSaveResponse(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
-    prompt_hash: Annotated[
-        str | None,
-        Field(
-            alias="promptHash",
-            description="Same prompt hash as feedback/upload; null when prompt metadata is absent.",
-        ),
-    ] = None
+    prompt_hash: Annotated[str | None, Field(alias="promptHash")] = None
     saved_path: Annotated[LegacyAppPathString, Field(alias="savedPath")]
     thread_id: Annotated[str, Field(alias="threadId")]
 
@@ -9320,13 +9305,6 @@ class GetAccountResponse(BaseModel):
             description="ChatGPT user ID belonging to this account response, when available.",
         ),
     ] = None
-
-
-class GetAccountSecuritySetupResponse(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    notice: AccountSecuritySetupNotice | None = None
 
 
 class GuardianApprovalReview(BaseModel):
@@ -9777,13 +9755,6 @@ class McpServerStatus(BaseModel):
         ),
     ] = None
     server_info: Annotated[McpServerInfo | None, Field(alias="serverInfo")] = None
-    tool_list_meta: Annotated[
-        Any | None,
-        Field(
-            alias="toolListMeta",
-            description="Opaque `_meta` from the first page of the corresponding MCP tool catalog. Null when unavailable.",
-        ),
-    ] = None
     tools: dict[str, Tool]
     tools_error: Annotated[
         str | None,
@@ -9964,68 +9935,6 @@ class NewThreadModelDefaults(BaseModel):
         ReasoningEffort | None, Field(alias="modelReasoningEffort")
     ] = None
     service_tier: Annotated[str | None, Field(alias="serviceTier")] = None
-
-
-class OtlpHttp(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    endpoint: str
-    headers: Annotated[
-        dict[str, str],
-        Field(description="Header names are retained; values are redacted by the server."),
-    ]
-    protocol: OtelHttpProtocol
-    tls: OtelTlsConfig | None = None
-
-
-class OtlpHttpOtelExporter(BaseModel):
-    model_config = ConfigDict(
-        extra="forbid",
-        populate_by_name=True,
-    )
-    otlp_http: Annotated[OtlpHttp, Field(alias="otlp-http")]
-
-
-class OtlpGrpc(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    endpoint: str
-    headers: Annotated[
-        dict[str, str],
-        Field(description="Header names are retained; values are redacted by the server."),
-    ]
-    tls: OtelTlsConfig | None = None
-
-
-class OtlpGrpcOtelExporter(BaseModel):
-    model_config = ConfigDict(
-        extra="forbid",
-        populate_by_name=True,
-    )
-    otlp_grpc: Annotated[OtlpGrpc, Field(alias="otlp-grpc")]
-
-
-class OtelExporter(RootModel[OtelExporterValue | OtlpHttpOtelExporter | OtlpGrpcOtelExporter]):
-    root: OtelExporterValue | OtlpHttpOtelExporter | OtlpGrpcOtelExporter
-
-
-class OtelRequirements(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    environment: str | None = None
-    exporter: OtelExporter | None = None
-    log_agent_responses: bool | None = None
-    log_guardian_assessments: bool | None = None
-    log_sse_deltas: bool | None = None
-    log_user_prompt: bool | None = None
-    metrics_exporter: OtelExporter | None = None
-    span_attributes: dict[str, Any] | None = None
-    tool_result: OtelToolResultLogConfig | None = None
-    trace_exporter: OtelExporter | None = None
-    tracestate: dict[str, Any] | None = None
 
 
 class OverriddenMetadata(BaseModel):
@@ -11858,6 +11767,23 @@ class AccountRateLimitsUpdatedNotification(BaseModel):
     rate_limits: Annotated[RateLimitSnapshot, Field(alias="rateLimits")]
 
 
+class AccountSession(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    display_name: Annotated[str | None, Field(alias="displayName")] = None
+    email: str | None = None
+    image_url: Annotated[str | None, Field(alias="imageUrl")] = None
+    is_active: Annotated[bool, Field(alias="isActive")]
+    last_used_at: Annotated[int, Field(alias="lastUsedAt")]
+    selected_workspace_account_id: Annotated[
+        str | None, Field(alias="selectedWorkspaceAccountId")
+    ] = None
+    session_id: Annotated[str, Field(alias="sessionId")]
+    user_id: Annotated[str | None, Field(alias="userId")] = None
+    workspaces: list[AccountSessionWorkspace]
+
+
 class ShowAgentMessageDisplay(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -13310,7 +13236,6 @@ class ConfigRequirements(BaseModel):
         ),
     ] = None
     models: ModelsRequirements | None = None
-    otel: OtelRequirements | None = None
     sqlite_home: Annotated[str | None, Field(alias="sqliteHome")] = None
 
 
@@ -14059,6 +13984,13 @@ class TurnStartParams(BaseModel):
         Personality | None,
         Field(
             description="@deprecated `friendly` and `pragmatic` no longer select a style. Changing this does not rewrite the thread's existing instructions."
+        ),
+    ] = None
+    root_turn_id: Annotated[
+        str | None,
+        Field(
+            alias="rootTurnId",
+            description="ID of the first turn in the chain of work that led to this new turn.\n\nWhen setting `parentTurnId`, set this to the parent turn's `rootTurnId` when known. This keeps descendant work attributed to the original turn. If omitted, the new turn becomes its own root. Ignored when this request adds input to an active turn.",
         ),
     ] = None
     sandbox_policy: Annotated[
