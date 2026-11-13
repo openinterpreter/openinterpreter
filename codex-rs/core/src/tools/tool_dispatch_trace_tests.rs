@@ -120,6 +120,7 @@ async fn dispatch_lifecycle_trace_records_direct_and_code_mode_requesters() -> a
     let temp = TempDir::new()?;
     let (mut session, turn) = make_session_and_context().await;
     attach_test_trace(&mut session, &turn, temp.path())?;
+    let trace = session.services.rollout_thread_trace.clone();
     session.services.rollout_thread_trace.start_code_cell_trace(
         turn.sub_id.as_str(),
         "cell-1",
@@ -163,6 +164,7 @@ async fn dispatch_lifecycle_trace_records_direct_and_code_mode_requesters() -> a
         )
         .await?;
 
+    trace.flush()?;
     let replayed = codex_rollout_trace::replay_bundle(single_bundle_dir(temp.path())?)?;
     assert_eq!(
         replayed.tool_calls["direct-call"].model_visible_call_id,
@@ -213,6 +215,7 @@ async fn dispatch_lifecycle_trace_records_unsupported_tool_failures() -> anyhow:
     let temp = TempDir::new()?;
     let (mut session, turn) = make_session_and_context().await;
     attach_test_trace(&mut session, &turn, temp.path())?;
+    let trace = session.services.rollout_thread_trace.clone();
 
     let registry = ToolRegistry::empty_for_test();
     let session = Arc::new(session);
@@ -233,6 +236,7 @@ async fn dispatch_lifecycle_trace_records_unsupported_tool_failures() -> anyhow:
         .await;
 
     assert!(matches!(result, Err(FunctionCallError::RespondToModel(_))));
+    trace.flush()?;
     let replayed = codex_rollout_trace::replay_bundle(single_bundle_dir(temp.path())?)?;
     let tool_call = &replayed.tool_calls["unsupported-call"];
     assert_eq!(tool_call.execution.status, ExecutionStatus::Failed);
@@ -246,6 +250,7 @@ async fn dispatch_lifecycle_trace_records_incompatible_payload_failures() -> any
     let temp = TempDir::new()?;
     let (mut session, turn) = make_session_and_context().await;
     attach_test_trace(&mut session, &turn, temp.path())?;
+    let trace = session.services.rollout_thread_trace.clone();
 
     let registry = ToolRegistry::with_handler_for_test(Arc::new(TestHandler {
         tool_name: codex_tools::ToolName::plain(codex_code_mode::PUBLIC_TOOL_NAME),
@@ -270,6 +275,7 @@ async fn dispatch_lifecycle_trace_records_incompatible_payload_failures() -> any
         .await;
 
     assert!(matches!(result, Err(FunctionCallError::Fatal(_))));
+    trace.flush()?;
     let replayed = codex_rollout_trace::replay_bundle(single_bundle_dir(temp.path())?)?;
     let tool_call = &replayed.tool_calls["incompatible-call"];
     assert_eq!(tool_call.execution.status, ExecutionStatus::Failed);
@@ -290,6 +296,7 @@ async fn missing_code_mode_wait_traces_only_the_wait_tool_call() -> anyhow::Resu
         session.services.executed_tool_calls.clone(),
     );
     attach_test_trace(&mut session, &turn, temp.path())?;
+    let trace = session.services.rollout_thread_trace.clone();
 
     let registry = ToolRegistry::with_handler_for_test(Arc::new(CodeModeWaitHandler::new(
         /*description_override*/ None, /*parameters_override*/ None,
@@ -317,6 +324,7 @@ async fn missing_code_mode_wait_traces_only_the_wait_tool_call() -> anyhow::Resu
         .dispatch_any_with_state(invocation, /*call_state*/ None)
         .await?;
 
+    trace.flush()?;
     let replayed = codex_rollout_trace::replay_bundle(single_bundle_dir(temp.path())?)?;
     assert_eq!(replayed.code_cells.len(), 0);
     assert!(
