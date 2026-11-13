@@ -275,7 +275,7 @@ async fn load_skills_under_root(
             Some(namespace) => SkillNamespaceResolver::with_provided_namespace(namespace),
             None => {
                 SkillNamespaceResolver::discover(
-                    &discovery_access,
+                    file_system,
                     &root_uri,
                     &skill_paths,
                     plugin_roots,
