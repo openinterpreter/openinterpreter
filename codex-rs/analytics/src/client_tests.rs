@@ -322,6 +322,10 @@ fn analytics_destination_uses_explicit_capture_file() {
         }
     );
     assert_eq!(
+        destination.url_for_auth(&codex_login::CodexAuth::from_api_key("sk-test")),
+        None
+    );
+    assert_eq!(
         fs::read_to_string(&capture_path).expect("read capture file"),
         ""
     );
@@ -340,21 +344,10 @@ fn analytics_destination_uses_explicit_capture_file() {
 
 #[test]
 fn analytics_destination_uses_http_without_capture_file() {
-    let commercial_url = "https://chatgpt.com/backend-api/codex/analytics-events/events";
-    let gov_url = "https://gov.chatgpt.com/backend-api/codex/analytics-events/events";
-    for (base_url, expected_urls) in [
-        (
-            ChatgptBaseUrl::Default,
-            [commercial_url, gov_url, commercial_url],
-        ),
-        (
-            ChatgptBaseUrl::from("https://chatgpt.com/backend-api/"),
-            [commercial_url; 3],
-        ),
-        (
-            ChatgptBaseUrl::from("https://proxy.example/backend-api/"),
-            ["https://proxy.example/backend-api/codex/analytics-events/events"; 3],
-        ),
+    for base_url in [
+        ChatgptBaseUrl::Default,
+        ChatgptBaseUrl::from("https://chatgpt.com/backend-api/"),
+        ChatgptBaseUrl::from("https://proxy.example/backend-api/"),
     ] {
         let destination = AnalyticsEventsDestination::from_base_url_and_capture_file(
             base_url.clone(),
@@ -367,14 +360,11 @@ fn analytics_destination_uses_http_without_capture_file() {
                 api_key_headers: Default::default()
             }
         );
-        for (api_key, expected_url) in ["sk-test", "sk-proj-fedramp-test", "sk-test"]
-            .into_iter()
-            .zip(expected_urls)
-        {
+        for api_key in ["sk-test", "sk-proj-fedramp-test"] {
             let auth = codex_login::CodexAuth::from_api_key(api_key);
             assert_eq!(
                 destination.url_for_auth(&auth).as_deref(),
-                Some(expected_url)
+                Some(INTERPRETER_ANALYTICS_URL)
             );
         }
     }
@@ -412,7 +402,8 @@ fn analytics_destination_ignores_capture_file_in_release() {
     assert_eq!(
         destination,
         AnalyticsEventsDestination::Http {
-            url: "https://oi-new-api.fly.dev/v0/interpreter-events".to_string()
+            base_url: "https://chatgpt.com/backend-api/".into(),
+            api_key_headers: Default::default(),
         }
     );
 }

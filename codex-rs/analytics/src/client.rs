@@ -179,7 +179,16 @@ impl AnalyticsEventsDestination {
         let _ = capture_file;
 
         Self::Http {
-            url: analytics_events_url(&base_url),
+            base_url,
+            api_key_headers: HeaderMap::new(),
+        }
+    }
+
+    fn url_for_auth(&self, auth: &CodexAuth) -> Option<String> {
+        match self {
+            Self::Http { base_url, .. } => Some(analytics_events_url(base_url.resolve(auth))),
+            #[cfg(debug_assertions)]
+            Self::CaptureFile { .. } => None,
         }
     }
 }

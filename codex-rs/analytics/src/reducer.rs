@@ -3069,7 +3069,6 @@ fn tool_item_event(input: ToolItemEventInput<'_>) -> Option<TrackEventRequest> {
     match item {
         ThreadItemPayload::CommandExecution {
             id,
-            sandbox_type,
             plugin_id,
             script_path,
             source,
