@@ -163,7 +163,6 @@ pub(crate) struct UnifiedExecProcess {
     output_task: Option<JoinHandle<()>>,
     sandbox_type: Option<SandboxType>,
     timed_out: AtomicBool,
-    _spawn_lifecycle: Option<SpawnLifecycleHandle>,
     // The shell may still need to replay this file after process startup returns.
     pub(crate) _shell_snapshot: Option<Arc<ShellSnapshotFile>>,
 }
@@ -209,7 +208,6 @@ impl UnifiedExecProcess {
             output_task: None,
             sandbox_type,
             timed_out: AtomicBool::new(false),
-            _spawn_lifecycle: spawn_lifecycle,
             _shell_snapshot: None,
         }
     }
@@ -749,22 +747,15 @@ impl UnifiedExecProcess {
                 output_closed: Arc::clone(&output_closed),
                 output_closed_notify: Arc::clone(&output_closed_notify),
             };
-            loop {
-                match receiver.recv().await {
-                    Ok(chunk) => {
-                        append_output(&output_buffer, &output_metrics, &chunk).await;
-                        let _ = output_tx.send(chunk);
-                        output_notify.notify_waiters();
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        output_closed.store(true, Ordering::Release);
-                        output_closed_notify.notify_waiters();
-                        break;
-                    }
+            let mut stdout_open = true;
+            let mut stderr_open = true;
+            while stdout_open || stderr_open {
+                let (stream, chunk) = tokio::select! {
+                    chunk = stdout.recv(), if stdout_open => (ExecOutputStream::Stdout, chunk),
+                    chunk = stderr.recv(), if stderr_open => (ExecOutputStream::Stderr, chunk),
                 };
                 if let Some(chunk) = chunk {
-                    output_buffer.lock().await.push_chunk(stream, &chunk);
+                    append_output(&output_buffer, &output_metrics, &chunk).await;
                     let _ = output_tx.send(chunk);
                     output_notify.notify_waiters();
                 } else if stream == ExecOutputStream::Stdout {

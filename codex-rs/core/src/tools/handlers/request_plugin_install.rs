@@ -281,29 +281,29 @@ impl RequestPluginInstallHandler {
                 .await;
         }
 
-        if response.is_some() {
-            let tool_type = match tool_type {
-                DiscoverableToolType::Connector => "connector",
-                DiscoverableToolType::Plugin => "plugin",
-            };
-            let response_action = match response.as_ref().map(|response| &response.action) {
-                Some(ElicitationAction::Accept) => "accept",
-                Some(ElicitationAction::Decline) => "decline",
-                Some(ElicitationAction::Cancel) => "cancel",
-                Some(_) => "unknown",
-                None => "unavailable",
-            };
-            step_context
-                .session_telemetry
-                .record_plugin_install_suggestion(
-                    tool_type,
-                    tool.id(),
-                    tool.name(),
-                    response_action,
-                    user_confirmed,
-                    completed,
-                );
-        }
+        // The elicitation was dispatched before this awaited call returned;
+        // a closed response channel is still a sent, unanswered request.
+        let tool_type = match tool_type {
+            DiscoverableToolType::Connector => "connector",
+            DiscoverableToolType::Plugin => "plugin",
+        };
+        let response_action = match response.as_ref().map(|response| &response.action) {
+            Some(ElicitationAction::Accept) => "accept",
+            Some(ElicitationAction::Decline) => "decline",
+            Some(ElicitationAction::Cancel) => "cancel",
+            Some(_) => "unknown",
+            None => "unavailable",
+        };
+        step_context
+            .session_telemetry
+            .record_plugin_install_suggestion(
+                tool_type,
+                tool.id(),
+                tool.name(),
+                response_action,
+                user_confirmed,
+                completed,
+            );
 
         let content = serde_json::to_string(&RequestPluginInstallResult {
             completed,
