@@ -178,19 +178,24 @@ pub async fn local_model_cached(model_id: &str) -> Result<bool, String> {
     if !path.exists() {
         return Ok(false);
     }
+    cached_model_is_usable(&path, model.expected_bytes, model.sha256).await
+}
+
+async fn cached_model_is_usable(
+    path: &PathBuf,
+    expected_bytes: u64,
+    expected_sha256: &'static str,
+) -> Result<bool, String> {
     let size = tokio::fs::metadata(&path)
         .await
         .map_err(|err| format!("failed to inspect cached model {}: {err}", path.display()))?
         .len();
-    if size != model.expected_bytes {
-        return Err(format!(
-            "cached model {} has {size} bytes, expected {}",
-            path.display(),
-            model.expected_bytes
-        ));
+    if size != expected_bytes || validate_gguf_header(path).is_err() {
+        // Keep a damaged download for diagnosis; acquisition reports the exact
+        // failure, while the catalog must not mark it as usable.
+        return Ok(false);
     }
-    validate_gguf_header(&path)?;
-    Ok(true)
+    Ok(validate_model_digest(path, expected_sha256).await.is_ok())
 }
 
 fn local_model_spec_for_config(config: &Config) -> Result<&'static LocalModelSpec, String> {
@@ -597,6 +602,25 @@ fn llama_server_command(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn cached_model_requires_exact_header_length_and_digest() {
+        let path = std::env::temp_dir().join(format!(
+            "codex-llamacpp-cache-validation-{}-{}.gguf",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        let valid = b"GGUFtest";
+        let digest = "30be5a60b7786b878803d49ff1dcaa157e9c098b896ff8bca692104fa9df3ba0";
+        tokio::fs::write(&path, valid).await.unwrap();
+        assert!(cached_model_is_usable(&path, 8, digest).await.unwrap());
+        tokio::fs::write(&path, b"GGUFfail").await.unwrap();
+        assert!(!cached_model_is_usable(&path, 8, digest).await.unwrap());
+        tokio::fs::write(&path, b"BAD!test").await.unwrap();
+        assert!(!cached_model_is_usable(&path, 8, digest).await.unwrap());
+        assert!(!cached_model_is_usable(&path, 9, digest).await.unwrap());
+        tokio::fs::remove_file(&path).await.unwrap();
+    }
 
     #[test]
     fn loaded_server_is_reused_without_starting_another_process() {

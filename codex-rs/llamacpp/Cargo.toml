@@ -18,3 +18,6 @@ tracing = { workspace = true }
 
 [lib]
 doctest = false
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
