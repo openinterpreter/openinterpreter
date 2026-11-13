@@ -257,8 +257,9 @@ impl McpHandler {
             .is_enabled()
             && prepared_mcp_call
                 .as_ref()
+                .ok()
                 .is_some_and(codex_mcp::PreparedMcpCall::is_host_owned_apps);
-        let mcp_tool = prepared_mcp_call.as_ref().map(|call| {
+        let mcp_tool = prepared_mcp_call.as_ref().ok().map(|call| {
             McpToolContext::from_prepared_call(
                 call,
                 invocation
@@ -295,6 +296,7 @@ impl McpHandler {
         // Capture presentation policy from the same config snapshot used for execution.
         let truncation_policy = prepared_mcp_call
             .as_ref()
+            .ok()
             .and_then(codex_mcp::PreparedMcpCall::output_token_limit)
             .map(TruncationPolicy::Tokens)
             .unwrap_or(step_context.settings.model_info.truncation_policy.into());
@@ -306,7 +308,7 @@ impl McpHandler {
             &cancellation_token,
             call_id.clone(),
             originating_call,
-            &self.tool_info,
+            self.tool_info(),
             prepared_mcp_call,
             self.hook_tool_name(),
             tool_name,

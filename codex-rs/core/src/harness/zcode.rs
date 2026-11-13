@@ -202,6 +202,8 @@ pub(crate) fn build_compaction_request(
 pub(crate) fn compacted_summary_item(summary_text: &str) -> ResponseItem {
     ResponseItem::Message {
         id: None,
+        encrypted_content: None,
+        status: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputText {
             text: format_compacted_summary(summary_text),

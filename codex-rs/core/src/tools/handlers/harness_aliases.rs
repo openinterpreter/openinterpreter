@@ -1028,6 +1028,8 @@ pub(crate) fn take_claude_code_bare_completed_task_notification() -> Option<Resp
     );
     Some(ResponseItem::Message {
         id: None,
+        encrypted_content: None,
+        status: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputText { text }],
         phase: Some(MessagePhase::Commentary),
@@ -3040,6 +3042,7 @@ fn zcode_agent_rollout_stats(
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::RetainedContext(_)
+            | RolloutItem::DynamicToolsUpdated { .. }
             | RolloutItem::EventMsg(_) => {}
         }
     }

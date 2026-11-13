@@ -50,6 +50,8 @@ pub(crate) fn inject_no_tool_call_format_error(stream: ResponseStream) -> Respon
                         if tx_event
                             .send(Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
                                 id: None,
+                                encrypted_content: None,
+                                status: None,
                                 role: "user".to_string(),
                                 content: vec![ContentItem::InputText {
                                     text: MINI_SWE_AGENT_NO_TOOL_CALL_ERROR.to_string(),
@@ -116,6 +118,8 @@ pub(crate) fn inject_no_tool_call_format_error(stream: ResponseStream) -> Respon
     ResponseStream {
         rx_event,
         consumer_dropped: tokio_util::sync::CancellationToken::new(),
+        interrupt: None,
+        routing_affinity: None,
     }
 }
 

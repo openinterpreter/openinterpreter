@@ -1990,6 +1990,11 @@ impl Session {
                 tool_approvals: Mutex::new(ApprovalStore::default()),
                 granted_permissions_by_environment_id: Arc::default(),
                 runtime_handle: tokio::runtime::Handle::current(),
+                kimi_cron: crate::kimi_cron::KimiCronService::new(
+                    config.codex_home.join("cron").join(thread_id.to_string()).to_path_buf(),
+                    Arc::clone(&time_provider),
+                    thread_id,
+                ),
                 skills_service,
                 agents_md_manager,
                 plugins_manager: Arc::clone(&plugins_manager),
@@ -2201,6 +2206,9 @@ impl Session {
                 let mut state = sess.state.lock().await;
                 state.queue_pending_session_start_source(session_start_source);
             }
+            // Load the owning thread's persisted schedule after history and startup events
+            // are restored, then wake only through its existing session scheduler.
+            sess.services.kimi_cron.start(Arc::downgrade(&sess)).await;
             Ok(sess)
         }
         .await;

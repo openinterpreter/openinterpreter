@@ -177,6 +177,8 @@ pub struct CodexThreadSettingsOverrides {
     pub collaboration_mode: Option<CollaborationMode>,
     pub personality: Option<Personality>,
     pub disabled_plugin_ids: Option<Vec<String>>,
+    /// Host extension inputs retained when restoring thread-owned settings.
+    pub turn_extension_init: Option<codex_extension_api::ExtensionDataInit>,
 }
 
 pub use codex_guardian_context::GuardianRootMessage;
@@ -862,10 +864,11 @@ impl CodexThread {
             collaboration_mode,
             personality,
             disabled_plugin_ids,
+            turn_extension_init,
         } = overrides;
         SessionSettingsUpdate {
             requested_approvals_reviewer,
-            turn_extension_init: None,
+            turn_extension_init,
             step_settings: StepSettingsUpdate {
                 model,
                 effort,
@@ -1150,7 +1153,7 @@ impl CodexThread {
             .await
             && turn.sub_id == turn_id
         {
-            inputs.settings.approvals_reviewer()
+            inputs.approvals_reviewer()
         } else {
             self.config_snapshot().await.approvals_reviewer
         }

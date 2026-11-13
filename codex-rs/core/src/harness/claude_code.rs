@@ -270,10 +270,24 @@ pub(crate) fn build_claude_code_responses_shaped_request(
     let tools = claude_code_tools_as_responses_json(&tools);
     let tools =
         codex_api::ResponsesApiTools::from(Arc::from(serde_json::value::to_raw_value(&tools)?));
+    // Responses no longer has a separate instructions field. Preserve the harness system
+    // prompt as the first typed message instead of dropping its behavioral requirements.
+    let mut input = prompt.get_formatted_input().to_vec();
+    input.insert(
+        0,
+        ResponseItem::Message {
+            id: None,
+            role: "system".to_string(),
+            content: vec![codex_protocol::models::input_text(system_prompt)],
+            encrypted_content: None,
+            status: None,
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+    );
     Ok(codex_api::ResponsesApiRequest {
         model: model_info.slug.clone(),
-        instructions: system_prompt,
-        input: prompt.get_formatted_input().to_vec(),
+        input,
         tools: Some(tools),
         tool_choice: "auto".to_string(),
         parallel_tool_calls: prompt.parallel_tool_calls,
@@ -284,6 +298,7 @@ pub(crate) fn build_claude_code_responses_shaped_request(
         include: Vec::new(),
         service_tier: None,
         prompt_cache_key,
+        prompt_cache_options: None,
         text: None,
         client_metadata: None,
         access_programs: None,
@@ -4810,11 +4825,21 @@ mod tests {
         .expect("build bare chat shaping");
 
         // System prompt is the Claude Code bare prompt (CWD/Date header).
-        assert!(request.instructions.starts_with("CWD: /tmp/workspace"));
-        assert!(request.instructions.contains("Date:"));
+        let ResponseItem::Message { role, content, .. } = &request.input[0] else {
+            panic!("expected system prompt as first input");
+        };
+        assert_eq!(role, "system");
+        let ContentItem::InputText {
+            text: system_prompt,
+        } = &content[0]
+        else {
+            panic!("expected system text");
+        };
+        assert!(system_prompt.starts_with("CWD: /tmp/workspace"));
+        assert!(system_prompt.contains("Date:"));
 
         // The conversation input round-trips for the converter.
-        assert_eq!(request.input.len(), 1);
+        assert_eq!(request.input.len(), 2);
 
         // Tools are flat Responses-style function tools, limited to the bare set.
         let tools: Vec<serde_json::Value> =
@@ -4867,7 +4892,13 @@ mod tests {
         .expect("build full chat shaping");
 
         // The full profile renders the rich Claude Code agent system prompt.
-        assert!(request.instructions.contains("Claude Code"));
+        let ResponseItem::Message { role, content, .. } = &request.input[0] else {
+            panic!("expected system prompt as first input");
+        };
+        assert_eq!(role, "system");
+        assert!(
+            matches!(&content[0], ContentItem::InputText { text } if text.contains("Claude Code"))
+        );
         // Tools are flat Responses-style function tools and include Bash.
         let tools: Vec<serde_json::Value> =
             serde_json::from_str(request.tools.as_ref().expect("tools").as_raw_value().get())

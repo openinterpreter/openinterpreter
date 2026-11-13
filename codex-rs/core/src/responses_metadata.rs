@@ -264,6 +264,8 @@ pub struct CodexResponsesMetadata {
     pub(crate) node_repl_disabled: Option<bool>,
     pub(crate) workspaces: BTreeMap<String, TurnMetadataWorkspace>,
     pub(crate) tool_namespaces_info: Option<TurnToolNamespacesInfo>,
+    /// Bounded attribution projected only into internal metadata when enabled.
+    pub(crate) mcp_attribution: Option<McpAttribution>,
     pub(crate) turn_started_at_unix_ms: Option<i64>,
     pub(crate) history_ingest_requested: Option<bool>,
     /// Selected session analytics client's collection state, independent of event eligibility or delivery.
@@ -310,6 +312,7 @@ impl CodexResponsesMetadata {
             node_repl_disabled: None,
             workspaces: BTreeMap::new(),
             tool_namespaces_info: None,
+            mcp_attribution: None,
             turn_started_at_unix_ms: None,
             history_ingest_requested: None,
             analytics_enabled: None,
