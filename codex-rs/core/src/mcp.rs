@@ -438,6 +438,11 @@ impl McpManager {
                         }
                         overlays.push(OrderedMcpOverlay::Set(Box::new(registration)));
                     }
+                    // Legacy contributions cannot prove the selected plugin's root or policy
+                    // identity. Selected plugins are projected above from typed catalog entries.
+                    McpServerContribution::SelectedPlugin { name, .. } => {
+                        tracing::warn!(%name, "ignoring plugin contribution without selected-root identity");
+                    }
                     McpServerContribution::HostedPluginConnectors {
                         plugin_id,
                         plugin_display_name,

@@ -2,7 +2,6 @@ use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::context::SharedTurnDiffTracker;
-use crate::tools::format_exec_output_str;
 use crate::tools::sandboxing::ToolError;
 use codex_analytics::ArtifactOperation;
 use codex_analytics::ArtifactOperationLifecycle;
@@ -525,10 +524,6 @@ async fn emit_exec_stage(
                 aggregated_output: output.aggregated_output.text,
                 exit_code: output.exit_code,
                 duration: output.duration,
-                formatted_output: format_exec_output_str(
-                    &output,
-                    ctx.model_info.truncation_policy.into(),
-                ),
                 status: if output.exit_code == 0 {
                     ExecCommandStatus::Completed
                 } else {

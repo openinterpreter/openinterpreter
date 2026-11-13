@@ -30,6 +30,8 @@ pub struct McpServerContributionContext<'a, C> {
     originator: Option<&'a str>,
     /// All selected environments captured for this projection, in priority order.
     selected_environments: Option<&'a [TurnEnvironmentSelection]>,
+    /// Plugins suppressed by the effective thread or step policy.
+    disabled_plugin_ids: Option<&'a [String]>,
     /// Selected roots resolved against ready environments for this exact step.
     ready_selected_capability_roots: Option<&'a [SelectedCapabilityRoot]>,
     /// Executor-materialized capability files shared by all consumers in this exact step.
@@ -57,6 +59,7 @@ impl<'a, C> McpServerContributionContext<'a, C> {
             session_source: None,
             originator: None,
             selected_environments: None,
+            disabled_plugin_ids: None,
             ready_selected_capability_roots: None,
             executor_capability_discovery: None,
             executor_capability_discovery_v2: None,
@@ -81,6 +84,7 @@ impl<'a, C> McpServerContributionContext<'a, C> {
             session_source: None,
             originator: Some(originator),
             selected_environments: None,
+            disabled_plugin_ids: None,
             ready_selected_capability_roots: Some(ready_selected_capability_roots),
             executor_capability_discovery,
             executor_capability_discovery_v2,
@@ -102,6 +106,27 @@ impl<'a, C> McpServerContributionContext<'a, C> {
     pub fn with_session_source(mut self, session_source: &'a SessionSource) -> Self {
         self.session_source = Some(session_source);
         self
+    }
+
+    pub fn with_selected_environments(
+        mut self,
+        environments: &'a [TurnEnvironmentSelection],
+    ) -> Self {
+        self.selected_environments = Some(environments);
+        self
+    }
+
+    pub fn selected_environments(&self) -> Option<&'a [TurnEnvironmentSelection]> {
+        self.selected_environments
+    }
+
+    pub fn with_disabled_plugin_ids(mut self, disabled_plugin_ids: &'a [String]) -> Self {
+        self.disabled_plugin_ids = Some(disabled_plugin_ids);
+        self
+    }
+
+    pub fn disabled_plugin_ids(&self) -> Option<&'a [String]> {
+        self.disabled_plugin_ids
     }
 
     /// Returns the host configuration visible during resolution.

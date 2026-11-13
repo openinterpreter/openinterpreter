@@ -349,7 +349,6 @@ impl ToolCallRuntime {
                         &dispatch_tool_name,
                         &dispatch_call_id,
                         trace_source,
-                        started.elapsed(),
                     );
                 }
                 // Finished calls release their IDs even if their results have not been collected.
@@ -395,7 +394,6 @@ impl ToolCallRuntime {
                                     &call.tool_name,
                                     &call.call_id,
                                     trace_source,
-                                    started.elapsed(),
                                 );
                                 call_state.terminal_outcome_reached.store(true, Ordering::Release);
                                 notify_tool_aborted(
