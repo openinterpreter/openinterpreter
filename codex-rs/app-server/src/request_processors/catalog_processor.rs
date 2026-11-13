@@ -304,6 +304,60 @@ impl CatalogRequestProcessor {
         ))
     }
 
+    pub(crate) async fn interpreter_harness_arguments_inspect(
+        &self,
+        params: InterpreterHarnessArgumentsInspectParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
+        if !config.model_providers.contains_key(&params.provider_id) {
+            return Err(invalid_params(format!(
+                "unknown provider `{}`",
+                params.provider_id
+            )));
+        }
+        let selected = params
+            .harness
+            .as_deref()
+            .unwrap_or(config.harness.as_deref().unwrap_or(""))
+            .to_string();
+        let available = crate::interpreter_catalog::harness_list(
+            &config,
+            InterpreterHarnessListParams {
+                provider_id: params.provider_id.clone(),
+                model: Some(params.model.clone()),
+            },
+        );
+        if !available
+            .data
+            .iter()
+            .any(|entry| entry.id.as_deref().unwrap_or("") == selected)
+        {
+            return Err(invalid_params(format!(
+                "unsupported harness `{selected}` for this provider"
+            )));
+        }
+        let mut arguments = serde_json::json!({"guidance": config.harness_guidance});
+        if params.provider_id == codex_model_provider_info::LOCAL_OSS_PROVIDER_ID {
+            let spec = codex_llamacpp::local_model_spec(&params.model).ok_or_else(|| {
+                invalid_params(format!("unsupported Local model `{}`", params.model))
+            })?;
+            arguments["contextWindow"] = serde_json::json!(spec.context_window);
+            arguments["serverPort"] =
+                serde_json::json!(codex_model_provider_info::DEFAULT_LOCAL_PORT);
+            arguments["modelBytes"] = serde_json::json!(spec.expected_bytes);
+            arguments["modelSha256"] = serde_json::json!(spec.sha256);
+        }
+        Ok(Some(
+            InterpreterHarnessArgumentsInspectResponse {
+                provider_id: params.provider_id,
+                model: params.model,
+                harness: selected,
+                arguments,
+            }
+            .into(),
+        ))
+    }
+
     pub(crate) async fn interpreter_harness_set(
         &self,
         params: InterpreterHarnessSetParams,

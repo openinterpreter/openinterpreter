@@ -120,6 +120,28 @@ pub struct InterpreterHarnessListResponse {
     pub data: Vec<InterpreterHarness>,
 }
 
+/// Inspect effective harness inputs without changing the active configuration.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct InterpreterHarnessArgumentsInspectParams {
+    pub provider_id: String,
+    pub model: String,
+    #[ts(optional = nullable)]
+    pub harness: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct InterpreterHarnessArgumentsInspectResponse {
+    pub provider_id: String,
+    pub model: String,
+    pub harness: String,
+    /// Effective, read-only values from core; not a parallel settings store.
+    pub arguments: serde_json::Value,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -199,6 +221,24 @@ mod tests {
         assert_eq!(
             serde_json::to_value(availability).unwrap(),
             serde_json::json!({"model": "example", "sizeLabel": "1 GB", "downloaded": false})
+        );
+    }
+
+    #[test]
+    fn harness_arguments_inspect_is_read_only_and_typed() {
+        let params: InterpreterHarnessArgumentsInspectParams = serde_json::from_value(
+            serde_json::json!({"providerId": "local", "model": "example", "harness": "local"}),
+        )
+        .unwrap();
+        let response = InterpreterHarnessArgumentsInspectResponse {
+            provider_id: params.provider_id,
+            model: params.model,
+            harness: params.harness.unwrap(),
+            arguments: serde_json::json!({"contextWindow": 32768}),
+        };
+        assert_eq!(
+            serde_json::to_value(response).unwrap()["arguments"]["contextWindow"],
+            32768
         );
     }
 }

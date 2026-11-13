@@ -1687,6 +1687,11 @@ impl MessageProcessor {
                     .interpreter_harness_list(params)
                     .await
             }
+            ClientRequest::InterpreterHarnessArgumentsInspect { params, .. } => {
+                self.catalog_processor
+                    .interpreter_harness_arguments_inspect(params)
+                    .await
+            }
             ClientRequest::InterpreterHarnessSet { params, .. } => {
                 self.catalog_processor.interpreter_harness_set(params).await
             }

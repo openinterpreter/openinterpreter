@@ -124,7 +124,7 @@ pub async fn ensure_oss_ready(config: &Config) -> Result<(), String> {
 
     let model_path = ensure_model_downloaded(model, false).await?;
     let llama_server = find_llama_server()?;
-    spawn_llama_server(&llama_server, &model_path)?;
+    spawn_llama_server(&llama_server, &model_path, model)?;
     wait_for_local_server(&base_url, model).await
 }
 
@@ -558,7 +558,22 @@ fn llama_server_names() -> &'static [&'static str] {
     }
 }
 
-fn spawn_llama_server(llama_server: &PathBuf, model_path: &PathBuf) -> Result<(), String> {
+fn spawn_llama_server(
+    llama_server: &PathBuf,
+    model_path: &PathBuf,
+    model: &LocalModelSpec,
+) -> Result<(), String> {
+    llama_server_command(llama_server, model_path, model)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("failed to start bundled llama.cpp server: {err}"))
+}
+
+fn llama_server_command(
+    llama_server: &PathBuf,
+    model_path: &PathBuf,
+    model: &LocalModelSpec,
+) -> Command {
     let mut command = Command::new(llama_server);
     command
         .arg("-m")
@@ -571,14 +586,11 @@ fn spawn_llama_server(llama_server: &PathBuf, model_path: &PathBuf) -> Result<()
         .arg("--parallel")
         .arg("1")
         .arg("--ctx-size")
-        .arg("32768")
+        .arg(model.context_window.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     command
-        .spawn()
-        .map(|_| ())
-        .map_err(|err| format!("failed to start bundled llama.cpp server: {err}"))
 }
 
 #[cfg(test)]
@@ -635,5 +647,20 @@ mod tests {
             assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
             assert_eq!(filename, model.filename);
         }
+    }
+
+    #[test]
+    fn server_context_matches_selected_model_catalog() {
+        let model = &LOCAL_MODEL_SPECS[4];
+        let command = llama_server_command(
+            &PathBuf::from("llama-server"),
+            &PathBuf::from("model.gguf"),
+            model,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>();
+        assert_eq!(args.last().map(|arg| arg.as_ref()), Some("40960"));
     }
 }

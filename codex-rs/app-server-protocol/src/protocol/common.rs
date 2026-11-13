@@ -1203,6 +1203,11 @@ client_request_definitions! {
         serialization: global_shared_read("config"),
         response: v2::InterpreterHarnessListResponse,
     },
+    InterpreterHarnessArgumentsInspect => "interpreter/harness/arguments/inspect" {
+        params: v2::InterpreterHarnessArgumentsInspectParams,
+        serialization: global_shared_read("config"),
+        response: v2::InterpreterHarnessArgumentsInspectResponse,
+    },
     InterpreterHarnessSet => "interpreter/harness/set" {
         params: v2::InterpreterHarnessSetParams,
         serialization: global("config"),

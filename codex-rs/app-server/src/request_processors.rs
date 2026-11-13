@@ -102,6 +102,8 @@ use codex_app_server_protocol::HooksListResponse;
 use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::InitializeResponse;
 use codex_app_server_protocol::InstalledApp;
+use codex_app_server_protocol::InterpreterHarnessArgumentsInspectParams;
+use codex_app_server_protocol::InterpreterHarnessArgumentsInspectResponse;
 use codex_app_server_protocol::InterpreterHarnessListParams;
 use codex_app_server_protocol::InterpreterHarnessSetParams;
 use codex_app_server_protocol::InterpreterHarnessSetResponse;
