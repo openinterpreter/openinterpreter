@@ -377,25 +377,6 @@ impl ApprovalAction {
                 sandbox_permissions,
                 additional_permissions,
             },
-            #[cfg(unix)]
-            Self::Execve {
-                id,
-                environment_id,
-                source,
-                program,
-                argv,
-                cwd,
-                additional_permissions,
-                ..
-            } => crate::guardian::GuardianApprovalRequest::Execve {
-                id,
-                environment_id,
-                source,
-                program: program.to_string_lossy().into_owned(),
-                argv,
-                cwd,
-                additional_permissions,
-            },
             Self::ApplyPatch {
                 id,
                 environment_id,
@@ -905,33 +886,6 @@ impl Session {
                     ],
                     cwd.clone(),
                     ctx.approval_reason.clone(),
-                    /*network_approval_context*/ None,
-                    /*proposed_execpolicy_amendment*/ None,
-                    additional_permissions.clone(),
-                    Some(vec![ReviewDecision::Approved, ReviewDecision::Abort]),
-                    /*plugin_attribution_override*/ None,
-                )
-                .await
-            }
-            #[cfg(unix)]
-            ApprovalAction::Execve {
-                approval_id,
-                environment_id,
-                command,
-                cwd,
-                additional_permissions,
-                ..
-            } => {
-                self.request_command_approval(
-                    ctx.review_context.turn(),
-                    ExecApprovalKind::Command,
-                    ctx.review_context.model_context(),
-                    ctx.call_id.clone(),
-                    Some(approval_id.clone()),
-                    Some(environment_id.clone()),
-                    command.clone(),
-                    cwd.clone().into(),
-                    /*reason*/ None,
                     /*network_approval_context*/ None,
                     /*proposed_execpolicy_amendment*/ None,
                     additional_permissions.clone(),

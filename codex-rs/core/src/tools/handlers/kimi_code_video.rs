@@ -75,7 +75,11 @@ pub(super) async fn handle(
     let request = client
         .post(format!("{}/files", base_url.trim_end_matches('/')))
         .timeout(MEDIA_UPLOAD_TIMEOUT)
-        .headers(auth.to_auth_headers())
+        .headers(auth.to_auth_headers().map_err(|error| {
+            FunctionCallError::RespondToModel(format!(
+                "Failed to prepare video upload authorization: {error}"
+            ))
+        })?)
         .header(
             reqwest::header::CONTENT_TYPE,
             format!("multipart/form-data; boundary={boundary}"),
