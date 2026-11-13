@@ -16,8 +16,8 @@ use codex_http_client::CHATGPT_ACCOUNT_ID_HEADER;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
+use codex_http_client::RequestBuilder;
 use codex_http_client::RouteAwareClientPool;
-use codex_http_client::RouteAwareRequestBuilder;
 use codex_http_client::RouteAwareRequestError;
 use codex_login::CodexAuth;
 use codex_login::default_client::get_codex_user_agent;
@@ -40,6 +40,7 @@ use http::header::USER_AGENT;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) mod analytics;
