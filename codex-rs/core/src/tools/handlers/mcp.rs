@@ -226,8 +226,8 @@ impl ToolExecutor<ToolInvocation> for McpHandler {
         });
 
         ToolSearchInfo::from_shared_spec(
-            build_mcp_search_text(&self.tool_info),
-            Arc::clone(&self.spec),
+            build_mcp_search_text(self.tool_info(), self.definition.agent_plugin),
+            Arc::clone(&self.definition.spec),
             source_info,
         )
     }

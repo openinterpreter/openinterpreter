@@ -68,6 +68,15 @@ impl ToolExecutor<ToolInvocation> for CodeModeWaitHandler {
 }
 
 impl CodeModeWaitHandler {
+    pub(crate) fn new(
+        description_override: Option<&str>,
+        parameters_override: Option<&str>,
+    ) -> Self {
+        Self {
+            spec: create_wait_tool(description_override, parameters_override),
+        }
+    }
+
     // Default to interrupted if this future is dropped; telemetry::CodeModeToolCallGuard::finish
     // overwrites this handler's captured span on explicit success or failure, including early errors.
     #[tracing::instrument(
@@ -228,5 +237,22 @@ impl CoreToolRuntime for CodeModeWaitHandler {
         // The wait result feeds code-mode control flow, so do not let
         // PostToolUse replace it with model-facing hook feedback.
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_handler_uses_catalog_description_and_parameters() {
+        let description = "Wait for a running cell";
+        let parameters = r#"{"type":"object","properties":{"cell_id":{"type":"string"}},"required":["cell_id"]}"#;
+        let handler = CodeModeWaitHandler::new(Some(description), Some(parameters));
+
+        assert_eq!(
+            handler.spec(),
+            create_wait_tool(Some(description), Some(parameters))
+        );
     }
 }

@@ -176,10 +176,11 @@ pub(crate) fn build_tool_router(
         extension_tool_executors(session, step_store),
         &mut registry,
     );
-    append_dynamic_tool_runtimes(&turn_context.dynamic_tools, &mut registry);
+    append_dynamic_tool_runtimes(dynamic_tools, &mut registry);
     let hosted_specs = hosted_model_tool_specs(
         turn_context,
         model_info,
+        turn_context.config.web_search_mode.value(),
         standalone_web_search_tool.as_slice(),
     );
 
@@ -222,7 +223,7 @@ fn apply_mcp_tool_exposure_policy(
         omitted_exposures_by_tool
             .entry(tool_name)
             .or_insert_with(|| {
-                let connector_omissions = (tool.server_name == CODEX_APPS_MCP_SERVER_NAME)
+                let connector_omissions = (tool.server_name() == CODEX_APPS_MCP_SERVER_NAME)
                     .then_some(tool.connector_id.as_deref())
                     .flatten()
                     .and_then(|id| apps_config.as_ref()?.apps.get(id))
@@ -1667,7 +1668,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                     exposure,
                 );
             }
-            registry.register_trusted_with_exposure(
+            registry.register_trusted_with_native_review(
                 multi_agent_v2_handler(
                     InterruptAgentHandler,
                     tool_namespace,
