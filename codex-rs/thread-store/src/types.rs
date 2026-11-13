@@ -5,6 +5,7 @@ use chrono::DateTime;
 use chrono::Utc;
 use codex_app_server_protocol::CodexErrorInfo;
 use codex_app_server_protocol::ThreadTimelineEntry;
+use codex_protocol::ContextWindowId;
 use codex_protocol::SanitizedGitUrl;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
@@ -113,7 +114,7 @@ pub struct CreateThreadParams {
     /// First rollout ordinal that belongs to this subagent's projected history.
     pub subagent_history_start_ordinal: Option<u64>,
     /// Initial context-window identity captured when the thread was created.
-    pub initial_window_id: String,
+    pub initial_window_id: ContextWindowId,
     /// Runtime workspace roots at creation, excluding permission-profile roots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,

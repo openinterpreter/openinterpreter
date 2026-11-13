@@ -97,7 +97,7 @@ impl LiveThreadInitGuard {
         self.live_thread = None;
     }
 
-    pub async fn discard(&mut self) {
+    pub async fn discard(&mut self) -> ThreadStoreResult<()> {
         let _ = self.finish_acquisition().await;
         let Some(live_thread) = self.live_thread.take() else {
             return Ok(());

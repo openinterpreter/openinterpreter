@@ -136,8 +136,8 @@ impl PersistContext {
     /// durability barrier. Stores may still choose to persist synchronously.
     pub fn allows_background_persistence(self) -> bool {
         match self {
-            Self::Standard => false,
-            Self::TurnStart | Self::SteeredUserInput => true,
+            Self::Standard | Self::ThreadPreparation => false,
+            Self::SubagentSpawn | Self::TurnStart | Self::SteeredUserInput => true,
         }
     }
 }

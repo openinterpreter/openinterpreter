@@ -928,7 +928,7 @@ async fn update_rollout_metadata(
     };
     patch(&mut metadata);
     recorder
-        .record_canonical_items(&[RolloutItem::SessionMeta(metadata)])
+        .record_canonical_items(&[RolloutItem::SessionMeta(Box::new(metadata))])
         .await
         .map_err(io_error)?;
     recorder.flush().await.map_err(io_error)?;

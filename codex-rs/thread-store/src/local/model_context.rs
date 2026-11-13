@@ -118,10 +118,13 @@ pub(super) async fn load_for_fork(
         // Recover only the runtime version before applying the fork cutoff. Stop at the
         // newest version-bearing context instead of retaining the source's full replay.
         let source_lineage = lineage.clone();
+        let (stop, _keep_running) = tokio::sync::oneshot::channel::<()>();
         session_meta.meta.multi_agent_version = tokio::task::spawn_blocking(move || {
             for segment in source_lineage.segments().iter().rev() {
-                let file =
-                    codex_rollout::open_rollout_seekable_reader(segment.rollout_path.as_path())?;
+                let file = codex_rollout::open_rollout_seekable_reader(
+                    segment.rollout_path.as_path(),
+                    || stop.is_closed(),
+                )?;
                 let mut scanner = match segment.end.map(|end| end.end_byte_offset) {
                     Some(end_byte_offset) => ReverseJsonlScanner::new_at(file, end_byte_offset)?,
                     None => ReverseJsonlScanner::new(file)?,
