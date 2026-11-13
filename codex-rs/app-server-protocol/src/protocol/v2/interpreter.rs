@@ -79,6 +79,22 @@ pub struct InterpreterModelListResponse {
     pub local_downloads: Vec<InterpreterLocalModelDownload>,
 }
 
+/// Explicit, user-initiated acquisition in the existing app-server protocol.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct InterpreterModelAcquireParams {
+    pub model: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct InterpreterModelAcquireResponse {
+    pub model: String,
+    pub size_bytes: u64,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -120,13 +136,10 @@ pub struct InterpreterProviderSetResponse {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 #[ts(export_to = "v2/")]
 pub struct InterpreterModelSetParams {
     pub model: String,
-    /// Explicit user consent to fetch this model's GGUF before selecting it.
-    #[serde(default)]
-    #[ts(optional)]
-    pub download: bool,
     #[ts(optional = nullable)]
     pub reasoning_effort: Option<ReasoningEffort>,
     #[ts(optional = nullable)]
@@ -158,14 +171,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn model_download_requires_explicit_opt_in() {
+    fn model_download_is_separate_from_configuration() {
         let set: InterpreterModelSetParams =
             serde_json::from_value(serde_json::json!({"model": "example"})).unwrap();
-        assert!(!set.download);
-        let set: InterpreterModelSetParams =
-            serde_json::from_value(serde_json::json!({"model": "example", "download": true}))
-                .unwrap();
-        assert!(set.download);
+        assert_eq!(set.model, "example");
+        assert!(
+            serde_json::from_value::<InterpreterModelSetParams>(
+                serde_json::json!({"model": "example", "download": true})
+            )
+            .is_err()
+        );
+        let acquire: InterpreterModelAcquireParams =
+            serde_json::from_value(serde_json::json!({"model": "example"})).unwrap();
+        assert_eq!(acquire.model, "example");
     }
 
     #[test]

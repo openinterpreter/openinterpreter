@@ -245,15 +245,28 @@ impl CatalogRequestProcessor {
         ))
     }
 
+    pub(crate) async fn interpreter_model_acquire(
+        &self,
+        params: InterpreterModelAcquireParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let spec = codex_llamacpp::local_model_spec(&params.model)
+            .ok_or_else(|| invalid_params(format!("unsupported Local model `{}`", params.model)))?;
+        codex_llamacpp::download_local_model(&params.model)
+            .await
+            .map_err(invalid_params)?;
+        Ok(Some(
+            InterpreterModelAcquireResponse {
+                model: spec.id.to_string(),
+                size_bytes: spec.expected_bytes,
+            }
+            .into(),
+        ))
+    }
+
     pub(crate) async fn interpreter_model_set(
         &self,
         params: InterpreterModelSetParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        if params.download {
-            codex_llamacpp::download_local_model(&params.model)
-                .await
-                .map_err(invalid_params)?;
-        }
         // The app-server does not run the TUI/exec OSS startup path. Prepare the
         // selected local engine before persisting its model so a failed launch
         // never leaves the active configuration pointing at an unreachable port.

@@ -430,7 +430,7 @@ async fn validate_model_digest(path: &PathBuf, expected: &'static str) -> Result
 fn confirm_download(model: &LocalModelSpec, path: &PathBuf) -> Result<bool, String> {
     if !std::io::stdin().is_terminal() {
         return Err(format!(
-            "local model `{}` is not downloaded at {}. A download must be confirmed before starting a headless turn.",
+            "local model `{}` is not downloaded at {}. Call interpreter/model/acquire before starting a headless turn.",
             model.id,
             path.display()
         ));

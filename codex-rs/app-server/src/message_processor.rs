@@ -1674,6 +1674,11 @@ impl MessageProcessor {
             ClientRequest::InterpreterModelList { params, .. } => {
                 self.catalog_processor.interpreter_model_list(params).await
             }
+            ClientRequest::InterpreterModelAcquire { params, .. } => {
+                self.catalog_processor
+                    .interpreter_model_acquire(params)
+                    .await
+            }
             ClientRequest::InterpreterModelSet { params, .. } => {
                 self.catalog_processor.interpreter_model_set(params).await
             }

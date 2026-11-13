@@ -1188,6 +1188,11 @@ client_request_definitions! {
         serialization: None,
         response: v2::InterpreterModelListResponse,
     },
+    InterpreterModelAcquire => "interpreter/model/acquire" {
+        params: v2::InterpreterModelAcquireParams,
+        serialization: None,
+        response: v2::InterpreterModelAcquireResponse,
+    },
     InterpreterModelSet => "interpreter/model/set" {
         params: v2::InterpreterModelSetParams,
         serialization: global("config"),

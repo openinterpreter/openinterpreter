@@ -106,6 +106,8 @@ use codex_app_server_protocol::InterpreterHarnessListParams;
 use codex_app_server_protocol::InterpreterHarnessSetParams;
 use codex_app_server_protocol::InterpreterHarnessSetResponse;
 use codex_app_server_protocol::InterpreterLocalModelDownload;
+use codex_app_server_protocol::InterpreterModelAcquireParams;
+use codex_app_server_protocol::InterpreterModelAcquireResponse;
 use codex_app_server_protocol::InterpreterModelListParams;
 use codex_app_server_protocol::InterpreterModelListResponse;
 use codex_app_server_protocol::InterpreterModelSetParams;
