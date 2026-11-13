@@ -11,6 +11,7 @@ use super::value::normalize_output_image;
 use super::value::serialize_output_text;
 use super::value::throw_type_error;
 use super::value::v8_value_to_json;
+use crate::session_runtime::OutputItem;
 
 pub(super) fn tool_callback(
     scope: &mut v8::PinScope<'_, '_>,

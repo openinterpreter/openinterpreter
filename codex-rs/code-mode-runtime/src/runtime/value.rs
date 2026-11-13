@@ -318,6 +318,7 @@ pub(super) fn v8_value_to_json(
         }
         return Ok(None);
     };
+    let json = stringified.to_rust_string_lossy(&tc);
     // V8 emits compact JSON with these ASCII key names unescaped. The object/comma
     // prefix and colon distinguish keys from string contents. Reject these before
     // Serde can reinterpret them as values and bypass its normal recursion limit.

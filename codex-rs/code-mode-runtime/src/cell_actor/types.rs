@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use super::send_cell_event;
 use crate::session_runtime::CellEvent;
 use crate::session_runtime::Observation;
+use crate::session_runtime::OutputItem;
 use crate::session_runtime::ToolKind;
 use crate::session_runtime::ToolName;
 

@@ -26,15 +26,13 @@ use codex_code_mode_protocol::CodeModeToolKind;
 #[cfg(feature = "v8-runtime")]
 use codex_code_mode_protocol::EnabledToolMetadata;
 use codex_code_mode_protocol::ExecuteRequest;
-use codex_code_mode_protocol::FunctionCallOutputContentItem;
 #[cfg(feature = "v8-runtime")]
-use codex_code_mode_protocol::enabled_tool_metadata;
+use codex_code_mode_protocol::normalize_code_mode_identifier;
 use codex_protocol::ToolName;
 pub(crate) use event_channel::RuntimeEventReceiver;
 pub(crate) use event_channel::RuntimeEventSender;
 pub(crate) use event_channel::runtime_event_channel;
 use serde_json::Value as JsonValue;
-use tokio::sync::mpsc;
 
 #[cfg(feature = "v8-runtime")]
 use crate::TaskFailureHandler;
@@ -102,9 +100,9 @@ impl RuntimeTerminateHandle {
 
 #[cfg(not(feature = "v8-runtime"))]
 pub(crate) fn spawn_runtime(
-    _stored_values: HashMap<String, JsonValue>,
+    _stored_values: HashMap<String, Arc<JsonValue>>,
     _request: ExecuteRequest,
-    _event_tx: mpsc::UnboundedSender<RuntimeEvent>,
+    _event_tx: impl Into<RuntimeEventSender>,
     _pending_mode: PendingRuntimeMode,
 ) -> Result<
     (
@@ -212,7 +210,7 @@ pub(super) struct RuntimeState {
     pending_timeouts: HashMap<u64, timers::ScheduledTimeout>,
     stored_values: HashMap<String, Arc<JsonValue>>,
     stored_value_writes: HashMap<String, Arc<JsonValue>>,
-    enabled_tools: Vec<EnabledToolMetadata>,
+    enabled_tools: Vec<ToolCallbackMetadata>,
     next_tool_call_id: u64,
     next_timeout_id: u64,
     tool_call_id: String,
@@ -221,12 +219,15 @@ pub(super) struct RuntimeState {
 }
 
 #[cfg(feature = "v8-runtime")]
+pub(super) struct ToolCallbackMetadata {
+    tool_name: ToolName,
+    kind: CodeModeToolKind,
+}
+
+#[cfg(feature = "v8-runtime")]
 pub(super) enum CompletionState {
     Pending,
-    Completed {
-        stored_value_writes: HashMap<String, Arc<JsonValue>>,
-        error_text: Option<String>,
-    },
+    Completed { error_text: Option<String> },
 }
 
 #[cfg(feature = "v8-runtime")]
@@ -281,14 +282,14 @@ fn run_runtime(
     let pending_promise = match module_loader::evaluate_main_module(scope, &config.source) {
         Ok(pending_promise) => pending_promise,
         Err(error_text) => {
-            send_scope_result(scope, &event_tx, Some(error_text));
+            capture_scope_send_error(scope, &event_tx, Some(error_text));
             return;
         }
     };
 
     match module_loader::completion_state(scope, pending_promise.as_ref()) {
         CompletionState::Completed { error_text } => {
-            send_scope_result(scope, &event_tx, error_text);
+            capture_scope_send_error(scope, &event_tx, error_text);
             return;
         }
         CompletionState::Pending => {}
@@ -304,7 +305,7 @@ fn run_runtime(
                 if let Err(error_text) =
                     module_loader::resolve_tool_response(scope, &id, Ok(result))
                 {
-                    send_scope_result(scope, &event_tx, Some(error_text));
+                    capture_scope_send_error(scope, &event_tx, Some(error_text));
                     return;
                 }
             }
@@ -312,13 +313,13 @@ fn run_runtime(
                 if let Err(runtime_error) =
                     module_loader::resolve_tool_response(scope, &id, Err(error_text))
                 {
-                    send_scope_result(scope, &event_tx, Some(runtime_error));
+                    capture_scope_send_error(scope, &event_tx, Some(runtime_error));
                     return;
                 }
             }
             RuntimeCommand::TimeoutFired { id } => {
                 if let Err(runtime_error) = timers::invoke_timeout_callback(scope, id) {
-                    send_scope_result(scope, &event_tx, Some(runtime_error));
+                    capture_scope_send_error(scope, &event_tx, Some(runtime_error));
                     return;
                 }
             }
@@ -328,7 +329,7 @@ fn run_runtime(
         scope.perform_microtask_checkpoint();
         match module_loader::completion_state(scope, pending_promise.as_ref()) {
             CompletionState::Completed { error_text } => {
-                send_scope_result(scope, &event_tx, error_text);
+                capture_scope_send_error(scope, &event_tx, error_text);
                 return;
             }
             CompletionState::Pending => {}
@@ -388,7 +389,7 @@ fn capture_scope_send_error(
 
 #[cfg(feature = "v8-runtime")]
 fn send_result(
-    event_tx: &mpsc::UnboundedSender<RuntimeEvent>,
+    event_tx: &RuntimeEventSender,
     stored_value_writes: HashMap<String, Arc<JsonValue>>,
     error_text: Option<String>,
 ) {
@@ -403,6 +404,7 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
+    use codex_code_mode_protocol::FunctionCallOutputContentItem;
     use pretty_assertions::assert_eq;
     use tokio::sync::mpsc;
 

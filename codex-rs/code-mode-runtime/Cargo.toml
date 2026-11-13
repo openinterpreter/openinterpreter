@@ -23,6 +23,9 @@ base64 = { workspace = true }
 codex-code-mode-protocol = { workspace = true }
 codex-plugin-host = { workspace = true }
 codex-protocol = { workspace = true }
+codex-utils-audio = { workspace = true }
+codex-utils-output-truncation = { workspace = true }
+codex-utils-string = { workspace = true }
 deno_core_icudata = { workspace = true, optional = true }
 futures = { workspace = true }
 opentelemetry = { workspace = true }

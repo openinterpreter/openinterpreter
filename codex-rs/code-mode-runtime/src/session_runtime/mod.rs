@@ -180,7 +180,7 @@ impl SessionRuntime {
             request,
             stored_values,
             host,
-            initial_observation,
+            initial_observe_mode.into(),
             cell_state,
             self.inner.task_failure_handler.clone(),
         )
