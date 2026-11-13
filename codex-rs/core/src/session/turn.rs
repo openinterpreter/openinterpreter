@@ -1864,6 +1864,7 @@ pub(crate) fn build_prompt(
             step_context.tool_router.model_visible_specs()
         },
         parallel_tool_calls: true,
+        cwd: Some(turn_context.cwd.as_path().to_path_buf()),
         base_instructions: if incremental_tools {
             BaseInstructions {
                 text: String::new(),

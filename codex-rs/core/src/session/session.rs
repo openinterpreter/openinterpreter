@@ -371,12 +371,9 @@ impl SessionConfiguration {
         environment_selections: Vec<TurnEnvironmentSelection>,
     ) -> CodexThreadSettingsOverrides {
         CodexThreadSettingsOverrides {
-            environments: Some(TurnEnvironmentRequests::new(
+            environments: Some(TurnEnvironmentSelections::new(
                 self.legacy_fallback_cwd.clone(),
-                environment_selections
-                    .into_iter()
-                    .map(TurnEnvironmentSelection::into_request)
-                    .collect(),
+                environment_selections,
             )),
             runtime_workspace_roots: Some(self.runtime_workspace_roots.clone()),
             profile_workspace_roots: Some(

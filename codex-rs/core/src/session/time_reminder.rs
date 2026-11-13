@@ -41,7 +41,7 @@ pub(super) fn apply_persistent_defaults(config: &mut Config) {
 pub(crate) struct CurrentTimeReminderState {
     last_delivery_time: Option<DateTime<Utc>>,
     last_window_id: Option<String>,
-    last_clock_failure: Option<(String, uuid::Uuid)>,
+    last_clock_failure: Option<(String, codex_protocol::ContextWindowId)>,
     pending_user_or_tool_output_boundary: bool,
 }
 

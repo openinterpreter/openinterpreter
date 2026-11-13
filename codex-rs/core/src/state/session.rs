@@ -6,6 +6,7 @@ use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_sandboxing::policy_transforms::merge_permission_profiles;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -39,6 +40,7 @@ use tokio_util::task::AbortOnDropHandle;
 
 /// Runtime request effort, initially unset and established by prewarm or sampling.
 /// Successful compaction allows a fresh baseline without an override.
+#[derive(Clone)]
 pub(crate) enum ReasoningEffortPin {
     Unset,
     Compacted,
@@ -79,6 +81,15 @@ pub(crate) struct SessionState {
     /// Persisted origin of the session base instructions, when known.
     pub(crate) base_instructions_provenance: Option<BaseInstructionsProvenance>,
     pub(crate) history: ContextManager,
+    pub(crate) context_window_id_generator: ContextWindowIdGenerator,
+    pub(crate) persisted_dynamic_tools: Arc<[DynamicToolSpec]>,
+    pub(crate) turn_attribution: Option<TurnAttribution>,
+    pub(crate) restored_turn_routing: Option<(String, Vec<String>)>,
+    pub(crate) shared_service_tier_pending: bool,
+    pub(crate) service_tier_acceptance: Option<ServiceTierAcceptance>,
+    pub(crate) shutting_down: bool,
+    pub(crate) async_compaction: crate::session::async_compaction::AsyncCompactionState,
+    pub(crate) pending_audio_duration_ids: BTreeSet<String>,
     /// Cancels work bound to discarded history or a superseded Guardian evidence policy.
     pub(crate) history_reset: CancellationToken,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
@@ -127,6 +138,7 @@ impl SessionState {
         context_window_id_generator: ContextWindowIdGenerator,
         history: ContextManager,
     ) -> Self {
+        let persisted_dynamic_tools = Arc::clone(&session_configuration.dynamic_tools);
         Self {
             active_disabled_plugin_ids: Vec::new(),
             session_configuration,
@@ -134,6 +146,13 @@ impl SessionState {
             service_tier_acceptance: None,
             base_instructions_provenance: None,
             history,
+            context_window_id_generator,
+            persisted_dynamic_tools,
+            turn_attribution: None,
+            restored_turn_routing: None,
+            shutting_down: false,
+            async_compaction: Default::default(),
+            pending_audio_duration_ids: BTreeSet::new(),
             history_reset: CancellationToken::new(),
             latest_rate_limits: None,
             latest_token_usage_record: None,

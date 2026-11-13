@@ -4467,6 +4467,9 @@ impl Session {
             }
             let extension_data =
                 codex_extension_api::ExtensionData::new(turn_context.sub_id.clone());
+            if let Some(discovery) = executor_capability_discovery.as_ref() {
+                extension_data.insert_arc(Arc::clone(discovery));
+            }
             extension_data.insert(extension_metrics::from_session_telemetry(
                 session_telemetry.clone(),
             ));

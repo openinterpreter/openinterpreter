@@ -322,9 +322,7 @@ impl Session {
                     .iter()
                     .any(|tool| tool == "send_user_message_async");
             world_state.add_section(PersistentModeState::new(
-                turn_context.config.features.persistent_execution_enabled(
-                    step_context.settings.effective_reasoning_effort().as_ref(),
-                ),
+                step_context.settings.effective_reasoning_effort().as_ref(),
                 model_messages.persistent_instructions(),
                 send_user_message_async_available,
             ));
@@ -408,6 +406,15 @@ impl Session {
             ));
         }
         let environments = step_context.environments.to_selections();
+        let ready_selected_capability_roots = step_context
+            .extension_data
+            .get::<Vec<codex_exec_server::ResolvedSelectedCapabilityRoot>>()
+            .map(|roots| Self::ready_selected_capability_roots(&roots))
+            .unwrap_or_default();
+        let executor_capability_discovery =
+            step_context
+                .extension_data
+                .get::<codex_exec_server_protocol::ExecutorCapabilityDiscoverySnapshot>();
         let previous_world_state = self.state.lock().await.history.world_state_checkpoint();
         for contributor in self.services.extensions.context_contributors() {
             for section in contributor
@@ -416,6 +423,8 @@ impl Session {
                     turn_id: turn_context.sub_id.as_str(),
                     model_info: &step_context.settings.model_info,
                     environments: &environments,
+                    ready_selected_capability_roots: &ready_selected_capability_roots,
+                    executor_capability_discovery: executor_capability_discovery.as_deref(),
                     extension_metrics: Some(Arc::clone(&extension_metrics)),
                     session_store: &self.services.session_extension_data,
                     thread_store: &self.services.thread_extension_data,

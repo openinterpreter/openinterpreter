@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
-use crate::agent::LocalAgentControl;
+use crate::agent::api::AgentControl;
+use crate::agent::control::LocalAgentRuntime;
 use crate::agents_md_manager::AgentsMdManager;
 use crate::attestation::AttestationProvider;
 use crate::client::ModelClient;
@@ -85,7 +86,10 @@ pub(crate) struct SessionServices {
     /// Keep roots for unselected environments so selecting them again restores their capabilities.
     pub(crate) selected_capability_roots: Vec<SelectedCapabilityRoot>,
     pub(crate) mcp_thread_init: ExtensionDataInit,
-    pub(crate) agent_control: LocalAgentControl,
+    pub(crate) agent_control: Arc<dyn AgentControl>,
+    pub(crate) local_agent_runtime: LocalAgentRuntime,
+    pub(crate) granted_permissions_by_environment_id:
+        Arc<StdMutex<HashMap<String, AdditionalPermissionProfile>>>,
     pub(crate) network_proxy: ArcSwapOption<StartedNetworkProxy>,
     pub(crate) network_proxy_audit_metadata: NetworkProxyAuditMetadata,
     pub(crate) managed_network_requirements_configured: bool,

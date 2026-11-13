@@ -25,7 +25,6 @@ use crate::WithTurnExtensionData;
 use crate::agent::helper_daybreak::turn::HelperTurnAdmission;
 use crate::context::ContextualUserFragment;
 use crate::context::GuardianContextMode;
-use crate::context::GuardianSenderMessages;
 use crate::state::ActiveTurn;
 use crate::state::AdditionalContextFormat;
 use crate::state::TurnState;
@@ -984,7 +983,7 @@ impl Session {
     async fn steer_input(
         &self,
         input: &mut SubmittedTurnInput,
-        sender_messages: Option<&GuardianSenderMessages>,
+        sender_messages: Option<&SenderUserMessages>,
         additional_context: BTreeMap<String, AdditionalContextEntry>,
         expected_turn_id: Option<&str>,
         required_final_output_json_schema: Option<&Value>,
@@ -1101,7 +1100,11 @@ async fn capture_sender_user_messages(
     session: &Session,
     input: &mut SubmittedTurnInput,
 ) -> Option<SenderUserMessages> {
-    if session.guardian_context_mode != GuardianContextMode::ThreadOwned {
+    let context_mode = {
+        let state = session.state.lock().await;
+        GuardianContextMode::from_history(state.history.conversation_history_snapshot().as_ref())
+    };
+    if context_mode != GuardianContextMode::ThreadOwned {
         return None;
     }
     let (SubmittedTurnInput::ResponseItem(item)

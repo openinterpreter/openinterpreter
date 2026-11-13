@@ -221,9 +221,10 @@ impl TurnEnvironment {
             }
             None
         } else {
-            self.shell_snapshot.peek()?.clone().filter(|snapshot| {
-                &snapshot.shell_environment_policy == self.shell_environment_policy()
-            })
+            self.shell_snapshot
+                .peek()?
+                .clone()
+                .filter(|snapshot| snapshot.is_brokered_for(self.shell_environment_policy()))
         }
     }
 

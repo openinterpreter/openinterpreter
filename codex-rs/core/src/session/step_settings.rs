@@ -126,7 +126,7 @@ impl ResolvedStepSettings {
         constraints: &StepSettingsConstraints<'_>,
         models_manager: &dyn ModelsManager,
         overrides: &ModelInfoOverrides,
-        fast_mode_enabled: bool,
+        features: &Features,
     ) -> ConstraintResult<Self> {
         let selected = self.selected.apply(update, constraints)?;
         let model_info = if selected.collaboration_mode.model()
@@ -137,7 +137,7 @@ impl ResolvedStepSettings {
         } else {
             Arc::new(selected.resolve_model_info(models_manager, overrides).await)
         };
-        let mut next = Self::new(Arc::new(selected), model_info, fast_mode_enabled);
+        let mut next = Self::new(Arc::new(selected), model_info, features);
         next.mcp_approvals_reviewer_override = update
             .approvals_reviewer
             .or(self.mcp_approvals_reviewer_override);
