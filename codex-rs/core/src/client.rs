@@ -2914,7 +2914,10 @@ impl ModelClientSession {
             );
             let attempt = inference_trace.start_attempt();
             attempt.add_request_headers(&mut options.extra_headers);
-            attempt.record_started(&request);
+            // Tracing must not turn an otherwise valid compatibility request into a failure.
+            if let Ok(body) = serde_json::to_vec(&request) {
+                attempt.record_started(body, Arc::clone(prompt), || Ok(None));
+            }
             let client =
                 ChatCompletionsCompatClient::new(transport, setup.api_provider, setup.api_auth)
                     .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
@@ -3601,7 +3604,7 @@ impl AuthRequestTelemetryContext {
         agent_identity_telemetry: Option<AgentIdentityTelemetry>,
         retry: PendingUnauthorizedRetry,
     ) -> std::result::Result<Self, ApiError> {
-        let auth_telemetry = auth_header_telemetry(api_auth)?;
+        let auth_telemetry = auth_header_telemetry(api_auth);
         Ok(Self {
             auth_mode: auth_mode.map(|mode| match mode {
                 AuthMode::ApiKey | AuthMode::BedrockApiKey | AuthMode::BedrockAccessKeys => {

@@ -314,7 +314,7 @@ async fn run_remote_compaction_request_v2(
                 stream = http_executor.stream_responses_http(
                     &turn_state, auth_owner.clone(), /*event_sender*/ None, prompt, &settings.model_info, &step_context.session_telemetry, effort,
                     settings.reasoning_summary, settings.service_tier.clone(), responses_metadata,
-                    &trace,
+                    &trace, None,
                 ) => stream?,
             };
             return collect_compaction_output(

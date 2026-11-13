@@ -338,7 +338,7 @@ pub async fn process_exec_tool_call(
 /// Transform a portable exec request into the concrete argv/env that should be
 /// spawned under the requested sandbox policy.
 #[allow(clippy::too_many_arguments)]
-pub fn build_exec_request(
+pub async fn build_exec_request(
     params: ExecParams,
     permission_profile: &PermissionProfile,
     sandbox_cwd: &AbsolutePathBuf,
@@ -444,7 +444,12 @@ pub fn build_exec_request(
     } else {
         Vec::new()
     };
-    ExecRequest::from_sandbox_exec_request(request, options, windows_sandbox_workspace_roots).await
+    ExecRequest::from_sandbox_exec_request(
+        request.into_command_request(),
+        options,
+        windows_sandbox_workspace_roots,
+    )
+    .await
 }
 
 pub(crate) async fn execute_exec_request(

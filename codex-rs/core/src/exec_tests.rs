@@ -1219,42 +1219,48 @@ fn process_exec_tool_call_uses_platform_sandbox_for_network_only_restrictions() 
     );
 }
 
-#[test]
-fn build_exec_request_projects_workspace_roots_only_for_windows_sandbox() -> Result<()> {
+#[tokio::test]
+async fn build_exec_request_projects_workspace_roots_only_for_windows_sandbox() -> Result<()> {
     let temp_dir = tempfile::TempDir::new()?;
     let cwd = temp_dir.path().abs();
-    let build_request = |profile: &PermissionProfile, roots: &[PathUri]| {
-        build_exec_request(
-            ExecParams {
-                command: vec!["echo".to_string(), "ok".to_string()],
-                cwd: cwd.clone(),
-                expiration: ExecExpiration::DefaultTimeout,
-                capture_policy: ExecCapturePolicy::ShellTool,
-                env: HashMap::new(),
-                network: None,
-                network_environment_id: None,
-                sandbox_permissions: SandboxPermissions::UseDefault,
-                windows_sandbox_level: WindowsSandboxLevel::RestrictedToken,
-                justification: None,
-                arg0: None,
-            },
-            profile,
-            &cwd,
-            roots,
-            &Some(temp_dir.path().join("codex-linux-sandbox")),
-            /*codex_self_exe*/ &None,
-            SandboxType::WindowsRestrictedToken,
-            /*use_legacy_landlock*/ false,
-        )
+    let build_request = |profile: PermissionProfile, roots: Vec<PathUri>| {
+        let cwd = cwd.clone();
+        let linux_sandbox_exe = temp_dir.path().join("codex-linux-sandbox");
+        async move {
+            build_exec_request(
+                ExecParams {
+                    command: vec!["echo".to_string(), "ok".to_string()],
+                    cwd: cwd.clone(),
+                    expiration: ExecExpiration::DefaultTimeout,
+                    capture_policy: ExecCapturePolicy::ShellTool,
+                    env: HashMap::new(),
+                    network: None,
+                    network_environment_id: None,
+                    sandbox_permissions: SandboxPermissions::UseDefault,
+                    windows_sandbox_level: WindowsSandboxLevel::RestrictedToken,
+                    justification: None,
+                    arg0: None,
+                },
+                &profile,
+                &cwd,
+                &roots,
+                &Some(linux_sandbox_exe),
+                /*codex_self_exe*/ &None,
+                SandboxType::WindowsRestrictedToken,
+                /*use_legacy_landlock*/ false,
+            )
+            .await
+        }
     };
     let native_roots = vec![cwd.clone(), temp_dir.path().join("additional").abs()];
     let request = build_request(
-        &PermissionProfile::read_only(),
-        &native_roots
+        PermissionProfile::read_only(),
+        native_roots
             .iter()
             .map(PathUri::from_abs_path)
             .collect::<Vec<_>>(),
-    )?;
+    )
+    .await?;
     assert_eq!(
         request.windows_sandbox_workspace_roots,
         if cfg!(windows) {
@@ -1272,10 +1278,12 @@ fn build_exec_request_projects_workspace_roots_only_for_windows_sandbox() -> Res
     .expect("foreign workspace URI");
     let roots = [PathUri::from_abs_path(&cwd), foreign_root];
     assert_eq!(
-        build_request(&PermissionProfile::Disabled, &roots)?.windows_sandbox_workspace_roots,
+        build_request(PermissionProfile::Disabled, roots.to_vec())
+            .await?
+            .windows_sandbox_workspace_roots,
         Vec::new(),
     );
-    let request = build_request(&PermissionProfile::read_only(), &roots);
+    let request = build_request(PermissionProfile::read_only(), roots.to_vec()).await;
     if cfg!(windows) {
         let error = request.expect_err("native Windows sandbox must reject foreign roots");
         assert!(matches!(

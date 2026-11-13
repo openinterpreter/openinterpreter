@@ -110,7 +110,6 @@ pub(super) async fn run_remote_compact_v2_attempt(
                 trim_function_call_history_to_fit_context_window(
                     &mut history,
                     turn_context,
-                    turn_context.model_context_window(),
                     &base_instructions,
                 );
             if rewritten_outputs > 0 {
@@ -190,7 +189,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
             tool_router.model_visible_specs()
         },
         parallel_tool_calls: true,
-        cwd: Some(turn_context.cwd.clone()),
+        cwd: Some(turn_context.cwd.as_path().to_path_buf()),
         base_instructions,
         output_schema: None,
         output_schema_strict: true,
@@ -308,7 +307,6 @@ pub(crate) async fn capture_background_input(
     trim_function_call_history_to_fit_context_window(
         &mut snapshot,
         &step_context.turn,
-        step_context.settings.model_info.usable_context_window(),
         &base_instructions,
     );
     snapshot.normalize_history(&step_context.settings.model_info.input_modalities);

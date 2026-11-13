@@ -206,7 +206,7 @@ impl ShellSnapshot {
                     SnapshotCredentialBrokerState::Ready(network_proxy) if sandbox.is_some() => {
                         Some(SnapshotCredentialBroker {
                             network_proxy,
-                            shell_environment_policy,
+                            shell_environment_policy: shell_environment_policy.clone(),
                             allow_login_shell,
                         })
                     }
@@ -1057,10 +1057,6 @@ async fn run_script_with_timeout(
     handler.args(&args[1..]);
     handler.stdin(Stdio::null());
     handler.current_dir(cwd);
-    if let Some(env) = prepared_env {
-        handler.env_clear();
-        handler.envs(env);
-    }
     codex_protocol::shell_environment::scrub_non_inheritable_env_vars(handler.as_std_mut());
     #[cfg(unix)]
     {
