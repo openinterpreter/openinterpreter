@@ -66,6 +66,7 @@ class PackageInputs:
     codex_command_runner_bin: Path | None
     codex_windows_sandbox_setup_bin: Path | None
     llama_server_bin: Path | None = None
+    llama_server_sha256: str | None = None
 
 
 PACKAGE_VARIANTS: dict[str, PackageVariant] = {

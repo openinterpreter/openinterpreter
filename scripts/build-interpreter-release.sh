@@ -10,6 +10,7 @@ Options:
   --install-dir <dir>      Visible bin directory for shims
   --home <dir>             Open Interpreter home directory
   --llama-server-bin <path>  Verified llama-server executable for the target
+  --llama-server-sha256 <hex>  Pinned SHA-256 for that executable
   -j, --jobs <N>           Number of parallel Cargo build jobs (default: 1)
   -h, --help               Show this help message
 
@@ -26,6 +27,7 @@ install_dir="${OPEN_INTERPRETER_INSTALL_DIR:-${CODEX_INSTALL_DIR:-$HOME/.local/b
 interpreter_home="${INTERPRETER_HOME:-$HOME/.openinterpreter}"
 build_jobs="${CARGO_BUILD_JOBS:-1}"
 llama_server_bin="${OPEN_INTERPRETER_LLAMA_SERVER_BIN:-}"
+llama_server_sha256="${OPEN_INTERPRETER_LLAMA_SERVER_SHA256:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -61,6 +63,14 @@ while [[ $# -gt 0 ]]; do
       llama_server_bin="${2:?--llama-server-bin requires a value}"
       shift 2
       ;;
+    --llama-server-sha256=*)
+      llama_server_sha256="${1#*=}"
+      shift
+      ;;
+    --llama-server-sha256)
+      llama_server_sha256="${2:?--llama-server-sha256 requires a value}"
+      shift 2
+      ;;
     --jobs=*|-j=*)
       build_jobs="${1#*=}"
       shift
@@ -90,6 +100,10 @@ if [[ -z "$llama_server_bin" || ! -f "$llama_server_bin" || ! -x "$llama_server_
   exit 1
 fi
 llama_server_bin="$(cd -- "$(dirname -- "$llama_server_bin")" && pwd -P)/$(basename -- "$llama_server_bin")"
+if [[ ! "$llama_server_sha256" =~ ^[[:xdigit:]]{64}$ ]]; then
+  echo "Supply a pinned 64-character --llama-server-sha256" >&2
+  exit 1
+fi
 
 # Resolve paths to absolute locations so relative CLI arguments work safely.
 mkdir -p "$install_dir" "$interpreter_home"
@@ -167,6 +181,7 @@ fi
   package_args=(
     --variant open-interpreter
     --llama-server-bin "$llama_server_bin"
+    --llama-server-sha256 "$llama_server_sha256"
     --cargo-profile release
     --package-dir "$staging_dir"
     --force

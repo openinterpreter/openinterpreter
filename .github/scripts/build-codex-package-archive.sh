@@ -14,6 +14,7 @@ Usage: build-codex-package-archive.sh \
   [--zsh-bin <path>] \
   [--zsh-manifest <path>] \
   [--llama-server-bin <path>] \
+  [--llama-server-sha256 <hex>] \
   [--codex-command-runner-bin <path>] \
   [--codex-windows-sandbox-setup-bin <path>] \
   [--voice-release-dir <path> --release-version <release-version>] \
@@ -76,6 +77,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --llama-server-bin)
       resource_args+=(--llama-server-bin "${2:?--llama-server-bin requires a value}")
+      shift 2
+      ;;
+    --llama-server-sha256)
+      resource_args+=(--llama-server-sha256 "${2:?--llama-server-sha256 requires a value}")
       shift 2
       ;;
     --codex-command-runner-bin)

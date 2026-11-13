@@ -10,6 +10,7 @@ from .cargo import build_source_binaries
 from .layout import build_package_dir
 from .layout import prepare_package_dir
 from .layout import validate_package_dir
+from .layout import verify_llama_server_input
 from .ripgrep import resolve_rg_bin
 from .targets import PACKAGE_VARIANTS
 from .targets import TARGET_SPECS
@@ -119,6 +120,10 @@ def parse_args() -> argparse.Namespace:
         help="Prebuilt llama-server executable for open-interpreter packages.",
     )
     parser.add_argument(
+        "--llama-server-sha256",
+        help="Pinned SHA-256 of the target's prebuilt llama-server executable.",
+    )
+    parser.add_argument(
         "--managed-codex-bin",
         type=Path,
         help=(
@@ -194,12 +199,21 @@ def main() -> int:
         "prebuilt llama-server executable",
         "--llama-server-bin",
     )
-    if variant.llama_cpp_required and llama_server_bin is None:
-        raise RuntimeError("open-interpreter packages require --llama-server-bin.")
-    if not variant.llama_cpp_required and llama_server_bin is not None:
+    llama_server_sha256 = getattr(args, "llama_server_sha256", None)
+    if variant.llama_cpp_required and (
+        llama_server_bin is None or llama_server_sha256 is None
+    ):
         raise RuntimeError(
-            f"--llama-server-bin is not supported for {variant.name} packages."
+            "open-interpreter packages require --llama-server-bin and --llama-server-sha256."
         )
+    if not variant.llama_cpp_required and (
+        llama_server_bin is not None or llama_server_sha256 is not None
+    ):
+        raise RuntimeError(
+            f"llama-server inputs are not supported for {variant.name} packages."
+        )
+    if variant.llama_cpp_required:
+        verify_llama_server_input(llama_server_bin, llama_server_sha256)
     package_dir_arg = getattr(args, "package_dir", None)
     package_dir = (
         package_dir_arg.resolve()
@@ -260,6 +274,7 @@ def main() -> int:
         codex_command_runner_bin=source_outputs.codex_command_runner_bin,
         codex_windows_sandbox_setup_bin=source_outputs.codex_windows_sandbox_setup_bin,
         llama_server_bin=llama_server_bin,
+        llama_server_sha256=llama_server_sha256,
     )
     prepare_package_dir(package_dir, force=args.force)
     build_package_dir(package_dir, args.package_version, variant, spec, inputs)

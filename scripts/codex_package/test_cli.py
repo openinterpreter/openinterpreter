@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -25,6 +27,24 @@ class LlamaServerPackageInputTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "require --llama-server-bin"):
                 main()
             build.assert_not_called()
+
+    def test_wrong_pinned_digest_rejects_before_build(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "llama-server"
+            binary.write_bytes(b"actual executable")
+            binary.chmod(0o755)
+            args = argparse.Namespace(
+                variant="open-interpreter",
+                target="x86_64-unknown-linux-gnu",
+                llama_server_bin=binary,
+                llama_server_sha256=hashlib.sha256(b"different executable").hexdigest(),
+            )
+            with patch("codex_package.cli.parse_args", return_value=args), patch(
+                "codex_package.cli.build_source_binaries"
+            ) as build:
+                with self.assertRaisesRegex(RuntimeError, "does not match the pinned digest"):
+                    main()
+                build.assert_not_called()
 
 
 class PackageVersionTest(unittest.TestCase):

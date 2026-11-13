@@ -35,6 +35,7 @@ class PackageLayoutTest(unittest.TestCase):
                 codex_command_runner_bin=None,
                 codex_windows_sandbox_setup_bin=None,
                 llama_server_bin=touch_executable(root / "llama-server"),
+                llama_server_sha256=hashlib.sha256(b"llama-server").hexdigest(),
             )
             package_dir = root / "package"
 
@@ -72,6 +73,16 @@ class PackageLayoutTest(unittest.TestCase):
             self.assertIn(
                 '"llamaServer": "codex-resources/llama.cpp/llama-server"', metadata
             )
+            self.assertIn('"llamaServerSha256": ', metadata)
+            packaged_llama = package_dir / "codex-resources" / "llama.cpp" / "llama-server"
+            packaged_llama.write_bytes(b"tampered executable")
+            with self.assertRaisesRegex(RuntimeError, "does not match the pinned digest"):
+                validate_package_dir(
+                    package_dir,
+                    PACKAGE_VARIANTS["open-interpreter"],
+                    TARGET_SPECS["x86_64-unknown-linux-musl"],
+                    include_zsh=False,
+                )
             self.assertNotIn('"managedCodex"', metadata)
 
             missing_llama_server = replace(inputs, llama_server_bin=None)
@@ -85,6 +96,17 @@ class PackageLayoutTest(unittest.TestCase):
                     TARGET_SPECS["x86_64-unknown-linux-musl"],
                     missing_llama_server,
                 )
+
+            wrong_digest = replace(inputs, llama_server_sha256="0" * 64)
+            with self.assertRaisesRegex(RuntimeError, "does not match the pinned digest"):
+                build_package_dir(
+                    root / "wrong-digest-package",
+                    "1.2.3",
+                    PACKAGE_VARIANTS["open-interpreter"],
+                    TARGET_SPECS["x86_64-unknown-linux-musl"],
+                    wrong_digest,
+                )
+            self.assertFalse((root / "wrong-digest-package").exists())
 
     def test_winget_preserves_signed_files_and_voice_hashes(self) -> None:
         for target in ("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"):

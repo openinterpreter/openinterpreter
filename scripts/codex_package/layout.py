@@ -1,6 +1,8 @@
 """Canonical Codex package directory layout."""
 
+import hashlib
 import json
+import re
 import shutil
 import stat
 from pathlib import Path
@@ -13,6 +15,17 @@ from .zsh import ZSH_RESOURCE_PATH
 
 LAYOUT_VERSION = 1
 LLAMA_CPP_RESOURCE_PATH = Path("llama.cpp")
+
+
+def verify_llama_server_input(binary_path: Path | None, expected: str | None) -> None:
+    if binary_path is None:
+        raise RuntimeError("open-interpreter packages require a llama-server binary.")
+    if expected is None or re.fullmatch(r"[0-9a-fA-F]{64}", expected) is None:
+        raise RuntimeError("open-interpreter packages require a pinned llama-server SHA-256.")
+    with binary_path.open("rb") as binary:
+        actual = hashlib.file_digest(binary, "sha256").hexdigest()
+    if actual != expected.lower():
+        raise RuntimeError("llama-server binary SHA-256 does not match the pinned digest.")
 
 
 def prepare_package_dir(package_dir: Path, *, force: bool) -> None:
@@ -39,6 +52,8 @@ def build_package_dir(
     spec: TargetSpec,
     inputs: PackageInputs,
 ) -> None:
+    if variant.llama_cpp_required:
+        verify_llama_server_input(inputs.llama_server_bin, inputs.llama_server_sha256)
     bin_dir = package_dir / "bin"
     resources_dir = package_dir / "codex-resources"
     path_dir = package_dir / "codex-path"
@@ -100,8 +115,6 @@ def build_package_dir(
         )
 
     if variant.llama_cpp_required:
-        if inputs.llama_server_bin is None:
-            raise RuntimeError(f"{variant.name} packages require a llama-server binary.")
         copy_executable(
             inputs.llama_server_bin,
             resources_dir / LLAMA_CPP_RESOURCE_PATH / spec.llama_server_name,
@@ -125,6 +138,7 @@ def build_package_dir(
         metadata["llamaServer"] = str(
             Path("codex-resources") / LLAMA_CPP_RESOURCE_PATH / spec.llama_server_name
         )
+        metadata["llamaServerSha256"] = inputs.llama_server_sha256.lower()
     write_json(package_dir / "codex-package.json", metadata)
 
 
@@ -211,6 +225,13 @@ def validate_package_dir(
         path = package_dir / relative_file
         if not path.is_file():
             raise RuntimeError(f"Missing package file: {relative_file}")
+
+    if variant.llama_cpp_required:
+        if metadata.get("llamaServer") != str(llama_server_path):
+            raise RuntimeError("Invalid packaged llama-server path in metadata")
+        verify_llama_server_input(
+            package_dir / llama_server_path, metadata.get("llamaServerSha256")
+        )
 
     if not spec.is_windows:
         for relative_file in executable_files:
