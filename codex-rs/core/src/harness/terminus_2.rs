@@ -62,9 +62,11 @@ pub(crate) fn inject_action_calls(
     pending_completion: bool,
 ) -> ResponseStream {
     let (tx_event, rx_event) = mpsc::channel(1600);
+    let mut stream = stream;
+    let routing_affinity = stream.routing_affinity.take();
+    let interrupt = stream.interrupt.take();
 
     tokio::spawn(async move {
-        let mut stream = stream;
         while let Some(event) = stream.next().await {
             let harness_items = match &event {
                 Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
@@ -95,7 +97,9 @@ pub(crate) fn inject_action_calls(
     });
 
     ResponseStream {
+        routing_affinity,
         rx_event,
+        interrupt,
         consumer_dropped: tokio_util::sync::CancellationToken::new(),
     }
 }
@@ -909,6 +913,8 @@ fn build_harness_follow_up_items(
             current_screen,
         } => {
             return vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -920,6 +926,8 @@ fn build_harness_follow_up_items(
         }
         Terminus2RequestKind::Questions => {
             return vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -931,6 +939,8 @@ fn build_harness_follow_up_items(
         }
         Terminus2RequestKind::AnswerQuestions { questions } => {
             return vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -946,6 +956,8 @@ fn build_harness_follow_up_items(
     let parsed = parse_response(content);
     if !parsed.error.is_empty() {
         return vec![ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -961,6 +973,8 @@ fn build_harness_follow_up_items(
             return Vec::new();
         }
         return vec![ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -1001,6 +1015,7 @@ fn build_shell_call(commands: Vec<ParsedCommand>, working_directory: String) -> 
     let timeout_ms = timeout_ms.max(1_000);
     let timeout_seconds = timeout_ms.saturating_add(999) / 1000;
     ResponseItem::LocalShellCall {
+        encrypted_content: None,
         id: None,
         call_id: Some(format!("terminus-2-shell-{id}")),
         status: LocalShellStatus::InProgress,

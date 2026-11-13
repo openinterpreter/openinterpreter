@@ -165,6 +165,16 @@ impl RealtimeHandoffAdmission {
         Ok(())
     }
 
+    async fn record_transcript(&self, session: &Session, text: String) -> std::io::Result<()> {
+        let Ok(_permit) = self.gate.acquire().await else {
+            return Ok(());
+        };
+        if !self.retired.load(Ordering::Acquire) {
+            transcript_tail::record(session, text).await?;
+        }
+        Ok(())
+    }
+
     async fn retire(&self) {
         let Ok(_permit) = self.gate.acquire().await else {
             return;
@@ -586,7 +596,7 @@ struct RealtimeStart {
 struct RealtimeStartOutput {
     realtime_active: Arc<AtomicBool>,
     route_handoffs: Arc<RealtimeHandoffAdmission>,
-    events_rx: Receiver<RealtimeEvent>,
+    events_rx: Receiver<RealtimeOutput>,
     transcript_tail_rx: Receiver<String>,
     sdp: Option<String>,
 }
@@ -641,6 +651,7 @@ impl RealtimeConversationManager {
             .state
             .lock()
             .await
+            .conversation
             .as_ref()
             .map(|state| Arc::clone(&state.route_handoffs));
         if let Some(route_handoffs) = route_handoffs {

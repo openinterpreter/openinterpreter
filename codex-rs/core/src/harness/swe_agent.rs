@@ -48,9 +48,11 @@ pub(crate) fn build_request(
 
 pub(crate) fn inject_action_calls(stream: ResponseStream, terminal_submit: bool) -> ResponseStream {
     let (tx_event, rx_event) = mpsc::channel(1600);
+    let mut stream = stream;
+    let routing_affinity = stream.routing_affinity.take();
+    let interrupt = stream.interrupt.take();
 
     tokio::spawn(async move {
-        let mut stream = stream;
         while let Some(event) = stream.next().await {
             let harness_item = match &event {
                 Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
@@ -77,7 +79,9 @@ pub(crate) fn inject_action_calls(stream: ResponseStream, terminal_submit: bool)
     });
 
     ResponseStream {
+        routing_affinity,
         rx_event,
+        interrupt,
         consumer_dropped: tokio_util::sync::CancellationToken::new(),
     }
 }
@@ -247,6 +251,8 @@ fn build_harness_follow_up_item(content: &str, terminal_submit: bool) -> Option<
     }
 
     Some(ResponseItem::Message {
+        encrypted_content: None,
+        status: None,
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputText {
@@ -260,6 +266,7 @@ fn build_harness_follow_up_item(content: &str, terminal_submit: bool) -> Option<
 fn build_swe_agent_command_call(command: String) -> ResponseItem {
     let id = SWE_AGENT_ACTION_CALL_ID.fetch_add(1, Ordering::Relaxed);
     ResponseItem::CustomToolCall {
+        encrypted_content: None,
         id: None,
         status: None,
         call_id: format!("swe-agent-command-{id}"),
@@ -273,6 +280,7 @@ fn build_swe_agent_command_call(command: String) -> ResponseItem {
 fn build_shell_call(command: String) -> ResponseItem {
     let id = SWE_AGENT_ACTION_CALL_ID.fetch_add(1, Ordering::Relaxed);
     ResponseItem::LocalShellCall {
+        encrypted_content: None,
         id: None,
         call_id: Some(format!("swe-agent-bash-{id}")),
         status: LocalShellStatus::InProgress,
