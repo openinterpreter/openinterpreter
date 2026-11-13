@@ -190,8 +190,9 @@ impl CatalogRequestProcessor {
         &self,
         params: InterpreterProviderListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
         Ok(Some(
-            crate::interpreter_catalog::provider_list(&self.config, params).into(),
+            crate::interpreter_catalog::provider_list(&config, params).into(),
         ))
     }
 
@@ -211,18 +212,22 @@ impl CatalogRequestProcessor {
         &self,
         params: InterpreterModelListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
         let inspect_local = params
             .model_provider
             .as_deref()
-            .unwrap_or(&self.config.model_provider_id)
+            .unwrap_or(&config.model_provider_id)
             == codex_model_provider_info::LOCAL_OSS_PROVIDER_ID;
         let response = self
-            .list_models(ModelListParams {
-                cursor: None,
-                limit: None,
-                include_hidden: params.include_hidden,
-                model_provider: params.model_provider,
-            })
+            .list_models_using_config(
+                ModelListParams {
+                    cursor: None,
+                    limit: None,
+                    include_hidden: params.include_hidden,
+                    model_provider: params.model_provider,
+                },
+                &config,
+            )
             .await?;
         let mut local_downloads = Vec::new();
         if inspect_local {
@@ -299,8 +304,9 @@ impl CatalogRequestProcessor {
         &self,
         params: InterpreterHarnessListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
         Ok(Some(
-            crate::interpreter_catalog::harness_list(&self.config, params).into(),
+            crate::interpreter_catalog::harness_list(&config, params).into(),
         ))
     }
 
@@ -435,6 +441,15 @@ impl CatalogRequestProcessor {
         &self,
         params: ModelListParams,
     ) -> Result<ModelListResponse, JSONRPCErrorError> {
+        self.list_models_using_config(params, self.config.as_ref())
+            .await
+    }
+
+    async fn list_models_using_config(
+        &self,
+        params: ModelListParams,
+        config: &Config,
+    ) -> Result<ModelListResponse, JSONRPCErrorError> {
         let ModelListParams {
             limit,
             cursor,
@@ -445,11 +460,11 @@ impl CatalogRequestProcessor {
         let models = match model_provider {
             Some(provider_id) => {
                 crate::models::supported_models_for_provider(
-                    self.config.as_ref(),
+                    config,
                     self.auth_manager.clone(),
                     provider_id.as_str(),
                     include_hidden,
-                    self.config.http_client_factory(),
+                    config.http_client_factory(),
                 )
                 .await
             }
