@@ -1559,6 +1559,7 @@ impl App {
         notification: &ThreadStartedNotification,
     ) -> Option<ThreadSessionState> {
         let mut session = self.primary_session_configured.clone()?;
+        session.read_only_history = false;
         session.thread_id = thread_id;
         session.windows_sandbox_host = crate::windows_sandbox::host_from_environments(
             notification.thread.environments.as_deref(),

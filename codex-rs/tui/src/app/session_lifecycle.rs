@@ -798,6 +798,9 @@ impl App {
         // Transfer replay state before stopping its backend voice session.
         self.retain_realtime_replay_state_before_replace();
         self.stop_realtime_conversation(app_server).await;
+        if is_replay_only && let Some(session) = snapshot.session.as_mut() {
+            session.read_only_history = true;
+        }
         self.render_thread_snapshot(tui, app_server, thread_id, snapshot, !is_replay_only)?;
         if !is_replay_only
             && let Some(message) = self
