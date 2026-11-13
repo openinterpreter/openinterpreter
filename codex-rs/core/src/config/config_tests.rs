@@ -3185,6 +3185,25 @@ fn permission_snapshot_setter_preserves_permission_constraints() {
     );
 }
 
+#[test]
+fn legacy_policy_projection_cannot_bypass_permission_profile_constraints() {
+    let cwd = TempDir::new().expect("cwd");
+    let initial_profile = PermissionProfile::read_only();
+    let mut permissions = Permissions::from_approval_and_profile(
+        Constrained::allow_any(AskForApproval::Never),
+        Constrained::allow_only(initial_profile.clone()),
+    )
+    .expect("initial permissions satisfy constraints");
+    let root = cwd.path().abs();
+    permissions.set_workspace_roots(vec![root.clone()]);
+
+    let result = permissions
+        .set_legacy_sandbox_policy(SandboxPolicy::new_workspace_write_policy(), cwd.path());
+    assert!(matches!(result, Err(ConstraintError::InvalidValue { .. })));
+    assert_eq!(permissions.permission_profile(), &initial_profile);
+    assert_eq!(permissions.workspace_roots(), &[root]);
+}
+
 #[tokio::test]
 async fn permission_profile_override_preserves_managed_unrestricted_filesystem()
 -> std::io::Result<()> {
