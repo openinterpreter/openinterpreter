@@ -48,7 +48,7 @@ try { image(value); } catch { text(calls); }
     let mut pending = request(source);
     pending.yield_time_ms = Some(60_000);
     let started = session
-        .execute(pending, delegate.clone(), /*preempt*/ None)
+        .execute(pending, delegate.clone())
         .await
         .map_err(anyhow::Error::msg)?;
     let id = started.cell_id.clone();

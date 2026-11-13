@@ -242,7 +242,7 @@ async fn interrupt_yields_observations_without_stopping_the_cell() {
     let session = provider.create_session().await.expect("create session");
     let (delegate, mut events) = CancellationDelegate::new();
     let mut request = execute_request("await tools.block({}); text('done');");
-    request.yield_time_ms = Some(60_000);
+    request.yield_time_ms = Some(1);
     request.enabled_tools = vec![ToolDefinition {
         name: "block".to_string(),
         tool_name: ToolName::plain("block"),
@@ -252,9 +252,8 @@ async fn interrupt_yields_observations_without_stopping_the_cell() {
         input_schema_max_bytes: None,
         output_schema: None,
     }];
-    let signal = CancellationToken::new();
     let started = session
-        .execute(request, delegate.clone(), Some(signal.clone()))
+        .execute(request, delegate.clone())
         .await
         .expect("start execution");
     let cell_id = started.cell_id.clone();
@@ -262,7 +261,6 @@ async fn interrupt_yields_observations_without_stopping_the_cell() {
         next_callback_event(&mut events).await,
         CallbackEvent::Started("block".to_string())
     );
-    signal.cancel();
     let initial = tokio::time::timeout(Duration::from_secs(5), started.initial_response())
         .await
         .expect("yield initial observation")

@@ -102,7 +102,7 @@ async fn assert_shared_capacity(
             max_output_tokens: None,
         };
         let started = session
-            .execute(request, delegate.clone(), /*preempt*/ None)
+            .execute(request, delegate.clone())
             .await
             .unwrap_or_else(|error| panic!("admit cell {index}: {error}"));
         let cell_id = started.cell_id.clone();
@@ -131,7 +131,6 @@ async fn assert_shared_capacity(
                 max_output_tokens: None,
             },
             delegate.clone(),
-            /*preempt*/ None,
         )
         .await
         .expect("unrelated work admitted")

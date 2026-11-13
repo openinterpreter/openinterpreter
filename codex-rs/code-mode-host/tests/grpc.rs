@@ -315,11 +315,9 @@ async fn grpc_early_yield_preserves_cell_and_later_waits() -> Result<()> {
     });
     let mut execute = request(r#"await tools.large({}); text("done");"#);
     execute.enabled_tools = vec![tool("large")];
-    execute.yield_time_ms = Some(60_000);
-    let signal = CancellationToken::new();
-    signal.cancel();
+    execute.yield_time_ms = Some(1);
     let cell = session
-        .execute(execute, delegate.clone(), Some(signal))
+        .execute(execute, delegate.clone())
         .await
         .map_err(anyhow::Error::msg)?;
     let cell_id = cell.cell_id.clone();
@@ -1319,9 +1317,9 @@ async fn cached_session_recovers_after_a_remote_host_restarts() -> Result<()> {
 
     let mut rejected = request(r#"await tools.echo({must_not_run: true});"#);
     rejected.enabled_tools = vec![tool("echo")];
-    let first = session.execute(rejected.clone(), delegate.clone(), /*preempt*/ None);
-    let concurrent = session.execute(rejected.clone(), delegate.clone(), /*preempt*/ None);
-    let queued = session.execute(rejected, delegate.clone(), /*preempt*/ None);
+    let first = session.execute(rejected.clone(), delegate.clone());
+    let concurrent = session.execute(rejected.clone(), delegate.clone());
+    let queued = session.execute(rejected, delegate.clone());
     let queued_wait = session.wait(
         WaitRequest {
             cell_id: old_cell_id.clone(),

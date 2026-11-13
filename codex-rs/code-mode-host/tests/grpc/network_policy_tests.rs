@@ -63,7 +63,6 @@ async fn account_change_revokes_active_rpc_and_renews_the_cached_client() -> Res
         .execute(
             pending,
             Arc::new(NoopCodeModeSessionDelegate),
-            /*preempt*/ None,
         )
         .await
         .map_err(anyhow::Error::msg)?;

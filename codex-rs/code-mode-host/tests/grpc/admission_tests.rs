@@ -252,7 +252,6 @@ async fn routing_metadata_is_scoped_to_each_session_on_a_shared_provider() -> Re
             .execute(
                 req,
                 Arc::new(NoopCodeModeSessionDelegate),
-                /*preempt*/ None,
             )
             .await
             .map_err(anyhow::Error::msg)?;
