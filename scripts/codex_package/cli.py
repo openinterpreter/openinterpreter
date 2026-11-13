@@ -213,7 +213,7 @@ def main() -> int:
             f"llama-server inputs are not supported for {variant.name} packages."
         )
     if variant.llama_cpp_required:
-        verify_llama_server_input(llama_server_bin, llama_server_sha256)
+        verify_llama_server_input(llama_server_bin, llama_server_sha256, spec)
     package_dir_arg = getattr(args, "package_dir", None)
     package_dir = (
         package_dir_arg.resolve()

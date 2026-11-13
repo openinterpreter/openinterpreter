@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import stat
+import struct
 from pathlib import Path
 
 from .targets import PackageInputs
@@ -17,7 +18,9 @@ LAYOUT_VERSION = 1
 LLAMA_CPP_RESOURCE_PATH = Path("llama.cpp")
 
 
-def verify_llama_server_input(binary_path: Path | None, expected: str | None) -> None:
+def verify_llama_server_input(
+    binary_path: Path | None, expected: str | None, spec: TargetSpec
+) -> None:
     if binary_path is None:
         raise RuntimeError("open-interpreter packages require a llama-server binary.")
     if expected is None or re.fullmatch(r"[0-9a-fA-F]{64}", expected) is None:
@@ -26,6 +29,34 @@ def verify_llama_server_input(binary_path: Path | None, expected: str | None) ->
         actual = hashlib.file_digest(binary, "sha256").hexdigest()
     if actual != expected.lower():
         raise RuntimeError("llama-server binary SHA-256 does not match the pinned digest.")
+    with binary_path.open("rb") as binary:
+        header = binary.read(64)
+        if spec.is_linux:
+            if not header.startswith(b"\x7fELF") or len(header) < 20:
+                raise RuntimeError("llama-server is not an ELF executable for this target.")
+            if header[4:6] != b"\x02\x01":
+                raise RuntimeError("llama-server requires a little-endian 64-bit ELF executable.")
+            machine = struct.unpack_from("<H", header, 18)[0]
+            expected_machine = 183 if spec.target.startswith("aarch64-") else 62
+        elif spec.is_windows:
+            if not header.startswith(b"MZ") or len(header) < 64:
+                raise RuntimeError("llama-server is not a Windows PE executable.")
+            pe_offset = struct.unpack_from("<I", header, 60)[0]
+            if pe_offset > 1_048_576:
+                raise RuntimeError("llama-server has an invalid PE header offset.")
+            binary.seek(pe_offset)
+            pe_header = binary.read(6)
+            if not pe_header.startswith(b"PE\0\0") or len(pe_header) < 6:
+                raise RuntimeError("llama-server has an invalid PE header.")
+            machine = struct.unpack_from("<H", pe_header, 4)[0]
+            expected_machine = 0xAA64 if spec.target.startswith("aarch64-") else 0x8664
+        else:
+            if header[:4] != b"\xcf\xfa\xed\xfe" or len(header) < 8:
+                raise RuntimeError("llama-server requires a thin 64-bit macOS Mach-O executable.")
+            machine = struct.unpack_from("<I", header, 4)[0]
+            expected_machine = 0x0100000C if spec.target.startswith("aarch64-") else 0x01000007
+        if machine != expected_machine:
+            raise RuntimeError(f"llama-server CPU architecture does not match {spec.target}.")
 
 
 def prepare_package_dir(package_dir: Path, *, force: bool) -> None:
@@ -53,7 +84,7 @@ def build_package_dir(
     inputs: PackageInputs,
 ) -> None:
     if variant.llama_cpp_required:
-        verify_llama_server_input(inputs.llama_server_bin, inputs.llama_server_sha256)
+        verify_llama_server_input(inputs.llama_server_bin, inputs.llama_server_sha256, spec)
     bin_dir = package_dir / "bin"
     resources_dir = package_dir / "codex-resources"
     path_dir = package_dir / "codex-path"
@@ -230,7 +261,7 @@ def validate_package_dir(
         if metadata.get("llamaServer") != str(llama_server_path):
             raise RuntimeError("Invalid packaged llama-server path in metadata")
         verify_llama_server_input(
-            package_dir / llama_server_path, metadata.get("llamaServerSha256")
+            package_dir / llama_server_path, metadata.get("llamaServerSha256"), spec
         )
 
     if not spec.is_windows:

@@ -3,6 +3,7 @@
 from pathlib import Path
 import hashlib
 import json
+import struct
 import sys
 import tempfile
 import unittest
@@ -14,12 +15,44 @@ from build_winget_package import prepare_winget_package
 from codex_package.layout import build_package_dir
 from codex_package.layout import prepare_package_dir
 from codex_package.layout import validate_package_dir
+from codex_package.layout import verify_llama_server_input
 from codex_package.targets import PACKAGE_VARIANTS
 from codex_package.targets import PackageInputs
 from codex_package.targets import TARGET_SPECS
 
 
 class PackageLayoutTest(unittest.TestCase):
+    def test_llama_server_binary_must_match_target_cpu_and_format(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "llama-server"
+            cases = (
+                ("x86_64-unknown-linux-musl", fake_elf(62)),
+                ("aarch64-unknown-linux-gnu", fake_elf(183)),
+                ("x86_64-apple-darwin", fake_macho(0x01000007)),
+                ("aarch64-apple-darwin", fake_macho(0x0100000C)),
+                ("x86_64-pc-windows-msvc", fake_pe(0x8664)),
+                ("aarch64-pc-windows-msvc", fake_pe(0xAA64)),
+            )
+            for target, contents in cases:
+                with self.subTest(target=target):
+                    path.write_bytes(contents)
+                    digest = hashlib.sha256(contents).hexdigest()
+                    verify_llama_server_input(path, digest, TARGET_SPECS[target])
+                    with self.assertRaisesRegex(RuntimeError, "architecture does not match"):
+                        other = (
+                            target.replace("x86_64-", "aarch64-")
+                            if target.startswith("x86_64-")
+                            else target.replace("aarch64-", "x86_64-")
+                        )
+                        verify_llama_server_input(path, digest, TARGET_SPECS[other])
+                    wrong_os = (
+                        "x86_64-apple-darwin"
+                        if "linux" in target
+                        else "x86_64-unknown-linux-musl"
+                    )
+                    with self.assertRaisesRegex(RuntimeError, "llama-server is not|requires a thin"):
+                        verify_llama_server_input(path, digest, TARGET_SPECS[wrong_os])
+
     def test_open_interpreter_package_contains_interpreter_alias_and_code_mode_host(
         self,
     ) -> None:
@@ -35,8 +68,9 @@ class PackageLayoutTest(unittest.TestCase):
                 codex_command_runner_bin=None,
                 codex_windows_sandbox_setup_bin=None,
                 llama_server_bin=touch_executable(root / "llama-server"),
-                llama_server_sha256=hashlib.sha256(b"llama-server").hexdigest(),
+                llama_server_sha256=hashlib.sha256(fake_elf(62)).hexdigest(),
             )
+            inputs.llama_server_bin.write_bytes(fake_elf(62))
             package_dir = root / "package"
 
             prepare_package_dir(package_dir, force=False)
@@ -60,8 +94,8 @@ class PackageLayoutTest(unittest.TestCase):
             )
             self.assertEqual((package_dir / "bin" / "i").read_text(), "interpreter")
             self.assertEqual(
-                (package_dir / "codex-resources" / "llama.cpp" / "llama-server").read_text(),
-                "llama-server",
+                (package_dir / "codex-resources" / "llama.cpp" / "llama-server").read_bytes(),
+                fake_elf(62),
             )
             self.assertEqual(
                 (package_dir / "bin" / "codex-code-mode-host").read_text(),
@@ -258,6 +292,26 @@ def touch_executable(path: Path) -> Path:
     path.write_text(path.name, encoding="utf-8")
     path.chmod(0o755)
     return path.resolve()
+
+
+def fake_elf(machine: int) -> bytes:
+    header = bytearray(64)
+    header[:6] = b"\x7fELF\x02\x01"
+    struct.pack_into("<H", header, 18, machine)
+    return bytes(header)
+
+
+def fake_macho(machine: int) -> bytes:
+    return b"\xcf\xfa\xed\xfe" + struct.pack("<I", machine)
+
+
+def fake_pe(machine: int) -> bytes:
+    header = bytearray(70)
+    header[:2] = b"MZ"
+    struct.pack_into("<I", header, 60, 64)
+    header[64:68] = b"PE\0\0"
+    struct.pack_into("<H", header, 68, machine)
+    return bytes(header)
 
 
 if __name__ == "__main__":
