@@ -124,7 +124,7 @@ pub(crate) fn serialize_tiered_input(
                     })
                     || InterAgentCommunication::is_message_content(content)
                     || content.iter().any(|part| match part {
-                        ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                        ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
                             let text = text.trim_start();
                             text.starts_with("<subagent_notification>")
                                 || (text.starts_with("Message Type:")

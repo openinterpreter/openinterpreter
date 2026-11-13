@@ -402,7 +402,7 @@ async fn chat_wire_native_hello_uses_chat_completions() -> anyhow::Result<()> {
             ResponseEvent::OutputItemDone(ResponseItem::Message { content, .. })
                 if content.iter().any(|item| matches!(
                     item,
-                    ContentItem::OutputText { text } if text.contains("hello")
+                    ContentItem::OutputText { text, .. } if text.contains("hello")
                 ))
         )),
         "expected assistant hello in stream: {events:?}"

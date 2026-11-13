@@ -588,7 +588,7 @@ fn user_response_matches_event(content: &[ContentItem], event: &UserMessageEvent
                     file_ids.push(file_id.as_str());
                 }
             },
-            ContentItem::InputAudio { audio_url } => audio.push(audio_url.as_str()),
+            ContentItem::InputAudio { audio: reference } => audio.push(reference),
             ContentItem::OutputText { .. } => return false,
         }
     }
@@ -603,14 +603,6 @@ fn user_response_matches_event(content: &[ContentItem], event: &UserMessageEvent
                 .map(String::as_str)
                 .collect::<Vec<_>>()
         && file_ids
-            == event
-                .file_ids
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-        && audio
             == event
                 .file_ids
                 .as_deref()
@@ -635,9 +627,9 @@ fn user_response_matches_event(content: &[ContentItem], event: &UserMessageEvent
                                 Some(expected),
                             ) if audio_url == expected
                         ),
-                        UserMessageAudioKind::File => {
-                            file.next().is_some_and(|expected| actual == expected)
-                        }
+                        UserMessageAudioKind::File => file.next().is_some_and(|expected| {
+                            matches!(actual, AudioReference::File { .. }) && actual == expected
+                        }),
                     }
                 }) && actual.next().is_none()
                     && inline.next().is_none()
@@ -662,4 +654,38 @@ fn user_response_matches_event(content: &[ContentItem], event: &UserMessageEvent
         }
         && event.local_images.is_empty()
         && event.local_audio.is_empty()
+}
+
+#[cfg(test)]
+mod audio_match_tests {
+    use super::*;
+
+    #[test]
+    fn mixed_audio_matches_only_the_exact_ordered_references() {
+        let content = vec![
+            ContentItem::InputAudio {
+                audio: AudioReference::File {
+                    file_id: "file-1".to_string(),
+                },
+            },
+            ContentItem::InputAudio {
+                audio: AudioReference::Inline {
+                    audio_url: "data:audio/wav;base64,AA==".to_string(),
+                },
+            },
+        ];
+        let mut event: UserMessageEvent = serde_json::from_value(serde_json::json!({
+            "message": "",
+            "audio": ["data:audio/wav;base64,AA=="],
+            "audio_references": [{"file_id":"file-1"}],
+            "audio_order": ["file", "inline"]
+        }))
+        .expect("mixed audio fixture");
+        assert!(user_response_matches_event(&content, &event));
+
+        event.audio_references = Some(vec![AudioReference::File {
+            file_id: "different".to_string(),
+        }]);
+        assert!(!user_response_matches_event(&content, &event));
+    }
 }
