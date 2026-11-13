@@ -343,40 +343,6 @@ impl McpResourceClient {
         })
     }
 
-    /// Lists one Codex Apps resource page using plugin-service's top-level `mimeType` parameter.
-    pub async fn list_codex_apps_resources(
-        &self,
-        params: CodexAppsResourceListParams,
-    ) -> Result<McpResourcePage> {
-        let params = serde_json::to_value(params)
-            .context("failed to serialize Codex Apps resource params")?;
-        let connections = self.runtime.latest_host_owned_codex_apps_connections()?;
-        let (managed, timeout) = connections
-            .client_by_name(CODEX_APPS_MCP_SERVER_NAME)
-            .await?;
-        let result = managed
-            .client
-            .send_custom_request_with_timeout("resources/list", Some(params), timeout)
-            .await
-            .context("resources/list failed for `codex_apps`")?;
-        let result = match result {
-            ServerResult::ListResourcesResult(result) => result,
-            ServerResult::CustomResult(result) => result
-                .result_as::<rmcp::model::ListResourcesResult>()
-                .context("resources/list returned invalid resources")?,
-            _ => return Err(anyhow!("resources/list returned an unexpected MCP result")),
-        };
-        let resources = result
-            .resources
-            .into_iter()
-            .map(resource_from_rmcp)
-            .collect::<Result<Vec<_>>>()?;
-        Ok(McpResourcePage {
-            resources,
-            next_cursor: result.next_cursor,
-        })
-    }
-
     /// Reads one resource from the named server.
     pub async fn read_resource(&self, server: &str, uri: &str) -> Result<McpResourceReadResult> {
         let params = ReadResourceRequestParams::new(uri.to_string());

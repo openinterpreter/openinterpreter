@@ -648,6 +648,10 @@ impl McpCatalogBuilder {
                                     disabled_server_names.insert(name.to_owned());
                                 }
                             }
+                            Some(McpServerDisabledReason::EmaRegistration) => {
+                                // Failed EMA registration is scoped to this declaration and
+                                // must not veto a later host-owned server with the same name.
+                            }
                             Some(McpServerDisabledReason::Unknown) | None => {
                                 disabled_server_names.insert(name.to_owned());
                             }

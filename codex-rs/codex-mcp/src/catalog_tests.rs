@@ -8,6 +8,7 @@ use codex_config::AppToolApproval;
 use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use codex_config::McpServerAuth;
 use codex_config::McpServerConfig;
+use codex_config::McpServerDisabledReason;
 use codex_config::McpServerIdpOAuthConfig;
 use codex_config::McpServerToolConfig;
 use codex_config::McpServerTransportConfig;
@@ -331,6 +332,35 @@ fn rejected_plugin_ema_registration_does_not_veto_hosted_apps() {
             &expected,
         );
     }
+}
+
+#[test]
+fn rejected_unscoped_ema_registration_does_not_veto_hosted_apps() {
+    let mut rejected = server("https://plugin.example/mcp");
+    rejected.auth = McpServerAuth::EmaAuth;
+    rejected.enabled = false;
+    rejected.disabled_reason = Some(McpServerDisabledReason::EmaRegistration);
+
+    let mut builder = ResolvedMcpCatalog::builder();
+    builder.register(McpServerRegistration::from_config(
+        CODEX_APPS_MCP_SERVER_NAME.to_string(),
+        rejected,
+    ));
+    let expected = server("https://chatgpt.com/mcp");
+    builder.register(McpServerRegistration::from_hosted_apps(
+        "apps",
+        /*contribution_order*/ 0,
+        expected.clone(),
+    ));
+
+    assert_eq!(
+        builder
+            .build()
+            .server(&McpServerKey::unscoped(CODEX_APPS_MCP_SERVER_NAME))
+            .unwrap()
+            .config(),
+        &expected,
+    );
 }
 
 #[test]
