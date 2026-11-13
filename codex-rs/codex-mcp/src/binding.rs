@@ -31,6 +31,7 @@ use serde_json::Value as JsonValue;
 use crate::McpConfig;
 use crate::McpServerKey;
 use crate::binding_clients::McpBindingClients;
+use crate::binding_clients::McpResourceListing;
 use crate::client_tool_catalog::ToolCatalogSnapshot;
 use crate::connection_manager::McpConnectionSet;
 use crate::rmcp_client::ManagedClient;
@@ -194,8 +195,7 @@ pub struct PreparedMcpCall {
     client: Arc<ManagedClient>,
     config: Arc<McpConfig>,
     catalog_snapshot: Arc<ToolCatalogSnapshot>,
-    tool_info: ToolInfo,
-    server_name: String,
+    tool_info: PreparedToolInfo,
     server_metadata: McpServerMetadata,
     plugin_id: Option<String>,
     selected_plugin_server: bool,
@@ -261,7 +261,7 @@ impl PreparedMcpCall {
         client: Arc<ManagedClient>,
         config: Arc<McpConfig>,
         catalog_snapshot: Arc<ToolCatalogSnapshot>,
-        tool_info: ToolInfo,
+        tool_info: impl Into<PreparedToolInfo>,
         server_metadata: McpServerMetadata,
         plugin_id: Option<String>,
         selected_plugin_server: bool,

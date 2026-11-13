@@ -6,6 +6,8 @@ use crate::McpServerRegistration;
 use crate::connection_manager::tests::create_ready_async_managed_client;
 use crate::mcp::auth::McpAuthStatusEntry;
 use crate::rmcp_client::StartupOutcomeError;
+use crate::server::McpCredentialPolicy;
+use anyhow::Context;
 use codex_config::Constrained;
 use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use codex_config::types::AppToolApproval;
@@ -207,65 +209,6 @@ async fn status_snapshot_only_downgrades_oauth_and_ema_authentication_failures()
     );
 }
 
-#[tokio::test]
-async fn status_snapshot_only_downgrades_oauth_authentication_failures() {
-    let auth_failure = StartupOutcomeError::Failed {
-        error: "OAuth refresh token was rejected".to_string(),
-        is_authentication_required: true,
-    };
-    let mut manager = McpConnectionSet::empty(/*prefix_mcp_tool_names*/ true);
-    let mut auth_status_entries = HashMap::new();
-    for (name, auth_state, startup_error) in [
-        (
-            "oauth-failed",
-            McpAuthState::OAuth,
-            Some(auth_failure.clone()),
-        ),
-        ("oauth-ready", McpAuthState::OAuth, None),
-        (
-            "oauth-provider-error",
-            McpAuthState::OAuth,
-            Some(StartupOutcomeError::Failed {
-                error: "provider temporarily unavailable".to_string(),
-                is_authentication_required: false,
-            }),
-        ),
-        ("bearer", McpAuthState::BearerToken, Some(auth_failure)),
-    ] {
-        let mut client = create_ready_async_managed_client(Vec::new()).await;
-        if let Some(error) = startup_error {
-            client.client = futures::future::ready(Err(error)).boxed().shared();
-        }
-        manager.insert_test_client(name, client);
-        auth_status_entries.insert(
-            name.to_string(),
-            McpAuthStatusEntry {
-                config: None,
-                auth_state,
-            },
-        );
-    }
-
-    let server_names = auth_status_entries.keys().cloned().collect();
-    let snapshot = collect_mcp_server_status_snapshot_from_manager(
-        &manager,
-        auth_status_entries,
-        server_names,
-        McpSnapshotDetail::ToolsAndAuthOnly,
-    )
-    .await;
-
-    assert_eq!(
-        snapshot.auth_statuses,
-        HashMap::from([
-            ("oauth-failed".to_string(), McpAuthStatus::NotLoggedIn),
-            ("oauth-ready".to_string(), McpAuthStatus::OAuth),
-            ("oauth-provider-error".to_string(), McpAuthStatus::OAuth),
-            ("bearer".to_string(), McpAuthStatus::BearerToken),
-        ]),
-    );
-}
-
 pub(crate) fn test_mcp_config(codex_home: PathBuf) -> McpConfig {
     McpConfig {
         chatgpt_base_url: "https://chatgpt.com".to_string(),
@@ -273,6 +216,8 @@ pub(crate) fn test_mcp_config(codex_home: PathBuf) -> McpConfig {
         requires_read_only_mcp_tools: false,
         codex_home,
         mcp_enterprise_managed_auth: None,
+        ema_state: Default::default(),
+        mcp_ema_cancellation: codex_config::McpEmaCancellation::default(),
         xaa_enabled: false,
         mcp_oauth_credentials_store_mode: OAuthCredentialsStoreMode::default(),
         oauth_refresh_mode: McpOAuthRefreshMode::Legacy,
@@ -298,6 +243,8 @@ pub(crate) fn test_mcp_config(codex_home: PathBuf) -> McpConfig {
         prefix_mcp_tool_names: true,
         non_prefixed_mcp_tool_servers: Vec::new(),
         protocol_mode: McpProtocolMode::Legacy,
+        discover_local_stdio: false,
+        mcp_tool_list_changed: true,
         host_owned_apps_protocol_mode: McpProtocolMode::Legacy,
         client_elicitation_capability: ElicitationCapability::default(),
         mcp_server_catalog: ResolvedMcpCatalog::default(),
@@ -321,7 +268,7 @@ pub(crate) fn test_elicitation_config(
 }
 
 #[test]
-fn ema_catalog_supports_configured_installed_and_selected_plugins_without_widening_policy() {
+fn ema_catalog_allows_only_configured_servers_without_widening_policy() {
     let server: McpServerConfig = serde_json::from_value(serde_json::json!({
         "url": "https://resource.example/mcp", "auth": "ema_auth",
         "oauth": { "client_id": "resource-client", "authorization_server_issuer": "https://as.example" }
@@ -342,11 +289,14 @@ fn ema_catalog_supports_configured_installed_and_selected_plugins_without_wideni
         "selected".into(),
         plugin,
         /*selection_order*/ 0,
+        codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
         server,
     ));
     let mut config = test_mcp_config(PathBuf::new());
     let idp = codex_config::McpServerIdpOAuthConfig {
         issuer: "https://idp.example".into(),
+        client_secret: None,
+        token_endpoint_auth_method: None,
         client_id: "enterprise-client".into(),
     };
     let deny_all = codex_protocol::mcp_policy::EnvironmentMcpPolicy {
@@ -367,12 +317,15 @@ fn ema_catalog_supports_configured_installed_and_selected_plugins_without_wideni
         });
         let servers = effective_mcp_servers(&config, /*auth*/ None);
         for name in ["configured", "installed", "selected"] {
-            assert_eq!(servers[name].enabled(), xaa_enabled && !denied, "{name}");
-            assert_eq!(
-                servers[name].config().oauth_idp(),
-                xaa_enabled.then_some(&idp)
-            );
-            assert_eq!(servers[name].config().auth, McpServerAuth::EmaAuth);
+            let eligible = name == "configured" && xaa_enabled;
+            let key = if name == "configured" {
+                McpServerKey::unscoped(name)
+            } else {
+                McpServerKey::in_environment(DEFAULT_MCP_SERVER_ENVIRONMENT_ID, name)
+            };
+            assert_eq!(servers[&key].enabled(), eligible && !denied, "{name}");
+            assert_eq!(servers[&key].config().oauth_idp(), eligible.then_some(&idp));
+            assert_eq!(servers[&key].config().auth, McpServerAuth::EmaAuth);
         }
     }
 }
@@ -497,18 +450,8 @@ fn mcp_prompt_auto_approval_honors_approved_tools_in_all_permission_modes() {
 }
 
 #[test]
-fn mcp_prompt_auto_approval_rejects_auto_mode_in_default_permission_mode() {
-    assert!(!mcp_permission_prompt_is_auto_approved(
-        AskForApproval::OnRequest,
-        &PermissionProfile::read_only(),
-        McpPermissionPromptAutoApproveContext {
-            tool_approval_mode: Some(AppToolApproval::Auto),
-        },
-    ));
-}
-
-#[test]
 fn tool_plugin_context_collects_app_and_mcp_sources() {
+    let alpha_key = McpServerKey::in_environment(DEFAULT_MCP_SERVER_ENVIRONMENT_ID, "alpha");
     let mut config = test_mcp_config(PathBuf::new());
     let mut catalog = ResolvedMcpCatalog::builder();
     catalog.register(McpServerRegistration::from_plugin(

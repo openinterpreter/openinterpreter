@@ -85,6 +85,7 @@ async fn test_step(
     );
     let tool_catalog = Arc::new(ClientToolCatalog::new(
         vec![tool.clone()],
+        /*meta*/ None,
         /*updates*/ None,
     ));
     let managed_client = Arc::new(ManagedClient {

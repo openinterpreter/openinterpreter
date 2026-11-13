@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
@@ -57,6 +58,7 @@ use tracing::warn;
 use crate::McpConfig;
 use crate::McpServerKey;
 use crate::binding::McpBinding;
+use crate::binding::PreparedMcpCall;
 use crate::client_tool_catalog::CodexAppsToolSnapshot;
 use crate::connection_manager::BindingCatalogRevision;
 use crate::connection_manager::McpConnectionSet;
@@ -82,6 +84,14 @@ pub enum McpStartupPolicy {
     DeferCachedStdio,
     /// Allow cached tools to satisfy startup for any eligible transport, including required servers.
     DeferCachedServers,
+}
+
+/// A host-requested tool result and its identity in the published MCP catalog.
+pub struct McpToolCallResult {
+    pub result: CallToolResult,
+    /// None when the cached catalog is missing, changed, or has no entry for the tool.
+    /// This is not MCP wire metadata.
+    pub source_tool_namespace: Option<String>,
 }
 
 /// Configuration and owning-thread state needed to materialize an MCP runtime.
@@ -141,12 +151,31 @@ struct PublishedMcpRuntime {
     config: Option<Arc<McpConfig>>,
     auth: Option<CodexAuth>,
     auth_token: Option<String>,
+    auth_manager: Option<Arc<AuthManager>>,
+    auth_owner: Option<AuthOwner>,
     auth_generation: Arc<()>,
     plugins_available: bool,
     ready_selected_capability_roots: Vec<SelectedCapabilityRoot>,
     environment_selections: Arc<[TurnEnvironmentSelection]>,
     ready_environments: HashMap<String, Arc<Environment>>,
     cached_binding: Mutex<Option<CachedMcpBinding>>,
+}
+
+/// The account that owns a private helper across credential refreshes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct AuthOwner {
+    generation: u64,
+    is_fedramp: bool,
+}
+
+impl AuthOwner {
+    fn capture(auth: Option<&CodexAuth>, manager: Option<&AuthManager>) -> Option<Self> {
+        let auth = auth?;
+        Some(Self {
+            generation: manager?.auth_change_state_for(auth)?.owner_generation,
+            is_fedramp: auth.is_fedramp_account(),
+        })
+    }
 }
 
 fn ensure_host_owned_apps_registration(
@@ -156,7 +185,7 @@ fn ensure_host_owned_apps_registration(
     if !current
         .config
         .as_ref()
-        .and_then(|config| config.mcp_server_catalog.server(server))
+        .and_then(|config| config.mcp_server_catalog.server_by_name(server))
         .is_some_and(|registration| {
             registration
                 .source()
@@ -186,7 +215,7 @@ impl PublishedMcpRuntime {
 }
 
 struct CachedMcpBinding {
-    catalog_revisions: HashMap<String, BindingCatalogRevision>,
+    catalog_revisions: HashMap<McpServerKey, BindingCatalogRevision>,
     // Reuse a frozen binding while a model step or caller still needs it.
     binding: Weak<McpBinding>,
 }
@@ -260,6 +289,8 @@ impl McpRuntime {
                 config: None,
                 auth: None,
                 auth_token: None,
+                auth_manager: None,
+                auth_owner: None,
                 auth_generation: Arc::new(()),
                 plugins_available: false,
                 ready_selected_capability_roots: Vec::new(),
@@ -400,8 +431,24 @@ impl McpRuntime {
         let auth = input.auth.clone();
         let auth_manager = input.auth_manager.clone();
         let auth_token = auth.as_ref().and_then(|auth| auth.get_token().ok());
-        let current = self.current.load_full();
-        let auth_generation = if current.auth_matches(auth.as_ref()) {
+        if !reuse_previous {
+            current.connections.retire_shared_connections();
+        }
+        let auth_matches = current.auth_matches(auth.as_ref());
+        let auth_owner = AuthOwner::capture(auth.as_ref(), auth_manager.as_deref());
+        let same_owner = match (current.auth_owner, auth_owner) {
+            (Some(previous), Some(next)) => {
+                previous == next
+                    && current
+                        .auth_manager
+                        .as_ref()
+                        .zip(auth_manager.as_ref())
+                        .is_some_and(|(previous, next)| Arc::ptr_eq(previous, next))
+            }
+            (None, None) => auth_matches,
+            _ => false,
+        };
+        let auth_generation = if auth_matches {
             Arc::clone(&current.auth_generation)
         } else {
             Arc::new(())
@@ -410,6 +457,7 @@ impl McpRuntime {
         let ready_selected_capability_roots = input.ready_selected_capability_roots.clone();
         let environment_selections = Arc::clone(&input.runtime_context.environment_selections);
         let ready_environments = input.runtime_context.ready_environments.clone();
+        // Keep MCP startup state out of the caller's nested session-initialization future.
         let connections = Arc::new(
             Box::pin(McpConnectionSet::new(
                 ema_auth,
@@ -454,6 +502,8 @@ impl McpRuntime {
             config: Some(config),
             auth,
             auth_token,
+            auth_manager,
+            auth_owner,
             auth_generation,
             plugins_available,
             ready_selected_capability_roots,
@@ -1091,6 +1141,12 @@ impl McpRuntimeContext {
         }
     }
 
+    /// Uses this process's pool for compatible local stdio servers using MCP 2026-07-28.
+    pub fn with_connection_pool(mut self, pool: McpConnectionPool) -> Self {
+        self.connection_pool = Some(pool);
+        self
+    }
+
     /// Pins all captured selections and the concrete handles for environments already ready.
     pub fn with_selected_environments(
         mut self,
@@ -1272,6 +1328,8 @@ mod tests {
             config: Some(Arc::new(config)),
             auth: None,
             auth_token: None,
+            auth_manager: None,
+            auth_owner: None,
             auth_generation: Arc::new(()),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
@@ -1360,6 +1418,8 @@ mod tests {
             ))),
             auth: None,
             auth_token: None,
+            auth_manager: None,
+            auth_owner: None,
             auth_generation: Arc::new(()),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),

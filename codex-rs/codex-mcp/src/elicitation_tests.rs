@@ -493,7 +493,7 @@ async fn permission_elicitation_preserves_automatic_review_decisions() {
             assert_eq!(reviewer.calls.load(Relaxed), expected_reviews);
             assert_eq!(reviewer.active_elicitations.load(Relaxed), 0);
             assert!(events.is_empty());
-            assert!(manager.router.requests.lock().unwrap().is_empty());
+            assert!(manager.router.requests.lock().unwrap().pending.is_empty());
         }
     }
 }
@@ -558,7 +558,7 @@ async fn elicitation_without_an_automatic_decision_prompts() {
             assert_eq!(reviewer.active_elicitations.load(Relaxed), 0);
         }
         assert!(events.is_empty());
-        assert!(manager.router.requests.lock().unwrap().is_empty());
+        assert!(manager.router.requests.lock().unwrap().pending.is_empty());
     }
 }
 
@@ -1057,7 +1057,7 @@ async fn user_verification_drops_pending_response_when_the_request_is_cancelled(
     assert_eq!(active_elicitations.load(Relaxed), 1);
     pending.abort();
     assert!(pending.await.unwrap_err().is_cancelled());
-    assert!(manager.router.requests.lock().unwrap().is_empty());
+    assert!(manager.router.requests.lock().unwrap().pending.is_empty());
     assert_eq!(active_elicitations.load(Relaxed), 0);
 }
 
@@ -1082,6 +1082,7 @@ async fn user_verification_rejects_attached_servers_even_if_they_use_the_plugin_
         }
         let (tx, events) = async_channel::bounded(1);
         let sender = manager.make_sender(
+            McpServerKey::unscoped(name),
             name.into(),
             Some(tx),
             &ClientMcpExtensions::new([(
@@ -1104,7 +1105,7 @@ async fn user_verification_rejects_attached_servers_even_if_they_use_the_plugin_
             ElicitationResponse {
                 action: ElicitationAction::Cancel,
                 content: None,
-                meta: None
+                meta: Some(json!({"openai/userVerificationReason": "approvalUnavailable"}))
             },
         );
         assert!(events.try_recv().is_err());

@@ -244,7 +244,8 @@ impl Drop for McpServerConnection {
 #[derive(Clone)]
 struct McpServerView {
     connection: Arc<McpServerConnection>,
-    protocol_mode: crate::McpProtocolMode,
+    protocol_mode: McpProtocolMode,
+    startup_readiness: McpStartupReadiness,
     metadata: McpServerMetadata,
     tool_filter: ToolFilter,
     tool_timeout: Option<Duration>,
@@ -254,17 +255,9 @@ struct McpServerView {
 }
 
 impl McpServerView {
-    async fn listed_tools(
-        &self,
-        tool_plugin_context: &ToolPluginContext,
-    ) -> Result<Vec<ToolInfo>, StartupOutcomeError> {
-        let tools = self.connection.client.listed_tools().await?;
-        let tools = filter_tools(tools, &self.tool_filter);
-        Ok(if self.connection.client.is_codex_apps_mcp_server {
-            prepare_codex_apps_tools_for_model(tools, tool_plugin_context)
-        } else {
-            prepare_regular_mcp_tools_for_model(tools, tool_plugin_context)
-        })
+    fn allows_cached_startup(&self) -> bool {
+        self.startup_readiness == McpStartupReadiness::Catalog
+            || self.connection.startup_is_dormant()
     }
 
     fn cached_startup_tools(&self, fallback: Option<Vec<ToolInfo>>) -> Option<Vec<ToolInfo>> {
@@ -380,7 +373,7 @@ pub(crate) struct McpConnectionSet {
     servers: HashMap<McpServerKey, McpServerView>,
     pub(crate) event_stream_connection: Option<Arc<EventStreamConnectionSettings>>,
     disabled_servers: Vec<String>,
-    required_servers: Vec<String>,
+    required_servers: Vec<McpServerKey>,
     optional_startup_deadline: OnceLock<tokio::time::Instant>,
     tool_plugin_context: Arc<ToolPluginContext>,
     prefix_mcp_tool_names: bool,
@@ -538,11 +531,20 @@ impl McpConnectionSet {
             .filter(|(_, server)| server.enabled())
         {
             let server = server.with_read_only_mcp_tools(config.requires_read_only_mcp_tools);
-            let registration = config.mcp_server_catalog.server(&server_name);
+            let registration = config.mcp_server_catalog.server(&server_key);
+            let server_name = registration
+                .map_or(server_key.name(), |server| server.name())
+                .to_owned();
+            let report_startup = config
+                .mcp_server_catalog
+                .resolve_server_name(&server_name)
+                .is_none_or(|key| key == &server_key);
             let client_mcp_extensions = crate::client_capabilities::server_mcp_extensions(
                 &client_mcp_extensions,
                 &server_name,
                 registration,
+                network_policy_metadata.is_some(),
+                &config.chatgpt_base_url,
             );
             let is_host_owned_codex_apps = registration.is_some_and(|server| {
                 server
@@ -577,6 +579,26 @@ impl McpConnectionSet {
             } else {
                 default_protocol_mode
             };
+            let uses_ema_auth =
+                config.xaa_enabled && matches!(configured_config.auth, McpServerAuth::EmaAuth);
+            let protocol_mode = if uses_ema_auth {
+                McpProtocolMode::V20260728
+            } else {
+                protocol_mode
+            };
+            let client_mcp_extensions = if uses_ema_auth {
+                ClientMcpExtensions::new(
+                    client_mcp_extensions
+                        .iter()
+                        .map(|(id, settings)| (id.to_string(), settings.clone()))
+                        .chain(std::iter::once((
+                            ENTERPRISE_MANAGED_AUTHORIZATION_EXTENSION_ID.to_string(),
+                            serde_json::json!({}),
+                        ))),
+                )
+            } else {
+                client_mcp_extensions
+            };
             let configured_tool_filter = ToolFilter::from_config(&configured_config);
             let startup_timeout = configured_config
                 .startup_timeout_sec
@@ -599,7 +621,7 @@ impl McpConnectionSet {
                 McpServerTransportConfig::Stdio { .. } => false,
             };
             // Filtered catalogs must not read or populate an unrestricted shared cache.
-            let shares_codex_apps_tools_cache = is_host_owned_codex_apps
+            let eligible_for_apps_cache = is_host_owned_codex_apps
                 && !server.requires_read_only_mcp_tools()
                 && should_share_codex_apps_tools_cache(&server_name, uses_env_bearer_token);
             let shares_codex_apps_tools_cache =
@@ -630,8 +652,13 @@ impl McpConnectionSet {
                 let mut scope = serde_json::json!([
                     transport,
                     &configured_config.auth,
+                    runtime_auth_mode,
                     protocol_mode.preferred_protocol_version().as_str(),
                     catalog_item_limit,
+                    &client_elicitation_capability,
+                    client_mcp_extensions
+                        .iter()
+                        .collect::<std::collections::BTreeMap<_, _>>(),
                 ]);
                 scope.sort_all_objects();
                 codex_apps_tools_cache
@@ -874,6 +901,9 @@ impl McpConnectionSet {
                         McpServerView {
                             connection,
                             protocol_mode,
+                            startup_readiness: configured_config.startup_readiness,
+                            refresh_tool_list: config.mcp_tool_list_changed,
+                            refresh_timeout: startup_timeout,
                             metadata,
                             tool_filter: configured_tool_filter,
                             tool_timeout: configured_tool_timeout,
@@ -939,26 +969,7 @@ impl McpConnectionSet {
                 }
             }
             let cancel_token = startup_cancellation_token.child_token();
-            let tool_catalog_cache_context = if server_name == CODEX_APPS_MCP_SERVER_NAME
-                || server.requires_read_only_mcp_tools()
-            {
-                None
-            } else if let Ok(environment) = resolved_environment.as_ref() {
-                tool_catalog_cache.context(
-                    &server_name,
-                    &configured_config,
-                    &runtime_context,
-                    environment.as_ref(),
-                    (&client_elicitation_capability, &client_mcp_extensions),
-                    Some((
-                        &connection_identity,
-                        protocol_mode,
-                        server.is_agent_plugin(),
-                    )),
-                )
-            } else {
-                None
-            };
+            let tool_catalog_cache_context = tool_catalog_cache_context.take();
             let has_runtime_auth = runtime_auth_provider.is_some();
             let connection_pool = connection_pool.map(|pool| {
                 (
@@ -1018,18 +1029,12 @@ impl McpConnectionSet {
                 connection_pool,
                 publish_apps,
             );
-            let defer_startup = allow_deferred_startup
-                && !tool_plugin_context.is_selected_plugin_mcp_server(&server_name)
-                && async_managed_client
-                    .tool_catalog_cache_context
-                    .as_ref()
-                    .and_then(McpToolCatalogCacheContext::current_tools)
-                    .is_some_and(|tools| {
-                        tools.into_iter().any(|tool| {
-                            configured_tool_filter.allows(&tool.tool.name)
-                                && tool_is_model_visible(&tool)
-                        })
-                    });
+            // A forced reconnect must also wait for the previously published helper to exit.
+            if let Some(previous) = existing_ema.and_then(|set| set.servers.get(&server_key)) {
+                async_managed_client.wait_for_failed_predecessor(&previous.connection.client);
+            }
+            let legacy_fallback = legacy_to_upgrade
+                .map(|connection| connection.retain_on_failed_discovery(&mut async_managed_client));
             let (startup_trigger, startup_receiver) = if defer_startup {
                 let (trigger, receiver) = watch::channel(false);
                 (Some(trigger), Some(receiver))
@@ -1049,6 +1054,9 @@ impl McpConnectionSet {
                         _diagnostics_guard: LIVE_CONNECTIONS.track(),
                     }),
                     protocol_mode,
+                    startup_readiness: configured_config.startup_readiness,
+                    refresh_tool_list: config.mcp_tool_list_changed,
+                    refresh_timeout: startup_timeout,
                     metadata,
                     tool_filter: configured_tool_filter,
                     tool_timeout: configured_tool_timeout,
@@ -1400,14 +1408,16 @@ impl McpConnectionSet {
         }
     }
 
-    pub fn plugin_id_for_mcp_server_name(&self, server_name: &str) -> Option<&str> {
-        self.tool_plugin_context
-            .plugin_id_for_mcp_server_name(server_name)
+    pub(crate) fn retire_shared_connections(&self) {
+        for view in self.servers.values() {
+            if let Some(slot) = &view.connection.client.connection_slot {
+                slot.retire();
+            }
+        }
     }
 
-    pub fn is_selected_plugin_mcp_server(&self, server_name: &str) -> bool {
-        self.tool_plugin_context
-            .is_selected_plugin_mcp_server(server_name)
+    pub fn plugin_id_for_server(&self, server_name: &McpServerKey) -> Option<&str> {
+        self.tool_plugin_context.plugin_id_for_server(server_name)
     }
 
     pub fn is_selected_plugin_server(&self, server_name: &McpServerKey) -> bool {
@@ -1531,17 +1541,22 @@ impl McpConnectionSet {
     }
 
     /// Capabilities belong to the initialized connection, never a shared tool cache.
-    pub(crate) fn list_available_server_capabilities(&self) -> HashMap<String, serde_json::Value> {
-        self.servers
-            .iter()
+    pub(crate) fn list_available_server_capabilities(
+        &self,
+        include_server: impl Fn(&str) -> bool,
+    ) -> HashMap<String, serde_json::Value> {
+        self.legacy_servers()
+            .filter(|(name, _)| include_server(name))
             .filter_map(|(name, view)| {
                 view.connection
+                    .retained_legacy()
+                    .unwrap_or(&view.connection)
                     .client
                     .server_capabilities
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone()
-                    .map(|capabilities| (name.clone(), capabilities))
+                    .map(|capabilities| (name.to_owned(), capabilities))
             })
             .collect()
     }

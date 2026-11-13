@@ -10,12 +10,33 @@ use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use codex_config::McpServerConfig;
 use codex_config::McpServerDisabledReason;
 use codex_config::McpServerIdpOAuthConfig;
+use codex_config::McpServerTransportConfig;
 use codex_config::RequirementSource;
 use codex_protocol::mcp_policy::EnvironmentMcpPolicy;
 use codex_utils_path_uri::PathUri;
 
 use crate::CODEX_APPS_MCP_SERVER_NAME;
 use crate::McpProtocolMode;
+use crate::McpServerKey;
+use crate::server::McpCredentialPolicy;
+
+/// Which servers to expose; their internal keys are the same in either mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum McpServerExposure {
+    #[default]
+    Legacy,
+    EnvironmentQualified,
+}
+
+impl McpServerExposure {
+    /// The environment selector shown alongside a server in model-visible output.
+    pub fn environment_id(self, key: &McpServerKey) -> Option<&str> {
+        match self {
+            Self::Legacy => None,
+            Self::EnvironmentQualified => key.scoped_environment_id(),
+        }
+    }
+}
 
 /// Plugin identity retained with an MCP registration for tool attribution.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -143,6 +164,7 @@ pub struct McpServerRegistration {
     key: McpServerKey,
     source: McpServerSource,
     config: McpServerConfig,
+    credential_policy: McpCredentialPolicy,
     protocol_mode: Option<McpProtocolMode>,
     precedence: RegistrationPrecedence,
 }
@@ -299,6 +321,7 @@ impl McpServerRegistration {
             key,
             source,
             config,
+            credential_policy,
             protocol_mode: None,
             precedence,
         }
@@ -382,10 +405,15 @@ pub struct McpCatalogBuilder {
     exposure: McpServerExposure,
     actions: Vec<CatalogAction>,
     disabled_server_names: BTreeSet<String>,
+    requirements_disabled_server_names: BTreeMap<String, RequirementSource>,
     ema_idp: Option<McpServerIdpOAuthConfig>,
 }
 
 impl McpCatalogBuilder {
+    pub fn set_exposure(&mut self, exposure: McpServerExposure) {
+        self.exposure = exposure;
+    }
+
     /// Enables EMA with the IdP selected from trusted configuration.
     /// Without this policy, finalization disables EMA registrations.
     pub fn enable_ema(&mut self, idp: McpServerIdpOAuthConfig) {
@@ -588,32 +616,63 @@ impl McpCatalogBuilder {
         }
 
         let mut disabled_server_names = self.disabled_server_names;
+        let mut requirements_disabled_server_names = self.requirements_disabled_server_names;
         let ema_idp = self.ema_idp;
         let servers = winners
             .into_iter()
             .filter_map(|(key, action)| match action {
                 CatalogAction::Register(registration) => {
                     let mut registration = *registration;
-                    let persist_disabled_name =
-                        registration.source.disabled_registration_is_name_veto()
-                            && !matches!(
-                                registration.config.disabled_reason,
-                                Some(McpServerDisabledReason::EmaRegistration)
-                            );
-                    if !registration.config.enabled || disabled_server_names.contains(&name) {
-                        registration.config.enabled = false;
-                        if persist_disabled_name {
-                            // Preserve legacy disabled winners across later runtime overlays.
-                            disabled_server_names.insert(name.clone());
+                    let name = registration.key.name();
+                    let persist_disabled_name = key.scoped_environment_id().is_none()
+                        && registration.source.disabled_registration_is_name_veto()
+                        && !(matches!(
+                            registration.source,
+                            McpServerSource::Plugin(_) | McpServerSource::SelectedPlugin(_)
+                        ) && matches!(
+                            registration.config.auth,
+                            codex_config::McpServerAuth::EmaAuth
+                        ));
+                    if !registration.config.enabled && persist_disabled_name {
+                        match &registration.config.disabled_reason {
+                            Some(
+                                McpServerDisabledReason::Requirements { source }
+                                | McpServerDisabledReason::ExplicitAndRequirements { source },
+                            ) => {
+                                requirements_disabled_server_names
+                                    .insert(name.to_owned(), source.clone());
+                                if matches!(
+                                    registration.config.disabled_reason,
+                                    Some(McpServerDisabledReason::ExplicitAndRequirements { .. })
+                                ) {
+                                    disabled_server_names.insert(name.to_owned());
+                                }
+                            }
+                            Some(McpServerDisabledReason::Unknown) | None => {
+                                disabled_server_names.insert(name.to_owned());
+                            }
                         }
+                    }
+                    if disabled_server_names.contains(name) {
+                        registration.config.enabled = false;
+                    }
+                    // Only trusted Apps may ignore a previous registration's requirements denial.
+                    // Retain it so a later custom replacement is still blocked.
+                    if !registration
+                        .source
+                        .is_host_owned_apps(name, &registration.config)
+                        && let Some(source) = requirements_disabled_server_names.get(name)
+                    {
+                        registration.config.disable_by_requirements(source.clone());
                     }
                     if matches!(
                         registration.config.auth,
                         codex_config::McpServerAuth::EmaAuth
                     ) {
-                        let allowed = ema_idp.as_ref().is_some_and(|idp| {
-                            registration.config.resolve_ema_registration(idp).is_ok()
-                        });
+                        let allowed = matches!(&registration.source, McpServerSource::Config)
+                            && ema_idp.as_ref().is_some_and(|idp| {
+                                registration.config.resolve_ema_registration(idp).is_ok()
+                            });
                         // EMA denial must not become a persistent name veto.
                         registration.config.enabled &= allowed;
                     }
@@ -623,6 +682,7 @@ impl McpCatalogBuilder {
                             key: registration.key,
                             source: registration.source,
                             config: registration.config,
+                            credential_policy: registration.credential_policy,
                             protocol_mode: registration.protocol_mode,
                         },
                     ))
@@ -635,6 +695,7 @@ impl McpCatalogBuilder {
             exposure: self.exposure,
             actions: self.actions,
             disabled_server_names,
+            requirements_disabled_server_names,
             ema_idp,
             servers,
             conflicts,
@@ -648,6 +709,7 @@ pub struct ResolvedMcpServer {
     key: McpServerKey,
     source: McpServerSource,
     config: McpServerConfig,
+    credential_policy: McpCredentialPolicy,
     protocol_mode: Option<McpProtocolMode>,
 }
 
@@ -668,6 +730,10 @@ impl ResolvedMcpServer {
         &self.config
     }
 
+    pub(crate) fn credential_policy(&self) -> McpCredentialPolicy {
+        self.credential_policy
+    }
+
     pub fn protocol_mode(&self) -> Option<McpProtocolMode> {
         self.protocol_mode
     }
@@ -679,8 +745,9 @@ pub struct ResolvedMcpCatalog {
     exposure: McpServerExposure,
     actions: Vec<CatalogAction>,
     disabled_server_names: BTreeSet<String>,
+    requirements_disabled_server_names: BTreeMap<String, RequirementSource>,
     ema_idp: Option<McpServerIdpOAuthConfig>,
-    servers: BTreeMap<String, ResolvedMcpServer>,
+    servers: BTreeMap<McpServerKey, ResolvedMcpServer>,
     conflicts: Vec<McpServerConflict>,
 }
 
@@ -706,6 +773,7 @@ impl ResolvedMcpCatalog {
             exposure: self.exposure,
             actions: self.actions.clone(),
             disabled_server_names: self.disabled_server_names.clone(),
+            requirements_disabled_server_names: self.requirements_disabled_server_names.clone(),
             ema_idp: self.ema_idp.clone(),
         }
     }
@@ -746,9 +814,11 @@ impl ResolvedMcpCatalog {
             .collect()
     }
 
-    /// Returns whether both catalogs have the same winning servers, sources, and EMA policy.
+    /// Returns whether both catalogs have the same winning servers, exposure, sources, and EMA policy.
     pub fn has_same_servers(&self, other: &Self) -> bool {
-        self.servers == other.servers && self.ema_idp == other.ema_idp
+        self.exposure == other.exposure
+            && self.servers == other.servers
+            && self.ema_idp == other.ema_idp
     }
 
     /// Replaces the resolved server set while preserving known sources and EMA policy.
@@ -758,14 +828,21 @@ impl ResolvedMcpCatalog {
     /// Panics if a materialized server is missing from the catalog.
     pub fn with_materialized_servers(&self, servers: HashMap<String, McpServerConfig>) -> Self {
         let mut builder = McpCatalogBuilder {
+            exposure: self.exposure,
+            disabled_server_names: self.disabled_server_names.clone(),
+            requirements_disabled_server_names: self.requirements_disabled_server_names.clone(),
             ema_idp: self.ema_idp.clone(),
             ..Default::default()
         };
         for (name, config) in servers {
-            let previous = self.server(&name);
-            let source = previous
-                .map(|server| server.source.clone())
-                .unwrap_or(McpServerSource::Config);
+            #[expect(
+                clippy::expect_used,
+                reason = "materialized servers must have catalog registrations"
+            )]
+            let previous = self
+                .server_by_name(&name)
+                .expect("materialized MCP server must have a catalog registration");
+            let source = previous.source.clone();
             let precedence = match &source {
                 McpServerSource::Plugin(_) => RegistrationPrecedence::Plugin(Reverse(0)),
                 McpServerSource::SelectedPlugin(_) => {
@@ -775,8 +852,18 @@ impl ResolvedMcpCatalog {
                 McpServerSource::Compatibility { .. } => RegistrationPrecedence::Compatibility,
                 McpServerSource::Extension { .. } => RegistrationPrecedence::Extension(0),
             };
-            let mut registration = McpServerRegistration::new(name, source, config, precedence);
-            registration.protocol_mode = previous.and_then(ResolvedMcpServer::protocol_mode);
+            let credential_policy = previous.credential_policy();
+            let mut registration = McpServerRegistration::new(
+                previous.name().to_owned(),
+                source,
+                config,
+                precedence,
+                credential_policy,
+            );
+            if previous.key.scoped_environment_id().is_some() {
+                registration = registration.with_environment_scope();
+            }
+            registration.protocol_mode = previous.protocol_mode();
             builder.register(registration);
         }
         builder.build()

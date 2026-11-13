@@ -35,8 +35,7 @@ impl McpConnectionSet {
         server: &str,
         generation: u64,
     ) -> Option<McpResourceServerCacheKey> {
-        self.servers
-            .get(server)
+        self.server_by_name(server)
             .map(|view| McpResourceServerCacheKey {
                 connection: Arc::downgrade(&view.connection),
                 generation,

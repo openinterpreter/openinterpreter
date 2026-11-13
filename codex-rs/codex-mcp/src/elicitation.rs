@@ -6,6 +6,8 @@
 //! and later resolved through the stored responder.
 //! Explicit MCP elicitation requests can be surfaced by root and non-root agents.
 
+use crate::McpServerKey;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -367,68 +369,6 @@ impl ElicitationRequestRouter {
         if let Some(event) = legacy_event {
             events.send(event).await.context(delivery_context)?;
         }
-        rx.await.context(response_context)
-    }
-
-    async fn request_user_interaction(
-        &self,
-        events: Option<Sender<Event>>,
-        authority: &ElicitationAuthority,
-        server_name: String,
-        request: ElicitationRequest,
-    ) -> Result<ElicitationResponse> {
-        let Some(events) = events else {
-            return Ok(ElicitationResponse {
-                action: ElicitationAction::Decline,
-                content: None,
-                meta: None,
-            });
-        };
-        let (delivery_context, response_context) =
-            if matches!(&request, ElicitationRequest::UserVerification { .. }) {
-                (
-                    "failed to deliver user-verification request",
-                    "user-verification response channel closed",
-                )
-            } else {
-                (
-                    "failed to deliver MCP elicitation request",
-                    "elicitation request channel closed unexpectedly",
-                )
-            };
-        let public_request_id = format!(
-            "codex-mcp-elicitation-{}",
-            NEXT_ELICITATION_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
-        );
-        let request_key = (
-            server_name.clone(),
-            RequestId::String(public_request_id.clone().into()),
-        );
-        let (tx, rx) = oneshot::channel();
-        let _active_elicitation = authority
-            .lifecycle
-            .as_ref()
-            .map(ElicitationLifecycle::start);
-        self.requests
-            .lock()
-            .map_err(|_| anyhow!("elicitation request router unavailable"))?
-            .insert(request_key.clone(), tx);
-        let _pending_request = PendingElicitationRequest {
-            router: self.clone(),
-            key: request_key,
-        };
-        events
-            .send(Event {
-                id: "mcp_elicitation_request".to_string(),
-                msg: EventMsg::ElicitationRequest(ElicitationRequestEvent {
-                    turn_id: None,
-                    server_name,
-                    id: ProtocolRequestId::String(public_request_id),
-                    request,
-                }),
-            })
-            .await
-            .context(delivery_context)?;
         rx.await.context(response_context)
     }
 }

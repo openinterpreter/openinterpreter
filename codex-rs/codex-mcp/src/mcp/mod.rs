@@ -143,7 +143,11 @@ pub struct McpConfig {
     pub codex_home: PathBuf,
     /// Trusted enterprise IdP inherited after normal catalog and policy resolution.
     pub mcp_enterprise_managed_auth: Option<McpEnterpriseManagedAuthConfig>,
+    /// Retires only EMA connections and pending exchanges for this config snapshot.
+    pub mcp_ema_cancellation: codex_config::McpEmaCancellation,
     pub xaa_enabled: bool,
+    /// Shared sign-in requirements for account-backed enterprise MCP.
+    pub ema_state: Arc<crate::EmaState>,
     /// Preferred credential store for MCP OAuth tokens.
     pub mcp_oauth_credentials_store_mode: OAuthCredentialsStoreMode,
     /// OAuth refresh ownership selected for new MCP connections.
@@ -201,6 +205,10 @@ pub struct McpConfig {
     pub non_prefixed_mcp_tool_servers: Vec<String>,
     /// Protocol mode for servers other than the host-owned Codex Apps registration.
     pub protocol_mode: McpProtocolMode,
+    /// Try protocol discovery before initializing eligible local stdio servers.
+    pub discover_local_stdio: bool,
+    /// Refresh ordinary server catalogs after tools/list_changed notifications.
+    pub mcp_tool_list_changed: bool,
     /// Independent protocol mode for the trusted, HTTP Codex Apps registration.
     pub host_owned_apps_protocol_mode: McpProtocolMode,
     /// Client-side elicitation capabilities advertised during MCP initialization.
@@ -302,9 +310,9 @@ impl McpConfig {
 pub struct ToolPluginContext {
     plugin_display_names_by_connector_id: HashMap<String, Vec<String>>,
     disabled_connector_ids: HashSet<String>,
-    plugin_display_names_by_mcp_server_name: HashMap<String, Vec<String>>,
-    plugin_ids_by_mcp_server_name: HashMap<String, String>,
-    selected_plugin_mcp_server_names: HashSet<String>,
+    plugin_display_names_by_server: HashMap<McpServerKey, Vec<String>>,
+    plugin_ids_by_server: HashMap<McpServerKey, String>,
+    selected_plugin_server_keys: HashSet<McpServerKey>,
 }
 
 impl ToolPluginContext {
@@ -353,25 +361,20 @@ impl ToolPluginContext {
                 );
         }
 
-        for (server_name, attribution) in config
-            .mcp_server_catalog
-            .plugin_attributions_by_server_name()
-        {
+        for (server_key, attribution) in config.mcp_server_catalog.plugin_attributions_by_server() {
+            tool_plugin_context.plugin_display_names_by_server.insert(
+                server_key.clone(),
+                vec![attribution.display_name().to_string()],
+            );
             tool_plugin_context
-                .plugin_display_names_by_mcp_server_name
-                .insert(
-                    server_name.clone(),
-                    vec![attribution.display_name().to_string()],
-                );
-            tool_plugin_context
-                .plugin_ids_by_mcp_server_name
-                .insert(server_name, attribution.plugin_id().to_string());
+                .plugin_ids_by_server
+                .insert(server_key, attribution.plugin_id().to_string());
         }
-        tool_plugin_context.selected_plugin_mcp_server_names.extend(
+        tool_plugin_context.selected_plugin_server_keys.extend(
             config
                 .mcp_server_catalog
-                .selected_plugin_server_names()
-                .map(str::to_string),
+                .selected_plugin_server_keys()
+                .cloned(),
         );
 
         for plugin_names in tool_plugin_context
@@ -379,7 +382,7 @@ impl ToolPluginContext {
             .values_mut()
             .chain(
                 tool_plugin_context
-                    .plugin_display_names_by_mcp_server_name
+                    .plugin_display_names_by_server
                     .values_mut(),
             )
         {
@@ -527,6 +530,7 @@ pub async fn read_mcp_resource(
 pub struct McpServerStatusSnapshot {
     pub server_infos: HashMap<String, McpServerInfo>,
     pub server_capabilities: HashMap<String, serde_json::Value>,
+    pub tool_list_meta: HashMap<String, Arc<serde_json::Value>>,
     pub tools_by_server: HashMap<String, HashMap<String, Tool>>,
     pub tools_errors: HashMap<String, String>,
     pub resources: HashMap<String, Vec<Resource>>,
@@ -561,6 +565,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
         return McpServerStatusSnapshot {
             server_infos: HashMap::new(),
             server_capabilities: HashMap::new(),
+            tool_list_meta: HashMap::new(),
             tools_by_server: HashMap::new(),
             tools_errors: HashMap::new(),
             resources: HashMap::new(),
@@ -909,17 +914,29 @@ pub(crate) async fn collect_mcp_server_status_snapshot_from_manager(
             .insert(tool_name, tool);
     }
 
-    // Status-only discovery has no event channel. Report OAuth failures from the completed
+    // Status-only discovery has no event channel. Report OAuth and EMA failures from the completed
     // connection attempt instead of retaining the credential-presence status read beforehand.
     let mut auth_statuses = auth_statuses_from_entries(&auth_status_entries);
-    for server_name in mcp_connection_manager.authentication_failed_servers().await {
-        if auth_statuses.get(&server_name) == Some(&McpAuthStatus::OAuth) {
+    for key in mcp_connection_manager.authentication_failed_servers().await {
+        let Some(server_name) = mcp_connection_manager
+            .legacy_server_name(&key)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if auth_statuses.get(&server_name) == Some(&McpAuthStatus::OAuth)
+            || auth_status_entries
+                .get(&server_name)
+                .and_then(|entry| entry.config.as_ref())
+                .is_some_and(|config| matches!(config.auth, McpServerAuth::EmaAuth))
+        {
             auth_statuses.insert(server_name, McpAuthStatus::NotLoggedIn);
         }
     }
 
     McpServerStatusSnapshot {
-        server_capabilities: mcp_connection_manager.list_available_server_capabilities(),
+        server_capabilities,
+        tool_list_meta,
         server_infos,
         tools_by_server,
         tools_errors,
