@@ -40,12 +40,9 @@ impl SnapshotMetrics {
         } else {
             match prepared.turn_environment.shell_snapshot.peek() {
                 None => "prewarm_pending",
-                Some(Some(snapshot))
-                    if &snapshot.shell_environment_policy
-                        == prepared.turn_environment.shell_environment_policy() =>
-                {
-                    "prewarm_ready"
-                }
+                // This is telemetry only. Execution revalidates the selected snapshot and
+                // credential policy before use; an available prewarm is not an authorization.
+                Some(Some(_snapshot)) => "prewarm_ready",
                 Some(_) => "unavailable",
             }
         };

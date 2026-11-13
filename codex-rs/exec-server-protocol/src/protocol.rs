@@ -164,6 +164,12 @@ pub struct EnvironmentCapabilities {
     /// Whether credential masking also supports configured providers.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     credential_masking_custom_providers: bool,
+    /// Whether approved Linux root writes preserve denied device restrictions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linux_root_write_preserves_devices: bool,
+    /// Whether approved Linux root writes preserve the complete sandbox restrictions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linux_approved_root_write_preserves_restrictions: bool,
     /// Whether capability discovery applies the filesystem sandbox sent with each root.
     #[serde(default)]
     pub capability_discovery_sandbox: bool,
@@ -191,6 +197,29 @@ pub struct EnvironmentCapabilities {
     /// Whether requests may explicitly select the MXC Windows sandbox backend.
     #[serde(default)]
     pub windows_mxc: bool,
+}
+
+/// Executor-reported support for network proxy launches and credential masking.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct NetworkProxyCapabilities {
+    pub launch: bool,
+    pub credential_masking: RemoteCredentialMasking,
+}
+
+impl EnvironmentCapabilities {
+    pub fn network_proxy(&self) -> NetworkProxyCapabilities {
+        let credential_masking = if !self.credential_masking {
+            RemoteCredentialMasking::Disabled
+        } else if self.credential_masking_custom_providers {
+            RemoteCredentialMasking::WithConfiguredProviders
+        } else {
+            RemoteCredentialMasking::BuiltInOnly
+        };
+        NetworkProxyCapabilities {
+            launch: self.network_proxy_launch,
+            credential_masking,
+        }
+    }
 }
 
 /// Status returned by an initialized exec-server connection.
@@ -294,6 +323,8 @@ impl EnvironmentInfo {
                 network_proxy_review_domains: true,
                 credential_masking,
                 credential_masking_custom_providers: credential_masking,
+                linux_root_write_preserves_devices: cfg!(target_os = "linux"),
+                linux_approved_root_write_preserves_restrictions: cfg!(target_os = "linux"),
                 capability_discovery_sandbox: true,
                 fs_watch_missing: cfg!(target_os = "linux"),
                 capability_discovery_v2: true,
@@ -1524,6 +1555,8 @@ mod tests {
                 network_proxy_review_domains: false,
                 credential_masking: false,
                 credential_masking_custom_providers: false,
+                linux_root_write_preserves_devices: false,
+                linux_approved_root_write_preserves_restrictions: false,
                 capability_discovery_sandbox: true,
                 fs_watch_missing: false,
                 capability_discovery_v2: false,

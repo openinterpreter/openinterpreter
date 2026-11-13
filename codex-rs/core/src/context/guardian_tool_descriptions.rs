@@ -2,7 +2,9 @@
 
 use super::ContextualUserFragment;
 use codex_guardian_context::truncate_text;
-use codex_protocol::models::{ContentItem, ContentItemKind, input_text};
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 
 /// Descriptions may be shortened or omitted without changing the required action.
 pub(crate) struct GuardianToolDescriptions {

@@ -283,7 +283,7 @@ impl RequestPluginInstallHandler {
 
         // The elicitation was dispatched before this awaited call returned;
         // a closed response channel is still a sent, unanswered request.
-        let tool_type = match tool_type {
+        let tool_type_tag = match tool_type {
             DiscoverableToolType::Connector => "connector",
             DiscoverableToolType::Plugin => "plugin",
         };
@@ -297,7 +297,7 @@ impl RequestPluginInstallHandler {
         step_context
             .session_telemetry
             .record_plugin_install_suggestion(
-                tool_type,
+                tool_type_tag,
                 tool.id(),
                 tool.name(),
                 response_action,

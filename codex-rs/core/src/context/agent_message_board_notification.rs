@@ -1,7 +1,9 @@
 //! Fixed-size discussion notices. Post text is fetched through bounded tools.
 
 use super::ContextualUserFragment;
-use codex_protocol::models::{ContentItem, ContentItemKind, input_text};
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 use uuid::Uuid;
 
 pub struct AgentMessageBoardNotification {

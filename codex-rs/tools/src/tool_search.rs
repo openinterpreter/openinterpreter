@@ -17,6 +17,27 @@ pub struct ToolSearchEntry {
 }
 
 impl ToolSearchEntry {
+    /// Names carried by this immutable catalog entry before nested-tool policy filtering.
+    pub fn tool_names(&self) -> Vec<ToolName> {
+        match self.spec.as_ref() {
+            ToolSpec::Function(tool) => vec![ToolName::plain(tool.name.clone())],
+            ToolSpec::Freeform(tool) => vec![ToolName::plain(tool.name.clone())],
+            ToolSpec::Namespace(namespace) => namespace
+                .tools
+                .iter()
+                .map(|tool| match tool {
+                    ResponsesApiNamespaceTool::Function(tool) => {
+                        ToolName::namespaced(namespace.name.clone(), tool.name.clone())
+                    }
+                    ResponsesApiNamespaceTool::Custom(tool) => {
+                        ToolName::namespaced(namespace.name.clone(), tool.name.clone())
+                    }
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Materialize only selected results; output schemas remain shared until discarded.
     pub fn to_loadable_spec(&self) -> LoadableToolSpec {
         let Some(output) = normalize_search_spec(self.spec.as_ref().clone()) else {

@@ -269,6 +269,18 @@ pub trait TurnLifecycleContributor: Send + Sync {
         Box::pin(std::future::ready(()))
     }
 
+    /// Observes a completed item with optional input-local extension metadata. Implementations
+    /// using the ordinary item callback continue to receive exactly one completion event.
+    fn on_item_completed_with_metadata<'a>(
+        &'a self,
+        thread_store: &'a ExtensionData,
+        turn_store: &'a ExtensionData,
+        item: &'a TurnItem,
+        _user_input_extension_data: Option<&'a BTreeMap<String, serde_json::Value>>,
+    ) -> ExtensionFuture<'a, ()> {
+        self.on_item_completed(thread_store, turn_store, item)
+    }
+
     /// Called before the host drops the completed turn runtime and turn store.
     /// The callback completes before the host emits the turn-complete event.
     fn on_turn_stop<'a>(&'a self, input: TurnStopInput<'a>) -> ExtensionFuture<'a, ()> {

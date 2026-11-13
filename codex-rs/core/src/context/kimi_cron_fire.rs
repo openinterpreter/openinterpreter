@@ -1,5 +1,7 @@
 use super::ContextualUserFragment;
-use codex_protocol::models::{ContentItem, ContentItemKind, input_text};
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 
 /// A scheduled Kimi Code prompt re-injected into its owning thread.
 #[derive(Debug, Clone, PartialEq)]

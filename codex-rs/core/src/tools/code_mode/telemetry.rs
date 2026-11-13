@@ -11,6 +11,7 @@ use tracing::Span;
 
 pub(super) struct CodeModeToolCallGuard {
     analytics: AnalyticsEventsClient,
+    extensions: Arc<codex_extension_api::ExtensionRegistry<crate::config::Config>>,
     thread_id: String,
     turn_id: String,
     turn_metadata: Arc<dyn TurnAnalyticsMetadata>,
@@ -33,6 +34,7 @@ impl CodeModeToolCallGuard {
     ) -> Self {
         Self {
             analytics: session.services.analytics_events_client.clone(),
+            extensions: Arc::clone(&session.services.extensions),
             thread_id: session.thread_id.to_string(),
             turn_id,
             turn_metadata,

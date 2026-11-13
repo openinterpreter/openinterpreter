@@ -37,12 +37,12 @@ pub(super) fn multi_agent_v2_handler(
             && let Some(properties) = tool.parameters.properties
         {
             // Argument transport requires these markers even without server encryption config.
-            for (name, schema) in properties {
+            for (name, schema) in properties.iter() {
                 if schema.encrypted == Some(true) {
                     let property = parameters
                         .properties
                         .as_mut()
-                        .and_then(|properties| properties.get_mut(&name))
+                        .and_then(|properties| properties.get_mut(name))
                         .ok_or("schema omits an encrypted parameter")?;
                     property.encrypted = Some(true);
                 }

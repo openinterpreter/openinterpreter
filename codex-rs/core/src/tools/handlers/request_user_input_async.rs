@@ -23,6 +23,7 @@ const TOOL_NAME: &str = "request_user_input_async";
 
 pub struct RequestUserInputAsyncHandler {
     pub description: String,
+    pub parameters: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
