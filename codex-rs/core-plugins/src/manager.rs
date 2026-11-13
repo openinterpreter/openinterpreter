@@ -108,6 +108,7 @@ use codex_config::types::ToolSuggestDisabledTool;
 use codex_config::types::ToolSuggestDiscoverableType;
 use codex_connectors::ConnectorSnapshot;
 use codex_connectors::PluginConnectorSource;
+use codex_features::RuntimeAuthMode;
 use codex_hooks::plugin_hook_declarations;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClientFactory;
@@ -1482,7 +1483,7 @@ impl PluginsManager {
             generation,
             plugins,
             auth,
-            RemoteInstalledPluginsCachePublication::Refresh,
+            RemoteInstalledPluginsCachePublication::Refresh(display_assets),
         ) else {
             let auth_identity = RemoteInstalledPluginsAuthIdentity::from_auth(auth);
             if !self.remote_installed_plugins_auth_is_current(&auth_identity) {
@@ -1611,7 +1612,7 @@ impl PluginsManager {
             return None;
         }
         let is_reconcile = matches!(
-            publication,
+            &publication,
             RemoteInstalledPluginsCachePublication::Reconcile
         );
         if !is_reconcile && cache.reconciliation_generation == Some(generation) {
@@ -1626,12 +1627,6 @@ impl PluginsManager {
         }
         let needs_effective_plugins_refresh =
             is_reconcile && std::mem::take(&mut cache.needs_effective_plugins_refresh);
-        if cache.plugins.as_ref() == Some(&plugins) {
-            drop(cache);
-            if needs_effective_plugins_refresh {
-                self.clear_loaded_plugins_cache();
-            }
-        };
         let previous = cache.plugins.as_deref();
         let payload_changed = previous != Some(plugins.as_slice());
         let metadata_changed = payload_changed
@@ -1640,28 +1635,17 @@ impl PluginsManager {
             });
         let changed = needs_effective_plugins_refresh || metadata_changed;
         let metadata_change_id = changed.then(uuid::Uuid::new_v4);
-        let initial_snapshot = previous.is_none();
-        let changes = if metadata_changed && tracing::enabled!(tracing::Level::INFO) {
-            crate::remote_metadata::installed_plugin_metadata_changes(
-                previous.unwrap_or_default(),
-                &plugins,
-            )
-        } else {
-            Default::default()
-        };
         if payload_changed {
             cache.plugins = Some(plugins);
         }
-        let metadata_changed = cache.plugins.as_ref().is_none_or(|previous| {
-            !crate::remote_metadata::installed_plugin_metadata_eq(previous, &plugins)
-        });
-        cache.plugins = Some(plugins);
+        if let RemoteInstalledPluginsCachePublication::Refresh(display_assets) = publication {
+            cache.display_assets = display_assets;
+        }
         drop(cache);
-        let changed = needs_effective_plugins_refresh || metadata_changed;
         if changed {
             self.clear_loaded_plugins_cache();
         }
-        Some(changed)
+        Some(InstalledPluginCacheUpdate { metadata_change_id })
     }
 
     #[cfg(test)]
@@ -1674,7 +1658,7 @@ impl PluginsManager {
             generation,
             plugins,
             auth.as_ref(),
-            RemoteInstalledPluginsCachePublication::Refresh,
+            RemoteInstalledPluginsCachePublication::Refresh(InstalledPluginDisplayAssets::Include),
         )
         .expect("test cache generation should remain current")
         .metadata_change_id
@@ -3532,7 +3516,9 @@ impl PluginsManager {
                         request.generation,
                         plugins,
                         request.auth.as_ref(),
-                        RemoteInstalledPluginsCachePublication::Refresh,
+                        RemoteInstalledPluginsCachePublication::Refresh(
+                            InstalledPluginDisplayAssets::Include,
+                        ),
                     ) else {
                         continue;
                     };

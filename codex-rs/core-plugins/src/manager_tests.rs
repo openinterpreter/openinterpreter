@@ -7928,21 +7928,27 @@ fn reconciliation_fences_refresh_publication_and_recovers_after_cancellation() {
         .expect("capture concurrent refresh generation");
 
     assert_eq!(
-        manager.write_remote_installed_plugins_cache_snapshot(
-            stale_refresh_generation,
-            Vec::new(),
-            /*auth*/ None,
-            RemoteInstalledPluginsCachePublication::Refresh,
-        ),
+        manager
+            .write_remote_installed_plugins_cache_snapshot(
+                stale_refresh_generation,
+                Vec::new(),
+                /*auth*/ None,
+                RemoteInstalledPluginsCachePublication::Refresh(
+                    InstalledPluginDisplayAssets::Include
+                ),
+            )
+            .map(|update| update.metadata_change_id.is_some()),
         None
     );
     assert_eq!(
-        manager.write_remote_installed_plugins_cache_snapshot(
-            reconcile_generation,
-            vec![remote_installed_linear_plugin()],
-            /*auth*/ None,
-            RemoteInstalledPluginsCachePublication::Reconcile,
-        ),
+        manager
+            .write_remote_installed_plugins_cache_snapshot(
+                reconcile_generation,
+                vec![remote_installed_linear_plugin()],
+                /*auth*/ None,
+                RemoteInstalledPluginsCachePublication::Reconcile,
+            )
+            .map(|update| update.metadata_change_id.is_some()),
         Some(true)
     );
     let cancelled_generation = manager
@@ -7960,24 +7966,30 @@ fn reconciliation_fences_refresh_publication_and_recovers_after_cancellation() {
         .remote_installed_plugins_cache_generation_if_current(/*auth*/ None)
         .expect("capture refresh generation after cancellation");
     assert_eq!(
-        manager.write_remote_installed_plugins_cache_snapshot(
-            refresh_generation,
-            vec![remote_installed_plugin("beta")],
-            /*auth*/ None,
-            RemoteInstalledPluginsCachePublication::Refresh,
-        ),
+        manager
+            .write_remote_installed_plugins_cache_snapshot(
+                refresh_generation,
+                vec![remote_installed_plugin("beta")],
+                /*auth*/ None,
+                RemoteInstalledPluginsCachePublication::Refresh(
+                    InstalledPluginDisplayAssets::Include
+                ),
+            )
+            .map(|update| update.metadata_change_id.is_some()),
         Some(true)
     );
     let retry_generation = manager
         .begin_remote_installed_plugins_reconcile(/*auth*/ None)
         .expect("begin retry after cancellation");
     assert_eq!(
-        manager.write_remote_installed_plugins_cache_snapshot(
-            retry_generation,
-            vec![remote_installed_plugin("beta")],
-            /*auth*/ None,
-            RemoteInstalledPluginsCachePublication::Reconcile,
-        ),
+        manager
+            .write_remote_installed_plugins_cache_snapshot(
+                retry_generation,
+                vec![remote_installed_plugin("beta")],
+                /*auth*/ None,
+                RemoteInstalledPluginsCachePublication::Reconcile,
+            )
+            .map(|update| update.metadata_change_id.is_some()),
         Some(true)
     );
 }
