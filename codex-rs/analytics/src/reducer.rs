@@ -185,7 +185,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 const MAX_TOOL_RESPONSE_ENTRIES: usize = 256;
-const MAX_RECENT_VOICE_SESSION_WINDOWS: usize = 16;
 
 pub(crate) const MAX_PLUGIN_MEASUREMENTS_PER_BATCH: usize = 100;
 const MAX_PLUGIN_MEASUREMENT_DIMENSIONS: usize = 8;
@@ -257,22 +256,7 @@ impl ThreadAnalyticsState {
     }
 
     fn active_voice_session_id(&self) -> Option<String> {
-        self.active_voice_session
-            .as_ref()
-            .and_then(|session| session.session_id.clone())
-    }
-
-    fn voice_session_id_at(&self, timestamp: u64) -> Option<String> {
-        self.active_voice_session
-            .iter()
-            .chain(self.recent_voice_sessions.iter().rev())
-            .find(|session| {
-                session.started_at <= timestamp
-                    && session
-                        .closed_at
-                        .is_none_or(|closed_at| timestamp <= closed_at)
-            })
-            .and_then(|session| session.session_id.clone())
+        self.active_voice_session_id.clone()
     }
 }
 
@@ -2070,18 +2054,67 @@ impl AnalyticsReducer {
                 else {
                     return;
                 };
-                let model_context = match &notification.item {
-                    ThreadItem::CommandExecution { model_context, .. } => model_context.clone(),
+                let model_context = match &notification.item.payload {
+                    ThreadItemPayload::CommandExecution { model_context, .. } => {
+                        model_context.clone()
+                    }
                     _ => None,
                 };
                 self.tool_items_started_at_ms
                     .entry(ToolItemKey {
-                        thread_id: notification.thread_id,
-                        turn_id: notification.turn_id,
+                        thread_id: notification.thread_id.clone(),
+                        turn_id: notification.turn_id.clone(),
                         item_id: item_id.to_string(),
                     })
                     .and_modify(|(timestamp, _)| *timestamp = started_at_ms)
                     .or_insert((started_at_ms, model_context));
+                if let Some((server, tool, plugin_id, connector_id)) =
+                    cua_mcp_tool_identity(&notification.item.payload)
+                {
+                    let Some((connection, thread, metadata)) =
+                        self.thread_context_or_warn(AnalyticsDropSite::cua_tool_call_started(
+                            &notification.thread_id,
+                            &notification.turn_id,
+                            item_id,
+                        ))
+                    else {
+                        return;
+                    };
+                    let turn_metadata = self
+                        .turns
+                        .get(&notification.turn_id)
+                        .and_then(|turn| turn.resolved_config.as_ref())
+                        .map(|config| config.turn_metadata.as_ref());
+                    out.push(TrackEventRequest::CuaToolCallStarted(
+                        CodexCuaToolCallStartedEventRequest {
+                            event_type: "codex_cua_tool_call_started_event",
+                            event_params: CodexCuaToolCallStartedEventParams {
+                                turn_trigger: turn_metadata
+                                    .and_then(TurnAnalyticsMetadata::turn_trigger),
+                                thread_id: notification.thread_id.clone(),
+                                session_id: metadata.session_id.clone(),
+                                turn_id: notification.turn_id.clone(),
+                                root_turn_id: turn_metadata
+                                    .and_then(TurnAnalyticsMetadata::root_turn_id),
+                                item_id: item_id.to_string(),
+                                cell_id: None,
+                                parent_call_id: None,
+                                originating_response_id: None,
+                                app_server_client: thread.app_server_client(connection),
+                                runtime: connection.runtime.clone(),
+                                thread_source: metadata.thread_source.clone(),
+                                subagent_source: metadata.subagent_source.clone(),
+                                parent_thread_id: metadata.parent_thread_id.clone(),
+                                tool_event_type: None,
+                                started_at_ms,
+                                mcp_server_name: server.to_string(),
+                                mcp_tool_name: tool.to_string(),
+                                plugin_id: plugin_id.map(str::to_string),
+                                connector_id: connector_id.map(str::to_string),
+                            },
+                        },
+                    ));
+                }
             }
             ServerNotification::ItemCompleted(notification) => {
                 if matches!(
@@ -2107,18 +2140,20 @@ impl AnalyticsReducer {
                     turn_id: notification.turn_id.clone(),
                     item_id: item_id.to_string(),
                 };
-                let elicitation_type =
-                    if matches!(notification.item, ThreadItem::McpToolCall { .. }) {
-                        // Producers enqueue known classifications before completion on
-                        // the same analytics queue, so completed keys need no history.
-                        self.pending_mcp_tool_elicitations
-                            .iter()
-                            .position(|(pending, _)| pending == &key)
-                            .and_then(|index| self.pending_mcp_tool_elicitations.remove(index))
-                            .map(|(_, elicitation_type)| elicitation_type)
-                    } else {
-                        None
-                    };
+                let elicitation_type = if matches!(
+                    notification.item.payload,
+                    ThreadItemPayload::McpToolCall { .. }
+                ) {
+                    // Producers enqueue known classifications before completion on
+                    // the same analytics queue, so completed keys need no history.
+                    self.pending_mcp_tool_elicitations
+                        .iter()
+                        .position(|(pending, _)| pending == &key)
+                        .and_then(|index| self.pending_mcp_tool_elicitations.remove(index))
+                        .map(|(_, elicitation_type)| elicitation_type)
+                } else {
+                    None
+                };
                 let Some(turn_state) = self.turns.get_mut(&notification.turn_id) else {
                     tracing::warn!(
                         thread_id = %notification.thread_id,
@@ -2128,7 +2163,7 @@ impl AnalyticsReducer {
                     );
                     return;
                 };
-                turn_state.tool_counts.record(&notification.item);
+                turn_state.tool_counts.record(&notification.item.payload);
                 let Some((started_at_ms, model_context)) =
                     self.tool_items_started_at_ms.remove(&key)
                 else {
@@ -2152,7 +2187,7 @@ impl AnalyticsReducer {
                 if let Some(mut event) = tool_item_event(ToolItemEventInput {
                     thread_id: &notification.thread_id,
                     turn_id: &notification.turn_id,
-                    item: &notification.item,
+                    item: &notification.item.payload,
                     model_context: model_context.as_ref(),
                     started_at_ms,
                     completed_at_ms,
@@ -2168,7 +2203,7 @@ impl AnalyticsReducer {
                             .get(&notification.turn_id)
                             .and_then(|turn| turn.voice_session_id.clone());
                     }
-                    let root_turn_id = self
+                    let turn_metadata = self
                         .turns
                         .get(&notification.turn_id)
                         .and_then(|turn| turn.resolved_config.as_ref())
@@ -2191,7 +2226,9 @@ impl AnalyticsReducer {
                         emission,
                         out,
                     );
-                    if is_cua && let Some(turn) = self.turns.get_mut(&notification.turn_id) {
+                    if cua_mcp_tool_identity(&notification.item.payload).is_some()
+                        && let Some(turn) = self.turns.get_mut(&notification.turn_id)
+                    {
                         turn.completed_cua_tool_item_ids.insert(item_id.to_string());
                     }
                 }
@@ -2421,13 +2458,11 @@ impl AnalyticsReducer {
         else {
             return;
         };
-        let voice_session_id = thread_state
-            .voice_session_id_at(input.started_at)
-            .or_else(|| {
-                self.turns
-                    .get(&input.turn_id)
-                    .and_then(|turn| turn.voice_session_id.clone())
-            });
+        let voice_session_id = thread_state.active_voice_session_id().or_else(|| {
+            self.turns
+                .get(&input.turn_id)
+                .and_then(|turn| turn.voice_session_id.clone())
+        });
         let mut event_params = codex_compaction_event_params(
             input,
             thread_metadata.session_id.clone(),
@@ -2444,56 +2479,6 @@ impl AnalyticsReducer {
                 event_params,
             },
         )));
-    }
-
-    fn set_active_voice_session_id(
-        &mut self,
-        thread_id: String,
-        realtime_session_id: Option<String>,
-    ) {
-        let thread = self.threads.entry(thread_id).or_default();
-        let realtime_session_id = realtime_session_id.filter(|id| !id.is_empty());
-        let Some(session) = thread.active_voice_session.as_mut() else {
-            return;
-        };
-        session.session_id.clone_from(&realtime_session_id);
-        if let Some(turn_id) = thread.active_turn_id.clone() {
-            self.turn_state(turn_id).voice_session_id = realtime_session_id;
-        }
-    }
-
-    fn start_voice_session(
-        &mut self,
-        thread_id: String,
-        realtime_session_id: Option<String>,
-        started_at: u64,
-    ) {
-        self.close_voice_session(&thread_id, started_at);
-        let realtime_session_id = realtime_session_id.filter(|id| !id.is_empty());
-        let thread = self.threads.entry(thread_id).or_default();
-        thread.active_voice_session = Some(VoiceSessionWindow {
-            session_id: realtime_session_id.clone(),
-            started_at,
-            closed_at: None,
-        });
-        if let Some(turn_id) = thread.active_turn_id.clone() {
-            self.turn_state(turn_id).voice_session_id = realtime_session_id;
-        }
-    }
-
-    fn close_voice_session(&mut self, thread_id: &str, closed_at: u64) {
-        let Some(thread) = self.threads.get_mut(thread_id) else {
-            return;
-        };
-        if let Some(mut session) = thread.active_voice_session.take() {
-            session.closed_at = Some(closed_at);
-            if session.session_id.is_some() {
-                if thread.recent_voice_sessions.len() >= MAX_RECENT_VOICE_SESSION_WINDOWS {
-                    thread.recent_voice_sessions.pop_front();
-                }
-                thread.recent_voice_sessions.push_back(session);
-            }
-        }
     }
 
     fn ingest_goal(&mut self, input: CodexGoalEvent, out: &mut Vec<TrackEventRequest>) {
@@ -2972,7 +2957,7 @@ fn item_review_summary_key(pending_review: &PendingReviewState) -> Option<ToolIt
 struct ToolItemEventInput<'a> {
     thread_id: &'a str,
     turn_id: &'a str,
-    item: &'a ThreadItem,
+    item: &'a ThreadItemPayload,
     model_context: Option<&'a ModelInvocationContext>,
     started_at_ms: u64,
     completed_at_ms: u64,
@@ -4115,6 +4100,62 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[tokio::test]
+    async fn realtime_handoff_retains_voice_session_for_next_turn() {
+        let mut reducer = AnalyticsReducer::default();
+        let thread = reducer.threads.entry("thread".to_string()).or_default();
+        thread.active_voice_session_id = Some("voice-session".to_string());
+        assert_eq!(
+            thread.active_voice_session_id(),
+            Some("voice-session".to_string())
+        );
+
+        reducer
+            .ingest(
+                AnalyticsFact::RealtimeHandoffRequested {
+                    thread_id: "thread".to_string(),
+                },
+                &mut Vec::new(),
+            )
+            .await;
+        let thread = &mut reducer.threads.get_mut("thread").unwrap();
+        thread.active_voice_session_id = None;
+        assert_eq!(
+            thread.pending_voice_handoffs.pop_front(),
+            Some(Some("voice-session".to_string()))
+        );
+    }
+
+    #[test]
+    fn cua_identity_is_limited_to_node_repl_js() {
+        let item = ThreadItemPayload::McpToolCall {
+            id: "item".to_string(),
+            server: "codex_apps".to_string(),
+            tool: "js".to_string(),
+            status: McpToolCallStatus::Completed,
+            arguments: serde_json::json!({}),
+            app_context: None,
+            mcp_app_resource_uri: None,
+            mcp_app_ui: None,
+            plugin_id: None,
+            read_only_hint: None,
+            result: None,
+            error: None,
+            duration_ms: None,
+        };
+        assert!(cua_mcp_tool_identity(&item).is_none());
+        let ThreadItemPayload::McpToolCall { server, .. } = &mut item else {
+            unreachable!();
+        };
+        *server = "node_repl".to_string();
+        assert!(cua_mcp_tool_identity(&item).is_some());
+        let ThreadItemPayload::McpToolCall { tool, .. } = &mut item else {
+            unreachable!();
+        };
+        *tool = "other".to_string();
+        assert!(cua_mcp_tool_identity(&item).is_none());
+    }
+
+    #[tokio::test]
     async fn pending_classifications_evict_oldest_and_clean_up() {
         let mut reducer = AnalyticsReducer::default();
         let mut events = Vec::new();
@@ -4179,21 +4220,23 @@ mod tests {
                         thread_id: keys[2].thread_id.clone(),
                         turn_id: keys[2].turn_id.clone(),
                         completed_at_ms: 1_000,
-                        item: ThreadItem::McpToolCall {
-                            id: keys[2].item_id.clone(),
-                            server: "server".to_string(),
-                            tool: "tool".to_string(),
-                            status: McpToolCallStatus::Failed,
-                            arguments: serde_json::json!({}),
-                            app_context: None,
-                            mcp_app_resource_uri: None,
-                            mcp_app_ui: None,
-                            plugin_id: None,
-                            read_only_hint: None,
-                            result: None,
-                            error: None,
-                            duration_ms: None,
-                        },
+                        item: codex_app_server_protocol::ThreadItem::untimed(
+                            ThreadItemPayload::McpToolCall {
+                                id: keys[2].item_id.clone(),
+                                server: "server".to_string(),
+                                tool: "tool".to_string(),
+                                status: McpToolCallStatus::Failed,
+                                arguments: serde_json::json!({}),
+                                app_context: None,
+                                mcp_app_resource_uri: None,
+                                mcp_app_ui: None,
+                                plugin_id: None,
+                                read_only_hint: None,
+                                result: None,
+                                error: None,
+                                duration_ms: None,
+                            },
+                        ),
                     },
                 ))),
                 &mut events,

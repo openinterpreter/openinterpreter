@@ -1,4 +1,5 @@
 use std::sync::LazyLock;
+use std::time::Duration;
 use std::time::Instant;
 
 use crate::facts::AppInvocation;

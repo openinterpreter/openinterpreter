@@ -31,7 +31,7 @@ use codex_app_server_protocol::SandboxPolicy as AppServerSandboxPolicy;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::SessionSource as AppServerSessionSource;
 use codex_app_server_protocol::Thread;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload as ThreadItem;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadSource as AppServerThreadSource;
 use codex_app_server_protocol::ThreadStartResponse;
@@ -543,11 +543,13 @@ pub(super) async fn ingest_completed_command_execution_item(
                     thread_id: thread_id.to_string(),
                     turn_id: "turn-1".to_string(),
                     started_at_ms: 1_000,
-                    item: sample_command_execution_item_with_id(
-                        item_id,
-                        CommandExecutionStatus::InProgress,
-                        /*exit_code*/ None,
-                        /*duration_ms*/ None,
+                    item: codex_app_server_protocol::ThreadItem::untimed(
+                        sample_command_execution_item_with_id(
+                            item_id,
+                            CommandExecutionStatus::InProgress,
+                            /*exit_code*/ None,
+                            /*duration_ms*/ None,
+                        ),
                     ),
                 },
             ))),
@@ -561,11 +563,13 @@ pub(super) async fn ingest_completed_command_execution_item(
                     thread_id: thread_id.to_string(),
                     turn_id: "turn-1".to_string(),
                     completed_at_ms: 1_042,
-                    item: sample_command_execution_item_with_id(
-                        item_id,
-                        CommandExecutionStatus::Completed,
-                        Some(0),
-                        Some(42),
+                    item: codex_app_server_protocol::ThreadItem::untimed(
+                        sample_command_execution_item_with_id(
+                            item_id,
+                            CommandExecutionStatus::Completed,
+                            Some(0),
+                            Some(42),
+                        ),
                     ),
                 },
             ))),

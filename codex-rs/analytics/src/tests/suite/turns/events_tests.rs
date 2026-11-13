@@ -33,7 +33,7 @@ use codex_app_server_protocol::McpToolCallStatus;
 use codex_app_server_protocol::PatchApplyStatus;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::SubAgentActivityKind;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload as ThreadItem;
 use codex_app_server_protocol::ThreadRealtimeStartedNotification;
 use codex_app_server_protocol::TurnStatus as AppServerTurnStatus;
 use codex_app_server_protocol::WebSearchItem;
@@ -557,7 +557,7 @@ async fn turn_event_counts_completed_tool_items() {
                         thread_id: "thread-2".to_string(),
                         turn_id: "turn-2".to_string(),
                         started_at_ms: 998,
-                        item: item.clone(),
+                        item: codex_app_server_protocol::ThreadItem::untimed(item.clone()),
                     },
                 ))),
                 &mut out,
@@ -573,7 +573,7 @@ async fn turn_event_counts_completed_tool_items() {
                         thread_id: "thread-2".to_string(),
                         turn_id: "turn-2".to_string(),
                         completed_at_ms: 1_000,
-                        item,
+                        item: codex_app_server_protocol::ThreadItem::untimed(item),
                     },
                 ))),
                 &mut out,

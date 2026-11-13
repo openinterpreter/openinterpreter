@@ -46,7 +46,7 @@ use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::McpToolCallAppContext;
 use codex_app_server_protocol::McpToolCallStatus;
 use codex_app_server_protocol::ServerNotification;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload as ThreadItem;
 use codex_app_server_protocol::TurnStatus as AppServerTurnStatus;
 use codex_protocol::protocol::ThreadSource;
 use codex_utils_absolute_path::test_support::PathBufExt;
@@ -233,7 +233,7 @@ async fn item_lifecycle_notifications_publish_command_execution_event() {
                         thread_id: "thread-1".to_string(),
                         turn_id: "turn-1".to_string(),
                         started_at_ms: 1_000,
-                        item: {
+                        item: codex_app_server_protocol::ThreadItem::untimed({
                             let mut item = sample_command_execution_item(
                                 CommandExecutionStatus::InProgress,
                                 /*exit_code*/ None,
@@ -247,7 +247,7 @@ async fn item_lifecycle_notifications_publish_command_execution_event() {
                                     });
                             }
                             item
-                        },
+                        }),
                     },
                 ))),
                 &mut events,
@@ -266,31 +266,33 @@ async fn item_lifecycle_notifications_publish_command_execution_event() {
                     thread_id: "thread-1".to_string(),
                     turn_id: "turn-1".to_string(),
                     completed_at_ms: 1_045,
-                    item: sample_command_execution_item_with_actions(
-                        CommandExecutionStatus::Completed,
-                        Some(0),
-                        Some(42),
-                        vec![
-                            CommandAction::Read {
-                                command: "cat README.md".to_string(),
-                                name: "README.md".to_string(),
-                                path: test_path_buf("/tmp/README.md").abs().into(),
-                            },
-                            CommandAction::ListFiles {
-                                command: "ls".to_string(),
-                                path: None,
-                            },
-                            CommandAction::Search {
-                                command: "rg TODO".to_string(),
-                                query: Some("TODO".to_string()),
-                                path: None,
-                            },
-                            CommandAction::Unknown {
-                                command: "cargo test".to_string(),
-                            },
-                        ],
-                        Some("sample@openai-curated"),
-                        Some("scripts/run.py"),
+                    item: codex_app_server_protocol::ThreadItem::untimed(
+                        sample_command_execution_item_with_actions(
+                            CommandExecutionStatus::Completed,
+                            Some(0),
+                            Some(42),
+                            vec![
+                                CommandAction::Read {
+                                    command: "cat README.md".to_string(),
+                                    name: "README.md".to_string(),
+                                    path: test_path_buf("/tmp/README.md").abs().into(),
+                                },
+                                CommandAction::ListFiles {
+                                    command: "ls".to_string(),
+                                    path: None,
+                                },
+                                CommandAction::Search {
+                                    command: "rg TODO".to_string(),
+                                    query: Some("TODO".to_string()),
+                                    path: None,
+                                },
+                                CommandAction::Unknown {
+                                    command: "cargo test".to_string(),
+                                },
+                            ],
+                            Some("sample@openai-curated"),
+                            Some("scripts/run.py"),
+                        ),
                     ),
                 },
             ))),
@@ -381,7 +383,7 @@ async fn collaborator_tool_events_keep_response_ids_when_completion_races_sampli
                         thread_id: "thread-1".into(),
                         turn_id: "turn-1".into(),
                         started_at_ms: 1_000,
-                        item: item.clone(),
+                        item: codex_app_server_protocol::ThreadItem::untimed(item.clone()),
                     },
                 ))),
                 &mut events,
@@ -395,7 +397,7 @@ async fn collaborator_tool_events_keep_response_ids_when_completion_races_sampli
                 thread_id: "thread-1".into(),
                 turn_id: "turn-1".into(),
                 completed_at_ms: 1_010,
-                item,
+                item: codex_app_server_protocol::ThreadItem::untimed(item),
             },
         )));
         let facts = if response_first {
@@ -697,7 +699,7 @@ async fn mcp_elicitation_classification_survives_turn_completion_and_preserves_c
                         thread_id: "thread-2".to_string(),
                         turn_id: "turn-2".to_string(),
                         started_at_ms: 998,
-                        item: item.clone(),
+                        item: codex_app_server_protocol::ThreadItem::untimed(item.clone()),
                     },
                 ))),
                 &mut events,
@@ -739,7 +741,7 @@ async fn mcp_elicitation_classification_survives_turn_completion_and_preserves_c
                         thread_id: "thread-2".to_string(),
                         turn_id: "turn-2".to_string(),
                         completed_at_ms: 1_000,
-                        item,
+                        item: codex_app_server_protocol::ThreadItem::untimed(item),
                     },
                 ))),
                 &mut events,
@@ -869,7 +871,7 @@ async fn image_generation_events_preserve_transparent_background_metadata() {
                         thread_id: "thread-2".to_string(),
                         turn_id: "turn-2".to_string(),
                         started_at_ms: 998,
-                        item: item.clone(),
+                        item: codex_app_server_protocol::ThreadItem::untimed(item.clone()),
                     },
                 ))),
                 &mut out,
@@ -882,7 +884,7 @@ async fn image_generation_events_preserve_transparent_background_metadata() {
                         thread_id: "thread-2".to_string(),
                         turn_id: "turn-2".to_string(),
                         completed_at_ms: 1_000,
-                        item,
+                        item: codex_app_server_protocol::ThreadItem::untimed(item),
                     },
                 ))),
                 &mut out,
