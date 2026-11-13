@@ -179,6 +179,28 @@ async fn compaction_event_ingests_custom_fact() {
         .await;
     events.clear();
 
+    // The compaction fact arrives after the voice session closes, but its start
+    // timestamp still falls inside the closed window.
+    reducer
+        .ingest(
+            AnalyticsFact::RealtimeSessionStarted {
+                thread_id: "thread-1".to_string(),
+                realtime_session_id: Some("voice-session".to_string()),
+                started_at: 90,
+            },
+            &mut events,
+        )
+        .await;
+    reducer
+        .ingest(
+            AnalyticsFact::RealtimeSessionClosed {
+                thread_id: "thread-1".to_string(),
+                closed_at: 105,
+            },
+            &mut events,
+        )
+        .await;
+
     reducer
         .ingest(
             AnalyticsFact::Custom(CustomAnalyticsFact::Compaction(Box::new(
@@ -214,6 +236,10 @@ async fn compaction_event_ingests_custom_fact() {
     assert_eq!(payload[0]["event_params"]["session_id"], "session-thread-1");
     assert_eq!(payload[0]["event_params"]["thread_id"], "thread-1");
     assert_eq!(payload[0]["event_params"]["turn_id"], "turn-compact");
+    assert_eq!(
+        payload[0]["event_params"]["voice_session_id"],
+        "voice-session"
+    );
     assert_eq!(
         payload[0]["event_params"]["codex_error_kind"],
         json!("context_window_exceeded")

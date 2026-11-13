@@ -930,6 +930,24 @@ impl AnalyticsEventsClient {
 
     /// Records analytics-relevant notifications without cloning ignored variants.
     pub fn track_notification(&self, notification: &ServerNotification) {
+        match notification {
+            ServerNotification::ThreadRealtimeStarted(started) => {
+                self.record_fact(AnalyticsFact::RealtimeSessionStarted {
+                    thread_id: started.thread_id.clone(),
+                    realtime_session_id: started.realtime_session_id.clone(),
+                    started_at: crate::now_unix_seconds(),
+                });
+                return;
+            }
+            ServerNotification::ThreadRealtimeClosed(closed) => {
+                self.record_fact(AnalyticsFact::RealtimeSessionClosed {
+                    thread_id: closed.thread_id.clone(),
+                    closed_at: crate::now_unix_seconds(),
+                });
+                return;
+            }
+            _ => {}
+        }
         if let ServerNotification::ThreadRealtimeItemAdded(handoff) = notification {
             if handoff.item.get("type").and_then(serde_json::Value::as_str)
                 == Some("handoff_request")
