@@ -467,7 +467,9 @@ impl Client {
         &self,
         url: &str,
     ) -> std::result::Result<(String, String), RequestError> {
-        let request = self.request(Method::GET, url).headers(self.headers());
+        let request = self
+            .request(Method::GET, url)
+            .headers(self.headers().await?);
         if !self.http.allows_system_proxy_fallback() {
             return self.exec_request_detailed(request, "GET", url).await;
         }
@@ -483,7 +485,9 @@ impl Client {
             Ok(Err(RequestError::Other(error)))
                 if error
                     .downcast_ref::<RouteAwareRequestError>()
-                    .is_some_and(|error| error.is_connect() || error.is_timeout()) => {}
+                    .is_some_and(|error| {
+                        error.is_connect() || error.is_timeout() || error.is_request()
+                    }) => {}
             Err(_) => {}
             Ok(response) => return response,
         }
@@ -492,7 +496,7 @@ impl Client {
             .http
             .clone()
             .with_outbound_proxy_policy(OutboundProxyPolicy::RespectSystemProxy);
-        let request = http.get(url).headers(self.headers());
+        let request = http.get(url).headers(self.headers().await?);
         self.exec_request_detailed(request, "GET", url).await
     }
 
@@ -658,10 +662,7 @@ impl Client {
     pub async fn get_config_bundle(
         &self,
     ) -> std::result::Result<ConfigBundleResponse, RequestError> {
-        let url = match self.path_style {
-            PathStyle::CodexApi => format!("{}/api/codex/config/bundle", self.base_url),
-            PathStyle::ChatGptApi => format!("{}/wham/config/bundle", self.base_url),
-        };
+        let url = self.config_bundle_url();
         let (body, ct) = self.exec_bootstrap_get(&url).await?;
         self.decode_json::<ConfigBundleResponse>(&url, &ct, &body)
             .map_err(RequestError::from)

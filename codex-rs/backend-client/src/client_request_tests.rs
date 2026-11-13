@@ -197,6 +197,7 @@ fn fallback_client(base_url: &str) -> Client {
     .with_auth_provider(Arc::new(codex_model_provider::BearerAuthProvider::new(
         "bootstrap-token".to_string(),
     )))
+    .unwrap()
     .with_chatgpt_account_id("workspace-123")
     .with_user_agent("bootstrap-test")
 }
