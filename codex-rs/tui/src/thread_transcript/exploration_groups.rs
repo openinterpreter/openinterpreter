@@ -4,6 +4,7 @@ use super::tools::CommandHistory;
 use crate::exec_cell::ExecCell;
 use crate::history_cell::HistoryCell;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::Turn;
 use std::sync::Arc;
 
@@ -33,7 +34,7 @@ pub(crate) fn older_exploration_group(
     let items = adjacent_items(older, newer, turns)?;
     let older_items = items
         .iter()
-        .filter(|item| !matches!(item, ThreadItem::Reasoning { .. }))
+        .filter(|item| !matches!(item.payload, ThreadItemPayload::Reasoning { .. }))
         .take(older.group.calls.len())
         .cloned()
         .collect::<Vec<_>>();
@@ -61,10 +62,10 @@ fn adjacent_items<'a>(
 pub(super) fn completed_group(items: &[ThreadItem]) -> Option<ExecCell> {
     let mut group: Option<ExecCell> = None;
     for item in items {
-        if matches!(item, ThreadItem::Reasoning { .. }) {
+        if matches!(item.payload, ThreadItemPayload::Reasoning { .. }) {
             continue;
         }
-        let call = CommandHistory::from_item(item.clone())?.into_cell();
+        let call = CommandHistory::from_item(item.payload.clone())?.into_cell();
         if !call.is_exploring_cell() {
             return None;
         }
