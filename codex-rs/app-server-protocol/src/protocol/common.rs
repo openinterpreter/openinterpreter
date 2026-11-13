@@ -4688,7 +4688,6 @@ mod tests {
         let clear_request = ClientRequest::ThreadGoalClear {
             request_id: RequestId::Integer(3),
             params: v2::ThreadGoalClearParams {
-                origin: None,
                 thread_id: "thr_123".to_string(),
                 expected_goal_id: None,
                 expected_status: None,
@@ -4750,6 +4749,7 @@ mod tests {
                 thread_settings: v2::ThreadSettings {
                     disabled_plugin_ids: Vec::new(),
                     cwd: absolute_path("/tmp/repo"),
+                    environments: None,
                     approval_policy: v2::AskForApproval::Never,
                     approvals_reviewer: v2::ApprovalsReviewer::User,
                     sandbox_policy: v2::SandboxPolicy::DangerFullAccess,

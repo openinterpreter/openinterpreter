@@ -5584,44 +5584,31 @@ mod tests {
         let child_path = codex_protocol::AgentPath::root()
             .join("worker")
             .expect("worker path");
-        let items = vec![
-            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
-                turn_attribution: None,
-                turn_id: "turn-a".into(),
-                root_turn_id: None,
-                trace_id: None,
-                started_at: None,
-                model_context_window: None,
-                collaboration_mode_kind: Default::default(),
-            })),
-            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
-                root_turn_id: None,
-                turn_id: "turn-a".into(),
-                started_at: None,
-                last_agent_message: None,
-                error: None,
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            })),
-            RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
-                content_token_count: None,
-                thread_id: ThreadId::new(),
-                turn_id: "turn-a".into(),
-                item: CoreTurnItem::SubAgentActivity(CoreSubAgentActivityItem {
-                    id: "child-turn-completed".into(),
-                    kind: CoreSubAgentActivityKind::Completed,
-                    agent_thread_id: child_thread_id,
-                    agent_path: child_path,
-                }),
-                started_at_ms: None,
-                completed_at_ms: 0,
-            })),
-        ];
-
-        let turns = build_turns_from_rollout_items(&items);
-
-        assert_eq!(turns.len(), 1);
+        let spawn = ItemCompletedEvent {
+            content_token_count: None,
+            thread_id: ThreadId::new(),
+            turn_id: "turn-a".into(),
+            item: CoreTurnItem::SubAgentActivity(CoreSubAgentActivityItem {
+                model: Some("gpt-5".into()),
+                reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::High),
+                id: "spawn-child".into(),
+                kind: CoreSubAgentActivityKind::Started,
+                agent_thread_id: child_thread_id,
+                agent_path: child_path.clone(),
+            }),
+            started_at_ms: Some(1),
+            completed_at_ms: 2,
+        };
+        let expected_spawn = ThreadItemPayload::from(spawn.item.clone());
+        let legacy_spawn = spawn
+            .as_legacy_events(/*show_raw_agent_reasoning*/ false)
+            .pop()
+            .expect("legacy spawn activity");
+        let crate::ServerNotification::ItemCompleted(notification) =
+            crate::item_event_to_server_notification(legacy_spawn.clone(), "parent", "turn-a")
+        else {
+            panic!("expected item completed");
+        };
         assert_eq!(
             (notification.item.payload, notification.completed_at_ms),
             (expected_spawn.clone(), 2)
