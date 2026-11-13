@@ -58,6 +58,8 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use ratatui::widgets::Wrap;
 
+use super::StatusLine;
+use super::StatusLineFocus;
 use super::picker_rows;
 use super::picker_style;
 use super::selection_popup_common::ColumnWidthConfig;
@@ -109,7 +111,7 @@ pub type CancelCallback = Box<dyn Fn(&AppEventSender) + Send + Sync>;
 
 /// Callback to generate an optional preview line based on current item states.
 /// Returns `None` to hide the preview area.
-type PreviewCallback = Box<dyn Fn(&[MultiSelectItem]) -> Option<FooterContent> + Send + Sync>;
+type PreviewCallback = Box<dyn Fn(&[MultiSelectItem]) -> Option<StatusLine> + Send + Sync>;
 
 /// A single selectable item in the multi-select picker.
 ///
@@ -200,7 +202,7 @@ pub(crate) struct MultiSelectPicker {
     preview_builder: Option<PreviewCallback>,
 
     /// Cached preview line (updated on item changes).
-    preview_line: Option<FooterContent>,
+    preview_line: Option<StatusLine>,
 
     /// Callback invoked when items change (toggle or reorder).
     on_change: Option<ChangeCallBack>,
@@ -619,16 +621,8 @@ impl Renderable for MultiSelectPicker {
             let [preview_area, hint_area] =
                 Layout::vertical([Constraint::Length(1), Constraint::Length(hint_height)])
                     .areas(footer_area);
-            let preview_area = Rect {
-                x: preview_area.x + 2,
-                y: preview_area.y,
-                width: preview_area.width.saturating_sub(2),
-                height: preview_area.height,
-            };
-            let max_preview_width = preview_area.width.saturating_sub(2) as usize;
-            let preview_line =
-                truncate_line_with_ellipsis_if_overflow(preview_line.clone(), max_preview_width);
-            preview_line.render(preview_area, buf);
+            let preview_area = preview_area.inset(Insets::vh(/*v*/ 0, /*h*/ 2));
+            preview_line.render(preview_area, buf, StatusLineFocus::Focused);
             hint_area
         } else {
             footer_area
@@ -718,12 +712,12 @@ impl MultiSelectPickerBuilder {
     where
         F: Fn(&[MultiSelectItem]) -> Option<Line<'static>> + Send + Sync + 'static,
     {
-        self.on_preview_content(move |items| callback(items).map(FooterContent::from))
+        self.on_preview_content(move |items| callback(items).map(StatusLine::from))
     }
 
     pub(crate) fn on_preview_content(
         mut self,
-        callback: impl Fn(&[MultiSelectItem]) -> Option<FooterContent> + Send + Sync + 'static,
+        callback: impl Fn(&[MultiSelectItem]) -> Option<StatusLine> + Send + Sync + 'static,
     ) -> Self {
         self.preview_builder = Some(Box::new(callback));
         self
@@ -1062,7 +1056,7 @@ mod tests {
                 .collect(),
         );
         picker.header = Box::new(());
-        picker.jump_bottom();
+        picker.handle_key_event(KeyEvent::from(KeyCode::End));
         let mut snapshots = Vec::new();
         for height in 1..=7 {
             let area = Rect::new(/*x*/ 0, /*y*/ 0, /*width*/ 80, height);
@@ -1143,7 +1137,7 @@ mod tests {
             buf
         };
         let first = render(&picker);
-        picker.jump_bottom();
+        picker.handle_key_event(KeyEvent::from(KeyCode::End));
         picker.toggle_selected();
         picker.move_selected_item(Direction::Up);
         let last = render(&picker);
