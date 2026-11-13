@@ -185,7 +185,7 @@ fn command_actions_for_path_uri(parsed_cmd: &[ParsedCommand], cwd: &PathUri) -> 
 
 /// Build a guardian-derived [`ThreadItem`].
 ///
-/// Currently this only synthesizes [`ThreadItem::CommandExecution`] for
+/// Currently this only synthesizes [`ThreadItemPayload::CommandExecution`] for
 /// [`GuardianAssessmentAction::Command`] and [`GuardianAssessmentAction::Execve`].
 /// Stdin reviews are child approvals and must not change the parent item lifecycle.
 pub fn build_item_from_guardian_event(

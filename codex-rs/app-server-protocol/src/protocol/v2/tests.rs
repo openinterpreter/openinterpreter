@@ -3476,8 +3476,8 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     });
 
     assert_eq!(
-        ThreadItem::from(command_item),
-        ThreadItem::CommandExecution {
+        ThreadItemPayload::from(command_item),
+        ThreadItemPayload::CommandExecution {
             model_context: None,
             id: "exec-1".to_string(),
             plugin_id: Some("sample@openai-curated".to_string()),

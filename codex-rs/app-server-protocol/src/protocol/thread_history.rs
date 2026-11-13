@@ -1546,8 +1546,14 @@ impl ThreadHistoryBuilder {
             return;
         }
 
-        // If the completion event cannot be matched, apply it to the active turn.
-        if let Some(current_turn) = self.current_turn.as_mut() {
+        // A legacy item-created turn has only a synthesized ID, so its eventual
+        // completion may carry the real turn ID. Never complete a different
+        // explicitly identified turn for an unmatched (possibly late) event.
+        if let Some(current_turn) = self
+            .current_turn
+            .as_mut()
+            .filter(|turn| turn.has_generated_id)
+        {
             let changed_turn = apply_completion(current_turn);
             self.record_changed_turn(changed_turn);
             self.finish_current_turn();
@@ -2505,8 +2511,8 @@ mod tests {
         let turns = build_turns_from_rollout_items(&events);
 
         assert_eq!(
-            turns[0].items[0],
-            ThreadItem::UserMessage {
+            turns[0].items[0].payload,
+            ThreadItemPayload::UserMessage {
                 id: "item-1".into(),
                 client_id: None,
                 content: vec![
@@ -2857,7 +2863,7 @@ mod tests {
 
         assert_eq!(
             build_turns_from_rollout_items(&items[..2])[0].items,
-            vec![ThreadItem::CommandExecution {
+            vec![ThreadItem::untimed(ThreadItemPayload::CommandExecution {
                 model_context: None,
                 id: "exec-1".to_string(),
                 plugin_id: Some("sample@openai-curated".to_string()),
@@ -2876,32 +2882,37 @@ mod tests {
                 aggregated_output: None,
                 exit_code: None,
                 duration_ms: None,
-            }]
+            })]
         );
         let turns = build_turns_from_rollout_items(&items);
 
         assert_eq!(turns.len(), 1);
         assert_eq!(
             turns[0].items,
-            vec![ThreadItem::CommandExecution {
-                model_context: None,
-                id: "exec-1".to_string(),
-                plugin_id: Some("sample@openai-curated".to_string()),
-                script_path: Some("scripts/run.py".to_string()),
-                command: "git -c 'http.extraHeader=Authorization: Bearer [REDACTED_SECRET]' push"
-                    .to_string(),
-                cwd: test_path_buf("/tmp").abs().into(),
-                process_id: Some("pid-1".to_string()),
-                source: CommandExecutionSource::Agent,
-                status: CommandExecutionStatus::Completed,
-                command_actions: vec![CommandAction::Unknown {
+            vec![ThreadItem {
+                started_at_ms: Some(0),
+                completed_at_ms: Some(1_000),
+                payload: ThreadItemPayload::CommandExecution {
+                    model_context: None,
+                    id: "exec-1".to_string(),
+                    plugin_id: Some("sample@openai-curated".to_string()),
+                    script_path: Some("scripts/run.py".to_string()),
                     command:
                         "git -c 'http.extraHeader=Authorization: Bearer [REDACTED_SECRET]' push"
                             .to_string(),
-                }],
-                aggregated_output: Some("hello world\n".to_string()),
-                exit_code: Some(0),
-                duration_ms: Some(12),
+                    cwd: test_path_buf("/tmp").abs().into(),
+                    process_id: Some("pid-1".to_string()),
+                    source: CommandExecutionSource::Agent,
+                    status: CommandExecutionStatus::Completed,
+                    command_actions: vec![CommandAction::Unknown {
+                        command:
+                            "git -c 'http.extraHeader=Authorization: Bearer [REDACTED_SECRET]' push"
+                                .to_string(),
+                    }],
+                    aggregated_output: Some("hello world\n".to_string()),
+                    exit_code: Some(0),
+                    duration_ms: Some(12),
+                },
             }]
         );
     }
@@ -3604,8 +3615,8 @@ mod tests {
             })
         );
         assert_eq!(
-            turns[0].items[2],
-            ThreadItem::CommandExecution {
+            turns[0].items[2].payload,
+            ThreadItemPayload::CommandExecution {
                 model_context: None,
                 id: "exec-1".into(),
                 plugin_id: None,
@@ -3878,8 +3889,8 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].items.len(), 3);
         assert_eq!(
-            turns[0].items[1],
-            ThreadItem::CommandExecution {
+            turns[0].items[1].payload,
+            ThreadItemPayload::CommandExecution {
                 model_context: None,
                 id: "exec-declined".into(),
                 plugin_id: None,
@@ -3990,8 +4001,8 @@ mod tests {
         assert_eq!(turns[0].items.len(), 2);
         let item = &turns[0].items[1];
         assert_eq!(
-            turns[0].items[1],
-            ThreadItem::CommandExecution {
+            turns[0].items[1].payload,
+            ThreadItemPayload::CommandExecution {
                 model_context: None,
                 id: "guardian-exec".into(),
                 plugin_id: Some("sample@openai-curated".into()),
@@ -4065,8 +4076,8 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].items.len(), 2);
         assert_eq!(
-            turns[0].items[1],
-            ThreadItem::CommandExecution {
+            turns[0].items[1].payload,
+            ThreadItemPayload::CommandExecution {
                 model_context: None,
                 id: "guardian-execve".into(),
                 plugin_id: Some("sample@openai-curated".into()),
@@ -4093,6 +4104,7 @@ mod tests {
         use codex_protocol::protocol::HasLegacyEvent;
 
         let completion = ItemCompletedEvent {
+            content_token_count: None,
             thread_id: ThreadId::new(),
             turn_id: "turn-a".into(),
             started_at_ms: None,
@@ -4123,6 +4135,7 @@ mod tests {
         };
         let events = vec![
             EventMsg::TurnStarted(TurnStartedEvent {
+                turn_attribution: None,
                 turn_id: "turn-a".into(),
                 root_turn_id: None,
                 trace_id: None,
@@ -4135,6 +4148,7 @@ mod tests {
                 ..Default::default()
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
+                root_turn_id: None,
                 turn_id: "turn-a".into(),
                 started_at: None,
                 last_agent_message: None,
@@ -4144,6 +4158,7 @@ mod tests {
                 time_to_first_token_ms: None,
             }),
             EventMsg::TurnStarted(TurnStartedEvent {
+                turn_attribution: None,
                 turn_id: "turn-b".into(),
                 root_turn_id: None,
                 trace_id: None,
@@ -4160,7 +4175,9 @@ mod tests {
         let mut expected = build_turns_from_rollout_items(&items);
         expected[0]
             .items
-            .push(ThreadItem::from(completion.item.clone()));
+            .push(ThreadItem::untimed(ThreadItemPayload::from(
+                completion.item.clone(),
+            )));
 
         let legacy = completion.as_legacy_events(/*show_raw_agent_reasoning*/ false);
         let serialized = serde_json::to_string(&legacy[0]).unwrap();
@@ -4269,8 +4286,8 @@ mod tests {
         assert_eq!(turns[0].items.len(), 2);
         assert_eq!(turns[1].items.len(), 1);
         assert_eq!(
-            turns[0].items[1],
-            ThreadItem::CommandExecution {
+            turns[0].items[1].payload,
+            ThreadItemPayload::CommandExecution {
                 model_context: None,
                 id: "exec-late".into(),
                 plugin_id: None,
@@ -4399,6 +4416,7 @@ mod tests {
             None
         );
         builder.handle_event(&EventMsg::TurnStarted(TurnStartedEvent {
+            turn_attribution: None,
             turn_id: "turn-1".into(),
             root_turn_id: None,
             trace_id: None,
@@ -4417,6 +4435,7 @@ mod tests {
         }));
         for message in ["draft", "answer"] {
             builder.handle_event(&EventMsg::AgentMessage(AgentMessageEvent {
+                moderation: None,
                 message: message.into(),
                 phase: None,
                 memory_citation: None,
@@ -4442,6 +4461,7 @@ mod tests {
             Some(expected.clone())
         );
         builder.handle_event(&EventMsg::TurnComplete(TurnCompleteEvent {
+            root_turn_id: None,
             turn_id: "turn-1".into(),
             started_at: Some(100),
             last_agent_message: None,
@@ -4468,6 +4488,7 @@ mod tests {
         let mut builder = ThreadHistoryBuilder::new();
         assert_eq!(builder.active_turn_metadata_snapshot(), None);
         builder.handle_event(&EventMsg::TurnStarted(TurnStartedEvent {
+            turn_attribution: None,
             turn_id: "turn-1".into(),
             root_turn_id: Some("root-turn".into()),
             trace_id: None,
@@ -4495,6 +4516,7 @@ mod tests {
         assert_eq!(builder.active_turn_snapshot().unwrap().items.len(), 1);
 
         builder.handle_event(&EventMsg::TurnComplete(TurnCompleteEvent {
+            root_turn_id: Some("root-turn".into()),
             turn_id: "turn-1".into(),
             started_at: Some(100),
             last_agent_message: None,
@@ -4739,6 +4761,38 @@ mod tests {
         assert_eq!(turns[0].id, "turn-a");
         assert_eq!(turns[1].id, "turn-b");
         assert_eq!(turns[1].items.len(), 2);
+    }
+
+    #[test]
+    fn unmatched_turn_complete_does_not_close_explicit_active_turn() {
+        let mut builder = ThreadHistoryBuilder::new();
+        builder.handle_event(&EventMsg::TurnStarted(TurnStartedEvent {
+            turn_attribution: None,
+            turn_id: "turn-active".into(),
+            root_turn_id: None,
+            trace_id: None,
+            started_at: Some(10),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        }));
+        builder.handle_event(&EventMsg::TurnComplete(TurnCompleteEvent {
+            root_turn_id: None,
+            turn_id: "turn-unknown".into(),
+            started_at: None,
+            last_agent_message: None,
+            error: None,
+            completed_at: Some(20),
+            duration_ms: Some(10_000),
+            time_to_first_token_ms: None,
+        }));
+
+        let active = builder
+            .active_turn_snapshot()
+            .expect("explicit turn remains active");
+        assert_eq!(active.id, "turn-active");
+        assert_eq!(active.status, TurnStatus::InProgress);
+        assert_eq!(active.completed_at, None);
+        assert_eq!(active.duration_ms, None);
     }
 
     #[test]
@@ -5525,6 +5579,7 @@ mod tests {
             .expect("worker path");
         let items = vec![
             RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_attribution: None,
                 turn_id: "turn-a".into(),
                 root_turn_id: None,
                 trace_id: None,
@@ -5533,6 +5588,7 @@ mod tests {
                 collaboration_mode_kind: Default::default(),
             })),
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                root_turn_id: None,
                 turn_id: "turn-a".into(),
                 started_at: None,
                 last_agent_message: None,
@@ -5542,6 +5598,7 @@ mod tests {
                 time_to_first_token_ms: None,
             })),
             RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+                content_token_count: None,
                 thread_id: ThreadId::new(),
                 turn_id: "turn-a".into(),
                 item: CoreTurnItem::SubAgentActivity(CoreSubAgentActivityItem {
