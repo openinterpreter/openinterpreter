@@ -36,6 +36,12 @@ pub trait ConversationHistorySnapshot: Send + Sync {
         self.retained_context().is_some()
     }
 
+    /// Whether review consumes an independent, unshortened history instead of the parent window.
+    /// Hosts without that history must not claim its completeness.
+    fn uses_independent_review_history(&self) -> bool {
+        false
+    }
+
     /// Latest opaque checkpoint, including unusable items, with its recorded producer.
     /// Hosts without provenance leave the producer unknown rather than using the live model.
     fn latest_compaction(&self) -> Option<CompactionCheckpoint<'_>> {
