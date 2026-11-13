@@ -20,6 +20,8 @@ use codex_config::AbsolutePathBuf;
 use codex_config::CloudConfigBundle;
 use codex_config::CloudConfigBundleLoadError;
 use codex_config::CloudConfigBundleLoadErrorCode;
+use codex_config::CloudConfigBundlePolicy;
+use codex_config::CloudConfigBundleSnapshot;
 use codex_login::AuthManager;
 use std::path::PathBuf;
 use std::sync::Arc;

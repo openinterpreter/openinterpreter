@@ -3061,6 +3061,7 @@ dependencies = [
  "codex-config",
  "codex-core",
  "codex-http-client",
+ "codex-keyring-store",
  "codex-login",
  "codex-otel",
  "codex-protocol",
