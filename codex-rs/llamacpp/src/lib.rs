@@ -7,8 +7,11 @@ use std::io::IsTerminal as _;
 use std::io::Read as _;
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use codex_core::config::Config;
@@ -18,6 +21,7 @@ use sha2::Digest as _;
 use tokio::io::AsyncWriteExt;
 
 const STARTUP_LOCK_FILENAME: &str = ".local-startup.lock";
+static OWNED_SERVER: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
 
 pub const DEFAULT_OSS_MODEL: &str =
     "yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF:Q4_K_M";
@@ -113,19 +117,95 @@ pub async fn ensure_oss_ready(config: &Config) -> Result<(), String> {
         .unwrap_or_else(|| format!("http://127.0.0.1:{DEFAULT_LOCAL_PORT}/v1"));
     validate_bundled_base_url(&base_url)?;
     let model = local_model_spec_for_config(config)?;
-    if check_running_server_model(&base_url, model).await? {
-        return Ok(());
+    match check_running_server_model(&base_url, model).await {
+        Ok(true) => return Ok(()),
+        Err(error) if !owned_server_is_running()? => return Err(error),
+        _ => {}
     }
 
     let _startup_lock = acquire_startup_lock().await?;
+    let server_state = check_running_server_model(&base_url, model).await;
+    if matches!(&server_state, Ok(true)) {
+        return Ok(());
+    }
+    if let Err(error) = &server_state
+        && !owned_server_is_running()?
+    {
+        return Err(error.clone());
+    }
+    // Validate the new model and executable before stopping the old server;
+    // an acquisition or binary lookup failure keeps the old model available.
+    let model_path = ensure_model_downloaded(model, false).await?;
+    let llama_server = find_llama_server()?;
+    if server_state.is_err() {
+        // Only stop a child launched by this process. A server belonging to
+        // another process remains an explicit conflict, never a PID kill.
+        stop_owned_server()?;
+        for _ in 0..20 {
+            if matches!(
+                local_server_state(&base_url, model).await,
+                LocalServerState::Unreachable
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
     if check_running_server_model(&base_url, model).await? {
         return Ok(());
     }
-
-    let model_path = ensure_model_downloaded(model, false).await?;
-    let llama_server = find_llama_server()?;
     spawn_llama_server(&llama_server, &model_path, model)?;
-    wait_for_local_server(&base_url, model).await
+    let result = wait_for_local_server(&base_url, model).await;
+    if result.is_err() {
+        stop_owned_server()?;
+    }
+    result
+}
+
+fn owned_server() -> &'static Mutex<Option<Child>> {
+    OWNED_SERVER.get_or_init(|| Mutex::new(None))
+}
+
+fn owned_server_is_running() -> Result<bool, String> {
+    let mut owned = owned_server()
+        .lock()
+        .map_err(|_| "Local server process lock was poisoned".to_string())?;
+    match owned.as_mut() {
+        Some(child) => match child.try_wait() {
+            Ok(None) => Ok(true),
+            Ok(Some(_)) => {
+                owned.take();
+                Ok(false)
+            }
+            Err(err) => Err(format!("failed to inspect owned Local server: {err}")),
+        },
+        None => Ok(false),
+    }
+}
+
+fn stop_owned_server() -> Result<bool, String> {
+    let mut owned = owned_server()
+        .lock()
+        .map_err(|_| "Local server process lock was poisoned".to_string())?;
+    let Some(child) = owned.as_mut() else {
+        return Ok(false);
+    };
+    if child
+        .try_wait()
+        .map_err(|err| format!("failed to inspect owned Local server: {err}"))?
+        .is_some()
+    {
+        owned.take();
+        return Ok(false);
+    }
+    child
+        .kill()
+        .map_err(|err| format!("failed to stop owned Local server: {err}"))?;
+    child
+        .wait()
+        .map_err(|err| format!("failed to reap owned Local server: {err}"))?;
+    owned.take();
+    Ok(true)
 }
 
 fn validate_bundled_base_url(base_url: &str) -> Result<(), String> {
@@ -568,10 +648,22 @@ fn spawn_llama_server(
     model_path: &PathBuf,
     model: &LocalModelSpec,
 ) -> Result<(), String> {
-    llama_server_command(llama_server, model_path, model)
+    let mut owned = owned_server()
+        .lock()
+        .map_err(|_| "Local server process lock was poisoned".to_string())?;
+    if let Some(child) = owned.as_mut()
+        && child
+            .try_wait()
+            .map_err(|err| format!("failed to inspect owned Local server: {err}"))?
+            .is_none()
+    {
+        return Err("an owned Local server is already running".to_string());
+    }
+    let child = llama_server_command(llama_server, model_path, model)
         .spawn()
-        .map(|_| ())
-        .map_err(|err| format!("failed to start bundled llama.cpp server: {err}"))
+        .map_err(|err| format!("failed to start bundled llama.cpp server: {err}"))?;
+    *owned = Some(child);
+    Ok(())
 }
 
 fn llama_server_command(
@@ -602,6 +694,17 @@ fn llama_server_command(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[test]
+    fn only_an_owned_child_can_be_stopped() {
+        assert!(!stop_owned_server().unwrap());
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        *owned_server().lock().unwrap() = Some(child);
+        assert!(owned_server_is_running().unwrap());
+        assert!(stop_owned_server().unwrap());
+        assert!(!owned_server_is_running().unwrap());
+    }
 
     #[tokio::test]
     async fn cached_model_requires_exact_header_length_and_digest() {
