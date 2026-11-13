@@ -60,7 +60,7 @@ impl<const MAX_BYTES: usize> OutputBuffers<MAX_BYTES> {
 /// Shared output state exposed to polling and streaming consumers.
 #[derive(Clone)]
 pub(crate) struct OutputHandles<const MAX_BYTES: usize = UNIFIED_EXEC_OUTPUT_MAX_BYTES> {
-    pub(crate) output_buffer: Arc<Mutex<HeadTailBuffer<MAX_BYTES>>>,
+    pub(crate) output_buffer: Arc<Mutex<OutputBuffers<MAX_BYTES>>>,
     pub(crate) output_metrics: Arc<Mutex<OutputMetrics>>,
     pub(crate) output_notify: Arc<Notify>,
     pub(crate) output_closed: Arc<AtomicBool>,
@@ -95,14 +95,15 @@ pub(crate) struct OutputSnapshot {
 }
 
 async fn append_output<const MAX_BYTES: usize>(
-    output_buffer: &Arc<Mutex<HeadTailBuffer<MAX_BYTES>>>,
+    output_buffer: &Arc<Mutex<OutputBuffers<MAX_BYTES>>>,
     output_metrics: &Arc<Mutex<OutputMetrics>>,
+    stream: ExecOutputStream,
     chunk: &[u8],
 ) {
     let cap_reached = {
         let mut guard = output_buffer.lock().await;
-        guard.push_chunk(chunk);
-        guard.omitted_bytes() > 0
+        guard.push_chunk(stream, chunk);
+        guard.pending.omitted_bytes() > 0 || guard.transcript.omitted_bytes() > 0
     };
     let mut metrics = output_metrics.lock().await;
     metrics.total_bytes = metrics
@@ -163,6 +164,7 @@ pub(crate) struct UnifiedExecProcess {
     output_task: Option<JoinHandle<()>>,
     sandbox_type: Option<SandboxType>,
     timed_out: AtomicBool,
+    termination_requested: AtomicBool,
     // The shell may still need to replay this file after process startup returns.
     pub(crate) _shell_snapshot: Option<Arc<ShellSnapshotFile>>,
 }
@@ -184,7 +186,7 @@ impl UnifiedExecProcess {
         drain_policy: OutputDrainPolicy,
     ) -> Self {
         let output = OutputHandles {
-            output_buffer: Arc::new(Mutex::new(HeadTailBuffer::default())),
+            output_buffer: Arc::new(Mutex::new(OutputBuffers::default())),
             output_metrics: Arc::new(Mutex::new(OutputMetrics::default())),
             output_notify: Arc::new(Notify::new()),
             output_closed: Arc::new(AtomicBool::new(false)),
@@ -208,6 +210,7 @@ impl UnifiedExecProcess {
             output_task: None,
             sandbox_type,
             timed_out: AtomicBool::new(false),
+            termination_requested: AtomicBool::new(false),
             _shell_snapshot: None,
         }
     }
@@ -636,7 +639,13 @@ impl UnifiedExecProcess {
                     } = response;
                     for chunk in chunks.into_iter().filter(|chunk| chunk.seq > last_seq) {
                         let bytes = chunk.chunk.into_inner();
-                        append_output(&output_buffer, &output_metrics, &bytes).await;
+                        append_output(
+                            &output_buffer,
+                            &output_metrics,
+                            ExecOutputStream::Stdout,
+                            &bytes,
+                        )
+                        .await;
                         let _ = output_tx.send(bytes);
                         output_notify.notify_waiters();
                     }
@@ -680,7 +689,13 @@ impl UnifiedExecProcess {
                         }
                         last_seq = chunk.seq;
                         let bytes = chunk.chunk.into_inner();
-                        append_output(&output_buffer, &output_metrics, &bytes).await;
+                        append_output(
+                            &output_buffer,
+                            &output_metrics,
+                            ExecOutputStream::Stdout,
+                            &bytes,
+                        )
+                        .await;
                         let _ = output_tx.send(bytes);
                         output_notify.notify_waiters();
                     }
@@ -755,7 +770,7 @@ impl UnifiedExecProcess {
                     chunk = stderr.recv(), if stderr_open => (ExecOutputStream::Stderr, chunk),
                 };
                 if let Some(chunk) = chunk {
-                    append_output(&output_buffer, &output_metrics, &chunk).await;
+                    append_output(&output_buffer, &output_metrics, stream, &chunk).await;
                     let _ = output_tx.send(chunk);
                     output_notify.notify_waiters();
                 } else if stream == ExecOutputStream::Stdout {
