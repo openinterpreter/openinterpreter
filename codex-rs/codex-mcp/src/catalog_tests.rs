@@ -138,6 +138,63 @@ fn executor_credential_policy_survives_catalog_rebuilds_and_materialization() {
 }
 
 #[test]
+fn client_selector_preserves_legacy_owner_and_exact_environment_registration() {
+    let mut builder = ResolvedMcpCatalog::builder();
+    builder.set_exposure(McpServerExposure::EnvironmentQualified);
+    for environment in ["a", "b"] {
+        let mut config = server("https://selected.example/mcp");
+        config.environment_id = environment.to_string();
+        builder.register(McpServerRegistration::from_selected_plugin(
+            "docs".to_string(),
+            plugin(environment),
+            0,
+            environment,
+            config,
+        ));
+    }
+    let catalog = builder.build();
+    let legacy_key = catalog.resolve_server_name("docs").unwrap().clone();
+    assert_eq!(catalog.resolve_server_key("docs", None), legacy_key);
+    for environment in ["a", "b"] {
+        let key = catalog.resolve_server_key("docs", Some(environment));
+        assert_eq!(key, McpServerKey::in_environment(environment, "docs"));
+        assert!(catalog.server(&key).is_some());
+    }
+    assert_ne!(
+        catalog.resolve_server_key("docs", Some("missing")),
+        legacy_key
+    );
+    assert!(
+        catalog
+            .server(&catalog.resolve_server_key("docs", Some("missing")))
+            .is_none()
+    );
+    assert_eq!(
+        catalog.resolve_server_key("absent", None),
+        McpServerKey::unscoped("absent")
+    );
+
+    let mut host = catalog.to_builder();
+    host.register(McpServerRegistration::from_config(
+        "docs".to_string(),
+        server("https://host.example/mcp"),
+    ));
+    let host = host.build();
+    assert_eq!(
+        host.resolve_server_key("docs", None),
+        McpServerKey::unscoped("docs")
+    );
+    assert_eq!(
+        host.resolve_server_key("docs", Some("a")),
+        McpServerKey::in_environment("a", "docs")
+    );
+    assert!(
+        host.server(&host.resolve_server_key("docs", Some("a")))
+            .is_none()
+    );
+}
+
+#[test]
 #[should_panic(expected = "materialized MCP server must have a catalog registration")]
 fn materialized_server_requires_catalog_registration() {
     let catalog = ResolvedMcpCatalog::default();
