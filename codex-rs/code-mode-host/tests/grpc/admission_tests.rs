@@ -249,10 +249,7 @@ async fn routing_metadata_is_scoped_to_each_session_on_a_shared_provider() -> Re
         let mut req = request("await new Promise(() => {});");
         req.yield_time_ms = Some(1);
         let started = session
-            .execute(
-                req,
-                Arc::new(NoopCodeModeSessionDelegate),
-            )
+            .execute(req, Arc::new(NoopCodeModeSessionDelegate))
             .await
             .map_err(anyhow::Error::msg)?;
         let id = started.cell_id.clone();
