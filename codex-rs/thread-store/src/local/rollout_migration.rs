@@ -601,8 +601,8 @@ impl LocalThreadStore {
         };
         let locks = Arc::new(MigrationLocks {
             _maintenance: maintenance_guard.cloned(),
-            _live_writer: live_writer_guard,
-            _writer: writer_guard,
+            _live_writer: _live_writer_guard,
+            _writer: _writer_guard,
         });
         // SessionMeta gives us the writer-lock id, so archiving can win between that read and
         // lock acquisition. Once the lock is ours, follow the same rollout to its current path.
@@ -1048,7 +1048,13 @@ impl LocalThreadStore {
         limiter: &mut RolloutMigrationRateLimiter,
         maintenance_guard: Option<&Arc<RolloutMaintenanceGuard>>,
     ) -> ThreadStoreResult<PathBuf> {
-        let _writer_guard = self.acquire_writer_lock(thread_id)?;
+        let live_writer_guard = self.live_writer_locks.lock(thread_id).await;
+        let writer_guard = self.acquire_writer_lock(thread_id)?;
+        let locks = Arc::new(MigrationLocks {
+            _maintenance: maintenance_guard.cloned(),
+            _live_writer: live_writer_guard,
+            _writer: writer_guard,
+        });
         let decompressed_path = rollout_path_is_compressed(rollout_path)
             .then(|| decompressed_staged_rollout_path(rollout_path))
             .transpose()?;

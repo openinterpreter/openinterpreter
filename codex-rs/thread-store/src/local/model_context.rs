@@ -151,7 +151,7 @@ pub(super) async fn load_for_fork(
             message: format!("failed to read fork runtime version: {err}"),
         })?;
     }
-    match history_base {
+    let mut items = match history_base {
         Some(history_base) => {
             let lineage = lineage.truncate_at(history_base).await?;
             scan_model_context_from_lineage(lineage).await?

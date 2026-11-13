@@ -95,6 +95,25 @@ impl fmt::Debug for ThreadStoreResumePreparation {
     }
 }
 
+/// The staged choice takes effect until durable thread metadata records a choice.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PendingDaybreakPreference(Option<bool>);
+
+impl PendingDaybreakPreference {
+    pub async fn read(store: &dyn ThreadStore, thread_id: ThreadId) -> ThreadStoreResult<Self> {
+        Ok(Self(
+            store
+                .read_pending_thread_metadata(thread_id)
+                .await?
+                .and_then(|patch| patch.daybreak_enabled),
+        ))
+    }
+
+    pub fn resolve(self, stored: Option<bool>) -> Option<bool> {
+        stored.or(self.0)
+    }
+}
+
 /// Why thread persistence is being requested.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PersistContext {

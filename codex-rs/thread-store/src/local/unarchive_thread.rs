@@ -8,6 +8,7 @@ use super::helpers::validated_rollout_file_name;
 use crate::ArchiveThreadParams;
 use crate::ReadThreadParams;
 use crate::StoredThread;
+use crate::ThreadStore;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 use codex_protocol::ThreadId;
@@ -22,10 +23,55 @@ pub(super) async fn unarchive_threads(
     store: &LocalThreadStore,
     params: ArchiveThreadParams,
 ) -> ThreadStoreResult<StoredThread> {
-    let thread_id = params.thread_id;
+    unarchive_threads_with_descendants(store, params, Vec::new())
+        .await
+        .map(|(thread, _)| thread)
+}
+
+pub(super) async fn unarchive_threads_with_descendants(
+    store: &LocalThreadStore,
+    params: ArchiveThreadParams,
+    descendant_thread_ids: Vec<ThreadId>,
+) -> ThreadStoreResult<(StoredThread, Vec<ThreadId>)> {
+    let root_id = params.thread_id;
+    let restored = unarchive_one(store, root_id).await?;
+    if restored.is_none() {
+        return Err(ThreadStoreError::ThreadNotFound { thread_id: root_id });
+    }
+    let thread = store
+        .read_thread(ReadThreadParams {
+            thread_id: root_id,
+            include_archived: false,
+            include_history: false,
+        })
+        .await?;
+    let mut restored_ids = vec![root_id];
+    for thread_id in descendant_thread_ids {
+        if thread_id == root_id || restored_ids.contains(&thread_id) {
+            continue;
+        }
+        match unarchive_one(store, thread_id).await {
+            Ok(Some(())) => restored_ids.push(thread_id),
+            Ok(None) => {}
+            Err(err) => warn!("failed to unarchive descendant thread {thread_id}: {err}"),
+        }
+    }
+    Ok((thread, restored_ids))
+}
+
+async fn unarchive_one(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+) -> ThreadStoreResult<Option<()>> {
     let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
     // Archive, delete, and revert use the same cross-process lock while moving or selecting
     // rollout files. Unarchive must participate before it moves those files back.
+    let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
+    if store.live_recorders.lock().await.contains_key(&thread_id) {
+        return Err(ThreadStoreError::Conflict {
+            message: format!("thread {thread_id} already has an active writer"),
+        });
+    }
     let _writer_lock = store.acquire_writer_lock(thread_id)?;
     let state_db_ctx = store.state_db().await;
     let Some(selected_archived_path) =
@@ -37,7 +83,15 @@ pub(super) async fn unarchive_threads(
         return Ok(None);
     };
 
-    let mut rollout_paths = owned_rollout_paths_from_index(reference_index, thread_id);
+    let reference_index = RolloutReferenceIndex::scan_archived_threads(
+        store.config.codex_home.as_path(),
+        &[thread_id],
+    )
+    .await
+    .map_err(|err| ThreadStoreError::Internal {
+        message: format!("failed to scan archived rollout files: {err}"),
+    })?;
+    let mut rollout_paths = owned_rollout_paths_from_index(&reference_index, thread_id);
     if !rollout_paths.contains(&selected_archived_path) {
         rollout_paths.push(selected_archived_path.clone());
     }
@@ -135,7 +189,7 @@ pub(super) async fn unarchive_threads(
     }
 
     // Descendants need only their restored id for notifications, not metadata hydration.
-    Ok(Some(thread_id))
+    Ok(Some(()))
 }
 
 #[cfg(test)]

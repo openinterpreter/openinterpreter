@@ -843,11 +843,7 @@ impl ThreadStore for LocalThreadStore {
     }
 
     fn unarchive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
-        Box::pin(async move {
-            unarchive_thread::unarchive_threads(self, params, Vec::new())
-                .await
-                .map(|(thread, _)| thread)
-        })
+        Box::pin(async move { unarchive_thread::unarchive_threads(self, params).await })
     }
 
     fn unarchive_threads(
@@ -856,7 +852,12 @@ impl ThreadStore for LocalThreadStore {
         descendant_thread_ids: Vec<ThreadId>,
     ) -> ThreadStoreFuture<'_, (StoredThread, Vec<ThreadId>)> {
         Box::pin(async move {
-            unarchive_thread::unarchive_threads(self, params, descendant_thread_ids).await
+            unarchive_thread::unarchive_threads_with_descendants(
+                self,
+                params,
+                descendant_thread_ids,
+            )
+            .await
         })
     }
 

@@ -26,6 +26,7 @@ use codex_protocol::items::SubAgentActivityItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::items::WebSearchItem;
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::ImageReference;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::UserMessageAudioKind;
@@ -41,6 +42,7 @@ pub(super) fn user_message_item(
 ) -> ThreadStoreResult<TurnItem> {
     let mut content = Vec::new();
     let has_image_order = event.has_complete_image_order();
+    let has_audio_order = event.has_complete_audio_order();
     if !event.message.trim().is_empty() {
         content.push(UserInput::Text {
             text: event.message,

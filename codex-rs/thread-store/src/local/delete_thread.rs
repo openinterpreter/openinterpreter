@@ -117,7 +117,6 @@ pub(super) async fn delete_thread(
     let thread_rollouts = ThreadRollouts::from_index(&reference_index, thread_id);
     check_attached_children(&reference_index, &[thread_id])?;
     ensure_no_external_references(&reference_index, std::slice::from_ref(&thread_rollouts))?;
-    let mut writer_guards = store.acquire_writer_locks(&[thread_id]).await?;
     if let Some(cleanup) = &store.thread_data_cleanup {
         cleanup(vec![thread_id]).await?;
     }
@@ -183,7 +182,7 @@ pub(super) async fn delete_threads(
     Ok(())
 }
 
-async fn delete_state_rows(
+pub(super) async fn delete_state_rows(
     store: &LocalThreadStore,
     thread_ids: &[codex_protocol::ThreadId],
 ) -> ThreadStoreResult<u64> {
