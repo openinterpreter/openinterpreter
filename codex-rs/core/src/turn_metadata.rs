@@ -593,6 +593,20 @@ async fn git_workspaces(
     workspaces
 }
 
+/// A reviewed target is bound to this turn; a timestamp-only legacy override
+/// may still be forwarded to compaction but must not be treated as a target.
+fn is_targeted_continuation(value: &str) -> bool {
+    serde_json::from_str::<Value>(value)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("review_target")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .is_some_and(|target| !target.is_empty())
+}
+
 #[cfg(test)]
 #[path = "turn_metadata_tests.rs"]
 mod tests;

@@ -58,7 +58,7 @@ use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
 use crate::tools::hosted_spec::WebSearchToolOptions;
 use crate::tools::hosted_spec::create_web_search_tool;
 use crate::tools::multi_agent_tool::multi_agent_v2_handler;
-#[cfg(test)]
+use crate::tools::registry::NativeReview;
 use crate::tools::registry::RegisteredTool;
 use crate::tools::registry::ToolExposure;
 use crate::tools::registry::ToolRegistry;
@@ -84,6 +84,7 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::Harness;
+use codex_tools::IndirectNamespacePrefixes;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::TOOL_SEARCH_TOOL_NAME;
@@ -158,7 +159,8 @@ pub(crate) fn build_tool_router(
         &turn_context.config,
         apps_enabled,
         &mcp.config().mcp_server_catalog,
-        search_tool_enabled(turn_context, model_info),
+        model_info.supports_search_tool,
+        session.services.mcp_manager.shared_definitions(),
         &mut registry,
     );
     apply_mcp_tool_exposure_policy(
@@ -465,6 +467,7 @@ pub(crate) fn finalize_tool_router(
         );
     }
 
+    let model_messages = ResolvedModelMessages::from_model(model_info);
     let indirect_prefixes = IndirectNamespacePrefixes::new(
         model_messages.indirect_description_prefixes(),
         registry.mcp_namespaces(),
@@ -1235,17 +1238,12 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
                 && !matches!(context.model_info.shell_type, ConfigShellToolType::Disabled)
             {
                 registry.add(ExecCommandHandler::new(ExecCommandHandlerOptions {
-                    allow_login_shell: any_environment_allows_login_shell(context.environments),
                     allow_tty: turn_context
                         .config
                         .features
                         .enabled(Feature::UnifiedExecTty),
                     exec_permission_approvals_enabled: false,
                     include_environment_id,
-                    include_shell_parameter: unified_exec_should_include_shell_parameter(
-                        turn_context,
-                        context.environments,
-                    ),
                     include_windows_shell_guidance: should_include_windows_shell_guidance(
                         context.environments,
                     ),
@@ -1380,7 +1378,6 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
         return;
     }
 
-    let allow_login_shell = any_environment_allows_login_shell(context.environments);
     if context.tool_policy.require_unified_exec && !features.enabled(Feature::UnifiedExec) {
         return;
     }
@@ -1415,18 +1412,6 @@ fn should_include_windows_shell_guidance(environments: &TurnEnvironmentSnapshot)
         Some(platform_os) => platform_os == "windows",
         None => cfg!(windows),
     }
-}
-
-fn unified_exec_should_include_shell_parameter(
-    turn_context: &TurnContext,
-    environments: &TurnEnvironmentSnapshot,
-) -> bool {
-    !matches!(
-        &turn_context.unified_exec_shell_mode,
-        UnifiedExecShellMode::ZshFork(_)
-    ) || environments
-        .turn_environments()
-        .any(|environment| environment.environment.is_remote())
 }
 
 #[instrument(level = "trace", skip_all)]

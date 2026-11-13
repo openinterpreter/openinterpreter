@@ -586,35 +586,6 @@ async fn execute_prepared_patch(
     tracker: Option<&SharedTurnDiffTracker>,
     tool_ctx: ToolCtx,
 ) -> Result<String, FunctionCallError> {
-    let cwd = action.cwd.clone();
-    let sandbox_context = turn_environment.sandbox_context(/*additional_permissions*/ None);
-    let policy_context = file_system_sandbox_policy_context_for_cwd(&sandbox_context, &cwd);
-    let sandbox_route = if turn_environment.environment.is_remote() {
-        PatchSandboxRoute::ExecutorManaged
-    } else {
-        PatchSandboxRoute::Platform(windows_sandbox_level_for_legacy_checks(
-            turn_environment.config().windows_sandbox_type,
-            turn_environment.config().windows_sandbox_level,
-        ))
-    };
-    let (file_paths, effective_additional_permissions, file_system_sandbox_policy) =
-        effective_patch_permissions(
-            tool_ctx.session.as_ref(),
-            &turn_environment,
-            &action,
-            &policy_context,
-            sandbox_route,
-        )
-        .await;
-    let apply = apply_patch::prepare_apply_patch(
-        &tool_ctx.step_context,
-        &turn_environment,
-        &file_system_sandbox_policy,
-        &policy_context,
-        sandbox_route,
-        action,
-    )?;
-    let changes = convert_apply_patch_to_protocol(&apply.action);
     let emitter = ToolEmitter::apply_patch_for_environment(
         request.changes.as_ref().clone(),
         matches!(

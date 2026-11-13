@@ -41,6 +41,8 @@ pub(crate) const COMPACTION_KEY: &str = "compaction";
 // Keep the removed inventory reserved so callers cannot reintroduce oversized metadata.
 pub(crate) const LEGACY_CODE_MODE_TOOL_NAMES_KEY: &str = "code_mode_tool_names";
 pub(crate) const TOOL_NAMESPACES_INFO_KEY: &str = "tool_namespaces_info";
+pub(crate) const MCP_ATTRIBUTION_CLIENT_METADATA_KEY: &str = "mcp_attribution";
+pub(crate) const MAX_MCP_ATTRIBUTION_BYTES: usize = 8 * 1024;
 pub(crate) const TURN_STARTED_AT_UNIX_MS_KEY: &str = "turn_started_at_unix_ms";
 pub(crate) const HISTORY_INGEST_REQUESTED_KEY: &str = "history_ingest_requested";
 pub(crate) const ANALYTICS_ENABLED_KEY: &str = "analytics_enabled";
