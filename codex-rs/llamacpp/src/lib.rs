@@ -14,10 +14,10 @@ use std::time::Duration;
 use codex_core::config::Config;
 use codex_model_provider_info::DEFAULT_LOCAL_PORT;
 use reqwest::StatusCode;
+use sha2::Digest as _;
 use tokio::io::AsyncWriteExt;
 
 const STARTUP_LOCK_FILENAME: &str = ".local-startup.lock";
-const MIN_GGUF_BYTES: u64 = 1_048_576;
 
 pub const DEFAULT_OSS_MODEL: &str =
     "yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF:Q4_K_M";
@@ -30,6 +30,8 @@ pub struct LocalModelSpec {
     pub repo: &'static str,
     pub filename: &'static str,
     pub url: &'static str,
+    pub expected_bytes: u64,
+    pub sha256: &'static str,
     pub size_label: &'static str,
     pub context_window: i64,
     pub hf_token_required: bool,
@@ -42,7 +44,9 @@ pub const LOCAL_MODEL_SPECS: &[LocalModelSpec] = &[
         description: "Best quality Local default • Public HF download • llama.cpp tool calling",
         repo: "yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF",
         filename: "gemma4-v2-Q4_K_M.gguf",
-        url: "https://huggingface.co/yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF/resolve/main/gemma4-v2-Q4_K_M.gguf",
+        url: "https://huggingface.co/yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF/resolve/190a31365a6b80a692349be34ccdac730cad4fe4/gemma4-v2-Q4_K_M.gguf",
+        expected_bytes: 7381381664,
+        sha256: "0b9506cab36f7f818e34f9c0f5a3d6568d0b37100f3a3e1092e2eec3c4c96791",
         size_label: "about 7.4 GB",
         context_window: 32768,
         hf_token_required: false,
@@ -53,7 +57,9 @@ pub const LOCAL_MODEL_SPECS: &[LocalModelSpec] = &[
         description: "Tiny coding baseline • Public HF download • experimental",
         repo: "Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF",
         filename: "qwen2.5-coder-0.5b-instruct-q4_k_m.gguf",
-        url: "https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-0.5b-instruct-q4_k_m.gguf",
+        url: "https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/ebb2015119c907b064c512bf053e945850b5875f/qwen2.5-coder-0.5b-instruct-q4_k_m.gguf",
+        expected_bytes: 491400064,
+        sha256: "1d9614638d18024d0fbb36575a15f1302a3adf044df10345688ec4f6e1c4ff32",
         size_label: "about 491 MB",
         context_window: 32768,
         hf_token_required: false,
@@ -64,7 +70,9 @@ pub const LOCAL_MODEL_SPECS: &[LocalModelSpec] = &[
         description: "Small coding model • Public HF download • experimental",
         repo: "Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF",
         filename: "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
-        url: "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
+        url: "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/f86cb2c1fa58255f8052cc32aeede1b7482d4361/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
+        expected_bytes: 1117320768,
+        sha256: "cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046",
         size_label: "about 1.1 GB",
         context_window: 32768,
         hf_token_required: false,
@@ -75,7 +83,9 @@ pub const LOCAL_MODEL_SPECS: &[LocalModelSpec] = &[
         description: "Small coding model • Public HF download • experimental",
         repo: "Qwen/Qwen2.5-Coder-3B-Instruct-GGUF",
         filename: "qwen2.5-coder-3b-instruct-q4_k_m.gguf",
-        url: "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/qwen2.5-coder-3b-instruct-q4_k_m.gguf",
+        url: "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/f74adce6aa16316c625447af059dbebe4983757c/qwen2.5-coder-3b-instruct-q4_k_m.gguf",
+        expected_bytes: 2104932800,
+        sha256: "724fb256bec1ff062b2f65e4569e871ad2e95ab2a3989723d1769c54294730b7",
         size_label: "about 2.1 GB",
         context_window: 32768,
         hf_token_required: false,
@@ -86,7 +96,9 @@ pub const LOCAL_MODEL_SPECS: &[LocalModelSpec] = &[
         description: "Small reasoning/tool model • Public HF download • experimental",
         repo: "unsloth/Qwen3-1.7B-GGUF",
         filename: "Qwen3-1.7B-Q4_K_M.gguf",
-        url: "https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf",
+        url: "https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/d7f544eead698dbd1f15126ef60b45a1e1933222/Qwen3-1.7B-Q4_K_M.gguf",
+        expected_bytes: 1107409472,
+        sha256: "b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897",
         size_label: "about 1.1 GB",
         context_window: 40960,
         hf_token_required: false,
@@ -170,10 +182,11 @@ pub async fn local_model_cached(model_id: &str) -> Result<bool, String> {
         .await
         .map_err(|err| format!("failed to inspect cached model {}: {err}", path.display()))?
         .len();
-    if size < MIN_GGUF_BYTES {
+    if size != model.expected_bytes {
         return Err(format!(
-            "cached model {} is incomplete ({size} bytes)",
-            path.display()
+            "cached model {} has {size} bytes, expected {}",
+            path.display(),
+            model.expected_bytes
         ));
     }
     validate_gguf_header(&path)?;
@@ -279,13 +292,15 @@ async fn ensure_model_downloaded(
             .await
             .map_err(|err| format!("failed to inspect cached model {}: {err}", path.display()))?
             .len();
-        if size < MIN_GGUF_BYTES {
+        if size != model.expected_bytes {
             return Err(format!(
-                "cached model {} is incomplete ({size} bytes); preserve or remove it before retrying",
-                path.display()
+                "cached model {} has {size} bytes, expected {}; preserve or remove it before retrying",
+                path.display(),
+                model.expected_bytes
             ));
         }
         validate_gguf_header(&path)?;
+        validate_model_digest(&path, model.sha256).await?;
         return Ok(path);
     }
 
@@ -325,6 +340,14 @@ async fn ensure_model_downloaded(
             response.status()
         ));
     }
+    if let Some(length) = response.content_length()
+        && length != model.expected_bytes
+    {
+        return Err(format!(
+            "GGUF response size {length} does not match the pinned {} bytes for `{}`",
+            model.expected_bytes, model.id
+        ));
+    }
 
     let mut file = tokio::fs::File::create(&partial_path)
         .await
@@ -347,14 +370,16 @@ async fn ensure_model_downloaded(
         .await
         .map_err(|err| format!("failed to inspect downloaded model: {err}"))?
         .len();
-    if size < MIN_GGUF_BYTES {
+    if size != model.expected_bytes {
         return Err(format!(
-            "downloaded model is incomplete ({size} bytes); partial file retained at {}",
+            "downloaded model has {size} bytes, expected {}; partial file retained at {}",
+            model.expected_bytes,
             partial_path.display()
         ));
     }
     drop(file);
     validate_gguf_header(&partial_path)?;
+    validate_model_digest(&partial_path, model.sha256).await?;
     tokio::fs::rename(&partial_path, &path)
         .await
         .map_err(|err| format!("failed to install local model file: {err}"))?;
@@ -371,6 +396,35 @@ fn validate_gguf_header(path: &PathBuf) -> Result<(), String> {
         return Err(format!("model {} is not a GGUF file", path.display()));
     }
     Ok(())
+}
+
+async fn validate_model_digest(path: &PathBuf, expected: &'static str) -> Result<(), String> {
+    let path = path.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut file = File::open(&path)
+            .map_err(|err| format!("failed to open GGUF {} for checksum: {err}", path.display()))?;
+        let mut digest = sha2::Sha256::new();
+        let mut buffer = [0_u8; 1024 * 1024];
+        loop {
+            let count = file
+                .read(&mut buffer)
+                .map_err(|err| format!("failed to checksum GGUF {}: {err}", path.display()))?;
+            if count == 0 {
+                break;
+            }
+            digest.update(&buffer[..count]);
+        }
+        let actual = format!("{:x}", digest.finalize());
+        if actual != expected {
+            return Err(format!(
+                "GGUF checksum mismatch for {}; preserve or remove it before retrying",
+                path.display()
+            ));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|err| format!("GGUF checksum task failed: {err}"))?
 }
 
 fn confirm_download(model: &LocalModelSpec, path: &PathBuf) -> Result<bool, String> {
@@ -562,5 +616,24 @@ mod tests {
         assert!(validate_bundled_base_url("http://127.0.0.1:17654/v1").is_ok());
         assert!(validate_bundled_base_url("https://example.com/v1").is_err());
         assert!(validate_bundled_base_url("http://127.0.0.1:11434/v1").is_err());
+    }
+
+    #[test]
+    fn download_catalog_uses_exact_revision_and_digest() {
+        for model in LOCAL_MODEL_SPECS {
+            assert!(model.expected_bytes > 1_000_000);
+            assert_eq!(model.sha256.len(), 64);
+            assert!(model.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            let path = model.url.strip_prefix("https://huggingface.co/").unwrap();
+            let revision_and_file = path.strip_prefix(model.repo).unwrap();
+            let (revision, filename) = revision_and_file
+                .strip_prefix("/resolve/")
+                .unwrap()
+                .split_once('/')
+                .unwrap();
+            assert_eq!(revision.len(), 40);
+            assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert_eq!(filename, model.filename);
+        }
     }
 }
