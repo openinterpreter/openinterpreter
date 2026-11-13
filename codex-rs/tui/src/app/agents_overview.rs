@@ -12,6 +12,8 @@ mod errors;
 #[path = "agents_overview_loading.rs"]
 mod loading;
 
+use super::agents_overview_discovery::is_overview_root;
+use super::agents_overview_discovery::is_visible_in_agents_overview;
 use super::agents_overview_view::AgentsOverviewGroup;
 use super::agents_overview_view::AgentsOverviewRow;
 use super::agents_overview_view::AgentsOverviewView;
@@ -265,11 +267,7 @@ impl App {
                         if displayed_refresh
                             && !self.agents_overview.threads.contains_key(&thread_id)
                             && !self.agents_overview.hidden_threads.contains(&thread_id)
-                            && thread.parent_thread_id.is_none()
-                            && !matches!(
-                                thread.source,
-                                SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
-                            )
+                            && is_overview_root(&thread)
                         {
                             self.agents_overview.refill_count =
                                 self.agents_overview.refill_count.saturating_sub(1);
@@ -415,7 +413,7 @@ impl App {
                 threads.push(target.clone());
             }
         }
-        threads.retain(|thread| !thread.ephemeral);
+        threads.retain(is_visible_in_agents_overview);
         for thread in &mut threads {
             if thread.parent_thread_id.is_none()
                 && let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
