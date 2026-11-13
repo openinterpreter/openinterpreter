@@ -35,6 +35,7 @@ tracing = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v7"] }
 
 [dev-dependencies]
+codex-attachment-store = { workspace = true }
 codex-utils-output-truncation = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
