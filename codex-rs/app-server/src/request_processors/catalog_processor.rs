@@ -254,6 +254,18 @@ impl CatalogRequestProcessor {
                 .await
                 .map_err(invalid_params)?;
         }
+        // The app-server does not run the TUI/exec OSS startup path. Prepare the
+        // selected local engine before persisting its model so a failed launch
+        // never leaves the active configuration pointing at an unreachable port.
+        if params.profile.is_none() {
+            let mut config = self.load_latest_config(/*fallback_cwd*/ None).await?;
+            if config.model_provider_id == codex_model_provider_info::LOCAL_OSS_PROVIDER_ID {
+                config.model = Some(params.model.clone());
+                codex_llamacpp::ensure_oss_ready(&config)
+                    .await
+                    .map_err(invalid_params)?;
+            }
+        }
         let mut edits = vec![config_replace_edit(
             scoped_config_key(params.profile.as_deref(), "model"),
             serde_json::json!(params.model),
