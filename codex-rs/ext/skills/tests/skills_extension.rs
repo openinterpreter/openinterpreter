@@ -1460,7 +1460,7 @@ async fn selected_executor_catalog_caches_root_selections_per_turn_and_reuses_di
             model_info: &catalog_model_info(),
             thread_id: codex_protocol::ThreadId::new(),
             turn_id: "turn-3",
-            environments: &[turn_environment],
+            environments: &[turn_environment.clone()],
             extension_metrics: None,
             session_store: &session_store,
             thread_store: &thread_store,

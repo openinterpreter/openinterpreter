@@ -2916,7 +2916,7 @@ impl ModelClientSession {
             attempt.add_request_headers(&mut options.extra_headers);
             // Tracing must not turn an otherwise valid compatibility request into a failure.
             if let Ok(body) = serde_json::to_vec(&request) {
-                attempt.record_started(body, Arc::clone(prompt), || Ok(None));
+                attempt.record_started(body, Arc::new(prompt.clone()), || Ok(None));
             }
             let client =
                 ChatCompletionsCompatClient::new(transport, setup.api_provider, setup.api_auth)

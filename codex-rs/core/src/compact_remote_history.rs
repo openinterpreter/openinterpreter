@@ -88,7 +88,7 @@ pub(crate) fn trim_function_call_history_to_fit_context_window(
         i128::try_from(approx_token_count(&base_instructions.text)).unwrap_or(i128::MAX);
     let original_items = history.annotated_items();
     let mut estimated_tokens = history_item_groups(original_items.iter().map(|item| &item.item))
-        .map(|group| group.estimated_token_count())
+        .map(|group| group.estimated_token_count(&history.file_audio_durations))
         .fold(base_tokens, i128::saturating_add);
     let initial_estimated_tokens = i64::try_from(estimated_tokens).unwrap_or(i64::MAX);
     let mut rewritten_items = Vec::new();
@@ -113,7 +113,7 @@ pub(crate) fn trim_function_call_history_to_fit_context_window(
             break;
         };
         estimated_tokens = estimated_tokens
-            .saturating_sub(group.estimated_token_count())
+            .saturating_sub(group.estimated_token_count(&history.file_audio_durations))
             .saturating_add(i128::from(estimate_item_token_count(&rewritten_item.item)));
         consumed_items += group_item_count;
         rewritten_items.push(rewritten_item);

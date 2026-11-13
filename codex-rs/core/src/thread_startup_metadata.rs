@@ -7,7 +7,6 @@ use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionNetworkProxyRuntime;
 use codex_protocol::protocol::ThreadSource;
@@ -55,7 +54,6 @@ impl From<&SessionConfiguredEvent> for ThreadStartupMetadata {
             active_permission_profile,
             cwd,
             reasoning_effort,
-            initial_messages: _,
             network_proxy,
             rollout_path,
         } = event;
@@ -82,10 +80,7 @@ impl From<&SessionConfiguredEvent> for ThreadStartupMetadata {
 }
 
 impl ThreadStartupMetadata {
-    pub(crate) fn to_session_configured_event(
-        &self,
-        initial_messages: Option<Vec<EventMsg>>,
-    ) -> SessionConfiguredEvent {
+    pub(crate) fn to_session_configured_event(&self) -> SessionConfiguredEvent {
         SessionConfiguredEvent {
             session_id: self.session_id,
             thread_id: self.thread_id,
@@ -102,7 +97,6 @@ impl ThreadStartupMetadata {
             active_permission_profile: self.active_permission_profile.clone(),
             cwd: self.cwd.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
-            initial_messages,
             network_proxy: self.network_proxy.clone(),
             rollout_path: self.rollout_path.clone(),
         }

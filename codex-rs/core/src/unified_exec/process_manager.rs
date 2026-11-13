@@ -1176,7 +1176,7 @@ impl UnifiedExecProcessManager {
                 // for another poll; closed, empty output cannot grow again.
                 if retention == OutputRetention::UntilCollected
                     && output.drain_policy == OutputDrainPolicy::WaitForOutputClosure
-                    && !entry.process.termination_requested.load(Ordering::Acquire)
+                    && !entry.process.termination_requested()
                     && (!output.output_closed.load(Ordering::Acquire)
                         || output
                             .output_buffer

@@ -289,6 +289,10 @@ impl UnifiedExecProcess {
         self.timed_out.load(Ordering::Acquire)
     }
 
+    pub(super) fn termination_requested(&self) -> bool {
+        self.termination_requested.load(Ordering::Acquire)
+    }
+
     fn finish_termination(&self) {
         self.termination_requested.store(true, Ordering::Release);
         self.output.cancellation_token.cancel();

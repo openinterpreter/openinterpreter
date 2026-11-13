@@ -523,7 +523,7 @@ pub(crate) fn finalize_tool_router(
             }
 
             let ToolSpec::Namespace(namespace) = spec else {
-                return None;
+                continue;
             };
             if namespace.description.trim().is_empty() {
                 continue;

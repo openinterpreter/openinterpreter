@@ -2652,9 +2652,8 @@ impl ThreadManagerState {
                             resumed.conversation_id
                         )));
                     }
-                    let session_configured = thread
-                        .startup_metadata()
-                        .to_session_configured_event(/* initial_messages */ None);
+                    let session_configured =
+                        thread.startup_metadata().to_session_configured_event();
                     startup_state.release_membership();
                     if let Some(startup_guard) = startup_guard {
                         startup_guard.disarm();

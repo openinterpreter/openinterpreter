@@ -95,6 +95,7 @@ pub(crate) fn inject_no_tool_call_format_error(stream: ResponseStream) -> Respon
                 | Ok(ResponseEvent::ModelsEtag(_))
                 | Ok(ResponseEvent::TurnModerationMetadata(_))
                 | Ok(ResponseEvent::SafetyBuffering(_))
+                | Ok(ResponseEvent::GuardianAssessment(_))
                 | Ok(ResponseEvent::OutputItemDone(_))
                 | Err(_) => {}
             }

@@ -87,6 +87,7 @@ impl Session {
                         /*has_managed_network_requirements*/ false,
                     )
                     .then(|| FileSystemSandboxContext {
+                        sandbox_override: SandboxOverride::NoOverride,
                         permissions: environment.permission_profile().clone(),
                         cwd: environment.cwd().clone(),
                         workspace_roots: environment.workspace_roots().to_vec(),
