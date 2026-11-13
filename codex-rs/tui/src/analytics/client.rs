@@ -10,7 +10,7 @@ use crate::legacy_core::config::Config;
 use codex_backend_client::AnalyticsReport;
 use codex_backend_client::AnalyticsSession;
 use codex_backend_client::RequestError;
-use codex_core::features::Feature;
+use codex_features::Feature;
 use codex_protocol::account::PlanType;
 use std::collections::HashMap;
 use std::sync::Arc;
