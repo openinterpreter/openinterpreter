@@ -25,6 +25,7 @@ pub(crate) enum ChatHarnessRoute {
     KimiCode,
     KimiCli,
     LittleCoder,
+    Local,
     MiniSweAgent,
     Minimal,
     OpenCode,
@@ -74,6 +75,9 @@ pub(crate) fn resolve_stream_transport_route(
         (WireApi::Chat, Harness::LittleCoder) => Ok(StreamTransportRoute::ChatHarness(
             ChatHarnessRoute::LittleCoder,
         )),
+        (WireApi::Chat, Harness::Local) => {
+            Ok(StreamTransportRoute::ChatHarness(ChatHarnessRoute::Local))
+        }
         (WireApi::Chat, Harness::MiniSweAgent) => Ok(StreamTransportRoute::ChatHarness(
             ChatHarnessRoute::MiniSweAgent,
         )),
@@ -113,6 +117,9 @@ pub(crate) fn resolve_stream_transport_route(
         )),
         (WireApi::Messages, Harness::LittleCoder) => Err(CodexErr::InvalidRequest(
             "wire_api = \"messages\" is not supported by harness = \"little-coder\"".to_string(),
+        )),
+        (WireApi::Messages, Harness::Local) => Err(CodexErr::InvalidRequest(
+            "wire_api = \"messages\" is not supported by harness = \"local\"".to_string(),
         )),
         (WireApi::Messages, Harness::MiniSweAgent) => Err(CodexErr::InvalidRequest(
             "wire_api = \"messages\" is not supported by harness = \"mini-swe-agent\""
@@ -171,6 +178,7 @@ fn harness_config_name(harness: &Harness) -> &str {
         Harness::KimiCli => "kimi-cli",
         Harness::ZCode => "zcode",
         Harness::LittleCoder => "little-coder",
+        Harness::Local => "local",
         Harness::MiniSweAgent => "mini-swe-agent",
         Harness::OpenCode => "opencode",
         Harness::Pi => "pi",

@@ -211,6 +211,11 @@ impl CatalogRequestProcessor {
         &self,
         params: InterpreterModelListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let inspect_local = params
+            .model_provider
+            .as_deref()
+            .unwrap_or(&self.config.model_provider_id)
+            == codex_model_provider_info::LOCAL_OSS_PROVIDER_ID;
         let response = self
             .list_models(ModelListParams {
                 cursor: None,
@@ -219,9 +224,22 @@ impl CatalogRequestProcessor {
                 model_provider: params.model_provider,
             })
             .await?;
+        let mut local_downloads = Vec::new();
+        if inspect_local {
+            for spec in codex_llamacpp::LOCAL_MODEL_SPECS {
+                local_downloads.push(InterpreterLocalModelDownload {
+                    model: spec.id.to_string(),
+                    size_label: spec.size_label.to_string(),
+                    downloaded: codex_llamacpp::local_model_cached(spec.id)
+                        .await
+                        .map_err(internal_error)?,
+                });
+            }
+        }
         Ok(Some(
             InterpreterModelListResponse {
                 data: response.data,
+                local_downloads,
             }
             .into(),
         ))
@@ -231,6 +249,11 @@ impl CatalogRequestProcessor {
         &self,
         params: InterpreterModelSetParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if params.download {
+            codex_llamacpp::download_local_model(&params.model)
+                .await
+                .map_err(invalid_params)?;
+        }
         let mut edits = vec![config_replace_edit(
             scoped_config_key(params.profile.as_deref(), "model"),
             serde_json::json!(params.model),

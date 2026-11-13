@@ -4,10 +4,27 @@ import argparse
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from codex_package.cli import parse_package_version
+from codex_package.cli import main
+
+
+class LlamaServerPackageInputTest(unittest.TestCase):
+    def test_open_interpreter_requires_server_before_build(self) -> None:
+        args = argparse.Namespace(
+            variant="open-interpreter",
+            target="x86_64-unknown-linux-gnu",
+            llama_server_bin=None,
+        )
+        with patch("codex_package.cli.parse_args", return_value=args), patch(
+            "codex_package.cli.build_source_binaries"
+        ) as build:
+            with self.assertRaisesRegex(RuntimeError, "require --llama-server-bin"):
+                main()
+            build.assert_not_called()
 
 
 class PackageVersionTest(unittest.TestCase):

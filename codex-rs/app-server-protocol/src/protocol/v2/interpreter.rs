@@ -73,6 +73,19 @@ pub struct InterpreterModelListParams {
 #[ts(export_to = "v2/")]
 pub struct InterpreterModelListResponse {
     pub data: Vec<Model>,
+    /// Local GGUF availability is inspected through the same model catalog response.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional)]
+    pub local_downloads: Vec<InterpreterLocalModelDownload>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct InterpreterLocalModelDownload {
+    pub model: String,
+    pub size_label: String,
+    pub downloaded: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema, TS)]
@@ -110,6 +123,10 @@ pub struct InterpreterProviderSetResponse {}
 #[ts(export_to = "v2/")]
 pub struct InterpreterModelSetParams {
     pub model: String,
+    /// Explicit user consent to fetch this model's GGUF before selecting it.
+    #[serde(default)]
+    #[ts(optional)]
+    pub download: bool,
     #[ts(optional = nullable)]
     pub reasoning_effort: Option<ReasoningEffort>,
     #[ts(optional = nullable)]
@@ -135,3 +152,35 @@ pub struct InterpreterHarnessSetParams {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct InterpreterHarnessSetResponse {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_download_requires_explicit_opt_in() {
+        let set: InterpreterModelSetParams =
+            serde_json::from_value(serde_json::json!({"model": "example"})).unwrap();
+        assert!(!set.download);
+        let set: InterpreterModelSetParams =
+            serde_json::from_value(serde_json::json!({"model": "example", "download": true}))
+                .unwrap();
+        assert!(set.download);
+    }
+
+    #[test]
+    fn local_availability_uses_existing_catalog_response() {
+        let response: InterpreterModelListResponse =
+            serde_json::from_value(serde_json::json!({"data": []})).unwrap();
+        assert!(response.local_downloads.is_empty());
+        let availability = InterpreterLocalModelDownload {
+            model: "example".to_string(),
+            size_label: "1 GB".to_string(),
+            downloaded: false,
+        };
+        assert_eq!(
+            serde_json::to_value(availability).unwrap(),
+            serde_json::json!({"model": "example", "sizeLabel": "1 GB", "downloaded": false})
+        );
+    }
+}

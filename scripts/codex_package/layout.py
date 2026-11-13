@@ -12,6 +12,7 @@ from .zsh import ZSH_RESOURCE_PATH
 
 
 LAYOUT_VERSION = 1
+LLAMA_CPP_RESOURCE_PATH = Path("llama.cpp")
 
 
 def prepare_package_dir(package_dir: Path, *, force: bool) -> None:
@@ -98,6 +99,17 @@ def build_package_dir(
             is_windows=True,
         )
 
+    if variant.llama_cpp_required:
+        if inputs.llama_server_bin is None:
+            raise RuntimeError(f"{variant.name} packages require a llama-server binary.")
+        copy_executable(
+            inputs.llama_server_bin,
+            resources_dir / LLAMA_CPP_RESOURCE_PATH / spec.llama_server_name,
+            is_windows=spec.is_windows,
+        )
+    elif inputs.llama_server_bin is not None:
+        raise RuntimeError(f"llama-server is not supported for {variant.name} packages.")
+
     metadata = {
         "layoutVersion": LAYOUT_VERSION,
         "version": version,
@@ -109,6 +121,10 @@ def build_package_dir(
     }
     if variant.managed_codex_required:
         metadata["managedCodex"] = f"bin/{variant.managed_codex_name(spec)}"
+    if variant.llama_cpp_required:
+        metadata["llamaServer"] = str(
+            Path("codex-resources") / LLAMA_CPP_RESOURCE_PATH / spec.llama_server_name
+        )
     write_json(package_dir / "codex-package.json", metadata)
 
 
@@ -166,6 +182,13 @@ def validate_package_dir(
         managed_codex_path = Path("bin") / variant.managed_codex_name(spec)
         required_files.append(managed_codex_path)
         executable_files.append(managed_codex_path)
+
+    if variant.llama_cpp_required:
+        llama_server_path = (
+            Path("codex-resources") / LLAMA_CPP_RESOURCE_PATH / spec.llama_server_name
+        )
+        required_files.append(llama_server_path)
+        executable_files.append(llama_server_path)
 
     if include_zsh:
         zsh_path = Path("codex-resources") / ZSH_RESOURCE_PATH

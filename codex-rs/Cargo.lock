@@ -2410,6 +2410,7 @@ dependencies = [
  "codex-hooks",
  "codex-http-client",
  "codex-image-generation-extension",
+ "codex-llamacpp",
  "codex-login",
  "codex-mcp",
  "codex-mcp-extension",
@@ -4091,6 +4092,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-llamacpp"
+version = "0.0.61"
+dependencies = [
+ "codex-core",
+ "codex-model-provider-info",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "codex-lmstudio"
 version = "0.0.61"
 dependencies = [
@@ -5380,6 +5393,7 @@ name = "codex-utils-oss"
 version = "0.0.61"
 dependencies = [
  "codex-core",
+ "codex-llamacpp",
  "codex-lmstudio",
  "codex-model-provider-info",
  "codex-ollama",

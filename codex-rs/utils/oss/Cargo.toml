@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 codex-core = { workspace = true }
 codex-lmstudio = { workspace = true }
+codex-llamacpp = { workspace = true }
 codex-model-provider-info = { workspace = true }
 codex-ollama = { workspace = true }
 

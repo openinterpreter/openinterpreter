@@ -9,6 +9,7 @@ pub enum Harness {
     KimiCli,
     ZCode,
     LittleCoder,
+    Local,
     MiniSweAgent,
     OpenCode,
     Pi,
@@ -30,6 +31,7 @@ impl Harness {
             Some("kimi-cli") => Self::KimiCli,
             Some("zcode") => Self::ZCode,
             Some("little-coder") => Self::LittleCoder,
+            Some("local") => Self::Local,
             Some("mini-swe-agent") => Self::MiniSweAgent,
             Some("opencode") => Self::OpenCode,
             Some("pi") => Self::Pi,
@@ -63,6 +65,10 @@ impl Harness {
 
     pub fn is_little_coder(&self) -> bool {
         matches!(self, Self::LittleCoder)
+    }
+
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Local)
     }
 
     pub fn is_opencode(&self) -> bool {
@@ -140,6 +146,7 @@ mod tests {
             Harness::OpenCode
         );
         assert_eq!(Harness::from_config_name(Some("pi")), Harness::Pi);
+        assert_eq!(Harness::from_config_name(Some("local")), Harness::Local);
         assert_eq!(
             Harness::from_config_name(Some("qwen-code")),
             Harness::QwenCode

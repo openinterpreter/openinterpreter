@@ -114,6 +114,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--llama-server-bin",
+        type=Path,
+        help="Prebuilt llama-server executable for open-interpreter packages.",
+    )
+    parser.add_argument(
         "--managed-codex-bin",
         type=Path,
         help=(
@@ -184,6 +189,17 @@ def main() -> int:
     args = parse_args()
     spec = TARGET_SPECS[getattr(args, "target", None) or default_target()]
     variant = PACKAGE_VARIANTS[args.variant]
+    llama_server_bin = resolve_optional_input_path(
+        args.llama_server_bin,
+        "prebuilt llama-server executable",
+        "--llama-server-bin",
+    )
+    if variant.llama_cpp_required and llama_server_bin is None:
+        raise RuntimeError("open-interpreter packages require --llama-server-bin.")
+    if not variant.llama_cpp_required and llama_server_bin is not None:
+        raise RuntimeError(
+            f"--llama-server-bin is not supported for {variant.name} packages."
+        )
     package_dir_arg = getattr(args, "package_dir", None)
     package_dir = (
         package_dir_arg.resolve()
@@ -243,6 +259,7 @@ def main() -> int:
         bwrap_bin=source_outputs.bwrap_bin,
         codex_command_runner_bin=source_outputs.codex_command_runner_bin,
         codex_windows_sandbox_setup_bin=source_outputs.codex_windows_sandbox_setup_bin,
+        llama_server_bin=llama_server_bin,
     )
     prepare_package_dir(package_dir, force=args.force)
     build_package_dir(package_dir, args.package_version, variant, spec, inputs)

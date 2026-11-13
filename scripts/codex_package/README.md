@@ -23,6 +23,7 @@ The builder creates a canonical Codex package directory:
 ├── codex-resources
 │   ├── bwrap                             # Linux only
 │   ├── zsh/bin/zsh                       # supported Unix targets only
+│   ├── llama.cpp/llama-server[.exe]      # open-interpreter variant only
 │   ├── codex-command-runner.exe          # Windows only
 │   └── codex-windows-sandbox-setup.exe   # Windows only
 └── codex-path
@@ -45,6 +46,14 @@ the same entrypoint provides TUI, exec, app-server, and daemon subcommands. The
 `--package-version` flag sets the version in
 `codex-package.json`; it defaults to `[workspace.package].version` in
 `codex-rs/Cargo.toml`.
+
+The `open-interpreter` package requires `--llama-server-bin` pointing to a
+prebuilt executable for the selected target. The builder fails before running
+Cargo when it is absent; it does not install a server on the user's machine or
+copy a release archive as if it were an executable. Supply a verified,
+platform-matched upstream binary through the release job and retain its version
+and digest in that job's provenance. Package metadata records the staged
+`codex-resources/llama.cpp/llama-server[.exe]` path.
 
 ## Source-built artifacts
 

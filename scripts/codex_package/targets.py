@@ -30,6 +30,10 @@ class TargetSpec:
     def rg_name(self) -> str:
         return f"rg{self.exe_suffix}"
 
+    @property
+    def llama_server_name(self) -> str:
+        return f"llama-server{self.exe_suffix}"
+
 
 @dataclass(frozen=True)
 class PackageVariant:
@@ -38,6 +42,7 @@ class PackageVariant:
     executable_stem: str
     alias_stems: tuple[str, ...] = ()
     managed_codex_required: bool = False
+    llama_cpp_required: bool = False
     v8_runtime_required: bool = False
 
     def entrypoint_name(self, spec: TargetSpec) -> str:
@@ -60,6 +65,7 @@ class PackageInputs:
     bwrap_bin: Path | None
     codex_command_runner_bin: Path | None
     codex_windows_sandbox_setup_bin: Path | None
+    llama_server_bin: Path | None = None
 
 
 PACKAGE_VARIANTS: dict[str, PackageVariant] = {
@@ -78,6 +84,7 @@ PACKAGE_VARIANTS: dict[str, PackageVariant] = {
         cargo_bin="codex",
         executable_stem="interpreter",
         alias_stems=("i",),
+        llama_cpp_required=True,
     ),
 }
 

@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -33,6 +34,7 @@ class PackageLayoutTest(unittest.TestCase):
                 bwrap_bin=touch_executable(root / "bwrap"),
                 codex_command_runner_bin=None,
                 codex_windows_sandbox_setup_bin=None,
+                llama_server_bin=touch_executable(root / "llama-server"),
             )
             package_dir = root / "package"
 
@@ -57,13 +59,32 @@ class PackageLayoutTest(unittest.TestCase):
             )
             self.assertEqual((package_dir / "bin" / "i").read_text(), "interpreter")
             self.assertEqual(
+                (package_dir / "codex-resources" / "llama.cpp" / "llama-server").read_text(),
+                "llama-server",
+            )
+            self.assertEqual(
                 (package_dir / "bin" / "codex-code-mode-host").read_text(),
                 "codex-code-mode-host",
             )
             self.assertFalse((package_dir / "bin" / "codex").exists())
             metadata = (package_dir / "codex-package.json").read_text(encoding="utf-8")
             self.assertIn('"entrypoint": "bin/interpreter"', metadata)
+            self.assertIn(
+                '"llamaServer": "codex-resources/llama.cpp/llama-server"', metadata
+            )
             self.assertNotIn('"managedCodex"', metadata)
+
+            missing_llama_server = replace(inputs, llama_server_bin=None)
+            missing_package = root / "missing-llama-package"
+            prepare_package_dir(missing_package, force=False)
+            with self.assertRaisesRegex(RuntimeError, "require a llama-server binary"):
+                build_package_dir(
+                    missing_package,
+                    "1.2.3",
+                    PACKAGE_VARIANTS["open-interpreter"],
+                    TARGET_SPECS["x86_64-unknown-linux-musl"],
+                    missing_llama_server,
+                )
 
     def test_winget_preserves_signed_files_and_voice_hashes(self) -> None:
         for target in ("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"):
