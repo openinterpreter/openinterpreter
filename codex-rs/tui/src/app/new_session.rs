@@ -90,6 +90,9 @@ impl App {
             defaults_cwd,
         )
         .await?;
+        let refreshed_config = self
+            .rebuild_config_for_cwd_from(&settings.config, cwd)
+            .await;
         // Stage local preferences and permission carryover without changing the active task.
         let (mut config, local_settings) = match refreshed_config {
             Ok(config) => {
