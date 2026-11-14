@@ -44,8 +44,14 @@ fn runtime_auth_config_accepts_modes_without_implicitly_enabling_the_feature() {
 #[test]
 fn under_development_features_are_disabled_by_default() {
     for spec in crate::FEATURES {
-        // Instant interrupts are enabled by default while retaining their development stage.
-        if matches!(spec.stage, Stage::UnderDevelopment) && spec.id != Feature::InstantInterrupt {
+        // These two opt-out behaviors retain their development stage while
+        // remaining on by default for existing OIX sessions.
+        if matches!(spec.stage, Stage::UnderDevelopment)
+            && !matches!(
+                spec.id,
+                Feature::InstantInterrupt | Feature::DeferMailboxPreemption
+            )
+        {
             assert_eq!(
                 spec.default_enabled, false,
                 "feature `{}` is under development and must be disabled by default",
@@ -134,8 +140,12 @@ fn codex_apps_mcp_protocol_can_be_enabled_independently_of_generic_mcp() {
 #[test]
 fn default_enabled_features_are_stable() {
     for spec in crate::FEATURES {
-        // Instant interrupts are enabled by default while retaining their development stage.
-        if spec.default_enabled && spec.id != Feature::InstantInterrupt {
+        if spec.default_enabled
+            && !matches!(
+                spec.id,
+                Feature::InstantInterrupt | Feature::DeferMailboxPreemption
+            )
+        {
             assert!(
                 matches!(
                     spec.stage,
@@ -959,7 +969,9 @@ code_mode = true
 }
 
 #[test]
-fn retired_worktree_and_voice_config_overrides_are_ignored() {
+fn worktree_and_voice_config_overrides_remain_effective() {
+    assert!(Features::with_defaults().enabled(Feature::Worktrees));
+    assert!(Features::with_defaults().enabled(Feature::RealtimeConversation));
     for enabled in [false, true] {
         let features_toml = FeaturesToml::from(BTreeMap::from([
             ("worktrees".to_string(), enabled),
@@ -973,8 +985,22 @@ fn retired_worktree_and_voice_config_overrides_are_ignored() {
             FeatureConfigSource::default(),
             FeatureOverrides::default(),
         );
-        assert_eq!(features, Features::with_defaults());
+        let mut expected = Features::with_defaults();
+        expected.set_enabled(Feature::Worktrees, enabled);
+        expected.set_enabled(Feature::RealtimeConversation, enabled);
+        assert_eq!(features, expected);
     }
+}
+
+#[test]
+fn mailbox_preemption_can_be_explicitly_opted_out_of_deferred_delivery() {
+    assert!(Features::with_defaults().enabled(Feature::DeferMailboxPreemption));
+    let mut features = Features::with_defaults();
+    features.apply_map(&BTreeMap::from([(
+        Feature::DeferMailboxPreemption.key().to_string(),
+        false,
+    )]));
+    assert!(!features.enabled(Feature::DeferMailboxPreemption));
 }
 
 #[test]
