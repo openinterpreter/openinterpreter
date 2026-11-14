@@ -1104,7 +1104,9 @@ pub(super) async fn handle_pending_thread_resume_request(
     };
     let mut initial_turns_page = if let Some(mut page) = pending.paginated_initial_turns_page.take()
     {
-        if let (Some(active_turn), Some(params)) = (active_turn, active_page_params) {
+        if let (Some(active_turn), Some(params)) =
+            (active_turn, pending.initial_turns_page.as_ref())
+        {
             let sort_direction = params.sort_direction.unwrap_or(SortDirection::Desc);
             let active_turn_is_in_page = page.data.iter().any(|turn| turn.id == active_turn.id);
             if matches!(sort_direction, SortDirection::Desc)

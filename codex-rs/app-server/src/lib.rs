@@ -54,6 +54,7 @@ use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::TextPosition as AppTextPosition;
 use codex_app_server_protocol::TextRange as AppTextRange;
+use codex_app_server_transport::WebSocketCompression;
 use codex_app_server_transport::daemon_recovery_file_path;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLoadError;
@@ -67,6 +68,8 @@ use codex_features::Feature;
 use codex_feedback::CodexFeedback;
 use codex_protocol::protocol::SessionSource;
 use codex_rollout::state_db as rollout_state_db;
+use codex_skills_extension::FrozenCloudSkillProvider;
+use codex_skills_extension::SkillProvider;
 use codex_state::log_db;
 use codex_websocket_auth::WebsocketAuthSettings;
 use codex_websocket_auth::policy_from_settings;
@@ -590,6 +593,15 @@ pub async fn run_main_with_transport_options(
     };
     config.validate_windows_mxc_requirement()?;
     config.auth_config().validate()?;
+    let cloud_skill_provider: Option<Arc<dyn SkillProvider>> = runtime_options
+        .cloud_skills_snapshot
+        .as_ref()
+        .map(|path| {
+            FrozenCloudSkillProvider::from_file(path)
+                .map(|provider| Arc::new(provider) as Arc<dyn SkillProvider>)
+                .map_err(std::io::Error::other)
+        })
+        .transpose()?;
     let auth_manager =
         AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
             .await
@@ -772,10 +784,6 @@ pub async fn run_main_with_transport_options(
         );
     }
 
-    #[cfg(unix)]
-    if let Some(Err(err)) = nofile_limit_result {
-        warn!(%err, "failed to raise managed app-server file descriptor limit");
-    }
     for warning in &config_warnings {
         match &warning.details {
             Some(details) => error!("{} {}", warning.summary, details),
@@ -823,6 +831,12 @@ pub async fn run_main_with_transport_options(
         runtime_options.install_shutdown_signal_handler && !single_client_mode;
     let managed_daemon = matches!(&transport, AppServerTransport::UnixSocket { .. })
         && runtime_options.managed_daemon;
+    let daemon_settings_file = managed_daemon.then(|| {
+        config
+            .codex_home
+            .join("app-server-daemon")
+            .join("settings.json")
+    });
     #[cfg(unix)]
     if managed_daemon {
         managed_daemon::raise_nofile_limit()?;

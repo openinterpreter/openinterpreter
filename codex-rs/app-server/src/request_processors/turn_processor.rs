@@ -1,9 +1,17 @@
 use super::thread_input::ensure_direct_input_allowed;
+use super::thread_processor::thread_from_stored_thread;
 use super::*;
 use codex_agent_extension::AgentInvocation;
 use codex_agent_extension::AgentRun;
 use codex_agent_extension::AgentRunner;
 use codex_app_server_protocol::ImageReference as V2ImageReference;
+use codex_app_server_protocol::ReviewDelivery as ApiReviewDelivery;
+use codex_app_server_protocol::ThreadGuardianAssessment;
+use codex_app_server_protocol::ThreadGuardianReviewParams;
+use codex_app_server_protocol::ThreadGuardianReviewResponse;
+use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadPrepareApprovedPlanParams;
+use codex_app_server_protocol::ThreadPrepareApprovedPlanResponse;
 use codex_protocol::capabilities::EnvironmentCapabilityRoots;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::ContentItem;
@@ -20,6 +28,7 @@ use codex_protocol::protocol::TurnSettingsUpdateOutcome;
 use codex_protocol::turn_input::AnnotatedResponseItem;
 use codex_protocol::turn_input::InjectedResponseItem;
 use codex_protocol::turn_input::ResponseItemAnnotations;
+use codex_skills::system_cache_root_dir;
 use codex_utils_path_uri::PathUri;
 
 use crate::image_url::REMOTE_IMAGE_URL_ERROR;
@@ -1596,8 +1605,7 @@ impl TurnRequestProcessor {
             thread_id,
             thread: review_thread,
             turn_id,
-        } = self
-            .agent_runner
+        } = AgentRunner::new(Arc::downgrade(&self.thread_manager))
             .start(
                 parent_thread.startup_metadata().thread_id,
                 AgentInvocation {
@@ -1686,8 +1694,8 @@ impl TurnRequestProcessor {
             .map_err(|error| config_load_error(&error))?;
         let (review_request, display_text, target_prompt) =
             Self::review_request_from_target(target)?;
-        match delivery.unwrap_or(ApiReviewDelivery::Inline).to_core() {
-            CoreReviewDelivery::Inline => {
+        match delivery.unwrap_or(ApiReviewDelivery::Inline) {
+            ApiReviewDelivery::Inline => {
                 self.start_inline_review(
                     request_id,
                     parent_thread,
@@ -1697,7 +1705,7 @@ impl TurnRequestProcessor {
                 )
                 .await?;
             }
-            CoreReviewDelivery::Detached => {
+            ApiReviewDelivery::Detached => {
                 let review_skill_path = system_cache_root_dir(&self.config.codex_home)
                     .join("review-agent")
                     .join("SKILL.md");
@@ -1709,6 +1717,14 @@ impl TurnRequestProcessor {
                 if actual_chars > MAX_USER_INPUT_TEXT_CHARS {
                     return Err(Self::input_too_large_error(actual_chars));
                 }
+                self.outgoing
+                    .send_server_notification(ServerNotification::DeprecationNotice(
+                        DeprecationNoticeNotification {
+                            summary: "review/start with delivery \"detached\" is deprecated and will be removed in a future release.".to_string(),
+                            details: Some("Use thread/start followed by review/start with delivery \"inline\" for a separate review thread, or thread/fork followed by turn/start with your own review instructions.".to_string()),
+                        },
+                    ))
+                    .await;
                 self.start_detached_review(request_id, parent_thread, &prompt)
                     .await?;
             }

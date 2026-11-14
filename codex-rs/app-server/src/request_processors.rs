@@ -566,7 +566,7 @@ use uuid::Uuid;
 #[cfg(test)]
 use codex_app_server_protocol::ServerRequest;
 
-mod account_processor;
+pub(crate) mod account_processor;
 mod agent_contract_processor;
 mod apps_processor;
 mod bedrock_auth;

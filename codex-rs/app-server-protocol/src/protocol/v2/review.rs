@@ -9,6 +9,8 @@ use serde::Serialize;
 #[ts(export_to = "v2/")]
 pub enum ReviewDelivery {
     Inline,
+    /// Run review on a separate legacy child thread. Deprecated in favor of starting a thread.
+    Detached,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -18,8 +20,8 @@ pub struct ReviewStartParams {
     pub thread_id: String,
     pub target: ReviewTarget,
 
-    /// Reviews run inline on the supplied thread. Omit this field or pass `inline`.
-    /// To review on a separate thread, start a thread first and use its id.
+    /// Reviews run inline by default. `detached` is retained for legacy clients;
+    /// new clients should start a separate thread and review it inline.
     #[serde(default)]
     #[ts(optional = nullable)]
     pub delivery: Option<ReviewDelivery>,

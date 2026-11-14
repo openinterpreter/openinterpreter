@@ -5,6 +5,7 @@ use super::*;
 use codex_config::types::McpServerAuth;
 use codex_core::McpRefreshReason;
 use codex_mcp::McpServerSource;
+use codex_mcp::McpServerStatusSnapshot;
 use codex_mcp::ReadResourceRequestParams;
 use codex_mcp::ema_auth_scope;
 use codex_mcp::resolve_oauth_callback;
@@ -550,6 +551,7 @@ impl McpRequestProcessor {
         let McpServerStatusSnapshot {
             mut server_infos,
             mut server_capabilities,
+            mut tool_list_meta,
             mut tools_by_server,
             mut tools_errors,
             mut resources,

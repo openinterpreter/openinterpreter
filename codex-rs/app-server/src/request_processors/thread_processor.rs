@@ -5849,7 +5849,7 @@ impl ThreadRequestProcessor {
             parent_trace,
             client_mcp_extensions,
             reserved_thread_id,
-            ..StartThreadOptions::new(config)
+            ..options
         };
         let new_thread = if let Some(prepared_fork) = prepared_fork {
             self.thread_manager
@@ -6839,7 +6839,7 @@ fn set_thread_name_from_title(thread: &mut Thread, title: String) {
     thread.name = Some(title);
 }
 
-fn thread_from_stored_thread(
+pub(super) fn thread_from_stored_thread(
     thread: StoredThread,
     fallback_provider: &str,
     fallback_cwd: &AbsolutePathBuf,
