@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use codex_exec_server::Environment;
-use codex_exec_server::ExecServerRuntimePaths;
+use codex_exec_server::ExecServerRuntimeOptions;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::FileSystemSandboxContext;
 use codex_exec_server::LocalFileSystem;
@@ -50,7 +50,7 @@ pub(crate) async fn create_file_system_context(
     match implementation {
         FileSystemImplementation::Local => {
             let helper_paths = test_codex_helper_paths()?;
-            let runtime_paths = ExecServerRuntimePaths::new(
+            let runtime_paths = ExecServerRuntimeOptions::new(
                 helper_paths.codex_exe.clone(),
                 helper_paths.codex_linux_sandbox_exe.clone(),
             )?;

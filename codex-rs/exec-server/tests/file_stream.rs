@@ -1,19 +1,24 @@
 mod common;
 
+#[cfg(unix)]
+use anyhow::Context;
 use anyhow::Result;
 use codex_exec_server::Environment;
 use codex_exec_server::ExecServerClient;
 use codex_exec_server::ExecServerError;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::FsCloseParams;
+use codex_exec_server::FsOpenMode;
 use codex_exec_server::FsOpenParams;
 use codex_exec_server::FsReadBlockParams;
 use codex_exec_server::FsReadBlockResponse;
+use codex_exec_server::FsWriteBlockParams;
 use codex_exec_server::ReadFileOptions;
 use codex_exec_server::RemoteExecServerConnectArgs;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
 use codex_utils_path_uri::PathUri;
+use futures::StreamExt;
 use futures::TryStreamExt;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
@@ -30,6 +35,140 @@ use crate::common::exec_server::exec_server;
 
 const BLOCK_SIZE: usize = 1024 * 1024;
 const OPEN_FILE_LIMIT: usize = 128;
+
+/// The writer must finish a block before asking its source for more data.
+#[tokio::test]
+async fn streaming_replacement_writes_before_reading_the_next_block() -> Result<()> {
+    let server = exec_server().await?;
+    let local = Environment::create_for_tests(/*exec_server_url*/ None)?.get_filesystem();
+    let remote = connect_file_system(server.websocket_url())?;
+    let tmp = TempDir::new()?;
+    let target = tmp.path().join("sequential.bin");
+    let target_uri = PathUri::from_host_native_path(&target)?;
+    for fs in [&local, &remote] {
+        // This stream borrows the target path rather than requiring an owned filesystem stream.
+        let contents = futures::stream::iter(0..3_u8).map(|block| {
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().len(),
+                u64::from(block) * BLOCK_SIZE as u64
+            );
+            Ok(bytes::Bytes::from(vec![block; BLOCK_SIZE]))
+        });
+        assert_eq!(
+            fs.write_file_stream(&target_uri, contents.boxed(), /*sandbox*/ None)
+                .await?,
+            3 * BLOCK_SIZE as u64
+        );
+    }
+    Ok(())
+}
+
+/// Streaming replacement preserves binary data across local and remote filesystem combinations.
+#[tokio::test]
+async fn streaming_replacement_copies_binary_and_empty_files() -> Result<()> {
+    let server = exec_server().await?;
+    let local = Environment::create_for_tests(/*exec_server_url*/ None)?.get_filesystem();
+    let remote = connect_file_system(server.websocket_url())?;
+    let tmp = TempDir::new()?;
+    let source = tmp.path().join("source.bin");
+    let target = tmp.path().join("target.bin");
+    let source_uri = PathUri::from_host_native_path(&source)?;
+    let target_uri = PathUri::from_host_native_path(&target)?;
+    for source_fs in [&local, &remote] {
+        for target_fs in [&local, &remote] {
+            for bytes in [[0, 255, 13, 10].repeat(BLOCK_SIZE), Vec::new()] {
+                std::fs::write(&source, &bytes)?;
+                std::fs::write(&target, vec![42; bytes.len() + 10])?;
+                let contents = source_fs
+                    .read_file_stream(&source_uri, /*sandbox*/ None)
+                    .await?;
+                let written = target_fs
+                    .write_file_stream(&target_uri, contents.boxed(), /*sandbox*/ None)
+                    .await?;
+                assert_eq!(
+                    (written, std::fs::read(&target)?),
+                    (bytes.len() as u64, bytes)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A failed source leaves only confirmed blocks at the target and releases remote handle capacity.
+#[tokio::test]
+async fn streaming_replacement_preserves_partial_failure_and_releases_handles() -> Result<()> {
+    let server = exec_server().await?;
+    let fs = connect_file_system(server.websocket_url())?;
+    let tmp = TempDir::new()?;
+    let target = tmp.path().join("partial.bin");
+    let target_uri = PathUri::from_host_native_path(&target)?;
+    for _ in 0..=OPEN_FILE_LIMIT {
+        std::fs::write(&target, b"original target contents")?;
+        let contents = futures::stream::iter([
+            Ok(bytes::Bytes::from_static(b"partial")),
+            Err(std::io::Error::other("source failed")),
+        ]);
+        let error = fs
+            .write_file_stream(&target_uri, contents.boxed(), /*sandbox*/ None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (error.to_string(), std::fs::read(&target)?),
+            ("source failed".to_string(), b"partial".to_vec())
+        );
+    }
+    Ok(())
+}
+
+/// Cancelling a partial replacement must not let later metadata lookups reuse an older response.
+#[tokio::test]
+async fn cancelled_streaming_replacement_invalidates_metadata() -> Result<()> {
+    let server = exec_server().await?;
+    let fs = connect_file_system(server.websocket_url())?;
+    let tmp = TempDir::new()?;
+    let target = tmp.path().join("metadata.bin");
+    let path = PathUri::from_host_native_path(&target)?;
+    let original = b"original target contents";
+    std::fs::write(&target, original)?;
+    // Connect before polling metadata so its first poll sends the request.
+    fs.read_file(&path, Default::default(), /*sandbox*/ None)
+        .await?;
+    let stale = fs.get_metadata(&path, Default::default(), /*sandbox*/ None);
+    tokio::pin!(stale);
+    assert!(futures::poll!(stale.as_mut()).is_pending());
+    // The fixture dispatches requests in order. This read confirms the old stat finished,
+    // while leaving its caller unpolled so that another lookup could still join it.
+    assert_eq!(
+        fs.read_file(&path, Default::default(), /*sandbox*/ None)
+            .await?,
+        original
+    );
+
+    let (polled_tx, polled_rx) = tokio::sync::oneshot::channel();
+    let contents = futures::stream::iter([Ok(bytes::Bytes::from_static(b"partial"))]).chain(
+        futures::stream::once(async move {
+            let _ = polled_tx.send(());
+            futures::future::pending::<std::io::Result<bytes::Bytes>>().await
+        }),
+    );
+    let mut write = fs.write_file_stream(&path, contents.boxed(), /*sandbox*/ None);
+    tokio::select! {
+        result = &mut write => panic!("copy should await its source: {result:?}"),
+        _ = polled_rx => {},
+    }
+    drop(write);
+
+    let (refreshed, stale) = tokio::join!(
+        fs.get_metadata(&path, Default::default(), /*sandbox*/ None),
+        stale.as_mut(),
+    );
+    assert_eq!(
+        (stale?.size, refreshed?.size, std::fs::read(&target)?),
+        (original.len() as u64, 7, b"partial".to_vec())
+    );
+    Ok(())
+}
 
 #[tokio::test]
 async fn stream_stops_after_an_exact_block_boundary() -> Result<()> {
@@ -77,12 +216,14 @@ async fn completed_streams_release_handle_capacity() -> Result<()> {
 }
 
 #[cfg(unix)]
+#[test_case::test_case(true ; "follow")]
+#[test_case::test_case(false ; "no_follow")]
 #[tokio::test]
-async fn file_reads_reject_fifo_without_waiting_for_a_writer() -> Result<()> {
+async fn file_reads_reject_fifo_without_waiting_for_a_writer(follow_symlinks: bool) -> Result<()> {
     let server = exec_server().await?;
     let file_system = connect_file_system(server.websocket_url())?;
     let tmp = TempDir::new()?;
-    let path = tmp.path().join("named-pipe");
+    let path = tmp.path().canonicalize()?.join("named-pipe");
     let output = std::process::Command::new("mkfifo").arg(&path).output()?;
     if !output.status.success() {
         anyhow::bail!(
@@ -93,26 +234,37 @@ async fn file_reads_reject_fifo_without_waiting_for_a_writer() -> Result<()> {
     }
 
     let path_uri = PathUri::from_host_native_path(&path)?;
-    let read_error = timeout(
+    let read_result = timeout(
         Duration::from_secs(1),
-        file_system.read_file(&path_uri, ReadFileOptions::default(), /*sandbox*/ None),
+        file_system.read_file(
+            &path_uri,
+            ReadFileOptions { follow_symlinks },
+            /*sandbox*/ None,
+        ),
     )
     .await
-    .expect("reading a FIFO should not wait for a writer")
-    .expect_err("reading a FIFO should be rejected");
+    .context("reading a FIFO should not wait for a writer")?;
+    let Err(read_error) = read_result else {
+        panic!("reading a FIFO should be rejected");
+    };
     let stream_result = timeout(
         Duration::from_secs(1),
         file_system.read_file_stream(&path_uri, /*sandbox*/ None),
     )
     .await
-    .expect("streaming a FIFO should not wait for a writer");
+    .context("streaming a FIFO should not wait for a writer")?;
     let Err(stream_error) = stream_result else {
         panic!("streaming a FIFO should be rejected");
     };
     let expected = format!("path `{}` is not a file", path.display());
+    let expected_read = if follow_symlinks {
+        expected.clone()
+    } else {
+        "path is not a regular file".to_string()
+    };
     assert_eq!(
         (read_error.to_string(), stream_error.to_string()),
-        (expected.clone(), expected)
+        (expected_read, expected)
     );
     Ok(())
 }
@@ -212,9 +364,19 @@ async fn read_block_supports_non_sequential_offsets_and_lengths() -> Result<()> 
         .fs_open(FsOpenParams {
             handle_id: Uuid::new_v4().simple().to_string(),
             path: PathUri::from_host_native_path(path)?,
+            mode: FsOpenMode::Read,
             sandbox: None,
         })
         .await?;
+
+    client
+        .fs_write_block(FsWriteBlockParams {
+            handle_id: open.handle_id.clone(),
+            offset: 0,
+            chunk: b"x".to_vec().into(),
+        })
+        .await
+        .expect_err("default read-only handles must reject writes");
 
     let mut blocks = Vec::new();
     for (offset, len) in [(6, 3), (1, 2), (8, 4), (0, 2)] {
@@ -278,6 +440,7 @@ async fn open_enforces_the_per_connection_limit_and_close_releases_capacity() ->
             .fs_open(FsOpenParams {
                 handle_id: Uuid::new_v4().simple().to_string(),
                 path: path.clone(),
+                mode: FsOpenMode::Read,
                 sandbox: None,
             })
             .await?;
@@ -288,6 +451,7 @@ async fn open_enforces_the_per_connection_limit_and_close_releases_capacity() ->
         .fs_open(FsOpenParams {
             handle_id: Uuid::new_v4().simple().to_string(),
             path: path.clone(),
+            mode: FsOpenMode::Read,
             sandbox: None,
         })
         .await
@@ -299,7 +463,7 @@ async fn open_enforces_the_per_connection_limit_and_close_releases_capacity() ->
         (code, message),
         (
             -32600,
-            format!("at most {OPEN_FILE_LIMIT} file reads may be open per connection"),
+            format!("at most {OPEN_FILE_LIMIT} file handles may be open per connection"),
         )
     );
 
@@ -312,11 +476,62 @@ async fn open_enforces_the_per_connection_limit_and_close_releases_capacity() ->
         .fs_open(FsOpenParams {
             handle_id: Uuid::new_v4().simple().to_string(),
             path,
+            mode: FsOpenMode::Read,
             sandbox: None,
         })
         .await?;
     drop(client);
     server.shutdown().await?;
+    Ok(())
+}
+
+/// Rejected replacement opens must neither truncate existing files nor create missing files.
+#[test_case::test_case(1, "0", "file handle `0` already exists"; "duplicate_id")]
+#[test_case::test_case(OPEN_FILE_LIMIT, "overflow", "at most 128 file handles may be open per connection"; "capacity")]
+#[tokio::test]
+async fn replace_open_rejects_unavailable_handles_before_touching_files(
+    handle_count: usize,
+    handle_id: &str,
+    expected_message: &str,
+) -> Result<()> {
+    let server = exec_server().await?;
+    let client = ExecServerClient::connect_websocket(RemoteExecServerConnectArgs::new(
+        server.websocket_url().to_string(),
+        "file-admission-test".to_string(),
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    ))
+    .await?;
+    let tmp = TempDir::new()?;
+    let existing = tmp.path().join("existing.bin");
+    let missing = tmp.path().join("missing.bin");
+    std::fs::write(&existing, b"original")?;
+    for index in 0..handle_count {
+        client
+            .fs_open(FsOpenParams {
+                handle_id: index.to_string(),
+                path: PathUri::from_host_native_path(&existing)?,
+                mode: FsOpenMode::Read,
+                sandbox: None,
+            })
+            .await?;
+    }
+
+    for path in [&existing, &missing] {
+        let error = client
+            .fs_open(FsOpenParams {
+                handle_id: handle_id.to_string(),
+                path: PathUri::from_host_native_path(path)?,
+                mode: FsOpenMode::Replace,
+                sandbox: None,
+            })
+            .await;
+        let Err(ExecServerError::Server { code, message }) = error else {
+            anyhow::bail!("expected server error, got {error:?}");
+        };
+        assert_eq!((code, message), (-32600, expected_message.to_string()));
+    }
+    assert_eq!(std::fs::read(&existing)?, b"original");
+    assert!(!missing.exists());
     Ok(())
 }
 
@@ -337,6 +552,7 @@ async fn open_rejects_handle_ids_longer_than_32_bytes() -> Result<()> {
         .fs_open(FsOpenParams {
             handle_id: "x".repeat(33),
             path: PathUri::from_host_native_path(path)?,
+            mode: FsOpenMode::Read,
             sandbox: None,
         })
         .await
@@ -349,9 +565,251 @@ async fn open_rejects_handle_ids_longer_than_32_bytes() -> Result<()> {
         (code, message),
         (
             -32600,
-            "file read handle ID must not exceed 32 bytes".to_string(),
+            "file handle ID must not exceed 32 bytes".to_string(),
         )
     );
+    Ok(())
+}
+
+/// Writes use explicit offsets and preserve untouched bytes across multiple blocks.
+#[tokio::test]
+async fn write_blocks_support_non_sequential_offsets_and_enforce_bounds() -> Result<()> {
+    let server = exec_server().await?;
+    let client = ExecServerClient::connect_websocket(RemoteExecServerConnectArgs::new(
+        server.websocket_url().to_string(),
+        "file-write-test".to_string(),
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    ))
+    .await?;
+    let tmp = TempDir::new()?;
+    let path = tmp.path().join("blocks.bin");
+    let open = client
+        .fs_open(FsOpenParams {
+            handle_id: "writer".to_string(),
+            path: PathUri::from_host_native_path(&path)?,
+            mode: FsOpenMode::Replace,
+            sandbox: None,
+        })
+        .await?;
+    for (offset, chunk) in [
+        (BLOCK_SIZE as u64, vec![b'z'; 3]),
+        (0, vec![b'a'; BLOCK_SIZE]),
+        (1, b"bc".to_vec()),
+    ] {
+        client
+            .fs_write_block(FsWriteBlockParams {
+                handle_id: open.handle_id.clone(),
+                offset,
+                chunk: chunk.into(),
+            })
+            .await?;
+    }
+    for (offset, chunk) in [
+        (0, Vec::new()),
+        (0, vec![b'x'; BLOCK_SIZE + 1]),
+        (u64::MAX, vec![b'x']),
+    ] {
+        client
+            .fs_write_block(FsWriteBlockParams {
+                handle_id: open.handle_id.clone(),
+                offset,
+                chunk: chunk.into(),
+            })
+            .await
+            .expect_err("empty, oversized, and overflowing writes must be rejected");
+    }
+    let read = client
+        .fs_read_block(FsReadBlockParams {
+            handle_id: open.handle_id.clone(),
+            offset: 0,
+            len: 4,
+        })
+        .await;
+    read.expect_err("write-only handles must reject reads");
+    let mut expected = vec![b'a'; BLOCK_SIZE];
+    expected[1..3].copy_from_slice(b"bc");
+    expected.extend_from_slice(b"zzz");
+    assert_eq!(std::fs::read(&path)?, expected);
+    client
+        .fs_write_block(FsWriteBlockParams {
+            handle_id: "writer".to_string(),
+            offset: 0,
+            chunk: b"x".to_vec().into(),
+        })
+        .await
+        .expect_err("read failures must close the handle");
+    Ok(())
+}
+
+/// Invalid signed offsets must not reach Windows' current-position sentinel or mutate the file.
+#[test_case::test_case(u64::MAX - 1, 1; "windows_current_position_sentinel")]
+#[test_case::test_case(u64::MAX, 1; "unsigned_overflow")]
+#[test_case::test_case(i64::MAX as u64, 1; "signed_end_overflow")]
+#[test_case::test_case(i64::MAX as u64 - 1, 2; "block_crosses_signed_limit")]
+#[tokio::test]
+async fn write_blocks_reject_ranges_outside_signed_file_offsets(
+    offset: u64,
+    len: usize,
+) -> Result<()> {
+    let server = exec_server().await?;
+    let client = ExecServerClient::connect_websocket(RemoteExecServerConnectArgs::new(
+        server.websocket_url().to_string(),
+        "file-write-offset-test".to_string(),
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    ))
+    .await?;
+    let tmp = TempDir::new()?;
+    let path = tmp.path().join("offsets.bin");
+    let open = client
+        .fs_open(FsOpenParams {
+            handle_id: "writer".to_string(),
+            path: PathUri::from_host_native_path(&path)?,
+            mode: FsOpenMode::Replace,
+            sandbox: None,
+        })
+        .await?;
+    client
+        .fs_write_block(FsWriteBlockParams {
+            handle_id: open.handle_id.clone(),
+            offset: 0,
+            chunk: b"original".to_vec().into(),
+        })
+        .await?;
+
+    let error = client
+        .fs_write_block(FsWriteBlockParams {
+            handle_id: open.handle_id.clone(),
+            offset,
+            chunk: vec![b'x'; len].into(),
+        })
+        .await;
+    let Err(ExecServerError::Server { code, message }) = error else {
+        anyhow::bail!("expected server error, got {error:?}");
+    };
+    assert_eq!(
+        (code, message),
+        (
+            -32600,
+            "file write range exceeds the signed 64-bit file offset limit".to_string(),
+        )
+    );
+    client
+        .fs_close(FsCloseParams {
+            handle_id: open.handle_id,
+        })
+        .await?;
+    assert_eq!(std::fs::read(&path)?, b"original");
+    Ok(())
+}
+
+/// Replacement discards the previous contents before any streamed blocks are written.
+#[tokio::test]
+async fn replace_open_truncates_existing_file() -> Result<()> {
+    let server = exec_server().await?;
+    let client = ExecServerClient::connect_websocket(RemoteExecServerConnectArgs::new(
+        server.websocket_url().to_string(),
+        "file-replace-test".to_string(),
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    ))
+    .await?;
+    let tmp = TempDir::new()?;
+    let path = tmp.path().join("replace.bin");
+    std::fs::write(&path, b"original")?;
+    let open = client
+        .fs_open(FsOpenParams {
+            handle_id: "replacement".to_string(),
+            path: PathUri::from_host_native_path(&path)?,
+            mode: FsOpenMode::Replace,
+            sandbox: None,
+        })
+        .await?;
+    assert_eq!(std::fs::read(&path)?, b"");
+    client
+        .fs_close(FsCloseParams {
+            handle_id: open.handle_id,
+        })
+        .await?;
+    Ok(())
+}
+
+/// Both restricted reads and full-disk reads must retain write sandbox enforcement.
+#[cfg(unix)]
+#[tokio::test]
+async fn writable_open_obeys_sandbox_write_permissions() -> Result<()> {
+    use codex_exec_server::FileSystemSandboxContext;
+    use codex_protocol::models::PermissionProfile;
+    use codex_protocol::permissions::FileSystemAccessMode;
+    use codex_protocol::permissions::FileSystemPath;
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_protocol::permissions::FileSystemSandboxPolicy;
+    use codex_protocol::permissions::FileSystemSpecialPath;
+    use codex_protocol::permissions::NetworkSandboxPolicy;
+    use codex_utils_absolute_path::AbsolutePathBuf;
+
+    let server = exec_server().await?;
+    let client = ExecServerClient::connect_websocket(RemoteExecServerConnectArgs::new(
+        server.websocket_url().to_string(),
+        "file-write-sandbox-test".to_string(),
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    ))
+    .await?;
+    let workspace = TempDir::new()?;
+    let outside = TempDir::new()?;
+    let allowed = workspace.path().join("allowed.bin");
+    let denied = outside.path().join("denied.bin");
+    std::fs::write(&denied, b"original")?;
+    for full_disk_read in [false, true] {
+        let mut entries = vec![FileSystemSandboxEntry::new(
+            AbsolutePathBuf::from_absolute_path(workspace.path())?.into(),
+            FileSystemAccessMode::Write,
+        )];
+        if full_disk_read {
+            entries.push(FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Read,
+            ));
+        }
+        let sandbox = FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::from_runtime_permissions(
+                &FileSystemSandboxPolicy::restricted(entries),
+                NetworkSandboxPolicy::Restricted,
+            ),
+            PathUri::from_host_native_path(workspace.path())?,
+        );
+        client
+            .fs_open(FsOpenParams {
+                handle_id: "denied".to_string(),
+                path: PathUri::from_host_native_path(&denied)?,
+                mode: FsOpenMode::Replace,
+                sandbox: Some(sandbox.clone()),
+            })
+            .await
+            .expect_err("writable opens must not escape the write sandbox");
+        let open = client
+            .fs_open(FsOpenParams {
+                handle_id: "allowed".to_string(),
+                path: PathUri::from_host_native_path(&allowed)?,
+                mode: FsOpenMode::Replace,
+                sandbox: Some(sandbox.clone()),
+            })
+            .await?;
+        client
+            .fs_write_block(FsWriteBlockParams {
+                handle_id: open.handle_id.clone(),
+                offset: 0,
+                chunk: b"allowed".to_vec().into(),
+            })
+            .await?;
+        client
+            .fs_close(FsCloseParams {
+                handle_id: open.handle_id,
+            })
+            .await?;
+        assert_eq!(std::fs::read(&allowed)?, b"allowed");
+        assert_eq!(std::fs::read(&denied)?, b"original");
+    }
     Ok(())
 }
 

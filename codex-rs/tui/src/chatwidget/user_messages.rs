@@ -27,6 +27,7 @@ use codex_utils_plugins::mention_syntax::PLUGIN_TEXT_MENTION_SIGIL;
 use codex_utils_plugins::mention_syntax::TOOL_MENTION_SIGIL;
 
 use super::ChatWidget;
+use super::StatusSurfaceOverrides;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct UserMessage {
@@ -63,22 +64,44 @@ pub(super) enum ShellEscapePolicy {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum UserMessageSource {
     Prompt,
+    /// Enter submits directly, bypassing model-command interpretation.
+    DirectEnter,
     QuestionAnswer,
+    /// Resume the original turn after a safety interstitial.
+    SafetyRecourse,
+}
+
+/// Preserve a sent-but-unacknowledged input until a matching server receipt arrives.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum MessageDelivery {
+    Unsent,
+    Unconfirmed(Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct QueuedUserMessage {
     pub(super) user_message: UserMessage,
+    pub(super) prepared_images: Option<Vec<UserInput>>,
     pub(super) action: QueuedInputAction,
+    pub(super) delivery: MessageDelivery,
     pub(super) pending_pastes: Vec<(String, String)>,
     pub(super) source: UserMessageSource,
 }
 
 impl QueuedUserMessage {
+    pub(super) fn unconfirmed_user_message_id(&self) -> Option<&str> {
+        match &self.delivery {
+            MessageDelivery::Unconfirmed(id) => id.as_deref(),
+            MessageDelivery::Unsent => None,
+        }
+    }
+
     pub(super) fn new(user_message: UserMessage, action: QueuedInputAction) -> Self {
         Self {
             user_message,
+            prepared_images: None,
             action,
+            delivery: MessageDelivery::Unsent,
             pending_pastes: Vec::new(),
             source: UserMessageSource::Prompt,
         }
@@ -112,6 +135,7 @@ pub(super) enum QueueDrain {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(super) struct ThreadComposerState {
     pub(super) text: String,
+    pub(super) shell_mode: Option<bool>,
     pub(super) local_images: Vec<LocalImageAttachment>,
     pub(super) remote_image_urls: Vec<String>,
     pub(super) text_elements: Vec<TextElement>,
@@ -132,7 +156,12 @@ impl ThreadComposerState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ThreadInputState {
+    pub(crate) provider_error: Option<codex_app_server_protocol::ModelProviderError>,
     pub(crate) questions: Option<crate::bottom_pane::QuestionState>,
+    pub(crate) pending_thread_settings:
+        Option<codex_app_server_protocol::ThreadSettingsUpdatedNotification>,
+    pub(super) initial_user_message: Option<UserMessage>,
+    pub(super) startup_submission: Option<crate::bottom_pane::ComposerDraftSnapshot>,
     pub(super) composer: Option<ThreadComposerState>,
     pub(super) safety_buffering_prompt: Option<UserMessage>,
     pub(super) safety_buffering_source: UserMessageSource,
@@ -143,7 +172,10 @@ pub(crate) struct ThreadInputState {
     pub(super) queued_user_messages: VecDeque<QueuedUserMessage>,
     pub(super) queued_user_message_history_records: VecDeque<UserMessageHistoryRecord>,
     pub(crate) recovered_queue: bool,
+    /// Reconcile delivery against resumed history after recovery or an idle thread switch.
+    pub(crate) reconnect_pending: bool,
     pub(super) user_turn_pending_start: bool,
+    pub(super) pending_user_message_client_id: Option<String>,
     pub(super) submit_pending_steers_after_interrupt: bool,
     pub(super) current_collaboration_mode: CollaborationMode,
     pub(super) active_collaboration_mask: Option<CollaborationModeMask>,
@@ -187,6 +219,9 @@ impl From<&str> for UserMessage {
 pub(crate) struct PendingSteer {
     /// Preserved across request retries and thread switches until this submission commits.
     pub(crate) client_id: String,
+    /// The admission identifies the turn whose interruption can discard this input.
+    pub(super) admitted_turn_id: Option<String>,
+    pub(super) optimistically_rendered: bool,
     pub(super) user_message: UserMessage,
     pub(super) history_record: UserMessageHistoryRecord,
     pub(super) source: UserMessageSource,
@@ -834,5 +869,49 @@ impl ChatWidget {
             local_images,
             remote_image_urls,
         )
+    }
+}
+
+pub(super) fn remove_confirmed_queued_messages(
+    messages: &mut VecDeque<QueuedUserMessage>,
+    history: &mut VecDeque<UserMessageHistoryRecord>,
+    confirmed_ids: &[String],
+) {
+    let mut index = 0;
+    messages.retain(|message| {
+        let confirmed = message
+            .unconfirmed_user_message_id()
+            .is_some_and(|id| confirmed_ids.iter().any(|confirmed_id| confirmed_id == id));
+        if confirmed {
+            history.remove(index);
+        } else {
+            index += 1;
+        }
+        !confirmed
+    });
+}
+
+impl ThreadInputState {
+    pub(crate) fn reconcile_confirmed_messages(&mut self, confirmed_ids: &[String]) {
+        self.pending_steers
+            .retain(|steer| !confirmed_ids.contains(&steer.client_id));
+        self.submit_pending_steers_after_interrupt &= !self.pending_steers.is_empty();
+        remove_confirmed_queued_messages(
+            &mut self.queued_user_messages,
+            &mut self.queued_user_message_history_records,
+            confirmed_ids,
+        );
+    }
+
+    pub(crate) fn has_unsent_input(&self) -> bool {
+        self.composer.is_some()
+            || !self.queued_user_messages.is_empty()
+            || !self.rejected_steers_queue.is_empty()
+    }
+
+    pub(crate) fn has_unconfirmed_messages(&self) -> bool {
+        self.queued_user_messages
+            .iter()
+            .any(|message| matches!(message.delivery, MessageDelivery::Unconfirmed(_)))
     }
 }

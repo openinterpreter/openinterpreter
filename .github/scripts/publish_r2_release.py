@@ -1,0 +1,573 @@
+#!/usr/bin/env python3
+"""Mirror a Codex GitHub Release to Cloudflare R2.
+
+Cloudflare R2 exposes an S3-compatible API, so the built-in AWS CLI uses
+standard AWS credentials and the R2 endpoint from ``AWS_ENDPOINT_URL``.
+Objects are created under ``codex/releases/<version>/`` with a validated upload
+checksum and checked using object metadata before the run succeeds. The
+versioned prefix includes every release asset plus installer-facing
+``release.json`` metadata derived from the verified downloads. Once those
+objects are verified, the same metadata advances ``codex/channels/latest`` when
+the release is marked latest and ``codex/channels/prerelease`` for prereleases
+that are newer than its current version, or when that version is unreadable.
+Latest stable releases also update the mutable ``codex/install.sh`` and
+``codex/install.ps1`` bootstrap aliases from their verified versioned assets.
+An older stable release cannot move these aliases or the latest channel back.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any, NamedTuple, NoReturn
+from urllib.parse import quote
+
+from releases import (
+    is_valid_release_version,
+    is_valid_stable_release_version,
+    should_update_version,
+)
+
+BUCKET = "releases"
+PREFIX = "codex"
+REPOSITORY = "openai/codex"
+RELEASE_METADATA_NAME = "release.json"
+INSTALLER_NAMES = ("install.sh", "install.ps1")
+MAX_UPLOAD_WORKERS = 8
+CRC64_RE = re.compile(r"^[A-Za-z0-9+/]{11}=$")
+SHA256_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
+MISSING_OBJECT_RE = re.compile(r"\((?:404|NoSuchKey|NotFound)\)")
+
+
+class PublishError(RuntimeError):
+    pass
+
+
+class ReleaseAsset(NamedTuple):
+    path: Path
+    size: int
+    sha256: str
+
+
+def run_command(args: list[str]) -> str:
+    result = subprocess.run(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.stdout:
+        print(result.stdout, end="", file=sys.stderr)
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    result.check_returncode()
+    return result.stdout or ""
+
+
+def get_release_metadata(tag: str, directory: Path, stage: str) -> list[ReleaseAsset]:
+    try:
+        metadata = json.loads(
+            run_command(
+                [
+                    "gh",
+                    "release",
+                    "view",
+                    tag,
+                    "--repo",
+                    REPOSITORY,
+                    "--json",
+                    "assets",
+                    "--jq",
+                    "[.assets[] | {name, size, state, digest}]",
+                ]
+            )
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise PublishError(
+            f"GitHub release metadata request failed for {tag}: {error}"
+        ) from error
+    except json.JSONDecodeError as error:
+        raise PublishError(
+            f"invalid GitHub release metadata for {tag}: {error}"
+        ) from error
+
+    expected = {}
+    if not isinstance(metadata, list):
+        raise PublishError(f"GitHub returned invalid release metadata for {tag}")
+    for asset in metadata:
+        if not isinstance(asset, dict):
+            raise PublishError(
+                f"GitHub returned invalid release metadata for {tag}: {asset!r}"
+            )
+        # DotSlash runs concurrently, so defer its in-progress assets to finalization.
+        if stage == "assets" and asset.get("state") != "uploaded":
+            continue
+        name = asset.get("name")
+        size = asset.get("size")
+        digest = asset.get("digest")
+        match = SHA256_RE.fullmatch(digest) if isinstance(digest, str) else None
+        if (
+            not isinstance(name, str)
+            or not name
+            or name == RELEASE_METADATA_NAME
+            or name in expected
+            or type(size) is not int
+            or size < 0
+            or asset.get("state") != "uploaded"
+            or match is None
+        ):
+            raise PublishError(
+                f"GitHub returned invalid release metadata for {tag}: {asset!r}"
+            )
+        expected[name] = ReleaseAsset(directory / name, size, match.group(1))
+
+    if not expected:
+        raise PublishError(f"GitHub Release {tag} has no assets")
+    return sorted(expected.values(), key=lambda asset: asset.path.name)
+
+
+def download_assets(tag: str, directory: Path, assets: list[ReleaseAsset]) -> None:
+    if not assets:
+        return
+
+    command = [
+        "gh",
+        "release",
+        "download",
+        tag,
+        "--repo",
+        REPOSITORY,
+        "--dir",
+        str(directory),
+    ]
+    for asset in assets:
+        command.extend(["--pattern", asset.path.name])
+
+    try:
+        run_command(command)
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise PublishError(
+            f"GitHub release download failed for {tag}: {error}"
+        ) from error
+
+    if any(not asset.path.is_file() for asset in assets):
+        raise PublishError("GitHub returned invalid release assets")
+
+
+def stream_digest(source: Any) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    while chunk := source.read(1024 * 1024):
+        digest.update(chunk)
+        size += len(chunk)
+    return size, digest.hexdigest()
+
+
+def validate_asset(asset: ReleaseAsset) -> None:
+    with asset.path.open("rb") as source:
+        size, sha256 = stream_digest(source)
+    if size != asset.size or sha256 != asset.sha256:
+        raise PublishError(
+            f"GitHub asset mismatch for {asset.path.name}: expected "
+            f"size={asset.size} sha256={asset.sha256}, got "
+            f"size={size} sha256={sha256}"
+        )
+
+
+def raise_s3(
+    action: str, key: str, error: Exception, detail: str | None = None
+) -> NoReturn:
+    raise PublishError(
+        f"could not {action} s3://{BUCKET}/{key}: {detail or error}"
+    ) from error
+
+
+def put_object(
+    endpoint: str,
+    key: str,
+    path: Path,
+    sha256: str,
+    *,
+    extra_args: list[str],
+) -> None:
+    try:
+        run_command(
+            [
+                "aws",
+                "s3",
+                "cp",
+                str(path),
+                f"s3://{BUCKET}/{key}",
+                *extra_args,
+                "--checksum-algorithm",
+                "CRC64NVME",
+                "--metadata",
+                f"sha256={sha256}",
+                "--endpoint-url",
+                endpoint,
+            ]
+        )
+    except subprocess.CalledProcessError as error:
+        raise_s3("upload", key, error, (error.stderr or "").strip())
+    except OSError as error:
+        raise_s3("upload", key, error)
+
+
+def verify_remote(
+    endpoint: str,
+    key: str,
+    expected_size: int,
+    expected_sha256: str,
+) -> None:
+    try:
+        response = json.loads(
+            run_command(
+                [
+                    "aws",
+                    "s3api",
+                    "head-object",
+                    "--bucket",
+                    BUCKET,
+                    "--key",
+                    key,
+                    "--checksum-mode",
+                    "ENABLED",
+                    "--endpoint-url",
+                    endpoint,
+                ]
+            )
+        )
+    except subprocess.CalledProcessError as error:
+        raise_s3("inspect", key, error, (error.stderr or "").strip())
+    except OSError as error:
+        raise_s3("inspect", key, error)
+    except json.JSONDecodeError as error:
+        raise PublishError(f"invalid object metadata for {key}: {error}") from error
+
+    metadata = response.get("Metadata") if isinstance(response, dict) else None
+    size = response.get("ContentLength") if isinstance(response, dict) else None
+    crc64 = response.get("ChecksumCRC64NVME") if isinstance(response, dict) else None
+    sha256 = metadata.get("sha256") if isinstance(metadata, dict) else None
+    if (
+        size != expected_size
+        or sha256 != expected_sha256
+        or not isinstance(crc64, str)
+        or not CRC64_RE.fullmatch(crc64)
+    ):
+        raise PublishError(
+            f"object metadata mismatch for {key}: expected size={expected_size} "
+            f"sha256={expected_sha256}, got size={size} sha256={sha256} "
+            f"crc64nvme={crc64}"
+        )
+
+
+def should_update_channel(endpoint: str, version: str, channel: str) -> bool:
+    # Read R2 directly: the public CDN may still serve an older version.
+    key = f"{PREFIX}/channels/{channel}"
+    url = f"s3://{BUCKET}/{key}"
+    try:
+        raw = run_command(["aws", "s3", "cp", url, "-", "--endpoint-url", endpoint])
+    except subprocess.CalledProcessError as error:
+        if MISSING_OBJECT_RE.search(error.stderr or ""):
+            return True
+        raise_s3("read", key, error, (error.stderr or "").strip())
+    except OSError as error:
+        raise_s3("read", key, error)
+
+    try:
+        metadata = json.loads(raw)
+    except json.JSONDecodeError as error:
+        if channel == "latest":
+            raise PublishError(f"invalid channel metadata for {key}") from error
+        return True
+    tag = metadata.get("tag_name") if isinstance(metadata, dict) else None
+    if not isinstance(tag, str) or not tag.startswith("rust-v"):
+        if channel == "latest":
+            raise PublishError(f"invalid channel metadata for {key}")
+        return True
+
+    current = tag.removeprefix("rust-v")
+    if channel == "latest":
+        if not is_valid_stable_release_version(current):
+            raise PublishError(f"invalid stable version in channel metadata for {key}")
+        # Reruns can repair installer writes interrupted before channel finalization.
+        if version == current:
+            return True
+    return should_update_version(version, current)
+
+
+def publish_installers(endpoint: str, tag: str, assets: list[ReleaseAsset]) -> None:
+    installers = {asset.path.name: asset for asset in assets}
+    missing = sorted(set(INSTALLER_NAMES) - installers.keys())
+    if missing:
+        raise PublishError(
+            f"GitHub Release {tag} is missing installer assets: {', '.join(missing)}"
+        )
+    for name in INSTALLER_NAMES:
+        asset = installers[name]
+        validate_asset(asset)
+        installer_key = f"{PREFIX}/{name}"
+        put_object(endpoint, installer_key, asset.path, asset.sha256, extra_args=[])
+        verify_remote(endpoint, installer_key, asset.size, asset.sha256)
+        print(
+            f"published and verified s3://{BUCKET}/{installer_key} "
+            f"size={asset.size} sha256={asset.sha256}",
+            file=sys.stderr,
+        )
+
+
+def publish_asset(
+    endpoint: str, version: str, asset: ReleaseAsset, *, verify: bool = True
+) -> dict[str, Any]:
+    validate_asset(asset)
+    key = f"{PREFIX}/releases/{version}/{asset.path.name}"
+    put_object(endpoint, key, asset.path, asset.sha256, extra_args=["--no-overwrite"])
+    if verify:
+        verify_remote(endpoint, key, asset.size, asset.sha256)
+    status = "published and verified" if verify else "published"
+    print(
+        f"{status} s3://{BUCKET}/{key} size={asset.size} sha256={asset.sha256}",
+        file=sys.stderr,
+    )
+    return {
+        "key": key,
+        "name": asset.path.name,
+        "sha256": asset.sha256,
+        "size": asset.size,
+    }
+
+
+def publish_assets(
+    endpoint: str, version: str, assets: list[ReleaseAsset], *, verify: bool = True
+) -> list[dict[str, Any]]:
+    if not assets:
+        return []
+
+    published = {}
+    with ThreadPoolExecutor(
+        max_workers=min(MAX_UPLOAD_WORKERS, len(assets))
+    ) as executor:
+        futures = {
+            executor.submit(
+                publish_asset, endpoint, version, asset, verify=verify
+            ): asset
+            for asset in assets
+        }
+        for future in as_completed(futures):
+            asset = futures[future]
+            published[asset.path.name] = future.result()
+    return [published[asset.path.name] for asset in assets]
+
+
+def find_published_assets(
+    endpoint: str, version: str, assets: list[ReleaseAsset]
+) -> dict[str, dict[str, Any]]:
+    published = {}
+    with ThreadPoolExecutor(
+        max_workers=min(MAX_UPLOAD_WORKERS, len(assets))
+    ) as executor:
+        futures = {
+            executor.submit(
+                verify_remote,
+                endpoint,
+                f"{PREFIX}/releases/{version}/{asset.path.name}",
+                asset.size,
+                asset.sha256,
+            ): asset
+            for asset in assets
+        }
+        for future in as_completed(futures):
+            asset = futures[future]
+            try:
+                future.result()
+            except PublishError as error:
+                cause = error.__cause__
+                if isinstance(cause, subprocess.CalledProcessError) and (
+                    MISSING_OBJECT_RE.search(cause.stderr or "")
+                ):
+                    continue
+                raise
+            published[asset.path.name] = {
+                "key": f"{PREFIX}/releases/{version}/{asset.path.name}",
+                "name": asset.path.name,
+                "sha256": asset.sha256,
+                "size": asset.size,
+            }
+    return published
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tag", required=True)
+    parser.add_argument("--make-latest", choices=("true", "false"), required=True)
+    parser.add_argument("--prerelease", choices=("true", "false"), required=True)
+    parser.add_argument("--stage", choices=("assets", "finalize"), required=True)
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        endpoint = os.environ.get("AWS_ENDPOINT_URL")
+        if not os.environ.get("GH_TOKEN"):
+            raise PublishError("GH_TOKEN is required")
+        if not endpoint:
+            raise PublishError("AWS_ENDPOINT_URL is required for the R2 S3 endpoint")
+
+        version = args.tag.removeprefix("rust-v")
+        if args.tag == version or not is_valid_release_version(version):
+            raise PublishError(f"invalid rust release tag: {args.tag}")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            assets_directory = Path(temp_dir) / "assets"
+            assets_directory.mkdir()
+            assets = get_release_metadata(args.tag, assets_directory, args.stage)
+
+            if args.stage == "assets":
+                download_assets(args.tag, assets_directory, assets)
+                published = publish_assets(endpoint, version, assets, verify=False)
+                print(
+                    json.dumps(
+                        {
+                            "assetCount": len(published),
+                            "assets": published,
+                            "releasePrefix": f"{PREFIX}/releases/{version}/",
+                            "stage": args.stage,
+                            "tag": args.tag,
+                            "version": version,
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 0
+
+            previously_published = find_published_assets(endpoint, version, assets)
+            remaining = [
+                asset for asset in assets if asset.path.name not in previously_published
+            ]
+            required_downloads = list(remaining)
+            if args.prerelease == "false" and args.make_latest == "true":
+                required_downloads.extend(
+                    asset
+                    for asset in assets
+                    if asset.path.name in INSTALLER_NAMES
+                    and asset.path.name in previously_published
+                )
+            download_assets(args.tag, assets_directory, required_downloads)
+            additionally_published = {
+                asset["name"]: asset
+                for asset in publish_assets(endpoint, version, remaining)
+            }
+            published = [
+                previously_published.get(asset.path.name)
+                or additionally_published[asset.path.name]
+                for asset in assets
+            ]
+            metadata_assets = [
+                {
+                    "name": asset.path.name,
+                    "digest": f"sha256:{asset.sha256}",
+                    "browser_download_url": (
+                        f"https://releases.openai.com/{PREFIX}/releases/"
+                        f"{version}/{quote(asset.path.name, safe='')}"
+                    ),
+                }
+                for asset in assets
+            ]
+
+            metadata_path = Path(temp_dir) / RELEASE_METADATA_NAME
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "assets": metadata_assets,
+                        "tag_name": args.tag,
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with metadata_path.open("rb") as source:
+                metadata_size, metadata_sha256 = stream_digest(source)
+            metadata_key = f"{PREFIX}/releases/{version}/{RELEASE_METADATA_NAME}"
+            put_object(
+                endpoint,
+                metadata_key,
+                metadata_path,
+                metadata_sha256,
+                extra_args=["--no-overwrite"],
+            )
+            verify_remote(
+                endpoint,
+                metadata_key,
+                metadata_size,
+                metadata_sha256,
+            )
+            print(
+                f"published and verified s3://{BUCKET}/{metadata_key} "
+                f"size={metadata_size} sha256={metadata_sha256}",
+                file=sys.stderr,
+            )
+            channels = []
+            if args.make_latest == "true" and should_update_channel(
+                endpoint, version, "latest"
+            ):
+                channels.append("latest")
+            if args.prerelease == "true" and should_update_channel(
+                endpoint, version, "prerelease"
+            ):
+                channels.append("prerelease")
+            if "latest" in channels and args.prerelease == "false":
+                publish_installers(endpoint, args.tag, assets)
+            for channel in channels:
+                channel_key = f"{PREFIX}/channels/{channel}"
+                put_object(
+                    endpoint,
+                    channel_key,
+                    metadata_path,
+                    metadata_sha256,
+                    extra_args=["--content-type", "application/json"],
+                )
+                verify_remote(
+                    endpoint,
+                    channel_key,
+                    metadata_size,
+                    metadata_sha256,
+                )
+                print(
+                    f"published and verified s3://{BUCKET}/{channel_key} "
+                    f"size={metadata_size} sha256={metadata_sha256}",
+                    file=sys.stderr,
+                )
+
+        print(
+            json.dumps(
+                {
+                    "assetCount": len(published),
+                    "assets": published,
+                    "releaseMetadata": {
+                        "key": metadata_key,
+                        "sha256": metadata_sha256,
+                        "size": metadata_size,
+                    },
+                    "releasePrefix": f"{PREFIX}/releases/{version}/",
+                    "stage": args.stage,
+                    "tag": args.tag,
+                    "version": version,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    except PublishError as error:
+        print(f"publish failed: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

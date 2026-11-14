@@ -59,6 +59,12 @@ version = "149.2.0"
                     windows_source_required(changed_files, "149.2.0", "149.2.0")
                 )
 
+    def test_security_backport_changes_require_canary_and_source_build(self) -> None:
+        changed_files = {"patches/v8_array_sort_elements_kind.patch"}
+
+        self.assertTrue(canary_required(changed_files, "152.2.0", "152.2.0"))
+        self.assertTrue(windows_source_required(changed_files, "152.2.0", "152.2.0"))
+
     def test_manual_dispatch_requires_source_build(self) -> None:
         self.assertTrue(
             windows_source_required(

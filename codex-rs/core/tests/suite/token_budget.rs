@@ -1,15 +1,19 @@
 use anyhow::Result;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
+use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_core::config::Config;
 use codex_core::config::TokenBudgetConfig;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_features::Feature;
 use codex_login::CodexAuth;
+use codex_mcp::McpServerKey;
 use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::items::TurnItem;
+use codex_protocol::mcp::McpServerConnectionStatus;
+use codex_protocol::models::ContentItemMetadata;
 use codex_protocol::openai_models::ModelTokenBudgetConfig;
 use codex_protocol::protocol::CONTEXT_WINDOW_CLOSE_TAG;
 use codex_protocol::protocol::CONTEXT_WINDOW_GUIDANCE_CLOSE_TAG;
@@ -21,6 +25,8 @@ use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
 use codex_skills_extension::SkillsExtensionConfig;
@@ -39,6 +45,7 @@ use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
+use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_completed;
 use core_test_support::responses::start_mock_server;
@@ -76,8 +83,9 @@ fn model_token_budget_config() -> ModelTokenBudgetConfig {
 fn token_budget_contexts(request: &ResponsesRequest) -> Vec<String> {
     let context_window_prefix = format!("{CONTEXT_WINDOW_OPEN_TAG}\n");
     request
-        .message_input_texts("developer")
+        .message_input_text_groups("developer")
         .into_iter()
+        .map(|parts| parts.concat())
         .filter(|text| text.starts_with(&context_window_prefix))
         .collect()
 }
@@ -286,8 +294,9 @@ async fn token_budget_guidance_precedes_standalone_context_window(
     assert!(request.has_content_kinds(&[
         "token_budget.context_window_guidance",
         "permissions.instructions",
+        "tools.deferred_namespaces",
     ]));
-    assert!(request.has_content_kinds(&["token_budget.context_window"]));
+    assert!(request.has_content_kinds(&["token_budget.context_window"; 3]));
     let developer_texts = request.message_input_texts("developer");
     let context_window_index = developer_texts
         .iter()
@@ -724,13 +733,16 @@ async fn model_token_budget_defaults_do_not_enable_disabled_feature() -> Result<
     Ok(())
 }
 
+#[test_case(false; "root")]
+#[test_case(true; "cached_subagent")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn token_budget_context_injects_plain_thread_hint_text() -> Result<()> {
+async fn token_budget_context_injects_plain_thread_hint_text(cached_subagent: bool) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
     let rmcp_test_server_bin = stdio_server_bin()?;
     let test = test_codex()
+        .with_model_info_override("gpt-5.5", |model| model.use_responses_lite = true)
         .with_config(move |config| {
             config.model_context_window = Some(CONFIGURED_CONTEXT_WINDOW);
             config
@@ -752,13 +764,15 @@ async fn token_budget_context_injects_plain_thread_hint_text() -> Result<()> {
                     environment_id: "local".to_string(),
                     enabled: true,
                     required: false,
+                    startup_readiness: Default::default(),
                     supports_parallel_tool_calls: false,
+                    tool_input_schema_max_bytes: None,
                     omit_tools_from: None,
                     disabled_reason: None,
                     startup_timeout_sec: Some(Duration::from_secs(10)),
                     tool_timeout_sec: None,
                     default_tools_approval_mode: None,
-                    enabled_tools: None,
+                    enabled_tools: Some(vec!["thread_hint".to_string()]),
                     disabled_tools: None,
                     scopes: None,
                     oauth: None,
@@ -774,19 +788,55 @@ async fn token_budget_context_injects_plain_thread_hint_text() -> Result<()> {
         .build(&server)
         .await?;
     wait_for_mcp_server(&test.codex, "notes").await?;
-    let responses = mount_sse_sequence(
+    let (thread, thread_id) = if cached_subagent {
+        let subagent = test
+            .thread_manager
+            .start_thread(StartThreadOptions {
+                session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id: test.session_configured.thread_id,
+                    depth: 1,
+                    agent_path: None,
+                    agent_nickname: None,
+                    agent_role: None,
+                })),
+                ..test.start_thread_options().await
+            })
+            .await?;
+        wait_for_event(&subagent.thread, |event| {
+            matches!(event, EventMsg::McpStartupComplete(_))
+        })
+        .await;
+        let (mcp_config, _) = subagent
+            .thread
+            .current_mcp_config_and_runtime_context()
+            .await;
+        assert_eq!(
+            subagent
+                .thread
+                .mcp_connection_statuses(&mcp_config)
+                .await
+                .get(&McpServerKey::unscoped("notes")),
+            Some(&McpServerConnectionStatus::NotStarted),
+        );
+        (subagent.thread, subagent.thread_id)
+    } else {
+        (Arc::clone(&test.codex), test.session_configured.thread_id)
+    };
+    let responses = mount_sse_once(
         &server,
-        vec![sse(vec![
-            ev_response_created("resp-1"),
-            ev_completed("resp-1"),
-        ])],
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
     )
     .await;
 
-    test.submit_turn("inject the history hint").await?;
+    thread
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "inject the history hint".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
 
     let request = responses.single_request();
-    let thread_id = test.session_configured.thread_id;
     let token_budgets = token_budget_contexts(&request);
     assert_eq!(token_budgets.len(), 1);
     let captures = assert_regex_match(
@@ -799,12 +849,31 @@ async fn token_budget_context_injects_plain_thread_hint_text() -> Result<()> {
         captures.get(1).expect("first window id capture").as_str(),
         captures.get(2).expect("current window id capture").as_str()
     );
+    let tools = request.inputs_of_type("additional_tools");
+    assert_eq!(tools.len(), 1);
     assert!(
-        !tool_names(&request)
-            .iter()
-            .any(|name| name == "mcp__notes__thread_hint"),
+        namespace_child_tool(&tools[0], "mcp__notes", "thread_hint").is_none(),
         "thread_hint should be hidden from model tool exposure"
     );
+    let metadata = request.input().into_iter().find_map(|item| {
+        let index = item["content"].as_array()?.iter().position(|content| {
+            content["text"]
+                .as_str()
+                .is_some_and(|text| text.starts_with("manual history hint for thread "))
+        })?;
+        Some(
+            item["internal_chat_message_metadata_passthrough"]["content_item_metadata"][index]
+                .clone(),
+        )
+    });
+    assert_eq!(
+        metadata,
+        Some(json!(ContentItemMetadata::tool(Some(
+            "mcp__notes".to_string().into()
+        )))),
+        "the first Notes hint must retain its exact tool namespace"
+    );
+    thread.shutdown_and_wait().await?;
 
     Ok(())
 }
@@ -1607,9 +1676,11 @@ async fn new_context_tool_skips_auto_compact_fallback() -> Result<()> {
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
     install(&mut extensions, |config: &Config| SkillsExtensionConfig {
         include_instructions: config.include_skill_instructions,
+        catalog_deltas_enabled: config.features.enabled(Feature::SkillCatalogDeltas),
+        omit_descriptions: false,
         max_context_tokens: config.skill_max_context_tokens,
         bundled_skills_enabled: config.bundled_skills_enabled(),
-        orchestrator_skills_enabled: config.orchestrator_skills_enabled,
+        cloud_skill_enabled: config.cloud_skill_enabled,
         shadow_selection_enabled: config.features.enabled(Feature::SkillSearch),
     });
     let test = test_codex()

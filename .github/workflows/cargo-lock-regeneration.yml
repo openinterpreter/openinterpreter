@@ -1,0 +1,167 @@
+name: Cargo lock reconciliation candidate (review only)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+    paths:
+      - .github/workflows/cargo-lock-regeneration.yml
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact 40-character PR head to reconcile (must match dispatch ref)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    name: Generate review-only Cargo.lock
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.number == 1981 && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'interpreterwork/codex-main-integration-publish-20261112') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      EXPECTED_SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.source_sha }}
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - name: Require exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$GITHUB_SHA" == "$EXPECTED_SOURCE_SHA" ]]
+          else
+            [[ "$GITHUB_EVENT_NAME" == pull_request ]]
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ env.EXPECTED_SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Check source identity and install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SOURCE_SHA" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          rustup toolchain install "$(cat codex-rs/rust-toolchain.toml | sed -n 's/^channel = "\([^"]*\)"/\1/p')" --profile minimal
+
+      - name: Generate and resolve candidate without publishing
+        id: candidate
+        shell: bash
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+          cargo update --workspace
+          # Patch-level security updates must resolve under the reviewed source
+          # constraints. Do not conceal an incompatible pin with a deny exception.
+          update_affected() {
+            local package="$1" affected="$2" fixed="$3"
+            if python3 - "$package" "$affected" <<'PY'
+          import sys, tomllib
+          packages = tomllib.load(open('Cargo.lock', 'rb'))['package']
+          sys.exit(0 if any(p['name'] == sys.argv[1] and p['version'] == sys.argv[2] for p in packages) else 1)
+          PY
+            then
+              cargo update -p "$package@$affected" --precise "$fixed"
+            fi
+          }
+          update_affected age 0.11.5 0.12.1
+          update_affected i18n-embed-fl 0.9.4 0.10.1
+          update_affected lru 0.16.4 0.18.5
+          update_affected quinn-proto 0.11.17 0.11.19
+          update_affected quinn-udp 0.5.15 0.5.16
+          update_affected quinn-udp 0.6.2 0.6.3
+          update_affected rustix 1.1.4 1.1.6
+          update_affected rustls 0.23.45 0.23.46
+          update_affected rustls-webpki 0.103.15 0.103.16
+          update_affected tokio 1.53.1 1.53.3
+          update_affected webpki-root-certs 1.0.9 1.0.10
+          update_affected webpki-roots 1.0.9 1.0.10
+          update_affected async-executor 1.14.0 1.13.3
+          update_affected clipboard-win 5.4.1 5.4.0
+          cargo metadata --locked --format-version 1 > /dev/null
+          unexpected="$(git diff --name-only -- . ':!Cargo.lock')"
+          [[ -z "$unexpected" ]]
+          [[ -z "$(git ls-files --others --exclude-standard)" ]]
+          if git diff --quiet -- Cargo.lock; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install policy CLI
+        uses: taiki-e/install-action@60ae4ce63c7aeb6e96d7f572c1ec7fafbb17ca80 # v2
+        with:
+          tool: cargo-deny
+
+      - name: Check full dependency policy against the candidate
+        id: policy
+        continue-on-error: true
+        shell: bash
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+          cargo deny check
+
+      - name: Bind changed lock to immutable source and run
+        if: steps.candidate.outputs.changed == 'true'
+        shell: bash
+        env:
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          POLICY_OUTCOME: ${{ steps.policy.outcome }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cargo-lock-review"
+          cp codex-rs/Cargo.lock "$RUNNER_TEMP/cargo-lock-review/Cargo.lock"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          source = pathlib.Path('codex-rs/Cargo.lock')
+          original = subprocess.check_output(['git', 'show', 'HEAD:codex-rs/Cargo.lock'])
+          candidate = source.read_bytes()
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == os.environ['EXPECTED_SOURCE_SHA']
+          record = {
+              'source_sha': os.environ['EXPECTED_SOURCE_SHA'],
+              'source_tree': subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip(),
+              'run_id': os.environ['WORKFLOW_RUN_ID'],
+              'run_attempt': os.environ['WORKFLOW_RUN_ATTEMPT'],
+              'original_sha256': hashlib.sha256(original).hexdigest(),
+              'candidate_sha256': hashlib.sha256(candidate).hexdigest(),
+              'candidate_size': len(candidate),
+              'path': 'codex-rs/Cargo.lock',
+              'cargo_deny_outcome': os.environ['POLICY_OUTCOME'],
+          }
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'cargo-lock-review' / 'manifest.json'
+          out.write_text(json.dumps(record, sort_keys=True, indent=2) + '\n', encoding='utf-8')
+          PY
+
+      - name: Upload review-only candidate (never commit or publish)
+        if: steps.candidate.outputs.changed == 'true'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: cargo-lock-review-${{ env.EXPECTED_SOURCE_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cargo-lock-review/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Verify only the candidate lock changed
+        if: always() && !cancelled()
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -z "$(git diff --name-only -- . ':!codex-rs/Cargo.lock')" ]]
+          [[ -z "$(git ls-files --others --exclude-standard)" ]]
+
+      - name: Reject a candidate that fails dependency policy
+        if: always() && !cancelled()
+        shell: bash
+        env:
+          POLICY_OUTCOME: ${{ steps.policy.outcome }}
+        run: |
+          set -euo pipefail
+          [[ "$POLICY_OUTCOME" == success ]]

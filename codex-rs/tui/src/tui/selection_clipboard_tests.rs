@@ -13,6 +13,26 @@ use pretty_assertions::assert_eq;
 use std::sync::Arc;
 
 #[tokio::test]
+async fn selection_policy_rejects_no_destination_without_changing_existing_lease()
+-> std::io::Result<()> {
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    tui.copy_transcript_selection_with("prior", |_| {
+        Ok(CopyOutcome::Copied(Some(ClipboardLease::test())))
+    })
+    .unwrap();
+    let (result, owner) = tui.copy_selection(
+        "new",
+        crate::clipboard_copy::CopyFormat::PlainText,
+        SelectionCopy::on_select(false, false, false),
+        "new",
+    );
+    assert_eq!(result, Err("selection copy has no destination".into()));
+    assert!(owner.is_none());
+    assert!(tui.selection_clipboard_lease.is_some());
+    Ok(())
+}
+
+#[tokio::test]
 async fn selection_clipboard_survives_overlay_close_and_later_terminal_requests()
 -> std::io::Result<()> {
     let mut tui = crate::tui::test_support::make_test_tui()?;

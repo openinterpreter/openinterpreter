@@ -1,0 +1,109 @@
+//! Regression coverage for associating asynchronous matcher results with their query.
+
+use crate::*;
+use pretty_assertions::assert_eq;
+
+#[test]
+fn query_update_does_not_relabel_pending_matches() {
+    let root = tempfile::tempdir().unwrap();
+    let (work_tx, work_rx) = unbounded();
+    let notify_tx = work_tx.clone();
+    let mut nucleo = Nucleo::new(
+        Config::DEFAULT.match_paths(),
+        Arc::new(move || {
+            let _ = notify_tx.send(WorkSignal::NucleoNotify);
+        }),
+        /*num_threads*/ Some(1),
+        /*columns*/ 1,
+    );
+    let injector = nucleo.injector();
+    for (relative, match_type) in [("", MatchType::Directory), ("beta.txt", MatchType::File)] {
+        injector.push(
+            IndexedEntry::Ascii {
+                root_idx: 0,
+                match_type,
+            },
+            |_, columns| columns[0] = Utf32String::from(relative),
+        );
+    }
+    while nucleo.tick(/*timeout*/ 10).running {
+        work_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    let inner = SessionInner {
+        search_directories: vec![root.path().to_path_buf()],
+        limit: 50,
+        threads: 1,
+        compute_indices: true,
+        respect_gitignore: true,
+        cancelled: Arc::new(AtomicBool::new(false)),
+        shutdown: Arc::new(AtomicBool::new(false)),
+        reporter: Arc::new(tests::RecordingReporter::default()),
+        work_tx,
+    };
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let snapshot = |nucleo: &Nucleo<IndexedEntry>, query: &str, matcher: &mut Matcher| {
+        snapshot::Ranking::start(nucleo, query, /*walk_complete*/ true)?.advance(
+            &inner,
+            nucleo,
+            query,
+            matcher,
+            Duration::from_secs(5),
+        )
+    };
+    let initial = snapshot(&nucleo, "", &mut matcher).unwrap();
+    assert_eq!(initial.matches.len(), 2);
+
+    nucleo.pattern.reparse(
+        /*column*/ 0,
+        "bet",
+        CaseMatching::Ignore,
+        Normalization::Smart,
+        /*append*/ true,
+    );
+    // The requested pattern has changed, but no tick has replaced the previous
+    // snapshot. This is the same intermediate state a busy tick can expose.
+    assert_eq!(snapshot(&nucleo, "bet", &mut matcher), None);
+
+    while nucleo.tick(/*timeout*/ 10).running {
+        work_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    assert_eq!(
+        snapshot(&nucleo, "bet", &mut matcher),
+        Some(FileSearchSnapshot {
+            query: "bet".to_string(),
+            matches: vec![FileMatch {
+                score: 65_536 + 84,
+                path: PathBuf::from("beta.txt"),
+                match_type: MatchType::File,
+                root: root.path().to_path_buf(),
+                indices: Some(vec![0, 1, 2]),
+            }],
+            total_match_count: 1,
+            scanned_file_count: 2,
+            walk_complete: true,
+        }),
+    );
+    // Force the pending ranking to span worker turns, then resume it on the same snapshot.
+    for i in 0..256 {
+        injector.push(
+            IndexedEntry::Ascii {
+                root_idx: 0,
+                match_type: MatchType::File,
+            },
+            |_, columns| columns[0] = Utf32String::from(format!("bet/path-{i}")),
+        );
+    }
+    while nucleo.tick(/*timeout*/ 10).running {
+        work_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    let mut partial = snapshot::Ranking::start(&nucleo, "bet", /*walk_complete*/ true).unwrap();
+    assert!(
+        partial
+            .advance(&inner, &nucleo, "bet", &mut matcher, Duration::ZERO)
+            .is_none()
+    );
+    assert_eq!(
+        partial.advance(&inner, &nucleo, "bet", &mut matcher, Duration::from_secs(5)),
+        snapshot(&nucleo, "bet", &mut matcher)
+    );
+}

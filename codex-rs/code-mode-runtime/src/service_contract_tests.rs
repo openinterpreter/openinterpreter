@@ -176,6 +176,7 @@ fn blocking_tool() -> ToolDefinition {
         description: String::new(),
         kind: CodeModeToolKind::Function,
         input_schema: None,
+        input_schema_max_bytes: None,
         output_schema: None,
     }
 }
@@ -220,17 +221,22 @@ async fn yielded_cells_retain_their_own_delegate_until_closed() {
     delegate_a.release_tool();
     assert_eq!(
         service
-            .wait(WaitRequest {
-                cell_id: cell_id("1"),
-                yield_time_ms: 60_000
-            })
+            .wait(
+                WaitRequest {
+                    cell_id: cell_id("1"),
+                    yield_time_ms: 60_000,
+                    max_output_tokens: None,
+                },
+                None
+            )
             .await
             .unwrap(),
         WaitOutcome::LiveCell(RuntimeResponse::Result {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
-            error_text: None
+            error_text: None,
+            result_buffered_for: Duration::ZERO,
         })
     );
     assert_eq!(
@@ -246,7 +252,7 @@ async fn yielded_cells_retain_their_own_delegate_until_closed() {
     );
     assert!(weak_a.upgrade().is_none());
 
-    service.terminate(cell_id("2")).await.unwrap();
+    service.terminate(cell_id("2").into()).await.unwrap();
     assert_eq!(
         next_event(&mut events_b).await,
         DelegateEvent::ToolCancelled
@@ -282,20 +288,26 @@ async fn yields_and_resumes() {
             }],
         }
     );
-    assert_eq!(
-        service
-            .wait(WaitRequest {
+    let actual = service
+        .wait(
+            WaitRequest {
+                max_output_tokens: None,
                 cell_id: cell_id("1"),
                 yield_time_ms: 60_000,
-            })
-            .await
-            .unwrap(),
+            },
+            /*preempt*/ None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        actual,
         WaitOutcome::LiveCell(RuntimeResponse::Result {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "after".to_string(),
             }],
+            result_buffered_for: actual.result_buffered_for().unwrap(),
             error_text: None,
         })
     );
@@ -347,6 +359,7 @@ text("after");
                 content_items: vec![FunctionCallOutputContentItem::InputText {
                     text: "after".to_string(),
                 }],
+                result_buffered_for: Duration::ZERO,
                 error_text: None,
             }
         ))
@@ -402,14 +415,18 @@ async fn observed_natural_completion_wins_over_termination() {
     })
     .await
     .unwrap();
+    let actual = service.terminate(cell_id("1").into()).await.unwrap();
+    let result_buffered_for = actual.result_buffered_for().unwrap();
+    assert!(!result_buffered_for.is_zero());
     assert_eq!(
-        service.terminate(cell_id("1")).await.unwrap(),
+        actual,
         WaitOutcome::LiveCell(RuntimeResponse::Result {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "done".to_string(),
             }],
+            result_buffered_for,
             error_text: None,
         })
     );
@@ -440,7 +457,7 @@ async fn termination_cancels_pending_callbacks_before_responding() {
         }
     );
     assert_eq!(
-        service.terminate(cell_id("1")).await.unwrap(),
+        service.terminate(cell_id("1").into()).await.unwrap(),
         WaitOutcome::LiveCell(RuntimeResponse::Terminated {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
@@ -515,13 +532,13 @@ async fn repeated_termination_is_rejected_while_callback_cleanup_is_pending() {
 
     let terminating_service = Arc::clone(&service);
     let first_termination =
-        tokio::spawn(async move { terminating_service.terminate(cell_id("1")).await });
+        tokio::spawn(async move { terminating_service.terminate(cell_id("1").into()).await });
     assert_eq!(
         next_event(&mut events_rx).await,
         DelegateEvent::NotificationCancelled
     );
 
-    let repeated_termination = service.terminate(cell_id("1")).await;
+    let repeated_termination = service.terminate(cell_id("1").into()).await;
     delegate.release_notification();
 
     assert_eq!(
@@ -563,17 +580,25 @@ async fn second_observer_is_rejected_without_displacing_the_first() {
     );
 
     let first_observer = service
-        .begin_wait(WaitRequest {
-            cell_id: cell_id("1"),
-            yield_time_ms: 60_000,
-        })
+        .begin_wait(
+            WaitRequest {
+                cell_id: cell_id("1"),
+                yield_time_ms: 60_000,
+                max_output_tokens: None,
+            },
+            /*preempt*/ None,
+        )
         .await;
     assert_eq!(
         service
-            .wait(WaitRequest {
-                cell_id: cell_id("1"),
-                yield_time_ms: 60_000,
-            })
+            .wait(
+                WaitRequest {
+                    cell_id: cell_id("1"),
+                    yield_time_ms: 60_000,
+                    max_output_tokens: None,
+                },
+                /*preempt*/ None,
+            )
             .await
             .unwrap_err(),
         "exec cell 1 already has an active observer"
@@ -585,7 +610,7 @@ async fn second_observer_is_rejected_without_displacing_the_first() {
         content_items: Vec::new(),
     };
     assert_eq!(
-        service.terminate(cell_id("1")).await.unwrap(),
+        service.terminate(cell_id("1").into()).await.unwrap(),
         WaitOutcome::LiveCell(terminated.clone())
     );
     assert_eq!(
@@ -620,6 +645,7 @@ async fn natural_completion_cleans_up_callbacks_before_responding() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "done".to_string(),
             }],
+            result_buffered_for: Duration::ZERO,
             error_text: None,
         }
     );

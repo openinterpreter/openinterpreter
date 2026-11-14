@@ -153,7 +153,7 @@ async fn command_center_new_reads_server_defaults_for_actual_destination() -> Re
         std::fs::write(
             server_home.path().join("config.toml"),
             format!(
-                "{}model_reasoning_effort = \"high\"\n{}",
+                "{}model_reasoning_effort = \"high\"\nservice_tier = \"fast\"\n{}",
                 if mode == "remote-null-fast" {
                     ""
                 } else {
@@ -229,6 +229,7 @@ async fn command_center_new_reads_server_defaults_for_actual_destination() -> Re
             },
         )
         .await?;
+        server.model_provider_override = app.harness_overrides.model_provider.clone();
         if launch_override {
             server = server.with_remote_cwd_override(Some(launch.path().to_path_buf()));
         }
@@ -277,11 +278,11 @@ async fn command_center_new_reads_server_defaults_for_actual_destination() -> Re
             "." => ".".to_string(),
             _ => unreachable!(),
         };
-        assert_eq!(
-            recorded_params(&requests, "config/read"),
-            vec![serde_json::json!({"cwd": cwd})],
-            "{mode} {expected_cwd}"
-        );
+        let reads = recorded_params(&requests, "config/read")
+            .into_iter()
+            .filter(|params| params["includeLayers"] == true)
+            .collect::<Vec<_>>();
+        assert_eq!(reads.last().expect("defaults read")["cwd"], cwd);
         let starts = recorded_params(&requests, "thread/start");
         assert_eq!(starts.len(), 1, "{mode} {expected_cwd}");
         assert_eq!(
@@ -299,19 +300,13 @@ async fn command_center_new_reads_server_defaults_for_actual_destination() -> Re
                     serde_json::json!(cwd)
                 },
                 &serde_json::json!(expected_model),
-                &if mode.starts_with("remote") {
-                    serde_json::Value::Null
-                } else if mode == "local" && !explicit_cwd {
-                    serde_json::json!("ollama")
-                } else {
+                &if mode == "local-cli-provider" || (mode == "local" && explicit_cwd) {
                     serde_json::json!("openai")
+                } else {
+                    serde_json::Value::Null
                 },
                 &serde_json::json!("high"),
-                &serde_json::json!(if mode == "local" && explicit_cwd {
-                    "flex"
-                } else {
-                    "priority"
-                }),
+                &serde_json::json!(if explicit_cwd { "flex" } else { "priority" }),
             ),
             "{mode} {expected_cwd}"
         );
@@ -494,9 +489,12 @@ async fn command_center_new_read_failure_keeps_overview_and_does_not_start() -> 
                 );
             }
         } else {
-            assert_eq!(
-                recorded_params(&requests, "thread/start")[0]["model"],
-                "local-model"
+            insta::assert_snapshot!(
+                "command_center_session_start_error",
+                crate::chatwidget::tests::helpers::render_bottom_popup(
+                    &app.chat_widget,
+                    /*width*/ 80,
+                )
             );
         }
         server.shutdown().await?;

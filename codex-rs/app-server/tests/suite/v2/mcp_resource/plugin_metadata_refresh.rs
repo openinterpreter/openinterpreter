@@ -250,6 +250,57 @@ async fn read_skill_in_turn(
     Ok(())
 }
 
+async fn list_plugin_skills(
+    app_server: &mut TestAppServer,
+    cwd: &Path,
+) -> Result<Vec<SkillMetadata>> {
+    let request = app_server
+        .send_skills_list_request(SkillsListParams {
+            cwds: vec![cwd.to_path_buf()],
+            force_reload: false,
+        })
+        .await?;
+    let response: SkillsListResponse =
+        timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(request)).await??;
+    assert_eq!(response.data.len(), 1);
+    assert!(response.data[0].errors.is_empty());
+    Ok(response
+        .data
+        .into_iter()
+        .flat_map(|entry| entry.skills)
+        .filter(|skill| skill.plugin_id.as_deref() == Some("demo-plugin@openai-curated-remote"))
+        .collect())
+}
+
+async fn read_mcp_skill_resource(app_server: &mut TestAppServer, thread_id: &str) -> Result<()> {
+    let request = app_server
+        .send_mcp_resource_read_request(McpResourceReadParams {
+            environment_id: None,
+            meta: None,
+            thread_id: Some(thread_id.to_string()),
+            origin_call_id: None,
+            server: "codex_apps".to_string(),
+            uri: SKILL_MAIN_PROMPT_URI.to_string(),
+            connector_id: None,
+            target: None,
+        })
+        .await?;
+    let response: McpResourceReadResponse =
+        timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(request)).await??;
+    assert_eq!(
+        response,
+        McpResourceReadResponse {
+            contents: vec![McpResourceContent::Text {
+                uri: SKILL_MAIN_PROMPT_URI.to_string(),
+                mime_type: Some("text/markdown".to_string()),
+                text: SKILL_CONTENTS.to_string(),
+                meta: None,
+            }],
+            origin_call_id: None,
+        }
+    );
+    Ok(())
+}
 // Reuse the resource-read fixture with a healthy, single-page skills catalog.
 struct MetadataMcpServer(ResourceAppsMcpServer);
 

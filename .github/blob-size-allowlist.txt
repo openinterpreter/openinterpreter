@@ -9,3 +9,4 @@ codex-rs/models-manager/models.json
 codex-rs/tui/tests/fixtures/oss-story.jsonl
 codex-rs/tui_app_server/tests/fixtures/oss-story.jsonl
 codex-rs/tui/src/app.rs
+codex-rs/tui/src/bottom_pane/chat_composer.rs

@@ -4,6 +4,122 @@ mod command_center;
 use super::super::agents_overview_view::AgentsOverviewGrouping;
 use super::*;
 use crate::chatwidget::tests::helpers::normalize_agent_center_snapshot;
+use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
+
+#[tokio::test]
+async fn overview_cloud_selection_routes_before_reading_or_displacing_current_task() -> Result<()> {
+    let mut app = make_test_app().await;
+    let (client, mut commands, _notifications) = CloudClient::channel(/*capacity*/ 1);
+    let backend_id = BackendId::new();
+    let mut server = AppServerSession::new(
+        backend_id,
+        AppServerClient::Cloud(client),
+        ThreadParamsMode::Cloud,
+    );
+    let [current, target] = std::array::from_fn(|_| ThreadId::new());
+    app.active_thread_id = Some(current);
+    app.primary_thread_id = Some(current);
+    app.app_server_backend_id = Some(backend_id);
+    assert!(app.backend_registry.observe(backend_id, target));
+    let row = overview_thread(
+        target,
+        /*parent_thread_id*/ None,
+        "Other task",
+        ThreadStatus::NotLoaded,
+    );
+    app.agents_overview.threads.insert(target, Some(row));
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    app.app_event_tx = AppEventSender::new(tx);
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let selection = tokio::select! {
+        result = app.select_agents_overview_thread(&mut tui, &mut server, target) => result?,
+        _ = commands.recv() => panic!("selection must not read before the navigation is ready"),
+    };
+    assert!(matches!(selection, AppRunControl::Continue));
+    assert!(matches!(
+        events.try_recv()?,
+        AppEvent::ResumeBackendSession(session)
+            if session.backend_id == backend_id && session.thread_id == target
+    ));
+    assert_eq!(app.current_displayed_thread_id(), Some(current));
+    assert!(commands.try_recv().is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn overview_opens_a_search_only_task_on_the_search_backend() -> Result<()> {
+    let mut app = make_test_app().await;
+    let (client, _commands, _events) = CloudClient::channel(/*capacity*/ 1);
+    let mut displayed = AppServerSession::new(
+        BackendId::new(),
+        AppServerClient::Cloud(client),
+        ThreadParamsMode::Cloud,
+    );
+    let source = BackendId::new();
+    let [hit, collision] = std::array::from_fn(|_| ThreadId::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    app.app_event_tx = AppEventSender::new(tx);
+    app.app_server_backend_id = Some(displayed.backend_id());
+    assert!(
+        app.backend_registry
+            .observe(displayed.backend_id(), collision)
+    );
+
+    let mut view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+    view.handle_key_event(KeyCode::Char('/').into());
+    view.handle_paste("Older task".into());
+    let AppEvent::SearchAgentsOverview(search_id, _) = rx.try_recv()? else {
+        panic!("expected an older-history search");
+    };
+    app.agents_overview.search_id = search_id;
+    let row = |id| {
+        overview_thread(
+            id,
+            /*parent_thread_id*/ None,
+            "Older task",
+            ThreadStatus::NotLoaded,
+        )
+    };
+    let found = row(hit);
+    app.apply_agents_overview_search_page(
+        search_id,
+        source,
+        vec![(found.clone(), false), (row(collision), false)],
+        Default::default(),
+        /*ok*/ true,
+    );
+    assert_eq!(
+        app.backend_registry.owner(collision),
+        Some(displayed.backend_id())
+    );
+    assert!(!app.agents_overview.search_matches.contains_key(&collision));
+    assert!(!app.agents_overview.threads.contains_key(&hit));
+
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.select_agents_overview_thread(&mut tui, &mut displayed, hit)
+        .await?;
+    let AppEvent::ResumeBackendSession(target) = rx.try_recv()? else {
+        panic!("expected the search-only task to resume");
+    };
+    assert_eq!(
+        (
+            target.backend_id,
+            target.thread_id,
+            target.path,
+            target.cwd,
+            target.history_mode
+        ),
+        (
+            source,
+            hit,
+            found.path,
+            Some(found.cwd.to_path_buf()),
+            Some(found.history_mode)
+        )
+    );
+    Ok(())
+}
 
 #[tokio::test]
 async fn overview_worktree_creation_busy_state() {
@@ -119,8 +235,10 @@ use crate::render::renderable::Renderable;
 use crate::test_support::PathBufExt;
 use crate::test_support::test_path_buf;
 use crate::test_support::test_path_display;
+use codex_app_server_client::AppServerClient;
 use codex_app_server_client::AppServerEvent;
-use codex_app_server_protocol::CurrentTimeReadParams;
+use codex_app_server_client::CloudClient;
+use codex_app_server_protocol::DynamicToolCallParams;
 use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerRequest;
@@ -232,7 +350,7 @@ async fn overview_right_preserves_editors_and_offline_state() {
     assert!(rx.try_recv().is_err());
 }
 
-fn overview_thread(
+pub(in crate::app) fn overview_thread(
     thread_id: ThreadId,
     parent_thread_id: Option<ThreadId>,
     name: &str,
@@ -247,6 +365,7 @@ fn overview_thread(
         daybreak_enabled: None,
         session_id: parent_thread_id.unwrap_or(thread_id).to_string(),
         forked_from_id: None,
+        attached_to_thread_id: None,
         parent_thread_id: None,
         preview: name.to_string(),
         ephemeral: false,
@@ -303,7 +422,7 @@ async fn shared_overview_keeps_rows_and_replays_changes_over_stale_reads() -> Re
         overview_thread(id, /*parent_thread_id*/ None, name, ThreadStatus::Idle)
     });
     let request_id = Uuid::new_v4();
-    app.agents_overview.request_id = Some(request_id);
+    app.agents_overview.active_refresh = Some((request_id, app_server.backend_id()));
     // The seed is still in flight and the command center has never been opened.
     for notification in [
         ServerNotification::ThreadNameUpdated(ThreadNameUpdatedNotification {
@@ -359,13 +478,16 @@ async fn shared_overview_keeps_rows_and_replays_changes_over_stale_reads() -> Re
         &app_server,
         request_id,
         Ok(AgentsOverviewThreadRefresh {
+            cleared_unread: Vec::new(),
             last_messages: HashMap::new(),
             threads: HashMap::from([
-                (retained, Some(retained_thread.clone())),
-                (archived, Some(archived_thread)),
-                (deleted, Some(deleted_thread)),
+                (retained, Some((retained_thread.clone(), false, None))),
+                (archived, Some((archived_thread, false, None))),
+                (deleted, Some((deleted_thread, false, None))),
             ]),
             recent_seed_complete: true,
+            discovery: None,
+            pinned_thread_ids: None,
         }),
     );
     retained_thread.name = Some("New name".to_string());
@@ -377,19 +499,22 @@ async fn shared_overview_keeps_rows_and_replays_changes_over_stale_reads() -> Re
     assert_eq!(app.agents_overview.threads, expected);
 
     let request_id = Uuid::new_v4();
-    app.agents_overview.request_id = Some(request_id);
+    app.agents_overview.active_refresh = Some((request_id, app_server.backend_id()));
     app.apply_agents_overview_thread_refresh(
         &app_server,
         request_id,
         Ok(AgentsOverviewThreadRefresh {
+            cleared_unread: Vec::new(),
             last_messages: HashMap::new(),
             threads: HashMap::from([(retained, None)]),
             recent_seed_complete: true,
+            discovery: None,
+            pinned_thread_ids: None,
         }),
     );
     assert_eq!(app.agents_overview.threads, expected);
     let request_id = Uuid::new_v4();
-    app.agents_overview.request_id = Some(request_id);
+    app.agents_overview.active_refresh = Some((request_id, app_server.backend_id()));
     app.apply_agents_overview_thread_refresh(
         &app_server,
         request_id,
@@ -409,7 +534,7 @@ async fn shared_overview_keeps_rows_and_replays_changes_over_stale_reads() -> Re
         AppServerEvent::Lagged { skipped: 1 },
     ] {
         let old_request = Uuid::new_v4();
-        app.agents_overview.request_id = Some(old_request);
+        app.agents_overview.active_refresh = Some((old_request, app_server.backend_id()));
         app.agents_overview.activity.entry(retained).or_default();
         app.agents_overview.last_messages = stale_messages.clone();
         app.handle_app_server_event(&app_server, event).await;
@@ -421,7 +546,7 @@ async fn shared_overview_keeps_rows_and_replays_changes_over_stale_reads() -> Re
             "new-reasoning",
             "**Checking the revised task**",
         ));
-        let current_request = app.agents_overview.request_id.unwrap();
+        let current_request = app.agents_overview.active_refresh.unwrap().0;
         for (request_id, last_messages) in [
             (old_request, stale_messages.clone()),
             (current_request, HashMap::new()),
@@ -430,15 +555,18 @@ async fn shared_overview_keeps_rows_and_replays_changes_over_stale_reads() -> Re
                 &app_server,
                 request_id,
                 Ok(AgentsOverviewThreadRefresh {
+                    cleared_unread: Vec::new(),
                     threads: HashMap::new(),
                     last_messages,
                     recent_seed_complete: true,
+                    discovery: None,
+                    pinned_thread_ids: None,
                 }),
             );
             assert!(app.agents_overview.last_messages.is_empty());
         }
         assert!(app.agents_overview.activity.contains_key(&retained));
-        assert!(app.agents_overview.request_id.is_none());
+        assert!(app.agents_overview.active_refresh.is_none());
     }
     app_server.shutdown().await?;
     Ok(())
@@ -557,9 +685,9 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let event = app_server.next_event().await.expect("server notification");
-            let is_created = matches!(&event, AppServerEvent::ServerNotification(notification)
+            let is_created = matches!(&event.event, AppServerEvent::ServerNotification(notification)
                 if matches!(notification.as_ref(), ServerNotification::ThreadStarted(started) if started.thread.id == created.to_string()));
-            app.handle_app_server_event(&app_server, event).await;
+            app.handle_backend_event(&app_server, event).await;
             if is_created { break; }
         }
     }).await.expect("creation notification received");
@@ -637,6 +765,10 @@ async fn finish_overview_refresh(
             if let AppEvent::AgentsOverviewThreadsLoaded { request_id, result } =
                 events.recv().await.expect("overview event")
             {
+                // Aborting a refresh task cannot retract an already queued response.
+                if app.agents_overview.active_refresh.map(|(id, _)| id) != Some(request_id) {
+                    continue;
+                }
                 assert!(result.is_ok(), "{result:?}");
                 app.apply_agents_overview_thread_refresh(app_server, request_id, result);
                 return;
@@ -666,7 +798,7 @@ async fn check_hidden_thread_does_not_refresh_shared_overview(source: &str) {
     app.chat_widget.show_bottom_pane_view(Box::new(view));
 
     let request_id = uuid::Uuid::new_v4();
-    app.agents_overview.request_id = Some(request_id);
+    app.agents_overview.active_refresh = Some((request_id, app_server.backend_id()));
 
     let parent_thread_id = ThreadId::new();
     app.primary_thread_id = Some(parent_thread_id);
@@ -696,7 +828,7 @@ async fn check_hidden_thread_does_not_refresh_shared_overview(source: &str) {
 
     assert_eq!(
         (
-            app.agents_overview.request_id,
+            app.agents_overview.active_refresh.map(|(id, _)| id),
             app.agents_overview.refresh_pending,
         ),
         (Some(request_id), false)
@@ -727,7 +859,7 @@ async fn check_hidden_thread_does_not_refresh_shared_overview(source: &str) {
 
     assert_eq!(
         (
-            app.agents_overview.request_id,
+            app.agents_overview.active_refresh.map(|(id, _)| id),
             app.agents_overview.refresh_pending,
         ),
         (Some(request_id), true)
@@ -744,9 +876,9 @@ async fn check_hidden_thread_does_not_refresh_shared_overview(source: &str) {
 
 #[tokio::test]
 async fn agents_overview_details_show_available_attention_without_expanding_rows() -> Result<()> {
-    let mut app = make_test_app().await;
+    let mut app = make_test_app_with_chat().await;
     let app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
-    let [root, child, unloaded] = std::array::from_fn(|_| ThreadId::new());
+    let [root, failed_agent, child, unloaded] = std::array::from_fn(|_| ThreadId::new());
     let waiting = ThreadStatus::Active {
         active_flags: vec![
             ThreadActiveFlag::WaitingOnApproval,
@@ -756,12 +888,18 @@ async fn agents_overview_details_show_available_attention_without_expanding_rows
     // The child question takes priority over the generic waiting parent.
     let mut threads = [
         (root, None, "Repair authentication", waiting.clone()),
-        (child, Some(root), "Check dependencies", waiting),
+        (child, Some(failed_agent), "Check dependencies", waiting),
         (
             unloaded,
             None,
             "Investigate parser",
             ThreadStatus::NotLoaded,
+        ),
+        (
+            failed_agent,
+            Some(root),
+            "Failed agent",
+            ThreadStatus::SystemError,
         ),
     ]
     .map(|(id, parent, title, status)| overview_thread(id, parent, title, status))
@@ -769,6 +907,10 @@ async fn agents_overview_details_show_available_attention_without_expanding_rows
     threads[0].name = None;
     threads[2].name = None;
     threads[2].preview = "Investigate parser\nInclude edge cases\n".repeat(8);
+    threads[2].model = Some("provider/".repeat(12));
+    threads[2].reasoning_effort = Some(codex_protocol::openai_models::ReasoningEffort::Custom(
+        "deliberate".repeat(12),
+    ));
     app.agents_overview.threads = threads
         .iter()
         .cloned()
@@ -799,7 +941,10 @@ async fn agents_overview_details_show_available_attention_without_expanding_rows
                 is_blocking: true,
                 auto_resolution_ms: None,
             },
-        }],
+        }]
+        .into_iter()
+        .map(|request| BufferedServerRequest::new(request, &app_server.request_handle()))
+        .collect(),
     );
     let view = app.agents_overview_view(threads.clone(), Some(root));
     app.agents_overview.visible_thread_ids = view.thread_ids();
@@ -826,7 +971,7 @@ async fn agents_overview_details_show_available_attention_without_expanding_rows
     assert!(!rendered.contains("Which dependency version"));
     assert!(rendered.contains("Waiting for approval."));
     assert!(app.thread_event_channels.is_empty());
-    assert!(app.agents_overview.request_id.is_none());
+    assert!(app.agents_overview.active_refresh.is_none());
 
     let view = app.agents_overview_view(threads, Some(unloaded));
     app.chat_widget.show_bottom_pane_view(Box::new(view));
@@ -889,15 +1034,17 @@ async fn agents_overview_details_render_markdown() {
         &ServerNotification::ItemCompleted(codex_app_server_protocol::ItemCompletedNotification {
             thread_id: thread.id.clone(),
             turn_id: "turn".into(),
+            content_token_count: None,
             completed_at_ms: 0,
-            item: ThreadItem::AgentMessage {
+            item: ThreadItem::untimed(ThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: "answer".into(),
                 text: message.into(),
                 phase: None,
                 memory_citation: None,
                 delivery: None,
                 questions: None,
-            },
+            }),
         }),
     );
     let view = app.agents_overview_view(vec![thread.clone()], Some(thread_id));
@@ -932,6 +1079,56 @@ async fn agents_overview_details_render_markdown() {
     );
 }
 
+#[tokio::test]
+async fn agents_overview_markdown_link_rows_preserve_destination_and_unlinked_clipping() {
+    let mut app = make_test_app().await;
+    let thread_id = ThreadId::new();
+    let mut thread = overview_thread(
+        thread_id,
+        /*parent_thread_id*/ None,
+        "Review links",
+        ThreadStatus::Idle,
+    );
+    let destination = "https://example.com/a/long/path/to/the/pull/request";
+    thread.preview = "[Prompt](https://example.com/prompt)".into();
+    app.agents_overview.last_messages.insert(
+        thread_id,
+        format!("Opened [a pull request with a label that wraps across rows]({destination}).\n\nMore context that should be clipped in a short preview.\n\nAdditional details."),
+    );
+    let view = app.agents_overview_view(vec![thread], Some(thread_id));
+    for height in [40, 22] {
+        let area =
+            ratatui::layout::Rect::new(/*x*/ 0, /*y*/ 0, /*width*/ 96, height);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        view.render(area, &mut buffer);
+        let mut linked_rows = Vec::new();
+        for y in 0..height {
+            let linked = (0..area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .filter(|symbol| symbol.starts_with(&format!("\x1b]8;;{destination}\x07")))
+                .map(crate::terminal_hyperlinks::strip_osc8)
+                .collect::<String>();
+            if !linked.is_empty() {
+                linked_rows.push(linked);
+            }
+        }
+        assert!(linked_rows.len() >= 2, "link must span multiple rows");
+        assert!(buffer.content.iter().all(|cell| {
+            crate::terminal_hyperlinks::strip_osc8(cell.symbol()) != "…"
+                || !cell.symbol().contains("\x1b]8;;")
+        }));
+        if height == 40 {
+            insta::assert_snapshot!("agents_overview_link_rows", linked_rows.join("\n"));
+            assert!(buffer.content.iter().any(|cell| {
+                cell.symbol()
+                    .starts_with("\x1b]8;;https://example.com/prompt\x07")
+            }));
+        } else {
+            assert!(buffer.content.iter().any(|cell| cell.symbol() == "…"));
+        }
+    }
+}
+
 #[test]
 fn agents_overview_markdown_preview_preserves_layout_and_bounds() {
     let text = format!("a\r\n\t\u{1b}{}", "界".repeat(600));
@@ -943,7 +1140,7 @@ fn agents_overview_markdown_preview_preserves_layout_and_bounds() {
 
 #[tokio::test]
 async fn agents_overview_reasoning_uses_existing_events_and_expires_with_attachment() {
-    let mut app = make_test_app().await;
+    let mut app = make_test_app_with_chat().await;
     let thread_id = ThreadId::new();
     let mut thread = overview_thread(
         thread_id,
@@ -973,7 +1170,7 @@ async fn agents_overview_reasoning_uses_existing_events_and_expires_with_attachm
     insta::with_settings!({snapshot_path => "../snapshots"}, {
         insta::assert_snapshot!("agents_overview_live_activity", render_bottom_popup(&app.chat_widget, /*width*/ 96).replace(&format!("{project}  1"), &normalized_group).replace(&project, "/tmp/project"));
     });
-    assert!(app.agents_overview.request_id.is_none());
+    assert!(app.agents_overview.active_refresh.is_none());
 
     // A working child can stream through a server attachment without a local channel.
     let parent = overview_thread(
@@ -987,11 +1184,11 @@ async fn agents_overview_reasoning_uses_existing_events_and_expires_with_attachm
         .threads
         .insert(parent_id, Some(parent.clone()));
     app.track_agents_overview_notification(&ServerNotification::ItemCompleted(
-        codex_app_server_protocol::ItemCompletedNotification {
-            thread_id: parent.id.clone(),
-            turn_id: "previous-turn".into(),
-            completed_at_ms: 0,
-            item: ThreadItem::AgentMessage {
+        codex_app_server_protocol::ItemCompletedNotification::new(
+            parent.id.clone(),
+            "previous-turn".into(),
+            ThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: "answer".into(),
                 text: "Previous answer".into(),
                 phase: None,
@@ -999,7 +1196,9 @@ async fn agents_overview_reasoning_uses_existing_events_and_expires_with_attachm
                 delivery: None,
                 questions: None,
             },
-        },
+            /*started_at_ms*/ None,
+            /*completed_at_ms*/ 0,
+        ),
     ));
     let channel = app.thread_event_channels.remove(&thread_id).unwrap();
     let details = app.agents_overview_details(
@@ -1040,16 +1239,18 @@ async fn agents_overview_reasoning_uses_existing_events_and_expires_with_attachm
 }
 
 #[tokio::test]
-async fn worktrees_overview_grouping_requires_feature() {
-    let mut app = make_test_app().await;
+async fn worktrees_overview_groups_by_project_or_directory() {
+    let mut app = make_test_app_with_chat().await;
     let root = tempfile::tempdir().unwrap();
     let primary = root.path().join("primary");
     let linked = root.path().join("linked");
-    let linked_subdir = linked.join("subdir/child");
+    let primary_subdir = primary.join("shared/child");
+    let linked_subdir = linked.join("shared/child");
     let nested = primary.join("subdir");
     let nested_child = nested.join("child");
     let admin = primary.join(".git/worktrees/linked");
     std::fs::create_dir_all(&admin).unwrap();
+    std::fs::create_dir_all(&primary_subdir).unwrap();
     std::fs::create_dir_all(&linked_subdir).unwrap();
     std::fs::create_dir_all(nested.join(".git")).unwrap();
     std::fs::create_dir_all(&nested_child).unwrap();
@@ -1111,6 +1312,53 @@ async fn worktrees_overview_grouping_requires_feature() {
             });
         }
     }
+    let project_grouping = project_grouping.replace('\\', "/");
+    app.agents_overview.view_state.lock().unwrap().grouping = AgentsOverviewGrouping::Directory;
+    let directory_popup = render_bottom_popup(&app.chat_widget, width);
+    for (heading, _) in &directory_headings[..2] {
+        assert!(
+            directory_popup.contains(&format!("{heading}  2")),
+            "{directory_popup}"
+        );
+    }
+    let mut directory_grouping = directory_popup
+        .lines()
+        .map(|line| line.split('│').next().unwrap_or(line).trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for (heading, stable) in directory_headings.iter().rev() {
+        directory_grouping = directory_grouping.replace(heading, stable);
+    }
+    let directory_grouping = directory_grouping.replace('\\', "/");
+    insta::with_settings!({snapshot_path => "../snapshots"}, {
+        insta::assert_snapshot!(
+            "agents_overview_worktree_grouping",
+            normalize_agent_center_snapshot(project_grouping)
+        );
+        insta::assert_snapshot!(
+            "agents_overview_directory_grouping",
+            normalize_agent_center_snapshot(directory_grouping)
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn overview_directory_group_keys_normalize_aliases() {
+    use super::super::agents_overview_view::directory_group_key;
+
+    let root = tempfile::tempdir().unwrap();
+    let checkout = root.path().join("checkout");
+    let alias = root.path().join("alias");
+    std::fs::create_dir(&checkout).unwrap();
+    std::os::unix::fs::symlink(&checkout, &alias).unwrap();
+
+    assert_eq!(
+        directory_group_key(&checkout, /*worktrees_enabled*/ true),
+        directory_group_key(&alias, /*worktrees_enabled*/ true),
+    );
+    let worktrees_enabled = false;
+    assert_eq!(directory_group_key(&alias, worktrees_enabled), alias);
 }
 
 #[tokio::test]
@@ -1172,14 +1420,11 @@ async fn overview_model_grouping_shows_details_and_preserves_selection() {
 
 #[tokio::test]
 async fn shared_overview_shows_only_root_sessions() {
-    assert_eq!(
-        AgentsOverviewGroup::for_status(&ThreadStatus::SystemError),
-        AgentsOverviewGroup::NeedsYou
-    );
     let mut app = make_test_app().await;
     let first_root = ThreadId::from_string("00000000-0000-0000-0000-000000000101").unwrap();
     let unloaded_root = ThreadId::from_string("00000000-0000-0000-0000-000000000102").unwrap();
     let [child, second_root, side_thread] = std::array::from_fn(|_| ThreadId::new());
+    attach_thread(&mut app, first_root);
     app.primary_thread_id = Some(first_root);
 
     let mut threads = vec![
@@ -1220,6 +1465,20 @@ async fn shared_overview_shows_only_root_sessions() {
     );
     side.ephemeral = true;
     threads.push(side);
+    let mut attached = overview_thread(
+        ThreadId::new(),
+        /*parent_thread_id*/ None,
+        "Saved side chat",
+        ThreadStatus::Idle,
+    );
+    attached.attached_to_thread_id = Some(first_root.to_string());
+    threads.push(attached);
+    let default_model = app
+        .model_catalog
+        .models
+        .first()
+        .expect("test model catalog");
+    threads[0].model = Some(default_model.model.clone());
     let view = app.agents_overview_view(threads, /*selected_thread_id*/ None);
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1328,66 +1587,6 @@ async fn shared_overview_shows_only_root_sessions() {
     assert!(app.last_rendered_history_tail.is_some());
 }
 
-#[cfg(any(unix, windows))]
-#[tokio::test]
-async fn embedded_sessions_offer_to_start_a_background_server_without_migrating() {
-    let mut app = make_test_app().await;
-    let app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
-        .await
-        .expect("embedded app server");
-
-    app.open_agents_overview(&app_server);
-
-    insta::with_settings!({snapshot_path => "../snapshots"}, {
-        insta::assert_snapshot!(
-            "agents_overview_embedded",
-            render_bottom_popup(&app.chat_widget, /*width*/ 96)
-        );
-    });
-    app_server.shutdown().await.expect("shutdown app server");
-}
-
-#[cfg(any(unix, windows))]
-#[tokio::test]
-async fn daemon_start_result_snapshots() -> Result<()> {
-    let (mut app, mut app_event_rx, _op_rx) =
-        crate::app::tests::make_test_app_with_channels().await;
-    let mut app_server =
-        crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
-    let mut tui = crate::tui::test_support::make_test_tui()?;
-
-    for (name, result) in [
-        ("agents_daemon_started", Ok(())),
-        (
-            "agents_daemon_start_failed",
-            Err("The host does not allow detached processes".to_string()),
-        ),
-    ] {
-        app.handle_event(
-            &mut tui,
-            &mut app_server,
-            AppEvent::AgentsDaemonStarted { result },
-        )
-        .await?;
-        let cell = match app_event_rx.try_recv()? {
-            AppEvent::InsertHistoryCell(cell) => cell,
-            other => panic!("expected daemon result history, got {other:?}"),
-        };
-        let rendered = cell
-            .display_lines(/*width*/ 80)
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
-        insta::with_settings!({snapshot_path => "../snapshots"}, {
-            insta::assert_snapshot!(name, rendered);
-        });
-    }
-
-    app_server.shutdown().await?;
-    Ok(())
-}
-
 #[tokio::test]
 async fn filtered_dashboard_actions_use_configured_shortcuts() {
     let mut app = make_test_app().await;
@@ -1441,6 +1640,10 @@ async fn filtered_dashboard_actions_use_configured_shortcuts() {
 
     view.handle_key_event(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE));
     assert!(view.handle_paste("Second task".to_string()));
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(AppEvent::SearchAgentsOverview(..))
+    ));
     view.handle_key_event(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE));
     assert!(matches!(
         event_rx.try_recv(),
@@ -1643,10 +1846,15 @@ async fn root_switch_preserves_idle_root_with_running_subagent() -> Result<()> {
     );
     app.handle_app_server_event(
         &app_server,
-        AppServerEvent::ServerRequest(Box::new(ServerRequest::CurrentTimeRead {
+        AppServerEvent::ServerRequest(Box::new(ServerRequest::DynamicToolCall {
             request_id: RequestId::Integer(99),
-            params: CurrentTimeReadParams {
+            params: DynamicToolCallParams {
                 thread_id: idle_child_id.to_string(),
+                turn_id: "turn".into(),
+                call_id: "call".into(),
+                namespace: None,
+                tool: "test".into(),
+                arguments: serde_json::Value::Null,
             },
         })),
     )
@@ -1751,23 +1959,27 @@ async fn overview_selection_applies_user_permissions_only_to_unloaded_threads() 
                 Some(codex_protocol::config_types::SandboxMode::WorkspaceWrite);
             app.harness_overrides.approval_policy =
                 Some(codex_protocol::protocol::AskForApproval::Never);
+            app.runtime_approvals_reviewer_override = Some(app.config.approvals_reviewer);
             app.runtime_permission_profile_override =
                 Some(RuntimePermissionProfileOverride::from_config(&app.config));
             app.runtime_approval_policy_override = Some(RuntimeApprovalPolicyOverride::Explicit(
                 AskForApproval::UnlessTrusted,
             ));
         }
-        app.select_agents_overview_thread(&mut tui, &mut app_server, thread_id)
-            .await?;
-        let observed = app_server
-            .resume_thread(
-                &app.local_settings,
-                app.config.clone(),
-                thread_id,
-                crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
-            )
-            .await?
-            .session;
+        Box::pin(app.select_agents_overview_thread(&mut tui, &mut app_server, thread_id)).await?;
+        assert_eq!(
+            app.runtime_approvals_reviewer_override,
+            (thread_id == thread_ids[2] || thread_id == thread_ids[3])
+                .then_some(ApprovalsReviewer::User)
+        );
+        let observed = Box::pin(app_server.resume_thread(
+            &app.local_settings,
+            app.config.clone(),
+            thread_id,
+            crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
+        ))
+        .await?
+        .session;
         assert_eq!(
             (
                 app.primary_thread_id,
@@ -1789,8 +2001,9 @@ async fn overview_selection_applies_user_permissions_only_to_unloaded_threads() 
         "allowed_approvals_reviewers = [\"auto_review\"]\n",
     )?;
     app.loader_overrides.system_requirements_path = Some(requirements.to_path_buf());
-    app.select_agents_overview_thread(&mut tui, &mut app_server, thread_ids[4])
-        .await?;
+    let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    Box::pin(app.select_agents_overview_thread(&mut tui, &mut app_server, thread_ids[4])).await?;
     assert_eq!(
         (
             app.primary_thread_id,
@@ -1803,6 +2016,61 @@ async fn overview_selection_applies_user_permissions_only_to_unloaded_threads() 
             Some(thread_ids[3]),
             codex_app_server_protocol::ThreadStatus::NotLoaded
         ),
+    );
+    let mut rendered =
+        crate::chatwidget::tests::helpers::render_bottom_popup(&app.chat_widget, /*width*/ 96);
+    let start = rendered.find("(set by ").expect("requirement source");
+    let end = start + rendered[start..].find(')').expect("source end") + 1;
+    rendered.replace_range(start..end, "(set by <requirements>)");
+    insta::with_settings!({snapshot_path => "../snapshots"}, {
+        insta::assert_snapshot!("agents_overview_reviewer_conflict", rendered);
+    });
+    // The picker must also abort when a session-only choice violates destination policy.
+    std::fs::write(&requirements, "allowed_approval_policies = [\"never\"]\n")?;
+    app.harness_overrides.approval_policy = Some(codex_protocol::protocol::AskForApproval::Never);
+    let backend_id = app_server.backend_id();
+    Box::pin(app.resume_target_session(
+        &mut tui,
+        &mut app_server,
+        SessionTarget {
+            backend_id,
+            path: None,
+            thread_id: thread_ids[4],
+            cwd: None,
+            history_mode: None,
+        },
+    ))
+    .await?;
+    assert_eq!(app.primary_thread_id, Some(thread_ids[3]));
+    assert_eq!(
+        app_server
+            .thread_read(thread_ids[4], /*include_turns*/ false)
+            .await?
+            .status,
+        codex_app_server_protocol::ThreadStatus::NotLoaded,
+    );
+
+    app.loader_overrides.system_requirements_path = None;
+    app.runtime_permission_profile_override = None;
+    Box::pin(app.handle_event(
+        &mut tui,
+        &mut app_server,
+        AppEvent::UpdateApprovalsReviewer(ApprovalsReviewer::AutoReview),
+    ))
+    .await?;
+    app.select_agents_overview_thread(&mut tui, &mut app_server, thread_ids[4])
+        .await?;
+    let resumed = app_server
+        .resume_thread(
+            &app.local_settings,
+            app.config.clone(),
+            thread_ids[4],
+            crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
+        )
+        .await?;
+    assert_eq!(
+        resumed.session.approvals_reviewer,
+        ApprovalsReviewer::AutoReview
     );
     app_server.shutdown().await?;
     Ok(())
@@ -2115,11 +2383,13 @@ async fn resuming_active_session_closes_command_center() -> Result<()> {
     app.chat_widget.show_bottom_pane_view(Box::new(view));
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    let backend_id = server.backend_id();
     assert!(matches!(
         app.apply_resume_picker_selection(
             &mut tui,
             &mut server,
             SessionSelection::Resume(SessionTarget {
+                backend_id,
                 path: None,
                 thread_id,
                 cwd: None,
@@ -2154,13 +2424,101 @@ async fn resume_failure_keeps_command_center_available() {
 }
 
 #[tokio::test]
-async fn resume_picker_round_trip_preserves_each_threads_input() -> Result<()> {
-    let mut app = make_test_app().await;
+async fn resume_round_trip_preserves_input_and_dispatches_idle_queue() -> Result<()> {
+    check_resume_round_trip(ResumeRoundTrip::CompleteWhileAway).await
+}
+
+#[tokio::test]
+async fn resume_round_trip_drains_buffered_completion_without_sending_on_other_thread() -> Result<()>
+{
+    check_resume_round_trip(ResumeRoundTrip::BufferCompletion).await
+}
+
+#[tokio::test]
+async fn resume_round_trip_keeps_buffered_esc_retry_on_original_thread() -> Result<()> {
+    check_resume_round_trip(ResumeRoundTrip::BufferInterruption).await
+}
+
+#[derive(PartialEq, Eq)]
+enum ResumeRoundTrip {
+    CompleteWhileAway,
+    BufferCompletion,
+    BufferInterruption,
+}
+
+async fn check_resume_round_trip(round_trip: ResumeRoundTrip) -> Result<()> {
+    use codex_app_server_protocol::RequestId;
+    use codex_app_server_protocol::TurnStartParams;
+    use codex_app_server_protocol::TurnStartResponse;
+    use codex_app_server_protocol::TurnStatus;
+    use codex_model_provider_info::ModelProviderInfo;
+    use core_test_support::responses;
+    use core_test_support::streaming_sse::StreamingSseChunk;
+    use core_test_support::streaming_sse::start_streaming_sse_server;
+
+    async fn wait_for_turn_status(
+        server: &mut AppServerSession,
+        outgoing: ThreadId,
+        status: TurnStatus,
+    ) -> Result<codex_app_server_protocol::Turn> {
+        tokio::time::timeout(Duration::from_secs(/*secs*/ 5), async {
+            loop {
+                let thread = server.thread_read(outgoing, /*include_turns*/ true).await?;
+                if let Some(turn) = thread.turns.into_iter().last()
+                    && turn.status == status
+                {
+                    break Ok::<_, color_eyre::eyre::Report>(turn);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?
+    }
+
+    let interrupted = round_trip == ResumeRoundTrip::BufferInterruption;
+    let requests_before_return = if interrupted { 1 } else { 2 };
+    let steer_text = "Steer for the first task";
+    let (release, gate) = tokio::sync::oneshot::channel();
+    let (responses_server, _completions) = start_streaming_sse_server(vec![
+        vec![
+            StreamingSseChunk {
+                gate: None,
+                body: responses::sse(vec![responses::ev_response_created("running")]),
+            },
+            StreamingSseChunk {
+                gate: Some(gate),
+                body: responses::sse(vec![responses::ev_completed("running")]),
+            },
+        ],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: responses::sse(vec![responses::ev_completed("steer")]),
+        }],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: responses::sse(vec![responses::ev_completed("follow-up")]),
+        }],
+    ])
+    .await;
+    let (mut app, mut events, _ops) = Box::pin(make_test_app_with_channels()).await;
     trust_fixture_folders(&mut app);
-    std::fs::write(
-        app.config.codex_home.join("config.toml"),
-        "[tui]\nresume_cwd = \"current\"\n",
-    )?;
+    app.config.model = Some("gpt-5.2".into());
+    app.config.model_provider_id = "resume-test".into();
+    app.config.model_provider = ModelProviderInfo {
+        name: "Resume test".into(),
+        base_url: Some(format!("{}/v1", responses_server.uri())),
+        request_max_retries: Some(0),
+        stream_max_retries: Some(0),
+        ..ModelProviderInfo::default()
+    };
+    app_test_support::MockResponsesConfig::new(responses_server.uri())
+        .with_model("gpt-5.2")
+        .with_model_provider("resume-test")
+        .with_provider_name("Resume test")
+        .with_extra_config("[tui]\nresume_cwd = \"current\"")
+        .write(app.config.codex_home.as_path())?;
+    let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    let backend_id = server.backend_id();
     let mut targets = Vec::new();
     for (timestamp, name) in [
         ("2025-01-05T12-00-00", "First task"),
@@ -2176,6 +2534,7 @@ async fn resume_picker_round_trip_preserves_each_threads_input() -> Result<()> {
         )
         .expect("saved rollout");
         targets.push(SessionTarget {
+            backend_id,
             path: Some(app_test_support::rollout_path(
                 app.config.codex_home.as_path(),
                 timestamp,
@@ -2187,16 +2546,291 @@ async fn resume_picker_round_trip_preserves_each_threads_input() -> Result<()> {
         });
     }
     let mut tui = crate::tui::test_support::make_test_tui()?;
+    let mut expected_states = Vec::new();
+    let mut release = Some(release);
+    for target in targets.iter().chain(&targets) {
+        if round_trip != ResumeRoundTrip::CompleteWhileAway
+            && expected_states.len() == targets.len()
+            && target.thread_id == targets[1].thread_id
+        {
+            let outgoing = targets[0].thread_id;
+            assert_eq!(app.chat_widget.thread_id(), Some(outgoing));
+            assert_eq!(
+                app.chat_widget
+                    .capture_thread_input_state()
+                    .unwrap()
+                    .pending_steers
+                    .len(),
+                1
+            );
+            tokio::time::timeout(
+                Duration::from_secs(/*secs*/ 5),
+                responses_server.wait_for_request_count(requests_before_return),
+            )
+            .await?;
+            assert_eq!(
+                responses_server.requests().await.len(),
+                requests_before_return
+            );
+            let status = if interrupted {
+                let turn_id = app
+                    .chat_widget
+                    .last_turn_id()
+                    .expect("running turn")
+                    .to_owned();
+                app.chat_widget
+                    .handle_key_event(KeyEvent::from(KeyCode::Esc));
+                assert!(
+                    std::iter::from_fn(|| events.try_recv().ok())
+                        .any(|event| matches!(event, AppEvent::CodexOp(AppCommand::Interrupt)))
+                );
+                server.turn_interrupt(outgoing, turn_id).await?;
+                TurnStatus::Interrupted
+            } else {
+                release.take().unwrap().send(()).unwrap();
+                TurnStatus::Completed
+            };
+            let turn = wait_for_turn_status(&mut server, outgoing, status).await?;
+            drop(release.take());
+            // Route the real completion to A's receiver, leaving it buffered across the switch.
+            app.enqueue_thread_notification(
+                outgoing,
+                ServerNotification::TurnCompleted(
+                    codex_app_server_protocol::TurnCompletedNotification {
+                        thread_id: outgoing.to_string(),
+                        turn,
+                    },
+                ),
+            )
+            .await?;
+            assert!(
+                app.active_thread_rx
+                    .as_ref()
+                    .is_some_and(|rx| !rx.is_empty())
+            );
+        }
+        let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+        app.chat_widget.show_bottom_pane_view(Box::new(view));
+        Box::pin(app.apply_resume_picker_selection(
+            &mut tui,
+            &mut server,
+            SessionSelection::Resume(target.clone()),
+        ))
+        .await?;
+        assert_eq!(app.chat_widget.thread_id(), Some(target.thread_id));
+        if expected_states.len() < targets.len() {
+            assert_eq!(app.chat_widget.composer_text_with_pending(), "");
+            assert!(app.chat_widget.queued_user_message_texts().is_empty());
+            let running_turn = if target.thread_id == targets[0].thread_id {
+                let response = server
+                    .request_handle()
+                    .request_typed::<TurnStartResponse>(ClientRequest::TurnStart {
+                        request_id: RequestId::String(Uuid::new_v4().to_string()),
+                        params: TurnStartParams {
+                            thread_id: target.thread_id.to_string(),
+                            input: vec![codex_app_server_protocol::UserInput::Text {
+                                text: "Keep working".into(),
+                                text_elements: Vec::new(),
+                            }],
+                            ..Default::default()
+                        },
+                    })
+                    .await?;
+                tokio::time::timeout(
+                    Duration::from_secs(/*secs*/ 5),
+                    responses_server.wait_for_request_count(/*count*/ 1),
+                )
+                .await?;
+                Some(response.turn)
+            } else {
+                None
+            };
+            app.chat_widget.handle_server_notification(
+                ServerNotification::TurnStarted(
+                    codex_app_server_protocol::TurnStartedNotification {
+                        thread_id: target.thread_id.to_string(),
+                        turn: running_turn.unwrap_or_else(|| codex_app_server_protocol::Turn {
+                            id: "turn-with-follow-up".to_string(),
+                            root_turn_id: None,
+                            items_view: codex_app_server_protocol::TurnItemsView::Full,
+                            items: Vec::new(),
+                            status: codex_app_server_protocol::TurnStatus::InProgress,
+                            error: None,
+                            started_at: None,
+                            completed_at: None,
+                            duration_ms: None,
+                        }),
+                    },
+                ),
+                /*replay_kind*/ None,
+            );
+            let follow_up = format!("Follow-up for {}", target.thread_id);
+            app.chat_widget.apply_external_edit(follow_up.clone());
+            app.chat_widget
+                .handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+            assert_eq!(app.chat_widget.queued_user_message_texts(), vec![follow_up]);
+            app.chat_widget
+                .apply_external_edit(format!("Draft for {}", target.thread_id));
+            if target.thread_id != targets[0].thread_id {
+                let mut input_state = app.chat_widget.capture_thread_input_state().unwrap();
+                // Recovered follow-ups stay paused until the user explicitly submits them.
+                input_state.recovered_queue = true;
+                app.chat_widget.restore_thread_input_state(
+                    Some(input_state),
+                    crate::chatwidget::ThreadInputStateRestoreMode {
+                        preserve_in_flight_turn: false,
+                    },
+                );
+            }
+            expected_states.push(app.chat_widget.capture_thread_input_state());
+        } else {
+            let index = targets
+                .iter()
+                .position(|t| t.thread_id == target.thread_id)
+                .unwrap();
+            assert_eq!(
+                app.chat_widget.capture_thread_input_state(),
+                expected_states[index]
+            );
+            if target.thread_id == targets[0].thread_id {
+                app.chat_widget.apply_external_edit(steer_text.to_string());
+                app.chat_widget
+                    .handle_key_event(KeyEvent::from(KeyCode::Enter));
+                let steer_event = std::iter::from_fn(|| events.try_recv().ok())
+                    .find(|event| matches!(event, AppEvent::CodexOp(AppCommand::UserTurn { .. })))
+                    .expect("steer submission");
+                // Leave the steer uncommitted when exercising Esc's retry path.
+                if !interrupted {
+                    Box::pin(app.handle_event(&mut tui, &mut server, steer_event)).await?;
+                }
+                app.chat_widget
+                    .apply_external_edit(format!("Draft for {}", target.thread_id));
+            }
+        }
+    }
+    assert_eq!(app.chat_widget.thread_id(), Some(targets[1].thread_id));
+    if let Some(release) = release {
+        let outgoing = targets[0].thread_id;
+        assert_eq!(
+            app.agents_overview.input_states[&outgoing]
+                .pending_steers
+                .len(),
+            1
+        );
+        tokio::time::timeout(
+            Duration::from_secs(/*secs*/ 5),
+            responses_server.wait_for_request_count(/*count*/ 2),
+        )
+        .await?;
+        // A is unsubscribed now. Leave the completion out of the TUI event queue so
+        // resuming must discover it from the server's thread history.
+        release.send(()).unwrap();
+        wait_for_turn_status(&mut server, outgoing, TurnStatus::Completed).await?;
+    }
+    assert_eq!(
+        responses_server.requests().await.len(),
+        requests_before_return
+    );
+    while let Ok(event) = events.try_recv() {
+        assert!(!matches!(
+            event,
+            AppEvent::CodexOp(AppCommand::UserTurn { .. })
+        ));
+    }
+    Box::pin(app.handle_event(
+        &mut tui,
+        &mut server,
+        AppEvent::ResumeSessionByIdOrName(targets[0].thread_id.to_string()),
+    ))
+    .await?;
+    assert_eq!(app.active_thread_id, Some(targets[0].thread_id));
+    let mut submitted = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let AppEvent::CodexOp(AppCommand::UserTurn { ref items, .. }) = event {
+            submitted.push(items.clone());
+            Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+        }
+    }
+    let follow_up = format!("Follow-up for {}", targets[0].thread_id);
+    let expected_text = if interrupted {
+        steer_text.to_string()
+    } else {
+        follow_up.clone()
+    };
+    assert_eq!(
+        submitted,
+        vec![vec![codex_app_server_protocol::UserInput::Text {
+            text: expected_text,
+            text_elements: Vec::new(),
+        }]]
+    );
+    tokio::time::timeout(
+        Duration::from_secs(/*secs*/ 5),
+        responses_server.wait_for_request_count(requests_before_return + 1),
+    )
+    .await?;
+    assert_eq!(
+        responses_server.requests().await.len(),
+        requests_before_return + 1
+    );
+    if interrupted {
+        assert_eq!(app.chat_widget.queued_user_message_texts(), [follow_up]);
+    }
+    assert_eq!(
+        app.chat_widget.composer_text_with_pending(),
+        format!("Draft for {}", targets[0].thread_id)
+    );
+    server.shutdown().await?;
+    responses_server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resume_picker_round_trip_preserves_each_threads_input() -> Result<()> {
+    let mut app = make_test_app().await;
+    trust_fixture_folders(&mut app);
+    std::fs::write(
+        app.config.codex_home.join("config.toml"),
+        "[tui]\nresume_cwd = \"current\"\n",
+    )?;
     let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    let backend_id = server.backend_id();
+    let mut targets = Vec::new();
+    for (timestamp, name) in [
+        ("2025-01-05T12-00-00", "First task"),
+        ("2025-01-05T13-00-00", "Second task"),
+    ] {
+        let id = app_test_support::create_fake_rollout(
+            app.config.codex_home.as_path(),
+            timestamp,
+            "2025-01-05T12:00:00Z",
+            name,
+            Some(&app.config.model_provider_id),
+            /*git_info*/ None,
+        )
+        .expect("saved rollout");
+        targets.push(SessionTarget {
+            backend_id,
+            path: Some(app_test_support::rollout_path(
+                app.config.codex_home.as_path(),
+                timestamp,
+                &id,
+            )),
+            thread_id: ThreadId::from_string(&id)?,
+            cwd: None,
+            history_mode: None,
+        });
+    }
+    let mut tui = crate::tui::test_support::make_test_tui()?;
     let mut expected_states = Vec::new();
     for target in targets.iter().chain(&targets) {
         let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
         app.chat_widget.show_bottom_pane_view(Box::new(view));
-        app.apply_resume_picker_selection(
+        Box::pin(app.apply_resume_picker_selection(
             &mut tui,
             &mut server,
             SessionSelection::Resume(target.clone()),
-        )
+        ))
         .await?;
         assert_eq!(app.chat_widget.thread_id(), Some(target.thread_id));
         if expected_states.len() < targets.len() {
@@ -2208,6 +2842,7 @@ async fn resume_picker_round_trip_preserves_each_threads_input() -> Result<()> {
                         thread_id: target.thread_id.to_string(),
                         turn: codex_app_server_protocol::Turn {
                             id: "turn-with-follow-up".to_string(),
+                            root_turn_id: None,
                             items_view: codex_app_server_protocol::TurnItemsView::Full,
                             items: Vec::new(),
                             status: codex_app_server_protocol::TurnStatus::InProgress,
@@ -2276,17 +2911,19 @@ async fn command_center_handles_resume_failure_and_success() -> Result<()> {
     app.chat_widget.show_bottom_pane_view(Box::new(view));
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    let backend_id = server.backend_id();
     assert!(matches!(
-        app.apply_resume_picker_selection(
+        Box::pin(app.apply_resume_picker_selection(
             &mut tui,
             &mut server,
             SessionSelection::Resume(SessionTarget {
+                backend_id,
                 path: None,
                 thread_id: ThreadId::new(),
                 cwd: None,
                 history_mode: None,
             })
-        )
+        ))
         .await?,
         AppRunControl::Continue
     ));
@@ -2301,16 +2938,17 @@ async fn command_center_handles_resume_failure_and_success() -> Result<()> {
     app.chat_widget
         .handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(matches!(
-        app.apply_resume_picker_selection(
+        Box::pin(app.apply_resume_picker_selection(
             &mut tui,
             &mut server,
             SessionSelection::Resume(SessionTarget {
+                backend_id,
                 path: Some(path),
                 thread_id,
                 cwd: None,
                 history_mode: None,
             })
-        )
+        ))
         .await?,
         AppRunControl::Continue
     ));
@@ -2646,11 +3284,11 @@ async fn command_center_new_actions_use_selection_and_leave_metadata_text_alone(
     for _ in 0..3 {
         view.handle_key_event(KeyCode::Char('n').into());
         assert!(
-            matches!(rx.try_recv(), Ok(AppEvent::NewAgentsOverviewSession { cwd: Some(cwd) }) if cwd == target.cwd)
+            matches!(rx.try_recv(), Ok(AppEvent::NewAgentsOverviewSession { cwd: Some(cwd), .. }) if cwd == target.cwd)
         );
         view.handle_key_event(KeyCode::Char('w').into());
         assert!(
-            matches!(rx.try_recv(), Ok(AppEvent::NewAgentsOverviewWorktree { cwd: Some(cwd) }) if cwd == target.cwd)
+            matches!(rx.try_recv(), Ok(AppEvent::NewAgentsOverviewWorktree { cwd: Some(cwd), .. }) if cwd == target.cwd)
         );
         view.handle_key_event(KeyCode::Char('g').into());
     }
@@ -2667,7 +3305,7 @@ async fn command_center_new_actions_use_selection_and_leave_metadata_text_alone(
     empty.handle_key_event(KeyCode::Char('n').into());
     assert!(matches!(
         rx.try_recv(),
-        Ok(AppEvent::NewAgentsOverviewSession { cwd: None })
+        Ok(AppEvent::NewAgentsOverviewSession { cwd: None, .. })
     ));
     app.config.features.disable(Feature::Worktrees).unwrap();
     let mut disabled = app.agents_overview_view(vec![target], Some(id));

@@ -4,6 +4,7 @@ use crate::app_event::HistoryLookupResponse;
 use codex_app_server_protocol::ImageReference;
 use codex_app_server_protocol::NetworkAccess;
 use codex_app_server_protocol::SandboxPolicy;
+use codex_app_server_protocol::ThreadItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::permissions::FileSystemAccessMode;
@@ -16,10 +17,12 @@ use pretty_assertions::assert_eq;
 #[tokio::test]
 async fn resumed_initial_messages_render_history() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_feature_enabled(Feature::CliDaybreak, /*enabled*/ false);
 
     let thread_id = ThreadId::new();
     let rollout_file = NamedTempFile::new().unwrap();
     let configured = crate::session_state::ThreadSessionState {
+        read_only_history: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
@@ -37,13 +40,65 @@ async fn resumed_initial_messages_render_history() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
     };
 
+    // The first attachment can change project credentials even with an in-process server.
+    chat.status_account_display = Some(StatusAccountDisplay::ApiKey);
+    let mut model = crate::test_support::TEST_MODEL_PRESETS[0].clone();
+    model.available_access_programs = Some(codex_protocol::openai_models::ModelAccessPrograms {
+        cyber: vec![codex_protocol::turn_input::CyberAccessProgram::Standard],
+    });
+    chat.model_catalog = Arc::new(ModelCatalog::new(vec![model]));
+    chat.handle_thread_session(configured.clone());
+    assert!(
+        chat.model_catalog
+            .models
+            .iter()
+            .all(|model| model.available_access_programs.is_none()),
+        "access from the launch directory must not carry over to the attached project"
+    );
+    assert!(!chat.daybreak_enabled);
+    insta::assert_snapshot!(
+        drain_insert_history(&mut rx).into_iter().flatten()
+            .map(|line| line.to_string())
+            .filter(|line| line.contains("Daybreak"))
+            .collect::<Vec<_>>().join("\n"),
+        @""
+    );
+
+    // A saved On preference cannot bypass the API-key gate.
+    chat.status_account_display = Some(StatusAccountDisplay::ApiKey);
+    chat.set_feature_enabled(Feature::ApiKeyCyberAccessPrograms, /*enabled*/ false);
+    chat.set_feature_enabled(Feature::CliDaybreak, /*enabled*/ true);
+    configured.thread_id = ThreadId::new();
+    chat.handle_thread_session(configured.clone());
+    assert!(!chat.daybreak_enabled);
+    insta::assert_snapshot!(
+        drain_insert_history(&mut rx).into_iter().flatten()
+            .map(|line| line.to_string())
+            .filter(|line| line.contains("Daybreak"))
+            .collect::<Vec<_>>().join("\n"),
+        @""
+    );
+
+    // Session hydration can precede the account update on ChatGPT sign-in.
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_feature_enabled(Feature::CliDaybreak, /*enabled*/ true);
+    chat.show_welcome_banner = false;
+    chat.local_settings.tui.show_tooltips = false;
+    chat.config.cwd = configured.cwd.clone();
+    chat.transcript.active_cell = Some(ChatWidget::placeholder_session_header_cell(&chat.config));
+    configured.thread_id = ThreadId::new();
     chat.handle_thread_session(configured);
+    assert!(chat.daybreak_enabled);
+    chat.update_account_state(
+        /*status_account_display*/ None, /*plan_type*/ None,
+        /*has_chatgpt_account*/ true, /*has_codex_backend_auth*/ true,
+    );
+    assert!(chat.daybreak_enabled);
     replay_user_message_text(
         &mut chat,
         "user-1",
@@ -57,26 +112,18 @@ async fn resumed_initial_messages_render_history() {
         ReplayKind::ResumeInitialMessages,
     );
 
-    let cells = drain_insert_history(&mut rx);
-    let mut merged_lines = Vec::new();
-    for lines in cells {
-        let text = lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.clone())
-            .collect::<String>();
-        merged_lines.push(text);
-    }
-
-    let text_blob = merged_lines.join("\n");
-    assert!(
-        text_blob.contains("hello from user"),
-        "expected replayed user message",
-    );
-    assert!(
-        text_blob.contains("assistant reply"),
-        "expected replayed agent message",
-    );
+    let history = drain_insert_history(&mut rx)
+        .iter()
+        .flatten()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace(CODEX_CLI_VERSION, "<VERSION>")
+        .replace(
+            &test_path_display("/home/user/project"),
+            "/home/user/project",
+        );
+    insta::assert_snapshot!("resumed_daybreak_banner", history);
 }
 
 #[tokio::test]
@@ -85,14 +132,16 @@ async fn replayed_failed_turns_preserve_overload_warnings_between_retries() {
     let prompt = "The workspace also looks super confusing with its separator.";
     let error_message = "Selected model is at capacity. Please try a different model.";
     let failed_turn = |turn_id: &str, item_id: &str| AppServerTurn {
-        items: vec![AppServerThreadItem::UserMessage {
-            id: item_id.to_string(),
-            client_id: None,
-            content: vec![AppServerUserInput::Text {
-                text: prompt.to_string(),
-                text_elements: Vec::new(),
-            }],
-        }],
+        items: vec![ThreadItem::untimed(
+            AppServerThreadItemPayload::UserMessage {
+                id: item_id.to_string(),
+                client_id: None,
+                content: vec![AppServerUserInput::Text {
+                    text: prompt.to_string(),
+                    text_elements: Vec::new(),
+                }],
+            },
+        )],
         ..app_server_turn(
             turn_id,
             AppServerTurnStatus::Failed,
@@ -135,6 +184,7 @@ async fn restored_conversation_ultra_remains_selected_after_switching_to_plan() 
     chat.set_plan_mode_reasoning_effort(Some(ReasoningEffortConfig::High));
 
     chat.handle_thread_session(crate::session_state::ThreadSessionState {
+        read_only_history: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -152,7 +202,6 @@ async fn restored_conversation_ultra_remains_selected_after_switching_to_plan() 
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::Ultra),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -261,7 +310,7 @@ async fn replayed_review_prompt_does_not_seed_composer_history() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.replay_thread_item(
-        AppServerThreadItem::EnteredReviewMode {
+        AppServerThreadItemPayload::EnteredReviewMode {
             id: "review-start".to_string(),
             review: "changes against main".to_string(),
         },
@@ -284,26 +333,47 @@ async fn replayed_review_prompt_does_not_seed_composer_history() {
 async fn replayed_delegated_tool_output_is_attributed_without_seeding_composer_history() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
 
-    let item = AppServerThreadItem::FunctionCallOutput {
+    let item = AppServerThreadItemPayload::FunctionCallOutput {
         id: "delegation-1".to_string(),
         name: "send_message_to_thread".to_string(),
         namespace: Some("codex_tui".to_string()),
         output: FunctionCallOutputBody::Text(
-            "<codex_delegation>\n  <source_thread_id>source-task</source_thread_id>\n  <input>Follow &lt;up&gt; &amp; report</input>\n</codex_delegation>".to_string(),
+            concat!(
+                "<codex_delegation>\n  <source_thread_id>source-task</source_thread_id>\n  <input>",
+                "**Follow up** on [the PR](https://example.com/pr).\n\n",
+                "- Review `&lt;up&gt; &amp; report`.\n",
+                "- Share the result.",
+                "</input>\n</codex_delegation>",
+            )
+            .to_string(),
         ),
     };
+
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            item.clone(),
+            /*started_at_ms*/ None,
+            /*completed_at_ms*/ 0,
+        )),
+        /*replay_kind*/ None,
+    );
+    let live = drain_insert_history(&mut rx);
+
     chat.replay_thread_item(
         item.clone(),
         "turn-1".to_string(),
         ReplayKind::ResumeInitialMessages,
     );
-
     let cells = drain_insert_history(&mut rx);
     assert_eq!(cells.len(), 1);
+    assert_eq!(live, cells);
     assert_chatwidget_snapshot!(
         "replayed_delegated_tool_output",
         lines_to_single_string(&cells[0])
     );
+
     let projected = crate::thread_transcript::thread_items_to_transcript_cells(
         /*thread_id*/ None,
         &chat.config.cwd,
@@ -314,10 +384,23 @@ async fn replayed_delegated_tool_output_is_attributed_without_seeding_composer_h
     assert_eq!(
         projected
             .iter()
-            .map(|cell| lines_to_single_string(&cell.transcript_lines(/*width*/ 80)))
+            .map(|cell| cell.transcript_lines(/*width*/ 80))
             .collect::<Vec<_>>(),
-        vec![lines_to_single_string(&cells[0])]
+        cells,
     );
+    assert_eq!(
+        projected[0]
+            .transcript_hyperlink_lines(/*width*/ 80)
+            .iter()
+            .flat_map(|line| &line.hyperlinks)
+            .map(|link| link.destination.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["https://example.com/pr"]),
+    );
+    let narrow = projected[0].transcript_hyperlink_lines(/*width*/ 32);
+    let first = narrow[0].source.as_ref().unwrap();
+    let continuation = narrow[1].source.as_ref().unwrap();
+    assert!(std::sync::Arc::ptr_eq(&first.text, &continuation.text));
 
     chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
     assert_eq!(chat.bottom_pane.composer_text(), "");
@@ -328,7 +411,7 @@ async fn replayed_nested_review_prompts_do_not_render_or_seed_composer_history()
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     let review_hint = "current changes";
     let review_prompt = "Review the current code changes (staged, unstaged, and untracked files).";
-    let user_message = |id: &str, text: &str| AppServerThreadItem::UserMessage {
+    let user_message = |id: &str, text: &str| AppServerThreadItemPayload::UserMessage {
         id: id.to_string(),
         client_id: None,
         content: vec![AppServerUserInput::Text {
@@ -338,14 +421,14 @@ async fn replayed_nested_review_prompts_do_not_render_or_seed_composer_history()
     };
     let review_marker = |turn_id: &str| AppServerTurn {
         items: vec![
-            AppServerThreadItem::EnteredReviewMode {
+            ThreadItem::untimed(AppServerThreadItemPayload::EnteredReviewMode {
                 id: format!("{turn_id}-start"),
                 review: review_hint.to_string(),
-            },
-            AppServerThreadItem::ExitedReviewMode {
+            }),
+            ThreadItem::untimed(AppServerThreadItemPayload::ExitedReviewMode {
                 id: format!("{turn_id}-end"),
                 review: "review complete".to_string(),
-            },
+            }),
         ],
         ..app_server_turn(
             turn_id,
@@ -360,8 +443,8 @@ async fn replayed_nested_review_prompts_do_not_render_or_seed_composer_history()
             review_marker("turn-review-before-steer"),
             AppServerTurn {
                 items: vec![
-                    user_message("interrupted-prompt", review_hint),
-                    user_message("interrupted-steer", review_hint),
+                    ThreadItem::untimed(user_message("interrupted-prompt", review_hint)),
+                    ThreadItem::untimed(user_message("interrupted-steer", review_hint)),
                 ],
                 completed_at: Some(1),
                 ..app_server_turn(
@@ -374,16 +457,17 @@ async fn replayed_nested_review_prompts_do_not_render_or_seed_composer_history()
             review_marker("turn-review"),
             AppServerTurn {
                 items: vec![
-                    user_message("review-prompt-1", review_prompt),
-                    user_message("review-prompt-2", review_prompt),
-                    AppServerThreadItem::AgentMessage {
+                    ThreadItem::untimed(user_message("review-prompt-1", review_prompt)),
+                    ThreadItem::untimed(user_message("review-prompt-2", review_prompt)),
+                    ThreadItem::untimed(AppServerThreadItemPayload::AgentMessage {
+                        moderation: None,
                         id: "review-result".to_string(),
                         text: "review result is retained".to_string(),
                         phase: Some(MessagePhase::FinalAnswer),
                         memory_citation: None,
                         delivery: None,
                         questions: None,
-                    },
+                    }),
                 ],
                 ..app_server_turn(
                     "turn-review-child",
@@ -423,6 +507,7 @@ async fn replayed_user_message_preserves_text_elements_and_local_images() {
     let thread_id = ThreadId::new();
     let rollout_file = NamedTempFile::new().unwrap();
     let configured = crate::session_state::ThreadSessionState {
+        read_only_history: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
@@ -440,7 +525,6 @@ async fn replayed_user_message_preserves_text_elements_and_local_images() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
@@ -496,6 +580,7 @@ async fn replayed_user_message_preserves_remote_image_urls() {
     let thread_id = ThreadId::new();
     let rollout_file = NamedTempFile::new().unwrap();
     let configured = crate::session_state::ThreadSessionState {
+        read_only_history: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
@@ -513,7 +598,6 @@ async fn replayed_user_message_preserves_remote_image_urls() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
@@ -561,7 +645,7 @@ async fn replayed_user_message_preserves_remote_image_urls() {
 
 #[tokio::test]
 async fn session_configured_syncs_widget_config_permissions_and_cwd() {
-    let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let (mut chat, _rx, mut ops) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.config
         .permissions
@@ -603,6 +687,7 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
         .expect("permission profile should project to legacy sandbox policy");
     let expected_sandbox = SandboxPolicy::from(expected_core_sandbox);
     let configured = crate::session_state::ThreadSessionState {
+        read_only_history: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -620,7 +705,6 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -639,6 +723,13 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
         expected_app_server_permission_profile
     );
     assert_eq!(&chat.config_ref().cwd, &expected_cwd);
+    while ops.try_recv().is_ok() {}
+    chat.handle_manage_skills_closed();
+    assert!(matches!(
+        ops.try_recv(),
+        Ok(AppCommand::ListSkills { cwds, force_reload: true })
+            if cwds == vec![expected_cwd.to_path_buf()]
+    ));
 
     let updated_profile = PermissionProfile::workspace_write();
     chat.set_permission_profile_from_session_snapshot(PermissionProfileSnapshot::legacy(
@@ -677,6 +768,7 @@ async fn session_configured_preserves_profile_workspace_roots() {
     let session_permission_profile = PermissionProfile::workspace_write()
         .materialize_project_roots_with_workspace_roots(&session_effective_workspace_roots);
     let configured = crate::session_state::ThreadSessionState {
+        read_only_history: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -694,7 +786,6 @@ async fn session_configured_preserves_profile_workspace_roots() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -725,6 +816,7 @@ async fn session_configured_external_sandbox_keeps_external_runtime_policy() {
         network_access: NetworkAccess::Restricted,
     };
     let configured = crate::session_state::ThreadSessionState {
+        read_only_history: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -742,7 +834,6 @@ async fn session_configured_external_sandbox_keeps_external_runtime_policy() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -767,6 +858,7 @@ async fn replayed_user_message_with_only_remote_images_renders_history_cell() {
     let thread_id = ThreadId::new();
     let rollout_file = NamedTempFile::new().unwrap();
     let configured = crate::session_state::ThreadSessionState {
+        read_only_history: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
@@ -784,7 +876,6 @@ async fn replayed_user_message_with_only_remote_images_renders_history_cell() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
@@ -828,6 +919,7 @@ async fn replayed_user_message_with_only_local_images_renders_history_cell() {
     let thread_id = ThreadId::new();
     let rollout_file = NamedTempFile::new().unwrap();
     let configured = crate::session_state::ThreadSessionState {
+        read_only_history: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
@@ -845,7 +937,6 @@ async fn replayed_user_message_with_only_local_images_renders_history_cell() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
@@ -947,7 +1038,8 @@ async fn prompt_edit_stops_streaming_without_submitting_queued_input() {
 
     let retained_turn = AppServerTurn {
         items: vec![
-            AppServerThreadItem::AgentMessage {
+            AppServerThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: "retained-response".to_string(),
                 text: "retained response".to_string(),
                 phase: Some(MessagePhase::FinalAnswer),
@@ -955,7 +1047,7 @@ async fn prompt_edit_stops_streaming_without_submitting_queued_input() {
                 delivery: None,
                 questions: None,
             },
-            AppServerThreadItem::UserMessage {
+            AppServerThreadItemPayload::UserMessage {
                 id: "voice-steer".to_string(),
                 client_id: None,
                 content: vec![UserInput::Text {
@@ -964,7 +1056,8 @@ async fn prompt_edit_stops_streaming_without_submitting_queued_input() {
                     text_elements: Vec::new(),
                 }],
             },
-            AppServerThreadItem::AgentMessage {
+            AppServerThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: "private-commentary".to_string(),
                 text: "hidden voice commentary".to_string(),
                 phase: Some(MessagePhase::Commentary),
@@ -972,7 +1065,10 @@ async fn prompt_edit_stops_streaming_without_submitting_queued_input() {
                 delivery: None,
                 questions: None,
             },
-        ],
+        ]
+        .into_iter()
+        .map(ThreadItem::untimed)
+        .collect(),
         ..app_server_turn(
             "retained-turn",
             AppServerTurnStatus::Completed,
@@ -1126,6 +1222,7 @@ async fn replayed_retryable_app_server_error_keeps_turn_running() {
             thread_id: "thread-1".to_string(),
             turn: AppServerTurn {
                 id: "turn-1".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: AppServerTurnStatus::InProgress,
@@ -1183,6 +1280,7 @@ async fn replayed_reasoning_item_preserves_summary_parts_and_hides_raw_reasoning
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.config.show_raw_agent_reasoning = false;
     chat.handle_thread_session(crate::session_state::ThreadSessionState {
+        read_only_history: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -1200,7 +1298,6 @@ async fn replayed_reasoning_item_preserves_summary_parts_and_hides_raw_reasoning
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -1208,7 +1305,7 @@ async fn replayed_reasoning_item_preserves_summary_parts_and_hides_raw_reasoning
     let _ = drain_insert_history(&mut rx);
 
     chat.replay_thread_item(
-        AppServerThreadItem::Reasoning {
+        AppServerThreadItemPayload::Reasoning {
             id: "reasoning-1".to_string(),
             summary: vec![
                 "**Plan**\n\ndone".to_string(),
@@ -1235,6 +1332,7 @@ async fn replayed_reasoning_item_shows_raw_reasoning_when_enabled() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.config.show_raw_agent_reasoning = true;
     chat.handle_thread_session(crate::session_state::ThreadSessionState {
+        read_only_history: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -1252,7 +1350,6 @@ async fn replayed_reasoning_item_shows_raw_reasoning_when_enabled() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -1260,7 +1357,7 @@ async fn replayed_reasoning_item_shows_raw_reasoning_when_enabled() {
     let _ = drain_insert_history(&mut rx);
 
     chat.replay_thread_item(
-        AppServerThreadItem::Reasoning {
+        AppServerThreadItemPayload::Reasoning {
             id: "reasoning-1".to_string(),
             summary: vec!["Summary only".to_string()],
             content: vec!["Raw reasoning".to_string()],
@@ -1283,7 +1380,8 @@ async fn replayed_mcp_tool_call_stays_active_until_completion() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let _ = drain_insert_history(&mut rx);
 
-    let mut item = AppServerThreadItem::McpToolCall {
+    let mut item = AppServerThreadItemPayload::McpToolCall {
+        environment_id: None,
         id: "mcp-1".to_string(),
         server: "copilot-bridge".to_string(),
         tool: "copilot".to_string(),
@@ -1309,7 +1407,7 @@ async fn replayed_mcp_tool_call_stays_active_until_completion() {
     assert!(active.contains("Calling"));
     assert!(!active.contains("MCP tool call completed without a result"));
 
-    if let AppServerThreadItem::McpToolCall { status, .. } = &mut item {
+    if let AppServerThreadItemPayload::McpToolCall { status, .. } = &mut item {
         *status = codex_app_server_protocol::McpToolCallStatus::Completed;
     }
     chat.on_mcp_tool_call_completed(item);
@@ -1328,11 +1426,8 @@ async fn failed_repl_mcp_tool_call_preserves_status_and_result() {
         let _ = drain_insert_history(&mut rx);
 
         chat.handle_server_notification(
-            ServerNotification::ItemCompleted(ItemCompletedNotification {
-                thread_id: "thread-1".to_string(),
-                turn_id: "turn-1".to_string(),
-                completed_at_ms: 0,
-                item: AppServerThreadItem::McpToolCall {
+            ServerNotification::ItemCompleted(ItemCompletedNotification::new("thread-1".to_string(), "turn-1".to_string(), AppServerThreadItemPayload::McpToolCall {
+                    environment_id: None,
                     id: "mcp-failed".to_string(),
                     server: server.to_string(),
                     tool: "js".to_string(),
@@ -1354,8 +1449,7 @@ async fn failed_repl_mcp_tool_call_preserves_status_and_result() {
                     })),
                     error: None,
                     duration_ms: Some(5),
-                },
-            }),
+                }, /*started_at_ms*/ None, /*completed_at_ms*/ 0)),
             /*replay_kind*/ None,
         );
 
@@ -1399,7 +1493,8 @@ async fn deferred_mcp_lifecycle_events_keep_fifo_after_stream_finishes() {
         chat.history_render_mode(),
     ));
 
-    chat.on_mcp_tool_call_started(AppServerThreadItem::McpToolCall {
+    chat.on_mcp_tool_call_started(AppServerThreadItemPayload::McpToolCall {
+        environment_id: None,
         id: "mcp-deferred".to_string(),
         server: "copilot-bridge".to_string(),
         tool: "copilot".to_string(),
@@ -1417,7 +1512,8 @@ async fn deferred_mcp_lifecycle_events_keep_fifo_after_stream_finishes() {
     assert!(!chat.interrupts.is_empty());
 
     chat.stream_controller = None;
-    chat.on_mcp_tool_call_completed(AppServerThreadItem::McpToolCall {
+    chat.on_mcp_tool_call_completed(AppServerThreadItemPayload::McpToolCall {
+        environment_id: None,
         id: "mcp-deferred".to_string(),
         server: "copilot-bridge".to_string(),
         tool: "copilot".to_string(),
@@ -1461,6 +1557,7 @@ async fn live_reasoning_summary_is_not_rendered_twice_when_item_completes() {
             thread_id: "thread-1".to_string(),
             turn: AppServerTurn {
                 id: "turn-1".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: AppServerTurnStatus::InProgress,
@@ -1488,16 +1585,17 @@ async fn live_reasoning_summary_is_not_rendered_twice_when_item_completes() {
     );
 
     chat.handle_server_notification(
-        ServerNotification::ItemCompleted(ItemCompletedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            completed_at_ms: 0,
-            item: AppServerThreadItem::Reasoning {
+        ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            AppServerThreadItemPayload::Reasoning {
                 id: "reasoning-1".to_string(),
                 summary: vec!["Summary only".to_string()],
                 content: Vec::new(),
             },
-        }),
+            /*started_at_ms*/ None,
+            /*completed_at_ms*/ 0,
+        )),
         /*replay_kind*/ None,
     );
 
@@ -1520,6 +1618,7 @@ async fn live_reasoning_summary_drops_empty_parts_without_losing_content() {
             thread_id: "thread-1".to_string(),
             turn: AppServerTurn {
                 id: "turn-1".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: AppServerTurnStatus::InProgress,
@@ -1563,11 +1662,10 @@ async fn live_reasoning_summary_drops_empty_parts_without_losing_content() {
     }
 
     chat.handle_server_notification(
-        ServerNotification::ItemCompleted(ItemCompletedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            completed_at_ms: 0,
-            item: AppServerThreadItem::Reasoning {
+        ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            AppServerThreadItemPayload::Reasoning {
                 id: "reasoning-1".to_string(),
                 summary: vec![
                     "**Plan**\n\ndone".to_string(),
@@ -1575,7 +1673,9 @@ async fn live_reasoning_summary_drops_empty_parts_without_losing_content() {
                 ],
                 content: Vec::new(),
             },
-        }),
+            /*started_at_ms*/ None,
+            /*completed_at_ms*/ 0,
+        )),
         /*replay_kind*/ None,
     );
 
@@ -1592,15 +1692,38 @@ async fn live_reasoning_summary_drops_empty_parts_without_losing_content() {
 async fn thread_snapshot_replayed_turn_started_marks_task_running() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
-    replay_turn_started(&mut chat, ReplayKind::ThreadSnapshot);
+    let started_at = chrono::Utc::now().timestamp() - 125;
+    chat.handle_server_notification(
+        ServerNotification::TurnStarted(TurnStartedNotification {
+            thread_id: "thread-1".to_string(),
+            turn: AppServerTurn {
+                started_at: Some(started_at),
+                ..app_server_turn(
+                    "turn-1",
+                    AppServerTurnStatus::InProgress,
+                    /*duration_ms*/ None,
+                    /*error*/ None,
+                )
+            },
+        }),
+        Some(ReplayKind::ThreadSnapshot),
+    );
 
     drain_insert_history(&mut rx);
     assert!(chat.bottom_pane.is_task_running());
-    let status = chat
-        .bottom_pane
-        .status_widget()
-        .expect("status indicator should be visible");
-    assert_eq!(status.header(), "Working");
+    let before = chrono::Utc::now().timestamp() - started_at;
+    let elapsed = chat.bottom_pane.status_elapsed().unwrap().as_secs() as i64;
+    let after = chrono::Utc::now().timestamp() - started_at;
+    // The wire timestamp has second precision; reads may be separated by any CI delay.
+    assert!(
+        (before - 1..=after).contains(&elapsed),
+        "{elapsed} not in {before}..={after}"
+    );
+    let timer = regex_lite::Regex::new(r"\(\d+(?:h \d+m \d+s|m \d+s|s) •").unwrap();
+    insta::assert_snapshot!(
+        timer.replace_all(render_bottom_first_row(&chat, /*width*/ 80).trim(), "(<elapsed> •"),
+        @"• Working (<elapsed> • esc to interrupt)"
+    );
 }
 
 #[tokio::test]

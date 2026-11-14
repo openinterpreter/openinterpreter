@@ -160,25 +160,25 @@ mod tests {
 
     #[test]
     fn summarizes_external_sandbox_without_network_access_suffix() {
-        let summary = summarize_sandbox_policy(&SandboxPolicy::ExternalSandbox {
-            network_access: NetworkAccess::Restricted,
-        });
+        let cwd = PathUri::parse("file:///repo").unwrap();
+        let summary = summarize_permission_profile(
+            &PermissionProfile::External {
+                network: NetworkSandboxPolicy::Restricted,
+            },
+            &cwd,
+            std::slice::from_ref(&cwd),
+        );
         assert_eq!(summary, "external-sandbox");
     }
 
     #[test]
-    fn summarizes_external_sandbox_with_enabled_network() {
-        let summary = summarize_sandbox_policy(&SandboxPolicy::ExternalSandbox {
-            network_access: NetworkAccess::Enabled,
-        });
-        assert_eq!(summary, "external-sandbox (network access enabled)");
-    }
-
-    #[test]
     fn summarizes_read_only_with_enabled_network() {
-        let summary = summarize_sandbox_policy(&SandboxPolicy::ReadOnly {
-            network_access: true,
-        });
+        let cwd = PathUri::parse("file:///repo").unwrap();
+        let profile = PermissionProfile::from_runtime_permissions(
+            &FileSystemSandboxPolicy::read_only(),
+            NetworkSandboxPolicy::Enabled,
+        );
+        let summary = summarize_permission_profile(&profile, &cwd, std::slice::from_ref(&cwd));
         assert_eq!(summary, "read-only (network access enabled)");
     }
 
@@ -186,12 +186,15 @@ mod tests {
     fn workspace_write_summary_still_includes_network_access() {
         let root = if cfg!(windows) { "C:\\repo" } else { "/repo" };
         let writable_root = AbsolutePathBuf::try_from(root).unwrap();
-        let summary = summarize_sandbox_policy(&SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![writable_root.clone()],
-            network_access: true,
-            exclude_tmpdir_env_var: true,
-            exclude_slash_tmp: true,
-        });
+        let cwd = PathUri::from_abs_path(&writable_root.join("workdir"));
+        let workspace_roots = [cwd.clone(), PathUri::from_abs_path(&writable_root)];
+        let profile = PermissionProfile::workspace_write_with(
+            &[],
+            NetworkSandboxPolicy::Enabled,
+            /*exclude_tmpdir_env_var*/ true,
+            /*exclude_slash_tmp*/ true,
+        );
+        let summary = summarize_permission_profile(&profile, &cwd, &workspace_roots);
         assert_eq!(
             summary,
             format!(

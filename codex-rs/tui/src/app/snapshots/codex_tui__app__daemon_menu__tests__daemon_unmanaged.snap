@@ -1,0 +1,16 @@
+---
+source: tui/src/app/daemon_menu_tests.rs
+assertion_line: 223
+expression: "render_bottom_popup(&app.chat_widget, 80)"
+---
+  Daemon
+  Running daemon: v0.153.0
+
+
+› 1. Install latest public stable
+  2. Use this CLI build
+     Restart background server (disabled)  Codex hasn't verified it manages this
+                                           server. Restart it where it was
+                                           started.
+
+  enter select · esc back

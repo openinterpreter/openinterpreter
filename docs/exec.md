@@ -41,21 +41,21 @@ interpreter exec -i screenshot.png "describe the UI problem"
 
 ## Common Flags
 
-| Flag | Purpose |
-| ---- | ------- |
-| `--json` | Emit newline-delimited JSON events. |
-| `--output-schema <file>` | Require the final answer to match a JSON Schema. |
-| `--output-last-message, -o <file>` | Write the final assistant message to a file. |
-| `--color always|never|auto` | Control ANSI color. |
-| `--sandbox <mode>` | Override sandbox mode. |
-| `--ask-for-approval <mode>` | Override approval policy. |
-| `--profile <name>` | Use a config profile. |
-| `--ephemeral` | Do not persist a session record. |
-| `--skip-git-repo-check` | Allow running outside a Git repo. |
-| `--ignore-user-config` | Skip user config for this run. |
-| `--ignore-rules` | Skip execpolicy rules. |
-| `--verify` | Run an additional completion-check turn before exiting. |
-| `--timeout <seconds>` | Send time remaining reminders during the run. |
+| Flag                               | Purpose                                                 |
+| ---------------------------------- | ------------------------------------------------------- | ----- | ------------------- |
+| `--json`                           | Emit newline-delimited JSON events.                     |
+| `--output-schema <file>`           | Require the final answer to match a JSON Schema.        |
+| `--output-last-message, -o <file>` | Write the final assistant message to a file.            |
+| `--color always                    | never                                                   | auto` | Control ANSI color. |
+| `--sandbox <mode>`                 | Override sandbox mode.                                  |
+| `--ask-for-approval <mode>`        | Override approval policy.                               |
+| `--profile <name>`                 | Use a config profile.                                   |
+| `--ephemeral`                      | Do not persist a session record.                        |
+| `--skip-git-repo-check`            | Allow running outside a Git repo.                       |
+| `--ignore-user-config`             | Skip user config for this run.                          |
+| `--ignore-rules`                   | Skip execpolicy rules.                                  |
+| `--verify`                         | Run an additional completion-check turn before exiting. |
+| `--timeout <seconds>`              | Send time remaining reminders during the run.           |
 
 ## JSON Events
 

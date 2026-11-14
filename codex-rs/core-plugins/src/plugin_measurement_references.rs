@@ -92,7 +92,9 @@ impl RemotePluginMeasurementCache {
         // authoritative for enabled state, including default installations.
         // GLOBAL plugins have already passed server-side admission; local
         // marketplace product policy and skill capability loading are separate.
-        let service = config.remote_plugin_service_config();
+        // This cache is passed an explicit authenticated account, not a runtime
+        // authentication slot. Do not substitute one for that account's catalog.
+        let service = config.remote_plugin_service_config(None);
         let Some((remote_id, bundle)) = fetch_measurement_reference_bundle(&service, auth, target)
             .await
             .map_err(|_| anyhow::anyhow!("plugin measurement catalog lookup failed"))?

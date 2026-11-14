@@ -95,8 +95,10 @@ impl ManagedTuiWorktree {
 
 async fn latest_thread_cwd(path: Option<PathBuf>, fallback: PathBuf) -> PathBuf {
     let Some(path) = path else { return fallback };
-    tokio::task::spawn_blocking(move || {
-        let reader = codex_rollout::open_rollout_seekable_reader(&path).ok()?;
+    let (stop, keep_running) = tokio::sync::oneshot::channel::<()>();
+    let result = tokio::task::spawn_blocking(move || {
+        let reader =
+            codex_rollout::open_rollout_seekable_reader(&path, || stop.is_closed()).ok()?;
         let mut scanner = codex_rollout::ReverseJsonlScanner::new(reader).ok()?;
         while let Some(outcome) = scanner.scan_next_rollout_line().ok()? {
             if let codex_rollout::ScanOutcome::Parsed(codex_rollout::RolloutLine {
@@ -112,7 +114,9 @@ async fn latest_thread_cwd(path: Option<PathBuf>, fallback: PathBuf) -> PathBuf 
     .await
     .ok()
     .flatten()
-    .unwrap_or(fallback)
+    .unwrap_or(fallback);
+    drop(keep_running);
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -126,6 +130,7 @@ pub(super) async fn prepare(
     target: &AppServerTarget,
     arg0_paths: &Arg0DispatchPaths,
     source_bundle: CloudConfigBundleLoader,
+    embedded_network_policy: &codex_app_server_client::EmbeddedNetworkPolicy,
 ) -> color_eyre::Result<(Config, CloudConfigBundleLoader, ManagedTuiWorktree)> {
     if let Some(id_or_name) = cli.fork_session_id.as_deref() {
         let prepared = if should_load_configured_environments(&loader_overrides, target) {
@@ -138,11 +143,11 @@ pub(super) async fn prepare(
             color_eyre::eyre::bail!("`--worktree` is only supported for local sessions");
         }
         let environment = prepared.build(
-            Some(ExecServerRuntimePaths::from_optional_paths(
+            Some(ExecServerRuntimeOptions::from_optional_paths(
                 arg0_paths.codex_self_exe.clone(),
                 arg0_paths.codex_linux_sandbox_exe.clone(),
             )?),
-            source.http_client_factory(),
+            embedded_network_policy.bind(source.http_client_factory()),
         )?;
         let state =
             init_state_db_for_app_server_target(&source, &AppServerTarget::Embedded).await?;
@@ -159,16 +164,23 @@ pub(super) async fn prepare(
             /*log_db*/ None,
             state,
             Arc::new(environment),
+            embedded_network_policy.clone(),
         )
         .await?;
         let mut lookup = AppServerSession::new(
+            crate::backend_id::BackendId::new(),
             AppServerClient::InProcess(client),
             crate::app_server_session::ThreadParamsMode::Embedded,
         );
         let resolved = async {
-            let target = lookup_session_target_with_app_server(&mut lookup, &source, id_or_name)
-                .await?
-                .ok_or_else(|| color_eyre::eyre::eyre!("Session not found: {id_or_name}"))?;
+            let target = lookup_session_target_with_app_server(
+                crate::resume_picker::SessionPickerAction::Fork,
+                &mut lookup,
+                &source,
+                id_or_name,
+            )
+            .await?
+            .ok_or_else(|| color_eyre::eyre::eyre!("Session not found: {id_or_name}"))?;
             lookup
                 .thread_read(target.thread_id, /*include_turns*/ false)
                 .await
@@ -190,9 +202,13 @@ pub(super) async fn prepare(
                 CloudConfigBundleLoader::default(),
             )
             .await;
-            let source_bundle =
-                cloud_config_bundle_for_app_server_target(target, &bootstrap, &source.codex_home)
-                    .await?;
+            let source_bundle = cloud_config_bundle_for_app_server_target(
+                target,
+                &bootstrap,
+                &source.codex_home,
+                embedded_network_policy,
+            )
+            .await?;
             overrides.cwd = Some(cwd.into_path_buf());
             source = load_config_or_exit(
                 cli_overrides.clone(),
@@ -203,11 +219,6 @@ pub(super) async fn prepare(
             )
             .await;
         }
-    }
-    if !source.features.enabled(codex_features::Feature::Worktrees) {
-        color_eyre::eyre::bail!(
-            "`--worktree` requires the worktrees feature; enable it with `--enable worktrees`"
-        );
     }
     if source.active_project.is_untrusted() {
         color_eyre::eyre::bail!(
@@ -263,8 +274,13 @@ pub(super) async fn prepare(
         },
     )
     .await?;
-    let bundle =
-        cloud_config_bundle_for_app_server_target(target, &bootstrap, &source.codex_home).await?;
+    let bundle = cloud_config_bundle_for_app_server_target(
+        target,
+        &bootstrap,
+        &source.codex_home,
+        embedded_network_policy,
+    )
+    .await?;
     managed
         .check_source_policy(
             &cli_overrides,

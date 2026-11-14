@@ -1,7 +1,7 @@
 //! End-to-end grammar, topology, and rendered output checks for each supported family.
 
-use super::RenderError;
-use super::render;
+use crate::RenderError;
+use crate::render;
 use pretty_assertions::assert_eq;
 use unicode_width::UnicodeWidthStr;
 
@@ -10,9 +10,9 @@ const SEQUENCE: &str = "sequenceDiagram
     participant A as API
     participant S as 库存
     participant P as Payments
-    U->>A: Place order
+    U->>A: data[0] = {x: 1}
     A->>S: Reserve items
-    S-->>A: Reservation
+    S-->>A: say \"hello\" | C:\\tmp
     opt Items reserved
         loop Up to 3 attempts
             A->>P: Charge card
@@ -32,7 +32,7 @@ const STATE: &str = "stateDiagram-v2
     state \"Payment pending\" as Charging
     [*] --> Draft
     Draft --> Validating: submit
-    Validating --> Charging: valid
+    Validating --> Charging: [ready]
     Validating --> Rejected: invalid
     Charging --> Packing: paid
     Charging --> Rejected: declined
@@ -40,12 +40,14 @@ const STATE: &str = "stateDiagram-v2
     Shipped --> Delivered: received
     Delivered --> [*]
     Rejected --> Draft: revise
-    Charging: Retry up to 3 times";
+    Charging: Retry up to 3 times
+    Draft: Order drafted
+    Draft: Awaiting submission";
 
 const CLASS: &str = "classDiagram
-    class Order {
-        +String id
-        +Status status
+    class order {
+        +int[] ids
+        +String a;b
         +submit()
         +cancel()
     }
@@ -62,10 +64,10 @@ const CLASS: &str = "classDiagram
         +String lastFour
         +authorize()
     }
-    Order \"1\" *-- \"1..*\" LineItem : contains
-    Order \"1\" --> \"1\" Payment : pays with
+    order \"1\" *-- \"1..*\" LineItem : contains
+    order \"1\" --> \"1\" Payment : pays with
     Payment <|-- CardPayment
-    CardPayment ..> Order : updates";
+    CardPayment ..order : updates";
 
 const ER: &str = "erDiagram
     CUSTOMER ||--o{ ORDER : places
@@ -125,10 +127,36 @@ fn unicode_labels_and_later_declarations() {
             insta::assert_snapshot!("LR", output);
         }
     }
+    for descriptions in [
+        vec!["S: Ready"],
+        vec!["S: Ready", "S: Working"],
+        vec![r#"state "Ready" as S"#, "S: Working"],
+        vec!["S: Ready", r#"state "Working" as S"#],
+        vec![r#"state "Ready" as S"#, r#"state "Working" as S"#],
+    ] {
+        // References before and after descriptions must retain the same state identity.
+        let mut body = vec!["S --> T"];
+        body.extend(&descriptions);
+        body.push("T --> S");
+        let graph = crate::state::parse(&body).unwrap();
+        let mut expected = crate::state::parse(&["S --> T", "T --> S"]).unwrap();
+        expected.nodes[0] = crate::Node {
+            id: "S".to_owned(),
+            label: "Ready".to_owned(),
+            shape: crate::Shape::Rectangle,
+            declared: true,
+            members: if descriptions.len() == 1 {
+                Vec::new()
+            } else {
+                vec!["Working".to_owned()]
+            },
+        };
+        assert_eq!(graph, expected, "{descriptions:?}");
+    }
 }
 
 #[test]
-fn class_relationship_endpoints() {
+fn graph_relationship_endpoints() {
     for (operator, source_tip, target_tip, dashed) in [
         ("<|--", '◁', '─', false),
         ("*--", '◆', '─', false),
@@ -163,6 +191,82 @@ fn class_relationship_endpoints() {
         assert!(ports[0].contains("(one) uses"));
         assert!(ports[1].contains("(many)"));
         assert_eq!(output.contains('┆'), dashed);
+    }
+    for (operator, source_tip, target_tip, dashed) in [
+        ("---", '─', '─', false),
+        ("-.->", '─', '◄', true),
+        ("-.-", '─', '─', true),
+        ("<-->", '◄', '◄', false),
+        ("<-.->", '◄', '◄', true),
+    ] {
+        let output = render(
+            &format!("flowchart; A{operator}|uses|B"),
+            /*max_width*/ 100,
+        )
+        .unwrap();
+        let ports = output
+            .lines()
+            .filter(|line| line.contains('├'))
+            .collect::<Vec<_>>();
+        assert!(
+            ports[0].contains(&format!("├{source_tip}")),
+            "{operator}: {output}"
+        );
+        assert!(
+            ports[1].contains(&format!("├{target_tip}")),
+            "{operator}: {output}"
+        );
+        assert!(ports[0].contains("uses"));
+        assert_eq!(output.contains('┆'), dashed);
+    }
+    for source in [
+        "classDiagram\nclass A; A --> B : {ok}",
+        "classDiagram\nclass A; class B {\n+id\n}",
+    ] {
+        assert_eq!(
+            render(source, /*max_width*/ 100).unwrap(),
+            render(&source.replace(';', "\n"), /*max_width*/ 100).unwrap(),
+        );
+    }
+    let source = "classDiagram\nclass A {\nstring a;b\nObject[] elementData\n}\nA : +get()";
+    let statements = crate::syntax::statements(source).unwrap();
+    assert_eq!(
+        crate::relations::parse(statements[0], &statements[1..]).unwrap(),
+        crate::Graph {
+            nodes: vec![crate::Node {
+                id: "A".into(),
+                label: "A".into(),
+                shape: crate::Shape::Rectangle,
+                declared: false,
+                members: vec![
+                    "string a;b".into(),
+                    "Object[] elementData".into(),
+                    "+get()".into()
+                ],
+            }],
+            ..crate::Graph::default()
+        }
+    );
+    for (line, target, target_tip, target_label, dashed) in [
+        ("A --orange", "orange", '─', "", false),
+        ("A ..o_range", "o_range", '─', "", true),
+        ("A --o B", "B", '◇', "", false),
+        (r#"A ..o"many" B"#, "B", '◇', "(many)", true),
+    ] {
+        let graph = crate::relations::parse("classDiagram", &[line]).unwrap();
+        let mut expected = crate::Graph::default();
+        let from = expected.node("A").unwrap();
+        let to = expected.node(target).unwrap();
+        expected.edges.push(crate::Edge {
+            from,
+            to,
+            label: String::new(),
+            target_label: target_label.to_owned(),
+            source_tip: '─',
+            target_tip,
+            dashed,
+        });
+        assert_eq!(graph, expected, "{line}");
     }
 }
 
@@ -210,7 +314,6 @@ fn rejects_incomplete_and_unsupported_families() {
         "sequenceDiagram; participant A as e\u{301}",
         "stateDiagram-v2; state Processing {; A-->B; }",
         "stateDiagram-v2; A --> B: ok; garbage text",
-        "stateDiagram-v2; state \"First\" as A; state \"Second\" as A",
         "stateDiagram-v2; accDescr: Order lifecycle; [*] --> Ready",
         "stateDiagram; ACCDESCR: Order lifecycle; [*] --> Ready",
         "stateDiagram-v2; A:::highlight; A --> B",
@@ -221,6 +324,9 @@ fn rejects_incomplete_and_unsupported_families() {
         "classDiagram; A --> B; click A",
         "classDiagram; class A {; +<html>; }",
         "erDiagram; A ||--o{ B",
+        "erDiagram; A ||--|| B: \"owns\"",
+        "erDiagram; A {; string value \"x\"junk\"; }",
+        "classDiagram\nclass A {\nstring a;b }\n}",
         "erDiagram; A ||--?? B : owns",
         "erDiagram; A {; int x KEY; }",
         "erDiagram; A {; int x PK \"open comment; }",
@@ -241,7 +347,7 @@ fn rejects_incomplete_and_unsupported_families() {
 #[test]
 fn metadata_names_and_style_text_remain_valid_in_content() {
     for source in [
-        "classDiagram; class accTitle {; +id; }; class accDescr {; +id; }",
+        "classDiagram; class accTitle {\n +id\n }\n class accDescr {\n +id\n }",
         "classDiagram; class A; A: ::: literal; A --> B: ::: literal",
         "erDiagram; accTitle {; int id; }",
         "erDiagram; A ||--|| B: ::: literal",
@@ -266,9 +372,14 @@ fn family_limits() {
             "loop retry;".repeat(5),
             "end;".repeat(5)
         ),
-        format!("classDiagram; class A {{; {} }}", "+field;".repeat(17)),
+        format!("classDiagram; class A {{\n {} }}", "+field\n".repeat(17)),
         format!("erDiagram; A {{; {} }}", "int id;".repeat(17)),
         format!("stateDiagram-v2; {}", "A --> B;".repeat(25)),
+        format!("stateDiagram-v2\n{}", "S: Description\n".repeat(18)),
+        format!(
+            "stateDiagram-v2\n{}",
+            "state \"Description\" as S\n".repeat(18)
+        ),
     ] {
         assert_eq!(
             render(&source, /*max_width*/ usize::MAX),
@@ -293,6 +404,8 @@ fn truncated_sources_and_terminal_widths() {
         "sequenceDiagram; A->>B: hi",
         "sequenceDiagram; A->>A: self",
         "sequenceDiagram; Note over A: memo",
+        "stateDiagram-v2; state \"a;b\" as A; A-->B: [ready]",
+        "erDiagram; A {; string value \"a;b\"; }",
     ] {
         let output = render(source, /*max_width*/ 100).unwrap();
         let width = output.lines().map(UnicodeWidthStr::width).max().unwrap();
@@ -335,6 +448,11 @@ fn sequence_arrows_preserve_sender_recipient_and_style() {
             assert_eq!(rows[row].contains(&'┄'), dashed);
         }
     }
+    let source = "sequenceDiagram; A->>B: say \"hello; B->>A: world\"";
+    assert_eq!(
+        render(source, /*max_width*/ 180).unwrap(),
+        render(&source.replace(';', "\n"), /*max_width*/ 180).unwrap(),
+    );
 }
 
 #[test]

@@ -12,10 +12,15 @@ use crate::chatwidget::ChatWidget;
 use crate::render::renderable::Renderable;
 use crate::tui;
 use crate::wrapping::word_wrap_lines;
+use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::ThreadLoadedListParams;
+use codex_app_server_protocol::ThreadSectionMoveParams;
+use codex_app_server_protocol::ThreadSectionMoveResponse;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::SubAgentSource;
+use codex_state::PINNED_THREAD_SECTION_ID;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Stylize;
@@ -25,6 +30,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
+use uuid::Uuid;
 
 struct LifecycleHeader(Vec<Line<'static>>);
 
@@ -104,6 +110,126 @@ async fn run_lifecycle_modal<T>(
 }
 
 impl App {
+    pub(super) fn known_thread_subtree(&self, thread_id: ThreadId) -> HashSet<ThreadId> {
+        let mut removed = HashSet::from([thread_id]);
+        loop {
+            let previous_len = removed.len();
+            for (id, thread) in &self.agents_overview.threads {
+                let Some(thread) = thread else { continue };
+                let parent = thread
+                    .parent_thread_id
+                    .as_deref()
+                    .and_then(|id| ThreadId::from_string(id).ok())
+                    .or(match &thread.source {
+                        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                            parent_thread_id,
+                            ..
+                        }) => Some(*parent_thread_id),
+                        _ => None,
+                    });
+                if thread.session_id == thread_id.to_string()
+                    || parent.is_some_and(|parent| removed.contains(&parent))
+                {
+                    removed.insert(*id);
+                }
+            }
+            if removed.len() == previous_len {
+                break;
+            }
+        }
+        removed
+    }
+
+    pub(super) fn toggle_agents_overview_pin(
+        &mut self,
+        app_server: &AppServerSession,
+        thread_id: ThreadId,
+        pinned: bool,
+    ) {
+        if self.agents_overview.pending_pin_change.is_some() {
+            return;
+        }
+        let request_id = Uuid::new_v4();
+        self.agents_overview.pending_pin_change = Some((request_id, app_server.backend_id()));
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = request_handle
+                .request_typed::<ThreadSectionMoveResponse>(ClientRequest::ThreadSectionMove {
+                    request_id: RequestId::String(Uuid::new_v4().to_string()),
+                    params: ThreadSectionMoveParams {
+                        thread_id: thread_id.to_string(),
+                        section_id: pinned.then(|| PINNED_THREAD_SECTION_ID.to_string()),
+                        before_thread_id: None,
+                    },
+                })
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            app_event_tx.send(AppEvent::AgentsOverviewPinToggled {
+                request_id,
+                thread_id,
+                pinned,
+                result,
+            });
+        });
+    }
+
+    pub(super) fn complete_agents_overview_pin(
+        &mut self,
+        app_server: &AppServerSession,
+        request_id: Uuid,
+        thread_id: ThreadId,
+        pinned: bool,
+        result: Result<(), String>,
+    ) {
+        let Some((_, owner)) = self
+            .agents_overview
+            .pending_pin_change
+            .filter(|(id, _)| *id == request_id)
+        else {
+            return;
+        };
+        self.agents_overview.pending_pin_change = None;
+        match result {
+            Ok(()) => {
+                if let Some(Some(pinned_thread_ids)) =
+                    self.agents_overview.pins_by_backend.get_mut(&owner)
+                {
+                    if pinned {
+                        if !pinned_thread_ids.contains(&thread_id) {
+                            pinned_thread_ids.push(thread_id);
+                        }
+                    } else {
+                        pinned_thread_ids.retain(|id| *id != thread_id);
+                    }
+                }
+            }
+            Err(error) => {
+                self.add_agents_overview_error(format!(
+                    "Failed to {} task: {error}",
+                    if pinned { "pin" } else { "unpin" }
+                ));
+            }
+        }
+        let restore_show_more = self.agents_overview.refresh_show_more;
+        if let Some(refresh) = self.agents_overview.refresh_task.take() {
+            refresh.abort();
+        }
+        self.agents_overview.active_refresh = None;
+        self.agents_overview.refresh_show_more = false;
+        self.agents_overview.refresh_notifications.clear();
+        let refresh_thread_ids =
+            std::mem::take(&mut self.agents_overview.active_refresh_thread_ids);
+        self.agents_overview
+            .refresh_thread_ids
+            .extend(refresh_thread_ids);
+        self.agents_overview.refresh_pending = false;
+        self.agents_overview.show_more_requested |= restore_show_more;
+        self.refresh_agents_overview_threads(app_server);
+        self.repaint_agents_overview();
+    }
+
     pub(super) fn confirm_agents_overview_action(
         &mut self,
         thread_id: ThreadId,
@@ -276,7 +402,7 @@ impl App {
             self.pending_thread_switch_resets += 1;
             self.app_event_tx
                 .send(AppEvent::ResetTranscriptForThreadSwitch);
-            self.reset_thread_event_state();
+            self.reset_thread_event_state().await;
             let init = self.chatwidget_init_for_forked_or_resumed_thread(
                 tui,
                 self.config.clone(),

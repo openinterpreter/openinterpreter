@@ -1,0 +1,22 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+expression: popup
+---
+  Plugins
+  Browse plugins from available marketplaces.
+  Installed 2 of 2 available plugins.
+
+   All Plugins   Installed (2)   OpenAI Curated   Workspace   Add Marketplace
+
+  dr
+
+› [*] Drive      Installed   Tab to disable; Enter view details
+
+
+
+
+
+
+
+
+  ←/→ tabs · enter details · tab toggle · esc close

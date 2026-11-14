@@ -3,7 +3,6 @@ use crate::request::convert_request;
 use crate::stream::spawn_chat_stream;
 use bytes::Bytes;
 use codex_api::ApiError;
-use codex_api::AuthProvider;
 use codex_api::Compression;
 use codex_api::Provider;
 use codex_api::RequestTelemetry;
@@ -242,7 +241,10 @@ impl<T: HttpTransport> ChatCompletionsCompatClient<T> {
             make_request,
             |request, attempt| async move {
                 let start = std::time::Instant::now();
-                let result = self.transport.execute(request).await;
+                let result = match self.auth.apply_auth(request).await {
+                    Ok(request) => self.transport.execute(request).await,
+                    Err(error) => Err(TransportError::from(error)),
+                };
                 if let Some(telemetry) = self.request_telemetry.as_ref() {
                     let (status, error) = match &result {
                         Ok(response) => (Some(response.status), None),
@@ -279,7 +281,10 @@ impl<T: HttpTransport> ChatCompletionsCompatClient<T> {
             make_request,
             |request, attempt| async move {
                 let start = std::time::Instant::now();
-                let result = self.transport.stream(request).await;
+                let result = match self.auth.apply_auth(request).await {
+                    Ok(request) => self.transport.stream(request).await,
+                    Err(error) => Err(TransportError::from(error)),
+                };
                 if let Some(telemetry) = self.request_telemetry.as_ref() {
                     let (status, error) = match &result {
                         Ok(response) => (Some(response.status), None),
@@ -306,7 +311,6 @@ impl<T: HttpTransport> ChatCompletionsCompatClient<T> {
         if let Some(body) = body {
             request.body = Some(RequestBody::Json(body.clone()));
         }
-        add_auth_headers(self.auth.as_ref(), &mut request.headers);
         request
     }
 }
@@ -503,10 +507,6 @@ fn synthetic_sse_from_chat_completion_response(body: &[u8]) -> Result<String, Ap
     Ok(sse)
 }
 
-fn add_auth_headers(auth: &dyn AuthProvider, headers: &mut HeaderMap) {
-    auth.add_auth_headers(headers);
-}
-
 fn http_status(error: &TransportError) -> Option<http::StatusCode> {
     match error {
         TransportError::Http { status, .. } => Some(*status),
@@ -516,6 +516,7 @@ fn http_status(error: &TransportError) -> Option<http::StatusCode> {
         | TransportError::Network(_)
         | TransportError::Build(_)
         | TransportError::ResponseTooLarge { .. } => None,
+        TransportError::Policy(_) => None,
     }
 }
 
@@ -548,6 +549,8 @@ fn subagent_header(source: &Option<codex_protocol::protocol::SessionSource>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_api::AuthError;
+    use codex_api::AuthProvider;
     use codex_api::Compression;
     use codex_api::OpenAiVerbosity;
     use codex_api::ResponsesApiRequest;
@@ -625,6 +628,7 @@ mod tests {
                         r#"{"error":{"message":"This endpoint requested up to 1024 tokens, but can only afford 140. Please try again with fewer max_tokens."}}"#
                             .to_string(),
                     ),
+                    retry_after: None,
                 });
             }
             *attempts += 1;
@@ -639,7 +643,7 @@ mod tests {
     struct StaticAuth;
 
     impl AuthProvider for StaticAuth {
-        fn add_auth_headers(&self, headers: &mut HeaderMap) {
+        fn add_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), codex_api::AuthError> {
             headers.insert(
                 http::header::AUTHORIZATION,
                 "Bearer test-token".parse().expect("valid header value"),
@@ -648,6 +652,15 @@ mod tests {
                 "ChatGPT-Account-ID",
                 "acct_123".parse().expect("valid header value"),
             );
+            Ok(())
+        }
+    }
+
+    struct RejectingAuth;
+
+    impl AuthProvider for RejectingAuth {
+        fn add_auth_headers(&self, _headers: &mut HeaderMap) -> Result<(), AuthError> {
+            Err(AuthError::Build("test auth unavailable".to_string()))
         }
     }
 
@@ -788,6 +801,7 @@ mod tests {
                 r#"{"error":{"message":"requested up to 1,024 tokens, but can only afford 140"}}"#
                     .to_string(),
             ),
+            retry_after: None,
         });
 
         let retry_body =
@@ -833,16 +847,30 @@ mod tests {
     fn test_request() -> ResponsesApiRequest {
         ResponsesApiRequest {
             model: "gpt-5.2-codex".to_string(),
-            instructions: "be terse".to_string(),
-            input: vec![ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: "hello".to_string(),
-                }],
-                phase: None,
-                internal_chat_message_metadata_passthrough: None,
-            }],
+            input: vec![
+                ResponseItem::Message {
+                    id: None,
+                    status: None,
+                    encrypted_content: None,
+                    role: "developer".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "be terse".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::Message {
+                    id: None,
+                    status: None,
+                    encrypted_content: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "hello".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+            ],
             tools: Some(crate::request::responses_api_tools(Vec::new())),
             tool_choice: "auto".to_string(),
             parallel_tool_calls: true,
@@ -853,8 +881,10 @@ mod tests {
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
+            prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: Some(TextControls {
                 verbosity: Some(OpenAiVerbosity::Low),
                 format: None,
@@ -928,6 +958,43 @@ mod tests {
                 .get("ChatGPT-Account-ID")
                 .and_then(|value| value.to_str().ok()),
             Some("acct_123")
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_request_never_reaches_transport_when_auth_fails() {
+        let client = ChatCompletionsCompatClient::new(
+            RecordingTransport::default(),
+            test_provider(),
+            Arc::new(RejectingAuth),
+        );
+        let error = client
+            .stream_chat_request_value(
+                serde_json::json!({"model": "test", "messages": [], "stream": true}),
+                HashMap::new(),
+                ResponsesOptions {
+                    session_id: None,
+                    thread_id: None,
+                    session_source: None,
+                    extra_headers: HeaderMap::new(),
+                    compression: Compression::None,
+                    turn_state: Some(Arc::new(OnceLock::new())),
+                },
+            )
+            .await
+            .err()
+            .expect("auth failure must fail the chat request");
+        assert!(matches!(
+            error,
+            ApiError::Transport(TransportError::Build(_))
+        ));
+        assert!(
+            client
+                .transport
+                .last_request
+                .lock()
+                .expect("transport lock")
+                .is_none()
         );
     }
 

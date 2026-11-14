@@ -1,14 +1,97 @@
+use crate::OutputBoundary;
 use crate::TruncationPolicy;
 use crate::approx_token_count;
 use crate::approx_tokens_from_byte_count_i64;
+use crate::formatted_output_at_token_boundaries;
+use crate::formatted_truncate_function_output_items_with_policy;
 use crate::formatted_truncate_text;
-use crate::formatted_truncate_text_content_items_with_policy;
+use crate::mixed_output_at_token_boundaries;
 use crate::truncate_function_output_items_with_policy;
+use crate::truncate_mcp_tool_result;
+use crate::truncate_measured_tool_output;
 use crate::truncate_text;
+use codex_protocol::mcp::CallToolResult;
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ImageReference;
 use pretty_assertions::assert_eq;
+
+#[test]
+fn truncate_function_output_preserves_video_when_text_budget_is_exhausted() {
+    let video = FunctionCallOutputContentItem::InputVideo {
+        video_url: "video:fixture".to_string(),
+        id: Some("frame-1".to_string()),
+    };
+    let items = vec![text("omitted"), video.clone()];
+    let output =
+        truncate_function_output_items_with_policy(&items, TruncationPolicy::Bytes(0), |_| 0);
+    assert_eq!(output.first(), Some(&video));
+    assert!(matches!(
+        output.last(),
+        Some(FunctionCallOutputContentItem::InputText { text }) if text.contains("omitted 1 text")
+    ));
+}
+
+#[test]
+fn truncate_mcp_tool_result_borrows_small_result() {
+    let result = CallToolResult {
+        content: vec![serde_json::json!({
+            "type": "text",
+            "text": "hello",
+        })],
+        structured_content: Some(serde_json::json!({"x": 1})),
+        is_error: Some(false),
+        meta: Some(serde_json::json!({"k": "v"})),
+    };
+
+    let truncated = truncate_mcp_tool_result(&result, /*max_bytes*/ 1024);
+
+    assert!(matches!(truncated, std::borrow::Cow::Borrowed(_)));
+    assert_eq!(truncated.as_ref(), &result);
+}
+
+#[test]
+fn truncate_mcp_tool_result_compacts_large_result() {
+    let max_bytes = 1024;
+    let result = CallToolResult {
+        content: vec![serde_json::json!({
+            "type": "text",
+            "text": format!("head\n{}\ntail", "\"\\\n".repeat(5_000)),
+        })],
+        structured_content: Some(serde_json::json!({"x": "y".repeat(5_000)})),
+        is_error: Some(true),
+        meta: Some(serde_json::json!({
+            "private": format!("meta-head{}meta-tail", "z".repeat(5_000)),
+        })),
+    };
+
+    let truncated = truncate_mcp_tool_result(&result, max_bytes).into_owned();
+
+    let preview = truncated.content[0]["text"]
+        .as_str()
+        .expect("truncated result should contain a text preview");
+    assert_eq!(
+        truncated,
+        CallToolResult {
+            content: vec![serde_json::json!({
+                "type": "text",
+                "text": preview,
+            })],
+            structured_content: None,
+            is_error: Some(true),
+            meta: None,
+        }
+    );
+    assert!(serde_json::to_string(&truncated).unwrap().len() <= max_bytes);
+    assert!(preview.contains("head"));
+    assert!(preview.contains("chars truncated"));
+    assert!(preview.contains("meta-tail"));
+
+    let truncated_again = truncate_mcp_tool_result(&truncated, max_bytes);
+    assert!(matches!(truncated_again, std::borrow::Cow::Borrowed(_)));
+    assert_eq!(truncated_again.as_ref(), &truncated);
+}
 
 #[test]
 fn truncate_bytes_less_than_placeholder_returns_placeholder() {
@@ -199,9 +282,13 @@ fn truncate_function_output_items_with_policy_discards_empty_text() {
             },
             detail: Some(DEFAULT_IMAGE_DETAIL),
         },
-        FunctionCallOutputContentItem::InputAudio {
-            audio_url: "audio:one".to_string(),
+        FunctionCallOutputContentItem::InputImage {
+            image: ImageReference::File {
+                file_id: "file_123".to_string(),
+            },
+            detail: Some(DEFAULT_IMAGE_DETAIL),
         },
+        FunctionCallOutputContentItem::inline_audio("audio:one".to_string()),
         FunctionCallOutputContentItem::EncryptedContent {
             encrypted_content: "enc_opaque".to_string(),
         },
@@ -216,39 +303,28 @@ fn truncate_function_output_items_with_policy_discards_empty_text() {
 }
 
 #[test]
-fn formatted_truncate_text_content_items_with_policy_returns_original_under_limit() {
-    let items = vec![
-        FunctionCallOutputContentItem::InputText {
-            text: "alpha".to_string(),
-        },
-        FunctionCallOutputContentItem::InputText {
-            text: String::new(),
-        },
-        FunctionCallOutputContentItem::InputText {
-            text: "beta".to_string(),
-        },
-    ];
+fn formatted_text_output_reuses_owned_items_under_limit() {
+    let items = vec![text("alpha"), text(""), text("beta")];
+    let policy = TruncationPolicy::Bytes(32);
 
-    let (output, original_token_count) =
-        formatted_truncate_text_content_items_with_policy(&items, TruncationPolicy::Bytes(32));
+    let borrowed = formatted_truncate_function_output_items_with_policy(&items, policy, |_| 0);
+    assert_eq!(borrowed, items);
 
-    assert_eq!(output, items);
-    assert_eq!(original_token_count, None);
+    let allocation = items.as_ptr();
+    let owned = formatted_truncate_function_output_items_with_policy(items, policy, |_| 0);
+    assert_eq!(owned, borrowed);
+    assert_eq!(owned.as_ptr(), allocation);
 }
 
 #[test]
-fn formatted_truncate_text_content_items_with_policy_preserves_empty_leading_text_behavior() {
-    let items = vec![
-        FunctionCallOutputContentItem::InputText {
-            text: String::new(),
-        },
-        FunctionCallOutputContentItem::InputText {
-            text: "abc".to_string(),
-        },
-    ];
+fn formatted_text_output_preserves_empty_leading_text_behavior() {
+    let items = vec![text(""), text("abc")];
 
-    let (output, original_token_count) =
-        formatted_truncate_text_content_items_with_policy(&items, TruncationPolicy::Bytes(0));
+    let output = formatted_truncate_function_output_items_with_policy(
+        items,
+        TruncationPolicy::Bytes(0),
+        |_| 0,
+    );
 
     assert_eq!(
         output,
@@ -256,11 +332,10 @@ fn formatted_truncate_text_content_items_with_policy_preserves_empty_leading_tex
             text: "Warning: truncated output (original token count: 1)\nTotal output lines: 1\n\n…3 chars truncated…".to_string(),
         }]
     );
-    assert_eq!(original_token_count, Some(1));
 }
 
 #[test]
-fn formatted_truncate_text_content_items_with_policy_merges_text_and_appends_media() {
+fn formatted_mixed_output_budgets_text_and_audio_in_order() {
     let items = vec![
         FunctionCallOutputContentItem::InputText {
             text: "abcd".to_string(),
@@ -274,9 +349,7 @@ fn formatted_truncate_text_content_items_with_policy_merges_text_and_appends_med
         FunctionCallOutputContentItem::InputText {
             text: "efgh".to_string(),
         },
-        FunctionCallOutputContentItem::InputAudio {
-            audio_url: "audio:one".to_string(),
-        },
+        FunctionCallOutputContentItem::inline_audio("audio:one".to_string()),
         FunctionCallOutputContentItem::InputImage {
             image: ImageReference::File {
                 file_id: "file_123".to_string(),
@@ -294,22 +367,28 @@ fn formatted_truncate_text_content_items_with_policy_merges_text_and_appends_med
         },
     ];
 
-    let (output, original_token_count) =
-        formatted_truncate_text_content_items_with_policy(&items, TruncationPolicy::Bytes(8));
+    let output = formatted_truncate_function_output_items_with_policy(
+        items,
+        TruncationPolicy::Bytes(12),
+        |_| 1,
+    );
 
     assert_eq!(
         output,
         vec![
             FunctionCallOutputContentItem::InputText {
-                text: "Warning: truncated output (original token count: 4)\nTotal output lines: 3\n\nabcd…6 chars truncated…ijkl".to_string(),
+                text: "abcd".to_string(),
             },
             FunctionCallOutputContentItem::InputImage {
-                image: ImageReference::Inline { image_url: "img:one".to_string() },
+                image: ImageReference::Inline {
+                    image_url: "img:one".to_string()
+                },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             },
-            FunctionCallOutputContentItem::InputAudio {
-                audio_url: "audio:one".to_string(),
+            FunctionCallOutputContentItem::InputText {
+                text: "efgh".to_string(),
             },
+            FunctionCallOutputContentItem::inline_audio("audio:one".to_string()),
             FunctionCallOutputContentItem::InputImage {
                 image: ImageReference::File {
                     file_id: "file_123".to_string(),
@@ -317,40 +396,32 @@ fn formatted_truncate_text_content_items_with_policy_merges_text_and_appends_med
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             },
             FunctionCallOutputContentItem::InputImage {
-                image: ImageReference::Inline { image_url: "img:two".to_string() },
+                image: ImageReference::Inline {
+                    image_url: "img:two".to_string()
+                },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
+            },
+            FunctionCallOutputContentItem::InputText {
+                text: "[omitted 1 text items ...]".to_string(),
             },
         ]
     );
-    assert_eq!(original_token_count, Some(4));
 }
 
 #[test]
-fn formatted_truncate_text_content_items_with_policy_preserves_encrypted_content() {
-    let items = vec![
-        FunctionCallOutputContentItem::InputText {
-            text: "abcdefgh".to_string(),
-        },
-        FunctionCallOutputContentItem::EncryptedContent {
-            encrypted_content: "enc_opaque".to_string(),
-        },
-    ];
+fn formatted_mixed_output_preserves_encrypted_content() {
+    let encrypted = FunctionCallOutputContentItem::EncryptedContent {
+        encrypted_content: "enc_opaque".to_owned(),
+    };
+    let items = vec![text("abcdefgh"), encrypted.clone()];
 
-    let (output, original_token_count) =
-        formatted_truncate_text_content_items_with_policy(&items, TruncationPolicy::Bytes(2));
-
-    assert_eq!(
-        output,
-        vec![
-            FunctionCallOutputContentItem::InputText {
-                text: "Warning: truncated output (original token count: 2)\nTotal output lines: 1\n\na…6 chars truncated…h".to_string(),
-            },
-            FunctionCallOutputContentItem::EncryptedContent {
-                encrypted_content: "enc_opaque".to_string(),
-            },
-        ]
+    let output = formatted_truncate_function_output_items_with_policy(
+        items,
+        TruncationPolicy::Bytes(2),
+        |_| 0,
     );
-    assert_eq!(original_token_count, Some(2));
+
+    assert_eq!(output, vec![text("a…6 chars truncated…h"), encrypted]);
 }
 
 #[test]
@@ -362,9 +433,7 @@ fn truncate_function_output_items_with_policy_omits_audio_over_budget() {
         FunctionCallOutputContentItem::EncryptedContent {
             encrypted_content: "enc_opaque".to_string(),
         },
-        FunctionCallOutputContentItem::InputAudio {
-            audio_url: "audio:one".to_string(),
-        },
+        FunctionCallOutputContentItem::inline_audio("audio:one".to_string()),
     ];
 
     let output =
@@ -387,10 +456,30 @@ fn truncate_function_output_items_with_policy_omits_audio_over_budget() {
 }
 
 #[test]
-fn truncate_function_output_items_with_policy_charges_audio_against_byte_budget() {
+fn repeated_file_audio_and_text_share_one_output_budget() {
     let audio = FunctionCallOutputContentItem::InputAudio {
-        audio_url: "audio:one".to_string(),
+        audio: AudioReference::File {
+            file_id: "clip".into(),
+        },
     };
+    let items = [text("abcd"), audio.clone(), audio.clone()];
+    // Text takes one token. The first reference takes two, leaving too little
+    // for a second copy of the same clip under either budget.
+    for policy in [TruncationPolicy::Tokens(4), TruncationPolicy::Bytes(16)] {
+        assert_eq!(
+            truncate_function_output_items_with_policy(&items, policy, |_| 2),
+            vec![
+                text("abcd"),
+                audio.clone(),
+                text("[omitted 1 audio items ...]")
+            ],
+        );
+    }
+}
+
+#[test]
+fn truncate_function_output_items_with_policy_charges_audio_against_byte_budget() {
+    let audio = FunctionCallOutputContentItem::inline_audio("audio:one".to_string());
     let items = vec![
         audio.clone(),
         FunctionCallOutputContentItem::InputText {
@@ -413,18 +502,14 @@ fn truncate_function_output_items_with_policy_charges_audio_against_byte_budget(
 }
 
 #[test]
-fn formatted_truncate_text_content_items_with_policy_merges_all_text_for_token_budget() {
-    let items = vec![
-        FunctionCallOutputContentItem::InputText {
-            text: "abcdefgh".to_string(),
-        },
-        FunctionCallOutputContentItem::InputText {
-            text: "ijklmnop".to_string(),
-        },
-    ];
+fn formatted_text_output_merges_all_text_for_token_budget() {
+    let items = vec![text("abcdefgh"), text("ijklmnop")];
 
-    let (output, original_token_count) =
-        formatted_truncate_text_content_items_with_policy(&items, TruncationPolicy::Tokens(2));
+    let output = formatted_truncate_function_output_items_with_policy(
+        items,
+        TruncationPolicy::Tokens(2),
+        |_| 0,
+    );
 
     assert_eq!(
         output,
@@ -432,7 +517,6 @@ fn formatted_truncate_text_content_items_with_policy_merges_all_text_for_token_b
             text: "Warning: truncated output (original token count: 5)\nTotal output lines: 2\n\nabcd…3 tokens truncated…mnop".to_string(),
         }]
     );
-    assert_eq!(original_token_count, Some(5));
 }
 
 #[test]
@@ -440,4 +524,137 @@ fn byte_count_conversion_clamps_non_positive_values() {
     assert_eq!(approx_tokens_from_byte_count_i64(/*bytes*/ -1), 0);
     assert_eq!(approx_tokens_from_byte_count_i64(/*bytes*/ 0), 0);
     assert_eq!(approx_tokens_from_byte_count_i64(/*bytes*/ 5), 2);
+}
+
+fn boundaries<const N: usize>(positions: [(usize, usize); N]) -> [OutputBoundary; N] {
+    positions.map(|(item_index, text_offset)| OutputBoundary {
+        item_index,
+        text_offset,
+    })
+}
+
+fn positions<const N: usize>(boundaries: [OutputBoundary; N]) -> [(usize, usize); N] {
+    boundaries.map(|b| (b.item_index, b.text_offset))
+}
+
+fn text(s: &str) -> FunctionCallOutputContentItem {
+    FunctionCallOutputContentItem::InputText { text: s.to_owned() }
+}
+
+fn inline_image(image_url: String) -> FunctionCallOutputContentItem {
+    FunctionCallOutputContentItem::InputImage {
+        image: ImageReference::Inline { image_url },
+        detail: Some(DEFAULT_IMAGE_DETAIL),
+    }
+}
+
+#[test]
+fn boundary_formatters_normalize_input_and_remap_truncated_text() {
+    let audio_cost: fn(&AudioReference) -> usize = |_| 1;
+    let items = [text("left-head"), text("right-tail")];
+    let max_tokens = 2;
+    let mut boundary = boundaries([(0, 0), (0, 2), (1, 0), (1, 8), (2, 0)]);
+    let output =
+        formatted_output_at_token_boundaries(&items, max_tokens, audio_cost, &mut boundary);
+    let [FunctionCallOutputContentItem::InputText { text: rendered }] = output.as_slice() else {
+        panic!("expected one merged text item")
+    };
+    let head = rendered.find("left").expect("expected retained prefix");
+    let tail = rendered
+        .strip_suffix("tail")
+        .expect("expected retained suffix")
+        .len();
+    assert_eq!(
+        positions(boundary),
+        [
+            (0, 0),
+            (0, head + 2),
+            (0, tail),
+            (0, tail + 2),
+            (0, rendered.len())
+        ]
+    );
+
+    for (middle, middle_end) in [(text("after"), 5), (inline_image("img:one".to_owned()), 0)] {
+        let items = [text("🙂é boundary"), middle, text("last")];
+        for formatter in [
+            formatted_output_at_token_boundaries,
+            mixed_output_at_token_boundaries,
+        ] {
+            for tokens in [0, 1, 2, 256] {
+                let mut b = boundaries([(0, 1), (1, usize::MAX), (0, 8), (usize::MAX, usize::MAX)]);
+                let output = formatter(&items, tokens, audio_cost, &mut b);
+                assert_eq!(output, formatter(&items, tokens, audio_cost, &mut []));
+                let result = positions(b);
+                assert!(result.is_sorted());
+                assert!(
+                    result
+                        .iter()
+                        .all(|&(index, offset)| match output.get(index) {
+                            Some(FunctionCallOutputContentItem::InputText { text }) =>
+                                text.is_char_boundary(offset),
+                            _ => index <= output.len() && offset == 0,
+                        })
+                );
+                if tokens == 256 {
+                    assert_eq!(result, [(0, 0), (1, middle_end), (1, middle_end), (3, 0)]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn owned_mixed_output_moves_a_preserved_image_across_text_truncation() {
+    let image_url = "data:image/png;base64,".to_owned() + &"a".repeat(4096);
+    let url_ptr = image_url.as_ptr();
+    let items = vec![
+        text("long prefix"),
+        inline_image(image_url),
+        text("omitted"),
+    ];
+    let mut borrowed = boundaries([(0, 5), (2, 3)]);
+    let mut owned = boundaries([(0, 5), (2, 3)]);
+    let max_tokens = 1;
+    let expected = formatted_output_at_token_boundaries(&items, max_tokens, |_| 0, &mut borrowed);
+    let actual = formatted_output_at_token_boundaries(items, max_tokens, |_| 0, &mut owned);
+    assert_eq!(actual, expected);
+    let projected = positions(owned);
+    assert_eq!(projected, positions(borrowed));
+    let [(index, offset), omitted] = projected;
+    let FunctionCallOutputContentItem::InputText { text: snippet } = &actual[index] else {
+        panic!("expected boundary inside truncated text");
+    };
+    assert_eq!((index, &snippet[offset..], omitted), (0, "ix", (2, 0)));
+    let FunctionCallOutputContentItem::InputImage {
+        image: ImageReference::Inline { image_url },
+        ..
+    } = &actual[1]
+    else {
+        panic!("expected preserved image")
+    };
+    assert_eq!(image_url.as_ptr(), url_ptr);
+}
+
+#[test]
+fn measured_tool_output_keeps_charges_paired_with_retained_clips() {
+    let clip = FunctionCallOutputContentItem::inline_audio("clip".into());
+    let text = FunctionCallOutputContentItem::InputText {
+        text: "keep".into(),
+    };
+    let omitted = FunctionCallOutputContentItem::InputText {
+        text: "[omitted 1 audio items ...]".into(),
+    };
+    assert_eq!(
+        truncate_measured_tool_output(
+            vec![
+                (clip.clone(), 9),
+                (text.clone(), 0),
+                (clip.clone(), 2),
+                (clip.clone(), 1)
+            ],
+            TruncationPolicy::Tokens(4)
+        ),
+        vec![(text, 0), (clip.clone(), 2), (clip, 1), (omitted, 0)]
+    );
 }

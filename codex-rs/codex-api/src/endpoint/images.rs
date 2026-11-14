@@ -7,6 +7,7 @@ use crate::images::ImageResponse;
 use crate::provider::Provider;
 use codex_client::HttpTransport;
 use codex_client::RequestTelemetry;
+use codex_client::TransportError;
 use http::HeaderMap;
 use http::Method;
 use serde::Serialize;
@@ -17,6 +18,32 @@ const X_CODEX_IMAGEGEN_REQUEST_ID_HEADER: &str = "x-codex-imagegen-request-id";
 
 pub struct ImagesClient<T: HttpTransport> {
     session: EndpointSession<T>,
+}
+
+/// Image request failure with the nested ImageGen request ID, when available.
+#[derive(Debug)]
+pub struct ImageRequestError {
+    error: ApiError,
+    imagegen_request_id: Option<String>,
+}
+
+impl ImageRequestError {
+    fn from_api_error(error: ApiError) -> Self {
+        let imagegen_request_id = match &error {
+            ApiError::Transport(TransportError::Http { headers, .. }) => {
+                headers.as_ref().and_then(imagegen_request_id_from_headers)
+            }
+            _ => None,
+        };
+        Self {
+            error,
+            imagegen_request_id,
+        }
+    }
+
+    pub fn into_parts(self) -> (ApiError, Option<String>) {
+        (self.error, self.imagegen_request_id)
+    }
 }
 
 impl<T: HttpTransport> ImagesClient<T> {
@@ -36,7 +63,7 @@ impl<T: HttpTransport> ImagesClient<T> {
         &self,
         request: &ImageGenerationRequest,
         extra_headers: HeaderMap,
-    ) -> Result<(ImageResponse, Option<String>), ApiError> {
+    ) -> Result<(ImageResponse, Option<String>), ImageRequestError> {
         self.post_image_request(
             "images/generations",
             request,
@@ -50,7 +77,7 @@ impl<T: HttpTransport> ImagesClient<T> {
         &self,
         request: &ImageEditRequest,
         extra_headers: HeaderMap,
-    ) -> Result<(ImageResponse, Option<String>), ApiError> {
+    ) -> Result<(ImageResponse, Option<String>), ImageRequestError> {
         self.post_image_request("images/edits", request, extra_headers, "image edit")
             .await
     }
@@ -61,23 +88,31 @@ impl<T: HttpTransport> ImagesClient<T> {
         request: &R,
         extra_headers: HeaderMap,
         operation: &str,
-    ) -> Result<(ImageResponse, Option<String>), ApiError> {
-        let body = to_value(request)
-            .map_err(|e| ApiError::Stream(format!("failed to encode {operation} request: {e}")))?;
+    ) -> Result<(ImageResponse, Option<String>), ImageRequestError> {
+        let body = to_value(request).map_err(|e| ImageRequestError {
+            error: ApiError::Stream(format!("failed to encode {operation} request: {e}")),
+            imagegen_request_id: None,
+        })?;
         let resp = self
             .session
             .execute(Method::POST, path, extra_headers, Some(body))
-            .await?;
-        let imagegen_request_id = resp
-            .headers
-            .get(X_CODEX_IMAGEGEN_REQUEST_ID_HEADER)
-            .and_then(|value| value.to_str().ok())
-            .filter(|request_id| !request_id.is_empty())
-            .map(str::to_string);
-        let response = serde_json::from_slice(&resp.body)
-            .map_err(|e| ApiError::Stream(format!("failed to decode {operation} response: {e}")))?;
+            .await
+            .map_err(ImageRequestError::from_api_error)?;
+        let imagegen_request_id = imagegen_request_id_from_headers(&resp.headers);
+        let response = serde_json::from_slice(&resp.body).map_err(|e| ImageRequestError {
+            error: ApiError::Stream(format!("failed to decode {operation} response: {e}")),
+            imagegen_request_id: imagegen_request_id.clone(),
+        })?;
         Ok((response, imagegen_request_id))
     }
+}
+
+fn imagegen_request_id_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(X_CODEX_IMAGEGEN_REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|request_id| !request_id.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -87,13 +122,13 @@ mod tests {
     use crate::images::ImageBackground;
     use crate::images::ImageData;
     use crate::images::ImageQuality;
-    use crate::images::ImageUrl;
     use crate::provider::RetryConfig;
     use codex_client::Request;
     use codex_client::RequestBody;
     use codex_client::Response;
     use codex_client::StreamResponse;
     use codex_client::TransportError;
+    use codex_protocol::models::ImageReference;
     use http::StatusCode;
     use pretty_assertions::assert_eq;
     use serde_json::json;
@@ -104,7 +139,9 @@ mod tests {
     struct DummyAuth;
 
     impl AuthProvider for DummyAuth {
-        fn add_auth_headers(&self, _headers: &mut HeaderMap) {}
+        fn add_auth_headers(&self, _headers: &mut HeaderMap) -> Result<(), crate::AuthError> {
+            Ok(())
+        }
     }
 
     #[derive(Clone)]
@@ -225,6 +262,7 @@ mod tests {
         let (response, imagegen_request_id) = client
             .generate(
                 &ImageGenerationRequest {
+                    output: None,
                     prompt: "a red fox in a field".to_string(),
                     background: Some(ImageBackground::Opaque),
                     model: "gpt-image-1.5".to_string(),
@@ -274,6 +312,7 @@ mod tests {
         let (response, _) = client
             .generate(
                 &ImageGenerationRequest {
+                    output: None,
                     prompt: "test".to_string(),
                     background: None,
                     model: "gpt-image-2".to_string(),
@@ -304,9 +343,15 @@ mod tests {
         let (response, imagegen_request_id) = client
             .edit(
                 &ImageEditRequest {
-                    images: vec![ImageUrl {
-                        image_url: "data:image/png;base64,Zm9v".to_string(),
-                    }],
+                    output: None,
+                    images: vec![
+                        ImageReference::Inline {
+                            image_url: "data:image/png;base64,Zm9v".to_string(),
+                        },
+                        ImageReference::File {
+                            file_id: "file-image".to_string(),
+                        },
+                    ],
                     prompt: "add a red hat".to_string(),
                     background: None,
                     model: "gpt-image-1.5".to_string(),
@@ -327,7 +372,10 @@ mod tests {
         assert_eq!(
             request.body.as_ref().and_then(RequestBody::json),
             Some(&json!({
-                "images": [{"image_url": "data:image/png;base64,Zm9v"}],
+                "images": [
+                    {"image_url": "data:image/png;base64,Zm9v"},
+                    {"file_id": "file-image"},
+                ],
                 "prompt": "add a red hat",
                 "model": "gpt-image-1.5",
             }))
@@ -344,6 +392,7 @@ mod tests {
         let error = client
             .generate(
                 &ImageGenerationRequest {
+                    output: None,
                     prompt: "a red fox in a field".to_string(),
                     background: None,
                     model: "gpt-image-1.5".to_string(),
@@ -355,6 +404,7 @@ mod tests {
             )
             .await
             .expect_err("image response without data should fail");
+        let (error, _) = error.into_parts();
 
         let ApiError::Stream(message) = error else {
             panic!("expected image response decode error");

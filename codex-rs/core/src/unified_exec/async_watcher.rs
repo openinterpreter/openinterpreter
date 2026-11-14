@@ -1,3 +1,4 @@
+use codex_protocol::openai_models::CatalogModel;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -9,6 +10,7 @@ use tokio::time::Sleep;
 
 use super::SharedPluginMetricsSidecar;
 use super::UnifiedExecContext;
+use super::process::OutputBuffers;
 use super::process::OutputHandles;
 use super::process::UnifiedExecProcess;
 use super::take_plugin_metrics_sidecar;
@@ -20,11 +22,9 @@ use crate::tools::events::ToolEmitter;
 use crate::tools::events::ToolEventCtx;
 use crate::tools::events::ToolEventFailure;
 use crate::tools::events::ToolEventStage;
-use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
 use codex_core_plugins::PluginCommandAttribution;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::exec_output::StreamOutput;
-use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecCommandOutputDeltaEvent;
 use codex_protocol::protocol::ExecCommandSource;
@@ -50,18 +50,11 @@ struct Emitter {
 
 struct Buffer<const MAX_BYTES: usize = UNIFIED_EXEC_OUTPUT_DELTA_MAX_BYTES> {
     pending: Vec<u8>,
-    transcript: Arc<Mutex<HeadTailBuffer>>,
     emitter: Emitter,
 }
 
-/// Spawn a background task that continuously reads from the PTY, appends to the
-/// shared transcript, and emits ExecCommandOutputDelta events on UTF‑8
-/// boundaries.
-pub(crate) fn start_streaming_output(
-    process: &UnifiedExecProcess,
-    context: &UnifiedExecContext,
-    transcript: Arc<Mutex<HeadTailBuffer>>,
-) {
+/// Spawn a background task that emits ExecCommandOutputDelta events on UTF‑8 boundaries.
+pub(crate) fn start_streaming_output(process: &UnifiedExecProcess, context: &UnifiedExecContext) {
     let mut receiver = process.output_receiver();
     let output_drained = process.output_drained_notify();
     let exit_token = process.cancellation_token();
@@ -83,7 +76,6 @@ pub(crate) fn start_streaming_output(
 
         let mut output: Buffer = Buffer {
             pending: Vec::new(),
-            transcript,
             emitter,
         };
 
@@ -170,7 +162,7 @@ pub(crate) fn spawn_exit_watcher(
     cwd: PathUri,
     process_id: i32,
     plugin_attribution: Option<PluginCommandAttribution>,
-    transcript: Arc<Mutex<HeadTailBuffer>>,
+    output_buffer: Arc<Mutex<OutputBuffers>>,
     started_at: Instant,
     network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
     plugin_metrics_sidecar: Option<SharedPluginMetricsSidecar>,
@@ -202,6 +194,7 @@ pub(crate) fn spawn_exit_watcher(
         if let Some(message) = process.failure_message() {
             drop(plugin_metrics_sidecar);
             emit_failed_exec_end_for_unified_exec(
+                process.sandbox_type(),
                 session_ref,
                 turn_ref,
                 model_info,
@@ -210,7 +203,7 @@ pub(crate) fn spawn_exit_watcher(
                 cwd,
                 Some(process_id.to_string()),
                 plugin_attribution,
-                transcript,
+                output_buffer,
                 String::new(),
                 message,
                 duration,
@@ -229,6 +222,7 @@ pub(crate) fn spawn_exit_watcher(
             )
             .await;
             emit_exec_end_for_unified_exec(
+                process.sandbox_type(),
                 session_ref,
                 turn_ref,
                 model_info,
@@ -237,7 +231,7 @@ pub(crate) fn spawn_exit_watcher(
                 cwd,
                 Some(process_id.to_string()),
                 plugin_attribution,
-                transcript,
+                output_buffer,
                 String::new(),
                 exit_code,
                 duration,
@@ -256,13 +250,7 @@ impl<const MAX_BYTES: usize> Buffer<MAX_BYTES> {
                 "a frame must fit one UTF-8 scalar"
             )
         };
-        let Self {
-            pending,
-            transcript,
-            emitter,
-        } = self;
-
-        transcript.lock().await.push_chunk(&bytes);
+        let Self { pending, emitter } = self;
 
         // Reuse a producer chunk when it fits, retaining only an incomplete
         // UTF-8 suffix for the next push.
@@ -297,7 +285,6 @@ impl<const MAX_BYTES: usize> Buffer<MAX_BYTES> {
     async fn finish(self) {
         let Self {
             pending,
-            transcript: _,
             mut emitter,
         } = self;
         debug_assert!(
@@ -342,21 +329,22 @@ impl Emitter {
 /// text when the transcript is empty.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn emit_exec_end_for_unified_exec(
+    _sandbox_type: Option<codex_protocol::sandbox::SandboxType>,
     session_ref: Arc<Session>,
     turn_ref: Arc<TurnContext>,
-    model_info: Arc<ModelInfo>,
+    model_info: Arc<CatalogModel>,
     call_id: String,
     command: Vec<String>,
     cwd: PathUri,
     process_id: Option<String>,
     plugin_attribution: Option<PluginCommandAttribution>,
-    transcript: Arc<Mutex<HeadTailBuffer>>,
+    output_buffer: Arc<Mutex<OutputBuffers>>,
     fallback_output: String,
     exit_code: i32,
     duration: Duration,
     timed_out: bool,
 ) {
-    let aggregated_output = resolve_aggregated_output(&transcript, fallback_output).await;
+    let aggregated_output = resolve_aggregated_output(&output_buffer, fallback_output).await;
     let output = ExecToolCallOutput {
         exit_code,
         stdout: StreamOutput::new(aggregated_output.clone()),
@@ -392,21 +380,22 @@ pub(crate) async fn emit_exec_end_for_unified_exec(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn emit_failed_exec_end_for_unified_exec(
+    _sandbox_type: Option<codex_protocol::sandbox::SandboxType>,
     session_ref: Arc<Session>,
     turn_ref: Arc<TurnContext>,
-    model_info: Arc<ModelInfo>,
+    model_info: Arc<CatalogModel>,
     call_id: String,
     command: Vec<String>,
     cwd: PathUri,
     process_id: Option<String>,
     plugin_attribution: Option<PluginCommandAttribution>,
-    transcript: Arc<Mutex<HeadTailBuffer>>,
+    output_buffer: Arc<Mutex<OutputBuffers>>,
     fallback_output: String,
     message: String,
     duration: Duration,
 ) {
     let stdout = if fallback_output.is_empty() {
-        resolve_aggregated_output(&transcript, fallback_output).await
+        resolve_aggregated_output(&output_buffer, fallback_output).await
     } else {
         fallback_output
     };
@@ -466,15 +455,15 @@ fn utf8_boundary(bytes: &[u8]) -> usize {
 }
 
 async fn resolve_aggregated_output(
-    transcript: &Arc<Mutex<HeadTailBuffer>>,
+    output_buffer: &Arc<Mutex<OutputBuffers>>,
     fallback: String,
 ) -> String {
-    let guard = transcript.lock().await;
-    if guard.retained_bytes() == 0 {
+    let guard = output_buffer.lock().await;
+    if guard.transcript.retained_bytes() == 0 {
         return fallback;
     }
 
-    String::from_utf8_lossy(&guard.to_bytes_with_omission_marker()).to_string()
+    String::from_utf8_lossy(&guard.transcript.to_bytes_with_omission_marker()).to_string()
 }
 
 #[cfg(test)]

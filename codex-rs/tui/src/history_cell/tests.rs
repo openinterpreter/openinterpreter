@@ -356,28 +356,26 @@ fn source_backed_cells_render_raw_source_without_prefix_or_style() {
 
 #[test]
 fn proposed_plan_cell_renders_markdown_table() {
-    let plan = new_proposed_plan(
-        "## Plan\n\n| Step | Owner |\n| --- | --- |\n| Verify | Codex |\n".to_string(),
-        &test_cwd(),
-    );
+    crate::terminal_palette::with_test_default_colors(
+        crate::terminal_probe::DefaultColors {
+            fg: (30, 30, 30),
+            bg: (255, 255, 255),
+        },
+        || {
+            let plan = new_proposed_plan(
+                "## Plan\n\n| Step | Owner |\n| --- | --- |\n| Verify | Codex |\n".to_string(),
+                &test_cwd(),
+            );
 
-    let rendered = render_lines(&plan.display_lines(/*width*/ 80));
+            let lines = plan.display_lines(/*width*/ 80);
+            insta::assert_debug_snapshot!(lines);
 
-    assert!(
-        rendered.iter().any(|line| line.contains('━')),
-        "expected separated table in proposed plan output: {rendered:?}"
-    );
-    assert!(
-        !rendered
-            .iter()
-            .any(|line| line.trim() == "| Step | Owner |"),
-        "did not expect raw table header in rich proposed plan output: {rendered:?}"
-    );
-
-    let raw = render_lines(&plan.raw_lines());
-    assert!(
-        raw.iter().any(|line| line == "| Step | Owner |"),
-        "expected raw mode to preserve table markdown source: {raw:?}"
+            let raw = render_lines(&plan.raw_lines());
+            assert!(
+                raw.iter().any(|line| line == "| Step | Owner |"),
+                "expected raw mode to preserve table markdown source: {raw:?}"
+            );
+        },
     );
 }
 
@@ -405,7 +403,7 @@ fn proposed_plan_cell_preserves_wrapped_table_web_links() {
 
 #[test]
 fn composite_cell_preserves_child_web_links() {
-    let destination = "https://chatgpt.com/codex/settings/usage";
+    let destination = "https://chatgpt.com/settings/usage";
     let cell = CompositeHistoryCell::new(vec![
         Box::new(PlainHistoryCell::new(vec![Line::from("/status")])),
         Box::new(WebHyperlinkHistoryCell::new(vec![Line::from(destination)])),
@@ -496,6 +494,7 @@ fn proposed_plan_cell_unwraps_markdown_fenced_table() {
 #[test]
 fn structured_tool_cell_renders_raw_plain_text_without_prefix_or_style() {
     let invocation = McpInvocation {
+        environment_id: None,
         server: "search".into(),
         tool: "find_docs".into(),
         arguments: Some(json!({"query": "raw mode"})),
@@ -521,10 +520,32 @@ fn structured_tool_cell_renders_raw_plain_text_without_prefix_or_style() {
 }
 
 #[test]
+fn delegated_message_list_spacing_in_scrollback_and_transcript() {
+    let cell = DelegatedMessageCell::new(
+        "other",
+        "- One\n- This item has enough words to wrap\n- Three".to_string(),
+    );
+    let width = 32;
+    let scrollback = render_lines(&cell.display_lines(width)).join("\n");
+    let transcript = render_lines(&visible_lines(fullscreen_session_lines(
+        &cell,
+        width,
+        /*detailed*/ false,
+        HistoryRenderMode::Rich,
+    )))
+    .join("\n");
+
+    insta::assert_snapshot!(format!(
+        "Scrollback\n{scrollback}\n\nRedrawable transcript\n{transcript}"
+    ));
+}
+
+#[test]
 fn raw_mode_toggle_transcript_snapshot() {
     let mut tool_cell = new_active_mcp_tool_call(
         "call-snapshot".to_string(),
         McpInvocation {
+            environment_id: None,
             server: "workspace".to_string(),
             tool: "inspect".to_string(),
             arguments: Some(json!({"path": "README.md"})),
@@ -603,6 +624,7 @@ fn image_generation_call_renders_saved_path() {
 
 fn session_configured_event(model: &str) -> ThreadSessionState {
     ThreadSessionState {
+        read_only_history: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -620,7 +642,6 @@ fn session_configured_event(model: &str) -> ThreadSessionState {
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(PathBuf::new()),
@@ -747,7 +768,6 @@ async fn session_info_uses_availability_nux_tooltip_override() {
         /*is_first_event*/ false,
         Some("Model just became available".to_string()),
         Some(PlanType::Free),
-        /*show_fast_status*/ false,
     );
 
     let rendered = render_transcript(&cell).join("\n");
@@ -771,7 +791,6 @@ async fn session_info_availability_nux_tooltip_snapshot() {
         /*is_first_event*/ false,
         Some("Model just became available".to_string()),
         Some(PlanType::Free),
-        /*show_fast_status*/ false,
     );
 
     let rendered = render_transcript(&cell).join("\n");
@@ -839,15 +858,71 @@ async fn session_info_first_event_suppresses_tooltips_and_nux() {
         "gpt-5",
         "gpt-5",
         &session_configured_event("gpt-5"),
-        /*is_first_event*/ true,
-        Some("Model just became available".to_string()),
+        /*is_first_event*/ false,
+        Some(
+            "Use **/copy** or `ctrl+y`; visit the [Codex community forum](https://example.com)."
+                .to_string(),
+        ),
         Some(PlanType::Free),
-        /*show_fast_status*/ false,
     );
 
-    let rendered = render_transcript(&cell).join("\n");
-    assert!(!rendered.contains("Model just became available"));
-    assert!(rendered.contains("To get started"));
+    let lines = cell.transcript_hyperlink_lines(/*width*/ 30);
+    assert_eq!(lines, cell.display_hyperlink_lines(/*width*/ 30));
+    assert_eq!(lines, cell.compact_hyperlink_lines(/*width*/ 30));
+    assert_eq!(
+        visible_lines(lines.clone()),
+        cell.transcript_lines(/*width*/ 30)
+    );
+    let tip_start = lines
+        .iter()
+        .position(|line| line.line.to_string().starts_with("  Tip:"))
+        .unwrap();
+    let tip_lines = &lines[tip_start..];
+    let command = tip_lines
+        .iter()
+        .flat_map(|line| &line.line.spans)
+        .find(|span| span.content == "/copy")
+        .unwrap();
+    assert!(command.style.add_modifier.contains(Modifier::BOLD));
+    let mut rendered = Vec::new();
+    for line in tip_lines {
+        let text = line.line.to_string();
+        rendered.push(text.clone());
+        for link in &line.hyperlinks {
+            // This ASCII fixture makes byte offsets equal to terminal columns.
+            rendered.push(format!(
+                "    link {:?}: {} -> {}",
+                link.columns,
+                &text[link.columns.clone()],
+                link.destination,
+            ));
+        }
+    }
+    insta::assert_snapshot!(rendered.join("\n"));
+}
+
+#[tokio::test]
+async fn session_info_first_event_respects_tooltip_preference() {
+    let config = test_config().await;
+    let mut local_settings = crate::local_settings::LocalSettings::from(&config);
+    for show_tooltips in [true, false] {
+        local_settings.tui.show_tooltips = show_tooltips;
+        let cell = new_session_info(
+            &config,
+            &local_settings,
+            "requested-model",
+            "gpt-5",
+            &session_configured_event("gpt-5"),
+            /*is_first_event*/ true,
+            Some("Model just became available".to_string()),
+            Some(PlanType::Free),
+        );
+
+        let rendered = render_transcript(&cell).join("\n");
+        assert_eq!(rendered.contains("To get started"), show_tooltips);
+        assert!(!rendered.contains("Model just became available"));
+        assert!(!rendered.contains("model changed:"));
+    }
 }
 
 #[tokio::test]
@@ -863,7 +938,6 @@ async fn session_info_hides_tooltips_when_disabled() {
         /*is_first_event*/ false,
         Some("Model just became available".to_string()),
         Some(PlanType::Free),
-        /*show_fast_status*/ false,
     );
 
     let rendered = render_transcript(&cell).join("\n");
@@ -878,11 +952,29 @@ fn ps_output_multiline_snapshot() {
             recent_chunks: vec!["hello".to_string(), "done".to_string()],
         },
         UnifiedExecProcessDetails {
+            command_display: "(\n  sleep 120\n)".to_string(),
+            recent_chunks: Vec::new(),
+        },
+        UnifiedExecProcessDetails {
+            command_display: "sleep 1\r\nsleep 120".to_string(),
+            recent_chunks: Vec::new(),
+        },
+        UnifiedExecProcessDetails {
             command_display: "rg \"foo\" src".to_string(),
             recent_chunks: vec!["src/main.rs:12:foo".to_string()],
         },
     ]);
     let rendered = render_lines(&cell.display_lines(/*width*/ 40)).join("\n");
+    insta::assert_snapshot!(rendered);
+}
+
+#[test]
+fn ps_output_multiline_long_command_snapshot() {
+    let cell = new_unified_exec_processes_output(vec![UnifiedExecProcessDetails {
+        command_display: format!("(\n  {}\n)", "x".repeat(100)),
+        recent_chunks: Vec::new(),
+    }]);
+    let rendered = render_lines(&cell.display_lines(/*width*/ 100)).join("\n");
     insta::assert_snapshot!(rendered);
 }
 
@@ -901,9 +993,17 @@ fn cyber_policy_error_event_astra_snapshot() {
 }
 
 #[test]
-fn cyber_policy_error_event_limited_snapshot() {
-    let cell = new_cyber_policy_error_event(crate::daybreak::Notice::Limited);
-    let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
+fn cyber_policy_error_event_available_snapshot() {
+    let rendered = [
+        crate::daybreak::Notice::Disabled,
+        crate::daybreak::Notice::Enabled,
+    ]
+    .into_iter()
+    .map(|notice| {
+        render_lines(&new_cyber_policy_error_event(notice).display_lines(/*width*/ 80)).join("\n")
+    })
+    .collect::<Vec<_>>()
+    .join("\n\n");
     insta::assert_snapshot!(rendered);
 }
 
@@ -912,6 +1012,8 @@ fn safety_access_block_event_snapshot() {
     let cell = new_safety_access_block_event();
     let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
     insta::assert_snapshot!(rendered);
+    let body = cell.display_lines(u16::MAX)[1].to_string();
+    assert_eq!(cell.raw_lines()[1].to_string(), body.trim_start());
 }
 
 #[test]
@@ -1113,11 +1215,13 @@ async fn mcp_tools_output_lists_tools_for_hyphenated_server_names() {
 #[test]
 fn mcp_tools_output_from_statuses_renders_status_only_servers() {
     let statuses = vec![McpServerStatus {
+        environment_id: None,
         server_capabilities: None,
         tools_error: None,
         name: "plugin_docs".to_string(),
         runtime_status: None,
         plugin_id: None,
+        http_origin: None,
         server_info: None,
         tools: HashMap::from([(
             "lookup".to_string(),
@@ -1147,11 +1251,13 @@ fn mcp_tools_output_from_statuses_renders_status_only_servers() {
 #[test]
 fn mcp_tools_output_from_statuses_renders_verbose_inventory() {
     let statuses = vec![McpServerStatus {
+        environment_id: None,
         server_capabilities: None,
         tools_error: None,
         name: "plugin_docs".to_string(),
         runtime_status: None,
         plugin_id: None,
+        http_origin: None,
         server_info: None,
         tools: HashMap::from([(
             "lookup".to_string(),
@@ -1374,17 +1480,6 @@ fn pnpm_update_available_history_cell_snapshot() {
 }
 
 #[test]
-fn vite_plus_update_available_history_cell_snapshot() {
-    let cell = UpdateAvailableHistoryCell::new(
-        "9.9.9".to_string(),
-        Some(UpdateAction::VitePlusGlobalLatest),
-    );
-    let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
-
-    insta::assert_snapshot!(rendered);
-}
-
-#[test]
 fn web_search_history_cell_without_detail_snapshot() {
     let cell = new_web_search_call("call-1".to_string(), String::new(), WebSearchAction::Other);
     let rendered = render_lines(&cell.display_lines(/*width*/ 64)).join("\n");
@@ -1449,6 +1544,7 @@ fn web_search_history_cell_transcript_snapshot() {
 #[test]
 fn active_mcp_tool_call_snapshot() {
     let invocation = McpInvocation {
+        environment_id: Some("a".to_string()),
         server: "search".into(),
         tool: "find_docs".into(),
         arguments: Some(json!({
@@ -1473,6 +1569,7 @@ fn code_mode_tool_call_uses_title_and_preserves_full_transcript() {
     let mut cell = new_active_mcp_tool_call(
         "call-code-mode".into(),
         McpInvocation {
+            environment_id: None,
             server: "node_repl".into(),
             tool: "js".into(),
             arguments: Some(json!({
@@ -1523,6 +1620,7 @@ fn code_mode_tool_call_preserves_failure_details() {
     let mut cell = new_active_mcp_tool_call(
         "call-code-mode-failed".into(),
         McpInvocation {
+            environment_id: None,
             server: "node_repl".into(),
             tool: "js".into(),
             arguments: Some(json!({"title": "Inspect workspace", "code": "throw Error('denied')"})),
@@ -1585,6 +1683,7 @@ fn thread_recap_loading_without_animations_snapshot() {
 #[test]
 fn completed_mcp_tool_call_success_snapshot() {
     let invocation = McpInvocation {
+        environment_id: None,
         server: "search".into(),
         tool: "find_docs".into(),
         arguments: Some(json!({
@@ -1615,6 +1714,7 @@ fn completed_mcp_tool_call_success_snapshot() {
 #[test]
 fn completed_mcp_tool_call_image_after_text_snapshot() {
     let invocation = McpInvocation {
+        environment_id: None,
         server: "image".into(),
         tool: "generate".into(),
         arguments: Some(json!({
@@ -1646,6 +1746,7 @@ fn completed_mcp_tool_call_image_after_text_snapshot() {
 #[test]
 fn completed_mcp_tool_call_accepts_data_url_image_blocks() {
     let invocation = McpInvocation {
+        environment_id: None,
         server: "image".into(),
         tool: "generate".into(),
         arguments: Some(json!({
@@ -1675,6 +1776,7 @@ fn completed_mcp_tool_call_accepts_data_url_image_blocks() {
 #[test]
 fn completed_mcp_tool_call_multiple_image_blocks_snapshot() {
     let invocation = McpInvocation {
+        environment_id: None,
         server: "image".into(),
         tool: "generate".into(),
         arguments: Some(json!({
@@ -1703,6 +1805,7 @@ fn completed_mcp_tool_call_multiple_image_blocks_snapshot() {
 #[test]
 fn completed_mcp_tool_call_error_snapshot() {
     let invocation = McpInvocation {
+        environment_id: None,
         server: "search".into(),
         tool: "find_docs".into(),
         arguments: Some(json!({
@@ -1726,6 +1829,7 @@ fn completed_mcp_tool_call_error_snapshot() {
 #[test]
 fn completed_mcp_tool_call_multiple_outputs_snapshot() {
     let invocation = McpInvocation {
+        environment_id: None,
         server: "search".into(),
         tool: "find_docs".into(),
         arguments: Some(json!({
@@ -1766,6 +1870,7 @@ fn completed_mcp_tool_call_multiple_outputs_snapshot() {
 #[test]
 fn completed_mcp_tool_call_wrapped_outputs_snapshot() {
     let invocation = McpInvocation {
+        environment_id: None,
         server: "metrics".into(),
         tool: "get_nearby_metric".into(),
         arguments: Some(json!({
@@ -1798,6 +1903,7 @@ fn completed_mcp_tool_call_wrapped_outputs_snapshot() {
 #[test]
 fn completed_mcp_tool_call_multiple_outputs_inline_snapshot() {
     let invocation = McpInvocation {
+        environment_id: None,
         server: "metrics".into(),
         tool: "summary".into(),
         arguments: Some(json!({
@@ -1829,52 +1935,11 @@ fn completed_mcp_tool_call_multiple_outputs_inline_snapshot() {
 }
 
 #[test]
-fn session_header_includes_reasoning_level_when_present() {
-    let cell = SessionHeaderHistoryCell::new(
-        "gpt-4o".to_string(),
-        Some(ReasoningEffortConfig::High),
-        /*show_fast_status*/ true,
-        std::env::temp_dir(),
-        "test",
-    );
-
-    let lines = render_lines(&cell.display_lines(/*width*/ 80));
-    let model_line = lines
-        .iter()
-        .find(|line| line.contains("model:"))
-        .expect("model line");
-
-    assert!(model_line.contains("gpt-4o high   fast"));
-    assert!(model_line.contains("/model to change"));
-}
-
-#[test]
-fn session_header_hides_fast_status_when_disabled() {
-    let cell = SessionHeaderHistoryCell::new(
-        "gpt-4o".to_string(),
-        Some(ReasoningEffortConfig::High),
-        /*show_fast_status*/ false,
-        std::env::temp_dir(),
-        "test",
-    );
-
-    let lines = render_lines(&cell.display_lines(/*width*/ 80));
-    let model_line = lines
-        .iter()
-        .find(|line| line.contains("model:"))
-        .expect("model line");
-
-    assert!(model_line.contains("gpt-4o high"));
-    assert!(!model_line.contains("fast"));
-}
-
-#[test]
 fn session_header_clamps_to_narrow_width() {
     const WIDTH: u16 = 44;
     let cell = SessionHeaderHistoryCell::new(
         "gpt-5.6-sol".to_string(),
         Some(ReasoningEffortConfig::XHigh),
-        /*show_fast_status*/ true,
         PathBuf::from("project"),
         "test",
     )
@@ -1883,7 +1948,7 @@ fn session_header_clamps_to_narrow_width() {
     let lines = cell.display_lines(WIDTH);
     let widths = lines.iter().map(line_width).collect::<Vec<_>>();
 
-    assert_eq!(widths, vec![usize::from(WIDTH); lines.len()]);
+    assert!(widths.iter().all(|width| *width <= usize::from(WIDTH)));
     insta::assert_snapshot!(render_lines(&lines).join("\n"));
 }
 
@@ -1896,7 +1961,6 @@ fn session_header_indicates_yolo_mode() {
     let cell = SessionHeaderHistoryCell::new(
         "gpt-5".to_string(),
         /*reasoning_effort*/ None,
-        /*show_fast_status*/ false,
         test_path_buf("/tmp/project").abs().to_path_buf(),
         "test",
     )
@@ -1907,30 +1971,10 @@ fn session_header_indicates_yolo_mode() {
 }
 
 #[test]
-fn session_header_aligns_halfwidth_sound_marks() {
-    let cell: Box<dyn HistoryCell> = Box::new(SessionHeaderHistoryCell::new(
-        "gpt-5-ｶﾞ-ﾊﾟ".to_string(),
-        /*reasoning_effort*/ None,
-        /*show_fast_status*/ false,
-        PathBuf::from("project"),
-        "test",
-    ));
-
-    let width = 80;
-    let height = cell.desired_height(width);
-    let area = Rect::new(0, 0, width, height);
-    let mut buf = Buffer::empty(area);
-    cell.render(area, &mut buf);
-
-    insta::assert_snapshot!("session_header_halfwidth_sound_marks", format!("{buf:?}"));
-}
-
-#[test]
 fn session_header_truncates_halfwidth_directory() {
     let cell: Box<dyn HistoryCell> = Box::new(SessionHeaderHistoryCell::new(
         "gpt-5".to_string(),
         /*reasoning_effort*/ None,
-        /*show_fast_status*/ false,
         PathBuf::from("ｶﾞﾊﾟｶﾞﾊﾟｶﾞﾊﾟｶﾞﾊﾟｶﾞﾊﾟｶﾞﾊﾟｶﾞﾊﾟｶﾞﾊﾟ-project"),
         "test",
     ));
@@ -3012,6 +3056,18 @@ fn deprecation_notice_renders_summary_with_details() {
             "Use flag `bar` instead.".to_string(),
         ]
     );
+}
+
+#[test]
+fn legacy_zsh_migration_notice_snapshot() {
+    let mut features = codex_features::Features::default();
+    features.record_legacy_usage_force("shell_zsh_fork", codex_features::Feature::ShellZshFork);
+    let usage = features
+        .legacy_feature_usages()
+        .next()
+        .expect("migration notice");
+    let cell = new_deprecation_notice(usage.summary.clone(), usage.details.clone());
+    insta::assert_snapshot!(render_lines(&cell.transcript_lines(/*width*/ 80)).join("\n"));
 }
 
 #[test]

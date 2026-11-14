@@ -58,6 +58,8 @@ fn ema_profiles_and_auth_modes_preserve_non_project_authority() {
         idp: McpServerIdpOAuthConfig {
             issuer: "https://idp.example".into(),
             client_id: "enterprise".into(),
+            client_secret: None,
+            token_endpoint_auth_method: None,
         },
     };
     for (layers, selected) in [

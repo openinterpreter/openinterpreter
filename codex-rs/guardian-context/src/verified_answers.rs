@@ -6,9 +6,7 @@ use codex_history::RetainedContextEntry;
 use codex_history::VerifiedAnswer;
 
 use crate::GuardianRootMessage;
-use codex_protocol::protocol::TruncationPolicy;
-
-const MAX_ANSWER_TOKENS: usize = 900;
+use crate::retained_instructions::source_order_labels;
 
 /// Request-bounded answers and whether they are complete enough for cached fast approval.
 pub struct RenderedVerifiedAnswers {
@@ -20,7 +18,7 @@ pub struct RenderedVerifiedAnswers {
 pub fn render_verified_answers(context: &RetainedContext) -> RenderedVerifiedAnswers {
     let mut complete = context.verified_answers_complete();
     let mut fragments = Vec::new();
-    for (order, (_, entry)) in context.ordered_entries().enumerate() {
+    for (order, entry) in source_order_labels(context) {
         let RetainedContextEntry::VerifiedAnswer(answer) = entry else {
             continue;
         };
@@ -46,7 +44,13 @@ pub fn render_verified_answers(context: &RetainedContext) -> RenderedVerifiedAns
 /// Selects one complete response, preserving both sides of every question/answer pair.
 /// Returning None means the caller must account for missing evidence, not partial permission.
 pub fn render_verified_answer(answer: &VerifiedAnswer) -> Option<String> {
-    let text = answer
+    let text = render_original_verified_answer(answer);
+    answer_fits(text.len()).then_some(text)
+}
+
+/// Renders original question/answer bodies without making a request-selection decision.
+pub fn render_original_verified_answer(answer: &VerifiedAnswer) -> String {
+    answer
         .questions
         .iter()
         .map(|pair| {
@@ -56,7 +60,66 @@ pub fn render_verified_answer(answer: &VerifiedAnswer) -> Option<String> {
                 GuardianRootMessage::User(pair.answer.clone()).render()
             )
         })
-        .collect::<String>();
-    (!text.is_empty() && text.len() <= TruncationPolicy::Tokens(MAX_ANSWER_TOKENS).byte_budget())
-        .then_some(text)
+        .collect::<String>()
 }
+
+/// One role-labeled answer or host framing, with original answer cost when not yet admitted.
+#[derive(Clone, PartialEq)]
+pub struct TrustedUserAnswer {
+    pub(crate) text: String,
+    pub(crate) protected: bool,
+    pub(crate) answer_bytes: Option<usize>,
+}
+
+impl std::fmt::Debug for TrustedUserAnswer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TrustedUserAnswer")
+            .field("answer_bytes", &self.answer_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl From<String> for TrustedUserAnswer {
+    fn from(text: String) -> Self {
+        let protected = text == crate::authorization::TRUSTED_ANSWERS_START
+            || text == ">>> TRUSTED USER ANSWERS END\n"
+            || text == GuardianRootMessage::IncompleteVerifiedAnswers.render();
+        Self {
+            text,
+            protected,
+            answer_bytes: None,
+        }
+    }
+}
+
+impl From<&str> for TrustedUserAnswer {
+    fn from(text: &str) -> Self {
+        text.to_owned().into()
+    }
+}
+
+/// Collects originals for request preparation without applying the per-answer request limit.
+pub fn collect_verified_answer_candidates(context: &RetainedContext) -> Vec<TrustedUserAnswer> {
+    let mut items = Vec::new();
+    if !context.verified_answers_complete() {
+        items.push(
+            GuardianRootMessage::IncompleteVerifiedAnswers
+                .render()
+                .into(),
+        );
+    }
+    for (order, entry) in source_order_labels(context) {
+        if let RetainedContextEntry::VerifiedAnswer(answer) = entry {
+            let text = render_original_verified_answer(answer);
+            items.push(TrustedUserAnswer {
+                protected: false,
+                answer_bytes: Some(text.len()),
+                text: format!("Retained source order: {order}\n{text}"),
+            });
+        }
+    }
+    items
+}
+
+pub(crate) use crate::preparation::answer_fits;

@@ -2,7 +2,9 @@
 //! Model-authored framing is bounded; oversized identities use the previous plain-text format.
 
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 
 /// Identifies an answered question without repeating an unbounded model-authored prompt.
 pub struct AnsweredQuestion<'a> {
@@ -42,16 +44,16 @@ impl ContextualUserFragment for AnsweredQuestion<'_> {
             "</send_user_message_question_reply>",
         )
     }
-    fn body(&self) -> String {
+    fn body(&self) -> ContentItem {
         let Some(question_id) = self.question_id else {
-            return format!("> {}\n\n{}", self.question, self.answer);
+            return input_text(format!("> {}\n\n{}", self.question, self.answer));
         };
         let replies = serde_json::json!([{
             "answer": self.answer,
             "question": self.question,
             "questionItemId": question_id,
         }]);
-        format!("\n{replies}\n")
+        input_text(format!("\n{replies}\n"))
     }
 }
 

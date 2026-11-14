@@ -1,14 +1,16 @@
 --- a/cargo/private/cargo_build_script_runner/lib.rs
 +++ b/cargo/private/cargo_build_script_runner/lib.rs
-@@ -337,9 +337,18 @@
-             return "${pwd}".to_owned();
-         }
- 
+@@ -380,10 +380,20 @@
 -        value
 +        let redacted = value
              .replace(&format!("{exec_root}/"), "${pwd}/")
--            .replace(&format!("{exec_root}\\"), "${pwd}\\")
-+            .replace(&format!("{exec_root}\\"), "${pwd}\\");
+             .replace(&format!("{exec_root}\\"), "${pwd}\\")
+             // Flags such as `--remap-path-prefix=<exec_root>=.` (which build
+             // scripts see in CARGO_ENCODED_RUSTFLAGS and may echo back as
+             // `cargo:rustc-env`) follow the exec root with `=`. Leaving it
+             // unredacted bakes the per-action sandbox path into the output.
+-            .replace(&format!("{exec_root}="), "${pwd}=")
++            .replace(&format!("{exec_root}="), "${pwd}=");
 +        #[cfg(windows)]
 +        let redacted = {
 +            // pkg-config can emit forward slashes for the same Windows root.
@@ -16,18 +18,12 @@
 +            redacted
 +                .replace(&format!("{root}/"), "${pwd}/")
 +                .replace(&format!("{root}\\"), "${pwd}\\")
++                .replace(&format!("{root}="), "${pwd}=")
 +        };
 +        redacted
      }
  
-     /// Redact for env vars: uses the generic `${out_dir}` token, resolved
-@@ -630,6 +639,28 @@
-                 link_search_paths:
-                     "-L${pwd}/${bazel-out/cfg/bin/pkg/_bs.out_dir}\n-L${pwd}/other/path".to_owned(),
-             }
-+        );
-+    }
-+
+@@ -742,2 +752,24 @@
 +    #[cfg(windows)]
 +    #[test]
 +    fn windows_include_metadata_redacts_both_root_spellings() {
@@ -47,6 +43,8 @@
 +        assert_eq!(
 +            BuildScriptOutput::nonhermetic_absolute_paths(&outputs, directory, ""),
 +            Vec::<String>::new()
-         );
-     }
- 
++        );
++    }
++
+     #[test]
+     fn nonhermetic_absolute_paths_are_detected() {

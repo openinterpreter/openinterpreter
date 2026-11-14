@@ -24,7 +24,7 @@ use codex_exec_server::ExecParams;
 use codex_exec_server::ExecProcessEvent;
 use codex_exec_server::ExecResponse;
 use codex_exec_server::ExecServerClientConnectOptions;
-use codex_exec_server::ExecServerRuntimePaths;
+use codex_exec_server::ExecServerRuntimeOptions;
 use codex_exec_server::InitializeParams;
 use codex_exec_server::InitializeResponse;
 use codex_exec_server::ProcessId;
@@ -40,7 +40,10 @@ use codex_exec_server_protocol::JSONRPCMessage;
 use codex_exec_server_protocol::JSONRPCNotification;
 use codex_exec_server_protocol::JSONRPCRequest;
 use codex_exec_server_protocol::JSONRPCResponse;
+use codex_http_client::DestinationPolicy;
 use codex_http_client::HttpClientFactory;
+use codex_http_client::NetworkPolicy;
+use codex_http_client::NetworkPolicyController;
 use codex_http_client::OutboundProxyPolicy;
 use codex_utils_path_uri::PathUri;
 use common::exec_server::DisconnectableWebSocketProxy;
@@ -74,11 +77,12 @@ const SESSION_ALREADY_ATTACHED_ERROR_CODE: i64 = -32010;
 struct DirectExecutorAuth;
 
 impl AuthProvider for DirectExecutorAuth {
-    fn add_auth_headers(&self, headers: &mut HeaderMap) {
+    fn add_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), codex_api::AuthError> {
         headers.insert(
             http::header::AUTHORIZATION,
             HeaderValue::from_static("AWS4-HMAC-SHA256 test-signature"),
         );
+        Ok(())
     }
 }
 
@@ -132,8 +136,12 @@ async fn accepted_websocket_environment_info_uses_initialization_metadata() -> R
     Ok(())
 }
 
+#[test_case::test_case(false; "transport_disconnect")]
+#[test_case::test_case(true; "policy_unavailable")]
 #[tokio::test]
-async fn accepted_websocket_interoperates_and_recovers_with_real_direct_executor() -> Result<()> {
+async fn accepted_websocket_interoperates_and_recovers_with_real_direct_executor(
+    policy_unavailable: bool,
+) -> Result<()> {
     let (websocket_url, mut accepted_sockets, server_task) = start_acceptor().await?;
     let proxy = DisconnectableWebSocketProxy::new(&websocket_url).await?;
     let registry = MockServer::start().await;
@@ -150,7 +158,15 @@ async fn accepted_websocket_interoperates_and_recovers_with_real_direct_executor
         .mount(&registry)
         .await;
 
-    let http_client_factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
+    let controller = NetworkPolicyController::default();
+    let policy = controller.policy();
+    controller.publish(policy.revision(), DestinationPolicy::Unrestricted);
+    let http_client_factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault)
+        .with_network_policy(if policy_unavailable {
+            policy.clone().for_current_account()
+        } else {
+            NetworkPolicy::unmanaged()
+        });
     let config = RemoteEnvironmentConfig::new_with_transport(
         registry.uri(),
         "environment-1".to_string(),
@@ -159,7 +175,7 @@ async fn accepted_websocket_interoperates_and_recovers_with_real_direct_executor
         http_client_factory.clone(),
     )?;
     let (codex_exe, codex_linux_sandbox_exe) = common::current_test_binary_helper_paths()?;
-    let runtime_paths = ExecServerRuntimePaths::new(codex_exe, codex_linux_sandbox_exe)?;
+    let runtime_paths = ExecServerRuntimeOptions::new(codex_exe, codex_linux_sandbox_exe)?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let executor_task = AbortOnDropHandle::new(tokio::spawn(
         codex_exec_server::run_remote_environment_until_shutdown(
@@ -289,9 +305,22 @@ async fn accepted_websocket_interoperates_and_recovers_with_real_direct_executor
             EnvironmentConnectionState::Connected
         );
         proxy.pause_and_disconnect().await?;
+        if policy_unavailable {
+            controller.unavailable(policy.revision());
+            assert!(
+                timeout(Duration::from_secs(/*secs*/ 1), accepted_sockets.recv())
+                    .await
+                    .is_err(),
+                "unavailable policy reconnected"
+            );
+            assert!(
+                !executor_task.is_finished(),
+                "policy outage stopped the runner"
+            );
+        }
         timeout(
             TEST_TIMEOUT,
-            connection_state.wait_for(|state| *state == EnvironmentConnectionState::Disconnected),
+            connection_state.wait_for(|state| *state == EnvironmentConnectionState::Recovering),
         )
         .await??;
         tokio::fs::write(&gate_path, b"").await?;
@@ -319,6 +348,7 @@ async fn accepted_websocket_interoperates_and_recovers_with_real_direct_executor
                 .is_err(),
             "process reads should wait while recovery is in progress"
         );
+        controller.publish(policy.revision(), DestinationPolicy::Unrestricted);
         proxy.resume()?;
         let replacement = timeout(TEST_TIMEOUT, accepted_sockets.recv())
             .await?

@@ -1,0 +1,6 @@
+---
+source: tui/src/chatwidget/tests/permissions.rs
+assertion_line: 168
+expression: lines_to_single_string(&cell.display_lines(80))
+---
+■ Permission profile `:read-only` is unavailable: Disabled by requirements.

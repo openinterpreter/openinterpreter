@@ -122,6 +122,9 @@ async fn get_conversation_summary_by_thread_id_reads_pathless_store_thread() -> 
     let thread_id = ThreadId::from_string("00000000-0000-4000-8000-000000000125")?;
     store
         .create_thread(CreateThreadParams {
+            attached_thread: false,
+            creator_user_id: None,
+            creator_account_id: None,
             session_id: thread_id.into(),
             thread_id,
             extra_config: None,
@@ -161,6 +164,7 @@ async fn get_conversation_summary_by_thread_id_reads_pathless_store_thread() -> 
         loader_overrides,
         strict_config: false,
         cloud_config_bundle: CloudConfigBundleLoader::default(),
+        embedded_network_policy: Default::default(),
         thread_config_loader: Arc::new(codex_config::NoopThreadConfigLoader),
         feedback: CodexFeedback::new(),
         log_db: None,

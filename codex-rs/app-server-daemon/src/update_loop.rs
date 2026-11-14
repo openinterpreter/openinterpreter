@@ -1,9 +1,12 @@
 //! Owns scheduled and manual installs, daemon restarts, and updater replacement.
 
+use std::collections::VecDeque;
 use std::path::Path;
 #[cfg(unix)]
 use std::process::Command as StdCommand;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -15,6 +18,7 @@ use codex_product_info::Product;
 use futures::FutureExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 #[cfg(unix)]
@@ -69,6 +73,8 @@ const INSTALL_URL: &str = "https://chatgpt.com/codex/install.sh";
 const INSTALL_URL: &str = "https://chatgpt.com/codex/install.ps1";
 #[cfg(windows)]
 const OPEN_INTERPRETER_INSTALL_URL: &str = "https://www.openinterpreter.com/install.ps1";
+const INSTALLER_STDERR_TAIL_BYTES: usize = 8 * 1024;
+const INSTALLER_STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) async fn run(
     http_client_factory: HttpClientFactory,
@@ -264,7 +270,14 @@ async fn adopt_managed_updater(
     #[cfg(unix)]
     {
         let _ = listener;
-        reexec_managed_updater(&managed_bin).map(|_| UpdateLoopControl::Stop)
+        reexec_managed_updater(
+            &managed_bin,
+            daemon
+                .pid_file
+                .parent()
+                .context("daemon pid path has no parent")?,
+        )
+        .map(|_| UpdateLoopControl::Stop)
     }
     #[cfg(windows)]
     {
@@ -424,7 +437,7 @@ async fn update_once(
             return Ok((UpdateLoopControl::Stop, None));
         }
         match daemon
-            .try_restart_if_running(restart_mode, &managed_codex_bin)
+            .try_restart_if_running(restart_mode, &managed_codex_bin, &package_root)
             .await?
         {
             RestartIfRunningOutcome::Busy => {
@@ -514,10 +527,11 @@ async fn current_updater_identity() -> Result<ExecutableIdentity> {
 }
 
 #[cfg(unix)]
-pub(crate) fn reexec_managed_updater(managed_codex_bin: &std::path::Path) -> Result<()> {
-    let err = StdCommand::new(managed_codex_bin)
-        .args(["app-server", "daemon", "pid-update-loop"])
-        .exec();
+pub(crate) fn reexec_managed_updater(managed_codex_bin: &Path, state_dir: &Path) -> Result<()> {
+    let mut command = StdCommand::new(managed_codex_bin);
+    command.args(["app-server", "daemon", "pid-update-loop"]);
+    crate::background_command::set_working_directory(&mut command, state_dir)?;
+    let err = command.exec();
     Err(err).with_context(|| {
         format!(
             "failed to replace updater with managed Codex binary {}",
@@ -607,9 +621,33 @@ async fn run_installer_script(
         .kill_on_drop(true)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .context("failed to invoke standalone Codex updater")?;
+    // Drain throughout the install: a full stderr pipe must not block the child
+    // before exit. Retain only a bounded tail for a failed install's diagnostic.
+    let mut stderr = child
+        .stderr
+        .take()
+        .context("standalone Codex updater stderr was unavailable")?;
+    let stderr_tail = Arc::new(Mutex::new(VecDeque::<u8>::new()));
+    let stderr_tail_writer = Arc::clone(&stderr_tail);
+    let mut stderr_task = tokio::spawn(async move {
+        let mut chunk = [0u8; 4096];
+        while let Ok(n) = stderr.read(&mut chunk).await {
+            if n == 0 {
+                break;
+            }
+            if let Ok(mut tail) = stderr_tail_writer.lock() {
+                for byte in &chunk[..n] {
+                    if tail.len() == INSTALLER_STDERR_TAIL_BYTES {
+                        tail.pop_front();
+                    }
+                    tail.push_back(*byte);
+                }
+            }
+        }
+    });
     #[cfg(windows)]
     let _installer_job = crate::backend::windows::installer_job(&child)?;
     let mut stdin = child
@@ -645,11 +683,22 @@ async fn run_installer_script(
     #[cfg(windows)]
     let status = child.wait().await;
     let status = status.context("failed to wait for standalone Codex updater")?;
+    let _ = tokio::time::timeout(INSTALLER_STDERR_DRAIN_TIMEOUT, &mut stderr_task).await;
+    stderr_task.abort();
 
     if status.success() {
         Ok(UpdateLoopControl::Continue)
     } else {
-        anyhow::bail!("standalone Codex updater exited with status {status}")
+        let bytes = stderr_tail
+            .lock()
+            .map(|tail| tail.iter().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let detail = String::from_utf8_lossy(&bytes);
+        let detail = detail.trim();
+        if detail.is_empty() {
+            anyhow::bail!("standalone Codex updater exited with status {status}")
+        }
+        anyhow::bail!("standalone Codex updater exited with status {status}:\n{detail}")
     }
 }
 

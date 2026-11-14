@@ -1,7 +1,7 @@
 //! Onboarding screen orchestration and top-level keyboard routing.
 //!
 //! The onboarding flow is a small state machine over visible steps
-//! (welcome/auth/trust). This module decides which step receives key/paste
+//! (welcome/auth/trust/GovCloud). This module decides which step receives key/paste
 //! events and enforces flow-level safety rules that cut across individual step
 //! widgets. Folder-entry consent reuses this same event loop for startup and in-app navigation.
 //!
@@ -14,6 +14,7 @@ use codex_app_server_client::AppServerEvent;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigBatchWriteParams;
+use codex_app_server_protocol::GatewayOAuthPrompt;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_exec_server::LOCAL_FS;
@@ -33,6 +34,8 @@ use codex_protocol::config_types::ForcedLoginMethod;
 
 use crate::LoginStatus;
 use crate::app_server_session::AppServerSession;
+use crate::clipboard_copy::CopyFormat;
+use crate::clipboard_copy::CopyStatus;
 use crate::config_update::RemoteProjectTrust;
 use crate::config_update::format_config_error;
 use crate::config_update::replace_config_value;
@@ -43,11 +46,14 @@ use crate::legacy_core::config::Config;
 use crate::onboarding::auth::AuthModeWidget;
 use crate::onboarding::auth::SignInOption;
 use crate::onboarding::auth::SignInState;
+use crate::onboarding::bedrock::BedrockState;
 use crate::onboarding::keys;
 use crate::onboarding::trust_directory::TrustDirectorySelection;
 use crate::onboarding::trust_directory::TrustDirectoryWidget;
 use crate::onboarding::welcome::WelcomeWidget;
+use crate::startup_draft::StartupCancelled;
 use crate::tui::FrameRequester;
+use crate::tui::MouseCapture;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
 use color_eyre::eyre::Result;
@@ -58,13 +64,19 @@ use uuid::Uuid;
 
 #[path = "directory_trust.rs"]
 mod directory_trust;
+pub(crate) use directory_trust::DirectoryTrustOptions;
 pub(crate) use directory_trust::check_directory_trust;
 
 #[allow(clippy::large_enum_variant)]
 enum Step {
     Welcome(WelcomeWidget),
     Auth(AuthModeWidget),
+    GatewayDevice(GatewayOAuthPrompt),
     TrustDirectory(TrustDirectoryWidget),
+    GovCloudGuidance {
+        state: BedrockState,
+        acknowledged: bool,
+    },
 }
 
 pub(crate) trait KeyboardHandler {
@@ -96,7 +108,10 @@ pub(crate) struct OnboardingScreenArgs {
     pub remote_project_trust: Option<RemoteProjectTrust>,
     pub show_login_screen: bool,
     pub bedrock_setup_enabled: bool,
+    pub gcp_setup_enabled: bool,
+    pub gateway_setup_enabled: bool,
     pub login_status: LoginStatus,
+    pub app_server_target: crate::AppServerTarget,
     pub app_server_request_handle: Option<AppServerRequestHandle>,
     pub config: Config,
 }
@@ -104,6 +119,7 @@ pub(crate) struct OnboardingScreenArgs {
 #[derive(Default)]
 pub(crate) struct OnboardingResult {
     pub directory_trust_persisted: bool,
+    pub selected_gateway: Option<String>,
     pub should_exit: bool,
 }
 
@@ -122,7 +138,10 @@ impl OnboardingScreen {
             remote_project_trust,
             show_login_screen,
             bedrock_setup_enabled,
+            gcp_setup_enabled,
+            gateway_setup_enabled,
             login_status,
+            app_server_target,
             app_server_request_handle,
             config,
         } = args;
@@ -159,15 +178,17 @@ impl OnboardingScreen {
                 if auth_config.is_login_method_allowed(ForcedLoginMethod::Chatgpt) {
                     SignInOption::ChatGpt
                 } else {
-                    SignInOption::ApiKey
+                    SignInOption::OtherMethods
                 };
             if let Some(app_server_request_handle) = app_server_request_handle {
                 steps.push(Step::Auth(AuthModeWidget {
                     request_frame: tui.frame_requester(),
                     highlighted_mode,
+                    activation_key_guard: None,
                     error: Arc::new(RwLock::new(None)),
                     sign_in_state: Arc::new(RwLock::new(SignInState::PickMode)),
                     login_status,
+                    app_server_target,
                     app_server_request_handle,
                     auth_config,
                     bedrock_setup_enabled,
@@ -251,13 +272,15 @@ impl OnboardingScreen {
         // material so terminal selection is not interrupted by redraws.
         self.current_steps().into_iter().any(|step| match step {
             Step::Auth(widget) => widget.should_suppress_animations(),
-            Step::Welcome(_) | Step::TrustDirectory(_) => false,
+            Step::GatewayDevice(_) => true,
+            Step::Welcome(_) | Step::TrustDirectory(_) | Step::GovCloudGuidance { .. } => false,
         })
     }
 
     fn is_auth_in_progress(&self) -> bool {
         self.steps.iter().any(|step| {
-            matches!(step, Step::Auth(_)) && matches!(step.get_step_state(), StepState::InProgress)
+            matches!(step, Step::Auth(_) | Step::GatewayDevice(_))
+                && matches!(step.get_step_state(), StepState::InProgress)
         })
     }
 
@@ -289,10 +312,13 @@ impl OnboardingScreen {
         }
     }
 
-    fn auth_widget_mut(&mut self) -> Option<&mut AuthModeWidget> {
+    pub(super) fn auth_widget_mut(&mut self) -> Option<&mut AuthModeWidget> {
         self.steps.iter_mut().find_map(|step| match step {
             Step::Auth(widget) => Some(widget),
-            Step::Welcome(_) | Step::TrustDirectory(_) => None,
+            Step::Welcome(_)
+            | Step::TrustDirectory(_)
+            | Step::GovCloudGuidance { .. }
+            | Step::GatewayDevice(_) => None,
         })
     }
 
@@ -301,6 +327,11 @@ impl OnboardingScreen {
             ServerNotification::AccountLoginCompleted(notification) => {
                 if let Some(widget) = self.auth_widget_mut() {
                     widget.on_account_login_completed(notification);
+                }
+            }
+            ServerNotification::GatewayOAuthChanged(notification) => {
+                if let Some(widget) = self.auth_widget_mut() {
+                    widget.on_gateway_oauth_changed(notification);
                 }
             }
             ServerNotification::AccountUpdated(notification) => {
@@ -333,15 +364,20 @@ impl KeyboardHandler for OnboardingScreen {
     /// Route key events to onboarding steps while preserving text-entry safety.
     ///
     /// OpenAI API-key entry suppresses printable quit bindings after typing
-    /// starts, while Bedrock fields suppress them from the first character.
+    /// starts, while cloud provider fields suppress them from the first character.
     /// Control/alt quit chords still work as emergency exits.
     fn handle_key_event(&mut self, key_event: KeyEvent) {
-        if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+        if key_event.kind == KeyEventKind::Release {
+            if let Some(widget) = self.auth_widget_mut() {
+                widget.handle_key_event(key_event);
+            }
             return;
         }
         let text_entry_context = self.text_entry_context();
         let should_quit = key_event.kind == KeyEventKind::Press
-            && keys::QUIT.is_pressed(key_event)
+            && (keys::QUIT.is_pressed(key_event)
+                || matches!(self.steps.as_slice(), [Step::GatewayDevice(_)])
+                    && keys::CANCEL.is_pressed(key_event))
             && !suppress_quit_while_typing(key_event, text_entry_context);
         if should_quit {
             if self.is_auth_in_progress() {
@@ -349,7 +385,12 @@ impl KeyboardHandler for OnboardingScreen {
                 // If the user cancels the auth menu, exit the app rather than
                 // leave the user at a prompt in an unauthed state.
                 self.should_exit = true;
-            } else if self.is_trust_step_active() {
+            } else if self.is_trust_step_active()
+                || self
+                    .steps
+                    .iter()
+                    .any(|step| matches!(step, Step::GovCloudGuidance { .. }))
+            {
                 self.should_exit = true;
             }
             self.is_done = true;
@@ -417,7 +458,9 @@ impl WidgetRef for &OnboardingScreen {
             match step {
                 Step::Welcome(widget) => widget.set_presentation(logo_presentation),
                 Step::Auth(widget) => widget.set_animations_suppressed(suppress_animations),
-                Step::TrustDirectory(_) => {}
+                Step::TrustDirectory(_)
+                | Step::GovCloudGuidance { .. }
+                | Step::GatewayDevice(_) => {}
             }
         }
 
@@ -488,15 +531,22 @@ impl WidgetRef for &OnboardingScreen {
 impl KeyboardHandler for Step {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         match self {
+            Step::GatewayDevice(_) => {}
             Step::Welcome(widget) => widget.handle_key_event(key_event),
             Step::Auth(widget) => widget.handle_key_event(key_event),
             Step::TrustDirectory(widget) => widget.handle_key_event(key_event),
+            Step::GovCloudGuidance {
+                state,
+                acknowledged,
+            } => {
+                *acknowledged = state.handle_guidance_key_event(&key_event);
+            }
         }
     }
 
     fn handle_paste(&mut self, pasted: String) {
         match self {
-            Step::Welcome(_) => {}
+            Step::Welcome(_) | Step::GovCloudGuidance { .. } | Step::GatewayDevice(_) => {}
             Step::Auth(widget) => widget.handle_paste(pasted),
             Step::TrustDirectory(widget) => widget.handle_paste(pasted),
         }
@@ -506,9 +556,17 @@ impl KeyboardHandler for Step {
 impl StepStateProvider for Step {
     fn get_step_state(&self) -> StepState {
         match self {
+            Step::GatewayDevice(_) => StepState::InProgress,
             Step::Welcome(w) => w.get_step_state(),
             Step::Auth(w) => w.get_step_state(),
             Step::TrustDirectory(w) => w.get_step_state(),
+            Step::GovCloudGuidance { acknowledged, .. } => {
+                if *acknowledged {
+                    StepState::Complete
+                } else {
+                    StepState::InProgress
+                }
+            }
         }
     }
 }
@@ -525,8 +583,81 @@ impl WidgetRef for Step {
             Step::TrustDirectory(widget) => {
                 widget.render_ref(area, buf);
             }
+            Step::GatewayDevice(prompt) => render_gateway_device_prompt(prompt, area, buf),
+            Step::GovCloudGuidance { state, .. } => state.render(area, buf, /*error*/ None),
         }
     }
+}
+
+pub(crate) fn render_gateway_device_prompt(
+    prompt: &GatewayOAuthPrompt,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    super::auth::render_device_code_prompt(
+        area,
+        buf,
+        "  Sign in to your gateway".into(),
+        Some((&prompt.verification_url, &prompt.user_code)),
+        [
+            "  1. Open this link in a browser",
+            "  2. Enter this one-time code when prompted",
+        ],
+        keys::CANCEL[0],
+    );
+}
+
+pub(crate) async fn run_gateway_device_login(
+    tui: &mut Tui,
+    server: &mut AppServerSession,
+    prompt: GatewayOAuthPrompt,
+) -> Result<()> {
+    let screen = OnboardingScreen {
+        request_frame: tui.frame_requester(),
+        steps: vec![Step::GatewayDevice(prompt)],
+        remote_trust_key: None,
+        is_done: false,
+        should_exit: false,
+    };
+    let result = run_onboarding_screen(
+        screen,
+        /*app_server_request_handle*/ None,
+        Some(server),
+        tui,
+    )
+    .await
+    .and_then(|result| {
+        if result.should_exit {
+            Err(std::io::Error::new(std::io::ErrorKind::Interrupted, StartupCancelled).into())
+        } else {
+            Ok(())
+        }
+    });
+    if result.is_err() {
+        crate::device_login::cancel(server).await;
+    }
+    result
+}
+
+pub(crate) async fn run_gov_cloud_guidance(tui: &mut Tui) -> Result<()> {
+    let screen = OnboardingScreen {
+        request_frame: tui.frame_requester(),
+        steps: vec![Step::GovCloudGuidance {
+            state: BedrockState::guidance(),
+            acknowledged: false,
+        }],
+        remote_trust_key: None,
+        is_done: false,
+        should_exit: false,
+    };
+    let result = run_onboarding_screen(
+        screen, /*app_server_request_handle*/ None, /*app_server*/ None, tui,
+    )
+    .await?;
+    if result.should_exit {
+        return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, StartupCancelled).into());
+    }
+    Ok(())
 }
 
 pub(crate) async fn run_onboarding_app(
@@ -539,7 +670,7 @@ pub(crate) async fn run_onboarding_app(
     run_onboarding_screen(screen, request_handle, app_server, tui).await
 }
 
-async fn run_onboarding_screen(
+pub(super) async fn run_onboarding_screen(
     mut onboarding_screen: OnboardingScreen,
     app_server_request_handle: Option<AppServerRequestHandle>,
     mut app_server: Option<&mut AppServerSession>,
@@ -549,6 +680,7 @@ async fn run_onboarding_screen(
     let mut directory_trust_persisted = false;
     // One-time guard to fully clear the screen after ChatGPT login success message is shown
     let mut did_full_clear_after_success = false;
+    let mut pending_copy: Option<(u64, String)> = None;
 
     tui.draw(u16::MAX, |frame| {
         frame.render_widget_ref(&onboarding_screen, frame.area());
@@ -561,12 +693,47 @@ async fn run_onboarding_screen(
 
     while !onboarding_screen.is_done() {
         tokio::select! {
+            () = async {
+                match onboarding_screen.auth_widget_mut() {
+                    Some(auth) => auth.advance_gateway_request().await,
+                    None => std::future::pending().await,
+                }
+            } => {}
             event = tui_events.next() => {
                 if let Some(event) = event {
                     tui.screen_size_for_event(&event)?;
                     match event {
                         TuiEvent::Key(key_event) => {
-                            onboarding_screen.handle_key_event(key_event);
+                            let copy_link = if key_event.kind == KeyEventKind::Press
+                                && keys::COPY_LINK.is_pressed(key_event)
+                                && let Some(Step::Auth(widget)) = onboarding_screen.current_steps().last()
+                                && let Ok(state) = widget.sign_in_state.read()
+                                && let SignInState::ChatGptContinueInBrowser(state) = &*state
+                                && !state.auth_url.is_empty()
+                            {
+                                Some((state.login_id.clone(), Arc::<str>::from(state.auth_url.as_str())))
+                            } else {
+                                None
+                            };
+                            if let Some((login_id, url)) = copy_link {
+                                let result = tui.clipboard.copy(url, CopyFormat::PlainText, tui.frame_requester());
+                                let message = match result {
+                                    Ok(CopyStatus::Pending(id)) => {
+                                        pending_copy = Some((id, login_id));
+                                        "Copying link…".to_string()
+                                    }
+                                    Ok(CopyStatus::Busy) => "Clipboard busy; try again".to_string(),
+                                    Ok(CopyStatus::Confirmed) => "Copied link to clipboard".to_string(),
+                                    Ok(CopyStatus::Unconfirmed) => "Copy requested; check your clipboard".to_string(),
+                                    Err(error) => format!("Could not copy link: {error}"),
+                                };
+                                if let Some(Step::Auth(widget)) = onboarding_screen.current_steps_mut().into_iter().last() {
+                                    *widget.error.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(message);
+                                }
+                                tui.frame_requester().schedule_frame();
+                            } else {
+                                onboarding_screen.handle_key_event(key_event);
+                            }
                             if !directory_trust_persisted {
                                 directory_trust_persisted = persist_selected_trust(
                                     &mut onboarding_screen,
@@ -621,12 +788,14 @@ async fn run_onboarding_screen(
                                 let _ = tui.terminal.clear();
                                 did_full_clear_after_success = true;
                             }
-                            let _ = tui.draw(u16::MAX, |frame| {
+                            tui.draw(u16::MAX, |frame| {
                                 frame.render_widget_ref(&onboarding_screen, frame.area());
-                            });
+                            })?;
                         }
                         TuiEvent::Mouse(_) => {}
                     }
+                } else {
+                    return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, StartupCancelled).into());
                 }
             }
             event = async {
@@ -635,15 +804,26 @@ async fn run_onboarding_screen(
                     None => None,
                 }
             }, if app_server.is_some() => {
-                if let Some(event) = event {
-                    match event {
+                let Some(event) = event else {
+                    return Err(color_eyre::eyre::eyre!(super::SETUP_CONNECTION_LOST));
+                };
+                if let (Some(server), [Step::GatewayDevice(prompt)]) = (app_server.as_deref(), onboarding_screen.steps.as_slice()) {
+                    onboarding_screen.is_done = crate::device_login::handle_event_during_device_login(
+                        prompt,
+                        event.event,
+                        &server.request_handle(),
+                    ).await?;
+                } else {
+                    match event.event {
                         AppServerEvent::ServerNotification(notification) => {
                             onboarding_screen.handle_app_server_notification(*notification);
                         }
                         AppServerEvent::Disconnected { message } => {
                             return Err(color_eyre::eyre::eyre!(message));
                         }
-                        AppServerEvent::Lagged { .. }
+                        AppServerEvent::ThreadStreamReconnected(_)
+                | AppServerEvent::ThreadStreamDisconnected(_)
+                        | AppServerEvent::Lagged { .. }
                         | AppServerEvent::ServerRequest(_) => {}
                     }
                 }
@@ -664,6 +844,16 @@ async fn run_onboarding_screen(
     }
     Ok(OnboardingResult {
         directory_trust_persisted,
+        selected_gateway: onboarding_screen.auth_widget_mut().and_then(|widget| {
+            match &*widget
+                .sign_in_state
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
+                SignInState::GatewaySelected(id) => Some(id.clone()),
+                _ => None,
+            }
+        }),
         should_exit: onboarding_screen.should_exit(),
     })
 }

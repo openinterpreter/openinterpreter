@@ -14,7 +14,8 @@ use codex_protocol::protocol::ExecOutputStream;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnAbortReason;
-use codex_protocol::protocol::TurnEnvironmentSelections;
+use codex_protocol::protocol::TurnEnvironmentRequests;
+use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
 use core_test_support::PathBufExt;
 use core_test_support::PathExt;
@@ -30,7 +31,7 @@ use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::submit_thread_settings;
 use core_test_support::test_codex::local;
-use core_test_support::test_codex::local_selections;
+use core_test_support::test_codex::local_requests;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
@@ -77,15 +78,17 @@ async fn user_shell_cmd_ls_and_cat_in_temp_dir() {
         .unwrap();
     let msg = wait_for_event(&codex, |ev| matches!(ev, EventMsg::ExecCommandEnd(_))).await;
     let EventMsg::ExecCommandEnd(ExecCommandEndEvent {
-        stdout, exit_code, ..
+        aggregated_output,
+        exit_code,
+        ..
     }) = msg
     else {
         unreachable!()
     };
     assert_eq!(exit_code, 0);
     assert!(
-        stdout.contains(file_name),
-        "ls output should include {file_name}, got: {stdout:?}"
+        aggregated_output.contains(file_name),
+        "ls output should include {file_name}, got: {aggregated_output:?}"
     );
 
     // 2) shell command should print the file contents verbatim
@@ -99,7 +102,7 @@ async fn user_shell_cmd_ls_and_cat_in_temp_dir() {
         .unwrap();
     let msg = wait_for_event(&codex, |ev| matches!(ev, EventMsg::ExecCommandEnd(_))).await;
     let EventMsg::ExecCommandEnd(ExecCommandEndEvent {
-        mut stdout,
+        mut aggregated_output,
         exit_code,
         ..
     }) = msg
@@ -109,9 +112,9 @@ async fn user_shell_cmd_ls_and_cat_in_temp_dir() {
     assert_eq!(exit_code, 0);
     if cfg!(windows) {
         // Windows shells emit CRLF line endings; normalize so the assertion remains portable.
-        stdout = stdout.replace("\r\n", "\n");
+        aggregated_output = aggregated_output.replace("\r\n", "\n");
     }
-    assert_eq!(stdout, contents);
+    assert_eq!(aggregated_output, contents);
 }
 
 #[tokio::test]
@@ -122,7 +125,7 @@ async fn user_shell_command_without_local_environment_emits_error() -> anyhow::R
     submit_thread_settings(
         &test.codex,
         ThreadSettingsOverrides {
-            environments: Some(codex_protocol::protocol::TurnEnvironmentSelections::new(
+            environments: Some(codex_protocol::protocol::TurnEnvironmentRequests::new(
                 test.config.cwd.clone(),
                 vec![],
             )),
@@ -209,7 +212,13 @@ async fn user_shell_command_honors_default_and_extended_deadlines() -> anyhow::R
         submit_thread_settings(
             &fixture.codex,
             ThreadSettingsOverrides {
-                environments: Some(TurnEnvironmentSelections::new(local_cwd, environments)),
+                environments: Some(TurnEnvironmentRequests::new(
+                    local_cwd,
+                    environments
+                        .into_iter()
+                        .map(TurnEnvironmentSelection::into_request)
+                        .collect(),
+                )),
                 ..Default::default()
             },
         )
@@ -312,7 +321,7 @@ async fn user_shell_command_does_not_replace_active_turn() -> anyhow::Result<()>
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(cwd)),
+                environments: Some(local_requests(cwd)),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -447,7 +456,7 @@ async fn user_shell_command_history_is_persisted_and_shared_with_model() -> anyh
     })
     .await;
     assert_eq!(end_event.exit_code, 0);
-    assert_eq!(end_event.stdout.trim(), "not-set");
+    assert_eq!(end_event.aggregated_output.trim(), "not-set");
 
     let _ = wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
@@ -507,8 +516,7 @@ async fn user_shell_command_does_not_set_network_sandbox_env_var() -> anyhow::Re
 
     let ExecCommandEndEvent {
         exit_code,
-        stdout,
-        stderr,
+        aggregated_output,
         ..
     } = wait_for_event_match(&test.codex, |ev| match ev {
         EventMsg::ExecCommandEnd(event) => Some(event.clone()),
@@ -518,9 +526,9 @@ async fn user_shell_command_does_not_set_network_sandbox_env_var() -> anyhow::Re
 
     assert_eq!(
         exit_code, 0,
-        "shell command should execute successfully. stdout=`{stdout}`, stderr=`{stderr}`",
+        "shell command should execute successfully. output=`{aggregated_output}`",
     );
-    assert_eq!(stdout.trim(), "not-set");
+    assert_eq!(aggregated_output.trim(), "not-set");
 
     Ok(())
 }

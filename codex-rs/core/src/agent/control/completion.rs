@@ -1,7 +1,7 @@
 //! Delivers terminal child results and completion activity to the agent tree.
 //!
 //! Sessions capture terminal state; the controller owns routing and queue-only delivery.
-//! Delivery remains best effort, with tracing recorded only after the parent accepts it.
+//! Unconsumed results remain available to the source writer through graceful suspension.
 
 use super::LocalAgentControl;
 use crate::TurnStartOptions;
@@ -10,6 +10,7 @@ use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::session_prefix::format_inter_agent_completion_message;
 use codex_protocol::AgentPath;
+use codex_protocol::ResponseItemId;
 use codex_protocol::items::SubAgentActivityItem;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -71,6 +72,8 @@ impl LocalAgentControl {
                         initiating_thread_id,
                         parent_turn_id,
                         SubAgentActivityItem {
+                            model: None,
+                            reasoning_effort: None,
                             id: format!("subagent-completed-{}", outcome.turn_id),
                             kind: SubAgentActivityKind::Completed,
                             agent_thread_id: outcome.thread_id,
@@ -92,23 +95,20 @@ impl LocalAgentControl {
         ) else {
             return;
         };
-        // `communication` owns the message. Keep a second copy only when the
-        // recorder will actually need it after parent delivery succeeds.
         let trace_message = trace.is_enabled().then(|| message.clone());
-        let communication = InterAgentCommunication::new(
+        let mut communication = InterAgentCommunication::new(
             child_agent_path.clone(),
             parent_agent_path,
             Vec::new(),
             message,
             /*trigger_turn*/ false,
         );
-        let context =
-            AgentCommunicationContext::new(AgentCommunicationKind::Result, outcome.thread_id);
+        communication.id = Some(ResponseItemId::with_suffix("amsg", uuid::Uuid::now_v7()));
         if let Err(err) = self
             .send_inter_agent_communication(
                 parent_thread_id,
                 communication,
-                context,
+                AgentCommunicationContext::new(AgentCommunicationKind::Result, outcome.thread_id),
                 TurnStartOptions::default(),
             )
             .await

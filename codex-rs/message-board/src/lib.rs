@@ -1,0 +1,60 @@
+//! Shared message-board operations with interchangeable local, in-memory and remote backends.
+//!
+//! Board identity and caller identity come from the host. Implementations own
+//! storage and notification fanout. Shared tools are registered by consumers.
+
+mod api;
+mod host;
+mod in_memory;
+mod local;
+mod permissions;
+mod read_view;
+mod tools;
+mod types;
+
+pub use api::AgentMessageBoard;
+pub use api::AppendRequest;
+pub use api::ChannelDescription;
+pub use api::ChannelQuery;
+pub use api::CreateChannelRequest;
+pub use api::PageRequest;
+pub use api::PostDestination;
+pub use api::PostQuery;
+pub use api::PostRequest;
+pub use api::ReadPostRequest;
+pub use api::ReadThreadRequest;
+pub use api::SortDirection;
+pub use api::SubscriptionChange;
+pub use api::SubscriptionRequest;
+pub use api::SubscriptionTarget;
+pub use api::ThreadQuery;
+pub use api::ThreadSort;
+pub use api::UpsertChannelRequest;
+pub use host::MessageBoardHost;
+pub use host::NotificationDelivery;
+pub use in_memory::InMemoryAgentMessageBoard;
+pub use in_memory::InMemoryMessageBoards;
+pub use local::LocalAgentMessageBoard;
+pub use local::connection::LocalBoard;
+pub use local::connection::LocalBoardConnection;
+pub use local::options::LocalBoardOptions;
+pub use local::setup::LocalBoardSetup;
+pub use local::setup::configure_local_board;
+pub use permissions::BoardPermissions;
+pub use permissions::ChannelPermissions;
+pub use permissions::PermissionDenied;
+pub use read_view::BoardReadView;
+pub use tools::MAX_TOOL_ARGUMENT_KIB;
+pub use tools::MAX_TOOL_RESPONSE_BYTES;
+pub use tools::message_board_read_tools;
+pub use tools::message_board_tools;
+pub use tools::selection::MessageBoardTool;
+pub use types::ChannelPage;
+pub use types::ChannelSummary;
+pub use types::Page;
+pub use types::PostContent;
+pub use types::PostMetadata;
+pub use types::PostPreview;
+pub use types::SubscriptionState;
+pub use types::ThreadPage;
+pub use types::ThreadSummary;

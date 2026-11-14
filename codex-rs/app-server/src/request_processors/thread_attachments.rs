@@ -236,7 +236,10 @@ fn thread_attachment_store_error(
         ThreadStoreError::ThreadNotFound { thread_id } => {
             invalid_params(format!("thread not found: {thread_id}"))
         }
-        error @ (ThreadStoreError::Conflict { .. } | ThreadStoreError::Internal { .. }) => {
+        error @ (ThreadStoreError::Conflict { .. }
+        | ThreadStoreError::Retryable { .. }
+        | ThreadStoreError::OutcomeUnknown { .. }
+        | ThreadStoreError::Internal { .. }) => {
             internal_error(format!("failed to process {operation}: {error}"))
         }
     }

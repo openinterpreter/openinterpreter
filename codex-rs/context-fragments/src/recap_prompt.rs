@@ -2,7 +2,9 @@
 //! History selection belongs to the caller; this fragment caps the complete prompt.
 
 use crate::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 use codex_utils_string::approx_bytes_for_tokens;
 
 const PROMPT_PREFIX: &str = r#"Write a brief catch-up for a user returning to this task. Return JSON with summary and nullable next_action.
@@ -57,8 +59,8 @@ impl ContextualUserFragment for RecapPrompt<'_> {
         ("", "")
     }
 
-    fn body(&self) -> String {
-        format!("{PROMPT_PREFIX}{}", self.history)
+    fn body(&self) -> ContentItem {
+        input_text(format!("{PROMPT_PREFIX}{}", self.history))
     }
 }
 

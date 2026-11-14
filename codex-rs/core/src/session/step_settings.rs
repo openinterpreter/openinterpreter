@@ -4,16 +4,18 @@ use crate::config::Constrained;
 use crate::config::ConstraintError;
 use crate::config::ConstraintResult;
 use codex_config::ConfigRequirements;
+use codex_features::Features;
 use codex_models_manager::ModelsManagerConfig;
 use codex_models_manager::manager::ModelsManager;
 use codex_otel::SessionTelemetry;
+use codex_protocol::RequestCountry;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::ServiceTier;
-use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::CatalogModel;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use std::sync::Arc;
@@ -22,11 +24,12 @@ use std::sync::Arc;
 /// a turn. A turn may contain several steps, each using its own captured settings.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StepSettings {
+    /// Trusted host country captured for requests issued with these settings.
+    pub(crate) request_country: RequestCountry,
     pub(crate) collaboration_mode: CollaborationMode,
     /// `None` follows the pinned model's default.
     pub(crate) reasoning_summary: Option<ReasoningSummary>,
-    /// Normalized requested tier. Startup retains initial-model filtering;
-    /// resolution filters the effective tier against the pinned model.
+    /// Normalized requested tier; resolution filters it against the pinned model.
     pub(crate) service_tier: Option<String>,
     pub(crate) personality: Option<Personality>,
     pub(crate) approval_policy: Constrained<AskForApproval>,
@@ -42,7 +45,7 @@ pub(crate) struct ResolvedStepSettings {
     /// Inputs for later sparse patches. Unset defaults and unsupported requested
     /// tiers must not be reconstructed from the effective values below.
     selected: Arc<StepSettings>,
-    pub(crate) model_info: Arc<ModelInfo>,
+    pub(crate) model_info: Arc<CatalogModel>,
     /// Effective request summary: the configured value or the pinned model's default.
     pub(crate) reasoning_summary: ReasoningSummary,
     /// Tier sent on requests, filtered by feature and model support.
@@ -53,20 +56,21 @@ pub(crate) struct ResolvedStepSettings {
 }
 
 impl ResolvedStepSettings {
+    pub(crate) fn request_country(&self) -> &RequestCountry {
+        &self.selected.request_country
+    }
+
     /// Derives request values from selected settings and pinned metadata.
     pub(super) fn new(
         selected: Arc<StepSettings>,
-        model_info: Arc<ModelInfo>,
-        fast_mode_enabled: bool,
+        model_info: Arc<CatalogModel>,
+        features: &Features,
     ) -> Self {
         let reasoning_summary = selected
             .reasoning_summary
             .unwrap_or(model_info.default_reasoning_summary);
-        let service_tier = super::get_service_tier(
-            selected.service_tier.clone(),
-            fast_mode_enabled,
-            &model_info,
-        );
+        let service_tier =
+            super::get_service_tier(selected.service_tier.clone(), features, &model_info);
         Self {
             selected,
             model_info,
@@ -122,14 +126,14 @@ impl ResolvedStepSettings {
     }
 
     /// Applies sparse edits to the retained selection, preserving pinned metadata
-    /// unless model or personality selection changes, then resolves request values.
+    /// unless the model changes, then resolves request values.
     pub(super) async fn apply_update(
         &self,
         update: &StepSettingsUpdate,
         constraints: &StepSettingsConstraints<'_>,
         models_manager: &dyn ModelsManager,
         overrides: &ModelInfoOverrides,
-        fast_mode_enabled: bool,
+        features: &Features,
     ) -> ConstraintResult<Self> {
         let selected = self.selected.apply(update, constraints)?;
         let model_info = if selected.collaboration_mode.model()
@@ -140,7 +144,7 @@ impl ResolvedStepSettings {
         } else {
             Arc::new(selected.resolve_model_info(models_manager, overrides).await)
         };
-        let mut next = Self::new(Arc::new(selected), model_info, fast_mode_enabled);
+        let mut next = Self::new(Arc::new(selected), model_info, features);
         next.mcp_approvals_reviewer_override = update
             .approvals_reviewer
             .or(self.mcp_approvals_reviewer_override);
@@ -221,6 +225,8 @@ impl ModelInfoOverrides {
 /// that full value for another. Merge the requested edits with each target.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct StepSettingsUpdate {
+    /// Omission preserves the runtime country.
+    pub(crate) request_country: Option<RequestCountry>,
     pub(crate) model: Option<String>,
     pub(crate) effort: Option<Option<ReasoningEffort>>,
     /// A complete collaboration mode takes precedence over model and effort edits.
@@ -233,8 +239,7 @@ pub(crate) struct StepSettingsUpdate {
 }
 
 /// Constraints used when applying and validating a candidate settings version.
-/// Future settings use the proposed environment; active settings use the
-/// environment already admitted for that execution.
+/// Each caller supplies the permissions of the target environment selection.
 pub(crate) struct StepSettingsConstraints<'a> {
     pub(crate) requirements: &'a ConfigRequirements,
     pub(crate) guardian_approval_enabled: bool,
@@ -248,7 +253,7 @@ impl StepSettings {
         &self,
         models_manager: &dyn ModelsManager,
         overrides: &ModelInfoOverrides,
-    ) -> ModelInfo {
+    ) -> CatalogModel {
         let config = overrides.models_manager_config(self.personality);
         models_manager
             .get_model_info(self.collaboration_mode.model(), &config)
@@ -263,6 +268,9 @@ impl StepSettings {
         constraints: &StepSettingsConstraints<'_>,
     ) -> ConstraintResult<Self> {
         let mut next = self.clone();
+        if let Some(request_country) = &update.request_country {
+            next.request_country.clone_from(request_country);
+        }
         next.collaboration_mode = update.collaboration_mode.clone().unwrap_or_else(|| {
             self.collaboration_mode.with_updates(
                 update.model.clone(),

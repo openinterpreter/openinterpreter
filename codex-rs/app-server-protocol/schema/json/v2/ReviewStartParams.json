@@ -2,11 +2,21 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
     "ReviewDelivery": {
-      "enum": [
-        "inline",
-        "detached"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "inline"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Run review on a separate legacy child thread. Deprecated in favor of starting a thread.",
+          "enum": [
+            "detached"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "ReviewTarget": {
       "oneOf": [
@@ -111,7 +121,7 @@
         }
       ],
       "default": null,
-      "description": "Where to run the review: inline (default) on the current thread or detached on a new thread (returned in `reviewThreadId`). Detached delivery is deprecated and emits `deprecationNotice`. Use `thread/start` followed by an inline review for a separate review thread."
+      "description": "Reviews run inline by default. `detached` is retained for legacy clients; new clients should start a separate thread and review it inline."
     },
     "target": {
       "$ref": "#/definitions/ReviewTarget"

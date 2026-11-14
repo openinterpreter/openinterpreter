@@ -1,5 +1,6 @@
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnStatus;
 use codex_core::config::ConfigBuilder;
@@ -241,7 +242,6 @@ async fn config_summary_entries_include_runtime_workspace_roots() {
         active_permission_profile: None,
         cwd,
         reasoning_effort: None,
-        initial_messages: None,
         network_proxy: None,
         rollout_path: None,
     };
@@ -261,7 +261,8 @@ async fn config_summary_entries_include_runtime_workspace_roots() {
 #[test]
 fn final_message_from_turn_items_uses_latest_agent_message() {
     let message = final_message_from_turn_items(&[
-        ThreadItem::AgentMessage {
+        ThreadItemPayload::AgentMessage {
+            moderation: None,
             id: "msg-1".to_string(),
             text: "first".to_string(),
             phase: None,
@@ -269,11 +270,12 @@ fn final_message_from_turn_items_uses_latest_agent_message() {
             delivery: None,
             questions: None,
         },
-        ThreadItem::Plan {
+        ThreadItemPayload::Plan {
             id: "plan-1".to_string(),
             text: "plan".to_string(),
         },
-        ThreadItem::AgentMessage {
+        ThreadItemPayload::AgentMessage {
+            moderation: None,
             id: "msg-2".to_string(),
             text: "second".to_string(),
             phase: None,
@@ -289,16 +291,16 @@ fn final_message_from_turn_items_uses_latest_agent_message() {
 #[test]
 fn final_message_from_turn_items_falls_back_to_latest_plan() {
     let message = final_message_from_turn_items(&[
-        ThreadItem::Reasoning {
+        ThreadItemPayload::Reasoning {
             id: "reasoning-1".to_string(),
             summary: vec!["inspect".to_string()],
             content: Vec::new(),
         },
-        ThreadItem::Plan {
+        ThreadItemPayload::Plan {
             id: "plan-1".to_string(),
             text: "first plan".to_string(),
         },
-        ThreadItem::Plan {
+        ThreadItemPayload::Plan {
             id: "plan-2".to_string(),
             text: "final plan".to_string(),
         },
@@ -325,6 +327,7 @@ fn turn_completed_recovers_final_message_from_turn_items() {
         final_message_rendered: false,
         emit_final_message_on_shutdown: false,
         last_total_token_usage: None,
+        last_turn_diff: String::new(),
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(
@@ -332,15 +335,17 @@ fn turn_completed_recovers_final_message_from_turn_items() {
             thread_id: "thread-1".to_string(),
             turn: Turn {
                 id: "turn-1".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
-                items: vec![ThreadItem::AgentMessage {
+                items: vec![ThreadItem::untimed(ThreadItemPayload::AgentMessage {
+                    moderation: None,
                     id: "msg-1".to_string(),
                     text: "final answer".to_string(),
                     phase: None,
                     memory_citation: None,
                     delivery: None,
                     questions: None,
-                }],
+                })],
                 status: TurnStatus::Completed,
                 error: None,
                 started_at: None,
@@ -375,6 +380,7 @@ fn turn_completed_overwrites_stale_final_message_from_turn_items() {
         final_message_rendered: true,
         emit_final_message_on_shutdown: false,
         last_total_token_usage: None,
+        last_turn_diff: String::new(),
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(
@@ -382,15 +388,17 @@ fn turn_completed_overwrites_stale_final_message_from_turn_items() {
             thread_id: "thread-1".to_string(),
             turn: Turn {
                 id: "turn-1".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
-                items: vec![ThreadItem::AgentMessage {
+                items: vec![ThreadItem::untimed(ThreadItemPayload::AgentMessage {
+                    moderation: None,
                     id: "msg-1".to_string(),
                     text: "final answer".to_string(),
                     phase: None,
                     memory_citation: None,
                     delivery: None,
                     questions: None,
-                }],
+                })],
                 status: TurnStatus::Completed,
                 error: None,
                 started_at: None,
@@ -426,6 +434,7 @@ fn turn_completed_preserves_streamed_final_message_when_turn_items_are_empty() {
         final_message_rendered: false,
         emit_final_message_on_shutdown: false,
         last_total_token_usage: None,
+        last_turn_diff: String::new(),
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(
@@ -433,6 +442,7 @@ fn turn_completed_preserves_streamed_final_message_when_turn_items_are_empty() {
             thread_id: "thread-1".to_string(),
             turn: Turn {
                 id: "turn-1".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: TurnStatus::Completed,
@@ -470,6 +480,7 @@ fn turn_failed_clears_stale_final_message() {
         final_message_rendered: true,
         emit_final_message_on_shutdown: true,
         last_total_token_usage: None,
+        last_turn_diff: String::new(),
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(
@@ -477,6 +488,7 @@ fn turn_failed_clears_stale_final_message() {
             thread_id: "thread-1".to_string(),
             turn: Turn {
                 id: "turn-1".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: TurnStatus::Failed,
@@ -515,6 +527,7 @@ fn turn_interrupted_clears_stale_final_message() {
         final_message_rendered: true,
         emit_final_message_on_shutdown: true,
         last_total_token_usage: None,
+        last_turn_diff: String::new(),
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(
@@ -522,6 +535,7 @@ fn turn_interrupted_clears_stale_final_message() {
             thread_id: "thread-1".to_string(),
             turn: Turn {
                 id: "turn-1".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: TurnStatus::Interrupted,

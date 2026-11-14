@@ -1,6 +1,7 @@
 import gzip
 import json
 import os
+import platform
 import subprocess
 import tarfile
 from collections.abc import Iterator
@@ -85,6 +86,7 @@ suppress_unstable_features_warning = true
 
 [sandbox_workspace_write]
 network_access = true
+writable_roots = []
 
 [features]
 code_mode_only = true
@@ -149,13 +151,28 @@ def package(
                 capture_output=True,
                 text=True,
             )
-    return SmokePackage.from_archives(
+    package = SmokePackage.from_archives(
         directory,
         target,
         request.config.getoption("cli_archive"),
         request.config.getoption("app_server_archive"),
         compression,
     )
+    if target == "x86_64-apple-darwin" and platform.machine() == "arm64":
+        # Freshly extracted Intel binaries need cold Rosetta translation before
+        # the command and SDK startup deadlines begin. Keep startup bounded and
+        # fail setup if either packaged entrypoint cannot run.
+        for executable in (package.cli, package.app_server):
+            subprocess.run(
+                [str(executable), "--help"],
+                cwd=package.directory,
+                env=package.environment,
+                check=True,
+                text=True,
+                capture_output=True,
+                timeout=180,
+            )
+    return package
 
 
 @pytest.fixture
@@ -191,7 +208,12 @@ def code_mode_host_debug_symbols(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Path:
     target = pytestconfig.getoption("package_target")
-    binaries = {"codex", "codex-app-server", "codex-code-mode-host"}
+    binaries = {
+        "codex",
+        "codex-app-server",
+        "codex-code-mode-host",
+        "codex-exec-server",
+    }
     if "windows" in target:
         binaries.update({"codex-command-runner", "codex-windows-sandbox-setup"})
 

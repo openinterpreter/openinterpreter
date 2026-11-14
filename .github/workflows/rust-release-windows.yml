@@ -7,25 +7,41 @@ on:
         description: Whether to sign or package verified unsigned Windows artifacts.
         required: true
         type: string
+      build-systems:
+        description: Release build systems selected during tag validation, as a JSON array.
+        type: string
+        default: '["cargo"]'
 
 env:
-  WINDOWS_BINARIES: "codex codex-code-mode-host codex-responses-api-proxy codex-windows-sandbox-setup codex-windows-sandbox-service codex-command-runner codex-app-server"
+  CODEX_BAZEL_GCS_BUCKET: ${{ secrets.CODEX_BAZEL_GCS_BUCKET }}
+  CODEX_BAZEL_GCS_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.CODEX_BAZEL_GCS_WORKLOAD_IDENTITY_PROVIDER }}
+  WINDOWS_BINARIES: "codex codex-code-mode-host codex-exec-server codex-responses-api-proxy codex-windows-sandbox-setup codex-windows-sandbox-service codex-command-runner codex-app-server"
 
 jobs:
   build-windows-binaries:
-    name: Build Windows binaries - ${{ matrix.runner }} - ${{ matrix.target }} - ${{ matrix.bundle }}
+    name: Build Windows binaries - ${{ matrix.runner }} - ${{ matrix.target }} - ${{ matrix.bundle }} - ${{ matrix.build-system }}
     runs-on: ${{ matrix.runs_on }}
     # The primary Windows release bundle can exceed 90 minutes even when the
     # required PR architecture build passes; leave room to finish packaging.
     timeout-minutes: 150
     permissions:
       contents: read
+      id-token: write
     defaults:
       run:
         working-directory: codex-rs
+    env:
+      # Preserve Cargo names while teams opt into the additional Bazel artifacts.
+      ARTIFACT_SUFFIX: ${{ matrix.build-system == 'bazel' && '-bazel' || '' }}
+
     strategy:
       fail-fast: false
       matrix:
+        build-system: ${{ fromJSON(inputs.build-systems) }}
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+        bundle: [primary, helpers, app-server]
         include:
           - runner: windows-x64
             target: x86_64-pc-windows-msvc
@@ -63,6 +79,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-ci
+        if: matrix.build-system == 'cargo'
       - name: Print runner specs (Windows)
         shell: powershell
         run: |
@@ -77,21 +94,46 @@ jobs:
           Write-Host "Total RAM: $ramGiB GiB"
           Write-Host "Disk usage:"
           Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize Name, @{Name='Size(GB)';Expression={[math]::Round(($_.Used + $_.Free) / 1GB, 1)}}, @{Name='Free(GB)';Expression={[math]::Round($_.Free / 1GB, 1)}}
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.build-system == 'cargo' && matrix.target || '' }}
+
+      - name: Prepare Bazel release build
+        if: ${{ matrix.build-system == 'bazel' }}
+        uses: ./.github/actions/prepare-bazel-ci
+        with:
+          target: ${{ matrix.target }}
+          cache-scope: bazel-release-${{ matrix.bundle }}
 
       - name: Configure rusty_v8 artifact overrides and verify checksums
+        if: matrix.build-system == 'cargo'
         uses: ./.github/actions/setup-rusty-v8
         with:
           target: ${{ matrix.target }}
 
-      - name: Configure LLVM linker
+      - name: Configure MSVC environment
+        if: matrix.build-system == 'cargo'
         uses: ./.github/actions/setup-msvc-env
         with:
           target: ${{ matrix.target }}
 
+      - name: Prepare native Windows release dependencies
+        if: matrix.build-system == 'bazel'
+        uses: ./.github/actions/setup-bazel-windows
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Build Bazel release binaries and symbols
+        if: ${{ matrix.build-system == 'bazel' }}
+        uses: ./.github/actions/build-bazel-release
+        with:
+          target: ${{ matrix.target }}
+          bundle: ${{ matrix.bundle }}
+          release-dir: ${{ env.CARGO_TARGET_DIR }}/${{ matrix.target }}/release
+
       - name: Cargo build (Windows binaries)
+        if: ${{ matrix.build-system == 'cargo' }}
         shell: bash
         run: |
           target="${{ matrix.target }}"
@@ -105,13 +147,6 @@ jobs:
           STABLE_GIT_COMMIT="$(git rev-parse HEAD)"
           export STABLE_GIT_COMMIT
           cargo build --target "$target" --release --timings "${build_args[@]}"
-
-      - name: Upload Cargo timings
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: cargo-timings-rust-release-windows-${{ matrix.target }}-${{ matrix.bundle }}
-          path: ${{ env.CARGO_TARGET_DIR }}/**/cargo-timings/cargo-timing.html
-          if-no-files-found: warn
 
       - name: Stage Windows binaries
         shell: bash
@@ -137,7 +172,7 @@ jobs:
       - name: Upload Windows binaries
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: windows-binaries-${{ matrix.target }}-${{ matrix.bundle }}
+          name: windows-binaries-${{ matrix.target }}-${{ matrix.bundle }}${{ env.ARTIFACT_SUFFIX }}
           path: |
             ${{ env.CARGO_TARGET_DIR }}/${{ matrix.target }}/release/staged-${{ matrix.bundle }}/*
 
@@ -147,6 +182,7 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -269,7 +305,7 @@ jobs:
   build-windows-symbols:
     needs:
       - build-windows-binaries
-    name: Build Windows symbols - ${{ matrix.target }}
+    name: Build Windows symbols - ${{ matrix.target }} - ${{ matrix.build-system }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -277,9 +313,13 @@ jobs:
     defaults:
       run:
         working-directory: codex-rs
+    env:
+      ARTIFACT_SUFFIX: ${{ matrix.build-system == 'bazel' && '-bazel' || '' }}
+
     strategy:
       fail-fast: false
       matrix:
+        build-system: ${{ fromJSON(inputs.build-systems) }}
         target:
           - aarch64-pc-windows-msvc
           - x86_64-pc-windows-msvc
@@ -291,7 +331,7 @@ jobs:
       - name: Download prebuilt Windows binaries
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: windows-binaries-${{ matrix.target }}-*
+          pattern: windows-binaries-${{ matrix.target }}-{primary,helpers,app-server}${{ env.ARTIFACT_SUFFIX }}
           merge-multiple: true
           path: ${{ env.CARGO_TARGET_DIR }}/${{ matrix.target }}/release
       - name: Build symbols archive
@@ -303,10 +343,21 @@ jobs:
             --release-dir "${CARGO_TARGET_DIR}/${{ matrix.target }}/release" \
             --archive-dir "symbols-dist/${{ matrix.target }}" \
             --binaries "${WINDOWS_BINARIES}"
+      - name: Suffix Bazel artifact filenames
+        if: ${{ matrix.build-system == 'bazel' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for artifact in "symbols-dist/${{ matrix.target }}"/*; do
+            name="${artifact##*/}"
+            stem="${name%%.*}"
+            mv "$artifact" "${artifact%/*}/${stem}-bazel${name#"$stem"}"
+          done
+
       - name: Upload symbols archive
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: ${{ matrix.target }}-symbols
+          name: ${{ matrix.target }}-symbols${{ env.ARTIFACT_SUFFIX }}
           path: codex-rs/symbols-dist/${{ matrix.target }}/*
           if-no-files-found: error
 
@@ -326,9 +377,16 @@ jobs:
     defaults:
       run:
         working-directory: codex-rs
+    env:
+      ARTIFACT_SUFFIX: ${{ matrix.build-system == 'bazel' && '-bazel' || '' }}
+
     strategy:
       fail-fast: false
       matrix:
+        build-system: ${{ fromJSON(inputs.build-systems) }}
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
         include:
           - runner: windows-x64
             target: x86_64-pc-windows-msvc
@@ -347,19 +405,19 @@ jobs:
       - name: Download prebuilt Windows primary binaries
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: windows-binaries-${{ matrix.target }}-primary
+          name: windows-binaries-${{ matrix.target }}-primary${{ env.ARTIFACT_SUFFIX }}
           path: ${{ env.CARGO_TARGET_DIR }}/${{ matrix.target }}/release
 
       - name: Download prebuilt Windows helper binaries
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: windows-binaries-${{ matrix.target }}-helpers
+          name: windows-binaries-${{ matrix.target }}-helpers${{ env.ARTIFACT_SUFFIX }}
           path: ${{ env.CARGO_TARGET_DIR }}/${{ matrix.target }}/release
 
       - name: Download prebuilt Windows app-server binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: windows-binaries-${{ matrix.target }}-app-server
+          name: windows-binaries-${{ matrix.target }}-app-server${{ env.ARTIFACT_SUFFIX }}
           path: ${{ env.CARGO_TARGET_DIR }}/${{ matrix.target }}/release
 
       - name: Verify Windows binaries before optional signing
@@ -376,6 +434,8 @@ jobs:
         with:
           target: ${{ matrix.target }}
           binaries: ${{ env.WINDOWS_BINARIES }}
+          # The installer is architecture-independent; sign it only in the x64 job.
+          additional-files: ${{ matrix.target == 'x86_64-pc-windows-msvc' && format('{0}/scripts/install/install.ps1', github.workspace) || '' }}
           client-id: ${{ secrets.AZURE_ARTIFACT_SIGNING_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_ARTIFACT_SIGNING_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_ARTIFACT_SIGNING_SUBSCRIPTION_ID }}
@@ -516,6 +576,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Packaged runtime receipt verification failed' }
 
       - name: Build Python runtime wheel
+        if: ${{ matrix.build-system == 'cargo' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -552,9 +613,11 @@ jobs:
             "$wheel_package" \
             --codex-version "${GITHUB_REF_NAME}" \
             --platform-tag "$platform_tag"
-          "${RUNNER_TEMP}/python-runtime-build-venv/Scripts/python.exe" -m build --wheel --outdir "$wheel_dir" "$stage_dir"
+          uv build --offline --no-build-isolation --no-create-gitignore \
+            --python "${RUNNER_TEMP}/python-runtime-build-venv" --wheel --out-dir "$wheel_dir" "$stage_dir"
 
       - name: Upload Python runtime wheel
+        if: ${{ matrix.build-system == 'cargo' }}
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: python-runtime-wheel-${{ matrix.target }}
@@ -620,8 +683,31 @@ jobs:
             "${GITHUB_WORKSPACE}/.github/workflows/zstd" -T0 -19 "$dest/$base"
           ' _
 
+      - name: Verify and stage signed PowerShell installer
+        if: matrix.build-system == 'cargo' && matrix.target == 'x86_64-pc-windows-msvc'
+        shell: powershell
+        run: |
+          $installer = Join-Path $env:GITHUB_WORKSPACE 'scripts/install/install.ps1'
+          $signature = Get-AuthenticodeSignature $installer
+          if ($signature.Status -ne 'Valid' -or $null -eq $signature.TimeStamperCertificate) {
+            throw "Installer signature is invalid or missing a timestamp: $($signature.Status)"
+          }
+          # Stage after compression so the installer remains a plain script.
+          Copy-Item $installer 'dist/${{ matrix.target }}/install.ps1'
+
+      - name: Suffix Bazel artifact filenames
+        if: ${{ matrix.build-system == 'bazel' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for artifact in "dist/${{ matrix.target }}"/*; do
+            name="${artifact##*/}"
+            stem="${name%%.*}"
+            mv "$artifact" "${artifact%/*}/${stem}-bazel${name#"$stem"}"
+          done
+
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: ${{ matrix.target }}
+          name: ${{ matrix.target }}${{ env.ARTIFACT_SUFFIX }}
           path: |
             codex-rs/dist/${{ matrix.target }}/*

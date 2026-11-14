@@ -2,12 +2,11 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use codex_exec_server::ExecutorFileSystem;
+use codex_exec_server::EnvironmentAccessKey;
 use codex_protocol::protocol::Product;
 use codex_protocol::protocol::SkillScope;
 use codex_skills::LoadedSkillRoot;
 use codex_skills::SkillRootSnapshots;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use codex_utils_plugins::PluginSkillRoot;
 use codex_utils_plugins::migrated_command_skills_root;
@@ -18,6 +17,7 @@ use tokio::sync::Semaphore;
 
 use super::HostSkillRoot;
 use super::MAX_CONCURRENT_ROOT_SCANS;
+use super::canonicalize_for_skill_identity;
 use super::host::HostSkillRootSnapshot;
 use super::load_host_skill_root;
 use crate::SkillLoadOutcome;
@@ -25,7 +25,7 @@ use crate::host_service::RequestSkillRootSnapshots;
 use crate::host_service::config_skill_root_cache_key;
 
 pub(crate) async fn load_and_merge_host_skill_roots(
-    roots: Vec<HostSkillRoot>,
+    roots: Vec<HostSkillRoot<'_>>,
     root_scan_slots: &Semaphore,
     restriction_product: Option<Product>,
     plugin_skill_snapshots: Option<&SkillRootSnapshots<PluginSkillRoot>>,
@@ -41,7 +41,7 @@ pub(crate) async fn load_and_merge_host_skill_roots(
 }
 
 pub(crate) async fn load_and_merge_host_skill_roots_with_request_snapshots(
-    roots: Vec<HostSkillRoot>,
+    roots: Vec<HostSkillRoot<'_>>,
     root_scan_slots: &Semaphore,
     restriction_product: Option<Product>,
     plugin_skill_snapshots: Option<&SkillRootSnapshots<PluginSkillRoot>>,
@@ -53,15 +53,16 @@ pub(crate) async fn load_and_merge_host_skill_roots_with_request_snapshots(
         .map(|plugin_root| (plugin_root.clone(), Arc::new(OnceCell::new())))
         .collect::<HashMap<_, _>>();
     let migrated_command_roots = &migrated_command_roots_by_plugin;
-    let mut indexed_snapshots = futures::stream::iter(roots.into_iter().enumerate())
-        .map(|(root_index, root)| async move {
+    let mut loads = Vec::with_capacity(roots.len());
+    for (root_index, root) in roots.into_iter().enumerate() {
+        loads.push(async move {
             let plugin_root = root.plugin_root().cloned();
             let migrated_command_root = plugin_root
                 .as_ref()
                 .and_then(|plugin_root| migrated_command_roots.get(plugin_root))
                 .cloned();
             let plugin_skill_root = root.plugin_skill_root();
-            let file_system = Arc::clone(&root.file_system);
+            let file_system = root.file_system;
             let request_snapshot = if plugin_skill_root.is_none() {
                 request_root_snapshots.map(|snapshots| {
                     Arc::clone(
@@ -89,7 +90,7 @@ pub(crate) async fn load_and_merge_host_skill_roots_with_request_snapshots(
                         skills: snapshot.skills,
                         skill_discovery_path_by_path: snapshot.skill_discovery_path_by_path,
                         errors: snapshot.errors,
-                        file_system: Arc::clone(&file_system),
+                        file_system: file_system.cache_key(),
                         is_agent_plugin: snapshot.is_agent_plugin,
                     },
                     None => {
@@ -124,15 +125,11 @@ pub(crate) async fn load_and_merge_host_skill_roots_with_request_snapshots(
                 (Some(plugin_root), Some(migrated_command_root)) => Some(
                     migrated_command_root
                         .get_or_init(|| async {
-                            let migrated_root = migrated_command_skills_root(plugin_root);
-                            file_system
-                                .canonicalize(
-                                    &PathUri::from_abs_path(&migrated_root),
-                                    /*sandbox*/ None,
-                                )
-                                .await
-                                .and_then(|path| path.to_abs_path())
-                                .unwrap_or(migrated_root)
+                            canonicalize_for_skill_identity(
+                                file_system,
+                                &migrated_command_skills_root(plugin_root),
+                            )
+                            .await
                         })
                         .await
                         .clone(),
@@ -140,7 +137,9 @@ pub(crate) async fn load_and_merge_host_skill_roots_with_request_snapshots(
                 _ => None,
             };
             (root_index, migrated_command_root, snapshot)
-        })
+        });
+    }
+    let mut indexed_snapshots = futures::stream::iter(loads)
         .buffer_unordered(MAX_CONCURRENT_ROOT_SCANS)
         .collect::<Vec<_>>()
         .await;
@@ -160,8 +159,7 @@ pub(crate) async fn load_and_merge_host_skill_roots_with_request_snapshots(
                 !migrated_command_root.as_ref().is_some_and(|migrated_root| {
                     skill
                         .path_to_skills_md
-                        .as_path()
-                        .starts_with(migrated_root.as_path())
+                        .starts_with(&PathUri::from_abs_path(migrated_root))
                 })
             })
         })
@@ -180,8 +178,7 @@ pub(crate) async fn load_and_merge_host_skill_roots_with_request_snapshots(
         snapshot.skills.retain(|skill| {
             !skill
                 .path_to_skills_md
-                .as_path()
-                .starts_with(migrated_command_root.as_path())
+                .starts_with(&PathUri::from_abs_path(migrated_command_root))
                 || skill.plugin_id.as_ref().is_none_or(|plugin_id| {
                     native_plugin_skill_names
                         .get(plugin_id)
@@ -205,8 +202,7 @@ fn merge_host_skill_root_snapshots(snapshots: Vec<HostSkillRootSnapshot>) -> Ski
     let mut skill_root_by_path = HashMap::new();
     let mut skill_discovery_path_by_path = HashMap::new();
     let mut agent_plugin_skill_paths = HashSet::new();
-    let mut file_systems_by_skill_path =
-        HashMap::<AbsolutePathBuf, Arc<dyn ExecutorFileSystem>>::new();
+    let mut file_systems_by_skill_path = HashMap::<PathUri, EnvironmentAccessKey>::new();
 
     for snapshot in snapshots {
         if !snapshot.skills.is_empty() && !skill_roots.contains(&snapshot.root) {
@@ -219,7 +215,7 @@ fn merge_host_skill_root_snapshots(snapshots: Vec<HostSkillRootSnapshot>) -> Ski
                 if let Some(discovery_path) = snapshot.skill_discovery_path_by_path.get(&path) {
                     skill_discovery_path_by_path.insert(path.clone(), discovery_path.clone());
                 }
-                file_systems_by_skill_path.insert(path.clone(), Arc::clone(&snapshot.file_system));
+                file_systems_by_skill_path.insert(path.clone(), snapshot.file_system.clone());
                 if snapshot.is_agent_plugin {
                     agent_plugin_skill_paths.insert(path);
                 }
@@ -241,11 +237,13 @@ fn merge_host_skill_root_snapshots(snapshots: Vec<HostSkillRootSnapshot>) -> Ski
     skill_roots.retain(|root| retained_roots.contains(root));
     file_systems_by_skill_path.retain(|path, _| retained_paths.contains(path));
     agent_plugin_skill_paths.retain(|path| retained_paths.contains(path));
-    skills.sort_by(|left, right| {
-        scope_rank(left.scope)
-            .cmp(&scope_rank(right.scope))
-            .then_with(|| left.name.cmp(&right.name))
-            .then_with(|| left.path_to_skills_md.cmp(&right.path_to_skills_md))
+    // Keep native path ordering: URI escaping can reorder same-name skills.
+    skills.sort_by_cached_key(|skill| {
+        (
+            scope_rank(skill.scope),
+            skill.name.clone(),
+            skill.path_to_skills_md.to_abs_path().ok(),
+        )
     });
 
     SkillLoadOutcome::from_parts(

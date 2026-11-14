@@ -36,7 +36,6 @@ use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_remote;
 use core_test_support::skip_if_wine_exec;
-use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use pretty_assertions::assert_eq;
@@ -148,7 +147,6 @@ async fn user_turn_includes_skill_instructions() -> Result<()> {
                 },
             ])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(test.config.cwd.clone())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -323,9 +321,13 @@ async fn user_turn_selects_symlinked_skill_by_advertised_discovery_path() -> Res
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
     install(&mut extensions, |config: &Config| SkillsExtensionConfig {
         include_instructions: config.include_skill_instructions,
+        catalog_deltas_enabled: config
+            .features
+            .enabled(codex_features::Feature::SkillCatalogDeltas),
+        omit_descriptions: false,
         max_context_tokens: config.skill_max_context_tokens,
         bundled_skills_enabled: false,
-        orchestrator_skills_enabled: false,
+        cloud_skill_enabled: false,
         shadow_selection_enabled: false,
     });
     let mut builder = test_codex()

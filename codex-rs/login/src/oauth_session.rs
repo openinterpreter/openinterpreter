@@ -1,0 +1,571 @@
+//! Owns gateway credentials, token refresh, and policy-controlled browser authorization.
+//! Credential I/O runs off the async worker and writes retain the store lock through cancellation.
+//! Rotated credentials survive caller cancellation and remain pending until persistence succeeds.
+
+use std::fmt;
+use std::io;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::oauth::AuthorizationCodeGrant;
+use crate::oauth::AuthorizationRequest;
+use crate::oauth::ErrorBodyLimit;
+use crate::oauth::OAuthClient;
+use crate::oauth::OAuthError;
+use crate::oauth::RefreshTokenGrant;
+use crate::oauth::TokenEncoding;
+use crate::oauth::TokenEndpoint;
+use crate::oauth::build_authorization_url;
+use crate::oauth::generate_pkce;
+use crate::oauth::generate_state;
+use chrono::Utc;
+use codex_http_client::ClientRouteClass;
+use codex_http_client::HttpClient;
+use codex_http_client::HttpClientBuilder;
+use codex_http_client::HttpClientFactory;
+use codex_keyring_store::KeyringStore;
+use http::StatusCode;
+use sha2::Digest;
+use sha2::Sha256;
+use tokio::sync::Mutex;
+use url::Url;
+
+#[path = "oauth_session_callback.rs"]
+mod callback;
+#[path = "oauth_session_login.rs"]
+mod login;
+#[path = "oauth_session_request.rs"]
+mod request;
+#[path = "oauth_session_storage.rs"]
+mod storage;
+#[path = "oauth_session_token.rs"]
+mod token;
+
+pub use crate::oauth::OAuthDeviceCodePrompt;
+pub use codex_model_provider_info::OAuthSessionConfig;
+pub use login::OAuthLoginControl;
+pub use login::OAuthSessionStatus;
+pub use login::OAuthSessionStatusChange;
+pub use login::subscribe_oauth_session_status;
+pub use request::OAuthRequestCredentials;
+pub use request::OAuthSessionRequest;
+
+use callback::CallbackListener;
+use storage::OAuthSessionStorage;
+use token::StoredToken;
+use token::TokenResponse;
+
+const REFRESH_SKEW_SECONDS: i64 = 30;
+const HTTP_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 20);
+
+/// Credential states that require user action rather than request retries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum OAuthSessionError {
+    #[error("Gateway sign-in required. Choose Sign in or Reconnect, then retry your request")]
+    LoginRequired,
+    #[error("Gateway authentication is in progress; retry after sign-in")]
+    LoginInProgress,
+}
+
+/// Resolves and persists an OAuth access token without knowing how a consumer uses it.
+#[derive(Clone)]
+pub struct OAuthSessionManager {
+    control: Arc<OAuthLoginControl>,
+    state: Arc<OAuthSessionState>,
+    // Whether resolving missing/rejected credentials may start browser sign-in.
+    // Existing credentials can still be reused or refreshed when this is false.
+    allow_interactive_login: bool,
+}
+
+#[derive(Clone)]
+enum RefreshPolicy {
+    WhenExpired,
+    // Reconcile the cached token with the persisted grant before reusing it.
+    ObserveStored,
+    AfterRejection(String),
+}
+
+impl RefreshPolicy {
+    fn can_reuse(&self, token: &StoredToken) -> bool {
+        token_is_usable(token)
+            && match self {
+                Self::WhenExpired | Self::ObserveStored => true,
+                Self::AfterRejection(rejected_access_token) => {
+                    token.access_token != *rejected_access_token
+                }
+            }
+    }
+}
+
+enum RefreshOutcome {
+    Credentials(StoredToken),
+    LoginRequired,
+}
+
+struct OAuthSessionState {
+    config: OAuthSessionConfig,
+    codex_home: PathBuf,
+    storage: OAuthSessionStorage,
+    http_client: HttpClient,
+    http_client_factory: HttpClientFactory,
+    cached_token: Arc<Mutex<OAuthSessionCache>>,
+    // Reserve explicit login independently of background credential reads and refreshes.
+    login_attempt: Arc<Mutex<()>>,
+    status: tokio::sync::watch::Sender<Option<login::OAuthSessionStatusSnapshot>>,
+    status_tx: tokio::sync::broadcast::Sender<OAuthSessionStatusChange>,
+}
+
+#[derive(Clone, Default, PartialEq, Eq)]
+struct OAuthSessionCache {
+    token: Option<StoredToken>,
+    // Retain rotated credentials across a failed save. The prior persisted token remains
+    // available for comparison so retrying cannot overwrite a newer external login.
+    pending: Option<StoredToken>,
+    // A failed recovery requires replacement credentials, even before local expiry.
+    login_required: Option<StoredToken>,
+}
+
+impl OAuthSessionManager {
+    /// Creates an OAuth session using the configured credential store and the caller's HTTP policy.
+    /// Token grants never follow redirects or include primary-provider credentials or request logs.
+    pub fn new(
+        config: OAuthSessionConfig,
+        codex_home: PathBuf,
+        http_client_factory: &HttpClientFactory,
+        keyring: Arc<dyn KeyringStore>,
+    ) -> io::Result<Self> {
+        let http_client = HttpClientBuilder::new()
+            .without_redirects()
+            .without_request_logging()
+            .build_respecting_outbound_proxy_policy(
+                http_client_factory,
+                &config.token_url,
+                ClientRouteClass::Auth,
+            )
+            .map_err(|_| io::Error::other("failed to create provider OAuth HTTP client"))?;
+        Ok(Self {
+            control: OAuthLoginControl::for_host(&codex_home, http_client_factory),
+            allow_interactive_login: true,
+            state: Arc::new(OAuthSessionState {
+                storage: OAuthSessionStorage::new(
+                    codex_home.clone(),
+                    config.credentials_store,
+                    keyring,
+                ),
+                config,
+                status_tx: login::status_sender_for_host(&codex_home, http_client_factory),
+                codex_home,
+                http_client,
+                http_client_factory: http_client_factory.clone(),
+                cached_token: Arc::new(Mutex::new(OAuthSessionCache::default())),
+                login_attempt: Arc::new(Mutex::new(())),
+                status: tokio::sync::watch::channel(/*init*/ None).0,
+            }),
+        })
+    }
+
+    /// Keeps background credential consumers from opening a browser without
+    /// changing the login behavior of other managers in the same runtime.
+    pub fn without_interactive_login(mut self) -> Self {
+        self.allow_interactive_login = false;
+        self
+    }
+
+    fn interactive_login_allowed(&self) -> bool {
+        self.allow_interactive_login
+            && !self
+                .control
+                .explicit_login
+                .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Keeps the sent token paired with its sign-in identity across unauthorized
+    /// recovery and retries, using the existing gateway credential lifecycle.
+    pub fn begin_request(&self) -> OAuthSessionRequest {
+        OAuthSessionRequest::new(self.clone())
+    }
+
+    /// Returns a usable token, refreshing or starting browser login according to the host policy.
+    pub async fn resolve_access_token(&self) -> io::Result<String> {
+        self.resolve_with_browser(RefreshPolicy::WhenExpired, login::open_browser)
+            .await
+    }
+
+    /// Recovers after a request rejects `rejected_access_token`, reusing a usable replacement
+    /// from storage or refreshing/authorizing according to the host policy.
+    /// Pass the token used by the failed request; callers must bound retries and decide
+    /// whether the request is safe to replay.
+    pub async fn refresh_access_token(&self, rejected_access_token: &str) -> io::Result<String> {
+        self.resolve_with_browser(
+            RefreshPolicy::AfterRejection(rejected_access_token.to_owned()),
+            login::open_browser,
+        )
+        .await
+    }
+
+    async fn resolve_with_browser(
+        &self,
+        policy: RefreshPolicy,
+        open_browser: impl FnOnce(&Url),
+    ) -> io::Result<String> {
+        self.resolve_credentials_with_browser(policy, open_browser)
+            .await
+            .map(|token| token.access_token)
+    }
+
+    async fn resolve_credentials_with_browser(
+        &self,
+        policy: RefreshPolicy,
+        open_browser: impl FnOnce(&Url),
+    ) -> io::Result<StoredToken> {
+        validate_config(&self.state.config)?;
+        let mut cached = self.lock_cached_token().await?;
+        let terminal_status = self.state.status.borrow().as_ref().is_some_and(|snapshot| {
+            matches!(
+                snapshot.status,
+                OAuthSessionStatus::NotReady | OAuthSessionStatus::Failed { .. }
+            )
+        });
+        // A cached token may predate the failed login. Only persisted replacements can clear it.
+        if cached.pending.is_none()
+            && (cached.token.is_none() || terminal_status || cached.login_required.is_some())
+        {
+            cached.token = self.load_token_async().await?;
+        }
+        if cached.pending.is_none()
+            && cached.login_required.is_some()
+            && cached.token == cached.login_required
+        {
+            if self.interactive_login_allowed() {
+                return self.authorize_with_browser(&mut cached, open_browser).await;
+            }
+            return Err(self.login_required_error(cached.token.as_ref()));
+        }
+        if cached.pending.is_none()
+            && matches!(policy, RefreshPolicy::WhenExpired)
+            && let Some(token) = cached.token.as_ref()
+            && token_is_usable(token)
+        {
+            let terminal_matches = self.state.status.borrow().as_ref().is_some_and(|snapshot| {
+                matches!(
+                    snapshot.status,
+                    OAuthSessionStatus::NotReady | OAuthSessionStatus::Failed { .. }
+                ) && snapshot.credential.as_ref() == Some(token)
+            });
+            if !terminal_matches {
+                self.publish_status(OAuthSessionStatus::Succeeded, Some(token));
+            }
+            let token = token.clone();
+            cached.login_required = None;
+            return Ok(token);
+        }
+        // The provider may rotate its token before the HTTP response arrives. Keep the
+        // refresh, persistence, and cache update alive if the caller drops this future.
+        let manager = self.clone();
+        let (mut cached, result) = tokio::spawn(async move {
+            let result = match manager.refresh(&mut cached, &policy).await {
+                Err(error) => Err(error),
+                Ok(RefreshOutcome::Credentials(token)) => {
+                    cached.login_required = None;
+                    manager.publish_status(OAuthSessionStatus::Succeeded, Some(&token));
+                    Ok(token)
+                }
+                Ok(RefreshOutcome::LoginRequired) => {
+                    cached.login_required = cached.token.clone();
+                    Err(manager.login_required_error(cached.token.as_ref()))
+                }
+            };
+            (cached, result)
+        })
+        .await
+        .map_err(|_| io::Error::other("provider OAuth refresh task failed"))?;
+        if result.as_ref().is_err_and(|error| {
+            error
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<OAuthSessionError>())
+                == Some(&OAuthSessionError::LoginRequired)
+        }) && self.interactive_login_allowed()
+        {
+            return self.authorize_with_browser(&mut cached, open_browser).await;
+        }
+        result
+    }
+
+    async fn persist_pending(
+        &self,
+        cached: &mut OAuthSessionCache,
+        credential_lock: &Arc<std::fs::File>,
+    ) -> io::Result<StoredToken> {
+        let token = cached
+            .pending
+            .as_ref()
+            .ok_or_else(|| io::Error::other("provider OAuth credentials are missing"))?;
+        let manager = self.clone();
+        let saved = token.clone();
+        let credential_lock = Arc::clone(credential_lock);
+        tokio::task::spawn_blocking(move || {
+            // A canceled login may drop its async guard while this write is still running.
+            // Keep the cross-process lock until encryption and the atomic write finish.
+            let _credential_lock = credential_lock;
+            manager.save_token(&saved)
+        })
+        .await
+        .map_err(|_| io::Error::other("provider OAuth credential save task failed"))??;
+        let token = token.clone();
+        cached.token = cached.pending.take();
+        cached.login_required = None;
+        Ok(token)
+    }
+
+    async fn refresh(
+        &self,
+        cached: &mut OAuthSessionCache,
+        policy: &RefreshPolicy,
+    ) -> io::Result<RefreshOutcome> {
+        let credential_lock = Arc::new(storage::lock_credentials(&self.state.codex_home).await?);
+        // Recovery always rereads under the cross-process lock before choosing a token.
+        // Even a replacement from storage must differ from the token rejected by this request.
+        for _ in 0..2 {
+            let stored = self.load_token_async().await?;
+            if stored != cached.token {
+                cached.token = stored;
+                cached.pending = None;
+            }
+            if cached.pending.is_some() {
+                self.persist_pending(cached, &credential_lock).await?;
+            }
+            if let Some(token) = cached.token.as_ref()
+                && policy.can_reuse(token)
+            {
+                return Ok(RefreshOutcome::Credentials(token.clone()));
+            }
+            let Some(refresh_token) = cached
+                .token
+                .as_ref()
+                .and_then(|token| token.refresh_token.as_deref())
+            else {
+                break;
+            };
+            match self
+                .oauth()
+                .refresh::<TokenResponse>(RefreshTokenGrant {
+                    refresh_token,
+                    resource: self.state.config.resource.as_deref(),
+                    refresh_reason: None,
+                })
+                .await
+            {
+                Ok(response) => {
+                    cached.pending = Some(response.into_stored(cached.token.as_ref())?);
+                    return self
+                        .persist_pending(cached, &credential_lock)
+                        .await
+                        .map(RefreshOutcome::Credentials);
+                }
+                Err(OAuthError::Rejected(rejection))
+                    if rejection.status == StatusCode::BAD_REQUEST
+                        && matches!(
+                            rejection.detail.error_code(),
+                            Some(
+                                "invalid_grant" | "unauthorized_client" | "unsupported_grant_type"
+                            )
+                        ) =>
+                {
+                    // Some public clients receive refresh tokens despite being unable to use
+                    // that grant. Require browser login after rejection without disabling refresh.
+                    // Also recover updates from clients that predate the credential lock.
+                    if self.load_token_async().await? == cached.token {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    return Err(token::endpoint_error(
+                        error,
+                        &self.state.config,
+                        "refresh_token",
+                        /*redirect_uri*/ None,
+                    ));
+                }
+            }
+        }
+        let stored = self.load_token_async().await?;
+        if stored != cached.token {
+            cached.token = stored;
+            cached.pending = None;
+            if let Some(token) = cached.token.as_ref()
+                && policy.can_reuse(token)
+            {
+                return Ok(RefreshOutcome::Credentials(token.clone()));
+            }
+        }
+        Ok(RefreshOutcome::LoginRequired)
+    }
+
+    /// Stable, opaque identity of the issuer, client, audience, and scopes.
+    pub fn credential_id(&self) -> String {
+        let config = &self.state.config;
+        let mut digest = Sha256::new();
+        digest.update(self.state.codex_home.to_string_lossy().as_bytes());
+        digest.update([0]);
+        for value in [
+            config.authorization_url.as_str(),
+            config.token_url.as_str(),
+            config.client_id.as_str(),
+            config.resource.as_deref().unwrap_or_default(),
+        ] {
+            digest.update(value.as_bytes());
+            digest.update([0]);
+        }
+        for scope in &config.scopes {
+            digest.update(scope.as_bytes());
+            digest.update([0]);
+        }
+        format!("provider-oauth|{:x}", digest.finalize())
+    }
+
+    async fn load_token_async(&self) -> io::Result<Option<StoredToken>> {
+        let manager = self.clone();
+        tokio::task::spawn_blocking(move || manager.load_token())
+            .await
+            .map_err(|_| io::Error::other("provider OAuth credential load task failed"))?
+    }
+
+    fn load_token(&self) -> io::Result<Option<StoredToken>> {
+        self.state.storage.load(&self.credential_id())
+    }
+
+    fn save_token(&self, token: &StoredToken) -> io::Result<()> {
+        self.state.storage.save(&self.credential_id(), token)
+    }
+
+    async fn authorize_with_browser(
+        &self,
+        cached: &mut OAuthSessionCache,
+        open_browser: impl FnOnce(&Url),
+    ) -> io::Result<StoredToken> {
+        let pkce = generate_pkce();
+        let state = generate_state();
+        let mut listener = CallbackListener::new(self.state.config.redirect_port, state.clone())?;
+        let redirect_uri = listener.redirect_uri().to_string();
+        let scope = self.state.config.scopes.join(" ");
+        let authorization_url = build_authorization_url(AuthorizationRequest {
+            endpoint: &self.state.config.authorization_url,
+            client_id: &self.state.config.client_id,
+            redirect_uri: &redirect_uri,
+            scope: (!scope.is_empty()).then_some(scope.as_str()),
+            resource: self.state.config.resource.as_deref(),
+            pkce: &pkce,
+            state: &state,
+            extra_parameters: &[],
+        })
+        .map_err(|_| io::Error::other("invalid provider OAuth authorization endpoint"))?;
+
+        open_browser(&authorization_url);
+
+        let code = listener.wait().await?;
+        drop(listener);
+
+        // Wait for user interaction without the store lock, then serialize issuance and
+        // persistence with refreshes. Use the current stored token as the failed-save baseline.
+        let credential_lock = Arc::new(storage::lock_credentials(&self.state.codex_home).await?);
+        let stored = self.load_token_async().await?;
+        if stored != cached.token {
+            cached.token = stored;
+            cached.pending = None;
+        }
+        let response = self
+            .oauth()
+            .exchange_code::<TokenResponse>(AuthorizationCodeGrant {
+                code: &code,
+                redirect_uri: &redirect_uri,
+                pkce: &pkce,
+                resource: self.state.config.resource.as_deref(),
+            })
+            .await
+            .map_err(|error| {
+                token::endpoint_error(
+                    error,
+                    &self.state.config,
+                    "authorization_code",
+                    Some(&redirect_uri),
+                )
+            })?;
+        cached.pending = Some(response.into_stored(/*previous_token*/ None)?);
+        let token = self.persist_pending(cached, &credential_lock).await?;
+        self.publish_status(OAuthSessionStatus::Succeeded, Some(&token));
+        Ok(token)
+    }
+
+    fn oauth(&self) -> OAuthClient<'_> {
+        OAuthClient::new(
+            &self.state.http_client,
+            TokenEndpoint {
+                url: &self.state.config.token_url,
+                client_id: &self.state.config.client_id,
+                encoding: TokenEncoding::Form,
+                timeout: Some(HTTP_TIMEOUT),
+                error_body_limit: ErrorBodyLimit::Bytes(8 * 1024),
+            },
+        )
+    }
+}
+
+impl fmt::Debug for OAuthSessionManager {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OAuthSessionManager")
+            .field("config", &self.state.config)
+            .finish_non_exhaustive()
+    }
+}
+
+fn token_is_usable(token: &StoredToken) -> bool {
+    token
+        .expires_at
+        .is_none_or(|expires_at| expires_at > Utc::now().timestamp() + REFRESH_SKEW_SECONDS)
+}
+
+fn validate_config(config: &OAuthSessionConfig) -> io::Result<()> {
+    let authorization = validate_oauth_url(
+        &config.authorization_url,
+        "provider OAuth authorization endpoint",
+    )?;
+    if authorization.query_pairs().any(|(name, _)| {
+        matches!(
+            name.as_ref(),
+            "response_type"
+                | "client_id"
+                | "redirect_uri"
+                | "state"
+                | "scope"
+                | "resource"
+                | "code_challenge"
+                | "code_challenge_method"
+        )
+    }) {
+        return Err(io::Error::other(
+            "provider OAuth authorization endpoint cannot include OAuth request parameters",
+        ));
+    }
+    validate_oauth_url(&config.token_url, "provider OAuth token endpoint")?;
+    if config.client_id.trim().is_empty() {
+        return Err(io::Error::other(
+            "provider OAuth client ID must not be empty",
+        ));
+    }
+    if config.redirect_port == Some(0) {
+        return Err(io::Error::other(
+            "provider OAuth redirect port must not be zero",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_oauth_url(value: &str, description: &str) -> io::Result<Url> {
+    codex_http_client::validate_endpoint_url(value, description).map_err(io::Error::other)
+}
+
+#[cfg(test)]
+#[path = "oauth_session_tests.rs"]
+mod tests;

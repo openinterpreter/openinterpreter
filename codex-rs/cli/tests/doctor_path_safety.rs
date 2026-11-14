@@ -32,22 +32,38 @@ struct Fixture {
 impl Fixture {
     fn new() -> Result<Self> {
         let root = TempDir::new()?;
+        let home = root.path().join("home");
+        std::fs::create_dir(&home)?;
         // Cargo-built paths deliberately ignore npm provenance. Launch outside
         // target/ so this fixture also exercises the packaged-install checks.
         let program = root
             .path()
             .join(format!("codex{}", std::env::consts::EXE_SUFFIX));
         let source = codex_utils_cargo_bin::cargo_bin("codex")?;
+        // Hard-link setup and teardown invalidate other tests' Rosetta translations.
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            copy_executable(&source, &program)?;
+            // Translate the fixture before the timed diagnostic command.
+            anyhow::ensure!(
+                std::process::Command::new(&program)
+                    .env("CODEX_HOME", &home)
+                    .arg("--version")
+                    .output()?
+                    .status
+                    .success(),
+                "failed to prepare diagnostic test executable"
+            );
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
         if std::fs::hard_link(&source, &program).is_err() {
-            std::fs::copy(&source, &program)?;
+            copy_executable(&source, &program)?;
         }
         let workspace = root.path().join("workspace");
         let bin = workspace.join("node_modules/.bin");
-        let home = root.path().join("home");
         let marker = root.path().join("helper-ran");
         std::fs::create_dir_all(&bin)?;
         std::fs::create_dir_all(workspace.join(".git"))?;
-        std::fs::create_dir(&home)?;
         std::fs::write(
             home.join("config.toml"),
             r#"
@@ -67,15 +83,10 @@ wire_api = "responses"
         ] {
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
                 let executable = bin.join(name);
-                std::fs::write(
+                codex_utils_cargo_bin::write_executable(
                     &executable,
                     "#!/bin/sh\nprintf 'helper ran\\n' >> \"$CODEX_TEST_HELPER_MARKER\"\nexit 0\n",
-                )?;
-                std::fs::set_permissions(
-                    executable,
-                    std::fs::Permissions::from_mode(/*mode*/ 0o755),
                 )?;
             }
             #[cfg(windows)]
@@ -139,6 +150,10 @@ wire_api = "responses"
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows doctor fixture does not discover the synthetic Git executable"
+)]
 fn startup_and_doctor_do_not_execute_path_helpers() -> Result<()> {
     let fixture = Fixture::new()?;
     // Non-TTY dumb-terminal startup exits immediately after terminal detection.
@@ -350,6 +365,7 @@ fn filesystem_probe_does_not_load_configuration() -> Result<()> {
 #[tokio::test]
 async fn interactive_tmux_startup_does_not_execute_workspace_helpers() -> Result<()> {
     let fixture = Fixture::new()?;
+    std::fs::create_dir(fixture.workspace.join(".codex"))?;
     let command = fixture.command()?;
     let mut env: std::collections::HashMap<String, String> = std::env::vars().collect();
     for (key, value) in command.get_envs() {
@@ -373,7 +389,7 @@ async fn interactive_tmux_startup_does_not_execute_workspace_helpers() -> Result
     );
     let spawned = codex_utils_pty::spawn_pty_process(
         fixture.program.to_str().unwrap(),
-        &[],
+        &["--no-daemon".to_string()],
         &fixture.workspace,
         &env,
         /*arg0*/ &None,
@@ -381,7 +397,7 @@ async fn interactive_tmux_startup_does_not_execute_workspace_helpers() -> Result
             rows: 40,
             cols: 120,
         },
-        &[],
+        codex_utils_pty::ChildFds::Inherited(&[]),
     )
     .await?;
     let session = spawned.session;
@@ -418,8 +434,8 @@ async fn interactive_tmux_startup_does_not_execute_workspace_helpers() -> Result
             output.chars().take(/*n*/ 4000).collect::<String>()
         )
     })??;
-    // The trust screen discards pending input after its first draw. Retry the quit key
-    // until that drain has finished, and keep consuming output during normal shutdown.
+    // The first Ctrl+C leaves the untrusted workspace for the command center.
+    // Keep sending Ctrl+C so the TUI exits even if the first draw discarded input.
     let mut quit_retry = tokio::time::interval(Duration::from_millis(/*millis*/ 250));
     let mut exit_rx = spawned.exit_rx;
     timeout(Duration::from_secs(/*secs*/ 10), async {
@@ -427,7 +443,7 @@ async fn interactive_tmux_startup_does_not_execute_workspace_helpers() -> Result
             tokio::select! {
                 result = &mut exit_rx => return result,
                 _ = quit_retry.tick() => {
-                    let _ = writer.send(b"2".to_vec()).await;
+                    let _ = writer.send(b"\x03".to_vec()).await;
                 }
                 Some(_) = output_rx.recv() => {}
             }

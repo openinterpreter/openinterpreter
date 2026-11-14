@@ -99,6 +99,14 @@ pub(super) fn permission_profile_is_allowed(
         .allowed_permission_profiles
         .as_ref()
         .is_none_or(|allowed| is_permission_allowed(allowed, profile_id));
+    allowed_by_id
+        && permission_profile_satisfies_requirements(config_layer_stack, permission_profile)
+}
+
+pub(super) fn permission_profile_satisfies_requirements(
+    config_layer_stack: &ConfigLayerStack,
+    permission_profile: &PermissionProfile,
+) -> bool {
     let allowed_by_sandbox_mode = config_layer_stack
         .requirements()
         .permission_profile
@@ -112,7 +120,7 @@ pub(super) fn permission_profile_is_allowed(
             value.deny_read.is_empty()
                 || validate_permission_profile_for_deny_read(permission_profile, source).is_ok()
         });
-    allowed_by_id && allowed_by_sandbox_mode && allowed_by_filesystem
+    allowed_by_sandbox_mode && allowed_by_filesystem
 }
 
 /// Validates that a permission candidate can enforce managed filesystem denials.

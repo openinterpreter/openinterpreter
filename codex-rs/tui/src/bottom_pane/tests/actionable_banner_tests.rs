@@ -98,9 +98,17 @@ fn hidden_banner_preserves_input_before_render_and_after_resize() {
 
     // Keys remain composer input before the first frame and after resizing a
     // previously visible banner out of view.
-    for render_hidden in [false, true] {
+    for (render_hidden, composer_gap) in [
+        (false, None),
+        (true, None),
+        (true, Some(super::super::ComposerGap::default())),
+    ] {
         if render_hidden {
-            let rendered = render_snapshot(&pane, hidden_area);
+            let renderable = pane.as_renderable_with_options(ComposerRenderOptions {
+                composer_gap: composer_gap.as_ref(),
+                ..Default::default()
+            });
+            let rendered = render_snapshot(&renderable, hidden_area);
             assert!(!rendered.contains("View usage"));
         }
         pane.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
@@ -110,7 +118,22 @@ fn hidden_banner_preserves_input_before_render_and_after_resize() {
         assert!(pane.is_normal_backtrack_mode());
         pane.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
-        let rendered = render_snapshot(&pane, visible_area);
+        let rendered = {
+            let renderable = pane.as_renderable_with_options(ComposerRenderOptions {
+                composer_gap: composer_gap.as_ref(),
+                ..Default::default()
+            });
+            render_snapshot(
+                &renderable,
+                Rect {
+                    height: renderable.desired_height(width),
+                    ..visible_area
+                },
+            )
+        };
+        if composer_gap.is_some() {
+            assert_snapshot!("actionable_banner_with_composer_gap", rendered);
+        }
         assert!(rendered.contains("View usage"));
         assert!(!pane.is_normal_backtrack_mode());
         pane.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
@@ -234,4 +257,40 @@ fn information_banner_preserves_input_and_honors_dismissal() {
         pane.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
         assert_eq!(pane.composer_text(), "1");
     }
+}
+
+#[test]
+fn banner_copy_preserves_wrapped_url_destinations() {
+    let url = "https://github.com/openai/codex/pull/12345?diff=split";
+    let (tx, _rx) = unbounded_channel();
+    let mut pane = test_pane(AppEventSender::new(tx));
+    pane.set_inline_banner(Some(ActionableBanner {
+        title: "Review the release".into(),
+        description: format!("Open {url} before continuing."),
+        ..Default::default()
+    }));
+    let area = Rect::new(0, 0, 40, pane.desired_height(/*width*/ 40));
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    pane.render(area, &mut buf);
+    let linked = buf
+        .content
+        .iter()
+        .filter(|cell| cell.symbol().contains("\x1b]8;;"))
+        .map(|cell| {
+            assert!(cell.symbol().starts_with(&format!("\x1b]8;;{url}\x07")));
+            crate::terminal_hyperlinks::strip_osc8(cell.symbol())
+        })
+        .collect::<String>();
+    assert_eq!(linked, url);
+    let visible = buf
+        .content
+        .chunks(usize::from(area.width))
+        .map(|row| {
+            row.iter()
+                .map(|cell| crate::terminal_hyperlinks::strip_osc8(cell.symbol()))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!("banner_wrapped_url", visible);
 }

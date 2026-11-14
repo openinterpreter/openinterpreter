@@ -1,14 +1,22 @@
 ---
 source: tui/src/startup_draft_tests.rs
+assertion_line: 144
 expression: "snapshots.join(\"\\n---\\n\")"
 ---
 empty (48 columns):
-╭───────────────────────────────────────╮
-│ >_ OpenAI Codex (v<VERSION>)              │
-│                                       │
-│ model:     loading   /model to change │
-│ directory: loading                    │
-╰───────────────────────────────────────╯
+
+  >_ OpenAI Codex (v<VERSION>)
+     loading
+
+
+› Ask Codex to do anything
+
+  ? for shortcuts
+---
+configured (48 columns):
+
+  >_ OpenAI Codex (v<VERSION>)
+     workspace
 
 
 › Ask Codex to do anything
@@ -16,12 +24,9 @@ empty (48 columns):
   ? for shortcuts
 ---
 resuming (48 columns):
-╭───────────────────────────────────────╮
-│ >_ OpenAI Codex (v<VERSION>)              │
-│                                       │
-│ model:     loading   /model to change │
-│ directory: loading                    │
-╰───────────────────────────────────────╯
+
+  >_ OpenAI Codex (v<VERSION>)
+     loading
   Resuming session…
 
 › Ask Codex to do anything
@@ -29,39 +34,28 @@ resuming (48 columns):
   ? for shortcuts
 ---
 forking (48 columns):
-╭───────────────────────────────────────╮
-│ >_ OpenAI Codex (v<VERSION>)              │
-│                                       │
-│ model:     loading   /model to change │
-│ directory: loading                    │
-╰───────────────────────────────────────╯
+
+  >_ OpenAI Codex (v<VERSION>)
+     loading
   Forking session…
 
 › draft while loading
 
-
 ---
 multiline (48 columns):
-╭───────────────────────────────────────╮
-│ >_ OpenAI Codex (v<VERSION>)              │
-│                                       │
-│ model:     loading   /model to change │
-│ directory: loading                    │
-╰───────────────────────────────────────╯
+
+  >_ OpenAI Codex (v<VERSION>)
+     loading
 
 
 › first startup line
   second startup line
 
-
 ---
 narrow (18 columns):
-╭────────────────╮
-│ >_ OpenAI Cod… │
-│                │
-│ model:     lo… │
-│ directory: …ng │
-╰────────────────╯
+
+  >_ OpenAI Codex…
+     loading
 
 
 › first startup

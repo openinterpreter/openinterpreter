@@ -1,9 +1,11 @@
 //! Exercises streamed remote compaction, including the retained checkpoint and continuing history.
 
+use super::audio_duration_store::TestAudioDurationStore;
 use anyhow::Context;
 use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_core::RequestCountry;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_features::Feature;
@@ -14,6 +16,7 @@ use codex_login::CodexAuth;
 use codex_login::auth::BedrockApiKeyAuth;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_5_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+use codex_model_provider_info::GCP_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::AgentPath;
 use codex_protocol::models::ContentItem;
@@ -104,6 +107,7 @@ async fn start_realtime_conversation(codex: &codex_core::CodexThread) -> Result<
             codex_response_item_prefix: None,
             codex_response_handoff_mode:
                 codex_protocol::protocol::CodexResponseHandoffMode::Thinking,
+            backend_reasoning_status: false,
             codex_response_handoff_channel_prefixes: None,
             model: None,
             output_modality: RealtimeOutputModality::Audio,
@@ -113,6 +117,7 @@ async fn start_realtime_conversation(codex: &codex_core::CodexThread) -> Result<
             realtime_end_instructions: None,
             prompt: Some(Some("backend prompt".to_string())),
             realtime_session_id: None,
+            voice_session_id: None,
             transport: None,
             version: None,
             voice: None,
@@ -297,6 +302,7 @@ async fn remote_compact_v2_retains_metadata_from_resumed_history() -> Result<()>
 
     let builder = || test_codex().with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing());
     let initial = builder()
+        .with_request_country(RequestCountry::from_iso_code("DE")?)
         .with_pre_build_hook(|home| {
             fs::write(
                 home.join("config.toml"),
@@ -319,12 +325,26 @@ async fn remote_compact_v2_retains_metadata_from_resumed_history() -> Result<()>
     let resumed = builder()
         .resume(&server, home, rollout_path.clone())
         .await?;
+    resumed
+        .codex
+        .update_thread_settings(codex_protocol::protocol::ThreadSettingsOverrides {
+            request_country: Some(RequestCountry::UNKNOWN),
+            ..Default::default()
+        })
+        .await?;
     resumed.codex.submit(Op::Compact).await?;
     wait_for_turn_complete(&resumed.codex).await;
     resumed.submit_turn("continue after compaction").await?;
     resumed.codex.shutdown_and_wait().await?;
 
     let requests = response_mock.requests();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.body_json().get("request_country").cloned())
+            .collect::<Vec<_>>(),
+        vec![Some(json!("DE")), Some(Value::Null), Some(Value::Null)]
+    );
     let compact_request = &requests[1];
     assert_eq!(
         compact_request.inputs_of_type("compaction_trigger").len(),
@@ -363,6 +383,8 @@ async fn remote_compact_v2_retains_only_client_developer_messages_when_enabled(
     )
     .await?;
     let developer = |text: &str| ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "developer".to_string(),
         content: vec![ContentItem::InputText {
@@ -422,11 +444,7 @@ async fn remote_compact_v2_retains_only_client_developer_messages_when_enabled(
         .context("remote compaction should persist a checkpoint")?;
     let retained_client_developers = replacement_history
         .iter()
-        .filter(|item| {
-            item.metadata
-                .as_ref()
-                .is_some_and(|metadata| metadata.client_authored)
-        })
+        .filter(|item| item.is_always_retained())
         .count();
     assert_eq!(retained_client_developers, usize::from(enabled));
     Ok(())
@@ -527,18 +545,66 @@ async fn remote_compact_v2_records_usage_before_output_validation() -> Result<()
     Ok(())
 }
 
+enum CompactionProvider {
+    AmazonBedrock,
+    Gcp,
+}
+
+#[test_case(CompactionProvider::AmazonBedrock; "bedrock")]
+#[test_case(CompactionProvider::Gcp; "gcp")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn amazon_bedrock_automatic_compaction_uses_v2_responses_endpoint() -> Result<()> {
+async fn provider_automatic_compaction_uses_v2_responses_endpoint(
+    provider: CompactionProvider,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = TestCodexHarness::with_auto_env_builder(amazon_bedrock_test_codex().with_config(
-        |config| {
+    let server = responses::start_mock_server().await;
+    let auth_fixture;
+    let (builder, expected_model, expected_path, expected_auth) = match provider {
+        CompactionProvider::AmazonBedrock => (
+            amazon_bedrock_test_codex(),
+            AMAZON_BEDROCK_GPT_5_5_MODEL_ID,
+            "/v1/responses",
+            "Bearer bedrock-test-api-key",
+        ),
+        CompactionProvider::Gcp => {
+            auth_fixture = ProviderAuthCommandFixture::new(&["vertex-access-token"])?;
+            let mut provider = ModelProviderInfo::create_gcp_provider();
+            provider.base_url = Some(format!(
+                "{}/v1/projects/example-project/locations/global/publishers/openai/v1",
+                server.uri()
+            ));
+            provider.auth = Some(auth_fixture.auth());
+            (
+                test_codex()
+                    .with_model("gpt-6.1-sol")
+                    .with_config(move |config| {
+                        config.model_provider_id = GCP_PROVIDER_ID.to_string();
+                        config.model_provider = provider;
+                        config.model_reasoning_summary = Some(ReasoningSummary::Detailed);
+                        config
+                            .features
+                            .enable(Feature::IncrementalToolsLegacyGcp)
+                            .expect("enable incremental tools on Vertex");
+                        config
+                            .features
+                            .enable(Feature::RemoteCompactionV2)
+                            .expect("test config should allow feature update");
+                    }),
+                "gpt-6.1-sol",
+                "/v1/projects/example-project/locations/global/publishers/openai/v1/responses",
+                "Bearer vertex-access-token",
+            )
+        }
+    };
+    let test = builder
+        .with_config(|config| {
             config.model_auto_compact_token_limit = Some(200);
-        },
-    ))
-    .await?;
+        })
+        .build_with_auto_env(&server)
+        .await?;
     let response_mock = responses::mount_sse_sequence(
-        harness.server(),
+        &server,
         vec![
             sse(vec![
                 responses::ev_assistant_message("message-1", "before automatic compaction"),
@@ -549,7 +615,7 @@ async fn amazon_bedrock_automatic_compaction_uses_v2_responses_endpoint() -> Res
                     "type": "response.output_item.done",
                     "item": {
                         "type": "compaction",
-                        "encrypted_content": "BEDROCK_AUTOMATIC_REMOTE_COMPACTED_SUMMARY",
+                        "encrypted_content": "PROVIDER_AUTOMATIC_REMOTE_COMPACTED_SUMMARY",
                     }
                 }),
                 responses::ev_completed("response-compact"),
@@ -562,44 +628,47 @@ async fn amazon_bedrock_automatic_compaction_uses_v2_responses_endpoint() -> Res
     )
     .await;
 
-    harness
-        .test()
-        .submit_turn("before automatic compact")
-        .await?;
-    harness
-        .test()
-        .submit_turn("after automatic compact")
-        .await?;
+    test.submit_turn("before automatic compact").await?;
+    test.submit_turn("after automatic compact").await?;
 
     let response_requests = response_mock.requests();
     assert_eq!(response_requests.len(), 3);
     assert!(
         response_requests
             .iter()
-            .all(|request| request.path() == "/v1/responses")
+            .all(|request| request.path() == expected_path)
     );
     let compact_request = &response_requests[1];
     assert_eq!(
         compact_request.header("authorization").as_deref(),
-        Some("Bearer bedrock-test-api-key")
+        Some(expected_auth)
     );
-    assert_eq!(
-        compact_request
-            .header("x-amzn-mantle-client-agent")
-            .as_deref(),
-        Some("codex")
-    );
-    assert_eq!(
-        compact_request.body_json()["model"],
-        AMAZON_BEDROCK_GPT_5_5_MODEL_ID
-    );
+    match provider {
+        CompactionProvider::AmazonBedrock => assert_eq!(
+            compact_request
+                .header("x-amzn-mantle-client-agent")
+                .as_deref(),
+            Some("codex")
+        ),
+        CompactionProvider::Gcp => {
+            for request in &response_requests {
+                assert_eq!(request.body_json()["reasoning"].get("summary"), None);
+                assert_eq!(
+                    request.header("x-openai-internal-codex-responses-lite"),
+                    None
+                );
+                assert!(!request.inputs_of_type("additional_tools").is_empty());
+            }
+        }
+    }
+    assert_eq!(compact_request.body_json()["model"], expected_model);
     assert_eq!(
         compact_request.inputs_of_type("compaction_trigger").len(),
         1
     );
     assert!(response_requests[2].input().iter().any(|item| {
         item["type"] == "compaction"
-            && item["encrypted_content"] == "BEDROCK_AUTOMATIC_REMOTE_COMPACTED_SUMMARY"
+            && item["encrypted_content"] == "PROVIDER_AUTOMATIC_REMOTE_COMPACTED_SUMMARY"
     }));
 
     Ok(())
@@ -798,6 +867,162 @@ async fn remote_compact_v2_charges_retained_images_to_token_budget(
     Ok(())
 }
 
+#[test_case(None, 3, false; "audio_only")]
+#[test_case(None, 3, true; "mixed_media_boundary")]
+#[test_case(Some(false), 3, false; "metadata_unavailable")]
+#[test_case(Some(true), 1, false; "with_partial_metadata")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_compact_v2_budgets_persisted_file_audio_atomically(
+    measure_short_clips: Option<bool>,
+    first_retained: u32,
+    older_image: bool,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(|config| {
+            config
+                .features
+                .set_enabled(Feature::CompactionImageBudget, /*enabled*/ false)
+                .expect("disable image budgeting for this test");
+        })
+        .with_model_info_override("gpt-5.5", |model| {
+            model.input_modalities.push(InputModality::Audio);
+        });
+    let builder = if let Some(measure_short_clips) = measure_short_clips {
+        builder.with_image_store(Arc::new(TestAudioDurationStore {
+            measure_short_clips,
+            ..Default::default()
+        }))
+    } else {
+        builder
+    };
+    let harness = TestCodexHarness::with_builder(builder).await?;
+    // A 64k budget fits five unknown files. Measuring the other two clips at
+    // 30 seconds each leaves room to retain all seven.
+    let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+    let initial_history = (1..=6)
+        .map(|number| {
+            let mut content = Vec::new();
+            if older_image && number == 3 {
+                // The file fits, then the older text exhausts the remaining budget.
+                content.extend([
+                    input_text(image_open_tag_text()),
+                    ContentItem::InputImage {
+                        image: ImageReference::Inline {
+                            image_url: image_url.to_string(),
+                        },
+                        detail: None,
+                    },
+                    input_text(image_close_tag_text()),
+                    input_text("older context ".repeat(4000)),
+                ]);
+            }
+            content.extend([
+                input_text(format!("recording {number}")),
+                ContentItem::InputAudio {
+                    audio: AudioReference::File {
+                        file_id: format!("file_audio_{number}"),
+                    },
+                },
+            ]);
+            RolloutItem::ResponseItem(
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content,
+                    status: None,
+                    phase: None,
+                    encrypted_content: None,
+                    internal_chat_message_metadata_passthrough: None,
+                }
+                .into(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let codex = harness
+        .test()
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            initial_history: InitialHistory::Forked(initial_history),
+            ..StartThreadOptions::new(harness.test().config.clone())
+        })
+        .await?
+        .thread;
+    let responses = responses::mount_sse_sequence(
+        harness.server(),
+        vec![
+            sse(vec![
+                responses::ev_assistant_message("first", "heard it"),
+                responses::ev_completed("first"),
+            ]),
+            sse(vec![
+                json!({
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "compaction",
+                        "encrypted_content": "AUDIO_BUDGET_SUMMARY"
+                    },
+                }),
+                responses::ev_completed("compact-audio"),
+            ]),
+            sse(vec![
+                responses::ev_assistant_message("after-audio", "done"),
+                responses::ev_completed("after-audio"),
+            ]),
+        ],
+    )
+    .await;
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Audio {
+            audio: AudioReference::File {
+                file_id: "file_audio_7".into(),
+            },
+        }]))
+        .await?;
+    wait_for_turn_complete(&codex).await;
+    codex.submit(Op::Compact).await?;
+    wait_for_turn_complete(&codex).await;
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "continue after audio compaction".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_turn_complete(&codex).await;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 3);
+    if older_image {
+        assert_eq!(requests[0].message_input_image_urls("user").len(), 1);
+        assert!(requests[2].message_input_image_urls("user").is_empty());
+    }
+    assert_eq!(
+        requests[0].message_input_audio_file_ids("user"),
+        (1..=7)
+            .map(|number| format!("file_audio_{number}"))
+            .collect::<Vec<_>>()
+    );
+    let retained: Vec<_> = requests[2]
+        .input()
+        .into_iter()
+        .flat_map(|item| item["content"].as_array().cloned().unwrap_or_default())
+        .filter(|part| part["type"] == "input_audio")
+        .collect();
+    assert_eq!(
+        retained,
+        (first_retained..=7)
+            .map(|number| json!({"type":"input_audio", "file_id": format!("file_audio_{number}")}))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        requests[2].inputs_of_type("compaction")[0]["encrypted_content"],
+        "AUDIO_BUDGET_SUMMARY"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -912,6 +1137,19 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
             start_options: Default::default(),
         })
         .await?;
+    let channel_progress = "Message Type: CHANNEL_POST\nSender: /root/child\nChannel: progress\nMessage ID: aaaabbbbcccc\nThread ID: aaaabbbbcccc\nPayload:\nchild channel progress";
+    codex
+        .submit(Op::InterAgentCommunication {
+            communication: InterAgentCommunication::new(
+                AgentPath::root().join("child").expect("valid child path"),
+                AgentPath::root(),
+                Vec::new(),
+                channel_progress.to_string(),
+                /*trigger_turn*/ false,
+            ),
+            start_options: Default::default(),
+        })
+        .await?;
     codex
         .submit(Op::InterAgentCommunication {
             communication: InterAgentCommunication::new(
@@ -1016,6 +1254,12 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
         compact_request
             .inputs_of_type("agent_message")
             .iter()
+            .any(|item| item["content"][0]["text"].as_str() == Some(channel_progress))
+    );
+    assert!(
+        compact_request
+            .inputs_of_type("agent_message")
+            .iter()
             .any(|item| item.to_string().contains("child completion")),
         "expected v2 compaction input to include the child completion"
     );
@@ -1105,6 +1349,12 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
             .iter()
             .all(|item| !item.to_string().contains("child progress")),
         "expected v2 follow-up request to omit the child progress update"
+    );
+    assert!(
+        follow_up_request
+            .inputs_of_type("agent_message")
+            .iter()
+            .all(|item| item["content"][0]["text"].as_str() != Some(channel_progress))
     );
     assert!(
         follow_up_request
@@ -1269,8 +1519,11 @@ async fn remote_compact_v2_rewrites_multiple_trailing_function_call_outputs(
     let second_trimmed_call_id = "second-trimmed-call";
     let retained_output = "retained tool output";
 
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.thread_lifecycle_contributor(Arc::new(ThreadIdle));
     let harness = TestCodexHarness::with_builder(
         test_codex()
+            .with_extensions(Arc::new(extensions.build()))
             .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
             .with_config(|config| {
                 config.model_context_window = Some(2_000);

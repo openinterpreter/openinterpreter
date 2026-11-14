@@ -30,6 +30,7 @@ use anyhow::Context;
 use clap::Parser;
 use codex_api::ApiError;
 use codex_api::ResponsesWebsocketClient;
+use codex_api::TransportError;
 use codex_api::is_azure_responses_provider;
 use codex_arg0::Arg0DispatchPaths;
 use codex_config::ConfigLoadError;
@@ -40,6 +41,7 @@ use codex_core::config::ConfigOverrides;
 use codex_core::config::LoaderOverrides;
 use codex_core::config::find_codex_home;
 use codex_features::FEATURES;
+use codex_features::Feature;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
@@ -154,8 +156,9 @@ const NARROW_TERMINAL_ROWS: u16 = 24;
 
 /// Options for building a local Codex diagnostic report.
 ///
-/// The command always runs the full diagnostic set. Human output includes
-/// detailed diagnostics by default; --summary keeps the terminal output compact.
+/// The command runs the full diagnostic set unless `--network-only` is selected.
+/// Human output includes detailed diagnostics by default; --summary keeps the terminal output
+/// compact.
 #[derive(Debug, Parser)]
 pub struct DoctorCommand {
     /// Internal isolated filesystem probe; exits before loading configuration.
@@ -165,6 +168,10 @@ pub struct DoctorCommand {
     /// Emit a redacted machine-readable report.
     #[arg(long, default_value_t = false)]
     json: bool,
+
+    /// Run config, network environment, provider HTTP, and Responses WebSocket checks.
+    #[arg(long, default_value_t = false)]
+    network_only: bool,
 
     /// Limit database integrity scans when collecting a feedback attachment.
     #[arg(long, hide = true, default_value_t = false)]
@@ -358,6 +365,12 @@ async fn build_report(
     arg0_paths: &Arg0DispatchPaths,
 ) -> DoctorReport {
     let progress = doctor_progress(command.json);
+    if command.network_only {
+        let checks =
+            network::checks(root_config_overrides, interactive, arg0_paths, &progress).await;
+        progress.settle();
+        return report_from_checks(checks);
+    }
     let mut checks = Vec::new();
     checks.push(run_sync_check("system", progress.clone(), system_check));
     checks.push(run_async_check("endpoint protection", progress.clone(), security::check()).await);
@@ -603,6 +616,10 @@ async fn build_report(
 
     progress.settle();
 
+    report_from_checks(checks)
+}
+
+fn report_from_checks(checks: Vec<DoctorCheck>) -> DoctorReport {
     let overall_status = overall_status(&checks);
     DoctorReport {
         schema_version: 1,
@@ -610,6 +627,41 @@ async fn build_report(
         overall_status,
         codex_version: env!("CARGO_PKG_VERSION").to_string(),
         checks,
+    }
+}
+
+fn config_load_failure(err: &anyhow::Error) -> DoctorCheck {
+    let check = DoctorCheck::new(
+        "config.load",
+        "config",
+        CheckStatus::Fail,
+        "config could not be loaded",
+    )
+    .remediation("Fix the reported config error, then rerun codex doctor.");
+    // Error messages can echo config values. Report only typed metadata,
+    // including errors wrapped by io::Error, whose source skips the wrapper.
+    let config_error = err.chain().find_map(|cause| {
+        cause.downcast_ref::<ConfigLoadError>().or_else(|| {
+            cause
+                .downcast_ref::<std::io::Error>()?
+                .get_ref()?
+                .downcast_ref::<ConfigLoadError>()
+        })
+    });
+    if let Some(error) = config_error {
+        let error = error.config_error();
+        return check
+            .detail("error: invalid configuration")
+            .detail(format!("file: {}", error.path.display()))
+            .detail(format!("line: {}", error.range.start.line))
+            .detail(format!("column: {}", error.range.start.column));
+    }
+    let io_error = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>());
+    match io_error {
+        Some(error) => check.detail(format!("error: {}", error.kind())),
+        None => check.detail("error: configuration load failed"),
     }
 }
 
@@ -629,7 +681,7 @@ async fn load_config(
         ..config_overrides_from_interactive(interactive, arg0_paths)
     };
 
-    crate::cloud_config::config_builder(
+    let config = crate::cloud_config::config_builder(
         &root_config_overrides,
         LoaderOverrides::default(),
         overrides,
@@ -642,7 +694,9 @@ async fn load_config(
             "failed to load {} config",
             Product::current().short_display_name()
         )
-    })
+    })?;
+    config.config_layer_stack.ensure_config_server_applied()?;
+    Ok(config)
 }
 
 fn config_overrides_from_interactive(
@@ -670,7 +724,6 @@ fn config_overrides_from_interactive(
             .flatten(),
         codex_self_exe: arg0_paths.codex_self_exe.clone(),
         codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe.clone(),
-        main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe.clone(),
         show_raw_agent_reasoning: interactive.oss.then_some(true),
         additional_writable_roots: interactive.add_dir.clone(),
         ..Default::default()
@@ -1119,6 +1172,14 @@ fn config_check(config: &Config) -> DoctorCheck {
         config.model.as_deref().unwrap_or("<default>")
     ));
     details.push(format!("model provider: {}", config.model_provider_id));
+    details.push(format!(
+        "configured TUI mode: {}",
+        if config.tui_fullscreen_transcript {
+            "fullscreen"
+        } else {
+            "scrollback"
+        }
+    ));
     details.push(format!("log dir: {}", config.log_dir.display()));
     details.push(format!(
         "sqlite home: {}",
@@ -1535,6 +1596,7 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
     let mut details = Vec::new();
     let mut transport_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut disabled = 0usize;
+    let mut invalid_config = Vec::new();
     let mut missing_env = Vec::new();
     let mut unreachable_required_http = Vec::new();
     let mut unreachable_optional_http = Vec::new();
@@ -1558,43 +1620,44 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
                 }
                 let command_is_empty = command.trim().is_empty();
                 if command_is_empty {
-                    missing_env.push(format!("{name}: stdio command is empty"));
+                    invalid_config.push(format!("{name}: stdio command is empty"));
                 }
                 if server.is_local_environment() {
                     let host_native_cwd = cwd.as_ref().map(|cwd| Path::new(cwd.as_str()));
                     if let Some(cwd) = host_native_cwd
                         && !cwd.exists()
                     {
-                        missing_env.push(format!("{name}: cwd does not exist ({})", cwd.display()));
+                        invalid_config
+                            .push(format!("{name}: cwd does not exist ({})", cwd.display()));
                     }
                     if !command_is_empty
                         && let Err(err) =
                             stdio_command_resolves(command, host_native_cwd, env.as_ref())
                     {
-                        missing_env.push(format!(
+                        invalid_config.push(format!(
                             "{name}: stdio command {command:?} is not resolvable ({err})"
                         ));
                     }
                 } else {
                     match cwd {
                         Some(cwd) if cwd.to_inferred_path_uri().is_none() => {
-                            missing_env
+                            invalid_config
                                 .push(format!("{name}: remote stdio cwd is not absolute ({cwd})"));
                         }
-                        None => missing_env
+                        None => invalid_config
                             .push(format!("{name}: remote stdio requires an explicit cwd")),
                         Some(_) => {}
                     }
                 }
                 if let Some(env) = env {
                     for key in env.keys().filter(|key| key.trim().is_empty()) {
-                        missing_env.push(format!("{name}: empty env key {key}"));
+                        invalid_config.push(format!("{name}: empty env key {key}"));
                     }
                 }
                 for env_var in env_vars {
                     if env_var.is_remote_source() {
                         if server.is_local_environment() {
-                            missing_env.push(format!(
+                            invalid_config.push(format!(
                                 "{name}: env_vars entry `{}` uses source `remote`, which requires remote MCP stdio",
                                 env_var.name()
                             ));
@@ -1644,7 +1707,25 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
     for (transport, count) in transport_counts {
         details.push(format!("{transport} servers: {count}"));
     }
-    details.extend(missing_env.iter().cloned());
+    let mut hints = Vec::new();
+    if !invalid_config.is_empty() {
+        hints.push("Correct the listed MCP server configuration errors.");
+    }
+    if !missing_env.is_empty() {
+        hints.push("Set the missing MCP env vars.");
+    }
+    if !unreachable_required_http.is_empty() || !unreachable_optional_http.is_empty() {
+        hints.push("Check that the MCP server is running and its URL is reachable.");
+    }
+    let required_missing = servers.iter().any(|(name, server)| {
+        server.required
+            && invalid_config
+                .iter()
+                .chain(&missing_env)
+                .any(|detail| detail.starts_with(&format!("{name}:")))
+    });
+    details.extend(invalid_config);
+    details.extend(missing_env);
     details.extend(
         unreachable_required_http
             .iter()
@@ -1656,15 +1737,9 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
             .map(|detail| format!("optional reachability failed: {detail}")),
     );
 
-    let required_missing = servers.iter().any(|(name, server)| {
-        server.required
-            && missing_env
-                .iter()
-                .any(|missing| missing.starts_with(&format!("{name}:")))
-    });
     let status = if required_missing || !unreachable_required_http.is_empty() {
         CheckStatus::Fail
-    } else if !missing_env.is_empty() || !unreachable_optional_http.is_empty() {
+    } else if !hints.is_empty() {
         CheckStatus::Warning
     } else {
         CheckStatus::Ok
@@ -1677,7 +1752,8 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
 
     let mut check = DoctorCheck::new("mcp.config", "mcp", status, summary).details(details);
     if status != CheckStatus::Ok {
-        check = check.remediation("Set the missing MCP env vars or disable the affected server.");
+        hints.push("Alternatively, disable the affected server.");
+        check = check.remediation(hints.join(" "));
     }
     check
 }
@@ -1739,6 +1815,7 @@ fn terminal_check(no_color_flag: bool) -> DoctorCheck {
 
 #[cfg(windows)]
 fn windows_console_details() -> Vec<String> {
+    use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
     use windows_sys::Win32::System::Console::GetConsoleCP;
@@ -1762,8 +1839,8 @@ fn windows_console_details() -> Vec<String> {
         GetStdHandle(STD_ERROR_HANDLE)
     }));
 
-    fn console_mode_detail(label: &str, handle: isize) -> String {
-        if handle == 0 || handle == INVALID_HANDLE_VALUE {
+    fn console_mode_detail(label: &str, handle: HANDLE) -> String {
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
             return format!("{label}: unavailable");
         }
         let mut mode = 0_u32;
@@ -1883,6 +1960,7 @@ fn terminal_name(info: &TerminalInfo) -> &'static str {
     match info.name {
         TerminalName::AppleTerminal => "Apple Terminal",
         TerminalName::Ghostty => "Ghostty",
+        TerminalName::Rex => "Rex",
         TerminalName::Iterm2 => "iTerm2",
         TerminalName::WarpTerminal => "Warp",
         TerminalName::VsCode => "VS Code",
@@ -2113,36 +2191,56 @@ async fn state_check(config: &Config, command: &DoctorCommand) -> DoctorCheck {
     path_readiness(&mut details, "CODEX_HOME", &config.codex_home);
     path_readiness(&mut details, "log dir", &config.log_dir);
     path_readiness(&mut details, "sqlite home", config.sqlite_config().home());
+
     let mut status = CheckStatus::Ok;
+    let mut failed_databases = Vec::new();
     for db in config.sqlite_config().runtime_db_paths() {
         path_readiness(&mut details, db.label, &db.path);
         // Feedback collection gives each database its own budget; direct runs scan fully.
         let deadline = command
             .feedback
             .then(|| Instant::now() + Duration::from_secs(1));
-        status = status.max(
-            sqlite_integrity_detail(
-                config.sqlite_config(),
-                &mut details,
-                db.label,
-                &db.path,
-                deadline,
-            )
-            .await,
-        );
+        let db_status = sqlite_integrity_detail(
+            config.sqlite_config(),
+            &mut details,
+            db.label,
+            &db.path,
+            deadline,
+        )
+        .await;
+        if db_status == CheckStatus::Fail {
+            failed_databases.push(db.path.display().to_string());
+        }
+        status = status.max(db_status);
     }
     rollout_stats_details(&mut details, &config.codex_home);
     standalone_release_cache_details(&mut details);
 
     let summary = match status {
-        CheckStatus::Ok => "state paths and databases are inspectable",
-        CheckStatus::Warning => "some database integrity checks exceeded their time limit",
-        CheckStatus::Fail => "state database integrity check failed",
+        CheckStatus::Ok => "state paths and databases are inspectable".to_string(),
+        CheckStatus::Warning => {
+            "some database integrity checks exceeded their time limit".to_string()
+        }
+        CheckStatus::Fail => "state database integrity check failed".to_string(),
     };
     let mut check = DoctorCheck::new("state.paths", "state", status, summary).details(details);
     if status == CheckStatus::Fail {
-        check = check.remediation(
-            "Move the damaged SQLite database aside, then restart the interactive CLI or app server so it can rebuild that runtime database from saved data. Other entry points may not rebuild automatically.",
+        let noun = if failed_databases.len() == 1 {
+            "database"
+        } else {
+            "databases"
+        };
+        check = check.issue(
+            DoctorIssue::new(
+                CheckStatus::Fail,
+                format!(
+                    "{} {noun} failed integrity check",
+                    failed_databases.join(", ")
+                ),
+            )
+            .remedy(
+                "Move the damaged SQLite database aside, then restart the interactive CLI or app server so it can rebuild that runtime database from saved data. Other entry points may not rebuild automatically.",
+            ),
         );
     }
     check
@@ -2262,6 +2360,7 @@ fn collect_rollout_stats_inner(path: &Path, stats: &mut RolloutStats) {
 }
 
 fn is_rollout_file(path: &Path) -> bool {
+    let path = codex_rollout::plain_rollout_path(path);
     path.extension() == Some(OsStr::new("jsonl"))
         && path
             .file_name()
@@ -2297,15 +2396,39 @@ async fn websocket_reachability_check(
         provider.websocket_connect_timeout().as_millis()
     ));
 
-    let runtime_provider = create_model_provider(provider.clone(), auth_manager);
-    let auth = runtime_provider.auth().await;
-    details.push(format!(
-        "auth mode: {}",
-        auth.as_ref().map(auth_mode_name).unwrap_or("none")
-    ));
-
-    let api_provider = match runtime_provider.api_provider().await {
-        Ok(api_provider) => api_provider,
+    let setup = async {
+        let runtime_auth = if config.features.enabled(Feature::RuntimeAgentInstances)
+            && let Some(credentials) = &auth_manager
+        {
+            let installation_id = codex_core::resolve_installation_id(&config.codex_home).await?;
+            codex_core::build_runtime_auth_manager(
+                config,
+                Arc::clone(credentials),
+                &installation_id,
+            )
+            .map(|runtime| (runtime, config.runtime_auth_mode))
+        } else {
+            None
+        };
+        let runtime_provider = match auth_manager {
+            Some(credentials) => codex_model_provider::ProviderAuthContext {
+                credentials,
+                runtime_auth,
+            }
+            .model_provider(provider.clone()),
+            None => create_model_provider(provider.clone(), /*auth_manager*/ None),
+        };
+        codex_model_provider::resolve_request(
+            runtime_provider.as_ref(),
+            /*scope*/ None,
+            Some(&config.workspace_routing_context()),
+            config.http_client_factory(),
+        )
+        .await
+    }
+    .await;
+    let setup = match setup {
+        Ok(setup) => setup,
         Err(err) => {
             return websocket_probe_warning(
                 "Responses WebSocket provider setup failed",
@@ -2314,6 +2437,11 @@ async fn websocket_reachability_check(
             );
         }
     };
+    details.push(format!(
+        "auth mode: {}",
+        setup.auth.as_ref().map(auth_mode_name).unwrap_or("none")
+    ));
+    let api_provider = setup.api_provider;
     match api_provider.websocket_url_for_path("responses") {
         Ok(url) => {
             details.push(format!("endpoint: {url}"));
@@ -2332,24 +2460,13 @@ async fn websocket_reachability_check(
         }
     }
 
-    let api_auth = match runtime_provider.api_auth().await {
-        Ok(api_auth) => api_auth,
-        Err(err) => {
-            return websocket_probe_warning(
-                "Responses WebSocket auth could not be resolved",
-                details,
-                format!("auth resolution failed: {err}"),
-            );
-        }
-    };
-
     let mut extra_headers = HeaderMap::new();
     extra_headers.insert(
         OPENAI_BETA_HEADER,
         HeaderValue::from_static(RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE),
     );
-    let client = ResponsesWebsocketClient::new(api_provider, api_auth);
-    let http_client_factory = config.http_client_factory();
+    let client = ResponsesWebsocketClient::new(api_provider, setup.api_auth);
+    let http_client_factory = setup.http_client_factory;
     match tokio::time::timeout(
         provider.websocket_connect_timeout(),
         client.probe_handshake(
@@ -2370,7 +2487,10 @@ async fn websocket_reachability_check(
             ));
             if let Some(close) = probe.immediate_close {
                 details.push(format!("immediate close code: {}", close.code));
-                details.push(format!("immediate close reason: {}", close.reason));
+                details.push(format!(
+                    "immediate close reason: {}",
+                    close_reason_detail(&close.reason)
+                ));
                 return DoctorCheck::new(
                     "network.websocket_reachability",
                     "websocket",
@@ -2393,7 +2513,7 @@ async fn websocket_reachability_check(
         Ok(Err(err)) => websocket_probe_warning(
             "Responses WebSocket failed; HTTPS fallback may still work",
             details,
-            websocket_error_detail(&err),
+            websocket_error_detail(&err.error),
         ),
         Err(_) => websocket_probe_warning(
             "Responses WebSocket timed out; HTTPS fallback may still work",
@@ -2421,12 +2541,31 @@ fn websocket_probe_warning(
 
 fn websocket_error_detail(err: &ApiError) -> String {
     match err {
-        ApiError::Transport(transport) => format!("handshake transport error: {transport}"),
-        ApiError::Api { status, message } => {
-            format!("handshake API error: {status} {message}")
+        ApiError::Transport(transport) => {
+            let detail = match transport {
+                // Policy denials contain only fixed descriptions, without wire values.
+                TransportError::Policy(denied) => denied.to_string(),
+                TransportError::Http { status, .. } => format!("http {status}: [redacted]"),
+                TransportError::RetryLimit => "retry limit reached".to_string(),
+                TransportError::Timeout => "timeout".to_string(),
+                TransportError::Connection(_) => "connection failed: [redacted]".to_string(),
+                TransportError::Network(_) => "network error: [redacted]".to_string(),
+                TransportError::Build(_) => "request build error: [redacted]".to_string(),
+                TransportError::ResponseTooLarge { max_bytes } => {
+                    format!("response body exceeds the {max_bytes} byte limit")
+                }
+            };
+            format!("handshake transport error: {detail}")
         }
-        ApiError::Stream(message) => format!("handshake stream error: {message}"),
-        ApiError::ContextWindowExceeded
+        ApiError::Api { status, .. } => format!("handshake API error: {status} [redacted]"),
+        ApiError::Stream(_) => "handshake stream error: [redacted]".to_string(),
+        ApiError::ResponseIncomplete(_) => {
+            "handshake error: incomplete response: [redacted]".to_string()
+        }
+        // These variants format fixed text; retry metadata is typed and never printed.
+        ApiError::ContentFilter
+        | ApiError::WebsocketMessageTooLarge
+        | ApiError::ContextWindowExceeded
         | ApiError::QuotaExceeded
         | ApiError::UsageNotIncluded
         | ApiError::Retryable { .. }
@@ -3136,6 +3275,176 @@ mod tests {
     }
 
     #[test]
+    fn websocket_probe_human_output() {
+        let report = |websocket: DoctorCheck| DoctorReport {
+            schema_version: 1,
+            generated_at: "0s since unix epoch".to_string(),
+            overall_status: websocket.status,
+            codex_version: "0.0.0".to_string(),
+            checks: vec![
+                DoctorCheck::new(
+                    "network.environment",
+                    "network",
+                    CheckStatus::Ok,
+                    "network environment is readable",
+                )
+                .detail("HTTPS proxy: not set"),
+                websocket,
+                DoctorCheck::new(
+                    "network.provider_reachability",
+                    "reachability",
+                    CheckStatus::Ok,
+                    "active provider endpoints are reachable over HTTP",
+                )
+                .detail("OpenAI endpoint: HTTP 200"),
+            ],
+        };
+        let options = HumanOutputOptions {
+            show_details: true,
+            show_all: true,
+            ascii: true,
+            color_enabled: false,
+        };
+        let success = render_human_report(
+            &report(
+                DoctorCheck::new(
+                    "network.websocket_reachability",
+                    "websocket",
+                    CheckStatus::Ok,
+                    "Responses WebSocket handshake succeeded",
+                )
+                .detail("handshake result: HTTP 101")
+                .detail("reasoning header: true")
+                .detail("server model present: true"),
+            ),
+            options,
+        );
+        let immediate_close = render_human_report(
+            &report(
+                DoctorCheck::new(
+                    "network.websocket_reachability",
+                    "websocket",
+                    CheckStatus::Warning,
+                    "Responses WebSocket closed immediately after handshake",
+                )
+                .detail("handshake result: HTTP 101")
+                .detail("immediate close code: 1008")
+                .detail(format!(
+                    "immediate close reason: {}",
+                    close_reason_detail("private-close-reason")
+                ))
+                .remediation(
+                    "Check proxy, VPN, firewall, DNS, custom CA, and WebSocket policy support.",
+                ),
+            ),
+            options,
+        );
+        let generic_failure = render_human_report(
+            &report(websocket_probe_warning(
+                "Responses WebSocket failed; HTTPS fallback may still work",
+                vec!["endpoint: wss://example.com/responses".to_string()],
+                websocket_error_detail(&ApiError::Stream("private-stream-error".to_string())),
+            )),
+            options,
+        );
+        let rendered = format!(
+            "successful handshake\n{success}\nimmediate close\n{immediate_close}\nstream failure\n{generic_failure}"
+        );
+
+        assert!(!rendered.contains("private-close-reason"));
+        assert!(!rendered.contains("private-stream-error"));
+        insta::assert_snapshot!("websocket_probe_human_output", rendered);
+    }
+
+    #[test]
+    fn websocket_error_detail_preserves_categories_without_wire_values() {
+        let secret = "private-wire-value";
+        let message = || secret.to_string();
+        let cases = [
+            ApiError::Transport(TransportError::Http {
+                status: http::StatusCode::FORBIDDEN,
+                url: Some(format!("https://example.com/?token={secret}")),
+                headers: Some(HeaderMap::from_iter([(
+                    http::header::SET_COOKIE,
+                    HeaderValue::from_static(secret),
+                )])),
+                body: Some(message()),
+                retry_after: None,
+            }),
+            ApiError::Transport(TransportError::Network(message())),
+            ApiError::Transport(TransportError::Build(message())),
+            ApiError::Api {
+                status: http::StatusCode::UNAUTHORIZED,
+                message: message(),
+            },
+            ApiError::Stream(message()),
+            ApiError::ResponseIncomplete(Box::new(
+                codex_protocol::error::ResponseIncompleteError {
+                    partial_output: vec![],
+                    reason: message(),
+                    response_id: Some(message()),
+                    token_usage: None,
+                },
+            )),
+            ApiError::Retryable {
+                message: message(),
+                retry_after: None,
+            },
+            ApiError::RateLimitExceeded {
+                message: message(),
+                retry_after: None,
+            },
+            ApiError::RateLimit(message()),
+            ApiError::InvalidRequest { message: message() },
+            ApiError::InvalidAudioInput {
+                message: message(),
+                per_recording: true,
+            },
+            ApiError::ModelNotFound {
+                message: message(),
+                status: Some(http::StatusCode::NOT_FOUND),
+            },
+            ApiError::InvalidPrompt { message: message() },
+            ApiError::ContentPolicyViolation {
+                message: message(),
+                status: None,
+            },
+            ApiError::AccessProgramNotEnabled { message: message() },
+            ApiError::CyberPolicy { message: message() },
+            ApiError::BioPolicy { message: message() },
+            ApiError::MisalignmentPolicyViolation {
+                message: message(),
+                misalignment: None,
+            },
+        ];
+        let details = cases.iter().map(websocket_error_detail).collect::<Vec<_>>();
+        assert!(!details.join("\n").contains(secret));
+        assert_eq!(
+            details,
+            [
+                "handshake transport error: http 403 Forbidden: [redacted]",
+                "handshake transport error: network error: [redacted]",
+                "handshake transport error: request build error: [redacted]",
+                "handshake API error: 401 Unauthorized [redacted]",
+                "handshake stream error: [redacted]",
+                "handshake error: incomplete response: [redacted]",
+                "handshake error: retryable error: [redacted]",
+                "handshake error: rate limit exceeded: [redacted]",
+                "handshake error: rate limit: [redacted]",
+                "handshake error: invalid request: [redacted]",
+                "handshake error: invalid audio input: [redacted]",
+                "handshake error: model not found: [redacted]",
+                "handshake error: invalid prompt: [redacted]",
+                "handshake error: content policy violation",
+                "handshake error: access program not enabled",
+                "handshake error: cyber policy: [redacted]",
+                "handshake error: bio policy: [redacted]",
+                "handshake error: misalignment policy violation: [redacted]",
+            ]
+        );
+    }
+
+    #[test]
     fn run_sync_check_notifies_progress() {
         let progress_impl = Arc::new(RecordingProgress::default());
         let progress: Arc<dyn DoctorProgress> = progress_impl.clone();
@@ -3214,7 +3523,7 @@ mod tests {
         let arg0_paths = Arg0DispatchPaths {
             codex_self_exe: Some(PathBuf::from("/bin/codex")),
             codex_linux_sandbox_exe: Some(PathBuf::from("/bin/codex-linux-sandbox")),
-            main_execve_wrapper_exe: Some(PathBuf::from("/bin/codex-execve-wrapper")),
+            ..Default::default()
         };
 
         let overrides = config_overrides_from_interactive(&interactive, &arg0_paths);
@@ -3233,10 +3542,6 @@ mod tests {
         assert_eq!(
             overrides.codex_linux_sandbox_exe,
             arg0_paths.codex_linux_sandbox_exe
-        );
-        assert_eq!(
-            overrides.main_execve_wrapper_exe,
-            arg0_paths.main_execve_wrapper_exe
         );
     }
 
@@ -3392,12 +3697,30 @@ mod tests {
 
         assert_eq!(check.status, CheckStatus::Warning);
         assert_eq!(check.summary, "MCP configuration has optional issues");
+        insta::assert_snapshot!(check.remediation.unwrap(), @"Check that the MCP server is running and its URL is reachable. Alternatively, disable the affected server.");
         assert!(
             check
                 .details
                 .iter()
                 .any(|detail| detail.contains("optional reachability failed: optional:"))
         );
+    }
+
+    #[tokio::test]
+    async fn mcp_check_reports_both_missing_token_and_unreachable_url() {
+        let server = toml::from_str(
+            r#"
+                url = "http://127.0.0.1:9/mcp"
+                bearer_token_env_var = "CODEX_DOCTOR_MISSING_MCP_TOKEN"
+                required = true
+            "#,
+        )
+        .expect("required MCP config");
+        let check =
+            mcp_check_from_servers(&HashMap::from([("required".to_string(), server)])).await;
+
+        assert_eq!(check.status, CheckStatus::Fail);
+        insta::assert_snapshot!(check.remediation.unwrap(), @"Set the missing MCP env vars. Check that the MCP server is running and its URL is reachable. Alternatively, disable the affected server.");
     }
 
     #[tokio::test]
@@ -3835,7 +4158,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_rollout_stats_counts_nested_rollout_files() {
+    fn rollout_stats_details_count_plain_and_compressed_files() {
         let temp = tempfile::tempdir().expect("create temp dir");
         let nested = temp
             .path()
@@ -3849,14 +4172,40 @@ mod tests {
             "12345",
         )
         .expect("write rollout file");
+        // Storage totals include both physical files if both representations exist.
+        std::fs::write(
+            nested.join("rollout-2026-05-13T00-00-00-test.jsonl.zst"),
+            "1234567",
+        )
+        .expect("write compressed sibling");
+        std::fs::write(
+            nested.join("rollout-2026-05-13T01-00-00-compressed.jsonl.zst"),
+            "123",
+        )
+        .expect("write compressed rollout");
         std::fs::write(nested.join("not-a-rollout.jsonl"), "ignored").expect("write ignored jsonl");
+        std::fs::write(nested.join("not-a-rollout.jsonl.zst"), "ignored")
+            .expect("write ignored compressed file");
+        std::fs::write(
+            nested.join("rollout-2026-05-13T01-00-00-compressed.jsonl.zst.tmp"),
+            "ignored",
+        )
+        .expect("write compression temp file");
 
-        let stats = collect_rollout_stats(&temp.path().join("sessions"));
+        let archived = temp.path().join("archived_sessions");
+        std::fs::create_dir(&archived).expect("create archived rollout dir");
+        std::fs::write(
+            archived.join("rollout-2026-05-13T02-00-00-archived.jsonl.zst"),
+            "1234",
+        )
+        .expect("write archived compressed rollout");
 
-        assert_eq!(stats.files, 1);
-        assert_eq!(stats.total_bytes, 5);
-        assert_eq!(stats.average_bytes(), 5);
-        assert_eq!(stats.error, None);
+        let mut details = Vec::new();
+        rollout_stats_details(&mut details, temp.path());
+        insta::assert_snapshot!(details.join("\n"), @r"
+        active rollout files: 3 files, 15 total bytes, 5 average bytes
+        archived rollout files: 1 files, 4 total bytes, 4 average bytes
+        ");
     }
 
     #[tokio::test]
@@ -3882,35 +4231,51 @@ mod tests {
         assert_eq!(status, Ok("HTTP 405".to_string()));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn mcp_http_probe_falls_back_to_get_when_head_times_out() {
+        use std::io::BufRead as _;
+
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
         let addr = listener.local_addr().expect("listener address");
-        let server = std::thread::spawn(move || {
+        let (head_received_tx, head_received_rx) = tokio::sync::oneshot::channel();
+        let (probe_done_tx, probe_done_rx) = std::sync::mpsc::channel::<()>();
+        // A blocking task inhibits Tokio's automatic clock advancement while real socket I/O
+        // is pending. Keep it alive until the client has consumed the GET response, too.
+        let server = tokio::task::spawn_blocking(move || {
             let (mut head_stream, _) = listener.accept().expect("accept HEAD probe request");
-            let head = std::thread::spawn(move || {
-                let mut request = [0; 1024];
-                let _ = head_stream.read(&mut request);
-                std::thread::sleep(Duration::from_millis(50));
-            });
+            let mut head_request = String::new();
+            std::io::BufReader::new(&mut head_stream)
+                .read_line(&mut head_request)
+                .expect("read HEAD request line");
+            assert_eq!(head_request, "HEAD /mcp HTTP/1.1\r\n");
+            head_received_tx.send(()).expect("signal HEAD receipt");
 
             let (mut get_stream, _) = listener.accept().expect("accept GET probe request");
-            let mut request = [0; 1024];
-            let _ = get_stream.read(&mut request);
+            let mut get_request = String::new();
+            std::io::BufReader::new(&mut get_stream)
+                .read_line(&mut get_request)
+                .expect("read GET request line");
+            assert_eq!(get_request, "GET /mcp HTTP/1.1\r\n");
             get_stream
                 .write_all(
                     b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 )
                 .expect("write response");
-            head.join().expect("HEAD holder should finish");
+            // Dropping the sender also releases this wait if the probe panics.
+            let _ = probe_done_rx.recv();
+            drop(head_stream);
         });
 
-        let status = mcp_http_probe_url_with_timeout(
-            &format!("http://{addr}/mcp"),
-            Duration::from_millis(10),
-        )
-        .await;
-        server.join().expect("probe server thread should finish");
+        let url = format!("http://{addr}/mcp");
+        let probe = mcp_http_probe_url_with_timeout(&url, Duration::from_millis(10));
+        let expire_head = async {
+            head_received_rx.await.expect("server should receive HEAD");
+            // Cross the unchanged 10 ms deadline only after HEAD is waiting for a response.
+            tokio::time::advance(Duration::from_millis(11)).await;
+        };
+        let (status, ()) = tokio::join!(probe, expire_head);
+        drop(probe_done_tx);
+        server.await.expect("probe server task should finish");
 
         assert_eq!(status, Ok("HTTP 405".to_string()));
     }
@@ -3933,6 +4298,7 @@ mod tests {
             check.summary,
             "MCP configuration has failing required inputs or reachability"
         );
+        insta::assert_snapshot!(check.remediation.unwrap(), @"Correct the listed MCP server configuration errors. Alternatively, disable the affected server.");
         assert!(check.details.iter().any(|detail| {
             detail.contains(
                 "required: stdio command \"definitely-missing-codex-doctor-mcp\" is not resolvable",
@@ -4093,6 +4459,7 @@ mod tests {
     fn terminal_inputs() -> TerminalCheckInputs {
         TerminalCheckInputs {
             info: TerminalInfo {
+                backend: None,
                 name: TerminalName::Unknown,
                 term_program: None,
                 version: None,

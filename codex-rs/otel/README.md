@@ -15,13 +15,16 @@ metrics (when enabled), then attach its layers to your `tracing_subscriber`
 registry:
 
 ```rust
-use codex_otel::config::OtelExporter;
-use codex_otel::config::OtelHttpProtocol;
-use codex_otel::config::OtelSettings;
+use codex_http_client::{HttpClientFactory, OutboundProxyPolicy};
+use codex_otel::OtelExporter;
+use codex_otel::OtelHttpProtocol;
+use codex_otel::OtelSettings;
 use codex_otel::OtelProvider;
 use tracing_subscriber::prelude::*;
 
 let settings = OtelSettings {
+    headers_helper: None,
+    http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
     environment: "dev".to_string(),
     service_name: "codex-cli".to_string(),
     service_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -39,7 +42,8 @@ let settings = OtelSettings {
         tls: None,
     },
     metrics_exporter: OtelExporter::None,
-    span_attributes: std::collections::BTreeMap::new(),
+    runtime_metrics: false,
+    span_attributes: std::collections::HashMap::new(),
     tracestate: std::collections::BTreeMap::new(),
 };
 
@@ -96,12 +100,95 @@ let manager = SessionTelemetry::new(
 manager.user_prompt(&prompt_items);
 ```
 
+### Skill invocation logs
+
+`codex.skill_invocation` records explicit skill injection and detected implicit use,
+including reads through the skills tools. It contains `skill.name`,
+`skill.invocation_type` (`explicit` or `implicit`), `conversation.id`, `turn.id`,
+model and client metadata, and available `skill.scope`, `skill.plugin_id`,
+`user.id`, and `user.account_id`. The user ID identifies the authenticated ChatGPT
+user; the account ID identifies the workspace. Missing identity fields are omitted,
+including the user ID for API-key authentication.
+
+The event excludes skill contents, descriptions, resource paths, email addresses,
+prompts, tool arguments, and tool output. It reports detected use, not successful
+task completion. Shell-based implicit detection is best effort and is deduplicated
+per skill within a turn; explicit injection and later implicit access are distinct
+events. Skill-tool reads retain their existing invocation behavior.
+
+Skill events use the existing OTEL log exporter and are included automatically
+when `otel.exporter` points to an OTLP HTTP or gRPC destination. The default
+`otel.exporter = "none"` exports no logs. No additional configuration or skill-event
+opt-in is required; the destination also receives the other existing log events.
+
+```toml
+[otel]
+exporter = { otlp-http = { endpoint = "https://collector.example.com/v1/logs", protocol = "json" } }
+```
+
+### Agent response logs
+
+Set `otel.log_agent_responses = true` with an OTLP HTTP or gRPC log exporter to
+emit `codex.agent_response` for completed assistant messages explicitly marked
+`final_answer`. The default is false, independent of `otel.log_user_prompt`;
+disabled response logging emits no event. Main agents and spawned task agents
+are included. Internal/review/compaction/memory agents, commentary, untagged
+messages, streaming deltas, tool-generated async messages, and history replay
+are excluded. Plans are preserved and memory-citation markup is removed from
+the exported copy without changing the stored answer.
+
+Opting in exports potentially sensitive response text, including subagent work
+absent from the main answer, to your log destination. Text is sent only to logs,
+capped at 65,536 UTF-8 bytes at a character boundary, without a truncation notice.
+`response_length` is the original byte count after citation removal, and
+`response_truncated` indicates whether the cap removed text.
+The log-only target is excluded from trace export, local state logs, and the
+feedback log buffer.
+
+Events include standard session attributes, `agent.type` (`main` or `subagent`),
+`turn.id`, and `item.id`. `conversation.id` identifies the emitting thread.
+Available lineage includes `parent.conversation.id`, `parent.turn.id`,
+`root.turn.id`, and `initiating.agent.path`. The parent conversation is the
+structural owner; the parent turn is the trigger and may belong to another
+agent. They are not a guaranteed matching pair or a supported Compliance API join.
+Completion is logged even if the turn later fails. Duplicate item completions
+are suppressed within a turn; delivery retains the existing best-effort exporter
+behavior, without an exactly-once guarantee.
+
+`AgentResponseLogger` owns filtering, text preparation, and per-turn deduplication.
+Core supplies completed raw items and step attribution, retaining the logger in
+the existing turn extension data; it does not own response-logging policy.
+
+### Guardian assessment logs
+
+Set `otel.log_guardian_assessments = true` with an OTLP HTTP or gRPC log exporter
+to emit `codex.guardian_assessment` once a synchronous Guardian review finishes.
+The default is false. Events include the reviewed conversation, turn, review and
+target item IDs, status, risk level, user authorization and rationale. `outcome`
+is `allow` or `deny` for a completed model assessment and absent for review errors,
+timeouts and cancellations, including fail-closed denials. Low-risk approvals
+may contain the reviewer's generic fallback explanation.
+
+Rationales can contain sensitive content. The exported copy is capped at 65,536
+UTF-8 bytes at a character boundary; `rationale_length` records the original byte
+count and `rationale_truncated` indicates truncation. The log-only target is
+excluded from trace export, local state logs and the feedback log buffer. This
+does not add content to the main model's conversation or grant it log read access.
+Cached V2 approvals do not create a synchronous assessment and are not included.
+Delivery uses the existing best-effort OTLP exporter.
+
 ## Metrics (OTLP or in-memory)
 
 Modes:
 
 - OTLP: exports metrics via the OpenTelemetry OTLP exporter (HTTP or gRPC).
 - In-memory: records via `opentelemetry_sdk::metrics::InMemoryMetricExporter` for tests/assertions; call `shutdown()` to flush.
+
+Configured OTLP metrics exporters (HTTP or gRPC) default to delta temporality. Set
+`OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative` for backends that require
+cumulative metrics. The values `delta`, `cumulative`, and `lowmemory` are case-insensitive;
+unset, empty, or unrecognized values retain the delta default. This setting does not change
+the built-in Statsig exporter or on-demand runtime snapshots.
 
 `codex-otel` also provides `OtelExporter::Statsig`, a shorthand for exporting OTLP/HTTP JSON metrics
 to Statsig using Codex-internal defaults.

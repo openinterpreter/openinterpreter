@@ -9,13 +9,13 @@ a native `zcode` harness for GLM coding workflows.
 
 ## Choose the Right Provider
 
-| Account or service | Provider ID | Credential | Endpoint type |
-| --- | --- | --- | --- |
-| Z.AI pay-as-you-go API | `zai` | `ZAI_API_KEY` | General OpenAI-compatible Chat API |
-| Z.AI GLM Coding Plan | `zai-coding-plan` | `ZAI_API_KEY` | Coding Plan OpenAI-compatible Chat API |
-| Z.AI ZCode | `zai-zcode` | `ZAI_API_KEY` | Coding Plan Anthropic Messages API |
-| Zhipu AI pay-as-you-go API | `zhipuai` | `ZHIPU_API_KEY` | General OpenAI-compatible Chat API |
-| Zhipu AI Coding Plan | `zhipuai-coding-plan` | `ZHIPU_API_KEY` | Coding Plan OpenAI-compatible Chat API |
+| Account or service         | Provider ID           | Credential      | Endpoint type                          |
+| -------------------------- | --------------------- | --------------- | -------------------------------------- |
+| Z.AI pay-as-you-go API     | `zai`                 | `ZAI_API_KEY`   | General OpenAI-compatible Chat API     |
+| Z.AI GLM Coding Plan       | `zai-coding-plan`     | `ZAI_API_KEY`   | Coding Plan OpenAI-compatible Chat API |
+| Z.AI ZCode                 | `zai-zcode`           | `ZAI_API_KEY`   | Coding Plan Anthropic Messages API     |
+| Zhipu AI pay-as-you-go API | `zhipuai`             | `ZHIPU_API_KEY` | General OpenAI-compatible Chat API     |
+| Zhipu AI Coding Plan       | `zhipuai-coding-plan` | `ZHIPU_API_KEY` | Coding Plan OpenAI-compatible Chat API |
 
 Z.AI documents separate general and Coding Plan endpoints. Use the Coding Plan
 provider only for an eligible subscription; using the general endpoint does
@@ -97,11 +97,11 @@ when a model is unavailable or consumes a different quota multiplier.
 
 ## Chat or ZCode?
 
-| Goal | Configuration |
-| --- | --- |
-| Simplest setup with the built-in picker | `zai-coding-plan` or `zai`, generic Chat |
-| Provider-recommended OpenAI-compatible integration | Built-in provider, `wire_api = "chat"` |
-| ZCode-shaped coding-agent behavior | Built-in `zai-zcode` Messages provider plus `harness = "zcode"` |
+| Goal                                               | Configuration                                                   |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| Simplest setup with the built-in picker            | `zai-coding-plan` or `zai`, generic Chat                        |
+| Provider-recommended OpenAI-compatible integration | Built-in provider, `wire_api = "chat"`                          |
+| ZCode-shaped coding-agent behavior                 | Built-in `zai-zcode` Messages provider plus `harness = "zcode"` |
 
 Do not set `wire_api = "messages"` on the OpenAI-compatible `/paas/v4`
 endpoint, and do not point the Chat provider at `/api/anthropic`. The endpoint,

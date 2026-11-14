@@ -332,15 +332,22 @@ async fn prepare_from_package(
     } else if marker.exists() {
         std::fs::remove_file(marker)?;
     }
-    #[cfg(unix)]
-    {
-        let temporary = tempfile::TempDir::new_in(&root)?;
-        let link = temporary.path().join("current");
-        std::os::unix::fs::symlink(&release, &link)?;
-        std::fs::rename(link, root.join("current"))?;
+    if previous_release.as_deref() != Some(release.as_path()) {
+        #[cfg(unix)]
+        {
+            let temporary = tempfile::TempDir::new_in(&root)?;
+            let link = temporary.path().join("current");
+            std::os::unix::fs::symlink(&release, &link)?;
+            std::fs::rename(link, root.join("current"))?;
+        }
+        #[cfg(windows)]
+        windows::select_release(&root, &release)?;
+        if let Err(error) =
+            crate::release_pruning::record_selection(&root, previous_release.as_deref())
+        {
+            tracing::warn!(%error, "could not record daemon selection for pruning");
+        }
     }
-    #[cfg(windows)]
-    windows::select_release(&root, &release)?;
     if backend.is_some() {
         let selected = Daemon {
             pid_file: daemon.pid_file.with_file_name(crate::DAEMON_PID_FILE_NAME),
@@ -354,6 +361,12 @@ async fn prepare_from_package(
             "daemon package selected but could not start; retry with `codex app-server daemon start`",
         )?;
         selected.wait_until_ready().await?;
+    }
+    // Selection and readiness are established under both lifecycle and
+    // installer locks. An invalid history or active executable only skips
+    // pruning; it must never turn an installation into a failure.
+    if let Err(error) = crate::release_pruning::prune(daemon, &root, settings).await {
+        tracing::debug!(%error, "skipped daemon release pruning");
     }
     Ok(true)
 }

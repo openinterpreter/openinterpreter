@@ -30,15 +30,35 @@ use std::collections::VecDeque;
 use std::path::Path;
 use uuid::Uuid;
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct DirectoryTrustOptions<'a> {
+    pub resumed_thread: Option<&'a Thread>,
+    pub cancel: Option<TrustCancelAction>,
+}
+
+fn rejects_restricted_current_task(
+    cancel: Option<TrustCancelAction>,
+    destination: Option<TrustLevel>,
+    active_is_untrusted: bool,
+) -> bool {
+    cancel == Some(TrustCancelAction::CurrentTask)
+        && destination == Some(TrustLevel::Untrusted)
+        && !active_is_untrusted
+}
+
 pub(crate) async fn check_directory_trust(
     tui: &mut Tui,
     app_server: &AppServerSession,
     config: &Config,
     target: &AppServerTarget,
     cwd: &Path,
-    resumed_thread: Option<&Thread>,
+    options: DirectoryTrustOptions<'_>,
     mut startup_draft: Option<&mut StartupDraftPump>,
 ) -> Result<OnboardingResult> {
+    let DirectoryTrustOptions {
+        resumed_thread,
+        cancel,
+    } = options;
     let connected = !matches!(target, AppServerTarget::Embedded);
     let mut consent = OnboardingResult::default();
     // Another client can load the saved task while consent is pending. Check both folders.
@@ -95,6 +115,17 @@ pub(crate) async fn check_directory_trust(
         if target.uses_remote_workspace() && project.trust_level == Some(TrustLevel::Untrusted) {
             continue;
         }
+        // A running task cannot acquire restricted settings by consent alone: its
+        // already loaded configuration and hooks must not be silently reused.
+        if rejects_restricted_current_task(
+            cancel,
+            project.trust_level,
+            config.active_project.is_untrusted(),
+        ) {
+            color_eyre::eyre::bail!(
+                "Folder trust changed. Reopen the destination with its restricted settings."
+            );
+        }
         let remote_trust_key =
             connected.then(|| project.trust_target.to_string_lossy().into_owned());
         if let Some(draft) = startup_draft.as_deref_mut() {
@@ -105,11 +136,11 @@ pub(crate) async fn check_directory_trust(
             steps: vec![Step::TrustDirectory(TrustDirectoryWidget {
                 restricted: project.trust_level == Some(TrustLevel::Untrusted),
                 existing_task: connected && resumed_thread.is_some(),
-                cancel: if connected {
+                cancel: cancel.unwrap_or(if connected {
                     TrustCancelAction::AgentsOverview
                 } else {
                     TrustCancelAction::Quit
-                },
+                }),
                 cwd: project.cwd,
                 trust_target: project.trust_target,
                 show_windows_create_sandbox_hint: false,
@@ -156,4 +187,33 @@ pub(crate) async fn check_directory_trust(
         }
     }
     Ok(consent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_task_cannot_reuse_trusted_settings_in_restricted_folder() {
+        assert!(rejects_restricted_current_task(
+            Some(TrustCancelAction::CurrentTask),
+            Some(TrustLevel::Untrusted),
+            false,
+        ));
+        assert!(!rejects_restricted_current_task(
+            Some(TrustCancelAction::CurrentTask),
+            Some(TrustLevel::Untrusted),
+            true,
+        ));
+        assert!(!rejects_restricted_current_task(
+            Some(TrustCancelAction::AgentsOverview),
+            Some(TrustLevel::Untrusted),
+            false,
+        ));
+        assert!(!rejects_restricted_current_task(
+            Some(TrustCancelAction::CurrentTask),
+            Some(TrustLevel::Trusted),
+            false,
+        ));
+    }
 }

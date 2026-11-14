@@ -1,21 +1,25 @@
 use crate::function_tool::FunctionCallError;
+use crate::tools::context::ToolEnvironments;
 use crate::tools::context::ToolInvocation;
-use crate::tools::context::ToolPayload;
 use crate::tools::handlers::mcp_resource_spec::create_list_mcp_resource_templates_tool;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
+use codex_protocol::openai_models::ToolMessage;
 use codex_protocol::protocol::McpInvocation;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 
 use super::ListResourceArgs;
 use super::ListResourceTemplatesPayload;
+use super::ResourceOperation;
 use super::model_can_access_mcp_server;
-use super::parse_args_with_default;
-use super::parse_arguments;
+use super::resource_arguments;
+use super::resource_environments;
 use super::run_resource_operation;
 
-pub struct ListMcpResourceTemplatesHandler;
+pub struct ListMcpResourceTemplatesHandler {
+    spec: ToolSpec,
+}
 
 impl ToolExecutor<ToolInvocation> for ListMcpResourceTemplatesHandler {
     fn tool_name(&self) -> ToolName {
@@ -23,7 +27,7 @@ impl ToolExecutor<ToolInvocation> for ListMcpResourceTemplatesHandler {
     }
 
     fn spec(&self) -> ToolSpec {
-        create_list_mcp_resource_templates_tool()
+        self.spec.clone()
     }
 
     fn supports_parallel_tool_calls(&self) -> bool {
@@ -39,6 +43,12 @@ impl ToolExecutor<ToolInvocation> for ListMcpResourceTemplatesHandler {
 }
 
 impl ListMcpResourceTemplatesHandler {
+    pub fn new(messages: Option<&ToolMessage>, include_environment_id: bool) -> Self {
+        Self {
+            spec: create_list_mcp_resource_templates_tool(messages, include_environment_id),
+        }
+    }
+
     async fn handle_call(
         &self,
         invocation: ToolInvocation,
@@ -52,30 +62,28 @@ impl ListMcpResourceTemplatesHandler {
         } = invocation;
         let turn = std::sync::Arc::clone(&step_context.turn);
         let mcp = &step_context.mcp;
+        let exposure = mcp.config().mcp_server_catalog.exposure();
 
-        let arguments = match payload {
-            ToolPayload::Function { arguments } => arguments,
-            _ => {
-                return Err(FunctionCallError::RespondToModel(
-                    "list_mcp_resource_templates handler received unsupported payload".to_string(),
-                ));
-            }
-        };
-
-        let arguments = parse_arguments(arguments.as_str())?;
-        let args: ListResourceArgs = parse_args_with_default(arguments.clone())?;
-        let args = args.normalized();
+        let arguments = resource_arguments(&payload)?;
+        let args = ListResourceArgs::parse(arguments.clone())?;
+        let target = args.target(&step_context);
 
         let invocation = McpInvocation {
             server: args.server.clone().unwrap_or_else(|| "codex".to_string()),
+            environment_id: target
+                .as_ref()
+                .ok()
+                .and_then(Option::as_ref)
+                .and_then(|(key, _)| key.scoped_environment_id())
+                .map(str::to_owned),
             tool: "list_mcp_resource_templates".to_string(),
             arguments: arguments.clone(),
         };
 
         run_resource_operation(&session, &step_context, &call_id, invocation, async {
-            if let Some((server_name, params)) = args.target(turn.as_ref())? {
+            if let Some((server_key, params)) = target? {
                 let result = mcp
-                    .list_resource_templates(&server_name, params)
+                    .list_resource_templates(server_key, params)
                     .await
                     .map_err(|err| {
                         FunctionCallError::RespondToModel(format!(
@@ -83,20 +91,28 @@ impl ListMcpResourceTemplatesHandler {
                         ))
                     })?;
                 Ok(ListResourceTemplatesPayload::from_single_server(
-                    server_name,
-                    result,
+                    server_key, result, exposure,
                 ))
             } else {
                 let templates = mcp
-                    .list_all_resource_templates(|server_name| {
-                        model_can_access_mcp_server(turn.as_ref(), server_name)
+                    .list_all_resource_templates(|server_key| {
+                        model_can_access_mcp_server(turn.as_ref(), server_key.name())
                     })
                     .await;
-                Ok(ListResourceTemplatesPayload::from_all_servers(templates))
+                Ok(ListResourceTemplatesPayload::from_all_servers(
+                    templates, exposure,
+                ))
             }
         })
         .await
     }
 }
 
-impl CoreToolRuntime for ListMcpResourceTemplatesHandler {}
+impl CoreToolRuntime for ListMcpResourceTemplatesHandler {
+    fn environments_for_input(
+        &self,
+        invocation: &ToolInvocation,
+    ) -> Result<ToolEnvironments, FunctionCallError> {
+        resource_environments(invocation, ResourceOperation::List)
+    }
+}

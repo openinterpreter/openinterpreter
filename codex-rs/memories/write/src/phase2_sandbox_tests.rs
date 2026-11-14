@@ -1,9 +1,13 @@
 use super::agent;
+use codex_config::Constrained;
+use codex_core::config::Permissions;
 use codex_model_provider::create_model_provider;
 use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::FileSystemPolicyProjection;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
-use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::protocol::AskForApproval;
 use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::test_codex;
 use pretty_assertions::assert_eq;
@@ -24,12 +28,14 @@ async fn consolidation_uses_canonical_parent_enforcement() -> anyhow::Result<()>
     );
 
     let root = crate::memory_root(&test.config.codex_home);
-    let managed_worker_policy = SandboxPolicy::WorkspaceWrite {
-        writable_roots: vec![root.clone()],
-        network_access: false,
-        exclude_tmpdir_env_var: true,
-        exclude_slash_tmp: true,
-    };
+    let managed_worker_profile = PermissionProfile::from_runtime_permissions(
+        &FileSystemSandboxPolicy::workspace_write(
+            std::slice::from_ref(&root),
+            /*exclude_tmpdir_env_var*/ true,
+            /*exclude_slash_tmp*/ true,
+        ),
+        NetworkSandboxPolicy::Restricted,
+    );
 
     for (parent_permission_profile, expected_permission_profile) in [
         (PermissionProfile::Disabled, PermissionProfile::Disabled),
@@ -42,14 +48,19 @@ async fn consolidation_uses_canonical_parent_enforcement() -> anyhow::Result<()>
             },
         ),
         (
+            PermissionProfile::External {
+                network: NetworkSandboxPolicy::Enabled,
+            },
+            PermissionProfile::External {
+                network: NetworkSandboxPolicy::Enabled,
+            },
+        ),
+        (
             PermissionProfile::Managed {
                 file_system: ManagedFileSystemPermissions::Unrestricted,
                 network: NetworkSandboxPolicy::Enabled,
             },
-            PermissionProfile::from_legacy_sandbox_policy_for_cwd(
-                &managed_worker_policy,
-                root.as_path(),
-            ),
+            managed_worker_profile,
         ),
     ] {
         let agent_config =
@@ -57,10 +68,42 @@ async fn consolidation_uses_canonical_parent_enforcement() -> anyhow::Result<()>
                 .expect("agent config should be created");
 
         assert_eq!(
-            agent_config.permissions.permission_profile(),
-            &expected_permission_profile
+            (
+                agent_config.permissions.permission_profile().enforcement(),
+                agent_config.permissions.network_sandbox_policy(),
+                agent_config.permissions.approval_policy.value(),
+            ),
+            (
+                expected_permission_profile.enforcement(),
+                expected_permission_profile.network_sandbox_policy(),
+                AskForApproval::Never,
+            ),
+        );
+        assert_eq!(
+            agent_config
+                .permissions
+                .effective_permission_profile()
+                .file_system_sandbox_policy()
+                .resolve_for_enforcement(root.as_path(), FileSystemPolicyProjection::Native)?,
+            expected_permission_profile
+                .file_system_sandbox_policy()
+                .resolve_for_enforcement(root.as_path(), FileSystemPolicyProjection::Native)?,
         );
     }
+
+    let mut constrained_config = test.config.clone();
+    constrained_config.permissions = Permissions::from_approval_and_profile(
+        Constrained::allow_only(AskForApproval::Never),
+        Constrained::allow_only(PermissionProfile::read_only()),
+    )?;
+    assert!(
+        agent::get_config(
+            &constrained_config,
+            PermissionProfile::workspace_write(),
+            provider.as_ref(),
+        )
+        .is_none()
+    );
 
     test.codex.shutdown_and_wait().await?;
     Ok(())

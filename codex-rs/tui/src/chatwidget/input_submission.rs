@@ -2,6 +2,7 @@
 
 use super::*;
 use codex_app_server_protocol::ImageReference;
+use codex_utils_path_uri::LegacyAppPathString;
 
 impl ChatWidget {
     pub(crate) fn set_task_mentions_enabled(&mut self, enabled: bool) {
@@ -48,6 +49,13 @@ impl ChatWidget {
             self.submit_op(AppCommand::run_user_shell_command(cmd.to_string()));
             QueueDrain::Stop
         }
+    }
+
+    pub(crate) fn reject_user_shell_command(&mut self, message: String) {
+        // No turn event will arrive to clear the pending shell submission.
+        self.input_queue.user_turn_pending_start = false;
+        self.add_error_message(message);
+        self.maybe_send_next_queued_input();
     }
 
     fn submit_shell_command_with_history(
@@ -108,6 +116,27 @@ impl ChatWidget {
             UserMessageSource::Prompt,
         )
         .1
+    }
+
+    pub(crate) fn prepare_safety_recourse_rewrite(&mut self, prompt: &str) -> Option<AppCommand> {
+        if !self.is_session_configured()
+            || self.is_user_turn_pending_or_running()
+            || self.pending_image_submission.is_some()
+            || self.input_queue.rate_limit_recovery_pending
+            || self.safety_recourse.is_some()
+        {
+            return None;
+        }
+        let op = self
+            .submit_user_message_with_history_and_shell_escape_policy(
+                prompt.into(),
+                UserMessageHistoryRecord::UserMessageText,
+                ShellEscapePolicy::Disallow,
+                UserMessageSource::SafetyRecourse,
+            )
+            .1?;
+        self.safety_buffering_source = UserMessageSource::Prompt;
+        Some(op)
     }
 
     pub(super) fn submit_user_message_with_history_and_shell_escape_policy(
@@ -271,6 +300,21 @@ impl ChatWidget {
             }));
         }
 
+        use crate::app_command::CloudSubmissionIntent;
+        let (cloud_submission, source) = match source {
+            UserMessageSource::DirectEnter => (
+                CloudSubmissionIntent::StartOrSteer,
+                UserMessageSource::Prompt,
+            ),
+            UserMessageSource::Prompt => (CloudSubmissionIntent::StartIfIdle, source),
+            UserMessageSource::QuestionAnswer => (
+                CloudSubmissionIntent::QuestionAnswer {
+                    during_turn: !render_in_history,
+                },
+                source,
+            ),
+            UserMessageSource::SafetyRecourse => (CloudSubmissionIntent::UseKnownTurn, source),
+        };
         if !text.is_empty() {
             items.push(UserInput::Text {
                 text: text.clone(),
@@ -288,10 +332,11 @@ impl ChatWidget {
             collect_tool_mentions(reply_text.as_deref().unwrap_or(&text), &HashMap::new());
         let bound_names: HashSet<String> = mention_bindings
             .iter()
+            .filter(|binding| binding.sigil == '$')
             .map(|binding| binding.mention.clone())
             .collect();
         let mut skill_names_lower: HashSet<String> = HashSet::new();
-        let mut selected_skill_paths: HashSet<AbsolutePathBuf> = HashSet::new();
+        let mut selected_skill_paths = HashSet::new();
         let mut selected_plugin_ids: HashSet<String> = HashSet::new();
 
         if let Some(skills) = self.bottom_pane.skills() {
@@ -300,32 +345,40 @@ impl ChatWidget {
                 .map(|skill| skill.name.to_ascii_lowercase())
                 .collect();
 
+            // TODO(anp): Preserve executor path identity through both structured skill input paths
+            // below and selection. UserInput::Skill still relies on host-native path interpretation.
             for binding in &mention_bindings {
                 let path = binding
                     .path
                     .strip_prefix("skill://")
                     .unwrap_or(binding.path.as_str());
-                let path = Path::new(path);
-                if let Some(skill) = skills.iter().find(|skill| skill.path.as_path() == path)
-                    && selected_skill_paths.insert(skill.path.clone())
+                let Some(path) = LegacyAppPathString::from_string(path).to_inferred_path_uri()
+                else {
+                    continue;
+                };
+                if let Some(skill) = skills
+                    .iter()
+                    .find(|skill| skill.path.to_inferred_path_uri().as_ref() == Some(&path))
+                    && selected_skill_paths.insert(path)
                 {
                     items.push(UserInput::Skill {
                         name: skill.name.clone(),
-                        path: skill.path.to_path_buf(),
+                        path: PathBuf::from(skill.path.as_str()),
                     });
                 }
             }
 
             let skill_mentions = find_skill_mentions_with_tool_mentions(&mentions, skills);
             for skill in skill_mentions {
-                if bound_names.contains(skill.name.as_str())
-                    || !selected_skill_paths.insert(skill.path.clone())
-                {
+                let Some(path) = skill.path.to_inferred_path_uri() else {
+                    continue;
+                };
+                if bound_names.contains(skill.name.as_str()) || !selected_skill_paths.insert(path) {
                     continue;
                 }
                 items.push(UserInput::Skill {
                     name: skill.name.clone(),
-                    path: skill.path.to_path_buf(),
+                    path: PathBuf::from(skill.path.as_str()),
                 });
             }
         }
@@ -427,6 +480,8 @@ impl ChatWidget {
         crate::startup_recovery::bind_submission(&text, &client_user_message_id);
         let pending_steer = (!render_in_history).then(|| PendingSteer {
             client_id: client_user_message_id.clone(),
+            admitted_turn_id: None,
+            optimistically_rendered: false,
             user_message: UserMessage {
                 text: text.clone(),
                 local_images: local_images.clone(),
@@ -479,7 +534,8 @@ impl ChatWidget {
             ));
         }
 
-        if !self.submit_op(op.clone()) {
+        // The app submits recourse turns directly to the verified fork.
+        if source != UserMessageSource::SafetyRecourse && !self.submit_op(op.clone()) {
             return (false, None);
         }
         if source == UserMessageSource::Prompt {
@@ -489,6 +545,8 @@ impl ChatWidget {
         self.note_realtime_typed_input(&submitted_message.text);
         if render_in_history {
             self.input_queue.user_turn_pending_start = true;
+            self.input_queue.pending_user_message_client_id = Some(client_user_message_id.clone());
+            self.input_queue.pending_user_message_history_record = Some(history_record.clone());
         }
 
         // Persist the submitted text to cross-session message history. Mentions are encoded into

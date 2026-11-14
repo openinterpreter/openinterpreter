@@ -1,0 +1,10 @@
+---
+source: tui/src/chatwidget/tests/quick_dials_tests.rs
+expression: editor.clone()
+---
+  New preset
+
+› Review the current changes
+  for safety
+
+  enter choose slot · esc back

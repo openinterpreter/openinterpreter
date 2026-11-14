@@ -1,12 +1,24 @@
 //! Fixed-size discussion notices. Post text is fetched through bounded tools.
 
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 use uuid::Uuid;
 
-pub(crate) struct AgentMessageBoardNotification {
+pub struct AgentMessageBoardNotification {
     pub(crate) message_id: Uuid,
     pub(crate) thread_id: Uuid,
+}
+
+impl AgentMessageBoardNotification {
+    /// Construct a bounded, typed notice without copying untrusted post text.
+    pub fn new(message_id: Uuid, thread_id: Uuid) -> Self {
+        Self {
+            message_id,
+            thread_id,
+        }
+    }
 }
 
 impl ContextualUserFragment for AgentMessageBoardNotification {
@@ -25,10 +37,36 @@ impl ContextualUserFragment for AgentMessageBoardNotification {
             "</agent_message_board_notification>",
         )
     }
-    fn body(&self) -> String {
-        format!(
+    fn body(&self) -> ContentItem {
+        input_text(format!(
             "\nNew post {} in discussion {}. Use read_post or read_thread to read it.\n",
             self.message_id, self.thread_id
-        )
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_notice_contains_only_fixed_identifiers_and_read_instructions() {
+        let message_id = Uuid::from_u128(1);
+        let thread_id = Uuid::from_u128(2);
+        let notice = AgentMessageBoardNotification::new(message_id, thread_id);
+        let ContentItem::InputText { text: body } = notice.body() else {
+            panic!("expected text notice");
+        };
+        assert!(body.contains(&message_id.to_string()));
+        assert!(body.contains(&thread_id.to_string()));
+        assert!(body.contains("Use read_post or read_thread"));
+        assert!(body.len() < 160);
+        assert_eq!(
+            AgentMessageBoardNotification::type_markers(),
+            (
+                "<agent_message_board_notification>",
+                "</agent_message_board_notification>",
+            )
+        );
     }
 }

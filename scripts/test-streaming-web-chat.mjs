@@ -252,23 +252,32 @@ for await (const line of createInterface({ input: process.stdin })) {
     ).unref();
   });
   await ready;
-  async function turn(prompt) {
-    const result = await fetch("http://127.0.0.1:8787/chat", {
-      method: "POST",
-      headers: {
-        "Host": "127.0.0.1:8787",
-        "Origin": "http://127.0.0.1:8787",
-        "Content-Type": "text/plain",
-      },
-      body: prompt,
-    });
-    assert.equal(result.status, 200);
-    return (await result.text()).trim().split("\n").map(JSON.parse);
+  async function turn(prompt, afterInterrupt = false) {
+    // The HTTP stream closes before the app server acknowledges an interrupt.
+    // A 409 means this request was not admitted; wait only at those boundaries.
+    for (let attempt = 0; attempt < (afterInterrupt ? 40 : 1); attempt++) {
+      const result = await fetch("http://127.0.0.1:8787/chat", {
+        method: "POST",
+        headers: {
+          Host: "127.0.0.1:8787",
+          Origin: "http://127.0.0.1:8787",
+          "Content-Type": "text/plain",
+        },
+        body: prompt,
+      });
+      if (afterInterrupt && result.status === 409 && attempt < 39) {
+        await result.text();
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        continue;
+      }
+      assert.equal(result.status, 200);
+      return (await result.text()).trim().split("\n").map(JSON.parse);
+    }
   }
   assert.equal((await turn("short")).at(-1).type, "done");
   assert.match((await turn("large")).at(-1).text, /64 KiB/);
-  assert.match((await turn("early")).at(-1).text, /Too many early events/);
-  assert.equal((await turn("short")).at(-1).type, "done");
+  assert.match((await turn("early", true)).at(-1).text, /Too many early events/);
+  assert.equal((await turn("short", true)).at(-1).type, "done");
 } finally {
   child?.kill();
   rmSync(dir, { recursive: true, force: true });

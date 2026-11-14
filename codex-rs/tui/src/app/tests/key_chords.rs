@@ -1,12 +1,18 @@
 use super::App;
+use super::AppEvent;
 use super::AppServerSession;
 use super::Result;
 use super::RuntimeKeymap;
+use super::ThreadId;
 use super::TuiEvent;
 use super::make_test_app;
+use super::make_test_app_with_channels;
 use super::start_config_write_test_app_server;
+use super::test_thread_session;
+use crate::app::owned_transcript::tests::buffer_text;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
+use crate::chatwidget::ReplayKind;
 use crate::chatwidget::tests::helpers::render_bottom_popup;
 use crate::chatwidget::tests::helpers::set_active_cell;
 use crate::keymap::KeymapContext;
@@ -14,18 +20,21 @@ use crate::keymap::KeymapContext;
 use crate::pager_overlay::TranscriptHistoryState;
 use crate::test_support::test_path_display;
 use crate::tui::Tui;
+use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ToolRequestUserInputOption;
 use codex_app_server_protocol::ToolRequestUserInputParams;
 use codex_app_server_protocol::ToolRequestUserInputQuestion;
+use codex_app_server_protocol::TurnStatus;
 use codex_config::types::KeybindingSpec;
 use codex_config::types::KeybindingsSpec;
 use codex_config::types::TuiKeymap;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
+use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
 use pretty_assertions::assert_eq;
 
-async fn chord_app() -> Result<(App, Tui, AppServerSession)> {
+async fn chord_app() -> Result<(Box<App>, Tui, AppServerSession)> {
     let mut app = make_test_app().await;
     let mut config = TuiKeymap::default();
     config.global.open_transcript = Some(KeybindingsSpec::One(KeybindingSpec(
@@ -64,6 +73,61 @@ fn ctrl(ch: char) -> KeyEvent {
 }
 
 #[tokio::test]
+async fn empty_thread_backend_chord_preserves_draft_until_first_submission() -> Result<()> {
+    let (mut app, mut events, _operations) = make_test_app_with_channels().await;
+    let session = test_thread_session(ThreadId::new(), app.config.cwd.to_path_buf());
+    app.chat_widget.handle_thread_session(session);
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.chat_widget
+        .apply_external_edit("first draft".to_string());
+    app.chat_widget
+        .set_new_backend_control(Some("Cloud".to_string()));
+    let screen = render_bottom_popup(&app.chat_widget, /*width*/ 80);
+    insta::assert_snapshot!(screen.lines().find(|line| line.trim_start().starts_with("Cloud")).unwrap().trim(), @"Cloud  ⌃x b to cycle");
+
+    // Cursor movement remains available while the backend selector is visible.
+    let key = app.route_key_chord_event(&mut tui, ctrl('b')).unwrap();
+    app.chat_widget.handle_key_event(key);
+    app.chat_widget.handle_paste("!".to_string());
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "first draf!t");
+
+    assert_eq!(app.route_key_chord_event(&mut tui, ctrl('x')), None);
+    let key = app
+        .route_key_chord_event(&mut tui, KeyCode::Char('b').into())
+        .expect("backend chord dispatch");
+    app.chat_widget.handle_key_event(key);
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::CycleNewConversationBackend))
+    );
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "first draf!t");
+
+    // A single-key remap takes precedence over cursor movement in the same draft.
+    let config = toml::from_str("[global]\nchange_host = 'ctrl-b'")?;
+    app.keymap = RuntimeKeymap::from_config(&config).unwrap();
+    app.chat_widget.apply_keymap_update(config, &app.keymap);
+    app.chat_widget.handle_key_event(ctrl('b'));
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::CycleNewConversationBackend))
+    );
+
+    app.chat_widget.handle_key_event(KeyCode::Enter.into());
+    assert!(
+        !render_bottom_popup(&app.chat_widget, /*width*/ 80)
+            .lines()
+            .any(|line| line.trim_start().starts_with("Cloud"))
+    );
+
+    app.chat_widget.handle_key_event(ctrl('b'));
+    assert!(
+        !std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::CycleNewConversationBackend))
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn vim_buffer_jumps_route_default_chords_in_normal_and_operator_contexts() -> Result<()> {
     for (input, command, expected) in [
         ("one\ntwo\nthree", "gg", "!one\ntwo\nthree"),
@@ -98,8 +162,28 @@ async fn vim_buffer_jumps_route_default_chords_in_normal_and_operator_contexts()
 #[tokio::test]
 async fn global_chord_keeps_hints_and_completes_before_deadline() -> Result<()> {
     let (mut app, mut tui, mut app_server) = chord_app().await?;
+    // This test exercises the legacy inline HUD as well as the owned-screen HUD.
+    app.config
+        .features
+        .disable(codex_features::Feature::TuiWorkspace)?;
 
-    press(&mut app, &mut tui, &mut app_server, ctrl('x')).await?;
+    let config = toml::from_str(
+        r#"
+        [global]
+        open_transcript = "f12 ctrl-t"
+        open_external_editor = "f12 e"
+        copy = "f12 c"
+        open_agents = "f12 a"
+        toggle_vim_mode = "f12 v"
+        toggle_fast_mode = "f12 f"
+        clear_terminal = "f12 k"
+    "#,
+    )?;
+    app.keymap = RuntimeKeymap::from_config(&config).expect("valid custom prefix");
+    app.chat_widget.apply_keymap_update(config, &app.keymap);
+    tui.set_owned_screen(/*owned*/ true)?;
+    tokio::time::pause();
+    press(&mut app, &mut tui, &mut app_server, KeyCode::F(12).into()).await?;
     assert!(app.key_chord_matcher.is_pending());
     assert!(app.overlay.is_none());
     tokio::time::pause();
@@ -116,7 +200,22 @@ async fn global_chord_keeps_hints_and_completes_before_deadline() -> Result<()> 
           ctrl+x then · ctrl+t open transcript · ctrl+u interrupt turn · esc cancel
         "
     );
+    tui.set_owned_screen(/*owned*/ false)?;
+    let inline_size = ratatui::layout::Size::new(/*width*/ 36, /*height*/ 5);
+    app.handle_tui_event(&mut tui, &mut app_server, TuiEvent::Resize(inline_size))
+        .await?;
+    assert_eq!(tui.shortcut_hud_area, Some(tui.terminal.viewport_area));
+    insta::assert_snapshot!(
+        "pending_custom_chord_inline",
+        buffer_text(tui.terminal.previous_buffer())
+    );
+    tokio::time::advance(std::time::Duration::from_millis(/*millis*/ 650)).await;
+    app.handle_tui_event(&mut tui, &mut app_server, TuiEvent::Draw)
+        .await?;
+    assert!(!app.key_chord_matcher.is_pending());
+    assert_eq!(tui.shortcut_hud_area, None);
 
+    press(&mut app, &mut tui, &mut app_server, KeyCode::F(12).into()).await?;
     press(&mut app, &mut tui, &mut app_server, ctrl('t')).await?;
     assert!(!app.key_chord_matcher.is_pending());
     assert!(app.overlay.is_some());
@@ -187,6 +286,107 @@ async fn wrong_second_stroke_passes_through_but_escape_is_consumed() -> Result<(
     assert_eq!(app.route_key_chord_event(&mut tui, escape), None);
     assert!(!app.key_chord_matcher.is_pending());
     assert!(!app.backtrack.primed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn config_editor_chord_preserves_physical_completion_key_until_release() -> Result<()> {
+    let (mut app, mut events, _op_rx) = make_test_app_with_channels().await;
+    let mut config = TuiKeymap::default();
+    config.list.accept = Some(KeybindingsSpec::One(KeybindingSpec(
+        "enter enter".to_string(),
+    )));
+    let runtime =
+        RuntimeKeymap::from_config(&config).map_err(|error| color_eyre::eyre::eyre!(error))?;
+    app.chat_widget.apply_keymap_update(config, &runtime);
+    app.keymap = runtime;
+    app.reconnect.offline = true;
+    let mut app_server = start_config_write_test_app_server(&app).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.chat_widget.open_config_panel();
+    press(
+        &mut app,
+        &mut tui,
+        &mut app_server,
+        KeyCode::Char('/').into(),
+    )
+    .await?;
+    app.handle_tui_event(
+        &mut tui,
+        &mut app_server,
+        TuiEvent::Paste("terminal title".to_string()),
+    )
+    .await?;
+
+    for _ in 0..2 {
+        press(&mut app, &mut tui, &mut app_server, KeyCode::Enter.into()).await?;
+    }
+    let handoff = std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|event| match event {
+            crate::app_event::AppEvent::OpenConfigEditor(handoff) => Some(handoff),
+            _ => None,
+        })
+        .expect("config editor handoff");
+    assert_eq!(
+        handoff.activation_key,
+        crate::key_hint::plain(KeyCode::Enter)
+    );
+    assert!(handoff.active_at().is_some());
+
+    app.chat_widget.open_config_editor(
+        handoff,
+        crate::config_panel::ResumeCurrentAvailability::Available,
+    );
+    assert!(
+        render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("Configure Terminal Title")
+    );
+    let repeat = KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Repeat);
+    app.handle_tui_event(&mut tui, &mut app_server, TuiEvent::Key(repeat))
+        .await?;
+    let release =
+        KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Release);
+    app.handle_tui_event(&mut tui, &mut app_server, TuiEvent::Key(release))
+        .await?;
+    for _ in 0..2 {
+        press(&mut app, &mut tui, &mut app_server, KeyCode::Enter.into()).await?;
+    }
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event, crate::app_event::AppEvent::TerminalTitleSetup { .. }))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn queued_config_handoff_observes_a_consumed_chord_prefix() -> Result<()> {
+    let (mut app, mut events, _op_rx) = make_test_app_with_channels().await;
+    let mut config = TuiKeymap::default();
+    config.list.move_down = Some(KeybindingsSpec::One(KeybindingSpec("ctrl-x j".to_string())));
+    let runtime =
+        RuntimeKeymap::from_config(&config).map_err(|error| color_eyre::eyre::eyre!(error))?;
+    app.chat_widget.apply_keymap_update(config, &runtime);
+    app.keymap = runtime;
+    let mut app_server = start_config_write_test_app_server(&app).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.chat_widget.open_config_panel();
+    app.handle_tui_event(
+        &mut tui,
+        &mut app_server,
+        TuiEvent::Paste("terminal title".to_string()),
+    )
+    .await?;
+
+    press(&mut app, &mut tui, &mut app_server, KeyCode::Enter.into()).await?;
+    let handoff = std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|event| match event {
+            crate::app_event::AppEvent::OpenConfigEditor(handoff) => Some(handoff),
+            _ => None,
+        })
+        .expect("config editor handoff");
+    assert!(handoff.active_at().is_some());
+
+    press(&mut app, &mut tui, &mut app_server, ctrl('x')).await?;
+    assert_eq!(handoff.active_at(), None);
     Ok(())
 }
 
@@ -448,12 +648,12 @@ async fn legacy_terminal_preserves_image_paste_without_reading_clipboard() -> Re
             KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT),
             KeyEvent::new(KeyCode::Char('V'), KeyModifiers::ALT | KeyModifiers::SHIFT),
         ] {
-            assert!(!app.should_recover_vim_insert_escape(key));
+            assert!(!app.should_recover_vim_insert_escape(&tui, key));
         }
-        assert!(app.should_recover_vim_insert_escape(KeyEvent::new(
-            KeyCode::Char('x'),
-            KeyModifiers::ALT,
-        )));
+        assert!(app.should_recover_vim_insert_escape(
+            &tui,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT,)
+        ));
     }
     Ok(())
 }
@@ -481,12 +681,12 @@ async fn legacy_terminal_preserves_agent_shortcuts_without_editor_word_bindings(
 
         for key in ['b', 'f'] {
             let event = KeyEvent::new(KeyCode::Char(key), KeyModifiers::ALT);
-            assert!(!app.should_recover_vim_insert_escape(event));
+            assert!(!app.should_recover_vim_insert_escape(&tui, event));
         }
         app.chat_widget.insert_str("abc");
         for key in ['b', 'f'] {
             let event = KeyEvent::new(KeyCode::Char(key), KeyModifiers::ALT);
-            assert!(app.should_recover_vim_insert_escape(event));
+            assert!(app.should_recover_vim_insert_escape(&tui, event));
         }
     }
     Ok(())

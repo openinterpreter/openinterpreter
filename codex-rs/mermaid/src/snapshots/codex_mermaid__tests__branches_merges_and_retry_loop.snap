@@ -1,18 +1,17 @@
 ---
 source: mermaid/src/tests.rs
-assertion_line: 10
 expression: "render(source, 100).unwrap()"
 ---
 ┌───────────────┐
-│ Checkout      │
+│ Go []; &      │
 │               ├────────┐
 └───────────────┘        │
                          │
                          │
 ┌───────────────┐        │
-│ ◇ In stock?   │        │
+│ ◇ x < 3?      │        │
 │               ├◄───────┘
-│               ├──yes─────┐
+│               ├──y|n─────┐
 │               ├──no──────╪─┐
 └───────────────┘          │ │
                            │ │

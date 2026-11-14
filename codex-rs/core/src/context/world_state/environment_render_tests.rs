@@ -1,4 +1,6 @@
+use crate::context::world_state::test_support::FragmentSectionTestExt as _;
 use crate::shell::ShellType;
+use codex_protocol_test_support::ContentItemTestExt;
 
 use super::*;
 use codex_protocol::models::PermissionProfile;
@@ -37,6 +39,8 @@ fn environment(id: &str, cwd: PathUri, shell: impl Into<String>) -> (String, Env
             error: None,
             shell: Some(shell.into()),
             is_primary: false,
+            filesystem: None,
+            network_access: None,
         },
     )
 }
@@ -58,6 +62,7 @@ fn environment_state(
         .collect();
     EnvironmentsState {
         environments,
+        per_environment: false,
         shell_version: None,
         current_date,
         timezone,
@@ -92,7 +97,7 @@ fn serialize_workspace_write_environment_context() {
         cwd = cwd.display(),
     );
 
-    assert_eq!(context.render(), expected);
+    assert_eq!(context.render().expect_text(), expected);
 }
 
 #[test]
@@ -108,17 +113,28 @@ fn serialize_environment_context_with_foreign_windows_cwd() {
         /*network*/ None,
         /*subagents*/ None,
     );
-    context.filesystem = Some(FileSystemContext::from_permission_profile(
-        &PermissionProfile::Disabled,
-        &[PathUri::parse("file:///D:/workspace").expect("Windows workspace root URI")],
-    ));
+    context.per_environment = true;
+    let environment = context.environments.get_mut("remote").unwrap();
+    environment.network_access = Some(NetworkAccess::Enabled);
+    environment.filesystem = Some(
+        FileSystemContext::from_permission_profile(
+            &PermissionProfile::Disabled,
+            &[PathUri::parse("file:///D:/workspace").expect("Windows workspace root URI")],
+        )
+        .render(),
+    );
 
     assert_eq!(
-        context.render(),
+        context.render().expect_text(),
         r#"<environment_context>
-  <cwd>C:\windows</cwd>
-  <shell>powershell</shell>
-  <filesystem><workspace_roots><root>D:\workspace</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
+  <environments>
+    <environment id="remote">
+      <cwd>C:\windows</cwd>
+      <shell>powershell</shell>
+      <network access="enabled" />
+      <filesystem><workspace_roots><root>D:\workspace</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
+    </environment>
+  </environments>
 </environment_context>"#
     );
 }
@@ -152,7 +168,7 @@ fn serialize_environment_context_with_network() {
         test_path_buf("/repo").display()
     );
 
-    assert_eq!(context.render(), expected);
+    assert_eq!(context.render().expect_text(), expected);
 }
 
 fn workspace_write_permission_profile_with_private_denials() -> PermissionProfile {
@@ -228,7 +244,7 @@ fn serialize_environment_context_with_full_filesystem_profile() {
         other_repo_private_glob = other_repo_private_glob.to_string_lossy(),
     );
 
-    assert_eq!(context.render(), expected);
+    assert_eq!(context.render().expect_text(), expected);
 }
 
 #[test]
@@ -246,7 +262,7 @@ fn serialize_read_only_environment_context() {
   <timezone>America/Los_Angeles</timezone>
 </environment_context>"#;
 
-    assert_eq!(context.render(), expected);
+    assert_eq!(context.render().expect_text(), expected);
 }
 
 #[test]
@@ -277,7 +293,7 @@ fn serialize_environment_context_with_subagents() {
         test_path_buf("/repo").display()
     );
 
-    assert_eq!(context.render(), expected);
+    assert_eq!(context.render().expect_text(), expected);
 }
 
 #[test]
@@ -314,7 +330,7 @@ fn serialize_environment_context_with_multiple_selected_environments() {
         remote_cwd.display()
     );
 
-    assert_eq!(context.render(), expected);
+    assert_eq!(context.render().expect_text(), expected);
 }
 
 #[test]
@@ -353,7 +369,7 @@ fn serialize_environment_context_prefers_environment_shell_when_present() {
         remote_cwd.display()
     );
 
-    assert_eq!(context.render(), expected);
+    assert_eq!(context.render().expect_text(), expected);
 }
 
 fn powershell_environment() -> EnvironmentsState {
@@ -368,13 +384,18 @@ fn powershell_environment() -> EnvironmentsState {
 #[test]
 fn shell_version_diff_restates_shell_from_legacy_snapshot() {
     let current = powershell_environment();
-    let mut previous = current.snapshot();
+    let mut previous = current
+        .render_fragment_diff(PreviousSectionState::Absent)
+        .0
+        .unwrap();
     previous.shell_version = None;
     previous.environments.get_mut("local").expect("local").shell = None;
     let rendered = current
-        .render_diff(PreviousSectionState::Known(&previous))
+        .render_fragment_diff(PreviousSectionState::Known(&previous))
+        .1
         .expect("shell version update")
-        .render();
+        .render()
+        .expect_text();
     assert!(
         rendered.contains("<shell>powershell</shell>\n  <shell_version>5.1</shell_version>"),
         "{rendered}"
@@ -390,9 +411,16 @@ fn shell_version_diff_clears_previously_visible_version() {
     };
     assert_eq!(
         current
-            .render_diff(PreviousSectionState::Known(&previous.snapshot()))
+            .render_fragment_diff(PreviousSectionState::Known(
+                &previous
+                    .render_fragment_diff(PreviousSectionState::Absent)
+                    .0
+                    .unwrap()
+            ))
+            .1
             .expect("removed shell version")
-            .render(),
+            .render()
+            .expect_text(),
         "<environment_context>\n  <shell_version status=\"unavailable\" />\n</environment_context>"
     );
 }

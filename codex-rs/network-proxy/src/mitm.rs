@@ -1,4 +1,5 @@
 use crate::certs::ManagedMitmCa;
+use crate::config::NetworkMitmCaConfig;
 use crate::config::NetworkMode;
 use crate::mitm_hook::HookEvaluation;
 use crate::mitm_hook::MitmHookActions;
@@ -7,6 +8,7 @@ use crate::reasons::REASON_METHOD_NOT_ALLOWED;
 use crate::reasons::REASON_MITM_HOOK_DENIED;
 use crate::responses::blocked_text_response;
 use crate::responses::text_response;
+use crate::runtime::HostAuthorization;
 use crate::runtime::HostBlockDecision;
 use crate::runtime::HostBlockReason;
 use crate::state::BlockedRequest;
@@ -63,6 +65,7 @@ pub struct MitmState {
 
 pub(crate) struct MitmUpstreamConfig {
     pub(crate) allow_upstream_proxy: bool,
+    pub(crate) external_ca: Option<NetworkMitmCaConfig>,
 }
 
 #[derive(Clone)]
@@ -74,8 +77,55 @@ struct MitmPolicyContext {
     app_state: Arc<NetworkProxyState>,
 }
 
+impl MitmPolicyContext {
+    async fn deny_hook(&self, method: &str, client: Option<String>) -> Response {
+        let _ = self
+            .app_state
+            .record_blocked(BlockedRequest::new(BlockedRequestArgs {
+                host: self.target_host.clone(),
+                reason: REASON_MITM_HOOK_DENIED.to_string(),
+                client,
+                method: Some(method.to_string()),
+                mode: Some(self.mode),
+                protocol: self.scheme.to_string(),
+                decision: None,
+                source: None,
+                port: Some(self.target_port),
+            }))
+            .await;
+        warn!(
+            "MITM blocked by hook policy (host={}, method={method}, mode={:?})",
+            self.target_host, self.mode
+        );
+        blocked_text_response(REASON_MITM_HOOK_DENIED)
+    }
+
+    fn placeholders_match(&self, req: &Request, actions: &MitmHookActions) -> bool {
+        actions.inject_request_headers.iter().all(|header| {
+            header.placeholder.as_ref().is_none_or(|placeholder| {
+                self.scheme == Scheme::HTTPS
+                    && self.target_port == 443
+                    && req
+                        .headers()
+                        .get_all(&header.name)
+                        .iter()
+                        .eq(std::iter::once(placeholder))
+            })
+        })
+    }
+
+    fn credential_destination(&self, req: &Request) -> String {
+        let authority = authority_header_value(&self.target_host, self.target_port, &self.scheme);
+        let path = path_and_query(req.uri());
+        // Server-wide OPTIONS must not borrow authority from a narrower credential URL prefix.
+        let credential_path = if path == "*" { "/" } else { &path };
+        format!("{}://{authority}{credential_path}", self.scheme)
+    }
+}
+
 #[derive(Clone)]
 struct MitmRequestContext {
+    dial_policy: Option<crate::connect_policy::DialPolicy>,
     policy: MitmPolicyContext,
     mitm: Arc<MitmState>,
     upstream: UpstreamClient,
@@ -108,9 +158,14 @@ impl MitmState {
         // and host-specific hooks both need visibility after CONNECT is established. We
         // generate a process-local CA and issue per-host leaf certs so we can terminate TLS and
         // apply policy.
-        let ca = ManagedMitmCa::load_or_create()?;
-        let upstream_tls_root_store =
-            crate::certs::upstream_tls_root_store(&crate::certs::ca_env_from_process())?;
+        let ca = match config.external_ca.as_ref() {
+            Some(ca) => ManagedMitmCa::load_from_files(ca)?,
+            None => ManagedMitmCa::load_or_create()?,
+        };
+        let upstream_tls_root_store = crate::certs::upstream_tls_root_store_for_cert_path(
+            ca.certificate_path(),
+            &crate::certs::ca_env_from_process(),
+        )?;
 
         Ok(Self {
             ca,
@@ -179,6 +234,10 @@ where
         )
     };
     let request_ctx = Arc::new(MitmRequestContext {
+        dial_policy: stream
+            .extensions()
+            .get::<crate::connect_policy::DialPolicy>()
+            .cloned(),
         policy: MitmPolicyContext {
             target_host,
             target_port,
@@ -197,11 +256,8 @@ where
         .unwrap_or_default();
 
     let http_service = HttpServer::auto(executor).service(
-        (
-            (request_ctx.policy.scheme == Scheme::HTTPS)
-                .then(RemoveResponseHeaderLayer::hop_by_hop),
-            (request_ctx.policy.scheme == Scheme::HTTPS).then(RemoveRequestHeaderLayer::hop_by_hop),
-        )
+        (request_ctx.policy.scheme == Scheme::HTTPS)
+            .then(RemoveResponseHeaderLayer::hop_by_hop)
             .into_layer(service_fn({
                 let request_ctx = request_ctx.clone();
                 move |req| {
@@ -226,11 +282,24 @@ where
 }
 
 async fn handle_mitm_request(
-    req: Request,
+    mut req: Request,
     request_ctx: Arc<MitmRequestContext>,
 ) -> Result<Response, std::convert::Infallible> {
-    let response = match forward_request(req, &request_ctx).await {
+    crate::aws_sigv4::preserve_signing_headers(&mut req);
+    crate::secret_substitution::preserve_body_substitution_headers(&mut req);
+    let response = match (request_ctx.policy.scheme == Scheme::HTTPS)
+        .then(RemoveRequestHeaderLayer::hop_by_hop)
+        .into_layer(service_fn(move |req| {
+            let request_ctx = request_ctx.clone();
+            async move { forward_request(req, &request_ctx).await }
+        }))
+        .serve(req)
+        .await
+    {
         Ok(resp) => resp,
+        Err(err) if crate::connect_policy::ResolvedTargetsDenied::caused(err.as_ref()) => {
+            blocked_text_response(crate::reasons::REASON_POLICY_DENIED)
+        }
         Err(err) => {
             warn!("MITM request handling failed: {err}");
             text_response(StatusCode::BAD_GATEWAY, "mitm upstream error")
@@ -240,11 +309,33 @@ async fn handle_mitm_request(
 }
 
 async fn forward_request(req: Request, request_ctx: &MitmRequestContext) -> Result<Response> {
+    let credential_destination = request_ctx.policy.credential_destination(&req);
     let hook_actions = match evaluate_mitm_policy(&req, &request_ctx.policy).await? {
         MitmPolicyDecision::Allow { hook_actions } => hook_actions,
         MitmPolicyDecision::Block(response) => return Ok(response),
     };
 
+    // Select the credential from the guest's headers before injecting or stripping anything.
+    let mut signing = None;
+    let client = req
+        .extensions()
+        .get::<SocketInfo>()
+        .map(|info| info.peer_addr().to_string());
+    if let Some(signer) = hook_actions
+        .as_ref()
+        .and_then(|actions| actions.aws_sigv4.as_ref())
+    {
+        match signer.plan(&req) {
+            Ok(Some(guest)) => signing = Some((signer, guest)),
+            Ok(None) => {}
+            Err(_) => {
+                return Ok(request_ctx
+                    .policy
+                    .deny_hook(req.method().as_str(), client)
+                    .await);
+            }
+        }
+    }
     let target_host = request_ctx.policy.target_host.clone();
     let target_port = request_ctx.policy.target_port;
     let mitm = request_ctx.mitm.clone();
@@ -260,17 +351,12 @@ async fn forward_request(req: Request, request_ctx: &MitmRequestContext) -> Resu
         .authority(authority.as_str())
         .path_and_query(path.as_str())
         .build()?;
-    // Server-wide OPTIONS must not borrow authority from a narrower credential URL prefix.
-    let credential_path = if path == "*" { "/" } else { &path };
-    let credential_destination = format!(
-        "{}://{authority}{credential_path}",
-        request_ctx.policy.scheme
+    apply_request_credentials(
+        &mut parts.headers,
+        hook_actions.as_ref(),
+        request_ctx.policy.app_state.as_ref(),
+        &credential_destination,
     );
-    request_ctx
-        .policy
-        .app_state
-        .inject_request_credentials(&credential_destination, &mut parts.headers);
-    apply_mitm_hook_actions(&mut parts.headers, hook_actions.as_ref());
     parts
         .headers
         .insert(HOST, HeaderValue::from_str(&authority)?);
@@ -291,7 +377,25 @@ async fn forward_request(req: Request, request_ctx: &MitmRequestContext) -> Resu
         body
     };
 
-    let upstream_req = Request::from_parts(parts, body);
+    let mut upstream_req = Request::from_parts(parts, body);
+    if let Some(substitution) = hook_actions
+        .as_ref()
+        .and_then(|actions| actions.body_secret_substitution.as_ref())
+    {
+        let Ok(substituted) = substitution.apply(upstream_req).await else {
+            return Ok(request_ctx.policy.deny_hook(&method, client).await);
+        };
+        upstream_req = substituted;
+    }
+    if let Some((signer, guest)) = signing {
+        let Ok(signed) = signer.sign(upstream_req, &guest).await else {
+            return Ok(request_ctx.policy.deny_hook(&method, client).await);
+        };
+        upstream_req = signed;
+    }
+    if let Some(policy) = &request_ctx.dial_policy {
+        upstream_req.extensions_mut().insert(policy.clone());
+    }
     let upstream_resp = if request_ctx.policy.scheme == Scheme::HTTP {
         crate::brokered_tunnel::forward_http_request(upstream_req, &request_ctx.upstream).await?
     } else {
@@ -383,7 +487,12 @@ async fn evaluate_mitm_policy(
     if matches!(
         policy
             .app_state
-            .host_blocked(&policy.target_host, policy.target_port)
+            .host_blocked_with_local_binding(
+                &policy.target_host,
+                policy.target_port,
+                /*allow_local_binding*/ None,
+                HostAuthorization::Approved,
+            )
             .await?,
         HostBlockDecision::Blocked(HostBlockReason::NotAllowedLocal)
     ) {
@@ -411,32 +520,24 @@ async fn evaluate_mitm_policy(
 
     let hook_actions = match policy
         .app_state
-        .evaluate_mitm_hook_request(&policy.target_host, req)
+        .evaluate_mitm_hook_request(
+            &policy.target_host,
+            req,
+            &crate::mitm_hook::MitmHookOrigin {
+                scheme: policy.scheme.clone(),
+                port: policy.target_port,
+            },
+            &[policy.credential_destination(req)],
+        )
         .await?
     {
-        HookEvaluation::Matched { actions } => Some(actions),
-        HookEvaluation::HookedHostNoMatch => {
-            let _ = policy
-                .app_state
-                .record_blocked(BlockedRequest::new(BlockedRequestArgs {
-                    host: policy.target_host.clone(),
-                    reason: REASON_MITM_HOOK_DENIED.to_string(),
-                    client: client.clone(),
-                    method: Some(method.clone()),
-                    mode: Some(policy.mode),
-                    protocol: policy.scheme.to_string(),
-                    decision: None,
-                    source: None,
-                    port: Some(policy.target_port),
-                }))
-                .await;
-            warn!(
-                "MITM blocked by hook policy (host={}, method={method}, mode={:?})",
-                policy.target_host, policy.mode
-            );
-            return Ok(MitmPolicyDecision::Block(blocked_text_response(
-                REASON_MITM_HOOK_DENIED,
-            )));
+        HookEvaluation::Matched { actions } if policy.placeholders_match(req, &actions) => {
+            Some(actions)
+        }
+        HookEvaluation::Matched { .. } | HookEvaluation::HookedHostNoMatch => {
+            return Ok(MitmPolicyDecision::Block(
+                policy.deny_hook(&method, client).await,
+            ));
         }
         HookEvaluation::NoHooksForHost => None,
     };
@@ -471,11 +572,16 @@ async fn evaluate_mitm_policy(
     Ok(MitmPolicyDecision::Allow { hook_actions })
 }
 
-fn apply_mitm_hook_actions(headers: &mut HeaderMap, actions: Option<&MitmHookActions>) {
+fn apply_request_credentials(
+    headers: &mut HeaderMap,
+    actions: Option<&MitmHookActions>,
+    app_state: &NetworkProxyState,
+    credential_destination: &str,
+) {
+    app_state.inject_request_credentials(credential_destination, headers);
     let Some(actions) = actions else {
         return;
     };
-
     for header_name in &actions.strip_request_headers {
         headers.remove(header_name);
     }
@@ -630,3 +736,7 @@ fn path_for_log(uri: &Uri) -> String {
 #[cfg(test)]
 #[path = "mitm_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mitm_forwarding_tests.rs"]
+mod forwarding_tests;

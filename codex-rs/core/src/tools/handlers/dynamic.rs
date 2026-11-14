@@ -9,6 +9,7 @@ use crate::tools::handlers::parse_arguments;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
 use crate::tools::registry::ToolExposure;
+use codex_async_utils::OrCancelExt;
 use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
@@ -27,6 +28,7 @@ use codex_tools::dynamic_tool_to_responses_api_tool;
 use serde_json::Value;
 use std::time::Instant;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 pub struct DynamicToolHandler {
@@ -83,6 +85,10 @@ impl DynamicToolHandler {
 }
 
 impl ToolExecutor<ToolInvocation> for DynamicToolHandler {
+    fn supports_parallel_tool_calls(&self) -> bool {
+        true
+    }
+
     fn tool_name(&self) -> ToolName {
         self.tool_name.clone()
     }
@@ -123,6 +129,7 @@ impl DynamicToolHandler {
             turn,
             call_id,
             payload,
+            cancellation_token,
             ..
         } = invocation;
 
@@ -142,6 +149,7 @@ impl DynamicToolHandler {
             call_id,
             self.tool_name.clone(),
             args,
+            cancellation_token,
         )
         .await
         .ok_or_else(|| {
@@ -165,7 +173,15 @@ impl DynamicToolHandler {
     }
 }
 
-impl CoreToolRuntime for DynamicToolHandler {}
+impl CoreToolRuntime for DynamicToolHandler {
+    fn finishes_on_cancellation(&self) -> bool {
+        true
+    }
+
+    fn is_third_party_tool(&self) -> bool {
+        true
+    }
+}
 
 #[expect(
     clippy::await_holding_invalid_type,
@@ -177,19 +193,26 @@ async fn request_dynamic_tool(
     call_id: String,
     tool_name: ToolName,
     arguments: Value,
+    cancellation_token: CancellationToken,
 ) -> Option<DynamicToolResponse> {
+    if cancellation_token.is_cancelled() {
+        return None;
+    }
     let namespace = tool_name.namespace;
     let tool = tool_name.name;
     let (tx_response, rx_response) = oneshot::channel();
     let event_id = call_id.clone();
     let prev_entry = {
         let mut active = session.active_turn.lock().await;
+        if cancellation_token.is_cancelled() {
+            return None;
+        }
         match active.as_mut() {
             Some(at) => {
                 let mut ts = at.turn_state.lock().await;
                 ts.insert_pending_dynamic_tool(call_id.clone(), tx_response)
             }
-            None => None,
+            None => return None,
         }
     };
     if prev_entry.is_some() {
@@ -213,7 +236,11 @@ async fn request_dynamic_tool(
             }),
         )
         .await;
-    let response = rx_response.await.ok();
+    let response = rx_response
+        .or_cancel(&cancellation_token)
+        .await
+        .ok()
+        .and_then(Result::ok);
 
     let item = match &response {
         Some(response) => DynamicToolCallItem {
@@ -249,3 +276,7 @@ async fn request_dynamic_tool(
 
     response
 }
+
+#[cfg(test)]
+#[path = "dynamic_tests.rs"]
+mod tests;

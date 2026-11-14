@@ -1,23 +1,34 @@
 //! Resolves model-owned messages from catalog values and bundled defaults.
-//! Resolution preserves sparse catalog data, empty strings, and source identity.
+//! Resolution preserves sparse catalog data and source identity, with family-specific validation.
 //! Prompt composition and runtime settings remain with consumers; each accessor
 //! selects and resolves only the requested message family.
 
+use codex_protocol::openai_models::CodeModeToolMessages;
 use codex_protocol::openai_models::ConfirmationPolicies;
+use codex_protocol::openai_models::IndirectDescriptionPrefixes;
+use codex_protocol::openai_models::McpResourceToolMessages;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelMessages;
 use codex_protocol::openai_models::ToolMessage;
 use permissions::ResolvedApprovalMessages;
 use permissions::ResolvedPermissionMessages;
 
+mod apps;
 mod collaboration;
 mod guardian;
+mod incremental_tools;
 mod multi_agent;
 pub(crate) mod permissions;
+mod plugins;
 
+pub use apps::ResolvedAppsInstructions;
 pub use collaboration::ResolvedCollaborationModeMessages;
 pub use guardian::ResolvedAutoReviewMessages;
+pub use incremental_tools::ResolvedIncrementalToolMessages;
 pub use multi_agent::ResolvedMultiAgentMessages;
+pub use plugins::ResolvedGenericPluginMessages;
+pub use plugins::ResolvedPluginRecommendationMessages;
+pub use plugins::ResolvedSelectedPluginMessages;
 
 /// Text together with whether it was supplied by the catalog, even when it equals the default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,12 +62,14 @@ const REMINDER_MESSAGE_TEMPLATE: &str = concat!(
     "Once reset, message items in current context window will be cleared in the new window, but notes and history items will be persistent across windows."
 );
 const PERSISTENT_INSTRUCTIONS: &str = include_str!("../templates/persistent_mode.md");
+const CONTENT_FILTER_GUIDANCE: &str = "Your previous response was blocked by a content filter. Do not treat this as a transient failure or try to reproduce or work around the blocked content through repeated attempts, altered formatting, splitting, encoding, tools, subagents, or later wakes. Briefly explain the limitation and offer a permitted alternative. Continue unrelated authorized work.";
+const MAX_CONTENT_FILTER_GUIDANCE_BYTES: usize = 512;
 
 /// Resolves model-owned text from catalog overrides or bundled defaults, one family at a time.
 ///
 /// The view borrows the consumer's captured model metadata without resolving any families.
 /// Missing values select bundled text or retain delegation to consumer-owned settings.
-/// Explicit empty strings remain overrides.
+/// Explicit empty strings remain overrides unless a message family validates them.
 #[derive(Debug, Clone, Copy)]
 pub struct ResolvedModelMessages<'a> {
     catalog_messages: Option<&'a ModelMessages>,
@@ -81,6 +94,15 @@ impl<'a> ResolvedModelMessages<'a> {
     pub fn instructions_template(&self) -> Option<&'a str> {
         self.catalog_messages
             .and_then(|messages| messages.instructions_template.as_deref())
+    }
+
+    /// Resolves bounded literal Apps wording; callers retain availability and feature gates.
+    pub fn apps_usage_instructions(&self, mcp_server_name: &str) -> ResolvedAppsInstructions {
+        ResolvedAppsInstructions::new(
+            self.catalog_messages
+                .and_then(|messages| messages.apps.as_ref()),
+            mcp_server_name,
+        )
     }
 
     /// Resolves approval messages and their bundled alternatives.
@@ -137,6 +159,27 @@ impl<'a> ResolvedModelMessages<'a> {
             })
     }
 
+    /// Selects native history definitions; missing fields delegate to the tool owner.
+    pub fn history(self) -> Option<&'a codex_protocol::openai_models::HistoryToolMessages> {
+        self.catalog_messages?.tools.as_ref()?.history.as_ref()
+    }
+
+    /// Selects native notes definitions; missing fields delegate to the tool owner.
+    pub fn notes(self) -> Option<&'a codex_protocol::openai_models::NotesToolMessages> {
+        self.catalog_messages?.tools.as_ref()?.notes.as_ref()
+    }
+
+    /// Selects context-window control definitions independently of runtime tool names.
+    pub fn context_management(
+        self,
+    ) -> Option<&'a codex_protocol::openai_models::ContextManagementToolMessages> {
+        self.catalog_messages?
+            .tools
+            .as_ref()?
+            .context_management
+            .as_ref()
+    }
+
     /// Resolves optional confirmation policies, leaving missing values to actor defaults.
     pub fn confirmation_policies(&self) -> Option<&'a ConfirmationPolicies> {
         self.catalog_messages
@@ -152,6 +195,17 @@ impl<'a> ResolvedModelMessages<'a> {
             .unwrap_or(REQUEST_USER_INPUT_ASYNC_DESCRIPTION)
     }
 
+    /// Selects the asynchronous user-input schema; parsing belongs to the tool consumer.
+    pub fn request_user_input_async_parameters_override(&self) -> Option<&'a str> {
+        self.catalog_messages?
+            .tools
+            .as_ref()?
+            .send_user_message_async
+            .as_ref()?
+            .parameters
+            .as_deref()
+    }
+
     /// Selects a V2 tool's static description by its name, independently of its runtime namespace.
     /// Missing text retains the tool's bundled description; an empty string replaces it.
     pub fn multi_agent_tool_description_override(&self, tool_name: &str) -> Option<&'a str> {
@@ -164,20 +218,63 @@ impl<'a> ResolvedModelMessages<'a> {
     }
 
     fn multi_agent_tool(self, tool_name: &str) -> Option<&'a ToolMessage> {
-        let tools = self
-            .catalog_messages
+        self.catalog_messages
             .and_then(|messages| messages.tools.as_ref())
-            .and_then(|tools| tools.multi_agent.as_ref())?;
-        let tool = match tool_name {
-            "spawn_agent" => &tools.spawn_agent,
-            "send_message" => &tools.send_message,
-            "followup_task" => &tools.followup_task,
-            "wait_agent" => &tools.wait_agent,
-            "interrupt_agent" => &tools.interrupt_agent,
-            "list_agents" => &tools.list_agents,
-            _ => return None,
-        };
-        tool.as_ref()
+            .and_then(|tools| tools.multi_agent.as_ref())?
+            .by_name(tool_name)
+    }
+
+    /// Selects resource helper messages; schema parsing belongs to the tool owner.
+    pub fn mcp_resources(&self) -> Option<&'a McpResourceToolMessages> {
+        self.catalog_messages?
+            .tools
+            .as_ref()?
+            .mcp_resources
+            .as_ref()
+    }
+
+    /// Selects indirect tool guidance; tool rendering owns namespace mapping and normalization.
+    pub fn indirect_description_prefixes(&self) -> Option<&'a IndirectDescriptionPrefixes> {
+        self.catalog_messages?
+            .tools
+            .as_ref()?
+            .indirect_description_prefixes
+            .as_ref()
+    }
+
+    /// Selects per-function guidance restricted to the default `functions` namespace.
+    pub fn functions_namespace_functions_description_prefixes(
+        &self,
+    ) -> Option<&'a std::collections::BTreeMap<String, String>> {
+        self.catalog_messages?
+            .tools
+            .as_ref()?
+            .functions_namespace_functions_description_prefixes
+            .as_ref()
+    }
+
+    /// Resolves bounded incremental catalog wording for an owned world-state section.
+    pub fn incremental_tools(&self) -> ResolvedIncrementalToolMessages {
+        ResolvedIncrementalToolMessages::new(
+            self.catalog_messages
+                .and_then(|messages| messages.tools.as_ref())
+                .and_then(|tools| tools.incremental_tools.as_ref()),
+        )
+    }
+
+    /// Selects Code Mode messages; bundled text and runtime composition belong to the tool owner.
+    pub fn code_mode(&self) -> Option<&'a CodeModeToolMessages> {
+        self.catalog_messages?.tools.as_ref()?.code_mode.as_ref()
+    }
+
+    /// Selects wait's complete description.
+    pub fn code_mode_wait_description_override(&self) -> Option<&'a str> {
+        self.code_mode()?.wait.as_ref()?.description.as_deref()
+    }
+
+    /// Selects wait's parameter schema. Exec uses a harness-owned freeform grammar.
+    pub fn code_mode_wait_parameters_override(&self) -> Option<&'a str> {
+        self.code_mode()?.wait.as_ref()?.parameters.as_deref()
     }
 
     /// Resolves persistent-mode instructions without deciding whether the mode is active.
@@ -186,4 +283,22 @@ impl<'a> ResolvedModelMessages<'a> {
             .and_then(|messages| messages.persistent_instructions.as_deref())
             .unwrap_or(PERSISTENT_INSTRUCTIONS)
     }
+
+    /// Resolves bounded recovery guidance, falling back without truncating instructions.
+    pub fn content_filter_guidance(&self) -> &'a str {
+        self.catalog_messages
+            .and_then(|messages| messages.content_filter_guidance.as_deref())
+            .filter(|text| {
+                !text.trim().is_empty() && text.len() <= MAX_CONTENT_FILTER_GUIDANCE_BYTES
+            })
+            .unwrap_or(CONTENT_FILTER_GUIDANCE)
+    }
 }
+
+#[cfg(test)]
+#[path = "model_messages/apps_tests.rs"]
+mod apps_tests;
+
+#[cfg(test)]
+#[path = "model_messages/plugins_tests.rs"]
+mod plugins_tests;

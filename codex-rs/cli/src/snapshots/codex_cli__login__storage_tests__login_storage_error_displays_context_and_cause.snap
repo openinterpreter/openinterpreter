@@ -1,0 +1,5 @@
+---
+source: cli/src/login_storage_tests.rs
+expression: "message.replace(secrets_path.to_str().unwrap(),\n\"[SECRETS_PATH]\").replace(&cause, \"[OS_ERROR]\")"
+---
+failed to write OAuth tokens to encrypted auth storage: failed to read secrets file at [SECRETS_PATH]: [OS_ERROR]

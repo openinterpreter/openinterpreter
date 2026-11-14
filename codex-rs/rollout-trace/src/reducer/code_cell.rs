@@ -16,7 +16,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
-use serde_json::Value;
+use anyhow::ensure;
 
 use super::TraceReducer;
 use crate::model::CodeCell;
@@ -54,6 +54,7 @@ pub(super) struct PendingCodeCellStart {
     pub(super) wall_time_unix_ms: i64,
     pub(super) thread_id: String,
     pub(super) codex_turn_id: Option<String>,
+    pub(super) wait_tool_call_ids: Vec<ToolCallId>,
     pub(super) started: StartedCodeCell,
 }
 
@@ -72,9 +73,11 @@ pub(super) enum PendingCodeCellLifecycleEventKind {
     InitialResponse {
         runtime_cell_id: String,
         status: CodeCellRuntimeStatus,
+        response_payload: Option<RawPayloadRef>,
     },
     Ended {
         status: CodeCellRuntimeStatus,
+        response_payload: Option<RawPayloadRef>,
     },
 }
 
@@ -134,6 +137,7 @@ impl TraceReducer {
             wall_time_unix_ms,
             thread_id,
             codex_turn_id,
+            wait_tool_call_ids,
             started,
         } = pending;
         if self.rollout.code_cells.contains_key(&started.code_cell_id) {
@@ -192,11 +196,14 @@ impl TraceReducer {
                 runtime_status: CodeCellRuntimeStatus::Starting,
                 initial_response_at_unix_ms: None,
                 initial_response_seq: None,
+                initial_response_status: None,
+                raw_initial_response_payload_id: None,
+                raw_result_payload_id: None,
                 yielded_at_unix_ms: None,
                 yielded_seq: None,
                 source_js: started.source_js,
                 nested_tool_call_ids,
-                wait_tool_call_ids: Vec::new(),
+                wait_tool_call_ids,
             },
         );
 
@@ -239,6 +246,7 @@ impl TraceReducer {
         code_cell_id: CodeCellId,
         runtime_cell_id: String,
         status: CodeCellRuntimeStatus,
+        response_payload: Option<RawPayloadRef>,
     ) -> Result<()> {
         if !self.rollout.code_cells.contains_key(&code_cell_id) {
             if self.pending_code_cell_starts.contains_key(&code_cell_id) {
@@ -250,6 +258,7 @@ impl TraceReducer {
                         kind: PendingCodeCellLifecycleEventKind::InitialResponse {
                             runtime_cell_id,
                             status,
+                            response_payload,
                         },
                     },
                 );
@@ -263,6 +272,7 @@ impl TraceReducer {
             code_cell_id,
             runtime_cell_id,
             status,
+            response_payload,
         )
     }
 
@@ -273,15 +283,18 @@ impl TraceReducer {
         code_cell_id: CodeCellId,
         runtime_cell_id: String,
         status: CodeCellRuntimeStatus,
+        response_payload: Option<RawPayloadRef>,
     ) -> Result<()> {
         let Some(cell) = self.rollout.code_cells.get_mut(&code_cell_id) else {
             bail!("code cell initial response referenced unknown cell {code_cell_id}");
         };
 
         cell.runtime_cell_id = Some(runtime_cell_id);
-        if cell.initial_response_at_unix_ms.is_none() {
+        if cell.initial_response_status.is_none() {
             cell.initial_response_at_unix_ms = Some(wall_time_unix_ms);
             cell.initial_response_seq = Some(seq);
+            cell.initial_response_status = Some(status.clone());
+            cell.raw_initial_response_payload_id = response_payload.map(|p| p.raw_payload_id);
         }
         if status == CodeCellRuntimeStatus::Yielded {
             cell.yielded_at_unix_ms = Some(wall_time_unix_ms);
@@ -303,6 +316,7 @@ impl TraceReducer {
         wall_time_unix_ms: i64,
         code_cell_id: CodeCellId,
         status: CodeCellRuntimeStatus,
+        response_payload: Option<RawPayloadRef>,
     ) -> Result<()> {
         if !self.rollout.code_cells.contains_key(&code_cell_id) {
             if self.pending_code_cell_starts.contains_key(&code_cell_id) {
@@ -311,14 +325,23 @@ impl TraceReducer {
                     PendingCodeCellLifecycleEvent {
                         seq,
                         wall_time_unix_ms,
-                        kind: PendingCodeCellLifecycleEventKind::Ended { status },
+                        kind: PendingCodeCellLifecycleEventKind::Ended {
+                            status,
+                            response_payload,
+                        },
                     },
                 );
                 return Ok(());
             }
             bail!("code cell end referenced unknown cell {code_cell_id}");
         }
-        self.end_code_cell(seq, wall_time_unix_ms, code_cell_id, status)
+        self.end_code_cell(
+            seq,
+            wall_time_unix_ms,
+            code_cell_id,
+            status,
+            response_payload,
+        )
     }
 
     fn end_code_cell(
@@ -327,6 +350,7 @@ impl TraceReducer {
         wall_time_unix_ms: i64,
         code_cell_id: CodeCellId,
         status: CodeCellRuntimeStatus,
+        response_payload: Option<RawPayloadRef>,
     ) -> Result<()> {
         let Some(cell) = self.rollout.code_cells.get_mut(&code_cell_id) else {
             bail!("code cell end referenced unknown cell {code_cell_id}");
@@ -336,6 +360,7 @@ impl TraceReducer {
             cell.initial_response_at_unix_ms = Some(wall_time_unix_ms);
             cell.initial_response_seq = Some(seq);
         }
+        cell.raw_result_payload_id = response_payload.map(|p| p.raw_payload_id);
         cell.execution.ended_at_unix_ms = Some(wall_time_unix_ms);
         cell.execution.ended_seq = Some(seq);
         cell.execution.status = execution_status_for_code_cell(&status);
@@ -376,7 +401,13 @@ impl TraceReducer {
             .collect();
 
         for code_cell_id in code_cell_ids {
-            self.end_code_cell(seq, wall_time_unix_ms, code_cell_id, runtime_status.clone())?;
+            self.end_code_cell(
+                seq,
+                wall_time_unix_ms,
+                code_cell_id,
+                runtime_status.clone(),
+                /*response_payload*/ None,
+            )?;
         }
         Ok(())
     }
@@ -403,18 +434,24 @@ impl TraceReducer {
                 PendingCodeCellLifecycleEventKind::InitialResponse {
                     runtime_cell_id,
                     status,
+                    response_payload,
                 } => self.record_code_cell_initial_response(
                     event.seq,
                     event.wall_time_unix_ms,
                     code_cell_id.to_string(),
                     runtime_cell_id,
                     status,
+                    response_payload,
                 )?,
-                PendingCodeCellLifecycleEventKind::Ended { status } => self.end_code_cell(
+                PendingCodeCellLifecycleEventKind::Ended {
+                    status,
+                    response_payload,
+                } => self.end_code_cell(
                     event.seq,
                     event.wall_time_unix_ms,
                     code_cell_id.to_string(),
                     status,
+                    response_payload,
                 )?,
             }
         }
@@ -444,57 +481,52 @@ impl TraceReducer {
         Ok(())
     }
 
-    /// Records that a model-visible wait call is waiting on a runtime code cell.
-    ///
-    /// Wait calls are not nested JavaScript tools, so the relationship is inferred
-    /// from the runtime cell id inside the function arguments.
-    pub(super) fn link_wait_tool_call_from_request_payload(
+    /// Links only a host-confirmed wait, using the cell binding from this activation.
+    pub(super) fn link_confirmed_wait(
         &mut self,
         thread_id: &str,
-        tool_call_id: &ToolCallId,
-        request_payload: Option<&RawPayloadRef>,
+        turn_id: &str,
+        tool_call_id: ToolCallId,
+        runtime_cell_id: String,
     ) -> Result<()> {
-        let Some(request_payload) = request_payload else {
-            return Ok(());
-        };
-        let payload = self.read_payload_json(request_payload)?;
-        if payload.get("tool_name").and_then(Value::as_str) != Some("wait") {
+        let wait = self
+            .rollout
+            .tool_calls
+            .get_mut(&tool_call_id)
+            .with_context(|| {
+                format!("confirmed wait referenced unknown dispatch {tool_call_id}")
+            })?;
+        ensure!(
+            wait.thread_id == thread_id
+                && wait.started_by_codex_turn_id.as_deref() == Some(turn_id),
+            "confirmed wait target has wrong dispatch context"
+        );
+        ensure!(
+            wait.resolved_wait_runtime_cell_id.is_none(),
+            "duplicate confirmed wait target for {tool_call_id}"
+        );
+        wait.resolved_wait_runtime_cell_id = Some(runtime_cell_id.clone());
+
+        // Retain the host observation but do not bind an older dispatch to a
+        // potentially recycled handle if it was recorded after thread reload.
+        if self
+            .last_thread_resume_seq
+            .get(thread_id)
+            .is_some_and(|seq| *seq > wait.execution.started_seq)
+        {
             return Ok(());
         }
-        // `wait` is a normal model-visible function call, not a nested JS tool
-        // request. The only stable edge back to the code cell is the runtime
-        // `cell_id` inside the function arguments.
-        let Some(arguments) = payload
-            .get("payload")
-            .and_then(|payload| payload.get("arguments"))
-            .and_then(Value::as_str)
-        else {
-            bail!(
-                "wait tool request payload {} did not contain function arguments",
-                request_payload.raw_payload_id
-            );
-        };
-        let arguments: Value = serde_json::from_str(arguments).with_context(|| {
-            format!(
-                "wait tool request payload {} had invalid JSON arguments",
-                request_payload.raw_payload_id
-            )
-        })?;
-        let Some(runtime_cell_id) = arguments.get("cell_id").and_then(Value::as_str) else {
-            bail!(
-                "wait tool request payload {} did not contain cell_id",
-                request_payload.raw_payload_id
-            );
-        };
-        let Some(code_cell_id) =
-            self.code_cell_id_for_runtime_cell_id_if_known(thread_id, runtime_cell_id)
+        let Some(cell_id) =
+            self.code_cell_id_for_runtime_cell_id_if_known(thread_id, &runtime_cell_id)
         else {
             return Ok(());
         };
-        let Some(cell) = self.rollout.code_cells.get_mut(&code_cell_id) else {
-            return Ok(());
-        };
-        push_unique(&mut cell.wait_tool_call_ids, tool_call_id);
+        if let Some(cell) = self.rollout.code_cells.get_mut(&cell_id) {
+            cell.wait_tool_call_ids.push(tool_call_id);
+        } else if let Some(start) = self.pending_code_cell_starts.get_mut(&cell_id) {
+            // The runtime is known; its model-visible exec source may arrive later.
+            start.wait_tool_call_ids.push(tool_call_id);
+        }
         Ok(())
     }
 
@@ -518,45 +550,15 @@ impl TraceReducer {
         // when a later inference request carries the custom-tool result back to
         // the model. Add the reverse ProducerRef at that later observation
         // point instead of copying runtime bytes into the conversation model.
-        let code_cell_id = self.reduced_code_cell_id_for_model_visible_call(call_id);
+        let code_cell_id = Self::reduced_code_cell_id_for_model_visible_call(call_id);
         if !self.rollout.code_cells.contains_key(&code_cell_id) {
             return Ok(());
         }
         self.add_code_cell_output_item(&code_cell_id, item_id)
     }
 
-    /// Resolves the owning thread for a code-cell runtime event.
-    ///
-    /// Runtime events should carry a thread id, but older/raw paths may only have
-    /// the turn id. The fallback keeps replay strict while avoiding duplicate logic
-    /// in every code-cell event arm.
-    pub(super) fn code_cell_event_thread_id(
-        &self,
-        thread_id: Option<String>,
-        codex_turn_id: Option<&str>,
-        runtime_cell_id: &str,
-        event_name: &str,
-    ) -> Result<String> {
-        if let Some(thread_id) = thread_id {
-            return Ok(thread_id);
-        }
-        let Some(codex_turn_id) = codex_turn_id else {
-            bail!("{event_name} {runtime_cell_id} did not include a thread id");
-        };
-        self.rollout
-            .codex_turns
-            .get(codex_turn_id)
-            .map(|turn| turn.thread_id.clone())
-            .with_context(|| {
-                format!(
-                    "{event_name} {runtime_cell_id} referenced unknown Codex turn {codex_turn_id}"
-                )
-            })
-    }
-
     /// Derives the stable reduced code-cell id from the model-visible exec call id.
     pub(super) fn reduced_code_cell_id_for_model_visible_call(
-        &self,
         model_visible_call_id: &str,
     ) -> CodeCellId {
         // The model-visible `exec` call is the durable source identity. The
@@ -661,13 +663,12 @@ impl TraceReducer {
         kind: ConversationItemKind,
     ) -> Vec<String> {
         self.rollout
-            .conversation_items
-            .values()
-            .filter(|item| {
-                item.thread_id == thread_id
-                    && item.call_id.as_deref() == Some(call_id)
-                    && item.kind == kind
-            })
+            .threads
+            .get(thread_id)
+            .into_iter()
+            .flat_map(|thread| &thread.conversation_item_ids)
+            .map(|item_id| &self.rollout.conversation_items[item_id])
+            .filter(|item| item.call_id.as_deref() == Some(call_id) && item.kind == kind)
             .map(|item| item.item_id.clone())
             .collect()
     }

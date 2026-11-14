@@ -1,43 +1,81 @@
 //! Retains overview membership for this TUI, independently of server subscriptions.
-//! The loaded/recent seed runs at startup and after reconnect; other reads only refresh metadata.
+//! A bounded recent seed runs at startup, after reconnect, and after event lag.
 //! Discovery merges into retained membership without evicting rows.
 
 use super::App;
 use super::agents_overview::AGENTS_OVERVIEW_VIEW_ID;
 use super::agents_overview_details::preview_agent_message;
+use super::agents_overview_discovery::is_overview_root;
+use super::agents_overview_discovery::list_pinned_threads;
 use super::app_server_event_targets::ServerNotificationThreadTarget;
 use super::app_server_event_targets::server_notification_thread_target;
-use crate::AppServerTarget;
 use crate::app_event::AgentsOverviewThreadRefresh;
 use crate::app_event::AppEvent;
 use crate::app_server_session::AppServerSession;
 use crate::chatwidget::ChatWidget;
-use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
-use codex_app_server_protocol::SessionSource;
-use codex_app_server_protocol::ThreadItem;
-use codex_app_server_protocol::ThreadListParams;
-use codex_app_server_protocol::ThreadListResponse;
+use codex_app_server_protocol::Thread;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::ThreadLoadedListResponse;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
-use codex_app_server_protocol::ThreadSortKey;
-use codex_app_server_protocol::ThreadSourceKind;
 use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::ThreadTurnsListParams;
 use codex_app_server_protocol::ThreadTurnsListResponse;
 use codex_protocol::ThreadId;
-use codex_protocol::protocol::SubAgentSource;
+use futures::StreamExt;
 use std::collections::HashMap;
 use uuid::Uuid;
 
 // Seed the command center with this many recent sessions, in addition to loaded sessions.
 const RECENT_SESSION_LIMIT: usize = 10;
+const RECENT_DETAIL_LIMIT: usize = 10;
+
+// Detail scans prioritize recent and loaded tasks without hydrating every retained rollout.
+fn detail_thread_ids<'a>(threads: impl Iterator<Item = &'a Thread>) -> Vec<ThreadId> {
+    let mut threads: Vec<_> = threads.collect();
+    threads.sort_by(|left, right| {
+        right
+            .recency_at
+            .unwrap_or(right.updated_at)
+            .cmp(&left.recency_at.unwrap_or(left.updated_at))
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    threads
+        .into_iter()
+        .enumerate()
+        .filter(|(index, thread)| {
+            *index < RECENT_DETAIL_LIMIT || thread.status != ThreadStatus::NotLoaded
+        })
+        .filter_map(|(_, thread)| ThreadId::from_string(&thread.id).ok())
+        .collect()
+}
 
 impl App {
+    pub(super) fn remove_agents_overview_thread(&mut self, thread_id: ThreadId) {
+        self.prepare_agents_overview_removal(&std::collections::HashSet::from([thread_id]));
+        self.agents_overview.search_matches.remove(&thread_id);
+        self.agents_overview.removed_threads.insert(thread_id);
+        self.agents_overview.unread.remove(&thread_id);
+        if let Some(Some(thread)) = self.agents_overview.threads.remove(&thread_id)
+            && is_overview_root(&thread)
+            && !self.agents_overview.hidden_threads.contains(&thread_id)
+        {
+            self.agents_overview.refill_count += 1;
+        }
+    }
+
+    pub(super) fn show_more_agents_overview(&mut self, app_server: &AppServerSession) {
+        if !self.agents_overview.has_more(app_server.backend_id()) {
+            return;
+        }
+        self.agents_overview.show_more_requested |= self.agents_overview.refill_count == 0;
+        self.start_agents_overview_refresh(app_server);
+    }
+
     pub(super) fn track_agents_overview_notification(&mut self, notification: &ServerNotification) {
         let ServerNotificationThreadTarget::Thread(thread_id) =
             server_notification_thread_target(notification)
@@ -58,7 +96,8 @@ impl App {
             .agents_overview
             .threads
             .get_mut(&thread_id)
-            .and_then(Option::as_mut);
+            .and_then(Option::as_mut)
+            .or_else(|| self.agents_overview.search_matches.get_mut(&thread_id));
         match notification {
             ServerNotification::ThreadTokenUsageUpdated(usage) => {
                 if self.agents_overview.threads.contains_key(&thread_id) {
@@ -77,6 +116,7 @@ impl App {
                 self.agents_overview.removed_threads.remove(&thread_id);
                 let mut thread = started.thread.clone();
                 thread.turns.clear();
+                self.agents_overview.search_matches.remove(&thread_id);
                 self.agents_overview.threads.insert(thread_id, Some(thread));
             }
             ServerNotification::ThreadArchived(_) | ServerNotification::ThreadDeleted(_) => {
@@ -94,6 +134,9 @@ impl App {
                 self.agents_overview.removed_threads.remove(&thread_id);
             }
             ServerNotification::ThreadClosed(_) => {
+                self.agents_overview
+                    .requested_permission_profiles
+                    .remove(&thread_id);
                 self.agents_overview.activity.remove(&thread_id);
                 if let Some(usage) = self.agents_overview.usage.get_mut(&thread_id) {
                     usage.tokens = None;
@@ -153,7 +196,7 @@ impl App {
         {
             self.agents_overview.refresh_thread_ids.insert(thread_id);
         }
-        if self.agents_overview.request_id.is_some() {
+        if self.agents_overview.active_refresh.is_some() {
             // Replay the latest notification of each kind after the read, in arrival order.
             // This also protects sessions whose metadata has not arrived in the initial seed.
             let pending = self
@@ -169,9 +212,18 @@ impl App {
     }
 
     pub(super) fn refresh_agents_overview_threads(&mut self, app_server: &AppServerSession) {
+        self.agents_overview.pin_refresh_requested = true;
+        self.agents_overview.refresh_thread_ids.extend(
+            self.agents_overview
+                .threads
+                .iter()
+                .filter_map(|(id, thread)| thread.is_none().then_some(*id)),
+        );
         self.agents_overview
             .refresh_thread_ids
-            .extend(self.agents_overview.threads.keys());
+            .extend(detail_thread_ids(
+                self.agents_overview.threads.values().flatten(),
+            ));
         self.start_agents_overview_refresh(app_server);
     }
 
@@ -183,7 +235,6 @@ impl App {
             .chat_widget
             .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID)
             .is_none()
-            || (!self.agents_overview.initialized && self.agents_overview.request_id.is_none())
         {
             return;
         }
@@ -191,154 +242,161 @@ impl App {
     }
 
     fn start_agents_overview_refresh(&mut self, app_server: &AppServerSession) {
+        let backend_id = app_server.backend_id();
+        let initialized = self.agents_overview.initialized.contains(&backend_id);
+        let source_has_more = self.agents_overview.has_more(backend_id);
         let visible = self
             .chat_widget
             .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID)
             .is_some();
-        if !visible
-            && (self.agents_overview.initialized
-                || matches!(self.app_server_target, AppServerTarget::Embedded))
-        {
+        if !visible && initialized {
             return;
         }
-        if self.agents_overview.request_id.is_some() {
+        if self.agents_overview.active_refresh.is_some() {
             self.agents_overview.refresh_pending = true;
             return;
         }
-        if self.agents_overview.initialized && self.agents_overview.refresh_thread_ids.is_empty() {
+        if initialized
+            && self.agents_overview.refresh_thread_ids.is_empty()
+            && !self.agents_overview.show_more_requested
+            && !(self.agents_overview.refill_count > 0 && source_has_more)
+            && !self.agents_overview.pin_refresh_requested
+        {
             return;
         }
 
+        let owns_thread = |thread_id| {
+            self.backend_registry
+                .owner(thread_id)
+                .is_none_or(|owner| owner == backend_id)
+        };
+        let mut unread_rows = Vec::new();
+        if std::mem::take(&mut self.agents_overview.pin_refresh_requested) {
+            unread_rows.extend(
+                self.agents_overview
+                    .visible_thread_ids
+                    .iter()
+                    .copied()
+                    .filter(|id| self.agents_overview.unread.contains(id) && owns_thread(*id)),
+            );
+        }
         let request_id = Uuid::new_v4();
-        self.agents_overview.request_id = Some(request_id);
-        let initialized = self.agents_overview.initialized;
+        self.agents_overview.active_refresh = Some((request_id, backend_id));
+        self.agents_overview.refresh_invalidated = false;
+        let refill = self.agents_overview.refill_count;
+        let show_more =
+            refill == 0 && std::mem::take(&mut self.agents_overview.show_more_requested);
+        self.agents_overview.refresh_show_more = show_more;
+        let discover = !initialized || show_more || (refill > 0 && source_has_more);
+        let limit = if initialized && refill > 0 {
+            refill.min(10)
+        } else {
+            10
+        };
+        let mut discovery = discover.then(|| {
+            if initialized {
+                self.agents_overview
+                    .discovery
+                    .get(&backend_id)
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                self.agents_overview
+                    .removed_threads
+                    .retain(|id| !owns_thread(*id));
+                Default::default()
+            }
+        });
         let mut thread_ids = std::mem::take(&mut self.agents_overview.refresh_thread_ids);
+        thread_ids.retain(|id| owns_thread(*id));
+        self.agents_overview.active_refresh_thread_ids = thread_ids.clone();
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         self.agents_overview
             .view_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .loading = !initialized;
+            .loading = discover;
         let refresh_task = tokio::spawn(async move {
             let result = async {
                 let mut threads = HashMap::new();
                 let mut last_messages = HashMap::new();
                 let mut recent_seed_complete = true;
-                if !initialized {
-                    let loaded = request_handle.request_typed::<ThreadLoadedListResponse>(
-                        ClientRequest::ThreadLoadedList {
-                            request_id: RequestId::String(Uuid::new_v4().to_string()),
-                            params: ThreadLoadedListParams {
-                                cursor: None,
-                                limit: None,
-                            },
-                        },
-                    );
-                    let list_recent = async |source_kinds: Vec<ThreadSourceKind>| {
-                        let mut recent = Vec::new();
-                        let mut cursor = None;
-                        let mut sort_key = ThreadSortKey::RecencyAt;
-                        while recent.len() < RECENT_SESSION_LIMIT {
-                            let page = match request_handle
-                                .request_typed::<ThreadListResponse>(ClientRequest::ThreadList {
-                                    request_id: RequestId::String(Uuid::new_v4().to_string()),
-                                    params: ThreadListParams {
-                                        originators: None,
-                                        cursor,
-                                        limit: Some(RECENT_SESSION_LIMIT as u32),
-                                        sort_key: Some(sort_key),
-                                        sort_direction: None,
-                                        model_providers: Some(Vec::new()),
-                                        source_kinds: Some(source_kinds.clone()),
-                                        archived: Some(false),
-                                        section_id: None,
-                                        project_id: None,
-                                        parent_thread_id: None,
-                                        ancestor_thread_id: None,
-                                        cwd: None,
-                                        use_state_db_only: true,
-                                        search_term: None,
-                                    },
-                                })
-                                .await
-                            {
-                                Err(TypedRequestError::Server { source, .. })
-                                    if sort_key == ThreadSortKey::RecencyAt
-                                        && matches!(source.code, -32600 | -32602)
-                                        && source.message.contains("recency_at") =>
-                                {
-                                    // Older servers can still provide their activity-sorted history.
-                                    sort_key = ThreadSortKey::UpdatedAt;
-                                    cursor = None;
-                                    recent.clear();
-                                    continue;
-                                }
-                                result => result?,
-                            };
-                            recent.extend(
-                                page.data
-                                    .into_iter()
-                                    .filter(|thread| {
-                                        !thread.ephemeral
-                                            && thread.parent_thread_id.is_none()
-                                            && !matches!(
-                                                thread.source,
-                                                SessionSource::SubAgent(
-                                                    SubAgentSource::ThreadSpawn { .. }
-                                                )
-                                            )
-                                    })
-                                    .take(RECENT_SESSION_LIMIT - recent.len()),
-                            );
-                            cursor = page.next_cursor;
-                            if cursor.is_none() {
-                                break;
+                let pinned_thread_ids = match list_pinned_threads(&request_handle).await {
+                    Ok(Some(pinned_threads)) => {
+                        let mut ids = Vec::with_capacity(pinned_threads.len());
+                        for (thread, is_unread) in pinned_threads {
+                            if let Ok(thread_id) = ThreadId::from_string(&thread.id) {
+                                ids.push(thread_id);
+                                threads.insert(thread_id, Some((thread, is_unread, None)));
                             }
                         }
-                        Ok::<_, TypedRequestError>(recent)
+                        Some(Some(ids))
+                    }
+                    Ok(None) => Some(None),
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to list pinned agent threads");
+                        None
+                    }
+                };
+                if let Some(discovery) = &mut discovery {
+                    let loaded = async {
+                        if initialized {
+                            return Ok(ThreadLoadedListResponse {
+                                data: Vec::new(),
+                                next_cursor: None,
+                            });
+                        }
+                        request_handle
+                            .request_typed::<ThreadLoadedListResponse>(
+                                ClientRequest::ThreadLoadedList {
+                                    request_id: RequestId::String(Uuid::new_v4().to_string()),
+                                    params: ThreadLoadedListParams {
+                                        cursor: None,
+                                        limit: None,
+                                    },
+                                },
+                            )
+                            .await
                     };
-                    let recent = async {
-                        // Default interactive sources include Atlas/ChatGPT, which have no
-                        // explicit source kind. Exec/AppServer require a separate query.
-                        let (interactive, non_interactive) = tokio::join!(
-                            list_recent(Vec::new()),
-                            list_recent(vec![ThreadSourceKind::Exec, ThreadSourceKind::AppServer]),
-                        );
-                        let mut recent = interactive?;
-                        recent.extend(non_interactive?);
-                        recent.sort_by(|left, right| {
-                            right
-                                .recency_at
-                                .unwrap_or(right.updated_at)
-                                .cmp(&left.recency_at.unwrap_or(left.updated_at))
-                                .then_with(|| right.id.cmp(&left.id))
-                        });
-                        recent.truncate(RECENT_SESSION_LIMIT);
-                        Ok::<_, TypedRequestError>(recent)
-                    };
-                    let (loaded, recent) = tokio::join!(loaded, recent);
+                    let (loaded, (recent, complete)) =
+                        tokio::join!(loaded, discovery.next_batch(&request_handle, limit));
                     let loaded = loaded.map_err(|error| error.to_string())?;
-                    let recent = recent.unwrap_or_else(|error| {
-                        tracing::warn!(%error, "failed to list recent agent threads");
-                        recent_seed_complete = false;
-                        Vec::new()
-                    });
+                    recent_seed_complete = complete;
                     thread_ids.extend(
                         loaded
                             .data
                             .into_iter()
                             .filter_map(|id| ThreadId::from_string(&id).ok()),
                     );
-                    // Keep list metadata even if a subsequent read fails transiently.
-                    for thread in recent {
+                    thread_ids.extend(detail_thread_ids(recent.iter().map(|(thread, _)| thread)));
+                    for (thread, is_unread) in recent {
                         if let Ok(thread_id) = ThreadId::from_string(&thread.id) {
-                            threads.insert(thread_id, Some(thread));
-                            thread_ids.insert(thread_id);
+                            threads.insert(thread_id, Some((thread, is_unread, None)));
                         }
                     }
                 }
 
+                // Recheck dots on older rows without fetching their transcript previews.
+                unread_rows.retain(|id| !threads.contains_key(id) && !thread_ids.contains(id));
+                let cleared_unread = futures::stream::iter(unread_rows)
+                    .map(async |id| {
+                        let response: ThreadReadResponse = request_handle
+                            .request_typed(ClientRequest::ThreadRead {
+                                request_id: RequestId::String(Uuid::new_v4().to_string()),
+                                params: ThreadReadParams {
+                                    thread_id: id.to_string(),
+                                    include_turns: false,
+                                },
+                            })
+                            .await
+                            .ok()?;
+                        response.read_state?.first_unread.is_none().then_some(id)
+                    })
+                    .buffer_unordered(16)
+                    .filter_map(std::future::ready)
+                    .collect()
+                    .await;
                 let mut reads = tokio::task::JoinSet::new();
                 for thread_id in thread_ids {
                     threads.entry(thread_id).or_default();
@@ -354,7 +412,8 @@ impl App {
                             })
                             .await
                         {
-                            Ok(mut response) => {
+                            Ok(response) => {
+                                let mut latest_prompt = None;
                                 let mut last_message = None;
                                 if let Ok(turns) = request_handle
                                     .request_typed::<ThreadTurnsListResponse>(
@@ -374,22 +433,34 @@ impl App {
                                     .await
                                     && let Some(turn) = turns.data.first()
                                 {
-                                    if let Some(ThreadItem::UserMessage { content, .. }) =
-                                        turn.items.first()
+                                    if let Some(ThreadItemPayload::UserMessage {
+                                        content, ..
+                                    }) = turn.item_payloads().next()
                                     {
-                                        response.thread.preview =
-                                            ChatWidget::user_message_display_from_inputs(content)
-                                                .message;
+                                        latest_prompt =
+                                            Some(super::agents_overview_details::preview_markdown(
+                                                &ChatWidget::user_message_display_from_inputs(
+                                                    content,
+                                                )
+                                                .message,
+                                            ));
                                     }
                                     last_message =
-                                        turn.items.iter().rev().find_map(|item| match item {
-                                            ThreadItem::AgentMessage { text, .. } => {
+                                        turn.item_payloads().rev().find_map(|item| match item {
+                                            ThreadItemPayload::AgentMessage { text, .. } => {
                                                 Some(preview_agent_message(text))
                                             }
                                             _ => None,
                                         });
                                 }
-                                Some((thread_id, response.thread, last_message))
+                                let unread = response
+                                    .read_state
+                                    .is_some_and(|state| state.first_unread.is_some());
+                                Some((
+                                    thread_id,
+                                    (response.thread, unread, latest_prompt),
+                                    last_message,
+                                ))
                             }
                             Err(error) => {
                                 tracing::warn!(%thread_id, %error, "failed to read agent thread");
@@ -416,9 +487,12 @@ impl App {
                     }
                 }
                 Ok(AgentsOverviewThreadRefresh {
+                    cleared_unread,
                     threads,
                     last_messages,
                     recent_seed_complete,
+                    discovery,
+                    pinned_thread_ids,
                 })
             }
             .await;

@@ -38,6 +38,7 @@ async fn thread_color_preview_matches_footer_while_auto_naming() {
                             .map(|item| (item, chat.status_line_value_for_item(item).unwrap())),
                         use_colors,
                         Some(id),
+                        /*pull_request_url*/ None,
                     )
                     .unwrap();
                     assert_eq!(line, footer);
@@ -53,7 +54,7 @@ fn status_preview_line_option(chat: &mut ChatWidget, items: &[StatusLineItem]) -
     let preview_data = chat.status_surface_preview_data();
     preview_data
         .status_line_for_items(items.iter().copied(), /*use_theme_colors*/ true)
-        .map(line_text)
+        .map(|content| line_text(content.into_hyperlink_line().line))
 }
 
 fn status_preview_line(chat: &mut ChatWidget, items: &[StatusLineItem]) -> String {
@@ -100,7 +101,7 @@ fn cache_project_root(chat: &mut ChatWidget, root_name: &str) {
     });
 }
 
-fn cache_rate_limit_snapshot(chat: &mut ChatWidget) {
+pub(super) fn cache_rate_limit_snapshot(chat: &mut ChatWidget) {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
@@ -162,6 +163,7 @@ async fn status_surface_preview_lines_live_only_snapshot() {
 #[tokio::test]
 async fn status_line_setup_popup_live_only_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_feature_enabled(Feature::TuiExtensionsStatusLine, /*enabled*/ true);
     cache_project_root(&mut chat, "preview-live-root");
     chat.status_line_branch = Some("feature/live-preview-branch".to_string());
     chat.thread_name = Some("Live preview thread".to_string());
@@ -223,6 +225,8 @@ async fn status_line_setup_popup_hardcoded_only_snapshot() {
         "project-name".to_string(),
         "git-branch".to_string(),
         "thread-title".to_string(),
+        "profile".to_string(),
+        "provider".to_string(),
     ]);
 
     assert_chatwidget_snapshot!(
@@ -308,6 +312,7 @@ async fn status_surface_preview_lines_thread_usage_snapshot() {
         thread_id,
         request_id,
         Ok(ThreadUsageOutcome::Available(ThreadUsage {
+            native_usage_usd_micros: None,
             thread_id: thread_id.to_string(),
             estimated_usage_credits_micros: 5_200_000,
             estimated_usage_usd_micros: Some(210_000),
@@ -355,6 +360,7 @@ async fn status_surface_thread_usage_previews_omit_unavailable_usd_estimates() {
         thread_id,
         request_id,
         Ok(ThreadUsageOutcome::Available(ThreadUsage {
+            native_usage_usd_micros: None,
             thread_id: thread_id.to_string(),
             estimated_usage_credits_micros: 5_200_000,
             estimated_usage_usd_micros: None,
@@ -446,12 +452,16 @@ async fn status_line_setup_popup_rate_limits_snapshot() {
 #[tokio::test]
 async fn status_line_setup_popup_mixed_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.has_chatgpt_account = true;
+    chat.set_feature_enabled(Feature::CliDaybreak, /*enabled*/ true);
     chat.status_line_branch = Some("feature/mixed-preview".to_string());
     chat.thread_name = Some("Mixed preview thread".to_string());
+    chat.set_daybreak_enabled(/*enabled*/ true);
     chat.local_settings.tui.status_line = Some(vec![
         "project-name".to_string(),
         "git-branch".to_string(),
         "thread-title".to_string(),
+        "daybreak".to_string(),
     ]);
 
     assert_chatwidget_snapshot!(
@@ -498,11 +508,15 @@ async fn terminal_title_setup_popup_hardcoded_only_snapshot() {
 #[tokio::test]
 async fn terminal_title_setup_popup_mixed_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.has_chatgpt_account = true;
+    chat.set_feature_enabled(Feature::CliDaybreak, /*enabled*/ true);
     chat.thread_name = Some("Mixed preview thread".to_string());
+    chat.set_daybreak_enabled(/*enabled*/ true);
     chat.local_settings.tui.terminal_title = Some(vec![
         "project-name".to_string(),
         "thread-title".to_string(),
         "task-progress".to_string(),
+        "daybreak".to_string(),
     ]);
 
     assert_chatwidget_snapshot!(

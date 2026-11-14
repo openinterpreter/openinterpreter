@@ -60,6 +60,13 @@ pub struct ListMcpServerStatusParams {
     pub detail: Option<McpServerStatusDetail>,
     #[ts(optional = nullable)]
     pub thread_id: Option<String>,
+    /// Limit discovery to one server. With a thread ID, reuse that thread's MCP connection.
+    #[ts(optional = nullable)]
+    pub server_name: Option<String>,
+    /// Select this environment's registration. Requires `serverName` and `threadId`.
+    /// When omitted, a named request uses the same server as older clients.
+    #[ts(optional = nullable)]
+    pub environment_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
@@ -75,9 +82,16 @@ pub enum McpServerStatusDetail {
 #[ts(export_to = "v2/")]
 pub struct McpServerStatus {
     pub name: String,
+    /// Environment that contributed this registration; null for a thread-wide server.
+    /// Older servers omit this field.
+    #[ts(optional, as = "Option<Option<String>>")]
+    pub environment_id: Option<String>,
     /// Current thread-runtime connection state; null when unavailable or the configuration changed.
     pub runtime_status: Option<McpServerConnectionStatus>,
     pub plugin_id: Option<String>,
+    /// HTTP origin of the effective configured endpoint, including plugin servers.
+    /// Excludes credentials, path, query, and fragment; null for non-HTTP transports.
+    pub http_origin: Option<String>,
     pub server_info: Option<McpServerInfo>,
     /// Capabilities advertised by the initialized MCP server; null when unavailable.
     pub server_capabilities: Option<serde_json::Value>,
@@ -104,15 +118,40 @@ pub struct ListMcpServerStatusResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct McpResourceReadParams {
+    /// Additional MCP request metadata. Account and turn routing keys are reserved.
+    #[serde(rename = "_meta")]
+    #[ts(rename = "_meta", optional = nullable)]
+    pub meta: Option<serde_json::Map<String, JsonValue>>,
     #[ts(optional = nullable)]
     pub thread_id: Option<String>,
     /// Originating MCP tool call used to select the resource's app.
     #[ts(optional = nullable)]
     pub origin_call_id: Option<String>,
     pub server: String,
+    /// Exact registration scope; omission preserves legacy name-only selection.
+    #[ts(optional = nullable)]
+    pub environment_id: Option<String>,
     pub uri: String,
     #[ts(optional = nullable)]
     pub connector_id: Option<String>,
+    /// Explicit hosted app/account. Omit to retain legacy resource discovery.
+    #[ts(optional = nullable)]
+    pub target: Option<McpResourceReadTarget>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct McpResourceReadTarget {
+    pub connector_id: String,
+    /// Null explicitly requests no-auth access, subject to the app's resource policy.
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(
+        required,
+        schema_with = "crate::protocol::serde_helpers::nullable_string_schema"
+    )]
+    #[ts(type = "string | null")]
+    pub link_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -177,6 +216,9 @@ pub struct McpServerEventStreamNotification {
 pub struct McpServerToolCallParams {
     pub thread_id: String,
     pub server: String,
+    /// Exact registration scope; omission preserves legacy name-only selection.
+    #[ts(optional = nullable)]
+    pub environment_id: Option<String>,
     pub tool: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -269,6 +311,9 @@ pub struct McpServerRefreshResponse {}
 #[ts(export_to = "v2/")]
 pub struct McpServerOauthLoginParams {
     pub name: String,
+    /// Exact registration scope; omission preserves legacy name-only selection.
+    #[ts(optional = nullable)]
+    pub environment_id: Option<String>,
     #[ts(optional = nullable)]
     pub thread_id: Option<String>,
     /// Registration strategy for this login only; omission selects automatic discovery.
@@ -297,6 +342,11 @@ pub enum McpServerOauthClientRegistration {
 #[ts(export_to = "v2/")]
 pub struct McpServerOauthLoginResponse {
     pub authorization_url: String,
+    /// Identifies this login attempt across the response and completion notification.
+    /// Older servers omit this field; current servers always return it.
+    #[serde(default)]
+    #[ts(optional)]
+    pub login_id: Option<String>,
 }
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -314,6 +364,9 @@ pub struct McpToolCallProgressNotification {
 pub struct McpServerOauthLoginCompletedNotification {
     pub name: String,
     pub thread_id: Option<String>,
+    /// Identifies the explicit login attempt. Older servers omit this field.
+    #[ts(optional, as = "Option<Option<String>>")]
+    pub login_id: Option<String>,
     pub success: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -336,6 +389,8 @@ pub enum McpServerStartupState {
 pub struct McpServerStatusUpdatedNotification {
     pub thread_id: Option<String>,
     pub name: String,
+    /// Registration scope, not necessarily the server's execution environment.
+    pub environment_id: Option<String>,
     pub status: McpServerStartupState,
     pub error: Option<String>,
     pub failure_reason: Option<McpServerStartupFailureReason>,
@@ -395,6 +450,8 @@ pub struct McpServerElicitationRequestParams {
     /// elicitation itself.
     pub turn_id: Option<String>,
     pub server_name: String,
+    /// Registration scope, not necessarily the server's execution environment.
+    pub environment_id: Option<String>,
     #[serde(flatten)]
     #[experimental(nested)]
     pub request: McpServerElicitationRequest,

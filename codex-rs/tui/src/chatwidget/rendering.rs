@@ -1,8 +1,10 @@
 //! Shared composer and live-history composition for inline and owned transcript surfaces.
 
+use super::provider_error::ProviderErrorNotice;
 use super::transcript::ActiveCellLayoutCache;
 use super::transcript::ActiveCellLayoutCacheKey;
 use super::*;
+use crate::keymap::KeymapContext;
 use crate::render::RectExt;
 use crate::terminal_hyperlinks::HyperlinkParagraph;
 use crate::wrapping::RtOptions;
@@ -12,12 +14,13 @@ use ratatui::text::Span;
 use ratatui::widgets::Block;
 use std::cell::Cell;
 
-struct ExternalWriterNotice {
+struct ReadOnlyThreadNotice {
+    reason: ReadOnlyThread,
     command_center_available: bool,
     transcript_hint: Option<crate::key_hint::ShortcutHint>,
 }
 
-impl Renderable for ExternalWriterNotice {
+impl Renderable for ReadOnlyThreadNotice {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let content_width = area.width.saturating_sub(/*rhs*/ 4);
         let card_lines = self.card_lines(content_width);
@@ -55,17 +58,19 @@ impl Renderable for ExternalWriterNotice {
     }
 }
 
-impl ExternalWriterNotice {
+impl ReadOnlyThreadNotice {
     fn card_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let title: Line<'static> = vec![
-            "🔒".into(),
-            "  ".into(),
-            "This conversation is open in another app".bold(),
-        ]
-        .into();
+        let (prefix, title, indent) = match self.reason {
+            ReadOnlyThread::ExternalWriter => {
+                ("🔒  ", "This conversation is open in another app", "    ")
+            }
+            ReadOnlyThread::Archived => ("", "This thread was archived", ""),
+        };
+        let title: Line<'static> = vec![prefix.into(), title.bold()].into();
+        let (key, action) = self.reason.action();
         let retry: Line<'static> = vec![
-            Span::styled("R", crate::style::accent_style()),
-            " to Retry".into(),
+            Span::styled(key, crate::style::accent_style()),
+            format!(" to {action}").into(),
         ]
         .into();
         let mut lines = word_wrap_lines(&[title], usize::from(width));
@@ -77,18 +82,17 @@ impl ExternalWriterNotice {
             lines.push(retry);
         }
         lines.extend(word_wrap_lines(
-            &[Line::from(
-                "Close it there and press R to continue here.".dim(),
-            )],
+            &[Line::from(self.reason.message().dim())],
             RtOptions::new(usize::from(width))
-                .initial_indent("    ".into())
-                .subsequent_indent("    ".into()),
+                .initial_indent(indent.into())
+                .subsequent_indent(indent.into()),
         ));
         lines
     }
 
     fn footer_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let mut items = vec![("r".to_string(), "retry".to_string())];
+        let (key, action) = self.reason.action();
+        let mut items = vec![(key.to_string(), action.to_string())];
         let escape = crate::key_hint::plain(KeyCode::Esc).display_label();
         let mut quit_keys = vec![
             crate::key_hint::ctrl(KeyCode::Char('c')).display_label(),
@@ -116,11 +120,45 @@ impl ExternalWriterNotice {
 }
 
 impl ChatWidget {
+    pub(crate) fn prepare_composer_images(&mut self, protocol: Option<crate::pets::ImageProtocol>) {
+        self.composer_images = protocol
+            .filter(|_| {
+                !self.bottom_pane.composer_local_images().is_empty()
+                    && self.no_modal_or_popup_active()
+            })
+            .and_then(|protocol| {
+                crate::transcript_image::composer::ComposerImages::for_terminal(
+                    protocol,
+                    self.composer_images.take(),
+                )
+            });
+    }
+
     pub(crate) fn as_renderable(&self) -> RenderableItem<'_> {
+        let backdrop = self.as_backdrop_renderable();
+        match self.centered_dialog() {
+            Some(dialog) => RenderableItem::Owned(Box::new(crate::bottom_pane::DialogOverlay {
+                backdrop,
+                dialog,
+            })),
+            None => backdrop,
+        }
+    }
+
+    pub(crate) fn centered_dialog(&self) -> Option<crate::bottom_pane::CenteredView<'_>> {
+        self.bottom_pane.centered_dialog()
+    }
+
+    fn as_backdrop_renderable(&self) -> RenderableItem<'_> {
         if self
             .bottom_pane
             .selected_index_for_active_view(crate::app::AGENTS_OVERVIEW_VIEW_ID)
             .is_some()
+            || (self.bottom_pane.has_centered_view()
+                && self
+                    .bottom_pane
+                    .selected_index_for_present_view(crate::app::AGENTS_OVERVIEW_VIEW_ID)
+                    .is_some())
         {
             return self.bottom_pane_renderable(
                 /*footer*/ None,
@@ -206,8 +244,11 @@ impl ChatWidget {
         footer: Option<&'a crate::bottom_pane::TranscriptFooter>,
         command_popup_placement: crate::bottom_pane::CommandPopupPlacement,
     ) -> RenderableItem<'a> {
-        if self.external_writer_view && !self.bottom_pane.has_active_view() {
-            RenderableItem::Owned(Box::new(ExternalWriterNotice {
+        if let Some(reason) = self.read_only_thread
+            && !self.bottom_pane.has_active_view()
+        {
+            RenderableItem::Owned(Box::new(ReadOnlyThreadNotice {
+                reason,
                 command_center_available: self.remote_connection.is_some(),
                 transcript_hint: self.bottom_pane.transcript_shortcut_hint(),
             }))
@@ -227,6 +268,7 @@ impl ChatWidget {
                     textarea_right_reserve: right_reserve,
                     separate_status_line: command_popup_placement
                         != crate::bottom_pane::CommandPopupPlacement::AboveComposer,
+                    unfocused: false,
                     command_popup_placement,
                     footer,
                 })

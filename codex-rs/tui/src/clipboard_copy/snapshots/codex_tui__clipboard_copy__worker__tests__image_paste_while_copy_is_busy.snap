@@ -1,0 +1,6 @@
+---
+source: tui/src/clipboard_copy/worker_tests.rs
+assertion_line: 115
+expression: "feedback.join(\"\\n\")"
+---
+• Clipboard busy; try again

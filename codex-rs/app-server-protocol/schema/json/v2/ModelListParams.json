@@ -25,7 +25,7 @@
       ]
     },
     "modelProvider": {
-      "description": "Optional provider id to list models for instead of the active provider.",
+      "description": "List models for this configured provider instead of the app-server default.",
       "type": [
         "string",
         "null"

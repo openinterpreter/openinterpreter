@@ -9,7 +9,6 @@ use std::sync::atomic::Ordering;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
-use windows_sys::Win32::Foundation as foundation;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Security as security;
 use windows_sys::Win32::System::Pipes;
@@ -23,18 +22,8 @@ pub(crate) use registered::require_runtime_package_family;
 #[cfg(debug_assertions)]
 static FOREGROUND_MODE: AtomicBool = AtomicBool::new(false);
 
-struct OwnedHandle(HANDLE);
-
 pub(crate) struct AuthorizedClientProcess {
     handle: OwnedHandle,
-}
-
-impl Drop for OwnedHandle {
-    fn drop(&mut self) {
-        if self.0 != 0 && self.0 != foundation::INVALID_HANDLE_VALUE {
-            unsafe { foundation::CloseHandle(self.0) };
-        }
-    }
 }
 
 #[cfg(debug_assertions)]
@@ -52,10 +41,11 @@ pub(crate) fn authorize_client_process(pipe: HANDLE) -> Result<AuthorizedClientP
     let process = unsafe {
         Threading::OpenProcess(Threading::PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id)
     };
-    if process == 0 {
+    if process.is_null() {
         return Err(io::Error::last_os_error()).context("open the provisioning client process");
     }
-    let process = OwnedHandle(process);
+    // SAFETY: OpenProcess transferred this handle on success.
+    let process = unsafe { OwnedHandle::from_raw_handle(process) };
 
     let client_family = unsafe { codex_windows_sandbox::process_package_family(process.0) }
         .context("read provisioning client package identity")?;
@@ -77,7 +67,6 @@ pub(crate) fn authorize_client_process(pipe: HANDLE) -> Result<AuthorizedClientP
             }
             None => bail!("provisioning service has no package identity"),
         },
-        None if service_family.is_some() => {}
         #[cfg(debug_assertions)]
         None if FOREGROUND_MODE.load(Ordering::Acquire) => {}
         None => bail!("provisioning clients must run with an installed Codex package identity"),
@@ -90,9 +79,13 @@ pub(crate) fn authorize_client(
     process: &AuthorizedClientProcess,
     client_token: HANDLE,
 ) -> Result<()> {
-    let mut process_token = 0;
+    let mut process_token = std::ptr::null_mut();
     if unsafe {
-        Threading::OpenProcessToken(process.handle.0, security::TOKEN_QUERY, &mut process_token)
+        Threading::OpenProcessToken(
+            process.handle.as_raw_handle(),
+            security::TOKEN_QUERY,
+            &mut process_token,
+        )
     } == 0
     {
         return Err(io::Error::last_os_error())

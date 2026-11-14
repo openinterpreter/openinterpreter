@@ -8,6 +8,7 @@ use codex_analytics::build_track_events_context;
 use codex_config::types::ToolSuggestDisabledTool;
 use codex_core_plugins::remote::REMOTE_GLOBAL_MARKETPLACE_NAME;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
+use codex_mcp::McpServerKey;
 use codex_rmcp_client::ElicitationAction;
 use codex_rmcp_client::ElicitationResponse;
 use codex_tools::DiscoverableTool;
@@ -191,7 +192,10 @@ impl RequestPluginInstallHandler {
             let auth = session.services.auth_manager.auth().await;
             let plugins_config = turn.config.plugins_config_input();
             match codex_core_plugins::hydrate_selected_recommended_plugin_install_metadata(
-                &plugins_config,
+                &session
+                    .services
+                    .plugins_manager
+                    .remote_plugin_service_config(&plugins_config),
                 auth.as_ref(),
                 tool,
             )
@@ -230,6 +234,7 @@ impl RequestPluginInstallHandler {
                         session.thread_id.to_string(),
                         turn.sub_id.clone(),
                         turn.originator.clone(),
+                        /*turn_metadata*/ None,
                     ),
                     PluginInstallRequested {
                         suggestion_id: suggestion_id.clone(),
@@ -247,15 +252,14 @@ impl RequestPluginInstallHandler {
         let request =
             build_request_plugin_install_elicitation_request(suggest_reason, &tool, &suggestion_id);
         let request_id = RequestId::String(suggestion_id.into());
-        let elicitation = session
+        let response = session
             .request_mcp_server_elicitation(
                 turn.as_ref(),
-                CODEX_APPS_MCP_SERVER_NAME.to_string(),
+                McpServerKey::unscoped(CODEX_APPS_MCP_SERVER_NAME),
                 request_id,
                 request,
             )
             .await;
-        let response = elicitation.response;
         if let Some(response) = response.as_ref() {
             maybe_persist_disabled_install_request(&session, &turn, &tool, response).await;
         }
@@ -271,35 +275,41 @@ impl RequestPluginInstallHandler {
             false
         };
 
+        if completed {
+            // Skills-only installs have no connector tools to refresh. Dirty discovery too,
+            // so the next step can see the newly installed plugin and its skills.
+            session.request_mcp_runtime_refresh(crate::McpRefreshReason::PluginInstalled);
+        }
+
         if completed && let DiscoverableTool::Connector(connector) = &tool {
             session
                 .merge_connector_selection(HashSet::from([connector.id.clone()]))
                 .await;
         }
 
-        if elicitation.sent {
-            let tool_type = match tool_type {
-                DiscoverableToolType::Connector => "connector",
-                DiscoverableToolType::Plugin => "plugin",
-            };
-            let response_action = match response.as_ref().map(|response| &response.action) {
-                Some(ElicitationAction::Accept) => "accept",
-                Some(ElicitationAction::Decline) => "decline",
-                Some(ElicitationAction::Cancel) => "cancel",
-                Some(_) => "unknown",
-                None => "unavailable",
-            };
-            step_context
-                .session_telemetry
-                .record_plugin_install_suggestion(
-                    tool_type,
-                    tool.id(),
-                    tool.name(),
-                    response_action,
-                    user_confirmed,
-                    completed,
-                );
-        }
+        // The elicitation was dispatched before this awaited call returned;
+        // a closed response channel is still a sent, unanswered request.
+        let tool_type_tag = match tool_type {
+            DiscoverableToolType::Connector => "connector",
+            DiscoverableToolType::Plugin => "plugin",
+        };
+        let response_action = match response.as_ref().map(|response| &response.action) {
+            Some(ElicitationAction::Accept) => "accept",
+            Some(ElicitationAction::Decline) => "decline",
+            Some(ElicitationAction::Cancel) => "cancel",
+            Some(_) => "unknown",
+            None => "unavailable",
+        };
+        step_context
+            .session_telemetry
+            .record_plugin_install_suggestion(
+                tool_type_tag,
+                tool.id(),
+                tool.name(),
+                response_action,
+                user_confirmed,
+                completed,
+            );
 
         let content = serde_json::to_string(&RequestPluginInstallResult {
             completed,

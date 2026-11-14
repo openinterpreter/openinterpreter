@@ -88,14 +88,13 @@ async fn seed_stage1_output(
     let now = Utc::now();
     let thread_id = ThreadId::from_string(&Uuid::new_v4().to_string())?;
     let worker_id = ThreadId::from_string(&Uuid::new_v4().to_string())?;
-    let mut builder = ThreadMetadataBuilder::new(
+    let builder = ThreadMetadataBuilder::new(
         thread_id,
         codex_home.join("sessions").join("test.jsonl"),
         now,
         SessionSource::Cli,
-    );
-    builder.updated_at = Some(now);
-    builder.cwd = codex_home.to_path_buf();
+    )
+    .with_cwd(codex_home.to_path_buf());
     let metadata = builder.build("mock_provider");
     state_db.upsert_thread(&metadata).await?;
 
@@ -134,7 +133,7 @@ async fn seed_stage1_output(
     Ok(thread_id)
 }
 
-async fn init_state_db(codex_home: &Path) -> Result<Arc<StateRuntime>> {
+pub(super) async fn init_state_db(codex_home: &Path) -> Result<Arc<StateRuntime>> {
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.abs()),
         "mock_provider".into(),

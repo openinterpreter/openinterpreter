@@ -4,6 +4,7 @@ mod catalog;
 mod credential_export;
 mod error;
 mod mantle;
+mod region;
 mod runtime;
 mod runtime_catalog;
 
@@ -29,6 +30,8 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_protocol::openai_models::ModelsResponse;
 
+use crate::ProviderCapabilities;
+use crate::RemoteCompactionSupport;
 use crate::auth::auth_manager_for_provider;
 use crate::auth::resolve_provider_auth as resolve_configured_provider_auth;
 use crate::provider::ModelProvider;
@@ -36,17 +39,18 @@ use crate::provider::ModelProviderFuture;
 use crate::provider::ProviderAccountResult;
 use crate::provider::ProviderAccountState;
 use crate::provider::ProviderAuthRecoveryMessages;
-use crate::provider::ProviderCapabilities;
 use crate::provider::ProviderUnauthorizedRecovery;
-use crate::provider::RemoteCompactionSupport;
 use crate::shared_state::process_shared_state;
 use auth::resolve_provider_auth as resolve_bedrock_provider_auth;
 pub(crate) use auth_refresh::AwsAuthRecovery;
 use catalog::normalize_bedrock_catalog;
+use catalog::static_gov_model_catalog;
 pub(crate) use catalog::static_model_catalog;
 pub(crate) use credential_export::AwsCredentialExport;
 use mantle::bedrock_mantle_runtime_base_url;
+pub use mantle::is_amazon_bedrock_gov_cloud_region;
 pub use mantle::is_supported_amazon_bedrock_region;
+pub use region::resolve_amazon_bedrock_region;
 use runtime::bedrock_runtime_base_url;
 use runtime_catalog::static_runtime_model_catalog;
 
@@ -59,6 +63,7 @@ pub(super) enum BedrockEndpoint {
 /// Runtime provider for Amazon Bedrock's OpenAI-compatible endpoints.
 #[derive(Clone, Debug)]
 pub(crate) struct AmazonBedrockModelProvider {
+    http_client_factory: codex_http_client::HttpClientFactory,
     pub(crate) info: ModelProviderInfo,
     aws: ModelProviderAwsAuthInfo,
     endpoint: BedrockEndpoint,
@@ -103,8 +108,21 @@ impl AmazonBedrockModelProvider {
         } else {
             None
         };
+        let http_client_factory = auth_manager
+            .as_ref()
+            .map(|manager| {
+                manager
+                    .http_client_factory()
+                    .with_network_policy(manager.application_network_policy())
+            })
+            .unwrap_or_else(|| {
+                codex_http_client::HttpClientFactory::new(
+                    codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+                )
+            });
         let auth_manager = auth_manager_for_provider(auth_manager, &provider_info);
         Self {
+            http_client_factory,
             info: provider_info,
             aws,
             endpoint,
@@ -173,21 +191,44 @@ impl AmazonBedrockModelProvider {
         if let Some(base_url) = self.info.base_url.clone() {
             return Ok(Some(base_url));
         }
+        let http_client_factory = self.http_client_factory.clone().with_network_policy(
+            self.http_client_factory
+                .network_policy()
+                .clone()
+                .for_current_account(),
+        );
         let auth_source = self.auth_source();
         let managed_auth = self.managed_auth();
         let base_url = match self.endpoint {
             BedrockEndpoint::Mantle => {
-                bedrock_mantle_runtime_base_url(auth_source, managed_auth.as_ref(), &self.aws)
-                    .await?
+                bedrock_mantle_runtime_base_url(
+                    auth_source,
+                    managed_auth.as_ref(),
+                    &self.aws,
+                    &http_client_factory,
+                )
+                .await?
             }
             BedrockEndpoint::Runtime => {
-                bedrock_runtime_base_url(auth_source, managed_auth.as_ref(), &self.aws).await?
+                bedrock_runtime_base_url(
+                    auth_source,
+                    managed_auth.as_ref(),
+                    &self.aws,
+                    &http_client_factory,
+                )
+                .await?
             }
         };
         Ok(Some(base_url))
     }
 
     async fn api_auth(&self) -> Result<SharedAuthProvider> {
+        let http_client_factory = self.http_client_factory.clone().with_network_policy(
+            self.http_client_factory
+                .network_policy()
+                .clone()
+                .for_current_account(),
+        );
         let source = self.auth_source();
         if source == auth::BedrockAuthSource::CommandBearerToken {
             let auth = self.auth().await;
@@ -200,12 +241,37 @@ impl AmazonBedrockModelProvider {
         }
 
         let managed_auth = self.managed_auth();
-        resolve_bedrock_provider_auth(source, managed_auth.as_ref(), &self.aws, self.endpoint).await
+        resolve_bedrock_provider_auth(
+            source,
+            managed_auth.as_ref(),
+            &self.aws,
+            self.endpoint,
+            &http_client_factory,
+        )
+        .await
     }
 
     fn default_model_catalog(&self) -> ModelsResponse {
         match self.endpoint {
-            BedrockEndpoint::Mantle => static_model_catalog(),
+            BedrockEndpoint::Mantle => {
+                let endpoint = self
+                    .info
+                    .base_url
+                    .as_deref()
+                    .and_then(|base_url| url::Url::parse(base_url).ok());
+                let is_govcloud =
+                    endpoint
+                        .as_ref()
+                        .and_then(url::Url::host_str)
+                        .is_some_and(|host| {
+                            host.starts_with("bedrock-mantle.us-gov-") && host.ends_with(".api.aws")
+                        });
+                if is_govcloud {
+                    static_gov_model_catalog()
+                } else {
+                    static_model_catalog()
+                }
+            }
             BedrockEndpoint::Runtime => static_runtime_model_catalog(),
         }
     }
@@ -218,7 +284,7 @@ impl ModelProvider for AmazonBedrockModelProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            namespace_tools: true,
+            reasoning_summaries: true,
             image_generation: false,
             web_search: self.endpoint == BedrockEndpoint::Mantle,
             external_web_access: false,
@@ -359,10 +425,16 @@ impl ModelProvider for AmazonBedrockModelProvider {
         _codex_home: PathBuf,
         config_model_catalog: Option<ModelsResponse>,
     ) -> SharedModelsManager {
+        let origin = if config_model_catalog.is_some() {
+            codex_models_manager::ModelOrigin::ExplicitConfig
+        } else {
+            codex_models_manager::ModelOrigin::Provider
+        };
         Arc::new(StaticModelsManager::new(
             /*auth_manager*/ None,
             config_model_catalog
                 .map_or_else(|| self.default_model_catalog(), normalize_bedrock_catalog),
+            origin,
         ))
     }
 
@@ -370,11 +442,7 @@ impl ModelProvider for AmazonBedrockModelProvider {
         &self,
         config_model_catalog: Option<ModelsResponse>,
     ) -> SharedModelsManager {
-        Arc::new(StaticModelsManager::new(
-            /*auth_manager*/ None,
-            config_model_catalog
-                .map_or_else(|| self.default_model_catalog(), normalize_bedrock_catalog),
-        ))
+        self.models_manager(PathBuf::new(), config_model_catalog)
     }
 }
 
@@ -539,6 +607,7 @@ mod tests {
                 .await
                 .expect("managed Bedrock auth should resolve")
                 .to_auth_headers()
+                .unwrap()
                 .get(http::header::AUTHORIZATION),
             Some(&HeaderValue::from_static("Bearer managed-bedrock-api-key"))
         );
@@ -585,6 +654,7 @@ mod tests {
                     .await
                     .expect("configured AWS profile auth should resolve")
                     .to_auth_headers()
+                    .unwrap()
                     .get(http::header::AUTHORIZATION)
                     .is_none()
             );
@@ -624,7 +694,7 @@ mod tests {
         assert_eq!(
             provider.capabilities(),
             ProviderCapabilities {
-                namespace_tools: true,
+                reasoning_summaries: true,
                 image_generation: false,
                 web_search: true,
                 external_web_access: false,
@@ -643,7 +713,7 @@ mod tests {
         assert_eq!(
             provider.capabilities(),
             ProviderCapabilities {
-                namespace_tools: true,
+                reasoning_summaries: true,
                 image_generation: false,
                 web_search: false,
                 external_web_access: false,

@@ -2,11 +2,13 @@
 //!
 //! Offsets always address the original JSONL bytes. Readers retain an open file, or an anonymous
 //! decoded snapshot, so a concurrent compression cannot invalidate an in-progress scan.
+//! Cancellation is checked during decompression and subsequent bounded reads and seeks.
 
 use std::fs::File;
 use std::io;
 use std::io::Read;
 use std::io::Seek;
+use std::io::SeekFrom;
 use std::path::Path;
 use std::time::Duration;
 
@@ -67,15 +69,68 @@ pub fn read_rollout_prefix(path: &Path, max_bytes: usize) -> io::Result<Option<V
 ///
 /// Compressed files are decoded into an anonymous temporary file, keeping memory use bounded and
 /// preserving read-only access to the Codex home. Plain files retain their existing seek fast path.
-pub fn open_rollout_seekable_reader(path: &Path) -> io::Result<File> {
-    match RolloutReader::open(path)? {
-        RolloutReader::Plain(file) => Ok(file),
+/// `is_cancelled` must observe the lifetime of the calling task. Cancellation returns an error,
+/// never EOF, so callers cannot mistake a partial read for a complete history.
+pub fn open_rollout_seekable_reader(
+    path: &Path,
+    is_cancelled: impl Fn() -> bool,
+) -> io::Result<impl Read + Seek> {
+    if is_cancelled() {
+        return Err(io::Error::other("rollout read cancelled"));
+    }
+    let file = match RolloutReader::open(path)? {
+        RolloutReader::Plain(file) => file,
         RolloutReader::Compressed(file) => {
             let mut decoded = tempfile::tempfile()?;
-            io::copy(&mut zstd::stream::read::Decoder::new(file)?, &mut decoded)?;
+            // Empty and skippable frames can consume input without producing decoded bytes.
+            let file = CancellableReader {
+                inner: file,
+                is_cancelled: &is_cancelled,
+            };
+            let mut reader = CancellableReader {
+                inner: zstd::stream::read::Decoder::new(file)?,
+                is_cancelled: &is_cancelled,
+            };
+            io::copy(&mut reader, &mut decoded)?;
             decoded.rewind()?;
-            Ok(decoded)
+            decoded
         }
+    };
+    Ok(CancellableReader {
+        inner: file,
+        is_cancelled,
+    })
+}
+
+struct CancellableReader<R, F> {
+    inner: R,
+    is_cancelled: F,
+}
+
+impl<R, F: Fn() -> bool> CancellableReader<R, F> {
+    fn check_cancelled(&self) -> io::Result<()> {
+        if (self.is_cancelled)() {
+            // Interrupted is retried by io::copy and read_exact, defeating cancellation.
+            return Err(io::Error::other("rollout read cancelled"));
+        }
+        Ok(())
+    }
+}
+
+impl<R: Read, F: Fn() -> bool> Read for CancellableReader<R, F> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.check_cancelled()?;
+        let limit = buffer.len().min(64 * 1024);
+        let read = self.inner.read(&mut buffer[..limit])?;
+        self.check_cancelled()?;
+        Ok(read)
+    }
+}
+
+impl<R: Seek, F: Fn() -> bool> Seek for CancellableReader<R, F> {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.check_cancelled()?;
+        self.inner.seek(position)
     }
 }
 
@@ -84,10 +139,21 @@ pub fn open_rollout_seekable_reader(path: &Path) -> io::Result<File> {
 /// A known first-frame size is a lower bound even for concatenated zstd frames. New compressed
 /// rollouts include that size, so ordinary lineage validation only reads the header. Older frames
 /// without a size, and prefixes extending beyond the first frame, are decoded up to the bound.
-pub fn rollout_contains_prefix(path: &Path, end_byte_offset: u64) -> io::Result<bool> {
+pub fn rollout_contains_prefix(
+    path: &Path,
+    end_byte_offset: u64,
+    is_cancelled: impl Fn() -> bool,
+) -> io::Result<bool> {
+    if is_cancelled() {
+        return Err(io::Error::other("rollout read cancelled"));
+    }
     match RolloutReader::open(path)? {
         RolloutReader::Plain(file) => Ok(end_byte_offset <= file.metadata()?.len()),
-        RolloutReader::Compressed(mut file) => {
+        RolloutReader::Compressed(file) => {
+            let mut file = CancellableReader {
+                inner: file,
+                is_cancelled: &is_cancelled,
+            };
             // A zstd frame header occupies at most 18 bytes.
             let mut header = [0; 18];
             let read = file.read(&mut header)?;
@@ -99,7 +165,11 @@ pub fn rollout_contains_prefix(path: &Path, end_byte_offset: u64) -> io::Result<
                 return Ok(true);
             }
             file.rewind()?;
-            let mut prefix = zstd::stream::read::Decoder::new(file)?.take(end_byte_offset);
+            let mut prefix = CancellableReader {
+                inner: zstd::stream::read::Decoder::new(file)?,
+                is_cancelled: &is_cancelled,
+            }
+            .take(end_byte_offset);
             Ok(io::copy(&mut prefix, &mut io::sink())? == end_byte_offset)
         }
     }

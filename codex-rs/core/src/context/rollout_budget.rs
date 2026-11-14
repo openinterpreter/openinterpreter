@@ -1,5 +1,7 @@
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RolloutBudgetContext {
@@ -23,10 +25,10 @@ impl ContextualUserFragment for RolloutBudgetContext {
         ("<rollout_budget>\n", "\n</rollout_budget>")
     }
 
-    fn body(&self) -> String {
-        format!(
+    fn body(&self) -> ContentItem {
+        input_text(format!(
             "You have {} weighted tokens left in the shared session token budget.",
             self.remaining_tokens
-        )
+        ))
     }
 }

@@ -1,6 +1,6 @@
-use super::RuntimeState;
 use super::callbacks::audio_callback;
 use super::callbacks::clear_timeout_callback;
+use super::callbacks::content_block_callback;
 use super::callbacks::exit_callback;
 use super::callbacks::generated_image_callback;
 use super::callbacks::image_callback;
@@ -11,19 +11,24 @@ use super::callbacks::store_callback;
 use super::callbacks::text_callback;
 use super::callbacks::tool_callback;
 use super::callbacks::yield_control_callback;
+use codex_code_mode_protocol::EnabledToolMetadata;
 
-pub(super) fn install_globals(scope: &mut v8::PinScope<'_, '_>) -> Result<(), String> {
+pub(super) fn install_globals(
+    scope: &mut v8::PinScope<'_, '_>,
+    enabled_tools: &[EnabledToolMetadata],
+) -> Result<(), String> {
     let global = scope.get_current_context().global(scope);
     delete_global(scope, global, "console")?;
     delete_global(scope, global, "Atomics")?;
     delete_global(scope, global, "SharedArrayBuffer")?;
     delete_global(scope, global, "WebAssembly")?;
 
-    let tools = build_tools_object(scope)?;
-    let all_tools = build_all_tools_value(scope)?;
+    let tools = build_tools_object(scope, enabled_tools)?;
+    let all_tools = build_all_tools_value(scope, enabled_tools)?;
     let clear_timeout = helper_function(scope, "clearTimeout", clear_timeout_callback)?;
     let set_timeout = helper_function(scope, "setTimeout", set_timeout_callback)?;
     let text = helper_function(scope, "text", text_callback)?;
+    let content_block = helper_function(scope, "content", content_block_callback)?;
     let image = helper_function(scope, "image", image_callback)?;
     let audio = helper_function(scope, "audio", audio_callback)?;
     let generated_image = helper_function(scope, "generatedImage", generated_image_callback)?;
@@ -38,6 +43,7 @@ pub(super) fn install_globals(scope: &mut v8::PinScope<'_, '_>) -> Result<(), St
     set_global(scope, global, "clearTimeout", clear_timeout.into())?;
     set_global(scope, global, "setTimeout", set_timeout.into())?;
     set_global(scope, global, "text", text.into())?;
+    set_global(scope, global, "content", content_block.into())?;
     set_global(scope, global, "image", image.into())?;
     set_global(scope, global, "audio", audio.into())?;
     set_global(scope, global, "generatedImage", generated_image.into())?;
@@ -46,17 +52,21 @@ pub(super) fn install_globals(scope: &mut v8::PinScope<'_, '_>) -> Result<(), St
     set_global(scope, global, "notify", notify.into())?;
     set_global(scope, global, "yield_control", yield_control.into())?;
     set_global(scope, global, "exit", exit.into())?;
+
+    let helpers = concat!(include_str!("settled.js"), "\n", include_str!("content.js"));
+    let source = v8::String::new(scope, helpers)
+        .ok_or_else(|| "failed to allocate JavaScript helpers".to_string())?;
+    v8::Script::compile(scope, source, /*origin*/ None)
+        .and_then(|script| script.run(scope))
+        .ok_or_else(|| "failed to initialize JavaScript helpers".to_string())?;
     Ok(())
 }
 
 fn build_tools_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
+    enabled_tools: &[EnabledToolMetadata],
 ) -> Result<v8::Local<'s, v8::Object>, String> {
     let tools = v8::Object::new(scope);
-    let enabled_tools = scope
-        .get_slot::<RuntimeState>()
-        .map(|state| state.enabled_tools.clone())
-        .unwrap_or_default();
 
     for (tool_index, tool) in enabled_tools.iter().enumerate() {
         let name = v8::String::new(scope, &tool.global_name)
@@ -69,11 +79,8 @@ fn build_tools_object<'s>(
 
 fn build_all_tools_value<'s>(
     scope: &mut v8::PinScope<'s, '_>,
+    enabled_tools: &[EnabledToolMetadata],
 ) -> Result<v8::Local<'s, v8::Value>, String> {
-    let enabled_tools = scope
-        .get_slot::<RuntimeState>()
-        .map(|state| state.enabled_tools.clone())
-        .unwrap_or_default();
     let array = v8::Array::new(scope, enabled_tools.len() as i32);
     let name_key = v8::String::new(scope, "name")
         .ok_or_else(|| "failed to allocate ALL_TOOLS name key".to_string())?;

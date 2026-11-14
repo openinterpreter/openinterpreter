@@ -36,12 +36,18 @@ impl ChatComposer {
         {
             return true;
         }
-        if !in_slash_context
-            && !self.draft.disable_paste_burst
+        if self.draft.paste_burst.is_active()
             && self
                 .draft
                 .paste_burst
-                .newline_should_insert_instead_of_submit(now)
+                .append_control_char_if_active('\n', now)
+        {
+            return true;
+        }
+        if self
+            .draft
+            .paste_burst
+            .newline_should_insert_instead_of_submit(now)
         {
             self.draft.textarea.insert_str("\n");
             self.draft.paste_burst.extend_window(now);

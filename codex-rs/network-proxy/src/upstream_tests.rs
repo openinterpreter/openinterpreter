@@ -119,27 +119,43 @@ async fn mitm_upstream_client_trusts_startup_custom_ca() {
 }
 
 #[test]
-fn inherited_upstream_proxy_is_bypassed_for_non_public_targets() {
+fn private_ip_upstream_routing_is_opt_in() {
     let proxy = ProxyAddress::try_from("http://127.0.0.1:43128").unwrap();
-    let config = ProxyConfig {
-        http: Some(proxy.clone()),
-        https: Some(proxy),
-        all: None,
-    };
-
-    for target in [
-        HostWithPort::new(Host::LOCALHOST_NAME, 8080),
-        HostWithPort::new(Host::LOCALHOST_IPV4, 8080),
-        HostWithPort::new(Host::Address("10.0.0.1".parse().unwrap()), 8080),
-    ] {
-        assert_eq!(config.proxy_for_target(&target, /*is_secure*/ false), None);
-        assert_eq!(config.proxy_for_target(&target, /*is_secure*/ true), None);
+    for enabled in [false, true] {
+        let config = ProxyConfig {
+            http: Some(proxy.clone()),
+            https: Some(proxy.clone()),
+            proxy_private_ips_via_upstream: enabled,
+            ..ProxyConfig::default()
+        };
+        for (host, use_proxy) in [
+            ("10.0.0.1", enabled),
+            ("172.16.0.1", enabled),
+            ("192.168.0.1", enabled),
+            ("100.68.58.50", enabled),
+            ("fd00::1", enabled),
+            ("::ffff:100.68.58.50", enabled),
+            ("localhost", false),
+            ("127.0.0.1", false),
+            ("::1", false),
+            ("169.254.169.254", false),
+            ("fe80::1", false),
+            ("0.0.0.0", false),
+            ("224.0.0.1", false),
+            ("192.0.2.1", false),
+            ("240.0.0.1", false),
+            ("example.com", true),
+            ("100.63.255.255", true),
+            ("100.128.0.0", true),
+        ] {
+            let target = HostWithPort::new(host.parse::<Host>().unwrap(), /*port*/ 443);
+            for is_secure in [false, true] {
+                assert_eq!(
+                    config.proxy_for_target(&target, is_secure),
+                    use_proxy.then(|| proxy.clone()),
+                    "host={host}, enabled={enabled}, secure={is_secure}"
+                );
+            }
+        }
     }
-
-    let public = HostWithPort::new(Host::EXAMPLE_NAME, 443);
-    assert!(
-        config
-            .proxy_for_target(&public, /*is_secure*/ true)
-            .is_some()
-    );
 }

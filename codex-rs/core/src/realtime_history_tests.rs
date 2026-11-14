@@ -28,6 +28,7 @@ fn started_state() -> RealtimeHistoryState {
     let mut state = RealtimeHistoryState::default();
     state.observe(&EventMsg::TurnStarted(
         codex_protocol::protocol::TurnStartedEvent {
+            turn_attribution: None,
             turn_id: "turn-1".to_string(),
             root_turn_id: None,
             trace_id: None,
@@ -65,6 +66,7 @@ fn assistant_delta(item_id: &str, delta: &str) -> EventMsg {
 
 fn completed_item(item: TurnItem) -> EventMsg {
     EventMsg::ItemCompleted(ItemCompletedEvent {
+        content_token_count: None,
         thread_id: ThreadId::new(),
         turn_id: "turn-1".to_string(),
         item,
@@ -91,6 +93,7 @@ fn mcp_tool_call(id: &str, server: &str, status: McpToolCallStatus) -> TurnItem 
     TurnItem::McpToolCall(McpToolCallItem {
         id: id.to_string(),
         server: server.to_string(),
+        environment_id: None,
         tool: "create_thread".to_string(),
         arguments: serde_json::Value::Null,
         connector_id: None,
@@ -129,6 +132,7 @@ fn interrupted_turn_is_not_associated_with_a_new_voice_session(
     let mut state = RealtimeHistoryState::default();
     state.observe(&EventMsg::TurnStarted(
         codex_protocol::protocol::TurnStartedEvent {
+            turn_attribution: None,
             turn_id: "turn-1".to_string(),
             root_turn_id: None,
             trace_id: None,
@@ -138,8 +142,10 @@ fn interrupted_turn_is_not_associated_with_a_new_voice_session(
         },
     ));
     let aborted = EventMsg::TurnAborted(TurnAbortedEvent {
+        root_turn_id: None,
         turn_id: aborted_turn_id.map(str::to_string),
         reason: TurnAbortReason::Interrupted,
+        error: None,
         started_at: None,
         completed_at: None,
         duration_ms: None,
@@ -172,8 +178,10 @@ fn interrupted_turn_is_not_associated_with_a_new_voice_session(
 fn interrupted_turn_keeps_its_existing_voice_session_for_late_artifacts() {
     let mut state = started_state();
     state.observe(&EventMsg::TurnAborted(TurnAbortedEvent {
+        root_turn_id: None,
         turn_id: Some("turn-1".to_string()),
         reason: TurnAbortReason::Interrupted,
+        error: None,
         started_at: None,
         completed_at: None,
         duration_ms: None,
@@ -218,6 +226,7 @@ fn promotes_backing_agent_artifacts_once_without_a_client_request() {
     );
 
     let completed = completed_item(TurnItem::AgentMessage(AgentMessageItem {
+        moderation: None,
         id: "message-1".to_string(),
         content: vec![AgentMessageContent::Text {
             text: "[analysis] ::codex-realtime-inline{}\nVisible explanation".to_string(),
@@ -252,6 +261,8 @@ fn promotes_backing_agent_artifacts_once_without_a_client_request() {
         started_at_ms: 0,
     });
     let subagent = completed_item(TurnItem::SubAgentActivity(SubAgentActivityItem {
+        model: None,
+        reasoning_effort: None,
         id: "subagent-1".to_string(),
         kind: SubAgentActivityKind::Started,
         agent_thread_id: ThreadId::new(),
@@ -295,6 +306,7 @@ fn promotes_distinct_visualizations_once_and_ignores_markdown_fences() {
     );
 
     let completed = completed_item(TurnItem::AgentMessage(AgentMessageItem {
+        moderation: None,
         id: "message-1".to_string(),
         content: vec![AgentMessageContent::Text {
             text: text.to_string(),
@@ -333,6 +345,7 @@ fn streams_stable_segment_items_and_ignores_upstream_transcript_revisions() {
         done.items,
         vec![RealtimeItem {
             id: started.id,
+            observed_at_ms: started.observed_at_ms,
             realtime_session_id: "voice-1".to_string(),
             content: RealtimeItemContent::TranscriptSegment {
                 role: RealtimeTranscriptRole::Assistant,
@@ -360,6 +373,7 @@ fn emits_the_complete_item_lifecycle_when_only_a_final_transcript_arrives() {
         effects.items,
         vec![RealtimeItem {
             id: started.id,
+            observed_at_ms: started.observed_at_ms,
             realtime_session_id: "voice-1".to_string(),
             content: RealtimeItemContent::TranscriptSegment {
                 role: RealtimeTranscriptRole::Assistant,
@@ -554,6 +568,7 @@ fn promotes_successful_dynamic_tools_and_splits_active_transcripts() {
         items[0],
         RealtimeItem {
             id: first.item_id.clone(),
+            observed_at_ms: first.started_item.as_ref().unwrap().observed_at_ms,
             realtime_session_id: "voice-1".to_string(),
             content: RealtimeItemContent::TranscriptSegment {
                 role: RealtimeTranscriptRole::Assistant,

@@ -1,7 +1,43 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "McpResourceReadTarget": {
+      "properties": {
+        "connectorId": {
+          "type": "string"
+        },
+        "linkId": {
+          "description": "Null explicitly requests no-auth access, subject to the app's resource policy.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "connectorId",
+        "linkId"
+      ],
+      "type": "object"
+    }
+  },
   "properties": {
+    "_meta": {
+      "additionalProperties": true,
+      "description": "Additional MCP request metadata. Account and turn routing keys are reserved.",
+      "type": [
+        "object",
+        "null"
+      ]
+    },
     "connectorId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "environmentId": {
+      "description": "Exact registration scope; omission preserves legacy name-only selection.",
       "type": [
         "string",
         "null"
@@ -16,6 +52,17 @@
     },
     "server": {
       "type": "string"
+    },
+    "target": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/McpResourceReadTarget"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Explicit hosted app/account. Omit to retain legacy resource discovery."
     },
     "threadId": {
       "type": [

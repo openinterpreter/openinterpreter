@@ -1,0 +1,91 @@
+name: blocking-ci
+
+# This is the single entrypoint for checks that block a PR merge. It also runs
+# after pushes to main so the same check family stays grouped in the Actions UI.
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+
+jobs:
+  # Keep reusable workflow calls alphabetized. The `required` job below is the
+  # version-controlled list that the main-branch ruleset should require.
+  bazel:
+    permissions:
+      contents: read
+      id-token: write
+    name: Bazel
+    uses: ./.github/workflows/bazel.yml
+    secrets: inherit
+
+  bazel-result:
+    name: Bazel result
+    needs: bazel
+    if: ${{ always() && github.repository == 'openai/codex' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require the Bazel workflow to succeed
+        env:
+          BAZEL_RESULT: ${{ needs.bazel.result }}
+        run: test "$BAZEL_RESULT" = success
+
+  blob-size-policy:
+    name: Blob size policy
+    uses: ./.github/workflows/blob-size-policy.yml
+    secrets: inherit
+
+  cargo-deny:
+    name: cargo-deny
+    uses: ./.github/workflows/cargo-deny.yml
+    secrets: inherit
+
+  codespell:
+    name: Codespell
+    uses: ./.github/workflows/codespell.yml
+    secrets: inherit
+
+  repo-checks:
+    name: repo-checks
+    uses: ./.github/workflows/repo-checks.yml
+    secrets: inherit
+
+  rust-ci:
+    permissions:
+      contents: read
+      id-token: write
+    name: rust-ci
+    uses: ./.github/workflows/rust-ci.yml
+    secrets: inherit
+
+  sdk:
+    permissions:
+      contents: read
+      id-token: write
+    name: sdk
+    uses: ./.github/workflows/sdk.yml
+    secrets: inherit
+
+  required:
+    name: CI required
+    # Without `always()`, GitHub skips this job after a failed dependency and a
+    # required check can appear successful instead of reporting the failure.
+    if: ${{ always() }}
+    needs:
+      - blob-size-policy
+      - cargo-deny
+      - codespell
+      - repo-checks
+      - rust-ci
+      - sdk
+    runs-on: ubuntu-24.04
+    steps:
+      # Keep the helper on the same combined revision as the child workflows so
+      # the merge gate evaluates the exact candidate they validated.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Require successful dependencies
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 .github/scripts/check_ci_results.py

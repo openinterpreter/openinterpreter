@@ -36,11 +36,7 @@
           "docs/zh/portability",
           {
             "group": "核心概念",
-            "pages": [
-              "docs/zh/models",
-              "docs/zh/harness",
-              "docs/zh/subagents"
-            ]
+            "pages": ["docs/zh/models", "docs/zh/harness", "docs/zh/subagents"]
           }
         ]
       },
@@ -93,11 +89,7 @@
           },
           {
             "group": "扩展",
-            "pages": [
-              "docs/zh/mcp",
-              "docs/zh/plugins",
-              "docs/zh/hooks"
-            ]
+            "pages": ["docs/zh/mcp", "docs/zh/plugins", "docs/zh/hooks"]
           },
           {
             "group": "性能",

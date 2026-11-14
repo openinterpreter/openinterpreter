@@ -32,6 +32,7 @@ use codex_protocol::protocol::SessionSource;
 use once_cell::sync::Lazy;
 
 use crate::ThreadManager;
+pub use crate::code_mode_host::ProcessOwnedGrpcCodeModeSessionProvider;
 use crate::config::Config;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
@@ -39,6 +40,30 @@ use crate::responses_metadata::subagent_header_value;
 use crate::responses_metadata::subagent_metadata_kind;
 use crate::thread_manager;
 use crate::unified_exec;
+
+/// Supply fixed model metadata to tests without implementing a provider.
+pub fn fixed_model_catalog(
+    manager: SharedModelsManager,
+) -> Arc<dyn codex_model_provider::ModelCatalogFactory> {
+    struct FixedCatalog(SharedModelsManager);
+
+    impl codex_model_provider::ModelCatalogFactory for FixedCatalog {
+        fn build(
+            &self,
+            _provider: codex_model_provider::SharedModelProvider,
+            _config_model_catalog: Option<codex_protocol::openai_models::ModelsResponse>,
+            _api_key_model_discovery_default: bool,
+        ) -> SharedModelsManager {
+            Arc::clone(&self.0)
+        }
+
+        fn set_api_key_model_discovery_enabled(&self, enabled: bool) {
+            self.0.set_api_key_model_discovery_enabled(enabled);
+        }
+    }
+
+    Arc::new(FixedCatalog(manager))
+}
 
 static TEST_MODEL_PRESETS: Lazy<Vec<ModelPreset>> = Lazy::new(|| {
     let mut response = bundled_models_response()
@@ -137,7 +162,7 @@ pub async fn start_thread_with_user_shell_override(
         .await
 }
 
-pub async fn resume_thread_from_rollout_with_user_shell_override(
+pub async fn resume_legacy_thread_from_rollout_with_user_shell_override(
     thread_manager: &ThreadManager,
     config: Config,
     rollout_path: PathBuf,
@@ -146,7 +171,7 @@ pub async fn resume_thread_from_rollout_with_user_shell_override(
     supports_openai_form_elicitation: bool,
 ) -> codex_protocol::error::Result<crate::NewThread> {
     thread_manager
-        .resume_thread_from_rollout_with_user_shell_override_for_tests(
+        .resume_legacy_thread_from_rollout_with_user_shell_override_for_tests(
             config,
             rollout_path,
             auth_manager,
@@ -177,7 +202,9 @@ pub fn get_model_offline(model: Option<&str>) -> String {
 }
 
 pub fn construct_model_info_offline(model: &str, config: &Config) -> ModelInfo {
-    construct_model_info_offline_for_tests(model, &config.to_models_manager_config())
+    Arc::unwrap_or_clone(
+        construct_model_info_offline_for_tests(model, &config.to_models_manager_config()).model,
+    )
 }
 
 #[derive(Clone, Copy)]

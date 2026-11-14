@@ -19,6 +19,7 @@ class SourceBuildOutputs:
     entrypoint_bin: Path
     managed_codex_bin: Path | None
     code_mode_host_bin: Path
+    exec_server_bin: Path
     bwrap_bin: Path | None
     codex_command_runner_bin: Path | None
     codex_windows_sandbox_setup_bin: Path | None
@@ -33,6 +34,7 @@ def build_source_binaries(
     entrypoint_bin: Path | None,
     managed_codex_bin: Path | None,
     code_mode_host_bin: Path | None,
+    exec_server_bin: Path | None,
     bwrap_bin: Path | None,
     codex_command_runner_bin: Path | None,
     codex_windows_sandbox_setup_bin: Path | None,
@@ -50,6 +52,7 @@ def build_source_binaries(
         build_managed_codex=variant.managed_codex_required
         and managed_codex_bin is None,
         build_code_mode_host=code_mode_host_bin is None,
+        build_exec_server=exec_server_bin is None,
         build_bwrap=spec.is_linux and bwrap_bin is None,
         build_codex_command_runner=spec.is_windows and codex_command_runner_bin is None,
         build_codex_windows_sandbox_setup=spec.is_windows
@@ -102,6 +105,11 @@ def build_source_binaries(
             if code_mode_host_bin is not None
             else output_dir / f"codex-code-mode-host{spec.exe_suffix}"
         ),
+        exec_server_bin=(
+            exec_server_bin.resolve()
+            if exec_server_bin is not None
+            else output_dir / f"codex-exec-server{spec.exe_suffix}"
+        ),
         bwrap_bin=resolve_output_path(
             bwrap_bin,
             output_dir / "bwrap" if spec.is_linux else None,
@@ -130,6 +138,7 @@ def source_binaries_for_target(
     build_entrypoint: bool,
     build_managed_codex: bool,
     build_code_mode_host: bool,
+    build_exec_server: bool,
     build_bwrap: bool,
     build_codex_command_runner: bool,
     build_codex_windows_sandbox_setup: bool,
@@ -141,6 +150,8 @@ def source_binaries_for_target(
         binaries.append("codex")
     if build_code_mode_host:
         binaries.append("codex-code-mode-host")
+    if build_exec_server:
+        binaries.append("codex-exec-server")
     if build_bwrap:
         binaries.append("bwrap")
     if build_codex_command_runner:
@@ -208,6 +219,7 @@ def validate_source_outputs(outputs: SourceBuildOutputs) -> None:
         outputs.entrypoint_bin,
         outputs.managed_codex_bin,
         outputs.code_mode_host_bin,
+        outputs.exec_server_bin,
         outputs.bwrap_bin,
         outputs.codex_command_runner_bin,
         outputs.codex_windows_sandbox_setup_bin,

@@ -52,7 +52,7 @@ use codex_app_server_protocol::ThreadDeleteResponse;
 use codex_app_server_protocol::ThreadDeletedNotification;
 use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadInjectItemsParams;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::ThreadLoadedListResponse;
 use codex_app_server_protocol::ThreadMetadataUpdateParams;
@@ -584,11 +584,13 @@ async fn turn_start_with_empty_input_runs_model_request() -> Result<()> {
         })
         .await?;
     assert!(!turn.id.is_empty());
+    assert_eq!(turn.root_turn_id.as_deref(), Some(turn.id.as_str()));
 
     let started: TurnStartedNotification =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_notification("turn/started")).await??;
     assert_eq!(started.thread_id, thread.id);
     assert_eq!(started.turn.id, turn.id);
+    assert_eq!(started.turn.root_turn_id.as_deref(), Some(turn.id.as_str()));
     assert_eq!(started.turn.status, TurnStatus::InProgress);
 
     let completed: TurnCompletedNotification = timeout(
@@ -598,11 +600,15 @@ async fn turn_start_with_empty_input_runs_model_request() -> Result<()> {
     .await??;
     assert_eq!(completed.thread_id, thread.id);
     assert_eq!(completed.turn.id, turn.id);
+    assert_eq!(
+        completed.turn.root_turn_id.as_deref(),
+        Some(turn.id.as_str())
+    );
     assert_eq!(completed.turn.status, TurnStatus::Completed);
     assert_eq!(completed.turn.items_view, TurnItemsView::Summary);
     assert!(matches!(
         &completed.turn.items[..],
-        [ThreadItem::AgentMessage { text, .. }] if text == "Done"
+        [codex_app_server_protocol::ThreadItem { payload: ThreadItemPayload::AgentMessage { text, .. }, .. }] if text == "Done"
     ));
 
     let event = wait_for_analytics_event(&server, DEFAULT_READ_TIMEOUT, "codex_turn_event").await?;
@@ -709,11 +715,10 @@ async fn turn_start_steers_active_turn_and_returns_active_turn_id() -> Result<()
             },
         })
         .await?;
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("turn/started"),
-    )
-    .await??;
+    let started: TurnStartedNotification =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_notification("turn/started")).await??;
+    assert_eq!(active_turn.root_turn_id.as_deref(), Some("causal-root"));
+    assert_eq!(started.turn.root_turn_id.as_deref(), Some("causal-root"));
     timeout(
         DEFAULT_READ_TIMEOUT,
         server.wait_for_request_count(/*count*/ 1),
@@ -753,15 +758,17 @@ async fn turn_start_steers_active_turn_and_returns_active_turn_id() -> Result<()
         })
         .await?;
     assert_eq!(steered_turn.id, active_turn.id);
+    assert_eq!(steered_turn.root_turn_id, active_turn.root_turn_id);
 
     release_response
         .send(())
         .expect("active response gate should remain open");
-    timeout(
+    let completed: TurnCompletedNotification = timeout(
         DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("turn/completed"),
+        mcp.read_notification("turn/completed"),
     )
     .await??;
+    assert_eq!(completed.turn.root_turn_id.as_deref(), Some("causal-root"));
 
     let requests = server.requests().await;
     assert_eq!(requests.len(), 2);
@@ -778,8 +785,17 @@ async fn turn_start_steers_active_turn_and_returns_active_turn_id() -> Result<()
     Ok(())
 }
 
+#[test_case::test_case(false, Some("browser"); "disabled")]
+#[test_case::test_case(true, Some("browser"); "named_output")]
+#[test_case::test_case(true, Some("a"); "minimum_length")]
+#[test_case::test_case(true, Some("browser_2"); "digits_and_underscore")]
+#[test_case::test_case(true, Some(&"a".repeat(64)); "maximum_length")]
+#[test_case::test_case(true, None; "legacy_caller")]
 #[tokio::test]
-async fn turn_start_additional_context_flows_to_model_input() -> Result<()> {
+async fn turn_start_additional_context_flows_to_model_input(
+    tool_outputs: bool,
+    name: Option<&str>,
+) -> Result<()> {
     let responses = vec![create_final_assistant_message_sse_response("Done")?];
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
@@ -794,31 +810,100 @@ async fn turn_start_additional_context_flows_to_model_input() -> Result<()> {
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
             model: Some("mock-model".to_string()),
+            config: (!tool_outputs).then(|| {
+                HashMap::from([("features.untrusted_as_tool_output".to_owned(), json!(false))])
+            }),
             ..Default::default()
         })
         .await?;
 
-    let _: TurnStartResponse = mcp
-        .request(|request_id| ClientRequest::TurnStart {
-            request_id,
-            params: TurnStartParams {
-                thread_id: thread.id,
-                client_user_message_id: None,
-                input: vec![V2UserInput::Text {
-                    text: "inspect tab".to_string(),
-                    text_elements: Vec::new(),
-                }],
-                additional_context: Some(HashMap::from([(
-                    "custom_source".to_string(),
-                    AdditionalContextEntry {
-                        value: "source value".to_string(),
-                        kind: AdditionalContextKind::Untrusted,
-                    },
-                )])),
-                ..Default::default()
-            },
+    let rejected_request = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![V2UserInput::Text {
+                text: "rejected input".to_owned(),
+                text_elements: Vec::new(),
+            }],
+            additional_context: Some(HashMap::from([(
+                "application".to_owned(),
+                AdditionalContextEntry {
+                    value: "rejected context".to_owned(),
+                    kind: AdditionalContextKind::Application,
+                    name: Some("browser".to_owned()),
+                },
+            )])),
+            ..Default::default()
         })
         .await?;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(rejected_request)),
+    )
+    .await??;
+    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
+
+    let mut params = serde_json::to_value(TurnStartParams {
+        thread_id: thread.id,
+        client_user_message_id: None,
+        input: vec![V2UserInput::Text {
+            text: "inspect tab".to_string(),
+            text_elements: Vec::new(),
+        }],
+        additional_context: Some(HashMap::from([(
+            "custom_source".to_string(),
+            AdditionalContextEntry {
+                value: "source value".to_string(),
+                kind: AdditionalContextKind::Untrusted,
+                name: name.map(str::to_owned),
+            },
+        )])),
+        ..Default::default()
+    })?;
+    let entry = params["additionalContext"]["custom_source"]
+        .as_object_mut()
+        .context("additional context entry")?;
+    if name.is_none() {
+        entry.remove("name");
+    }
+    // Unknown wire fields cannot override the harness-owned namespace.
+    entry.insert("namespace".to_owned(), json!("other"));
+
+    let mut malformed_params = params.clone();
+    malformed_params["additionalContext"]["custom_source"]["name"] = json!("agent.browser");
+    let rejected_request = mcp
+        .send_request("turn/start", Some(malformed_params))
+        .await?;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(rejected_request)),
+    )
+    .await??;
+    assert_eq!(
+        error.error,
+        codex_app_server_protocol::JSONRPCErrorError {
+            code: INVALID_REQUEST_ERROR_CODE,
+            message: "additional context name must match [a-z][a-z0-9_]{0,63}".to_owned(),
+            data: None,
+        }
+    );
+
+    let capped_name = "A".repeat(128);
+    let long_key = format!("!{capped_name}z");
+    let unnamed_sources: &[(&str, &str)] = if tool_outputs && name.is_none() {
+        &[
+            ("Browser Tab/\té-_2", "Browser_Tab_2"),
+            ("Browser_Tab_2", "Browser_Tab_2"),
+            (&long_key, &capped_name),
+            ("!?", "untrusted_content"),
+        ]
+    } else {
+        &[]
+    };
+    for &(key, _) in unnamed_sources {
+        params["additionalContext"][key] = json!({"kind": "untrusted", "value": key});
+    }
+    let request_id = mcp.send_request("turn/start", Some(params)).await?;
+    let _: TurnStartResponse = mcp.read_response(request_id).await?;
     timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("turn/completed"),
@@ -836,16 +921,56 @@ async fn turn_start_additional_context_flows_to_model_input() -> Result<()> {
     let body = request
         .body_json::<Value>()
         .context("request body should be JSON")?;
-    assert!(
-        body.to_string()
-            .contains("<external_custom_source>source value</external_custom_source>")
-    );
+    let input = body["input"].as_array().context("input array")?;
+    let texts = input
+        .iter()
+        .filter_map(|item| item["content"].as_array())
+        .flatten()
+        .filter_map(|part| part["text"].as_str())
+        .collect::<Vec<_>>();
+    assert!(!texts.contains(&"rejected input"));
+    assert!(!texts.contains(&"<application>rejected context</application>"));
+    if tool_outputs {
+        let outputs = input
+            .iter()
+            .filter(|item| item["type"] == "function_call_output")
+            .map(|item| {
+                (
+                    item["name"].clone(),
+                    item["namespace"].clone(),
+                    item["output"].clone(),
+                    item.get("call_id").cloned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(outputs.len(), 1 + unnamed_sources.len());
+        for (value, expected_name) in
+            std::iter::once(("source value", name.unwrap_or("custom_source")))
+                .chain(unnamed_sources.iter().copied())
+        {
+            assert!(
+                outputs.contains(&(json!(expected_name), json!("agent"), json!(value), None)),
+                "missing agent.{expected_name} output for {value:?}: {outputs:?}"
+            );
+        }
+        assert!(!body.to_string().contains("<external_custom_source>"));
+    } else {
+        assert!(
+            body.to_string()
+                .contains("<external_custom_source>source value</external_custom_source>")
+        );
+        assert!(!body.to_string().contains("function_call_output"));
+    }
 
     Ok(())
 }
 
+#[test_case::test_case(None, TEST_ORIGINATOR)]
 #[tokio::test]
-async fn turn_start_sends_originator_header() -> Result<()> {
+async fn turn_start_sends_originator_header(
+    service_name: Option<&str>,
+    expected_originator: &str,
+) -> Result<()> {
     let responses = vec![create_final_assistant_message_sse_response("Done")?];
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
@@ -870,6 +995,7 @@ async fn turn_start_sends_originator_header() -> Result<()> {
         .start_thread(ThreadStartParams {
             model: Some("mock-model".to_string()),
             thread_source: Some(ThreadSource::User),
+            service_name: service_name.map(str::to_string),
             ..Default::default()
         })
         .await?;
@@ -905,7 +1031,7 @@ async fn turn_start_sends_originator_header() -> Result<()> {
             .headers
             .get("originator")
             .expect("originator header missing");
-        assert_eq!(originator.to_str()?, TEST_ORIGINATOR);
+        assert_eq!(originator.to_str()?, expected_originator);
     }
 
     Ok(())
@@ -955,15 +1081,15 @@ async fn turn_start_emits_user_message_item_with_text_elements() -> Result<()> {
         loop {
             let item_started: ItemStartedNotification =
                 mcp.read_notification("item/started").await?;
-            if let ThreadItem::UserMessage { .. } = item_started.item {
-                return Ok::<ThreadItem, anyhow::Error>(item_started.item);
+            if let ThreadItemPayload::UserMessage { .. } = item_started.item.payload {
+                return Ok::<ThreadItemPayload, anyhow::Error>(item_started.item.payload);
             }
         }
     })
     .await??;
 
     match user_message_item {
-        ThreadItem::UserMessage {
+        ThreadItemPayload::UserMessage {
             client_id, content, ..
         } => {
             assert_eq!(client_id, Some("client-message-1".to_string()));
@@ -2243,12 +2369,12 @@ allow_upstream_proxy = false
         loop {
             let completed: ItemCompletedNotification =
                 app_server.read_notification("item/completed").await?;
-            if let ThreadItem::CommandExecution {
+            if let ThreadItemPayload::CommandExecution {
                 id,
                 status,
                 exit_code,
                 ..
-            } = completed.item
+            } = completed.item.payload
                 && id == call_id
             {
                 assert_eq!(
@@ -2311,6 +2437,11 @@ fn managed_network_sandbox_probe() -> Result<()> {
         connection,
         "GET http://{target}/sandbox HTTP/1.0\r\nHost: {target}\r\nConnection: close\r\n\r\n"
     )?;
+    if let Some(signal) = std::env::var_os("CODEX_TEST_DISCONNECT_NETWORK_PROBE") {
+        // The parent releases its lock after receiving the approval, or when the test exits.
+        std::fs::File::open(signal)?.lock_shared()?;
+        return Ok(());
+    }
     let mut response = String::new();
     connection
         .take(/*limit*/ 4096)
@@ -2877,6 +3008,9 @@ async fn thread_start_ignores_deprecated_multi_agent_mode() -> Result<()> {
     Ok(())
 }
 
+#[test_case(Personality::Pragmatic, Personality::Friendly; "friendly")]
+#[test_case(Personality::Friendly, Personality::Pragmatic; "pragmatic")]
+#[test_case(Personality::Friendly, Personality::None; "none")]
 #[tokio::test]
 async fn turn_start_ignores_personality_change_mid_thread_v2() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -2919,7 +3053,7 @@ async fn turn_start_ignores_personality_change_mid_thread_v2() -> Result<()> {
                     text: "Hello".to_string(),
                     text_elements: Vec::new(),
                 }],
-                personality: None,
+                personality: Some(first_personality),
                 ..Default::default()
             },
         })
@@ -2930,6 +3064,7 @@ async fn turn_start_ignores_personality_change_mid_thread_v2() -> Result<()> {
         mcp.read_stream_until_notification_message("turn/completed"),
     )
     .await??;
+    mcp.clear_message_buffer();
 
     let _turn2: TurnStartResponse = mcp
         .request(|request_id| ClientRequest::TurnStart {
@@ -2941,11 +3076,21 @@ async fn turn_start_ignores_personality_change_mid_thread_v2() -> Result<()> {
                     text: "Hello again".to_string(),
                     text_elements: Vec::new(),
                 }],
-                personality: Some(Personality::Friendly),
+                personality: Some(next_personality),
                 ..Default::default()
             },
         })
         .await?;
+
+    let settings_updated: ThreadSettingsUpdatedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("thread/settings/updated"),
+    )
+    .await??;
+    assert_eq!(
+        settings_updated.thread_settings.personality,
+        Some(next_personality)
+    );
 
     timeout(
         DEFAULT_READ_TIMEOUT,
@@ -2978,13 +3123,13 @@ async fn turn_start_ignores_personality_change_mid_thread_v2() -> Result<()> {
 }
 
 #[tokio::test]
-async fn turn_start_defaults_local_image_detail_to_high() -> Result<()> {
+async fn turn_start_defaults_local_image_detail_to_original() -> Result<()> {
     let input_images = run_local_image_turn(/*detail*/ None).await?;
 
     assert_eq!(input_images.len(), 1);
     assert_eq!(
         input_images[0].get("detail").and_then(Value::as_str),
-        Some("high")
+        Some("original")
     );
 
     Ok(())
@@ -3106,6 +3251,7 @@ async fn turn_start_exec_approval_toggle_v2() -> Result<()> {
         params.command.as_deref(),
         Some(expected_approval_command.as_str())
     );
+    let approval_started_at_ms = params.started_at_ms;
     let resolved_request_id = request_id.clone();
 
     // Approve and wait for task completion
@@ -3127,14 +3273,15 @@ async fn turn_start_exec_approval_toggle_v2() -> Result<()> {
             "item/completed" => {
                 let completed: ItemCompletedNotification =
                     serde_json::from_value(notification.params.expect("item/completed params"))?;
-                match completed.item {
-                    ThreadItem::CommandExecution {
+                match completed.item.payload {
+                    ThreadItemPayload::CommandExecution {
                         id,
                         command,
                         exit_code,
                         aggregated_output,
                         ..
                     } if id == "call1" => {
+                        assert_eq!(completed.item.started_at_ms, Some(approval_started_at_ms));
                         assert_eq!(command, expected_display_command);
                         assert_eq!(exit_code, Some(0));
                         assert!(aggregated_output.is_some_and(|output| output.contains("True")));
@@ -3312,13 +3459,13 @@ async fn run_turn_start_exec_approval_rejection_v2(
     let started_command_execution = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
             let started: ItemStartedNotification = mcp.read_notification("item/started").await?;
-            if let ThreadItem::CommandExecution { .. } = started.item {
-                return Ok::<ThreadItem, anyhow::Error>(started.item);
+            if let ThreadItemPayload::CommandExecution { .. } = started.item.payload {
+                return Ok::<ThreadItemPayload, anyhow::Error>(started.item.payload);
             }
         }
     })
     .await??;
-    let ThreadItem::CommandExecution {
+    let ThreadItemPayload::CommandExecution {
         id,
         status,
         command,
@@ -3359,13 +3506,13 @@ async fn run_turn_start_exec_approval_rejection_v2(
         loop {
             let completed: ItemCompletedNotification =
                 mcp.read_notification("item/completed").await?;
-            if let ThreadItem::CommandExecution { .. } = completed.item {
-                return Ok::<ThreadItem, anyhow::Error>(completed.item);
+            if let ThreadItemPayload::CommandExecution { .. } = completed.item.payload {
+                return Ok::<ThreadItemPayload, anyhow::Error>(completed.item.payload);
             }
         }
     })
     .await??;
-    let ThreadItem::CommandExecution {
+    let ThreadItemPayload::CommandExecution {
         id,
         status,
         command,
@@ -3478,8 +3625,11 @@ async fn turn_start_explicit_local_environment_updates_legacy_cwd_between_turns(
                     text_elements: Vec::new(),
                 }],
                 turn_trigger: None,
+                parent_turn_id: None,
+                root_turn_id: None,
                 tool_output: None,
                 responsesapi_client_metadata: None,
+                responsesapi_client_metadata_patch: None,
                 additional_context: None,
                 cwd: Some(first_cwd.clone()),
                 runtime_workspace_roots: None,
@@ -3531,8 +3681,11 @@ async fn turn_start_explicit_local_environment_updates_legacy_cwd_between_turns(
                     text_elements: Vec::new(),
                 }],
                 turn_trigger: None,
+                parent_turn_id: None,
+                root_turn_id: None,
                 tool_output: None,
                 responsesapi_client_metadata: None,
+                responsesapi_client_metadata_patch: None,
                 additional_context: None,
                 cwd: None,
                 runtime_workspace_roots: None,
@@ -3564,13 +3717,16 @@ async fn turn_start_explicit_local_environment_updates_legacy_cwd_between_turns(
         loop {
             let item_started: ItemStartedNotification =
                 mcp.read_notification("item/started").await?;
-            if matches!(item_started.item, ThreadItem::CommandExecution { .. }) {
-                return Ok::<ThreadItem, anyhow::Error>(item_started.item);
+            if matches!(
+                item_started.item.payload,
+                ThreadItemPayload::CommandExecution { .. }
+            ) {
+                return Ok::<ThreadItemPayload, anyhow::Error>(item_started.item.payload);
             }
         }
     })
     .await??;
-    let ThreadItem::CommandExecution {
+    let ThreadItemPayload::CommandExecution {
         cwd,
         command,
         status,
@@ -3938,13 +4094,13 @@ async fn turn_start_file_change_approval_v2() -> Result<()> {
     let started_file_change = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
             let started: ItemStartedNotification = mcp.read_notification("item/started").await?;
-            if let ThreadItem::FileChange { .. } = started.item {
-                return Ok::<ThreadItem, anyhow::Error>(started.item);
+            if let ThreadItemPayload::FileChange { .. } = started.item.payload {
+                return Ok::<ThreadItemPayload, anyhow::Error>(started.item.payload);
             }
         }
     })
     .await??;
-    let ThreadItem::FileChange {
+    let ThreadItemPayload::FileChange {
         ref id,
         status,
         ref changes,
@@ -3987,7 +4143,7 @@ async fn turn_start_file_change_approval_v2() -> Result<()> {
     )
     .await?;
     let mut saw_resolved = false;
-    let mut completed_file_change: Option<ThreadItem> = None;
+    let mut completed_file_change: Option<ThreadItemPayload> = None;
     while completed_file_change.is_none() {
         let message = timeout(DEFAULT_READ_TIMEOUT, mcp.read_next_message()).await??;
         let JSONRPCMessage::Notification(notification) = message else {
@@ -4009,9 +4165,9 @@ async fn turn_start_file_change_approval_v2() -> Result<()> {
                 let completed: ItemCompletedNotification = serde_json::from_value(
                     notification.params.clone().expect("item/completed params"),
                 )?;
-                if let ThreadItem::FileChange { .. } = completed.item {
+                if let ThreadItemPayload::FileChange { .. } = completed.item.payload {
                     assert!(saw_resolved, "serverRequest/resolved should arrive first");
-                    completed_file_change = Some(completed.item);
+                    completed_file_change = Some(completed.item.payload);
                 }
             }
             _ => {}
@@ -4019,7 +4175,7 @@ async fn turn_start_file_change_approval_v2() -> Result<()> {
     }
     let completed_file_change =
         completed_file_change.expect("file change completion should be observed");
-    let ThreadItem::FileChange { ref id, status, .. } = completed_file_change else {
+    let ThreadItemPayload::FileChange { ref id, status, .. } = completed_file_change else {
         unreachable!("loop ensures we break on file change items");
     };
     assert_eq!(id, "patch-call");
@@ -4403,17 +4559,17 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
     let spawn_started = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
             let started: ItemStartedNotification = mcp.read_notification("item/started").await?;
-            if let ThreadItem::CollabAgentToolCall { id, .. } = &started.item
+            if let ThreadItemPayload::CollabAgentToolCall { id, .. } = &started.item.payload
                 && id == SPAWN_CALL_ID
             {
-                return Ok::<ThreadItem, anyhow::Error>(started.item);
+                return Ok::<ThreadItemPayload, anyhow::Error>(started.item.payload);
             }
         }
     })
     .await??;
     assert_eq!(
         spawn_started,
-        ThreadItem::CollabAgentToolCall {
+        ThreadItemPayload::CollabAgentToolCall {
             id: SPAWN_CALL_ID.to_string(),
             tool: CollabAgentTool::SpawnAgent,
             status: CollabAgentToolCallStatus::InProgress,
@@ -4430,15 +4586,15 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
         loop {
             let completed: ItemCompletedNotification =
                 mcp.read_notification("item/completed").await?;
-            if let ThreadItem::CollabAgentToolCall { id, .. } = &completed.item
+            if let ThreadItemPayload::CollabAgentToolCall { id, .. } = &completed.item.payload
                 && id == SPAWN_CALL_ID
             {
-                return Ok::<ThreadItem, anyhow::Error>(completed.item);
+                return Ok::<ThreadItemPayload, anyhow::Error>(completed.item.payload);
             }
         }
     })
     .await??;
-    let ThreadItem::CollabAgentToolCall {
+    let ThreadItemPayload::CollabAgentToolCall {
         id,
         tool,
         status,
@@ -4647,15 +4803,15 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected(
             let completed: ItemCompletedNotification =
                 mcp.read_notification("item/completed").await?;
             assert!(!matches!(
-                &completed.item,
-                ThreadItem::CollabAgentToolCall { .. }
+                &completed.item.payload,
+                ThreadItemPayload::CollabAgentToolCall { .. }
             ));
-            if let ThreadItem::SubAgentActivity {
+            if let ThreadItemPayload::SubAgentActivity {
                 id,
                 kind: SubAgentActivityKind::Started,
                 agent_thread_id,
                 ..
-            } = completed.item
+            } = completed.item.payload
                 && id == SPAWN_CALL_ID
             {
                 return Ok::<String, anyhow::Error>(agent_thread_id);
@@ -4668,6 +4824,11 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected(
         .request(|request_id| ClientRequest::ThreadList {
             request_id,
             params: codex_app_server_protocol::ThreadListParams {
+                include_attached_threads: false,
+                current_account_only: false,
+                included_thread_ids: None,
+                excluded_thread_ids: None,
+                attached_to_thread_id: None,
                 originators: None,
                 cursor: None,
                 limit: Some(10),
@@ -4753,6 +4914,7 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected(
                 text_elements: Vec::new(),
             }],
             responsesapi_client_metadata: None,
+            responsesapi_client_metadata_patch: None,
             additional_context: None,
             expected_turn_id: "any-active-turn".to_string(),
         })
@@ -4837,13 +4999,6 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected(
             json!({
                 "target": {"type": "custom", "instructions": "Replace the child's task."},
                 "delivery": "inline",
-            }),
-        ),
-        (
-            "review/start",
-            json!({
-                "target": {"type": "custom", "instructions": "Start a detached task."},
-                "delivery": "detached",
             }),
         ),
         (
@@ -5060,15 +5215,15 @@ config_file = "./custom-role.toml"
         loop {
             let completed: ItemCompletedNotification =
                 mcp.read_notification("item/completed").await?;
-            if let ThreadItem::CollabAgentToolCall { id, .. } = &completed.item
+            if let ThreadItemPayload::CollabAgentToolCall { id, .. } = &completed.item.payload
                 && id == SPAWN_CALL_ID
             {
-                return Ok::<ThreadItem, anyhow::Error>(completed.item);
+                return Ok::<ThreadItemPayload, anyhow::Error>(completed.item.payload);
             }
         }
     })
     .await??;
-    let ThreadItem::CollabAgentToolCall {
+    let ThreadItemPayload::CollabAgentToolCall {
         id,
         tool,
         status,
@@ -5195,13 +5350,13 @@ async fn turn_start_file_change_approval_accept_for_session_persists_v2() -> Res
     let started_file_change_1 = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
             let started: ItemStartedNotification = mcp.read_notification("item/started").await?;
-            if let ThreadItem::FileChange { .. } = started.item {
-                return Ok::<ThreadItem, anyhow::Error>(started.item);
+            if let ThreadItemPayload::FileChange { .. } = started.item.payload {
+                return Ok::<ThreadItemPayload, anyhow::Error>(started.item.payload);
             }
         }
     })
     .await??;
-    let ThreadItem::FileChange { id, status, .. } = started_file_change_1 else {
+    let ThreadItemPayload::FileChange { id, status, .. } = started_file_change_1 else {
         unreachable!("loop ensures we break on file change items");
     };
     assert_eq!(id, "patch-call-1");
@@ -5248,7 +5403,7 @@ async fn turn_start_file_change_approval_accept_for_session_persists_v2() -> Res
             "item/completed" => {
                 let completed: ItemCompletedNotification =
                     serde_json::from_value(notification.params.expect("item/completed params"))?;
-                if matches!(completed.item, ThreadItem::FileChange { ref id, .. } if id == "patch-call-1")
+                if matches!(completed.item.payload, ThreadItemPayload::FileChange { ref id, .. } if id == "patch-call-1")
                 {
                     assert_eq!(completed.thread_id, thread.id);
                     assert_eq!(completed.turn_id, turn_1.id);
@@ -5287,13 +5442,13 @@ async fn turn_start_file_change_approval_accept_for_session_persists_v2() -> Res
     let started_file_change_2 = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
             let started: ItemStartedNotification = mcp.read_notification("item/started").await?;
-            if let ThreadItem::FileChange { .. } = started.item {
-                return Ok::<ThreadItem, anyhow::Error>(started.item);
+            if let ThreadItemPayload::FileChange { .. } = started.item.payload {
+                return Ok::<ThreadItemPayload, anyhow::Error>(started.item.payload);
             }
         }
     })
     .await??;
-    let ThreadItem::FileChange { id, status, .. } = started_file_change_2 else {
+    let ThreadItemPayload::FileChange { id, status, .. } = started_file_change_2 else {
         unreachable!("loop ensures we break on file change items");
     };
     assert_eq!(id, "patch-call-2");
@@ -5311,7 +5466,7 @@ async fn turn_start_file_change_approval_accept_for_session_persists_v2() -> Res
                     let completed: ItemCompletedNotification = serde_json::from_value(
                         notification.params.expect("item/completed params"),
                     )?;
-                    if matches!(completed.item, ThreadItem::FileChange { ref id, .. } if id == "patch-call-2")
+                    if matches!(completed.item.payload, ThreadItemPayload::FileChange { ref id, .. } if id == "patch-call-2")
                     {
                         return Ok::<ItemCompletedNotification, anyhow::Error>(completed);
                     }
@@ -5423,13 +5578,13 @@ async fn run_turn_start_file_change_approval_rejection_v2(
     let started_file_change = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
             let started: ItemStartedNotification = mcp.read_notification("item/started").await?;
-            if let ThreadItem::FileChange { .. } = started.item {
-                return Ok::<ThreadItem, anyhow::Error>(started.item);
+            if let ThreadItemPayload::FileChange { .. } = started.item.payload {
+                return Ok::<ThreadItemPayload, anyhow::Error>(started.item.payload);
             }
         }
     })
     .await??;
-    let ThreadItem::FileChange {
+    let ThreadItemPayload::FileChange {
         ref id,
         status,
         ref changes,
@@ -5469,13 +5624,13 @@ async fn run_turn_start_file_change_approval_rejection_v2(
         loop {
             let completed: ItemCompletedNotification =
                 mcp.read_notification("item/completed").await?;
-            if let ThreadItem::FileChange { .. } = completed.item {
-                return Ok::<ThreadItem, anyhow::Error>(completed.item);
+            if let ThreadItemPayload::FileChange { .. } = completed.item.payload {
+                return Ok::<ThreadItemPayload, anyhow::Error>(completed.item.payload);
             }
         }
     })
     .await??;
-    let ThreadItem::FileChange { ref id, status, .. } = completed_file_change else {
+    let ThreadItemPayload::FileChange { ref id, status, .. } = completed_file_change else {
         unreachable!("loop ensures we break on file change items");
     };
     assert_eq!(id, "patch-call");
@@ -5506,9 +5661,13 @@ async fn run_turn_start_file_change_approval_rejection_v2(
     Ok(())
 }
 
+#[cfg_attr(not(windows), test_case(None; "started"))]
+#[test_case(Some(json!({"cmd": "echo unreachable", "workdir": "missing-work-directory", "tty": false})); "pipe_launch_failure")]
+#[test_case(Some(json!({"cmd": "echo unreachable\u{0}", "tty": true, "login": false})); "pty_launch_failure")]
 #[tokio::test]
-#[cfg_attr(windows, ignore = "process id reporting differs on Windows")]
-async fn command_execution_notifications_include_process_id() -> Result<()> {
+async fn command_execution_notifications_include_process_id(
+    launch_failure_args: Option<Value>,
+) -> Result<()> {
     // TODO(anp): Add target-Windows process-id expectations for remote executors.
     skip_if_wine_exec!(
         Ok(()),
@@ -5516,8 +5675,18 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
     );
     skip_if_no_network!(Ok(()));
 
+    let launch_failed = launch_failure_args.is_some();
+    let command = if let Some(args) = launch_failure_args {
+        responses::sse(vec![
+            responses::ev_response_created("launch"),
+            responses::ev_function_call("uexec-1", "exec_command", &args.to_string()),
+            responses::ev_completed("launch"),
+        ])
+    } else {
+        create_exec_command_sse_response("uexec-1")?
+    };
     let responses = vec![
-        create_exec_command_sse_response("uexec-1")?,
+        command,
         create_final_assistant_message_sse_response("done")?,
     ];
     let server = create_mock_responses_server_sequence(responses).await;
@@ -5525,6 +5694,7 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
     MockResponsesConfig::new(&server.uri())
         .with_sandbox_mode("danger-full-access")
         .enable_feature(Feature::UnifiedExec)
+        .disable_feature(Feature::ShellSnapshot)
         .write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
@@ -5558,13 +5728,13 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
     let started_command = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
             let started: ItemStartedNotification = mcp.read_notification("item/started").await?;
-            if let ThreadItem::CommandExecution { .. } = started.item {
-                return Ok::<ThreadItem, anyhow::Error>(started.item);
+            if let ThreadItemPayload::CommandExecution { .. } = started.item.payload {
+                return Ok::<ThreadItemPayload, anyhow::Error>(started.item.payload);
             }
         }
     })
     .await??;
-    let ThreadItem::CommandExecution {
+    let ThreadItemPayload::CommandExecution {
         id,
         process_id: started_process_id,
         status,
@@ -5575,23 +5745,25 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
     };
     assert_eq!(id, "uexec-1");
     assert_eq!(status, CommandExecutionStatus::InProgress);
-    let started_process_id = started_process_id.expect("process id should be present");
+    assert_eq!(started_process_id.is_none(), launch_failed);
 
     let completed_command = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
             let completed: ItemCompletedNotification =
                 mcp.read_notification("item/completed").await?;
-            if let ThreadItem::CommandExecution { .. } = completed.item {
-                return Ok::<ThreadItem, anyhow::Error>(completed.item);
+            if let ThreadItemPayload::CommandExecution { .. } = completed.item.payload {
+                return Ok::<ThreadItemPayload, anyhow::Error>(completed.item.payload);
             }
         }
     })
     .await??;
-    let ThreadItem::CommandExecution {
+    let ThreadItemPayload::CommandExecution {
         id: completed_id,
         process_id: completed_process_id,
         status: completed_status,
         exit_code,
+        duration_ms,
+        aggregated_output,
         ..
     } = completed_command
     else {
@@ -5605,15 +5777,22 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
         ),
         "unexpected command execution status: {completed_status:?}"
     );
-    if completed_status == CommandExecutionStatus::Completed {
+    if launch_failed {
+        assert_eq!(
+            (completed_status, exit_code, duration_ms),
+            (CommandExecutionStatus::Failed, Some(-1), Some(0))
+        );
+        assert!(
+            aggregated_output
+                .context("launch diagnostic")?
+                .starts_with("Failed to create unified exec process:")
+        );
+    } else if completed_status == CommandExecutionStatus::Completed {
         assert_eq!(exit_code, Some(0));
     } else {
         assert!(exit_code.is_some(), "expected exit_code for failed command");
     }
-    assert_eq!(
-        completed_process_id.as_deref(),
-        Some(started_process_id.as_str())
-    );
+    assert_eq!(completed_process_id, started_process_id);
 
     timeout(
         DEFAULT_READ_TIMEOUT,
@@ -5621,16 +5800,30 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
     )
     .await??;
 
+    for method in mcp.pending_notification_methods() {
+        let notification = mcp.read_stream_until_notification_message(&method).await?;
+        assert_ne!(
+            notification.params.context("notification params")?["item"]["id"],
+            "uexec-1"
+        );
+    }
+
     Ok(())
 }
 
 #[cfg_attr(windows, ignore = "plugin attribution fixture is Unix-only")]
+#[test_case(CommandExecutionStatus::Completed; "completed")]
+#[test_case(CommandExecutionStatus::Failed; "launch_failure")]
 #[tokio::test]
-async fn command_execution_notifications_include_trusted_plugin_id() -> Result<()> {
+async fn command_execution_notifications_include_trusted_plugin_id(
+    expected_status: CommandExecutionStatus,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_wine_exec!(Ok(()), "plugin attribution fixture is Unix-only");
 
     let codex_home = TempDir::new()?;
+    let missing_cwd = codex_home.path().join("missing-work-directory");
+    let launch_failed = expected_status == CommandExecutionStatus::Failed;
     let curated_sha = "0123456789abcdef0123456789abcdef01234567";
     let plugin_root = codex_home
         .path()
@@ -5672,7 +5865,7 @@ async fn command_execution_notifications_include_trusted_plugin_id() -> Result<(
                 "/bin/sh".to_string(),
                 script_path.to_string_lossy().into_owned(),
             ],
-            /*workdir*/ None,
+            launch_failed.then_some(missing_cwd.as_path()),
             /*timeout_ms*/ None,
             "plugin-command",
         )?,
@@ -5683,7 +5876,9 @@ async fn command_execution_notifications_include_trusted_plugin_id() -> Result<(
         .with_approval_policy("on-request")
         .with_sandbox_mode("danger-full-access")
         .enable_feature(Feature::Plugins)
+        .enable_feature(Feature::UnifiedExec)
         .disable_feature(Feature::RemotePlugin)
+        .disable_feature(Feature::ShellSnapshot)
         .with_extra_config("[plugins.\"google-calendar@openai-api-curated\"]\nenabled = true")
         .write(codex_home.path())?;
 
@@ -5718,8 +5913,8 @@ async fn command_execution_notifications_include_trusted_plugin_id() -> Result<(
                 let notification = mcp.read_stream_until_notification_message(method).await?;
                 let params = notification.params.expect("item notification params");
                 let item_json = params.get("item").expect("item notification item").clone();
-                let item = serde_json::from_value::<ThreadItem>(item_json.clone())?;
-                if let ThreadItem::CommandExecution { status, .. } = item {
+                let item = serde_json::from_value::<ThreadItemPayload>(item_json.clone())?;
+                if let ThreadItemPayload::CommandExecution { status, .. } = item {
                     let emitted_script_path = item_json
                         .get("scriptPath")
                         .and_then(serde_json::Value::as_str)
@@ -5744,7 +5939,7 @@ async fn command_execution_notifications_include_trusted_plugin_id() -> Result<(
         if method == "item/started" {
             assert_eq!(status, CommandExecutionStatus::InProgress);
         } else {
-            assert_eq!(status, CommandExecutionStatus::Completed);
+            assert_eq!(status, expected_status);
         }
     }
 

@@ -1,6 +1,7 @@
 name: cargo-deny
 
 on:
+  workflow_call:
   workflow_dispatch:
 
 # Cargo's libgit2 transport has been flaky when fetching git dependencies with
@@ -23,13 +24,47 @@ jobs:
       - uses: ./.github/actions/setup-ci
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
 
       - name: Run cargo-deny
         uses: EmbarkStudios/cargo-deny-action@82eb9f621fbc699dd0918f3ea06864c14cc84246 # v2
         with:
-          rust-version: 1.95.0
+          rust-version: 1.99.1
           manifest-path: ./codex-rs/Cargo.toml
+
+      # The action runs its own binary and does not export it to later steps.
+      - name: Install policy diagnostic CLI after a failed check
+        if: failure()
+        uses: taiki-e/install-action@60ae4ce63c7aeb6e96d7f572c1ec7fafbb17ca80 # v2
+        with:
+          tool: cargo-deny
+
+      - name: Capture failed policy check for exact-source diagnosis
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/cargo-deny-diagnostic.txt"
+          if command -v cargo-deny >/dev/null 2>&1; then
+            if ! cargo deny --format json check > "$report" 2>&1; then
+              printf '\nCLI version and supported options:\n' >> "$report"
+              cargo deny --version >> "$report" 2>&1 || true
+              cargo deny --help >> "$report" 2>&1 || true
+            fi
+            test -s "$report"
+          else
+            printf '%s\n' 'cargo-deny executable unavailable after action' > "$report"
+          fi
+          test "$(wc -c < "$report")" -le 1048576
+
+      - name: Upload failed policy check for review
+        if: failure()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: cargo-deny-diagnostic-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cargo-deny-diagnostic.txt
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Check for a clean worktree
         if: always() && !cancelled()

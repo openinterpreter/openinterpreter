@@ -7,6 +7,7 @@
 
 use std::borrow::Cow;
 use std::ops::Range;
+use std::sync::Arc;
 
 #[path = "text_logical.rs"]
 mod logical;
@@ -40,43 +41,433 @@ use logical::logical_lines;
 use ratatui::text::Line;
 
 /// One cell's logical text and its width-dependent display rows.
-pub(super) struct TextLayout {
+pub(crate) struct TextLayout {
+    pub(super) image: Option<Arc<crate::transcript_image::TranscriptImage>>,
     logical: Vec<LogicalLine>,
     text: String,
     rows: Vec<TextRow>,
     width: u16,
     pub(super) separated: bool,
     pub(super) disclosure: bool,
+    leading_blank_hidden: bool,
     disclosure_control: Option<DisclosureControl>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DisclosureAnchor {
+    Activity(usize),
+    Turn,
 }
 
 struct DisclosureControl {
     label: String,
-    source_offset: usize,
+    anchor: DisclosureAnchor,
     row: usize,
 }
 
 struct TextRow {
     line: HyperlinkLine,
     source: Range<usize>,
+    /// Logical hard-break offset, absent from soft wraps and synthetic rows.
+    line_end: Option<usize>,
     content_width: u16,
     first_column: usize,
     prefix_columns: usize,
     tabs: tabs::TabStops,
 }
 
+pub(super) struct TableCellHit {
+    table: Arc<[&'static str]>,
+    pub(super) endpoint: TableEndpoint,
+    line: Range<usize>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct TableEndpoint {
+    pub(super) cell: (usize, usize),
+    pub(super) record_row: Option<usize>,
+}
+
+impl TableEndpoint {
+    pub(super) fn display_row(self) -> usize {
+        self.record_row.unwrap_or(self.cell.0)
+    }
+
+    pub(super) fn is_header_row_with(self, other: Self) -> bool {
+        self.cell.0 == 0 && other.cell.0 == 0 && self.record_row == other.record_row
+    }
+}
+
+impl TableCellHit {
+    fn new(
+        table: &crate::markdown_copy::table::TableLine,
+        cell: (usize, usize),
+        line: Range<usize>,
+    ) -> Self {
+        Self {
+            table: Arc::clone(&table.table),
+            endpoint: TableEndpoint {
+                cell,
+                record_row: table.record_row,
+            },
+            line,
+        }
+    }
+
+    pub(super) fn same_table(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.table, &other.table)
+    }
+}
+
 impl TextLayout {
+    pub(super) fn copy_block_ranges(&self) -> Vec<(Range<usize>, &'static str, Option<String>)> {
+        let mut ranges = Vec::new();
+        for (label, code) in [("Code block", true), ("Blockquote", false)] {
+            let mut active: Option<(Range<usize>, Option<Arc<str>>)> = None;
+            let mut offset = 0;
+            for line in &self.logical {
+                let end = offset + line.origin.range.len();
+                let metadata = line.origin.copy.as_deref();
+                let matches = metadata.is_some_and(|copy| {
+                    if code {
+                        copy.code || copy.code_source.is_some()
+                    } else {
+                        copy.prefix.contains('>')
+                    }
+                });
+                if matches {
+                    let source = metadata.and_then(|copy| {
+                        if code {
+                            copy.code_source.as_ref()
+                        } else {
+                            copy.quote_source.as_ref()
+                        }
+                    });
+                    if let Some(source) = source
+                        && active
+                            .as_ref()
+                            .and_then(|(_, retained)| retained.as_ref())
+                            .is_some_and(|retained| !Arc::ptr_eq(retained, source))
+                        && let Some((range, retained)) = active.take()
+                    {
+                        ranges.push((range, label, retained.map(|source| source.to_string())));
+                    }
+                    let (range, retained) = active.get_or_insert((offset..end, None));
+                    range.end = end;
+                    if retained.is_none() {
+                        *retained = source.cloned();
+                    }
+                } else if let Some((range, source)) = active.take() {
+                    ranges.push((range, label, source.map(|source| source.to_string())));
+                }
+                offset = end + 1;
+            }
+            if let Some((range, source)) = active {
+                ranges.push((range, label, source.map(|source| source.to_string())));
+            }
+        }
+        ranges.retain(|(range, _, _)| {
+            self.text
+                .get(range.clone())
+                .is_some_and(|text| !text.trim().is_empty())
+        });
+        ranges
+    }
+
+    fn logical_sources(&self) -> impl Iterator<Item = (usize, &LogicalLineSource)> {
+        self.logical.iter().scan(0, |offset, line| {
+            let start = *offset;
+            *offset += line.origin.range.len() + 1;
+            Some((start, &line.origin))
+        })
+    }
+
+    pub(super) fn table_cell_at(
+        &self,
+        row: usize,
+        column: u16,
+        offset: usize,
+    ) -> Option<TableCellHit> {
+        let display_row = self.rows.get(row)?;
+        if usize::from(column) < display_row.first_column {
+            return None;
+        }
+        let (position, origin) = self
+            .logical_sources()
+            .find(|(start, source)| (*start..=*start + source.range.len()).contains(&offset))?;
+        let table = origin.copy.as_ref()?.table.as_ref()?;
+        let trailing = if offset != display_row.source.end {
+            0
+        } else if display_row.line_end == Some(offset) {
+            column.saturating_sub(self.column_for_offset_on_row(row, offset))
+        } else {
+            return None;
+        };
+        let byte = origin.range.start + offset - position;
+        let column = display_width(&origin.text[..byte]) + usize::from(trailing);
+        let cell = table.cell_at(byte + usize::from(trailing), column)?;
+        Some(TableCellHit::new(
+            table,
+            cell,
+            position..position + origin.range.len(),
+        ))
+    }
+
+    pub(super) fn table_cell_at_offset(
+        &self,
+        offset: usize,
+        cell: (usize, usize),
+    ) -> Option<TableCellHit> {
+        let (start, source) = self
+            .logical_sources()
+            .find(|(start, source)| (*start..=*start + source.range.len()).contains(&offset))?;
+        let table = source.copy.as_ref()?.table.as_ref()?;
+        Some(TableCellHit::new(
+            table,
+            cell,
+            start..start + source.range.len(),
+        ))
+    }
+
+    /// Find a logical cell, retaining its grid column even when a trailing cell is blank.
+    pub(super) fn table_cell_position(
+        &self,
+        current: &TableCellHit,
+        cell: (usize, usize),
+    ) -> Option<(usize, Option<u16>)> {
+        let (row, column) = cell;
+        let mut padding = None;
+        for (start, source) in self.logical_sources() {
+            let Some(table) = source.copy.as_ref().and_then(|copy| copy.table.as_ref()) else {
+                continue;
+            };
+            if !Arc::ptr_eq(&table.table, &current.table) {
+                continue;
+            }
+            if row == 0
+                && current.endpoint.cell.0 == 0
+                && table.record_row != current.endpoint.record_row
+            {
+                continue;
+            }
+            let range = table.cell_range(&(row..=row), &(column..=column));
+            let position = range.and_then(|range| {
+                if range.is_empty() && source.range.is_empty() {
+                    let padding = display_width(&source.text[..range.start]);
+                    Some((start, u16::try_from(padding).ok()))
+                } else if range.start <= source.range.end && range.end >= source.range.start {
+                    Some((start + range.start.saturating_sub(source.range.start), None))
+                } else {
+                    None
+                }
+            });
+            if let Some(position) = position {
+                return Some(position);
+            }
+            if padding.is_none()
+                && let Some(column) = table.grid_cell_column(row, column)
+                && let Some(display_row) = self.rows.get(self.row_for_offset(start))
+            {
+                let first_column = display_row.first_column;
+                let source_prefix = display_width(&source.text[..source.range.start]);
+                let column = first_column + column.saturating_sub(source_prefix);
+                padding = Some((
+                    start + source.range.len(),
+                    Some(u16::try_from(column).unwrap_or(u16::MAX)),
+                ));
+            }
+        }
+        padding
+    }
+
+    pub(super) fn is_table_row(&self, row: usize, offset: usize, hit: &TableCellHit) -> bool {
+        self.rows
+            .get(row)
+            .is_some_and(|row| row.source.start <= offset && offset <= row.source.end)
+            && self.logical_sources().any(|(start, source)| {
+                (start..=start + source.range.len()).contains(&offset)
+                    && source
+                        .copy
+                        .as_ref()
+                        .and_then(|copy| copy.table.as_ref())
+                        .is_some_and(|table| Arc::ptr_eq(&table.table, &hit.table))
+            })
+    }
+
+    /// Select only the fragments in the rectangle, not hidden or padded cells.
+    pub(super) fn table_selection_ranges(
+        &self,
+        anchor: &TableCellHit,
+        head: &TableCellHit,
+    ) -> Vec<Range<usize>> {
+        let (row, col) = anchor.endpoint.cell;
+        let (head_row, head_col) = head.endpoint.cell;
+        let first = anchor
+            .endpoint
+            .display_row()
+            .min(head.endpoint.display_row());
+        let last = anchor
+            .endpoint
+            .display_row()
+            .max(head.endpoint.display_row());
+        let records = first..=last;
+        let rows = if anchor.endpoint == head.endpoint && row == 0 {
+            0..=0
+        } else if row == 0 || head_row == 0 {
+            0..=last
+        } else {
+            records.clone()
+        };
+        let columns = col.min(head_col)..=col.max(head_col);
+        let mut ranges = Vec::new();
+        for (start, source) in self.logical_sources() {
+            let fragment = source
+                .copy
+                .as_ref()
+                .and_then(|copy| copy.table.as_ref())
+                .filter(|line| Arc::ptr_eq(&line.table, &anchor.table))
+                .filter(|line| {
+                    line.record_row
+                        .is_none_or(|record| records.contains(&record))
+                })
+                .and_then(|line| line.cell_range(&rows, &columns))
+                .map(|range| range.start.max(source.range.start)..range.end.min(source.range.end));
+            if let Some(fragment) = fragment.filter(|range| range.start <= range.end) {
+                ranges.push(
+                    start + fragment.start - source.range.start
+                        ..start + fragment.end - source.range.start,
+                );
+            }
+        }
+        if ranges.is_empty() {
+            ranges.push(anchor.line.end..anchor.line.end);
+        }
+        ranges
+    }
+
+    pub(super) fn table_cell_on_row(
+        &self,
+        ranges: &[Range<usize>],
+        row: usize,
+    ) -> Option<Range<usize>> {
+        table_cell_intersection(ranges, &self.rows.get(row)?.source)
+    }
+
+    pub(super) fn table_cell_pointer_range(
+        &self,
+        ranges: &[Range<usize>],
+        row: usize,
+        offset: usize,
+    ) -> Range<usize> {
+        let limits = self
+            .table_cell_on_row(ranges, row)
+            .unwrap_or_else(|| ranges[0].start..ranges[ranges.len() - 1].end);
+        offset.clamp(limits.start, limits.end)
+            ..self
+                .after_cursor_grapheme(row, offset)
+                .clamp(limits.start, limits.end)
+    }
+
+    /// Use source-backed Markdown copy metadata, excluding unselected table cells.
+    pub(super) fn copy_lines(
+        &self,
+        range: Range<usize>,
+        separator: &str,
+        cell_ranges: &[Range<usize>],
+        output: &mut Vec<crate::markdown_copy::SelectedLine>,
+    ) {
+        for (offset, source) in self.logical_sources() {
+            let end = offset + source.range.len();
+            if range.start <= end && range.end >= offset {
+                let mut selected = range.start.max(offset)..range.end.min(end);
+                if !cell_ranges.is_empty() {
+                    selected = match table_cell_intersection(cell_ranges, &selected) {
+                        Some(fragment) => fragment,
+                        None => continue,
+                    };
+                }
+                crate::markdown_copy::SelectedLine::append(
+                    output,
+                    source.clone(),
+                    source.range.start + selected.start - offset
+                        ..source.range.start + selected.end - offset,
+                    if offset == 0 { separator } else { "\n" },
+                );
+            }
+        }
+    }
+
+    /// Word motion uses the original cell source, not padded or wrapped display rows.
+    pub(super) fn table_word_fragments(
+        &self,
+        ranges: &[Range<usize>],
+    ) -> impl Iterator<Item = (&str, Range<usize>, usize)> {
+        let mut fragments = Vec::new();
+        for (logical_start, line) in self.logical_sources() {
+            let Some(table) = line.copy.as_ref().and_then(|copy| copy.table.as_ref()) else {
+                continue;
+            };
+            for (display, source) in table.source_fragments() {
+                for selected in ranges {
+                    let start = display
+                        .start
+                        .max(line.range.start + selected.start.saturating_sub(logical_start));
+                    let end = display
+                        .end
+                        .min(line.range.start + selected.end.saturating_sub(logical_start));
+                    if start >= end {
+                        continue;
+                    }
+                    let source_start = source.range.start + start - display.start;
+                    fragments.push((
+                        source.text.as_ref(),
+                        source_start..source_start + end - start,
+                        logical_start + start - line.range.start,
+                    ));
+                }
+            }
+        }
+        fragments.into_iter()
+    }
+
     pub(super) fn new(lines: Vec<HyperlinkLine>, width: u16) -> Self {
         let logical = logical_lines(&lines);
         Self::from_logical(logical, width)
+    }
+
+    /// Retain exactly the painted plain-text viewport, including tab stops,
+    /// while keeping selection inside its visible source text.
+    pub(crate) fn visible_plaintext(mut self, start: usize, height: u16) -> Self {
+        if start == 0 && self.rows.len() <= usize::from(height) {
+            return self;
+        }
+        self.rows.truncate(start + usize::from(height));
+        self.rows.drain(..start.min(self.rows.len()));
+        let from = self.rows.first().map_or(0, |row| row.source.start);
+        let to = self.rows.last().map_or(from, |row| row.source.end);
+        self.text = self.text[from..to].to_owned();
+        let lines = self
+            .text
+            .split('\n')
+            .map(|line| line.to_owned().into())
+            .collect::<Vec<_>>();
+        self.logical = logical_lines(&lines);
+        for row in &mut self.rows {
+            row.source = row.source.start - from..row.source.end - from;
+            row.line_end = row.line_end.map(|end| end.min(to) - from);
+        }
+        self
     }
 
     /// Reflow the same displayed content revision, retaining styles, links and disclosure label.
     pub(super) fn rewrap(&self, width: u16) -> Self {
         let mut layout = Self::from_logical(self.logical.clone(), width);
         if let Some(control) = &self.disclosure_control {
-            layout =
-                layout.with_disclosure_control_at(control.label.clone(), control.source_offset);
+            layout = layout.with_control(control.label.clone(), control.anchor);
+        }
+        layout.image = self.image.clone();
+        if self.leading_blank_hidden {
+            layout = layout.without_leading_blank_row();
         }
         if self.separated {
             layout.with_leading_separator()
@@ -92,45 +483,58 @@ impl TextLayout {
     }
 
     /// Place a control after an activity, before any following auxiliary source text.
-    pub(super) fn with_disclosure_control_at(
-        mut self,
-        label: String,
-        source_offset: usize,
-    ) -> Self {
-        if self.text.is_empty() || label.is_empty() {
+    pub(super) fn with_disclosure_control_at(self, label: String, source_offset: usize) -> Self {
+        self.with_control(label, DisclosureAnchor::Activity(source_offset))
+    }
+
+    pub(super) fn with_turn_disclosure(self, label: String) -> Self {
+        self.with_control(label, DisclosureAnchor::Turn)
+    }
+
+    pub(super) fn is_turn_disclosure(&self) -> bool {
+        self.disclosure_control
+            .as_ref()
+            .is_some_and(|control| control.anchor == DisclosureAnchor::Turn)
+    }
+
+    fn with_control(mut self, label: String, anchor: DisclosureAnchor) -> Self {
+        if label.is_empty() {
             return self;
         }
         if let Some(control) = self.disclosure_control.take() {
             self.rows.remove(control.row);
+            if control.anchor == DisclosureAnchor::Turn {
+                self.rows.remove(control.row - 1);
+            }
         }
-        let source_offset = self
-            .text
-            .floor_char_boundary(source_offset.min(self.text.len()));
-        let control_row = self
+        let source_offset = match anchor {
+            DisclosureAnchor::Activity(offset) => {
+                self.text.floor_char_boundary(offset.min(self.text.len()))
+            }
+            DisclosureAnchor::Turn => self.text.len(),
+        };
+        let mut control_row = self
             .rows
             .iter()
             .rposition(|row| row.source.end <= source_offset)
             .map_or(/*default*/ 0, |row| row + 1);
-        let indent = usize::from(self.width / 4).min(/*other*/ 4);
+        let indent = match anchor {
+            DisclosureAnchor::Activity(_) => usize::from(self.width / 4).min(/*other*/ 4),
+            DisclosureAnchor::Turn => {
+                self.insert_presentation_row(control_row, source_offset, 0, Line::default());
+                control_row += 1;
+                0
+            }
+        };
         let line = truncate_line_to_width(
             Line::from(format!("{}{label}", " ".repeat(indent))).dim(),
             usize::from(self.width),
         );
-        self.rows.insert(
-            control_row,
-            TextRow {
-                line: HyperlinkLine::from(line),
-                source: source_offset..source_offset,
-                content_width: self.width,
-                first_column: indent,
-                prefix_columns: indent,
-                tabs: tabs::TabStops::default(),
-            },
-        );
+        self.insert_presentation_row(control_row, source_offset, indent, line);
         self.disclosure = true;
         self.disclosure_control = Some(DisclosureControl {
             label,
-            source_offset,
+            anchor,
             row: control_row,
         });
         self
@@ -138,24 +542,57 @@ impl TextLayout {
 
     /// Add visual spacing between entries without changing any source position.
     pub(super) fn with_leading_separator(mut self) -> Self {
-        if !self.separated && !self.rows.is_empty() {
-            self.rows.insert(
-                /*index*/ 0,
-                TextRow {
-                    line: HyperlinkLine::from(""),
-                    source: 0..0,
-                    content_width: self.width,
-                    first_column: 0,
-                    prefix_columns: 0,
-                    tabs: tabs::TabStops::default(),
-                },
-            );
+        if !self.separated {
+            self = self.with_leading_spacer();
+            self.separated = !self.rows.is_empty();
+        }
+        self
+    }
+
+    pub(super) fn without_leading_blank_row(mut self) -> Self {
+        if self
+            .rows
+            .first()
+            .is_some_and(|row| line_width(&row.line.line) == 0)
+        {
+            self.rows.remove(0);
+            self.leading_blank_hidden = true;
+            if let Some(control) = &mut self.disclosure_control {
+                control.row = control.row.saturating_sub(1);
+            }
+        }
+        self
+    }
+
+    pub(super) fn with_leading_spacer(mut self) -> Self {
+        if !self.rows.is_empty() {
+            self.insert_presentation_row(0, 0, 0, Line::default());
             if let Some(control) = &mut self.disclosure_control {
                 control.row += 1;
             }
-            self.separated = true;
         }
         self
+    }
+
+    fn insert_presentation_row(
+        &mut self,
+        index: usize,
+        offset: usize,
+        indent: usize,
+        line: Line<'static>,
+    ) {
+        self.rows.insert(
+            index,
+            TextRow {
+                line: HyperlinkLine::from(line),
+                source: offset..offset,
+                line_end: None,
+                content_width: self.width,
+                first_column: indent,
+                prefix_columns: indent,
+                tabs: tabs::TabStops::default(),
+            },
+        );
     }
 
     /// Source text between adjacent retained fragments; distinct logical lines have a hard break.
@@ -178,8 +615,33 @@ impl TextLayout {
         &self.text
     }
 
-    pub(super) fn row_count(&self) -> usize {
+    pub(crate) fn row_count(&self) -> usize {
+        self.text_row_count()
+            + self
+                .visible_image()
+                .map_or(0, |image| usize::from(image.rows))
+    }
+
+    pub(super) fn text_row_count(&self) -> usize {
         self.rows.len()
+    }
+
+    pub(super) fn visible_image(&self) -> Option<&Arc<crate::transcript_image::TranscriptImage>> {
+        self.image.as_ref().filter(|image| {
+            image.columns + 2 <= self.width
+                && (image.protocol != crate::pets::ImageProtocol::Sixel
+                    || crate::transcript_image::terminal_cell_size()
+                        == Some((image.cell_width, image.cell_height)))
+        })
+    }
+
+    pub(super) fn activity_content(&self) -> (&str, Option<&str>) {
+        (
+            self.text(),
+            self.disclosure_control
+                .as_ref()
+                .map(|control| control.label.as_str()),
+        )
     }
 
     pub(super) fn disclosure_row(&self) -> Option<usize> {
@@ -194,7 +656,7 @@ impl TextLayout {
     }
 
     /// Paint visible rows, including inherited styles on empty rows and trailing columns.
-    pub(super) fn render(&self, area: Rect, buf: &mut Buffer, start_row: usize) {
+    pub(crate) fn render(&self, area: Rect, buf: &mut Buffer, start_row: usize) {
         for (screen_row, row) in self.visible_rows(area, start_row) {
             let mut row_area =
                 Rect::new(area.x, area.y + screen_row, area.width, /*height*/ 1);
@@ -222,6 +684,50 @@ impl TextLayout {
         row.source.end
     }
 
+    /// Clamp a caret to the last painted grapheme, not trailing padding.
+    pub(super) fn cursor_position_at(&self, row: usize, column: u16) -> usize {
+        let offset = self.position_at(row, column);
+        let Some(row) = self.rows.get(row) else {
+            return offset;
+        };
+        if row.source.start == row.source.end || offset < row.source.end {
+            return offset;
+        }
+        self.text[row.source.clone()]
+            .grapheme_indices(/*is_extended*/ true)
+            .next_back()
+            .map_or(row.source.start, |(offset, _)| row.source.start + offset)
+    }
+
+    pub(super) fn first_cursor_position(&self, row: usize) -> Option<usize> {
+        let row = self.rows.get(row)?;
+        self.text[row.source.clone()]
+            .grapheme_indices(/*is_extended*/ true)
+            .next()
+            .map(|(offset, _)| row.source.start + offset)
+    }
+
+    pub(super) fn is_cursor_position(&self, offset: usize) -> bool {
+        self.rows.iter().any(|row| row.source.contains(&offset))
+    }
+
+    pub(super) fn after_cursor_grapheme(&self, row: usize, offset: usize) -> usize {
+        let Some(row) = self.rows.get(row) else {
+            return offset;
+        };
+        if row.source.start == row.source.end {
+            return offset;
+        }
+        let offset = self
+            .text
+            .floor_char_boundary(offset.clamp(row.source.start, row.source.end));
+        offset
+            + self.text[offset..row.source.end]
+                .graphemes(/*is_extended*/ true)
+                .next()
+                .map_or(/*default*/ 0, str::len)
+    }
+
     /// Find the display row containing a source position, including omitted wrapping whitespace.
     pub(super) fn row_for_offset(&self, offset: usize) -> usize {
         let before_control = if let Some(control_row) = self.disclosure_row() {
@@ -240,7 +746,12 @@ impl TextLayout {
     }
 
     pub(super) fn column_for_offset(&self, offset: usize) -> u16 {
-        let Some(row) = self.rows.get(self.row_for_offset(offset)) else {
+        self.column_for_offset_on_row(self.row_for_offset(offset), offset)
+    }
+
+    /// Resolve a source position in the requested display row when hard-break offsets overlap.
+    pub(super) fn column_for_offset_on_row(&self, row: usize, offset: usize) -> u16 {
+        let Some(row) = self.rows.get(row) else {
             return 0;
         };
         let offset = self
@@ -278,6 +789,36 @@ impl TextLayout {
                     }
                 }
                 column += width;
+            }
+        }
+    }
+
+    /// Include hard breaks in the selection without selecting terminal padding.
+    pub(super) fn highlight_selection(
+        &self,
+        range: Range<usize>,
+        next: Option<&Self>,
+        area: Rect,
+        buf: &mut Buffer,
+        start_row: usize,
+    ) {
+        self.highlight(range.clone(), area, buf, start_row);
+        for (screen_row, row) in self.visible_rows(area, start_row) {
+            if row.source.is_empty() {
+                continue;
+            }
+            let Some(end) = row.line_end else { continue };
+            let selected = range.contains(&end)
+                || (end == self.text.len()
+                    && next.is_some_and(|next| self.separator_after(next).contains('\n')));
+            let column = row.first_column
+                + row.tabs.column_for_offset(
+                    display_width(&self.text[row.source.clone()]),
+                    row.source.len(),
+                );
+            if selected && column < usize::from(self.width) {
+                buf[(area.x + column as u16, area.y + screen_row)]
+                    .set_style(Style::default().add_modifier(Modifier::REVERSED));
             }
         }
     }
@@ -320,18 +861,31 @@ impl TextLayout {
                     .iter()
                     .map(|span| span.content.as_ref()),
             );
-            rows.extend(layout_line(line, start, width));
+            let mut line_rows = layout_line(line, start, width);
+            if let Some(last) = line_rows.last_mut() {
+                last.line_end = Some(text.len());
+            }
+            rows.extend(line_rows);
         }
         Self {
+            image: None,
             logical,
             text,
             rows,
             width,
             separated: false,
             disclosure: false,
+            leading_blank_hidden: false,
             disclosure_control: None,
         }
     }
+}
+
+fn table_cell_intersection(ranges: &[Range<usize>], within: &Range<usize>) -> Option<Range<usize>> {
+    let fragment = ranges.get(ranges.partition_point(|range| range.end < within.start))?;
+    let start = within.start.max(fragment.start);
+    let end = within.end.min(fragment.end);
+    (start < end || start == end && fragment.is_empty()).then_some(start..end)
 }
 
 fn layout_line(logical: &LogicalLine, text_start: usize, width: u16) -> Vec<TextRow> {
@@ -405,6 +959,7 @@ fn layout_line(logical: &LogicalLine, text_start: usize, width: u16) -> Vec<Text
             TextRow {
                 line: wrapped,
                 source: range,
+                line_end: None,
                 content_width,
                 first_column: first_column + prefix_columns,
                 prefix_columns,

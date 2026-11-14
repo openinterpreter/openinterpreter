@@ -1,6 +1,7 @@
 use crate::bash::parse_shell_lc_literal_commands;
 #[path = "windows_dangerous_commands.rs"]
 mod windows_dangerous_commands;
+pub use windows_dangerous_commands::powershell_commands_are_independent;
 
 /// The platform whose command semantics should be used for safety checks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,6 +92,14 @@ pub fn dangerous_powershell_words_match(
     } else {
         None
     }
+}
+
+/// Classifies a strictly lowered command from an independent literal PowerShell script.
+pub fn dangerous_powershell_literal_words_match(
+    command: &[String],
+) -> Option<DangerousCommandMatch> {
+    windows_dangerous_commands::is_dangerous_powershell_literal_words(command)
+        .then_some(DangerousCommandMatch::Other)
 }
 
 fn executable_name_lookup_key(raw: &str, platform: DangerousCommandPlatform) -> Option<String> {

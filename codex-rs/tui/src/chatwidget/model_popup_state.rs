@@ -2,10 +2,63 @@
 //! Preserve highlighted models by wire slug, independent of their display names.
 
 use super::model_popups::ALL_MODELS_SELECTION_VIEW_ID;
+use super::model_popups::MODEL_LOADING_VIEW_ID;
+use super::model_popups::MODEL_OPTIONS_VIEW_ID;
 use super::model_popups::MODEL_SELECTION_VIEW_ID;
 use super::*;
 
 impl ChatWidget {
+    pub(crate) fn model_picker_unavailable(&self) -> Option<String> {
+        match self.model_catalog.provider_write.try_lock() {
+            Ok(changed) => changed.then(|| "The model list may be out of date. Restart the app server and TUI to refresh /model.".into()),
+            Err(_) => Some("Saving the default provider. Try /model after the save finishes.".into()),
+        }
+    }
+
+    pub(super) fn scope_model_picker_event(&self) -> impl Fn(AppEvent) -> AppEvent + use<> {
+        let backend = self.model_catalog.backend;
+        let thread_id = self.thread_id;
+        move |event| match backend {
+            Some(backend) => AppEvent::ScopedModelPicker {
+                backend,
+                thread_id,
+                event: Box::new(event),
+            },
+            None => event,
+        }
+    }
+
+    pub(crate) fn dismiss_stale_model_picker(&mut self) {
+        self.model_popup_request_id = None;
+        self.cloud_picker_selection = None;
+        let had_popup = !self.no_modal_or_popup_active();
+        for id in [
+            MODEL_LOADING_VIEW_ID,
+            MODEL_OPTIONS_VIEW_ID,
+            ALL_MODELS_SELECTION_VIEW_ID,
+            MODEL_SELECTION_VIEW_ID,
+        ] {
+            while self.bottom_pane.dismiss_view_by_id(id) {}
+        }
+        if had_popup && self.no_modal_or_popup_active() {
+            self.app_event_tx.send(AppEvent::SettingsSelectionClosed);
+        }
+    }
+
+    pub(super) fn refresh_account_scoped_models(&mut self) {
+        if self.model_catalog.provider_may_have_changed() {
+            return;
+        }
+        if self.status_account_display == Some(StatusAccountDisplay::ApiKey) {
+            for model in &mut Arc::make_mut(&mut self.model_catalog).models {
+                model.available_access_programs = None;
+            }
+        }
+        let request_id = uuid::Uuid::new_v4();
+        self.model_popup_request_id = Some(request_id);
+        self.app_event_tx.send(AppEvent::FetchModels { request_id });
+    }
+
     fn model_popup_view_id(&self) -> Option<&'static str> {
         [MODEL_SELECTION_VIEW_ID, ALL_MODELS_SELECTION_VIEW_ID]
             .into_iter()
@@ -25,19 +78,32 @@ impl ChatWidget {
         request_id: uuid::Uuid,
         result: Result<Vec<ModelPreset>, String>,
     ) -> bool {
-        if !self.model_popup_request_is_current(request_id) {
-            return false;
-        }
-        self.model_popup_request_id = None;
-        let Ok(presets) = result else {
-            return false;
-        };
-        if presets.is_empty()
-            || self.model_catalog.try_list_models().ok().as_ref() == Some(&presets)
+        if self.model_catalog.provider_may_have_changed()
+            || !self.model_popup_request_is_current(request_id)
         {
             return false;
         }
+        self.model_popup_request_id = None;
+        let loading = self.bottom_pane.active_view_id() == Some(MODEL_LOADING_VIEW_ID);
+        self.bottom_pane.dismiss_view_by_id(MODEL_LOADING_VIEW_ID);
+        if loading {
+            match &result {
+                Ok(presets) => self.open_model_popup_with_presets(presets.clone()),
+                Err(_) => self.add_error_message("Could not load models. Try /model again.".into()),
+            }
+            if self.no_modal_or_popup_active() {
+                self.on_modal_or_popup_closed();
+            }
+        }
+        let Ok(presets) = result else {
+            return false;
+        };
+        if presets.is_empty() || self.model_catalog.models == presets {
+            return false;
+        }
         Arc::make_mut(&mut self.model_catalog).models = presets;
+        self.set_daybreak_enabled(self.daybreak_enabled);
+        self.queue_unavailable_daybreak_disable(self.current_model());
         self.refresh_effective_service_tier();
         self.refresh_model_dependent_surfaces();
         true

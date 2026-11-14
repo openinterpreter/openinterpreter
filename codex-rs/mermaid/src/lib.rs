@@ -11,6 +11,7 @@ mod parse;
 mod relations;
 mod sequence;
 mod state;
+mod syntax;
 
 pub use output::Role;
 pub use output::Span;
@@ -63,19 +64,7 @@ pub fn render_spans(source: &str, max_width: usize) -> Result<Vec<Vec<Span>>, Re
     if source.len() > MAX_SOURCE {
         return Err(RenderError::Limit);
     }
-    let statements = source
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("%%"))
-        .flat_map(|line| line.split(';'))
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    if source
-        .lines()
-        .any(|line| line.trim_start().starts_with("%%{"))
-    {
-        return Err(RenderError::Unsupported);
-    }
+    let statements = syntax::statements(source)?;
     let (header, body) = statements.split_first().ok_or(RenderError::Unsupported)?;
     match *header {
         "sequenceDiagram" => sequence::render(body, max_width),
@@ -181,7 +170,3 @@ impl Graph {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "families_tests.rs"]
-mod families_tests;

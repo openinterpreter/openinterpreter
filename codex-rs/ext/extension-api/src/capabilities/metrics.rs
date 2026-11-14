@@ -19,3 +19,29 @@ pub trait ExtensionMetrics: Send + Sync {
         tags: &[(&str, &str)],
     );
 }
+
+/// Record the size of a newly published catalog, not a subsequent cached read.
+pub fn record_catalog_entries(
+    metrics: Option<&dyn ExtensionMetrics>,
+    name: &str,
+    stage: &str,
+    entries: usize,
+    is_partial: bool,
+    warning_count: usize,
+) {
+    let Some(metrics) = metrics else {
+        return;
+    };
+    let status = if warning_count > 0 {
+        "warning"
+    } else if is_partial {
+        "partial"
+    } else {
+        "complete"
+    };
+    metrics.histogram(
+        name,
+        i64::try_from(entries).unwrap_or(i64::MAX),
+        &[("stage", stage), ("status", status)],
+    );
+}

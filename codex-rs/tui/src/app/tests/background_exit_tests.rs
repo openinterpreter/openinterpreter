@@ -2,7 +2,7 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
-async fn external_writer_view_quits_with_escape_ctrl_c_or_q() -> Result<()> {
+async fn external_writer_view_quits_with_ctrl_c_or_q() -> Result<()> {
     let (mut app, mut events, _operations) = make_test_app_with_channels().await;
     app.chat_widget.show_external_writer_thread();
     let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
@@ -27,7 +27,6 @@ async fn external_writer_view_quits_with_escape_ctrl_c_or_q() -> Result<()> {
     );
 
     for key in [
-        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
         KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
         KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
     ] {
@@ -37,6 +36,41 @@ async fn external_writer_view_quits_with_escape_ctrl_c_or_q() -> Result<()> {
             Ok(AppEvent::Exit(ExitMode::Immediate))
         ));
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn embedded_quit_confirms_stopping_a_running_side_conversation() -> Result<()> {
+    let (mut app, mut events, mut ops) = make_test_app_with_channels().await;
+    let (mut server, mut tui) = prepare_background_exit_test(&app, &mut events, &mut ops).await?;
+    let id = ThreadId::new();
+    app.side_threads
+        .insert(id, SideThreadState::new(ThreadId::new()));
+    app.thread_event_channels.insert(
+        id,
+        ThreadEventChannel::new_with_session(
+            THREAD_EVENT_CHANNEL_CAPACITY,
+            test_thread_session(id, test_path_buf("/tmp/project")),
+            vec![test_turn("side-turn", TurnStatus::InProgress, Vec::new())],
+        ),
+    );
+    assert_matches!(
+        app.handle_event(&mut tui, &mut server, AppEvent::Exit(ExitMode::Immediate))
+            .await?,
+        AppRunControl::Continue
+    );
+    insta::assert_snapshot!(
+        "embedded_exit_running_sessions",
+        render_bottom_popup(&app.chat_widget, /*width*/ 90)
+    );
+    app.chat_widget.handle_key_event(KeyCode::Down.into());
+    app.chat_widget.handle_key_event(KeyCode::Enter.into());
+    assert_matches!(
+        app.handle_event(&mut tui, &mut server, events.try_recv()?)
+            .await?,
+        AppRunControl::Exit(ExitReason::UserRequested)
+    );
+    server.shutdown().await?;
     Ok(())
 }
 
@@ -56,6 +90,13 @@ async fn external_writer_view_preserves_draft_from_keys_and_paste() -> Result<()
         },
     };
     app.ensure_thread_channel(thread_id).mark_external_writer();
+    app.transcript_cells
+        .push(Arc::new(history_cell::new_user_prompt(
+            "Existing prompt".to_string(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )));
     app.chat_widget.insert_str("Retained draft");
     app.chat_widget.show_external_writer_thread();
     let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
@@ -85,6 +126,94 @@ async fn external_writer_view_preserves_draft_from_keys_and_paste() -> Result<()
     )
     .await?;
     assert!(app.overlay.is_some());
+    app.handle_tui_event(
+        &mut tui,
+        &mut app_server,
+        TuiEvent::Key(KeyCode::Esc.into()),
+    )
+    .await?;
+    assert!(app.overlay.is_none());
+    assert_eq!(
+        (
+            app.backtrack.primed,
+            app.backtrack.overlay_preview_active,
+            app.chat_widget.composer_text_with_pending(),
+        ),
+        (false, false, "Retained draft".to_string()),
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_writer_view_opens_agents_with_left() -> Result<()> {
+    for offline in [false, true] {
+        let (mut app, _, _) = make_test_app_with_channels().await;
+        app.app_server_target = AppServerTarget::Remote {
+            endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
+        };
+        app.chat_widget.insert_str("Retained draft");
+        app.chat_widget.show_external_writer_thread();
+        app.reconnect.offline = offline;
+        let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        tui.set_owned_screen(/*owned*/ true)?;
+
+        app.handle_tui_event(
+            &mut tui,
+            &mut app_server,
+            TuiEvent::Key(KeyCode::Left.into()),
+        )
+        .await?;
+
+        assert!(
+            app.chat_widget
+                .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID)
+                .is_some()
+        );
+        assert_eq!(
+            app.chat_widget.composer_text_with_pending(),
+            "Retained draft"
+        );
+        tui.set_owned_screen(/*owned*/ false)?;
+        app_server.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_writer_view_respects_remapped_left() -> Result<()> {
+    let config: codex_config::types::TuiKeymap = toml::from_str(
+        "[global]\nopen_transcript = 'left'\n[editor]\nmove_left = 'ctrl-b'\n[list]\nmove_left = 'ctrl-h'\n",
+    )?;
+    let keymap = RuntimeKeymap::from_config(&config).map_err(|err| color_eyre::eyre::eyre!(err))?;
+    for (offline, vim) in [(false, false), (true, false), (false, true), (true, true)] {
+        let (mut app, _, _) = make_test_app_with_channels().await;
+        app.app_server_target = AppServerTarget::Remote {
+            endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
+        };
+        app.chat_widget.apply_keymap_update(config.clone(), &keymap);
+        app.keymap = keymap.clone();
+        if vim {
+            app.chat_widget.toggle_vim_mode_and_notify();
+        }
+        app.chat_widget.show_external_writer_thread();
+        app.reconnect.offline = offline;
+        let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+
+        if !offline && vim {
+            insta::assert_snapshot!(render_bottom_popup(&app.chat_widget, /*width*/ 96));
+        }
+        app.handle_tui_event(
+            &mut tui,
+            &mut app_server,
+            TuiEvent::Key(KeyCode::Left.into()),
+        )
+        .await?;
+        assert!(app.chat_widget.no_modal_or_popup_active());
+        assert_eq!(app.overlay.is_some(), !offline);
+        app_server.shutdown().await?;
+    }
     Ok(())
 }
 
@@ -125,7 +254,7 @@ async fn remote_disconnect_exit_summary_does_not_require_a_local_rollout_or_prin
     ));
     let exit_info = app.exit_info(ExitReason::Fatal("connection lost".to_string()));
     let lines = exit_info.format_exit_messages(/*color_enabled*/ false);
-    let command = shlex::split(lines[1].strip_prefix("Reconnect: ").unwrap()).unwrap();
+    let command = shlex::split(&lines[2]).unwrap();
     assert_eq!(
         crate::resolve_remote_addr(&command[2]).unwrap(),
         crate::RemoteAppServerEndpoint::WebSocket {
@@ -610,10 +739,9 @@ async fn daemon_ctrl_c_during_paste_burst_does_not_show_exit_menu() -> Result<()
 async fn daemon_ctrl_c_during_mcp_startup_does_not_show_background_exit_menu() -> Result<()> {
     let (mut app, mut app_event_rx, mut op_rx) = make_test_app_with_channels().await;
     let thread_id = prepare_local_daemon_thread(&mut app)?;
-    app.chat_widget
-        .set_mcp_startup_expected_servers(["slow".to_string()]);
     app.chat_widget.handle_server_notification(
         ServerNotification::McpServerStatusUpdated(McpServerStatusUpdatedNotification {
+            environment_id: None,
             thread_id: Some(thread_id.to_string()),
             name: "slow".to_string(),
             status: McpServerStartupState::Starting,

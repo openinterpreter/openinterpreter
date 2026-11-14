@@ -17,6 +17,7 @@ use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadHistoryMode;
+use codex_app_server_protocol::ThreadItemsListCursor;
 use codex_app_server_protocol::ThreadItemsListParams;
 use codex_app_server_protocol::ThreadItemsListResponse;
 use codex_app_server_protocol::ThreadResumeParams;
@@ -36,6 +37,7 @@ use codex_app_server_protocol::UserInput;
 use codex_features::Feature;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::Settings;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::EventMsg;
@@ -44,12 +46,98 @@ use codex_rollout::RolloutItem;
 use codex_rollout::read_session_meta_line;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use core_test_support::load_default_config_for_test;
+use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[test_case::test_case(None; "default_paginated")]
+#[test_case::test_case(Some(ThreadHistoryMode::Legacy); "explicit_legacy")]
+#[tokio::test]
+async fn thread_revert_rejects_ephemeral_without_losing_context(
+    history_mode: Option<ThreadHistoryMode>,
+) -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Remembered answer").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
+    initialize_experimental(&mut mcp).await?;
+    let ThreadStartResponse { thread, .. } = mcp
+        .start_thread(ThreadStartParams {
+            ephemeral: Some(true),
+            history_mode,
+            ..Default::default()
+        })
+        .await?;
+    let completed = mcp
+        .start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: "Remember this task".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let request_id = mcp
+        .send_request(
+            "thread/revert",
+            Some(serde_json::to_value(ThreadRevertParams {
+                thread_id: thread.id.clone(),
+                before_turn_id: completed.turn.id,
+            })?),
+        )
+        .await?;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(
+        error.error,
+        codex_app_server_protocol::JSONRPCErrorError {
+            code: -32600,
+            message: "ephemeral threads do not support thread/revert".to_string(),
+            data: None,
+        }
+    );
+    mcp.start_turn_and_wait_for_completion(TurnStartParams {
+        thread_id: thread.id,
+        input: vec![UserInput::Text {
+            text: "Continue".to_string(),
+            text_elements: Vec::new(),
+        }],
+        ..Default::default()
+    })
+    .await?;
+    let requests = server.received_requests().await.expect("response requests");
+    let followup = requests
+        .iter()
+        .rev()
+        .find(|request| request.url.path().ends_with("/responses"))
+        .expect("followup request")
+        .body_json::<Value>()?;
+    let input = followup["input"].as_array().expect("model input");
+    for (role, text) in [
+        ("user", "Remember this task"),
+        ("assistant", "Remembered answer"),
+    ] {
+        assert!(
+            input.iter().any(|item| item["role"] == role
+                && item["content"]
+                    .as_array()
+                    .is_some_and(|content| content.iter().any(|part| part["text"] == text))),
+            "missing prior {role} message from followup: {followup}"
+        );
+    }
+    Ok(())
+}
 
 #[test_case::test_case(false; "live_reload")]
 #[test_case::test_case(true; "cold_resume")]
@@ -332,9 +420,14 @@ async fn thread_revert_preserves_fork_cutoff_after_cold_resume() -> Result<()> {
 
 #[tokio::test]
 async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let server = responses::start_mock_server().await;
+    let response_mock =
+        responses::mount_sse_sequence(&server, vec![responses::sse_completed("done"); 4]).await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri())
+        .with_model("gpt-5.5")
+        .enable_feature(Feature::FastMode)
+        .write(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build()
@@ -344,6 +437,8 @@ async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
             history_mode: Some(ThreadHistoryMode::Paginated),
+            service_tier: Some(Some("priority".to_string())),
+            personality: Some(Personality::Friendly),
             ..Default::default()
         })
         .await?;
@@ -357,6 +452,8 @@ async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {
                     text: text.to_string(),
                     text_elements: Vec::new(),
                 }],
+                model: (text == "second").then_some("gpt-daybreak-blue-latest".to_string()),
+                personality: (text == "second").then_some(Personality::None),
                 ..Default::default()
             })
             .await?;
@@ -405,9 +502,10 @@ async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {
             params: ThreadItemsListParams {
                 thread_id: thread.id.clone(),
                 turn_id: None,
-                cursor: items_backwards_cursor,
+                cursor: items_backwards_cursor.map(ThreadItemsListCursor::Opaque),
                 limit: None,
                 sort_direction: None,
+                defer_output: None,
             },
         })
         .await?;
@@ -479,21 +577,25 @@ async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {
                 text: "third".to_string(),
                 text_elements: Vec::new(),
             }],
+            model: Some("gpt-5.5".to_string()),
             ..Default::default()
         })
         .await?;
-    let requests = server.received_requests().await.expect("response requests");
-    let model_input = requests
-        .iter()
-        .rev()
-        .find(|request| request.url.path().ends_with("/responses"))
-        .expect("third turn response request")
-        .body_json::<serde_json::Value>()?["input"]
-        .clone();
+    let body = response_mock
+        .last_request()
+        .expect("third turn request")
+        .body_json();
+    assert_eq!(body["service_tier"], "priority");
+    assert!(
+        !body["instructions"]
+            .as_str()
+            .is_some_and(|instructions| { instructions.contains("# Personality") })
+    );
+    let model_input = body["input"].clone();
     let model_input = serde_json::to_string(&model_input)?;
-    assert!(model_input.contains("first"));
-    assert!(!model_input.contains("second"));
-    assert!(model_input.contains("third"));
+    assert!(model_input.contains(r#""text":"first""#));
+    assert!(!model_input.contains(r#""text":"second""#));
+    assert!(model_input.contains(r#""text":"third""#));
     assert_eq!(
         turn_ids_from_cursor(
             &mut mcp,
@@ -655,6 +757,8 @@ async fn initialize_experimental(mcp: &mut TestAppServer) -> Result<()> {
                 version: "0.1.0".to_string(),
             },
             Some(InitializeCapabilities {
+                required_human_approval: false,
+                explicit_gateway_oauth: false,
                 experimental_api: true,
                 request_attestation: false,
                 opt_out_notification_methods: None,

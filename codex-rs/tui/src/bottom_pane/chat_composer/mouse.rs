@@ -10,7 +10,40 @@ use crossterm::event::MouseButton;
 use crossterm::event::MouseEvent;
 use crossterm::event::MouseEventKind;
 
+/// Snapshot of the exact editor target before a delayed clipboard read.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ClipboardPasteTarget {
+    Draft(String, super::super::textarea::EditTarget),
+    HistorySearch(String),
+    VimSearch(String, super::super::textarea::EditTarget),
+}
+
 impl ChatComposer {
+    pub(crate) fn clipboard_paste_target(
+        &self,
+        shortcut: Option<KeyCode>,
+    ) -> Option<ClipboardPasteTarget> {
+        let allowed = self.draft.input_enabled
+            && !self.blocks_direct_input
+            && (shortcut.is_some()
+                || (self.history_search.is_none()
+                    && self.draft.textarea.vim_query().is_none()
+                    && self.draft.textarea.mouse_selection_range().is_none()));
+        if !allowed {
+            return None;
+        }
+        Some(if let Some(search) = &self.history_search {
+            ClipboardPasteTarget::HistorySearch(search.query.clone())
+        } else if let Some(search) = self.draft.textarea.vim_query() {
+            ClipboardPasteTarget::VimSearch(
+                search.editor.text().to_string(),
+                search.editor.edit_target(),
+            )
+        } else {
+            ClipboardPasteTarget::Draft(self.current_text(), self.draft.textarea.edit_target())
+        })
+    }
+
     pub(crate) fn copy_selection(
         &mut self,
         event: &TuiEvent,

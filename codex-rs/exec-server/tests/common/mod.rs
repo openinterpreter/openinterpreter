@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use codex_exec_server::CODEX_ARG0_EXEC_HELPER_ARG1;
 use codex_exec_server::CODEX_FS_HELPER_ARG1;
-use codex_exec_server::ExecServerRuntimePaths;
+use codex_exec_server::ExecServerRuntimeOptions;
 use codex_exec_server::ExecServerTelemetry;
 use codex_exec_server::RequestDispatchMode;
 use codex_http_client::HttpClientFactory;
@@ -165,6 +165,17 @@ fn maybe_run_exec_server_from_test_binary(guard: Option<&TestBinaryDispatchGuard
     if command != "exec-server" {
         return;
     }
+    // Enable requested child diagnostics so integration tests can observe background failures.
+    if env::var_os("RUST_LOG").is_some()
+        && let Err(error) = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .try_init()
+    {
+        eprintln!("failed to initialize executor test logging: {error}");
+        std::process::exit(1);
+    }
     // Initialize in the executor child, just as the real CLI does at startup.
     codex_build_info::BuildInfo::initialize(TEST_BUILD_COMMIT);
 
@@ -203,7 +214,7 @@ fn maybe_run_exec_server_from_test_binary(guard: Option<&TestBinaryDispatchGuard
             std::process::exit(1);
         }
     };
-    let runtime_paths = match ExecServerRuntimePaths::new(
+    let mut runtime_paths = match ExecServerRuntimeOptions::new(
         current_exe.clone(),
         linux_sandbox_exe(guard, &current_exe),
     ) {
@@ -213,6 +224,14 @@ fn maybe_run_exec_server_from_test_binary(guard: Option<&TestBinaryDispatchGuard
             std::process::exit(1);
         }
     };
+    runtime_paths.prefer_mxc = env::var("CODEX_EXEC_SERVER_TEST_PREFER_MXC")
+        .ok()
+        .map(|value| {
+            value.parse().unwrap_or_else(|error| {
+                eprintln!("invalid test MXC preference: {error}");
+                std::process::exit(1);
+            })
+        });
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -262,6 +281,7 @@ fn maybe_run_exec_server_from_test_binary(guard: Option<&TestBinaryDispatchGuard
             ExecServerTelemetry::default(),
             http_client_factory,
             request_dispatch_mode,
+            codex_websocket_auth::WebsocketAuthSettings::default(),
         )
         .await
     }) {

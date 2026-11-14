@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use codex_config::ConfigLayerSource;
+use codex_config::ConfigLayerStack;
 use codex_config::Constrained;
 use codex_config::ConstrainedWithSource;
 use codex_config::ConstraintError;
@@ -12,9 +14,36 @@ use codex_config::config_toml::ConfigToml;
 use codex_features::Feature;
 use codex_features::FeatureConfigSource;
 use codex_features::FeatureOverrides;
+use codex_features::FeatureToml;
 use codex_features::Features;
+use codex_features::RuntimeAuthMode;
 use codex_features::canonical_feature_for_key;
 use codex_features::feature_for_key;
+
+/// A project's explicit opt-in replaces only a strictly lower-priority V1 opt-out.
+pub(super) fn project_overrides_legacy_subagent_opt_out(layers: &ConfigLayerStack) -> bool {
+    let mut project_enabled = false;
+    for layer in layers.layers_high_to_low() {
+        if let Some(features) = layer.config.get("features").and_then(toml::Value::as_table)
+            && features.iter().any(|(key, enabled)| {
+                enabled.as_bool() == Some(false) && feature_for_key(key) == Some(Feature::Collab)
+            })
+        {
+            return project_enabled;
+        }
+        if matches!(layer.name, ConfigLayerSource::Project { .. })
+            && layer
+                .config
+                .get("agents")
+                .and_then(|agents| agents.get("enabled"))
+                .and_then(toml::Value::as_bool)
+                == Some(true)
+        {
+            project_enabled = true;
+        }
+    }
+    false
+}
 
 /// Wrapper around [`Features`] which enforces constraints defined in
 /// `FeatureRequirementsToml` and provides normalization to ensure constraints
@@ -116,6 +145,31 @@ impl ManagedFeatures {
         let mut next = self.get().clone();
         next.set_enabled(feature, enabled);
         self.set(next)
+    }
+
+    /// Refresh ordinary MCP feature values and pins without changing session-static features.
+    pub(crate) fn refresh_mcp_features(&mut self, next: &Self) -> ConstraintResult<()> {
+        let mut refreshed = self.clone();
+        let mut values = self.get().clone();
+        for feature in [
+            Feature::EnableMcpApps,
+            Feature::McpConnectionSharing,
+            Feature::McpSharedReplCwd,
+            Feature::McpLazyStdioStartup,
+            Feature::SecretAuthStorage,
+            Feature::McpOAuthRefreshCoordination,
+        ] {
+            values.set_enabled(feature, next.enabled(feature));
+            if let Some(enabled) = next.pinned_features.get(&feature) {
+                refreshed.pinned_features.insert(feature, *enabled);
+            } else {
+                refreshed.pinned_features.remove(&feature);
+            }
+        }
+        refreshed.value.source = next.value.source.clone().or(refreshed.value.source);
+        refreshed.set(values)?;
+        *self = refreshed;
+        Ok(())
     }
 
     pub fn enable(&mut self, feature: Feature) -> ConstraintResult<()> {
@@ -282,10 +336,42 @@ fn explicit_feature_settings_in_config(cfg: &ConfigToml) -> Vec<(String, Feature
     explicit_settings
 }
 
+pub(crate) fn resolve_runtime_auth_mode(
+    cfg: &ConfigToml,
+    requirements: Option<&Sourced<FeatureRequirementsToml>>,
+) -> std::io::Result<RuntimeAuthMode> {
+    let configured = cfg
+        .features
+        .as_ref()
+        .and_then(|features| features.runtime_agent_instances.as_ref())
+        .and_then(|feature| match feature {
+            FeatureToml::Enabled(_) => None,
+            FeatureToml::Config(config) => config.mode,
+        });
+    if let Some(requirements) = requirements
+        && let Some(required) = requirements.value.runtime_auth_mode
+    {
+        if configured.is_some_and(|mode| mode != required) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                ConstraintError::InvalidValue {
+                    field_name: "features.runtime_agent_instances.mode",
+                    candidate: format!("{:?}", configured.unwrap_or_default()),
+                    allowed: format!("{required:?}"),
+                    requirement_source: requirements.source.clone(),
+                },
+            ));
+        }
+        return Ok(required);
+    }
+    Ok(configured.unwrap_or_default())
+}
+
 pub(crate) fn validate_explicit_feature_settings_in_config_toml(
     cfg: &ConfigToml,
     feature_requirements: Option<&Sourced<FeatureRequirementsToml>>,
 ) -> std::io::Result<()> {
+    resolve_runtime_auth_mode(cfg, feature_requirements)?;
     let Some(Sourced {
         value: feature_requirements,
         source,

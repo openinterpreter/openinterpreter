@@ -1,6 +1,8 @@
 use super::*;
+use crate::McpRefreshReason;
 use crate::agents_md_manager::AgentsMdManager;
 use crate::agents_md_manager::SessionInstructions;
+use crate::session::Submission;
 use crate::session::handlers::submission_loop;
 use crate::session::step_context::StepContext;
 use crate::session::step_settings::StepSettings;
@@ -8,6 +10,7 @@ use crate::session::tests::HeldStepTask;
 use crate::session::tests::make_session_and_context;
 use crate::session::tests::update_selected_settings_for_test;
 use crate::session::tests::update_turn_settings_for_test;
+use crate::session::turn_context::TurnEnvironment;
 use crate::state::TaskKind;
 use codex_config::AutoReviewRequirementsToml;
 use codex_config::ConfigLayerStack;
@@ -30,19 +33,22 @@ use codex_models_manager::manager::ModelsManagerFuture;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_models_manager::manager::StaticModelsManager;
 use codex_models_manager::model_info::with_config_overrides;
+use codex_protocol::RequestCountry;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::openai_models::AsyncClassifierMode;
 use codex_protocol::openai_models::AutoReviewMessages;
+use codex_protocol::openai_models::CatalogModel;
 use codex_protocol::openai_models::GuardianV2ModelConfig;
 use codex_protocol::openai_models::GuardianV2TranscriptModelConfig;
+use codex_protocol::openai_models::ModelOrigin;
 use codex_protocol::openai_models::ModelTokenBudgetConfig;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::Submission;
 use codex_protocol::protocol::TurnAbortReason;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeSet;
@@ -159,6 +165,58 @@ async fn instruction_refresh_serializes_reads_and_releases_on_cancellation() {
         session.inherited_instructions().await.user,
         instructions("latest")
     );
+}
+
+#[tokio::test]
+async fn next_step_waits_for_environment_publication_before_capturing() {
+    let ActivationFixture { session, turn, .. } = activation_fixture(activation_models()).await;
+    let next_cwd = turn.config.cwd.join("next-step-environment");
+    std::fs::create_dir_all(&next_cwd).expect("create next workspace");
+    let next_cwd = codex_utils_path_uri::PathUri::from_abs_path(&next_cwd);
+    let mut selections = session.services.turn_environments.selections();
+    let primary = selections.first_mut().expect("initial environment");
+    assert_ne!(primary.cwd, next_cwd);
+    primary.cwd = next_cwd.clone();
+    primary.workspace_roots = vec![next_cwd.clone()];
+    let mut next_settings = turn.next_step_settings.load_full().as_ref().clone();
+    Arc::make_mut(&mut next_settings.model_info).slug = "next-step-model".to_string();
+
+    let cancellation = CancellationToken::new();
+    let capture = session.capture_step_context(Arc::clone(&turn), &cancellation);
+    tokio::pin!(capture);
+    {
+        let _active = session.active_turn.lock().await;
+        let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        assert!(std::future::Future::poll(capture.as_mut(), &mut context).is_pending());
+        turn.next_step_settings.store(Arc::new(next_settings));
+        session
+            .services
+            .turn_environments
+            .update_selections(&selections);
+    }
+    {
+        // Thread attachments publish under state independently of active-turn settings.
+        // A capture waiting for that publication must not retain the previous attachments.
+        let mut state = session.state.lock().await;
+        let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        assert!(std::future::Future::poll(capture.as_mut(), &mut context).is_pending());
+        session
+            .services
+            .turn_environments
+            .update_configured_selections(&selections);
+        state.session_configuration.environments = selections.clone();
+    }
+
+    let step = capture.await.expect("capture after publication");
+    assert_eq!(
+        (
+            step.settings.model_info.slug.as_str(),
+            step.environments.primary().map(TurnEnvironment::cwd),
+            step.inherited_environments.all_selections(),
+        ),
+        ("next-step-model", Some(&next_cwd), selections),
+    );
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
 }
 
 #[test_case(None; "thread only")]
@@ -294,6 +352,7 @@ impl GatedModelsManager {
                 inner: StaticModelsManager::new(
                     /*auth_manager*/ None,
                     ModelsResponse { models },
+                    codex_models_manager::ModelOrigin::ExplicitConfig,
                 ),
                 first_b_lookup: StdMutex::new(Some(Arc::clone(&lookup))),
             }),
@@ -303,12 +362,16 @@ impl GatedModelsManager {
 }
 
 impl ModelsManager for GatedModelsManager {
-    fn raw_model_catalog(
+    fn ensure_initialized(&self, factory: HttpClientFactory) -> ModelsManagerFuture<'_, ()> {
+        self.inner.ensure_initialized(factory)
+    }
+
+    fn model_catalog_with_origins(
         &self,
         strategy: RefreshStrategy,
         factory: HttpClientFactory,
-    ) -> ModelsManagerFuture<'_, ModelsResponse> {
-        self.inner.raw_model_catalog(strategy, factory)
+    ) -> ModelsManagerFuture<'_, Vec<codex_models_manager::CatalogModel>> {
+        self.inner.model_catalog_with_origins(strategy, factory)
     }
 
     fn get_remote_models(&self) -> ModelsManagerFuture<'_, Vec<ModelInfo>> {
@@ -339,7 +402,7 @@ impl ModelsManager for GatedModelsManager {
         &'a self,
         model: &'a str,
         config: &'a ModelsManagerConfig,
-    ) -> ModelsManagerFuture<'a, ModelInfo> {
+    ) -> ModelsManagerFuture<'a, CatalogModel> {
         Box::pin(async move {
             let pause = if model == MODEL_B {
                 self.first_b_lookup.lock().expect("lookup gate").take()
@@ -369,6 +432,7 @@ async fn activation_fixture(models: Vec<ModelInfo>) -> ActivationFixture {
     let (models, lookup) = GatedModelsManager::new(models);
     mutable.services.models_manager = models;
     for feature in [
+        Feature::SubagentThreadEnvironments,
         Feature::StepModelSwitching,
         Feature::FastMode,
         Feature::TokenBudget,
@@ -449,6 +513,7 @@ fn settings_submission(
     (
         Submission {
             id: id.to_string(),
+            turn_extension_init: None,
             op: Op::TurnSettings {
                 turn_id: turn_id.to_string(),
                 update,
@@ -457,6 +522,8 @@ fn settings_submission(
             trace: None,
             parent_turn_id: None,
             root_turn_id: None,
+            residency_guard: None,
+            message_delivery: None,
         },
         receiver,
     )
@@ -538,7 +605,7 @@ async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
         },
     );
     submissions
-        .send(submission)
+        .send(Box::new(submission))
         .await
         .expect("submit model update");
     lookup.wait_until_blocked().await;
@@ -547,7 +614,7 @@ async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
         .acquire()
         .await
         .expect("MCP refresh lock");
-    session.mark_mcp_runtime_dirty();
+    session.mark_mcp_runtime_dirty(McpRefreshReason::ExplicitInvalidation);
     let capture_cancel = CancellationToken::new();
     let mut during = Box::pin(tokio::task::unconstrained(
         session.capture_step_context(Arc::clone(&turn), &capture_cancel),
@@ -577,7 +644,10 @@ async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
         ),
     ] {
         let (submission, reply) = settings_submission(id, &turn.sub_id, update);
-        submissions.send(submission).await.expect("queue update");
+        submissions
+            .send(Box::new(submission))
+            .await
+            .expect("queue update");
         replies.push(reply);
     }
     lookup.release();
@@ -627,27 +697,12 @@ async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
     );
     assert!(Arc::ptr_eq(&before.turn, &after.turn));
     assert_eq!(
-        turn.to_turn_context_item().summary,
-        ReasoningSummary::Concise
+        after.settings.model_info.as_ref(),
+        &CatalogModel {
+            model: expected_destination.into(),
+            origin: ModelOrigin::ExplicitConfig
+        }
     );
-    // Even after the live update, an already-captured request retains its own
-    // summary setting in the durable context.
-    for step in [&before, &during, &after] {
-        let world_state = session
-            .record_context_updates_and_set_reference_context_item(step)
-            .await
-            .expect("record captured settings");
-        assert_eq!(
-            session.reference_context_item().await.unwrap().summary,
-            step.settings.reasoning_summary,
-        );
-        session.start_new_context_window(step, world_state).await;
-        assert_eq!(
-            session.reference_context_item().await.unwrap().summary,
-            step.settings.reasoning_summary,
-        );
-    }
-    assert_eq!(after.settings.model_info.as_ref(), &expected_destination);
     let initial_budget = turn
         .config
         .token_budget
@@ -705,6 +760,16 @@ async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
     assert_eq!(step_values(&retained), step_values(&after));
     assert_eq!(before.settings.model_info.slug, MODEL_A);
     assert_eq!(turn.model_info().slug, MODEL_A);
+    for step in [&before, &during, &after, &retained] {
+        let extension_model = step
+            .extension_data
+            .get::<ModelInfo>()
+            .expect("step metadata");
+        assert!(Arc::ptr_eq(
+            &step.settings.model_info.model,
+            &extension_model
+        ));
+    }
     drop(submissions);
     loop_task.await.expect("submission loop teardown");
 }
@@ -739,7 +804,7 @@ async fn delayed_activation_does_not_retarget_a_task(change: TaskChangeDuringLoo
         lookup,
     } = activation_fixture(models).await;
     let desired = desired_step_settings(&session).await;
-    let original = turn.next_step_input.load_full();
+    let original = turn.next_step_settings.load_full();
     let update_session = Arc::clone(&session);
     let turn_id = turn.sub_id.clone();
     let update = tokio::spawn(async move {
@@ -787,7 +852,7 @@ async fn delayed_activation_does_not_retarget_a_task(change: TaskChangeDuringLoo
                 TaskChangeDuringLookup::FinishedAndReusedContext => Arc::clone(&turn),
                 TaskChangeDuringLookup::CancelledWithRejectedDestination => unreachable!(),
             };
-            let inputs = replacement.next_step_input.load_full();
+            let inputs = replacement.next_step_settings.load_full();
             session
                 .spawn_task(
                     Arc::clone(&replacement),
@@ -798,7 +863,7 @@ async fn delayed_activation_does_not_retarget_a_task(change: TaskChangeDuringLoo
                     },
                 )
                 .await;
-            assert!(Arc::ptr_eq(&turn.next_step_input.load_full(), &original));
+            assert!(Arc::ptr_eq(&turn.next_step_settings.load_full(), &original));
             (replacement, inputs)
         }
     };
@@ -808,7 +873,7 @@ async fn delayed_activation_does_not_retarget_a_task(change: TaskChangeDuringLoo
         TurnSettingsUpdateOutcome::TargetUnavailable
     );
     assert!(Arc::ptr_eq(
-        &expected_turn.next_step_input.load_full(),
+        &expected_turn.next_step_settings.load_full(),
         &expected_inputs,
     ));
     assert_eq!(desired_step_settings(&session).await, desired);
@@ -821,12 +886,68 @@ enum ManagedAuthorizationChange {
     ApprovalsReviewer,
 }
 
+#[tokio::test]
+async fn country_updates_preserve_captured_steps_without_model_switching() {
+    let (mut session, turn) = make_session_and_context().await;
+    session
+        .features
+        .disable(Feature::StepModelSwitching)
+        .unwrap();
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    session
+        .spawn_task(
+            Arc::clone(&turn),
+            Vec::new(),
+            HeldStepTask {
+                kind: TaskKind::Compact,
+                finish: Arc::new(Notify::new()),
+            },
+        )
+        .await;
+    let original = turn.next_step_settings.load_full();
+    let defaults = desired_step_settings(&session).await;
+    for request_country in [
+        RequestCountry::from_iso_code("DE").unwrap(),
+        RequestCountry::UNKNOWN,
+    ] {
+        let captured = turn.next_step_settings.load_full();
+        let expected = captured.request_country().clone();
+        assert_eq!(
+            session
+                .apply_turn_settings(
+                    &turn.sub_id,
+                    TurnSettingsUpdate {
+                        request_country: Some(request_country.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await,
+            TurnSettingsUpdateOutcome::Applied,
+        );
+        assert_eq!(
+            turn.next_step_settings.load().request_country(),
+            &request_country
+        );
+        assert_eq!(captured.request_country(), &expected);
+    }
+    let issuing_step = session
+        .capture_step_context(Arc::clone(&turn), &CancellationToken::new())
+        .await
+        .unwrap();
+    let review = crate::guardian::GuardianReviewContext::from(&issuing_step);
+    assert_eq!(review.request_country, RequestCountry::UNKNOWN);
+    assert_eq!(original.request_country(), &RequestCountry::default());
+    assert_eq!(desired_step_settings(&session).await, defaults);
+    session.abort_all_tasks(TurnAbortReason::Replaced).await;
+}
+
 #[test_case(false; "reviewer allow-list")]
 #[test_case(true; "model-required review")]
 #[tokio::test]
 async fn reviewer_only_activation_enforces_managed_authority(required_review: bool) {
     let ActivationFixture { session, turn, .. } = activation_fixture(activation_models()).await;
-    let original = turn.next_step_input.load_full();
+    let original = turn.next_step_settings.load_full();
     let desired = desired_step_settings(&session).await;
     let source = RequirementSource::Unknown;
     let mut sourced = ConfigRequirementsWithSources::default();
@@ -870,7 +991,7 @@ async fn reviewer_only_activation_enforces_managed_authority(required_review: bo
             .await,
         TurnSettingsUpdateOutcome::Rejected { .. }
     ));
-    assert!(Arc::ptr_eq(&turn.next_step_input.load_full(), &original));
+    assert!(Arc::ptr_eq(&turn.next_step_settings.load_full(), &original));
     assert_eq!(desired_step_settings(&session).await, desired);
     session.abort_all_tasks(TurnAbortReason::Replaced).await;
 }
@@ -887,7 +1008,7 @@ async fn delayed_activation_rechecks_live_managed_authorization(
         lookup,
         ..
     } = activation_fixture(activation_models()).await;
-    let original = turn.next_step_input.load_full();
+    let original = turn.next_step_settings.load_full();
     let desired = desired_step_settings(&session).await;
     let update_session = Arc::clone(&session);
     let turn_id = turn.sub_id.clone();
@@ -913,7 +1034,7 @@ async fn delayed_activation_rechecks_live_managed_authorization(
     };
     let sourced = match change {
         ManagedAuthorizationChange::ApprovalPolicy => {
-            let allowed = if original.settings.approval_policy() == AskForApproval::Never {
+            let allowed = if original.approval_policy() == AskForApproval::Never {
                 AskForApproval::OnRequest
             } else {
                 AskForApproval::Never
@@ -924,7 +1045,7 @@ async fn delayed_activation_rechecks_live_managed_authorization(
             }
         }
         ManagedAuthorizationChange::ApprovalsReviewer => {
-            let allowed = if original.settings.approvals_reviewer() == ApprovalsReviewer::User {
+            let allowed = if original.approvals_reviewer() == ApprovalsReviewer::User {
                 ApprovalsReviewer::AutoReview
             } else {
                 ApprovalsReviewer::User
@@ -954,10 +1075,10 @@ async fn delayed_activation_rechecks_live_managed_authorization(
         match change {
             ManagedAuthorizationChange::ApprovalPolicy => requirements
                 .approval_policy
-                .can_set(&original.settings.approval_policy()),
+                .can_set(&original.approval_policy()),
             ManagedAuthorizationChange::ApprovalsReviewer => requirements
                 .approvals_reviewer
-                .can_set(&original.settings.approvals_reviewer()),
+                .can_set(&original.approvals_reviewer()),
         }
         .expect_err("the refreshed constraint rejects the admitted value")
     };
@@ -968,7 +1089,7 @@ async fn delayed_activation_rechecks_live_managed_authorization(
             reason: expected_error.to_string(),
         }
     );
-    assert!(Arc::ptr_eq(&turn.next_step_input.load_full(), &original));
+    assert!(Arc::ptr_eq(&turn.next_step_settings.load_full(), &original));
     assert_eq!(desired_step_settings(&session).await, desired);
     session.abort_all_tasks(TurnAbortReason::Replaced).await;
 }
@@ -1006,10 +1127,11 @@ async fn activation_must_match_the_retained_turn_authority(change: ManagedPolicy
         });
         let model_info = Arc::make_mut(&mut settings.model_info);
         model_info.model_specialty = None;
-        model_info.used_fallback_model_metadata = false;
+        model_info.origin = ModelOrigin::Provider;
     });
     assert!(
         !turn
+            .permission_profile()
             .file_system_sandbox_policy()
             .has_full_disk_write_access()
     );
@@ -1020,15 +1142,17 @@ async fn activation_must_match_the_retained_turn_authority(change: ManagedPolicy
     model_info.slug = "step-settings-policy-destination".to_string();
     let mut selected = current.selected().clone();
     selected.collaboration_mode.settings.model = model_info.slug.clone();
-    let destination = ResolvedStepSettings::new(
-        Arc::new(selected),
-        Arc::new(model_info),
-        session.features.enabled(Feature::FastMode),
-    );
+    let destination =
+        ResolvedStepSettings::new(Arc::new(selected), Arc::new(model_info), &session.features);
     let mut live = session.state.lock().await.session_configuration.clone();
     live.original_config_do_not_use = Arc::clone(&prepared.config);
     assert_eq!(
-        session.validate_active_step_settings(&prepared, &destination, &live,),
+        session.validate_active_step_settings(
+            &prepared,
+            &destination,
+            &live,
+            &session.services.turn_environments.selections(),
+        ),
         Ok(())
     );
     assert_eq!(
@@ -1082,7 +1206,12 @@ async fn activation_must_match_the_retained_turn_authority(change: ManagedPolicy
     // The destination satisfies today's managed policy. Only the temporary
     // compatibility check rejects the mismatch with retained turn consumers.
     assert_eq!(
-        session.validate_active_step_settings(&prepared, &destination, &live,),
+        session.validate_active_step_settings(
+            &prepared,
+            &destination,
+            &live,
+            &session.services.turn_environments.selections(),
+        ),
         Ok(())
     );
     assert_eq!(
@@ -1103,7 +1232,7 @@ async fn activation_must_match_the_retained_turn_authority(change: ManagedPolicy
     );
 }
 
-fn safety_models() -> (ModelInfo, ModelInfo) {
+fn safety_models() -> (CatalogModel, CatalogModel) {
     let [mut admitted, mut destination]: [ModelInfo; 2] = activation_models()
         .try_into()
         .expect("two activation models");
@@ -1112,12 +1241,20 @@ fn safety_models() -> (ModelInfo, ModelInfo) {
         model.node_repl_auto_review_required = false;
         model.node_repl_disabled = false;
         model.auto_review_model_override = None;
-        model.used_fallback_model_metadata = false;
         let messages = model.model_messages.as_mut().expect("model messages");
         messages.auto_review = None;
         messages.guardian_v2 = None;
     }
-    (admitted, destination)
+    (
+        CatalogModel {
+            model: admitted.into(),
+            origin: ModelOrigin::Provider,
+        },
+        CatalogModel {
+            model: destination.into(),
+            origin: ModelOrigin::Provider,
+        },
+    )
 }
 
 fn parent_review_messages(model: &mut ModelInfo) -> &mut AutoReviewMessages {
@@ -1177,7 +1314,7 @@ async fn model_safety_rejects_fallback_metadata() {
     let (_, turn) = make_session_and_context().await;
     let (admitted, destination) = safety_models();
     let mut fallback = admitted.clone();
-    fallback.used_fallback_model_metadata = true;
+    fallback.origin = ModelOrigin::Synthetic;
     for (old, current, next, reason) in [
         (
             &fallback,
@@ -1246,7 +1383,7 @@ async fn parent_fallback_preserves_explicit_empty_and_bundled_defaults() {
     let mut config = turn.config.as_ref().clone();
     config.guardian_policy_config = None;
     let (admitted, mut destination) = safety_models();
-    let check = |destination: &ModelInfo| {
+    let check = |destination: &CatalogModel| {
         check_legacy_model_safety(&admitted, &admitted, destination, &config, &config)
     };
     parent_review_messages(&mut destination).policy = Some(defaults.policy.to_string());
@@ -1416,8 +1553,17 @@ async fn inactive_guardian_v2_does_not_restrict_model_defaults(
     );
 }
 
+#[test_case(None, None; "default")]
+#[test_case(Some(AsyncClassifierMode::Snapshot), None; "remove snapshot")]
+#[test_case(Some(AsyncClassifierMode::Conversation), None; "remove conversation")]
+#[test_case(None, Some(AsyncClassifierMode::Snapshot); "legacy snapshot")]
+#[test_case(None, Some(AsyncClassifierMode::Conversation); "legacy conversation")]
+#[test_case(Some(AsyncClassifierMode::Snapshot), Some(AsyncClassifierMode::Conversation); "change legacy mode")]
 #[tokio::test]
-async fn guardian_v2_empty_model_defaults_are_equivalent() {
+async fn guardian_v2_empty_or_legacy_model_defaults_are_equivalent(
+    admitted_mode: Option<AsyncClassifierMode>,
+    destination_mode: Option<AsyncClassifierMode>,
+) {
     let (_, turn) = make_session_and_context().await;
     let mut config = turn.config.as_ref().clone();
     for feature in [Feature::GuardianV2, Feature::GuardianApproval] {
@@ -1426,23 +1572,34 @@ async fn guardian_v2_empty_model_defaults_are_equivalent() {
             .set_enabled(feature, /*enabled*/ true)
             .expect("enable Guardian V2");
     }
-    let (admitted, mut destination) = safety_models();
+    let (mut admitted, mut destination) = safety_models();
+    admitted
+        .model_messages
+        .as_mut()
+        .expect("model messages")
+        .guardian_v2 = admitted_mode.map(|mode| GuardianV2ModelConfig {
+        async_classifier_mode: Some(mode),
+        ..Default::default()
+    });
     destination.context_window = Some(123_456);
-    for settings in [
+    for mut settings in [
         GuardianV2ModelConfig::default(),
         GuardianV2ModelConfig {
             transcript: Some(GuardianV2TranscriptModelConfig::default()),
             ..Default::default()
         },
     ] {
+        settings.async_classifier_mode = destination_mode;
         destination
             .model_messages
             .as_mut()
             .expect("model messages")
             .guardian_v2 = Some(settings);
-        assert_eq!(
-            check_legacy_model_safety(&admitted, &admitted, &destination, &config, &config,),
-            Ok(())
-        );
+        for current in [&admitted, &destination] {
+            assert_eq!(
+                check_legacy_model_safety(&admitted, current, &destination, &config, &config,),
+                Ok(())
+            );
+        }
     }
 }

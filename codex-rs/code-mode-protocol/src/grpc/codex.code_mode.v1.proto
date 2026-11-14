@@ -5,7 +5,15 @@ package codex.code_mode.v1;
 // Hosts stateful JavaScript execution and delegates nested tool calls to the
 // session owner. Large tool inputs and outputs stay off the session event
 // stream so independent HTTP/2 streams can make progress concurrently.
+//
+// Execute (including its stream), Wait, and Terminate reserve NOT_FOUND for an
+// unknown session_id. Clients may retire the session binding on this status.
+// Missing cells use WaitResponse.missing_cell instead.
 service CodeModeHost {
+  // Optional host-level observation. UNIMPLEMENTED means no collector. Sampling
+  // never opens/closes a session and failures affect only this RPC stream.
+  rpc GetProcessMetrics(GetProcessMetricsRequest) returns (GetProcessMetricsResponse);
+
   // Opens a session lease. The first event is always SessionOpened; dropping
   // this stream closes the session and terminates its active cells.
   rpc OpenSession(OpenSessionRequest) returns (stream SessionEvent);
@@ -19,6 +27,7 @@ service CodeModeHost {
 
   // Each result receives its own HTTP/2 stream, preventing a large response
   // from blocking unrelated tool completions or session control events.
+  // NOT_FOUND may identify a missing invocation rather than a missing session.
   rpc CompleteToolCall(CompleteToolCallRequest)
       returns (CompleteToolCallResponse);
   rpc AcknowledgeNotification(AcknowledgeNotificationRequest)
@@ -29,13 +38,41 @@ service CodeModeHost {
   rpc Execute(ExecuteRequest) returns (stream ExecuteEvent);
   rpc Wait(WaitRequest) returns (WaitResponse);
 
+  // Ends the current observation early without stopping its cell. The
+  // corresponding Execute or Wait still returns its ordinary outcome.
+  rpc YieldObservation(YieldObservationRequest) returns (YieldObservationResponse);
+
   // Acknowledges that a canceled wait has retired before another wait starts.
   rpc CancelWait(CancelWaitRequest) returns (CancelWaitResponse);
   rpc Terminate(TerminateRequest) returns (WaitResponse);
 }
 
+message GetProcessMetricsRequest {}
+
+message GetProcessMetricsResponse {
+  uint32 process_id = 1;
+  double process_start_time_seconds = 2;
+  double cpu_seconds_total = 3;
+  uint64 resident_memory_bytes = 4;
+}
+
 message OpenSessionRequest {
   optional SessionCellExecutionLimits cell_execution_limits = 1;
+  // Absent preserves the legacy client-side truncation behavior.
+  optional OutputTruncation output_truncation = 2;
+  // Maximum pending tool callbacks the client can accept.
+  // Absent preserves the legacy 1,024 callback budget. Hosts may impose a lower
+  // shared limit, and older hosts ignore this field and retain their own limit.
+  optional uint32 max_pending_delegate_calls = 3;
+  reserved 4; // Boolean heartbeat opt-in used by earlier preview builds.
+  // Seconds of stream inactivity before a heartbeat. Zero disables heartbeats.
+  uint32 heartbeat_interval_s = 5;
+}
+
+enum OutputTruncation {
+  OUTPUT_TRUNCATION_UNSPECIFIED = 0;
+  OUTPUT_TRUNCATION_CLIENT = 1;
+  OUTPUT_TRUNCATION_SERVER = 2;
 }
 
 message SessionCellExecutionLimits {
@@ -50,11 +87,14 @@ message SessionEvent {
     Notification notification = 3;
     NotificationCancelled notification_cancelled = 4;
     CellClosed cell_closed = 5;
+    StreamHeartbeat heartbeat = 6;
   }
 }
 
 message SessionOpened {
   string session_id = 1;
+  // Absent (including from an older host) means the client owns truncation.
+  optional OutputTruncation output_truncation = 2;
 }
 
 message CloseSessionRequest {
@@ -66,7 +106,12 @@ message CloseSessionResponse {}
 message SubscribeToToolCallsRequest {
   string session_id = 1;
   repeated ToolName tool_names = 2;
+  reserved 3; // Boolean heartbeat opt-in used by earlier preview builds.
+  // Seconds of stream inactivity before a heartbeat. Zero disables heartbeats.
+  uint32 heartbeat_interval_s = 4;
 }
+
+message StreamHeartbeat {}
 
 message ToolCall {
   string session_id = 1;
@@ -87,6 +132,9 @@ message ToolCall {
   // gRPC metadata is fixed when the subscription stream opens, so each call
   // carries its own context in the message.
   optional string traceparent = 10;
+
+  // A heartbeat carries only the session ID and must not be handled as a tool call.
+  optional StreamHeartbeat heartbeat = 11;
 }
 
 message CompleteToolCallRequest {
@@ -173,6 +221,8 @@ message WaitRequest {
   string cell_id = 2;
   string wait_id = 3;
   uint64 yield_time_ms = 4;
+  // Only set for a session that selected server-side output truncation.
+  optional uint64 max_output_tokens = 5;
 }
 
 message WaitResponse {
@@ -189,9 +239,21 @@ message CancelWaitRequest {
 
 message CancelWaitResponse {}
 
+message YieldObservationRequest {
+  string session_id = 1;
+  oneof observation {
+    string execution_id = 2;
+    string wait_id = 3;
+  }
+}
+
+message YieldObservationResponse {}
+
 message TerminateRequest {
   string session_id = 1;
   string cell_id = 2;
+  // The terminating observation has its own output budget.
+  optional uint64 max_output_tokens = 3;
 }
 
 message ExecutionOutcome {

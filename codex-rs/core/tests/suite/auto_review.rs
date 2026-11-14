@@ -1,4 +1,5 @@
 use codex_core::TurnInputRequest;
+use core_test_support::test_codex::local_requests;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,7 +45,6 @@ use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_sandbox;
 use core_test_support::skip_if_wine_exec;
 use core_test_support::test_codex::TestCodex;
-use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
@@ -59,7 +59,10 @@ use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
-struct ApprovedReviewContributor;
+struct ApprovedReviewContributor {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Semaphore,
+}
 
 impl ApprovalReviewContributor for ApprovedReviewContributor {
     fn decide<'a>(
@@ -67,6 +70,8 @@ impl ApprovalReviewContributor for ApprovedReviewContributor {
         input: &'a codex_extension_api::ApprovalDecisionInput<'_>,
     ) -> ExtensionFuture<'a, Option<codex_extension_api::ApprovalDecision>> {
         Box::pin(async move {
+            self.entered.notify_one();
+            self.release.acquire().await.expect("review gate").forget();
             assert!(input.metrics.is_some());
             assert_eq!(input.action["tool"], "request_permissions");
             Some(codex_extension_api::ApprovalDecision::Allow)
@@ -125,11 +130,19 @@ async fn approval_review_contributor_skips_existing_guardian_model_call() -> Res
     .await;
 
     let mut extensions = ExtensionRegistryBuilder::new();
-    extensions.approval_review_contributor(Arc::new(ApprovedReviewContributor));
+    let reviewer = Arc::new(ApprovedReviewContributor {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Semaphore::new(/* permits */ 0),
+    });
+    extensions.approval_review_contributor(reviewer.clone());
     let mut builder = test_codex()
         .with_extensions(Arc::new(extensions.build()))
         .with_config(|config| {
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+            config
+                .features
+                .enable(Feature::CriticalPathTiming)
+                .expect("critical-path capture is configurable");
             config
                 .features
                 .enable(Feature::RequestPermissionsTool)
@@ -142,6 +155,16 @@ async fn approval_review_contributor_skips_existing_guardian_model_call() -> Res
             text_elements: Vec::new(),
         }]))
         .await?;
+
+    reviewer.entered.notified().await;
+    let observe = codex_core::test_support::observe_turn_timing(&test.codex)
+        .await
+        .expect("active turn");
+    let review_start = std::time::Instant::now();
+    tokio::task::yield_now().await;
+    let review_end = std::time::Instant::now();
+    assert!(review_end > review_start);
+    reviewer.release.add_permits(/* n */ 1);
 
     loop {
         match wait_for_event(&test.codex, |_| true).await {
@@ -156,6 +179,16 @@ async fn approval_review_contributor_skips_existing_guardian_model_call() -> Res
         }
     }
 
+    assert_eq!(
+        observe(review_start, review_end),
+        Some([
+            Duration::ZERO,
+            review_end.duration_since(review_start),
+            Duration::ZERO,
+            Duration::ZERO,
+            Duration::ZERO,
+        ])
+    );
     let requests = responses.requests();
     assert_eq!(requests.len(), 2);
     assert!(
@@ -332,7 +365,10 @@ async fn required_model_bypasses_extension_approval_when_guardian_v2_is_disabled
     let requirements =
         format!("{reviewer_requirements}[auto_review]\nrequired_on_models = [\"{model}\"]\n");
     let mut extensions = ExtensionRegistryBuilder::new();
-    extensions.approval_review_contributor(Arc::new(ApprovedReviewContributor));
+    extensions.approval_review_contributor(Arc::new(ApprovedReviewContributor {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Semaphore::new(/* permits */ 1),
+    }));
     let mut builder = test_codex()
         .with_model(model)
         .with_extensions(Arc::new(extensions.build()))
@@ -538,7 +574,7 @@ async fn remote_model_override_uses_catalog_model_for_strict_auto_review() -> Re
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(cwd_path)),
+                environments: Some(local_requests(cwd_path)),
                 approval_policy: Some(AskForApproval::OnRequest),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -581,9 +617,7 @@ async fn remote_model_override_uses_catalog_model_for_strict_auto_review() -> Re
         .into_iter()
         .find(|request| {
             request.body_contains_text("auto-review-model-override.txt")
-                && request
-                    .instructions_text()
-                    .starts_with("You are judging one planned coding-agent action.")
+                && request.body_json()["client_metadata"]["x-openai-subagent"] == "guardian"
         })
         .expect("expected Guardian request for apply_patch");
     assert_eq!(
@@ -613,7 +647,6 @@ fn remote_model_with_auto_review_override(slug: &str, review_model: &str) -> Mod
         visibility: ModelVisibility::List,
         supported_in_api: true,
         input_modalities: default_input_modalities(),
-        used_fallback_model_metadata: false,
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
@@ -642,6 +675,7 @@ fn remote_model_with_auto_review_override(slug: &str, review_model: &str) -> Mod
         availability_nux: None,
         apply_patch_tool_type: Some(ApplyPatchToolType::Freeform),
         web_search_tool_type: Default::default(),
+        web_search_provider: None,
         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
         supports_image_detail_original: false,
         context_window: Some(272_000),

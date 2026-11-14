@@ -83,6 +83,7 @@ impl AppLinkViewParams {
     pub(crate) fn from_url_app_server_request(
         thread_id: ThreadId,
         server_name: &str,
+        environment_id: Option<&str>,
         request_id: AppServerRequestId,
         request: &codex_app_server_protocol::McpServerElicitationRequest,
     ) -> Option<Self> {
@@ -95,7 +96,7 @@ impl AppLinkViewParams {
         else {
             return None;
         };
-        if server_name == MCP_CODEX_APPS_SERVER_NAME {
+        if server_name == MCP_CODEX_APPS_SERVER_NAME && environment_id.is_none() {
             let url = validate_external_url(url, /*require_chatgpt_host*/ true)?;
             return Self::from_codex_apps_auth_url_parts(
                 thread_id,
@@ -112,6 +113,7 @@ impl AppLinkViewParams {
         Some(Self::from_generic_url_parts(
             thread_id,
             server_name,
+            environment_id,
             request_id,
             message,
             url.as_str(),
@@ -178,6 +180,7 @@ impl AppLinkViewParams {
     fn from_generic_url_parts(
         thread_id: ThreadId,
         server_name: &str,
+        environment_id: Option<&str>,
         request_id: AppServerRequestId,
         message: &str,
         url: &str,
@@ -186,7 +189,13 @@ impl AppLinkViewParams {
         Self {
             app_id: elicitation_id.to_string(),
             title: "Action required".to_string(),
-            description: Some(format!("Server: {server_name}")),
+            description: Some(format!(
+                "Server: {}",
+                crate::app_server_approval_conversions::mcp_server_label(
+                    server_name,
+                    environment_id
+                )
+            )),
             instructions: "Complete the requested action in your browser, then return here."
                 .to_string(),
             url: url.to_string(),
@@ -203,7 +212,7 @@ impl AppLinkViewParams {
     }
 }
 
-fn validate_external_url(url: &str, require_chatgpt_host: bool) -> Option<Url> {
+pub(super) fn validate_external_url(url: &str, require_chatgpt_host: bool) -> Option<Url> {
     let parsed = Url::parse(url).ok()?;
     if parsed.scheme() != "https" || parsed.host_str().is_none() {
         return None;
@@ -813,6 +822,22 @@ impl BottomPaneView for AppLinkView {
     fn terminal_title_requires_action(&self) -> bool {
         self.is_tool_suggestion()
     }
+
+    fn program_status_blocked_kind(
+        &self,
+    ) -> Option<crate::terminal_program_status::ProgramStatusKind> {
+        use crate::terminal_program_status::ProgramStatusKind;
+        if !self.is_tool_suggestion() {
+            return None;
+        }
+        Some(match self.suggestion_type {
+            Some(AppLinkSuggestionType::Auth) => ProgramStatusKind::Auth,
+            Some(AppLinkSuggestionType::Install | AppLinkSuggestionType::Enable) => {
+                ProgramStatusKind::Permission
+            }
+            Some(AppLinkSuggestionType::ExternalAction) | None => ProgramStatusKind::Question,
+        })
+    }
 }
 
 impl crate::render::renderable::Renderable for AppLinkView {
@@ -938,6 +963,7 @@ mod tests {
         let params = AppLinkViewParams::from_url_app_server_request(
             target.thread_id,
             &target.server_name,
+            /*environment_id*/ None,
             target.request_id.clone(),
             &request,
         )
@@ -966,6 +992,7 @@ mod tests {
         let params = AppLinkViewParams::from_url_app_server_request(
             target.thread_id,
             &target.server_name,
+            /*environment_id*/ None,
             target.request_id.clone(),
             &request,
         )
@@ -1002,6 +1029,7 @@ mod tests {
             let params = AppLinkViewParams::from_url_app_server_request(
                 target.thread_id,
                 &target.server_name,
+                /*environment_id*/ None,
                 target.request_id.clone(),
                 &request,
             );
@@ -1025,6 +1053,7 @@ mod tests {
             let params = AppLinkViewParams::from_url_app_server_request(
                 target.thread_id,
                 &target.server_name,
+                /*environment_id*/ None,
                 target.request_id.clone(),
                 &request,
             );
@@ -1248,6 +1277,7 @@ mod tests {
         let params = AppLinkViewParams::from_url_app_server_request(
             target.thread_id,
             &target.server_name,
+            /*environment_id*/ None,
             target.request_id.clone(),
             &request,
         )
@@ -1693,6 +1723,7 @@ mod tests {
         let params = AppLinkViewParams::from_url_app_server_request(
             target.thread_id,
             &target.server_name,
+            Some("env-b"),
             target.request_id.clone(),
             &request,
         )
@@ -1722,6 +1753,7 @@ mod tests {
         let params = AppLinkViewParams::from_url_app_server_request(
             target.thread_id,
             &target.server_name,
+            /*environment_id*/ None,
             target.request_id.clone(),
             &request,
         )

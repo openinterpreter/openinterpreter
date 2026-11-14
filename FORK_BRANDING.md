@@ -33,18 +33,18 @@ behavior and makes the new brand testable without a global rename.
 
 The Open Interpreter installer exposes these canonical variables:
 
-| Setting | Variable | Official value |
-| --- | --- | --- |
-| Display name | `OPEN_INTERPRETER_PRODUCT_NAME` | `Open Interpreter` |
-| Primary command | `OPEN_INTERPRETER_COMMAND_NAME` | `interpreter` |
-| Command aliases | `OPEN_INTERPRETER_ALIAS_COMMAND_NAMES` | `i` |
-| Release repository | `OPEN_INTERPRETER_GITHUB_REPO` | `openinterpreter/openinterpreter` |
-| Asset stem | `OPEN_INTERPRETER_PACKAGE_ASSET_STEM` | `open-interpreter-package` |
-| Tag prefix | `OPEN_INTERPRETER_RELEASE_TAG_PREFIX` | `rust-v` |
-| Install directory | `OPEN_INTERPRETER_INSTALL_DIR` | platform default |
-| Requested release | `OPEN_INTERPRETER_RELEASE` | `latest` |
-| Non-interactive mode | `OPEN_INTERPRETER_NONINTERACTIVE` | false unless set |
-| Product home | `INTERPRETER_HOME` | `~/.openinterpreter` |
+| Setting              | Variable                               | Official value                    |
+| -------------------- | -------------------------------------- | --------------------------------- |
+| Display name         | `OPEN_INTERPRETER_PRODUCT_NAME`        | `Open Interpreter`                |
+| Primary command      | `OPEN_INTERPRETER_COMMAND_NAME`        | `interpreter`                     |
+| Command aliases      | `OPEN_INTERPRETER_ALIAS_COMMAND_NAMES` | `i`                               |
+| Release repository   | `OPEN_INTERPRETER_GITHUB_REPO`         | `openinterpreter/openinterpreter` |
+| Asset stem           | `OPEN_INTERPRETER_PACKAGE_ASSET_STEM`  | `open-interpreter-package`        |
+| Tag prefix           | `OPEN_INTERPRETER_RELEASE_TAG_PREFIX`  | `rust-v`                          |
+| Install directory    | `OPEN_INTERPRETER_INSTALL_DIR`         | platform default                  |
+| Requested release    | `OPEN_INTERPRETER_RELEASE`             | `latest`                          |
+| Non-interactive mode | `OPEN_INTERPRETER_NONINTERACTIVE`      | false unless set                  |
+| Product home         | `INTERPRETER_HOME`                     | `~/.openinterpreter`              |
 
 The generic installers still accept older `CODEX_*` names as compatibility
 aliases. They are intentionally absent from Open Interpreter help and update

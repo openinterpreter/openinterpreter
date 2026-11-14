@@ -11,6 +11,7 @@ use std::sync::atomic::Ordering;
 
 use anyhow::Context;
 use anyhow::Result;
+use codex_windows_sandbox::ServiceStopReason;
 use windows_sys::Win32::Foundation::ERROR_CALL_NOT_IMPLEMENTED;
 use windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR;
 use windows_sys::Win32::Foundation::NO_ERROR;
@@ -56,12 +57,19 @@ const MAX_EVENT_MESSAGE_UNITS: usize = 1024;
 
 static SERVICE_STATE: OnceLock<ServiceState> = OnceLock::new();
 
+struct ServiceStatusToken(SERVICE_STATUS_HANDLE);
+
+// SAFETY: Windows permits threads in the calling process to use this opaque
+// status token. The token does not need closing; this wrapper only shares it.
+unsafe impl Send for ServiceStatusToken {}
+unsafe impl Sync for ServiceStatusToken {}
+
 struct ServiceState {
     service_name: String,
     pipe_name: String,
     shutdown: Arc<AtomicBool>,
     uninstalling: Arc<AtomicBool>,
-    status_handle: OnceLock<SERVICE_STATUS_HANDLE>,
+    status_handle: OnceLock<ServiceStatusToken>,
     current_status: AtomicU32,
     stop_requested: AtomicBool,
 }
@@ -128,7 +136,16 @@ unsafe extern "system" fn service_main(_argument_count: u32, _arguments: *mut *m
         return;
     };
 
+    ServiceStopReason::Starting.record(/*hresult*/ 0);
     if let Err(error) = service_main_inner(state) {
+        let reason = if error.is::<crate::registered_runtime::RegistrationInterrupted>() {
+            ServiceStopReason::RegistrationInterrupted
+        } else if state.current_status.load(Ordering::Acquire) == SERVICE_START_PENDING {
+            ServiceStopReason::StartupFailed
+        } else {
+            ServiceStopReason::BrokerFailed
+        };
+        reason.record(fatal_error_hresult(&error));
         log_error(
             EVENT_SERVICE_FAILED,
             &format!("The Codex sandbox service encountered a fatal error: {error:#}"),
@@ -155,12 +172,12 @@ fn service_main_inner(state: &ServiceState) -> Result<()> {
             ptr::null(),
         )
     };
-    if status_handle == 0 {
+    if status_handle.is_null() {
         return Err(io::Error::last_os_error()).context("register the service control handler");
     }
     state
         .status_handle
-        .set(status_handle)
+        .set(ServiceStatusToken(status_handle))
         .map_err(|_| anyhow::anyhow!("the service status handle was already registered"))?;
 
     state.report_status(SERVICE_START_PENDING, NO_ERROR)?;
@@ -172,6 +189,22 @@ fn service_main_inner(state: &ServiceState) -> Result<()> {
         "The Codex sandbox service has stopped.",
     );
     state.report_status(SERVICE_STOPPED, NO_ERROR)
+}
+
+fn fatal_error_hresult(error: &anyhow::Error) -> u32 {
+    // Never stringify an error: contexts can contain paths, accounts or credentials.
+    error
+        .chain()
+        .find_map(|cause| {
+            if let Some(error) = cause.downcast_ref::<windows::core::Error>() {
+                return Some(error.code().0 as u32);
+            }
+            cause
+                .downcast_ref::<io::Error>()?
+                .raw_os_error()
+                .map(|code| windows::core::HRESULT::from_win32(code as u32).0 as u32)
+        })
+        .unwrap_or(0)
 }
 
 unsafe extern "system" fn service_control_handler(
@@ -246,7 +279,7 @@ fn log_event(event_type: u16, event_id: u32, message: &str) {
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
     let event_log = unsafe { RegisterEventSourceW(ptr::null(), source.as_ptr()) };
-    if event_log == 0 {
+    if event_log.is_null() {
         eprintln!("unable to open the Windows event log: {message}");
         return;
     }
@@ -288,7 +321,7 @@ fn log_event(event_type: u16, event_id: u32, message: &str) {
 
 impl ServiceState {
     fn report_status(&self, current_status: u32, win32_exit_code: u32) -> Result<()> {
-        let status_handle = *self
+        let status_handle = self
             .status_handle
             .get()
             .context("the service status handle was not registered")?;
@@ -307,12 +340,12 @@ impl ServiceState {
             dwWaitHint: if is_pending { 10_000 } else { 0 },
         };
 
-        self.current_status.store(current_status, Ordering::Release);
         // The SCM synchronously copies the status structure during this call.
-        let updated = unsafe { SetServiceStatus(status_handle, &status) };
+        let updated = unsafe { SetServiceStatus(status_handle.0, &status) };
         if updated == 0 {
             return Err(io::Error::last_os_error()).context("update the Windows service status");
         }
+        self.current_status.store(current_status, Ordering::Release);
 
         Ok(())
     }

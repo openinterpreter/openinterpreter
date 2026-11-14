@@ -1,0 +1,87 @@
+---
+source: tui/src/bottom_pane/chat_composer/status_surface_tests.rs
+expression: "snapshots.join(\"\\n---\\n\")"
+---
+"f4"
+
+
+
+
+
+
+
+
+  Keyboard shortcuts
+
+  Compose                       Session                              Transcript (open first)
+  /        Commands             tab      Send message                ⌃t            Open transcript
+  @        Mention files        ⌥,       Less reasoning              f3            Find text
+  !        Shell command        ⌥.       More reasoning              pgup / pgdn   Scroll
+  ⌃j       New line             ⌥← / ⌥→  Subagents (empty prompt)    ⌃space        Start selection
+  ⌃v       Paste image          f4       Inspect activity            ⌃home / ⌃end  Top / latest
+  ⌃g       External editor      ⌃c       Quit                        ⇧⌥, / ⇧⌥.     Top / latest
+  ⌃r       Search history
+  esc esc  Edit last message
+
+  /keymap customize
+
+› Ask Codex
+
+  MODEL · ~/project · Context 20% used
+  ? / esc close
+---
+"ctrl-x t"
+
+
+
+
+
+
+
+
+  Keyboard shortcuts
+
+  Compose                       Session                              Transcript (open first)
+  /        Commands             tab      Send message                ⌃t            Open transcript
+  @        Mention files        ⌥,       Less reasoning              f3            Find text
+  !        Shell command        ⌥.       More reasoning              pgup / pgdn   Scroll
+  ⌃j       New line             ⌥← / ⌥→  Subagents (empty prompt)    ⌃space        Start selection
+  ⌃v       Paste image          ⌃x t     Inspect activity            ⌃home / ⌃end  Top / latest
+  ⌃g       External editor      ⌃c       Quit                        ⇧⌥, / ⇧⌥.     Top / latest
+  ⌃r       Search history
+  esc esc  Edit last message
+
+  /keymap customize
+
+› Ask Codex
+
+  MODEL · ~/project · Context 20% used
+  ? / esc close
+---
+[]
+
+
+
+
+
+
+
+
+  Keyboard shortcuts
+
+  Compose                       Session                              Transcript (open first)
+  /        Commands             tab      Send message                ⌃t            Open transcript
+  @        Mention files        ⌥,       Less reasoning              f3            Find text
+  !        Shell command        ⌥.       More reasoning              pgup / pgdn   Scroll
+  ⌃j       New line             ⌥← / ⌥→  Subagents (empty prompt)    ⌃space        Start selection
+  ⌃v       Paste image          ⌃c       Quit                        ⌃home / ⌃end  Top / latest
+  ⌃g       External editor                                           ⇧⌥, / ⇧⌥.     Top / latest
+  ⌃r       Search history
+  esc esc  Edit last message
+
+  /keymap customize
+
+› Ask Codex
+
+  MODEL · ~/project · Context 20% used
+  ? / esc close

@@ -1,0 +1,21 @@
+load("//bazel/rules:schema_bundle.bzl", "python_sdk_exports")
+
+exports_files(["uv.lock"])
+
+python_sdk_exports(
+    name = "generated",
+    srcs = [
+        "pyproject.toml",
+        "release_version.py",
+        "scripts/update_sdk_artifacts.py",
+    ] + glob(
+        ["src/**/*.py"],
+        exclude = [
+            "src/openai_codex/generated/notification_registry.py",
+            "src/openai_codex/generated/v2_all.py",
+        ],
+    ),
+    schema = "//bazel/schema:stable",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)

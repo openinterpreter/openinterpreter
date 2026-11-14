@@ -4,7 +4,10 @@ use codex_core::config::Config;
 use codex_core::config::Constrained;
 use codex_core::sandboxing::SandboxPermissions;
 use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
+use codex_protocol::openai_models::ModelMessages;
+use codex_protocol::openai_models::PermissionMessages;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
@@ -20,7 +23,6 @@ use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_completed;
 use core_test_support::responses::start_mock_server;
-use core_test_support::skip_if_host_windows;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_sandbox;
 use core_test_support::skip_if_wine_exec;
@@ -28,8 +30,6 @@ use core_test_support::submit_thread_settings;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
-use core_test_support::zsh_fork::zsh_fork_runtime;
-use core_test_support::zsh_fork::zsh_fork_test_builder;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::fs;
@@ -44,12 +44,6 @@ enum ModelSpecialty {
     General,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ShellBackend {
-    Standard,
-    ZshFork,
-}
-
 fn configure_saved_prefix_and_guardian(config: &mut Config) {
     let policy_path = config.codex_home.join("rules/default.rules");
     fs::create_dir_all(policy_path.parent().expect("rules directory"))
@@ -61,14 +55,28 @@ fn configure_saved_prefix_and_guardian(config: &mut Config) {
     .expect("write saved command prefix rule");
     config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
     config.approvals_reviewer = ApprovalsReviewer::AutoReview;
-    config
-        .set_legacy_sandbox_policy(SandboxPolicy::WorkspaceWrite {
+    config.workspace_roots_explicit = false;
+    let permission_profile = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
+        &SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![],
             network_access: false,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
-        })
-        .expect("set workspace sandbox policy");
+        },
+        config.cwd.as_path(),
+    );
+    config
+        .permissions
+        .can_set_permission_profile(&permission_profile)
+        .expect("set permission profile");
+    config
+        .permissions
+        .set_workspace_roots(vec![config.cwd.clone()]);
+    config
+        .permissions
+        .set_permission_profile(permission_profile)
+        .expect("set permission profile");
+    config.workspace_roots = config.permissions.workspace_roots().to_vec();
 }
 
 fn command_response(response_id: &str, call_id: &str) -> Result<String> {
@@ -108,29 +116,18 @@ async fn submit_model_turn(test: &TestCodex, model: &str, prompt: &str) -> Resul
     test.submit_text_turn(prompt).await
 }
 
-#[test_case(ModelSpecialty::Cyber, ShellBackend::Standard; "cyber unified exec is reviewed")]
-#[test_case(ModelSpecialty::Cyber, ShellBackend::ZshFork; "cyber zsh unified exec is reviewed")]
-#[test_case(ModelSpecialty::General, ShellBackend::Standard; "general unified exec keeps saved approval")]
+#[test_case(ModelSpecialty::Cyber; "cyber unified exec is reviewed")]
+#[test_case(ModelSpecialty::General; "general unified exec keeps saved approval")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn saved_prefix_only_bypasses_guardian_for_general_models(
     model_specialty: ModelSpecialty,
-    shell_backend: ShellBackend,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     skip_if_wine_exec!(Ok(()), "Guardian command reviews require host-native paths");
 
     let server = start_mock_server().await;
-    let builder = match shell_backend {
-        ShellBackend::Standard => test_codex(),
-        ShellBackend::ZshFork => {
-            skip_if_host_windows!(Ok(()));
-            let Some(runtime) = zsh_fork_runtime("cyber model zsh-fork saved prefix")? else {
-                return Ok(());
-            };
-            zsh_fork_test_builder(runtime, AskForApproval::OnRequest)
-        }
-    };
+    let builder = test_codex();
     let mut builder = builder
         .with_model_info_override("gpt-5.4", move |model| {
             if model_specialty == ModelSpecialty::Cyber {
@@ -139,10 +136,9 @@ async fn saved_prefix_only_bypasses_guardian_for_general_models(
         })
         .with_config(configure_saved_prefix_and_guardian);
     let test = builder.build_with_auto_env(&server).await?;
-    let expected_guardian_review_count = match (model_specialty, shell_backend) {
-        (ModelSpecialty::General, _) => 0,
-        (ModelSpecialty::Cyber, ShellBackend::Standard) => 1,
-        (ModelSpecialty::Cyber, ShellBackend::ZshFork) => 2,
+    let expected_guardian_review_count = match model_specialty {
+        ModelSpecialty::General => 0,
+        ModelSpecialty::Cyber => 1,
     };
 
     let mut response_bodies = vec![command_response(
@@ -272,11 +268,21 @@ async fn switching_models_suppresses_and_restores_saved_prefix_approvals() -> Re
     skip_if_wine_exec!(Ok(()), "Guardian command reviews require host-native paths");
 
     let server = start_mock_server().await;
+    let messages = |heading: &str| ModelMessages {
+        permissions: Some(PermissionMessages {
+            approved_command_prefix_saved: Some(heading.to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
     let mut builder = test_codex()
-        .with_model_info_override("gpt-5.4", |model| {
+        .with_model_info_override("gpt-5.4", move |model| {
             model.model_specialty = Some(MODEL_SPECIALTY_CYBER.to_string());
+            model.model_messages = Some(messages("Cyber model saved rule"));
         })
-        .with_model("gpt-5.2")
+        .with_model_info_override("gpt-5.2", move |model| {
+            model.model_messages = Some(messages("General model saved rule"));
+        })
         .with_config(configure_saved_prefix_and_guardian);
     let test = builder.build_with_auto_env(&server).await?;
 
@@ -319,6 +325,7 @@ async fn switching_models_suppresses_and_restores_saved_prefix_approvals() -> Re
         .find(|message| message.contains("<permissions instructions>"))
         .expect("refreshed cyber-model permissions instructions");
     assert!(!cyber_permissions.contains(SAVED_PREFIX));
+    assert!(!cyber_request.body_contains_text("Cyber model saved rule"));
 
     let final_parent_request = requests
         .iter()
@@ -328,10 +335,9 @@ async fn switching_models_suppresses_and_restores_saved_prefix_approvals() -> Re
     assert!(
         final_parent_request
             .message_input_texts("developer")
-            .iter()
-            .any(|message| {
-                message.contains("Approved command prefix saved:") && message.contains(SAVED_PREFIX)
-            }),
+            .contains(&format!(
+                "Approved command prefix saved:\nGeneral model saved rule\n- {SAVED_PREFIX}"
+            )),
         "switching back should restore the original saved-prefix context",
     );
 

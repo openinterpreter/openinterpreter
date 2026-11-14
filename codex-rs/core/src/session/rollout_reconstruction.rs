@@ -1,33 +1,39 @@
 use super::*;
-use crate::context::GuardianContextMode;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::is_user_turn_boundary;
 use codex_history::ResponseItemEnvelope;
+use codex_history::TurnAttribution;
+use codex_protocol::ContextWindowId;
 use codex_protocol::protocol::SessionContextWindow;
-use uuid::Uuid;
+use codex_protocol::protocol::ThreadHistoryMode;
+use codex_utils_output_truncation::TruncationPolicy;
+use std::collections::BTreeSet;
 
 // Return value of `Session::reconstruct_history_from_rollout`, bundling the rebuilt history with
 // the resume/fork hydration metadata derived from the same replay.
-#[derive(Debug)]
-pub(super) struct RolloutReconstruction {
+#[derive(Debug, PartialEq)]
+pub(crate) struct RolloutReconstruction {
     pub(super) history: Vec<ResponseItemEnvelope>,
-    pub(super) retained_context: codex_history::RetainedContext,
+    pub(super) rejected_audio_file_ids: BTreeSet<String>,
+    pub(crate) retained_context: codex_history::RetainedContext,
     pub(super) guardian_history: Option<codex_history::GuardianHistoryCheckpoint>,
+    pub(super) last_started_turn_id: Option<String>,
     pub(super) previous_turn_settings: Option<PreviousTurnSettings>,
     pub(super) reference_context_item: Option<TurnContextItem>,
+    pub(super) turn_attribution: Option<TurnAttribution>,
     pub(super) world_state_baseline: Option<WorldStateSnapshot>,
     pub(super) window_number: u64,
-    pub(super) first_window_id: Option<Uuid>,
-    pub(super) previous_window_id: Option<Uuid>,
-    pub(super) window_id: Option<Uuid>,
+    pub(super) first_window_id: Option<ContextWindowId>,
+    pub(super) previous_window_id: Option<ContextWindowId>,
+    pub(super) window_id: Option<ContextWindowId>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ReconstructedWindow {
     number: u64,
-    first_id: Option<Uuid>,
-    previous_id: Option<Uuid>,
-    id: Option<Uuid>,
+    first_id: Option<ContextWindowId>,
+    previous_id: Option<ContextWindowId>,
+    id: Option<ContextWindowId>,
 }
 
 #[derive(Debug, Default)]
@@ -47,21 +53,69 @@ enum TurnReferenceContextItem {
 }
 
 #[derive(Debug, Clone, Copy)]
-// The selected checkpoint and its replay tail must belong to the same surviving segment.
+// The selected compaction and its replay tail must belong to the same surviving segment.
 struct ReplayCheckpoint<'a> {
     compacted: &'a CompactedItem,
     suffix: &'a [RolloutItem],
 }
 
+/// Selects the newest compaction that can safely bound replay.
+///
+/// Returns `None` when reconstruction must replay all supplied items, either because there is no
+/// compaction or the newest compaction cannot bound replay.
+fn select_input_compaction(
+    rollout_items: &[RolloutItem],
+    history_mode: ThreadHistoryMode,
+) -> Option<ReplayCheckpoint<'_>> {
+    // Only the newest compaction can bound replay. If it is incomplete, an older compaction
+    // cannot replace the history or window state that the newer one may have changed.
+    let (index, compacted) = rollout_items
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, item)| match item {
+            RolloutItem::Compacted(compacted) => Some((index, compacted)),
+            _ => None,
+        })?;
+    // Paginated histories always honor this boundary. Other histories only do so when resume
+    // metadata identifies a compaction written under the newer resume contract.
+    if compacted.replacement_history.is_none()
+        || compacted.window_number.is_none()
+        || (compacted.resume_metadata.is_none()
+            && !matches!(history_mode, ThreadHistoryMode::Paginated))
+    {
+        return None;
+    }
+    Some(ReplayCheckpoint {
+        compacted,
+        suffix: &rollout_items[index + 1..],
+    })
+}
+
 #[derive(Debug, Default)]
 struct ActiveReplaySegment<'a> {
     turn_id: Option<String>,
+    turn_completed: bool,
     counts_as_user_turn: bool,
     previous_turn_settings: Option<PreviousTurnSettings>,
     reference_context_item: TurnReferenceContextItem,
+    turn_attribution: Option<TurnAttribution>,
     world_state_replay: Vec<&'a RolloutItem>,
-    base_compaction: Option<ReplayCheckpoint<'a>>,
+    history_checkpoint: Option<ReplayCheckpoint<'a>>,
     window: Option<ReconstructedWindow>,
+}
+
+impl ActiveReplaySegment<'_> {
+    fn take_checkpoint_attribution(&mut self, checkpoint: &mut Option<TurnAttribution>) {
+        if checkpoint.as_ref().is_some_and(|attribution| {
+            self.turn_id
+                .as_ref()
+                .is_none_or(|id| id == &attribution.turn_id)
+        }) {
+            // Consume a matching checkpoint even when rollback discards this segment.
+            self.turn_attribution = self.turn_attribution.take().or(checkpoint.take());
+        }
+    }
 }
 
 fn turn_ids_are_compatible(active_turn_id: Option<&str>, item_turn_id: Option<&str>) -> bool {
@@ -71,13 +125,13 @@ fn turn_ids_are_compatible(active_turn_id: Option<&str>, item_turn_id: Option<&s
 
 fn finalize_active_segment<'a>(
     active_segment: ActiveReplaySegment<'a>,
-    base_compaction: &mut Option<ReplayCheckpoint<'a>>,
+    history_checkpoint: &mut Option<ReplayCheckpoint<'a>>,
     previous_turn_settings: &mut Option<PreviousTurnSettings>,
     reference_context_item: &mut TurnReferenceContextItem,
     world_state_replay: &mut Vec<&'a RolloutItem>,
     window: &mut Option<ReconstructedWindow>,
     pending_rollback_turns: &mut usize,
-) {
+) -> Option<TurnAttribution> {
     // Thread rollback drops the newest surviving real user-message boundaries. In replay, that
     // means skipping the next finalized segments that contain a non-contextual
     // `EventMsg::UserMessage`.
@@ -85,7 +139,7 @@ fn finalize_active_segment<'a>(
         if active_segment.counts_as_user_turn {
             *pending_rollback_turns -= 1;
         }
-        return;
+        return None;
     }
 
     // Full world-state snapshots are persisted after installing initial context. They still
@@ -100,12 +154,12 @@ fn finalize_active_segment<'a>(
             .any(|item| matches!(item, RolloutItem::WorldState(state) if state.full));
     world_state_replay.extend(active_segment.world_state_replay);
 
-    // A surviving replacement-history checkpoint is a complete history base. Once we
+    // A surviving replacement-history compaction is a complete history base. Once we
     // know the newest surviving one, older rollout items do not affect rebuilt history.
-    if base_compaction.is_none()
-        && let Some(segment_base_compaction) = active_segment.base_compaction
+    if history_checkpoint.is_none()
+        && let Some(segment_history_checkpoint) = active_segment.history_checkpoint
     {
-        *base_compaction = Some(segment_base_compaction);
+        *history_checkpoint = Some(segment_history_checkpoint);
     }
 
     if window.is_none() {
@@ -128,6 +182,9 @@ fn finalize_active_segment<'a>(
     {
         *reference_context_item = active_segment.reference_context_item;
     }
+    // Automatic turns can persist attribution without establishing a model-context baseline.
+    // Select recovery metadata from the same surviving segments, independently of that baseline.
+    active_segment.turn_attribution
 }
 
 impl Session {
@@ -136,11 +193,52 @@ impl Session {
         turn_context: &TurnContext,
         rollout_items: &[RolloutItem],
     ) -> RolloutReconstruction {
-        // Replay metadata should already match the shape of the future lazy reverse loader, even
-        // while history materialization still uses an eager bridge. Scan newest-to-oldest,
-        // stopping once a surviving replacement-history checkpoint and the required resume metadata
-        // are both known; then replay only the buffered surviving tail forward to preserve exact
-        // history semantics.
+        ContextManager::reconstruct_rollout(
+            rollout_items,
+            turn_context.history_mode,
+            ContextManager::for_session(
+                turn_context.root_capabilities_restricted,
+                &turn_context.config.features,
+                turn_context.config.guardian_context_budgeting(),
+                // Reconstructing retained evidence may mint temporary revisions before restoring
+                // the durable originals. Replay must not consume the live thread's item sequence.
+                Self::new_item_id_generator(),
+            ),
+            turn_context.model_info().truncation_policy.into(),
+        )
+    }
+}
+
+impl ContextManager {
+    /// Replays stored history without starting a session or acquiring its writer.
+    pub(crate) fn reconstruct_rollout(
+        rollout_items: &[RolloutItem],
+        history_mode: ThreadHistoryMode,
+        mut history: Self,
+        truncation_policy: TruncationPolicy,
+    ) -> RolloutReconstruction {
+        // Rejection facts are durable across compaction boundaries. File IDs are immutable,
+        // so retaining a fact after rollback is conservative and cannot suppress a different
+        // future upload.
+        let mut rejected_audio_file_ids = BTreeSet::new();
+        for item in rollout_items {
+            match item {
+                RolloutItem::Compacted(compacted) => {
+                    if let Some(metadata) = &compacted.resume_metadata {
+                        rejected_audio_file_ids
+                            .extend(metadata.rejected_audio_file_ids.iter().cloned());
+                    }
+                }
+                RolloutItem::EventMsg(EventMsg::TurnComplete(completed)) => {
+                    if let Some(error) = &completed.error {
+                        rejected_audio_file_ids
+                            .extend(error.rejected_audio_file_ids.iter().cloned());
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Select the compaction and suffix that can affect reconstruction.
         let has_legacy_compaction_without_window_number =
             rollout_items.iter().any(|item| {
                 matches!(item, RolloutItem::Compacted(compacted) if compacted.window_number.is_none())
@@ -157,36 +255,75 @@ impl Session {
                 _ => None,
             })
         };
-        let mut base_compaction = None;
+        let input_checkpoint = select_input_compaction(rollout_items, history_mode);
+        let replay_items = input_checkpoint.map_or(rollout_items, |checkpoint| checkpoint.suffix);
+        let resume_metadata =
+            input_checkpoint.and_then(|checkpoint| checkpoint.compacted.resume_metadata.as_ref());
+        let mut history_checkpoint = input_checkpoint;
+        let mut window = input_checkpoint
+            .and_then(|checkpoint| reconstructed_window_from_compaction(checkpoint.compacted));
+
+        // Scan the selected items backward to find the newest surviving turn state.
+        let mut started_turn_ids = replay_items
+            .iter()
+            .rev()
+            .filter_map(|item| match item {
+                RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => Some(event.turn_id.as_str()),
+                RolloutItem::DynamicToolsUpdated { .. }
+                | RolloutItem::SessionMeta(_)
+                | RolloutItem::ResponseItem(_)
+                | RolloutItem::InterAgentCommunication(_)
+                | RolloutItem::InterAgentCommunicationMetadata { .. }
+                | RolloutItem::TurnContext(_)
+                | RolloutItem::WorldState(_)
+                | RolloutItem::RetainedContext(_)
+                | RolloutItem::SecurityRiskScore(_)
+                | RolloutItem::TokenUsageRecord(_)
+                | RolloutItem::RealtimeItem(_)
+                | RolloutItem::Compacted(_)
+                | RolloutItem::EventMsg(_) => None,
+            })
+            .peekable();
+        let last_started_turn_id = started_turn_ids
+            .peek()
+            .map(|id| (*id).to_owned())
+            .or_else(|| resume_metadata.and_then(|metadata| metadata.last_started_turn_id.clone()));
+        // Saved attribution still identifies the turn when continuation eligibility was cleared.
+        let checkpoint_turn_id = resume_metadata.and_then(|metadata| {
+            metadata.last_started_turn_id.as_deref().or_else(|| {
+                metadata
+                    .turn_attribution
+                    .as_ref()
+                    .map(|attribution| attribution.turn_id.as_str())
+            })
+        });
+
         let mut previous_turn_settings = None;
         let mut reference_context_item = TurnReferenceContextItem::NeverSet;
+        let mut turn_attribution = None;
         let mut world_state_replay = Vec::new();
-        let mut window = None;
         // Rollback is "drop the newest N user turns". While scanning in reverse, that becomes
         // "skip the next N user-turn segments we finalize".
         let mut pending_rollback_turns = 0usize;
         // Reverse replay accumulates rollout items into the newest in-progress turn segment until
         // we hit its matching `TurnStarted`, at which point the segment can be finalized.
+        let mut checkpoint_attribution =
+            resume_metadata.and_then(|metadata| metadata.turn_attribution.clone());
+        let mut late_completed_turn_ids = HashSet::new();
         let mut active_segment: Option<ActiveReplaySegment<'_>> = None;
 
-        for (index, item) in rollout_items.iter().enumerate().rev() {
+        for (index, item) in replay_items.iter().enumerate().rev() {
+            let preceding_turn_id = started_turn_ids.peek().copied().or(checkpoint_turn_id);
             match item {
                 RolloutItem::Compacted(compacted) => {
                     let active_segment =
                         active_segment.get_or_insert_with(ActiveReplaySegment::default);
                     active_segment.world_state_replay.push(item);
                     if active_segment.window.is_none()
-                        && let Some(window_number) = compacted.window_number
+                        && let Some(compaction_window) =
+                            reconstructed_window_from_compaction(compacted)
                     {
-                        active_segment.window = Some(ReconstructedWindow {
-                            number: window_number,
-                            first_id: compacted.first_window_id.as_deref().and_then(parse_uuid_v7),
-                            previous_id: compacted
-                                .previous_window_id
-                                .as_deref()
-                                .and_then(parse_uuid_v7),
-                            id: compacted.window_id.as_deref().and_then(parse_uuid_v7),
-                        });
+                        active_segment.window = Some(compaction_window);
                     }
                     // Looking backward, compaction clears any older baseline unless a newer
                     // `TurnContextItem` in this same segment has already re-established it.
@@ -196,12 +333,12 @@ impl Session {
                     ) {
                         active_segment.reference_context_item = TurnReferenceContextItem::Cleared;
                     }
-                    if active_segment.base_compaction.is_none()
+                    if active_segment.history_checkpoint.is_none()
                         && compacted.replacement_history.is_some()
                     {
-                        active_segment.base_compaction = Some(ReplayCheckpoint {
+                        active_segment.history_checkpoint = Some(ReplayCheckpoint {
                             compacted,
-                            suffix: &rollout_items[index + 1..],
+                            suffix: &replay_items[index + 1..],
                         });
                     }
                 }
@@ -210,8 +347,14 @@ impl Session {
                         .saturating_add(usize::try_from(rollback.num_turns).unwrap_or(usize::MAX));
                 }
                 RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => {
+                    // Stop hooks can finish after a newer turn has started.
+                    if !turn_ids_are_compatible(preceding_turn_id, Some(event.turn_id.as_str())) {
+                        late_completed_turn_ids.insert(event.turn_id.as_str());
+                        continue;
+                    }
                     let active_segment =
                         active_segment.get_or_insert_with(ActiveReplaySegment::default);
+                    active_segment.turn_completed = true;
                     // Reverse replay often sees `TurnComplete` before any turn-scoped metadata.
                     // Capture the turn id early so later `TurnContext` / abort items can match it.
                     if active_segment.turn_id.is_none() {
@@ -219,6 +362,9 @@ impl Session {
                     }
                 }
                 RolloutItem::EventMsg(EventMsg::TurnAborted(event)) => {
+                    if !turn_ids_are_compatible(preceding_turn_id, event.turn_id.as_deref()) {
+                        continue;
+                    }
                     if let Some(active_segment) = active_segment.as_mut() {
                         if active_segment.turn_id.is_none()
                             && let Some(turn_id) = &event.turn_id
@@ -251,6 +397,7 @@ impl Session {
                     ) {
                         active_segment.previous_turn_settings = Some(PreviousTurnSettings {
                             model: ctx.model.clone(),
+                            cyber_access_program: ctx.cyber_access_program,
                             comp_hash: ctx.comp_hash.clone(),
                             realtime_active: ctx.realtime_active,
                         });
@@ -269,23 +416,43 @@ impl Session {
                     active_segment.world_state_replay.push(item);
                 }
                 RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
+                    started_turn_ids.next();
+                    // Startup can be suspended before any input or context is written.
+                    // Explicit start attribution is authoritative, including unknown fields.
+                    if let Some(attribution) = &event.turn_attribution
+                        && attribution.turn_id == event.turn_id
+                    {
+                        let segment =
+                            active_segment.get_or_insert_with(ActiveReplaySegment::default);
+                        if turn_ids_are_compatible(
+                            segment.turn_id.as_deref(),
+                            Some(event.turn_id.as_str()),
+                        ) {
+                            segment.turn_attribution = Some(attribution.clone());
+                        }
+                    }
                     // `TurnStarted` is the oldest boundary of the active reverse segment.
                     if active_segment.as_ref().is_some_and(|active_segment| {
                         turn_ids_are_compatible(
                             active_segment.turn_id.as_deref(),
                             Some(event.turn_id.as_str()),
                         )
-                    }) && let Some(active_segment) = active_segment.take()
+                    }) && let Some(mut active_segment) = active_segment.take()
                     {
-                        finalize_active_segment(
+                        active_segment
+                            .turn_id
+                            .get_or_insert_with(|| event.turn_id.clone());
+                        active_segment.take_checkpoint_attribution(&mut checkpoint_attribution);
+                        let segment_context = finalize_active_segment(
                             active_segment,
-                            &mut base_compaction,
+                            &mut history_checkpoint,
                             &mut previous_turn_settings,
                             &mut reference_context_item,
                             &mut world_state_replay,
                             &mut window,
                             &mut pending_rollback_turns,
                         );
+                        turn_attribution = turn_attribution.or(segment_context);
                     }
                 }
                 RolloutItem::ResponseItem(response_item) => {
@@ -300,6 +467,7 @@ impl Session {
                     active_segment.counts_as_user_turn = true;
                 }
                 RolloutItem::EventMsg(_)
+                | RolloutItem::DynamicToolsUpdated { .. }
                 | RolloutItem::SessionMeta(_)
                 | RolloutItem::RealtimeItem(_)
                 | RolloutItem::RetainedContext(_)
@@ -307,28 +475,39 @@ impl Session {
                 | RolloutItem::TokenUsageRecord(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. } => {}
             }
-
-            if base_compaction.is_some()
-                && previous_turn_settings.is_some()
-                && !matches!(reference_context_item, TurnReferenceContextItem::NeverSet)
-            {
-                // At this point we have both eager resume metadata values and the replacement-
-                // history base for the surviving tail, so older rollout items cannot affect this
-                // result.
-                break;
-            }
         }
 
-        if let Some(active_segment) = active_segment.take() {
-            finalize_active_segment(
+        if let Some(mut active_segment) = active_segment.take() {
+            active_segment.take_checkpoint_attribution(&mut checkpoint_attribution);
+            active_segment.turn_completed |= active_segment
+                .turn_id
+                .as_deref()
+                .or(checkpoint_turn_id)
+                .is_some_and(|turn_id| late_completed_turn_ids.contains(turn_id));
+            // A companion turn context only restores the context baseline. Once that turn
+            // completes, its settings are newer than the compaction metadata.
+            if resume_metadata.is_some() && !active_segment.turn_completed {
+                active_segment.previous_turn_settings = None;
+            }
+            let segment_context = finalize_active_segment(
                 active_segment,
-                &mut base_compaction,
+                &mut history_checkpoint,
                 &mut previous_turn_settings,
                 &mut reference_context_item,
                 &mut world_state_replay,
                 &mut window,
                 &mut pending_rollback_turns,
             );
+            turn_attribution = turn_attribution.or(segment_context);
+        }
+
+        if pending_rollback_turns == 0 {
+            turn_attribution = turn_attribution.or(checkpoint_attribution);
+        }
+
+        if previous_turn_settings.is_none() {
+            previous_turn_settings =
+                resume_metadata.and_then(|metadata| metadata.previous_turn_settings.clone());
         }
 
         let fallback_window_number = u64::try_from(
@@ -339,12 +518,9 @@ impl Session {
         )
         .unwrap_or(u64::MAX);
 
-        let mut history = ContextManager::with_guardian_context_mode(
-            self.guardian_context_mode,
-            &turn_context.session_source,
-        );
+        // Build model-visible history from the selected compaction and its newer suffix.
         let mut saw_legacy_compaction_without_replacement_history = false;
-        if let Some(checkpoint) = base_compaction
+        if let Some(checkpoint) = history_checkpoint
             && let Some(items) = &checkpoint.compacted.replacement_history
         {
             history.replace_annotated(items.clone());
@@ -356,32 +532,24 @@ impl Session {
                 None,
             );
         }
-        // Materialize exact history semantics from the replay-derived suffix. The eventual lazy
-        // design should keep this same replay shape, but drive it from a resumable reverse source
-        // instead of an eagerly loaded `&[RolloutItem]`.
-        let rollout_suffix = base_compaction.map_or(rollout_items, |checkpoint| checkpoint.suffix);
+        let rollout_suffix =
+            history_checkpoint.map_or(rollout_items, |checkpoint| checkpoint.suffix);
         for item in rollout_suffix {
             match item {
                 RolloutItem::RetainedContext(event) => {
                     history.record_retained_context(event);
                 }
                 RolloutItem::ResponseItem(response_item) => {
-                    history.record_annotated_items(
-                        std::slice::from_ref(response_item),
-                        turn_context.model_info().truncation_policy.into(),
-                    );
+                    history.replay_annotated_item(response_item, truncation_policy);
                 }
                 RolloutItem::InterAgentCommunication(communication) => {
                     let response_item = communication.to_model_input_item();
-                    history.record_items(
-                        std::iter::once(&response_item),
-                        turn_context.model_info().truncation_policy.into(),
-                    );
+                    history.record_items(std::iter::once(&response_item), truncation_policy);
                 }
                 RolloutItem::InterAgentCommunicationMetadata { .. } => {}
                 RolloutItem::Compacted(compacted) => {
-                    // Reverse replay already chose the newest surviving checkpoint. Any newer
-                    // replacement checkpoint belongs to a rolled-back turn; replay its original
+                    // Reverse replay already chose the newest surviving compaction. Any newer
+                    // replacement compaction belongs to a rolled-back turn; replay its original
                     // items so the rollback can still find the removed user boundary.
                     if compacted.replacement_history.is_none() {
                         saw_legacy_compaction_without_replacement_history = true;
@@ -393,21 +561,8 @@ impl Session {
                         // prompt shape.
                         // TODO(ccunningham): if we drop support for None replacement_history compaction items,
                         // we can get rid of this second loop entirely and just build `history` directly in the first loop.
-                        let identity =
-                            if self.guardian_context_mode == GuardianContextMode::ThreadOwned {
-                                compact::CompactedMessageIdentity::Preserve
-                            } else {
-                                compact::CompactedMessageIdentity::Regenerate
-                            };
-                        let user_messages = compact::collect_annotated_user_messages(
-                            history.annotated_items(),
-                            identity,
-                        );
-                        let rebuilt = compact::build_compacted_history(
-                            Vec::new(),
-                            &user_messages,
-                            &compacted.message,
-                        );
+                        let rebuilt =
+                            compact::build_compacted_history(&history, &compacted.message);
                         let retained_context = history.retained_context().clone();
                         history.replace_annotated(rebuilt);
                         history.restore_retained_context(Some(&retained_context));
@@ -422,6 +577,7 @@ impl Session {
                 | RolloutItem::WorldState(_)
                 | RolloutItem::SecurityRiskScore(_)
                 | RolloutItem::TokenUsageRecord(_)
+                | RolloutItem::DynamicToolsUpdated { .. }
                 | RolloutItem::SessionMeta(_) => {}
             }
         }
@@ -438,8 +594,8 @@ impl Session {
             reference_context_item
         };
 
-        // Segments and their contents were collected newest-first; replay the surviving records
-        // chronologically so compaction resets and merge patches have their original meaning.
+        // Replay the collected world-state records chronologically so compaction resets and merge
+        // patches keep their original meaning.
         world_state_replay.reverse();
         let mut world_state_baseline: Option<WorldStateSnapshot> = None;
         for item in world_state_replay {
@@ -455,7 +611,8 @@ impl Session {
                     };
                     baseline.apply_merge_patch(&world_state.state);
                 }
-                RolloutItem::SessionMeta(_)
+                RolloutItem::DynamicToolsUpdated { .. }
+                | RolloutItem::SessionMeta(_)
                 | RolloutItem::ResponseItem(_)
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
@@ -479,9 +636,12 @@ impl Session {
         RolloutReconstruction {
             retained_context: history.retained_context().clone(),
             guardian_history: history.guardian_history_checkpoint(),
+            last_started_turn_id,
             history: history.into_annotated_items(),
+            rejected_audio_file_ids,
             previous_turn_settings,
             reference_context_item,
+            turn_attribution,
             world_state_baseline,
             window_number: window.number,
             first_window_id: window.first_id,
@@ -491,19 +651,31 @@ impl Session {
     }
 }
 
-fn parse_uuid_v7(value: &str) -> Option<Uuid> {
-    Uuid::parse_str(value)
-        .ok()
-        .filter(|uuid| uuid.get_version_num() == 7)
+fn reconstructed_window_from_compaction(compacted: &CompactedItem) -> Option<ReconstructedWindow> {
+    Some(ReconstructedWindow {
+        number: compacted.window_number?,
+        first_id: compacted
+            .first_window_id
+            .as_ref()
+            .and_then(ContextWindowId::validated),
+        previous_id: compacted
+            .previous_window_id
+            .as_ref()
+            .and_then(ContextWindowId::validated),
+        id: compacted
+            .window_id
+            .as_ref()
+            .and_then(ContextWindowId::validated),
+    })
 }
 
 fn reconstructed_window_from_session_context_window(
     context_window: &SessionContextWindow,
 ) -> Option<ReconstructedWindow> {
-    let id = parse_uuid_v7(&context_window.window_id)?;
+    let id = context_window.window_id.validated()?;
     Some(ReconstructedWindow {
         number: 0,
-        first_id: Some(id),
+        first_id: Some(id.clone()),
         previous_id: None,
         id: Some(id),
     })

@@ -57,7 +57,7 @@ pub(super) fn read_connect_headers(reader: &mut impl BufRead) -> Result<HeaderMa
     Ok(headers)
 }
 
-pub(super) fn read_auth_token(reader: &mut impl BufRead) -> Result<Option<HeaderValue>> {
+pub(super) fn read_bearer(reader: &mut impl BufRead) -> Result<Option<HeaderValue>> {
     let mut line = Vec::new();
     std::io::Read::take(&mut *reader, (MAX_TOKEN_BYTES + 1) as u64)
         .read_until(b'\n', &mut line)
@@ -69,9 +69,13 @@ pub(super) fn read_auth_token(reader: &mut impl BufRead) -> Result<Option<Header
     let token = std::str::from_utf8(&line)
         .context("invalid MASQUE token encoding")?
         .trim();
+    Ok(Some(bearer_header(token)?))
+}
+
+pub(super) fn bearer_header(token: &str) -> Result<HeaderValue> {
     ensure!(!token.is_empty(), "empty MASQUE token");
     let mut auth =
         HeaderValue::from_str(&format!("Bearer {token}")).context("invalid MASQUE token header")?;
     auth.set_sensitive(true);
-    Ok(Some(auth))
+    Ok(auth)
 }

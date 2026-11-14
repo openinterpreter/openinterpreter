@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 //! Verifies guarded mutations, pinned storage, token mapping, and saved runtime snapshots.
 
 use std::time::Duration;
@@ -25,8 +27,10 @@ use crate::oauth::compute_store_key;
 use crate::oauth::load_oauth_tokens_from_file;
 use crate::oauth::normalized_oauth_credentials;
 use crate::oauth::save_oauth_tokens_to_file;
+use crate::oauth::save_oauth_tokens_to_file_with_lock_held;
 use crate::oauth::store_lock::OAuthStore;
 use crate::oauth::store_lock::OAuthStoreLock;
+use crate::oauth::store_lock::OAuthStoreWriteOperation;
 
 #[tokio::test(flavor = "current_thread")]
 async fn mutations_require_and_retain_the_transaction_guard() -> Result<()> {
@@ -36,8 +40,9 @@ async fn mutations_require_and_retain_the_transaction_guard() -> Result<()> {
         save_oauth_tokens_to_file(&initial)?;
         let store = OAuthCredentialStore::new(
             initial.clone(),
-            ResolvedOAuthCredentialStore::File,
+            ResolvedOAuthCredentialStore::file(),
             MockKeyringStore::default(),
+            /*oauth_config*/ None,
         );
         let guard = store.acquire_transaction_guard().await?;
         let credentials = store.load().await?.unwrap();
@@ -57,8 +62,8 @@ async fn mutations_require_and_retain_the_transaction_guard() -> Result<()> {
             load_oauth_tokens_from_file(&initial.server_name, &initial.url)?.is_none(),
             !clear,
         );
-        // Guard acquisition now rereads storage. Restore the deleted credential first,
-        // then delete it again under the guard so the queued save must recreate it.
+        // Guard acquisition requires a durable credential. Delete it under the guard in the
+        // save case: a queued save must retain the guard without recreating the row.
         save_oauth_tokens_to_file(&initial)?;
         let guard = CredentialStore::acquire_refresh_guard(&store)
             .await?
@@ -66,7 +71,8 @@ async fn mutations_require_and_retain_the_transaction_guard() -> Result<()> {
         if !clear {
             store.clear().await?;
         }
-        let aggregate_lock = OAuthStoreLock::acquire_for_write(OAuthStore::File)?;
+        let aggregate_lock =
+            OAuthStoreLock::acquire_for_write(OAuthStore::File, OAuthStoreWriteOperation::Save)?;
         let mut mutation = if clear {
             store.clear()
         } else {
@@ -85,7 +91,7 @@ async fn mutations_require_and_retain_the_transaction_guard() -> Result<()> {
         drop(aggregate_lock);
         let _guard = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), contender).await??;
         let durable = load_oauth_tokens_from_file(&initial.server_name, &initial.url)?;
-        assert_eq!(durable.is_none(), clear);
+        assert!(durable.is_none());
     }
     Ok(())
 }
@@ -96,7 +102,7 @@ async fn save_publishes_only_persisted_credentials() -> Result<()> {
         let _env = TempCodexHome::new();
         let initial = sample_tokens();
         let keyring = MockKeyringStore::default();
-        let authority = ResolvedOAuthCredentialStore::Keyring(AuthKeyringBackendKind::Direct);
+        let authority = ResolvedOAuthCredentialStore::keyring(AuthKeyringBackendKind::Direct);
         authority.save(&keyring, &initial.server_name, &initial)?;
         let mut fallback = initial.clone();
         fallback
@@ -104,7 +110,12 @@ async fn save_publishes_only_persisted_credentials() -> Result<()> {
             .0
             .set_access_token(AccessToken::new("fallback-token".into()));
         save_oauth_tokens_to_file(&fallback)?;
-        let store = OAuthCredentialStore::new(initial.clone(), authority, keyring.clone());
+        let store = OAuthCredentialStore::new(
+            initial.clone(),
+            authority,
+            keyring.clone(),
+            /*oauth_config*/ None,
+        );
         let _guard = store.acquire_transaction_guard().await?;
         let mut credentials = store.load().await?.expect("stored credentials");
         let token_response = credentials
@@ -161,8 +172,9 @@ async fn pinned_read_failure_does_not_adopt_fallback_credentials() -> Result<()>
     keyring.set_error(&key, KeyringError::Invalid("test".into(), "load".into()));
     let store = OAuthCredentialStore::new(
         initial.clone(),
-        ResolvedOAuthCredentialStore::Keyring(AuthKeyringBackendKind::Direct),
+        ResolvedOAuthCredentialStore::keyring(AuthKeyringBackendKind::Direct),
         keyring,
+        /*oauth_config*/ None,
     );
     let cached = store.load().await?.expect("cached credentials");
     assert_eq!(
@@ -187,8 +199,9 @@ async fn replacement_or_removal_does_not_acknowledge_a_new_runtime_snapshot() ->
     save_oauth_tokens_to_file(&initial)?;
     let store = OAuthCredentialStore::new(
         initial.clone(),
-        ResolvedOAuthCredentialStore::File,
+        ResolvedOAuthCredentialStore::file(),
         MockKeyringStore::default(),
+        /*oauth_config*/ None,
     );
     let original_snapshot = store.stored_credentials().await;
     for (client_id, issuer) in [
@@ -230,8 +243,9 @@ async fn storage_roundtrip_preserves_absolute_and_unknown_expiry() -> Result<()>
     save_oauth_tokens_to_file(&initial)?;
     let store = OAuthCredentialStore::new(
         initial.clone(),
-        ResolvedOAuthCredentialStore::File,
+        ResolvedOAuthCredentialStore::file(),
         MockKeyringStore::default(),
+        /*oauth_config*/ None,
     );
     let future_received_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let future_deadline = (future_received_at + 120) * 1000;
@@ -277,6 +291,102 @@ async fn storage_roundtrip_preserves_absolute_and_unknown_expiry() -> Result<()>
             store.stored_credentials().await,
             normalized_oauth_credentials(Some(&expected))
         );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_rejection_retains_guard_and_preserves_replacement() -> Result<()> {
+    let _env = TempCodexHome::new();
+    let initial = sample_tokens();
+    save_oauth_tokens_to_file(&initial)?;
+    let store = OAuthCredentialStore::new(
+        initial.clone(),
+        ResolvedOAuthCredentialStore::file(),
+        MockKeyringStore::default(),
+        /*oauth_config*/ None,
+    );
+    let credentials = store.load().await?.unwrap();
+    assert!(matches!(
+        store.on_refresh_token_rejected(&credentials).await,
+        Err(AuthError::CredentialStoreError(error)) if error.contains("active refresh guard")
+    ));
+    let guard = store.acquire_transaction_guard().await?;
+    let aggregate_lock =
+        OAuthStoreLock::acquire_for_write(OAuthStore::File, OAuthStoreWriteOperation::Save)?;
+    let mut mutation = store.on_refresh_token_rejected(&credentials);
+    assert!(futures::poll!(&mut mutation).is_pending());
+    drop(mutation);
+    drop(guard);
+    let mut contender = Box::pin(RefreshCredentialLock::acquire_for_server(
+        &initial.server_name,
+        &initial.url,
+    ));
+    assert!(futures::poll!(&mut contender).is_pending());
+    let mut replacement = initial.clone();
+    replacement
+        .token_response
+        .0
+        .set_refresh_token(Some(RefreshToken::new("replacement-refresh".into())));
+    // A legacy writer may finish while retirement is waiting for the aggregate lock.
+    save_oauth_tokens_to_file_with_lock_held(&replacement)?;
+    drop(aggregate_lock);
+    let _guard = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), contender).await??;
+    let mut expected = initial.clone();
+    expected.token_response.0.set_refresh_token(None);
+    let durable = load_oauth_tokens_from_file(&initial.server_name, &initial.url)?.unwrap();
+    assert_tokens_match_without_expiry(&durable, &replacement);
+    assert_eq!(
+        store.stored_credentials().await,
+        normalized_oauth_credentials(Some(&expected))
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn keyring_rejection_respects_credential_scope() -> Result<()> {
+    for kind in [
+        AuthKeyringBackendKind::Direct,
+        AuthKeyringBackendKind::Secrets,
+    ] {
+        let _env = TempCodexHome::new();
+        let initial = sample_tokens();
+        let keyring = MockKeyringStore::default();
+        let authority = ResolvedOAuthCredentialStore::keyring(kind);
+        authority.save(&keyring, &initial.server_name, &initial)?;
+        let store = OAuthCredentialStore::new(
+            initial.clone(),
+            authority,
+            keyring.clone(),
+            /*oauth_config*/ None,
+        );
+        let guard = store.acquire_transaction_guard().await?;
+        store
+            .on_refresh_token_rejected(&store.load().await?.unwrap())
+            .await?;
+        let mut retired = initial.clone();
+        retired.token_response.0.set_refresh_token(None);
+        let expected_durable = match kind {
+            AuthKeyringBackendKind::Direct => &initial,
+            AuthKeyringBackendKind::Secrets => &retired,
+        };
+        assert_tokens_match_without_expiry(
+            &authority
+                .load(&keyring, &initial.server_name, &initial.url)?
+                .unwrap(),
+            expected_durable,
+        );
+        assert_eq!(
+            store.stored_credentials().await,
+            normalized_oauth_credentials(Some(&retired))
+        );
+        drop(guard);
+        if kind == AuthKeyringBackendKind::Direct {
+            assert!(matches!(
+                store.acquire_transaction_guard().await,
+                Err(AuthError::AuthorizationRequired)
+            ));
+        }
     }
     Ok(())
 }

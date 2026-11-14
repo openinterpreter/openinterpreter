@@ -32,6 +32,31 @@ pub(super) fn background_terminals_blocker(
     }
 }
 
+pub(super) async fn check_background_terminals(
+    app_server: &mut AppServerSession,
+    target: &AppServerTarget,
+    thread_ids: impl IntoIterator<Item = ThreadId>,
+) -> Option<&'static str> {
+    for thread_id in thread_ids {
+        let request = ClientRequest::ThreadBackgroundTerminalsList {
+            request_id: app_server.next_request_id(),
+            params: ThreadBackgroundTerminalsListParams {
+                thread_id: thread_id.to_string(),
+                cursor: None,
+                limit: Some(1),
+            },
+        };
+        let result = app_server
+            .request_handle()
+            .request_typed::<ListResponse>(request)
+            .await;
+        if let Some(message) = background_terminals_blocker(result, target) {
+            return Some(message);
+        }
+    }
+    None
+}
+
 impl App {
     pub(super) async fn start_managed_worktree(
         &mut self,
@@ -218,7 +243,6 @@ impl App {
         };
         let can_continue = !self.reconnect.offline
             && !self.chat_widget.has_misalignment_policy_violation()
-            && self.config.features.enabled(Feature::Worktrees)
             && !crate::uses_remote_workspace_or_environment(
                 &self.app_server_target,
                 self.environment_manager.as_ref(),

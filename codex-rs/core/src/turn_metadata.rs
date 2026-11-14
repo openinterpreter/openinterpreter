@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,6 +37,7 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadSource;
+use codex_protocol::turn_input::ResponsesApiClientMetadataUpdate;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_git_discovery::GitRootDiscovery;
 
@@ -306,11 +306,22 @@ impl TurnMetadataState {
         window_id: String,
         request_kind: CodexResponsesRequestKind,
     ) -> CodexResponsesMetadata {
+        let mut metadata = self.responses_metadata_template();
+        if matches!(request_kind, CodexResponsesRequestKind::Compaction(_))
+            && metadata
+                .extra
+                .get("misalignment_override")
+                .is_some_and(|value| is_targeted_continuation(value))
+        {
+            // Target-based intent belongs to the pending turn, not compaction. Preserve the
+            // legacy timestamp path until servers can admit pre-turn compaction separately.
+            metadata.extra.remove("misalignment_override");
+        }
         CodexResponsesMetadata {
             installation_id,
             window_id,
             request_kind: Some(request_kind),
-            ..self.responses_metadata_template()
+            ..metadata
         }
     }
 
@@ -360,26 +371,44 @@ impl TurnMetadataState {
         self.root_turn_id.get().cloned()
     }
 
-    pub(crate) fn set_responsesapi_client_metadata(
+    pub(crate) fn update_responsesapi_client_metadata(
         &self,
-        responsesapi_client_metadata: HashMap<String, String>,
+        update: ResponsesApiClientMetadataUpdate,
     ) {
-        *self
+        let replacement = update.replacement.map(filter_extra_metadata);
+        let patch = update.patch.map(filter_extra_metadata).unwrap_or_default();
+        if replacement.is_none() && patch.is_empty() {
+            return;
+        }
+        let mut current = self
             .responsesapi_client_metadata
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            filter_extra_metadata(responsesapi_client_metadata);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let continuation = current
+            .get("misalignment_override")
+            .filter(|value| is_targeted_continuation(value))
+            .cloned();
+        if let Some(replacement) = replacement {
+            *current = replacement;
+        }
+        current.extend(patch);
+        if let Some(continuation) = continuation {
+            // Steering may update other metadata, but cannot replace the reviewed block.
+            current.insert("misalignment_override".to_string(), continuation);
+        }
     }
 
     pub(crate) fn set_responses_api_metadata(
         &self,
         responses_api_metadata: BTreeMap<String, String>,
     ) {
+        let mut metadata = filter_extra_metadata(responses_api_metadata);
+        // Only explicit per-turn metadata can acknowledge a reviewed block.
+        metadata.remove("misalignment_override");
         *self
             .responses_api_metadata
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            filter_extra_metadata(responses_api_metadata);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = metadata;
     }
 
     pub(crate) fn workspace_kind(&self) -> Option<String> {
@@ -562,6 +591,20 @@ async fn git_workspaces(
         );
     }
     workspaces
+}
+
+/// A reviewed target is bound to this turn; a timestamp-only legacy override
+/// may still be forwarded to compaction but must not be treated as a target.
+fn is_targeted_continuation(value: &str) -> bool {
+    serde_json::from_str::<Value>(value)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("review_target")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .is_some_and(|target| !target.is_empty())
 }
 
 #[cfg(test)]

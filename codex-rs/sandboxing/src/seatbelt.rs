@@ -3,11 +3,9 @@ use codex_network_proxy::NetworkProxy;
 use codex_network_proxy::PROXY_URL_ENV_KEYS;
 use codex_network_proxy::has_proxy_url_env_vars;
 use codex_network_proxy::proxy_url_env_value;
+use codex_protocol::permissions::FileSystemPolicyProjection;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
-use codex_protocol::permissions::PROTECTED_METADATA_PATH_NAMES;
-use codex_protocol::protocol::SandboxPolicy;
-use codex_protocol::protocol::WritableRoot;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -20,6 +18,9 @@ use url::Url;
 
 const MACOS_SEATBELT_BASE_POLICY: &str = include_str!("seatbelt_base_policy.sbpl");
 const MACOS_SEATBELT_NETWORK_POLICY: &str = include_str!("seatbelt_network_policy.sbpl");
+// System libcurl needs this service for TLS; keep it out of Unix-only profiles.
+const MACOS_SEATBELT_TLS_TRUST_POLICY: &str =
+    "(allow mach-lookup (global-name \"com.apple.TrustEvaluationAgent\"))\n";
 const MACOS_SEATBELT_PREFERENCES_POLICY: &str = include_str!("seatbelt_preferences_policy.sbpl");
 const MACOS_RESTRICTED_READ_ONLY_PLATFORM_DEFAULTS: &str =
     include_str!("seatbelt_read_only_platform_defaults.sbpl");
@@ -33,6 +34,7 @@ mod scratch;
 pub(crate) enum MacosSeatbeltProfile {
     #[default]
     Process,
+    ProcessWithInheritedTerminal,
     FileSystemHelper,
 }
 
@@ -300,19 +302,6 @@ fn unix_socket_policy(proxy: &ProxyPolicyInputs) -> String {
     policy
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-fn dynamic_network_policy(
-    sandbox_policy: &SandboxPolicy,
-    enforce_managed_network: bool,
-    proxy: &ProxyPolicyInputs,
-) -> String {
-    dynamic_network_policy_for_network(
-        NetworkSandboxPolicy::from(sandbox_policy),
-        enforce_managed_network,
-        proxy,
-    )
-}
-
 fn dynamic_network_policy_for_network(
     network_policy: NetworkSandboxPolicy,
     enforce_managed_network: bool,
@@ -334,14 +323,13 @@ fn dynamic_network_policy_for_network(
             policy.push_str("(allow network-inbound (local ip \"localhost:*\"))\n");
             policy.push_str("(allow network-outbound (remote ip \"localhost:*\"))\n");
         }
-        if proxy.allow_local_binding && !proxy.ports.is_empty() {
-            policy.push_str("; allow DNS lookups while application traffic remains proxy-routed\n");
-            policy.push_str("(allow network-outbound (remote ip \"*:53\"))\n");
-        }
         for port in &proxy.ports {
             policy.push_str(&format!(
                 "(allow network-outbound (remote ip \"localhost:{port}\"))\n"
             ));
+        }
+        if proxy.allow_local_binding || !proxy.ports.is_empty() {
+            policy.push_str(MACOS_SEATBELT_TLS_TRUST_POLICY);
         }
         let unix_socket_policy = unix_socket_policy(proxy);
         if !unix_socket_policy.is_empty() {
@@ -371,7 +359,7 @@ fn dynamic_network_policy_for_network(
             policy.push_str("; allow unix domain sockets for local IPC\n");
             policy.push_str(&unix_socket_policy);
         }
-        format!("{policy}{MACOS_SEATBELT_NETWORK_POLICY}")
+        format!("{policy}{MACOS_SEATBELT_NETWORK_POLICY}{MACOS_SEATBELT_TLS_TRUST_POLICY}")
     } else {
         String::new()
     }
@@ -423,30 +411,7 @@ fn nested_symlink_component(path: &Path) -> Option<&Path> {
 fn normalize_top_level_alias_for_sandbox(
     path: AbsolutePathBuf,
 ) -> Result<AbsolutePathBuf, SeatbeltPreparationError> {
-    let Some(top_level) = path.as_path().ancestors().find(|ancestor| {
-        ancestor.parent().is_some() && ancestor.parent().and_then(Path::parent).is_none()
-    }) else {
-        return Ok(path);
-    };
-    if !std::fs::symlink_metadata(top_level).is_ok_and(|metadata| metadata.file_type().is_symlink())
-    {
-        return Ok(path);
-    }
-
-    let canonical_top_level = top_level.canonicalize().map_err(|err| {
-        SeatbeltPreparationError::FileSystem(format!(
-            "failed to normalize top-level alias {} for Seatbelt: {err}",
-            top_level.display()
-        ))
-    })?;
-    let suffix = path.as_path().strip_prefix(top_level).map_err(|err| {
-        SeatbeltPreparationError::FileSystem(format!(
-            "failed to preserve path {} after normalizing {}: {err}",
-            path.display(),
-            top_level.display()
-        ))
-    })?;
-    AbsolutePathBuf::from_absolute_path(canonical_top_level.join(suffix)).map_err(|err| {
+    path.normalize_system_aliases().map_err(|err| {
         SeatbeltPreparationError::FileSystem(format!(
             "failed to normalize top-level alias for path {}: {err}",
             path.display()
@@ -624,49 +589,43 @@ fn seatbelt_protected_metadata_name_regex(root: &AbsolutePathBuf, name: &str) ->
     }
 }
 
-fn protected_metadata_names_for_writable_root(
-    file_system_sandbox_policy: &FileSystemSandboxPolicy,
-    writable_root: &WritableRoot,
-    cwd: &Path,
-) -> Vec<String> {
-    let mut names = writable_root.protected_metadata_names.clone();
-    for name in PROTECTED_METADATA_PATH_NAMES {
-        if names.iter().any(|existing| existing == name) {
-            continue;
-        }
-        let path = writable_root.root.join(*name);
-        if !file_system_sandbox_policy.can_write_local_path_with_cwd(path.as_path(), cwd) {
-            names.push((*name).to_string());
-        }
-    }
-    names
-}
-
-fn build_seatbelt_unreadable_glob_policy(
-    file_system_sandbox_policy: &FileSystemSandboxPolicy,
-    cwd: &Path,
-) -> String {
+fn build_seatbelt_unreadable_glob_policy(unreadable_globs: &[String]) -> String {
     // Seatbelt does not understand the filesystem policy's glob syntax directly.
     // Convert each unreadable pattern into anchored read/write denies. Also deny
     // renaming directories that could contain matches so the protected files
     // cannot be moved beyond the path where the glob applies.
-    let unreadable_globs = file_system_sandbox_policy.get_unreadable_globs_with_cwd(cwd);
     if unreadable_globs.is_empty() {
         return String::new();
     }
     let mut policy_components = Vec::new();
     for pattern in unreadable_globs {
         let mut patterns = BTreeSet::from([pattern.clone()]);
-        if let Some(pattern) = canonicalize_glob_static_prefix_for_sandbox(&pattern) {
+        if let Some(pattern) = canonicalize_glob_static_prefix_for_sandbox(pattern) {
             patterns.insert(pattern);
         }
         for pattern in patterns {
-            let Some(regex) = seatbelt_regex_for_unreadable_glob(&pattern) else {
+            // A root-anchored recursive literal basename remains denied after any
+            // ancestor move, including for files created after policy generation.
+            // Scoped or multi-component patterns still need ancestor protection.
+            let global_literal_basename = pattern.strip_prefix("/**/").is_some_and(|name| {
+                !matches!(name, "" | "." | "..")
+                    && !name.contains(['/', '*', '?', '[', ']', '{', '}', '\\'])
+            });
+            let Some(mut regex) = seatbelt_regex_for_unreadable_glob(&pattern) else {
                 continue;
             };
+            if global_literal_basename {
+                // Replace the compiler's end anchor to also protect descendants
+                // when the matching basename belongs to a directory.
+                regex.pop();
+                regex.push_str("(/.*)?$");
+            }
             let regex = regex.replace('"', "\\\"");
             policy_components.push(format!(r#"(deny file-read* (regex #"{regex}"))"#));
             policy_components.push(format!(r#"(deny file-write* (regex #"{regex}"))"#));
+            if global_literal_basename {
+                continue;
+            }
             for ancestor in Path::new(&pattern).ancestors().skip(1) {
                 let Some(regex) = ancestor
                     .to_str()
@@ -831,33 +790,8 @@ fn seatbelt_regex_for_glob(pattern: &str, glob_match: GlobMatch) -> Option<Strin
     Some(regex)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-fn create_seatbelt_command_args_for_legacy_policy(
-    command: Vec<String>,
-    sandbox_policy: &SandboxPolicy,
-    sandbox_policy_cwd: &Path,
-    enforce_managed_network: bool,
-    network: Option<&NetworkProxy>,
-) -> Result<Vec<String>, String> {
-    let file_system_sandbox_policy = FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
-        sandbox_policy,
-        sandbox_policy_cwd,
-    );
-    create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
-        command,
-        file_system_sandbox_policy: &file_system_sandbox_policy,
-        network_sandbox_policy: NetworkSandboxPolicy::from(sandbox_policy),
-        sandbox_policy_cwd,
-        enforce_managed_network,
-        managed_network: None,
-        environment_id: None,
-        network,
-        extra_allow_unix_sockets: &[],
-    })
-}
-
 #[derive(Debug)]
-pub struct CreateSeatbeltCommandArgsParams<'a> {
+pub(crate) struct CreateSeatbeltCommandArgsParams<'a> {
     pub command: Vec<String>,
     pub file_system_sandbox_policy: &'a FileSystemSandboxPolicy,
     pub network_sandbox_policy: NetworkSandboxPolicy,
@@ -869,7 +803,8 @@ pub struct CreateSeatbeltCommandArgsParams<'a> {
     pub extra_allow_unix_sockets: &'a [AbsolutePathBuf],
 }
 
-pub fn create_seatbelt_command_args(
+#[cfg(test)]
+fn create_seatbelt_command_args(
     args: CreateSeatbeltCommandArgsParams<'_>,
 ) -> Result<Vec<String>, String> {
     create_seatbelt_command_args_with_profile(
@@ -920,7 +855,7 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
     // Protect ancestors of read-only paths so renaming a writable directory
     // cannot move its descendants outside their policy carveouts.
     let mut protected_ancestors = BTreeSet::new();
-    for writable_root in &writable_roots {
+    for writable_root in &resolved_filesystem_permissions.writable_roots {
         let root = normalize_path_for_sandbox(writable_root.root.as_path())
             .unwrap_or_else(|| writable_root.root.clone());
         for path in &writable_root.read_only_subpaths {
@@ -945,8 +880,8 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
         .map(|(index, path)| (format!("PROTECTED_ANCESTOR_{index}"), path.into_path_buf()))
         .collect();
     let (file_write_policy, file_write_dir_params) =
-        if file_system_sandbox_policy.has_full_disk_write_access() {
-            if unreadable_roots.is_empty() {
+        if resolved_filesystem_permissions.has_full_disk_write_access {
+            if resolved_filesystem_permissions.unreadable_roots.is_empty() {
                 // Allegedly, this is more permissive than `(allow file-write*)`.
                 (
                     r#"(allow file-write* (regex #"^/"))"#.to_string(),
@@ -957,7 +892,7 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
                     SeatbeltAccessKind::Write,
                     vec![SeatbeltAccessRoot {
                         root: root_absolute_path(),
-                        excluded_subpaths: unreadable_roots.clone(),
+                        excluded_subpaths: resolved_filesystem_permissions.unreadable_roots.clone(),
                         protected_metadata_names: Vec::new(),
                     }],
                     /*allowed_symlinked_codex_home*/ None,
@@ -966,14 +901,11 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
         } else {
             build_seatbelt_access_policy(
                 SeatbeltAccessKind::Write,
-                writable_roots
+                resolved_filesystem_permissions
+                    .writable_roots
                     .into_iter()
                     .map(|root| SeatbeltAccessRoot {
-                        protected_metadata_names: protected_metadata_names_for_writable_root(
-                            file_system_sandbox_policy,
-                            &root,
-                            sandbox_policy_cwd,
-                        ),
+                        protected_metadata_names: root.protected_metadata_names,
                         root: root.root,
                         excluded_subpaths: root.read_only_subpaths,
                     })
@@ -983,8 +915,8 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
         };
 
     let (file_read_policy, file_read_dir_params) =
-        if file_system_sandbox_policy.has_full_disk_read_access() {
-            if unreadable_roots.is_empty() {
+        if resolved_filesystem_permissions.has_full_disk_read_access {
+            if resolved_filesystem_permissions.unreadable_roots.is_empty() {
                 (
                     "; allow read-only file operations\n(allow file-read*)".to_string(),
                     Vec::new(),
@@ -994,7 +926,7 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
                     SeatbeltAccessKind::Read,
                     vec![SeatbeltAccessRoot {
                         root: root_absolute_path(),
-                        excluded_subpaths: unreadable_roots,
+                        excluded_subpaths: resolved_filesystem_permissions.unreadable_roots,
                         protected_metadata_names: Vec::new(),
                     }],
                     /*allowed_symlinked_codex_home*/ None,
@@ -1007,11 +939,12 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
         } else {
             let (policy, params) = build_seatbelt_access_policy(
                 SeatbeltAccessKind::Read,
-                file_system_sandbox_policy
-                    .get_readable_roots_with_cwd(sandbox_policy_cwd)
+                resolved_filesystem_permissions
+                    .readable_roots
                     .into_iter()
                     .map(|root| SeatbeltAccessRoot {
-                        excluded_subpaths: unreadable_roots
+                        excluded_subpaths: resolved_filesystem_permissions
+                            .unreadable_roots
                             .iter()
                             .filter(|path| path.as_path().starts_with(root.as_path()))
                             .cloned()
@@ -1044,17 +977,17 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
         dynamic_network_policy_for_network(network_sandbox_policy, enforce_managed_network, &proxy);
 
     let deny_read_policy =
-        build_seatbelt_unreadable_glob_policy(file_system_sandbox_policy, sandbox_policy_cwd);
+        build_seatbelt_unreadable_glob_policy(&resolved_filesystem_permissions.unreadable_globs);
     let mut policy_sections = vec![
         MACOS_SEATBELT_BASE_POLICY.to_string(),
         file_read_policy,
         file_write_policy,
         network_policy,
     ];
-    if file_system_sandbox_policy.has_full_disk_read_access() {
+    if resolved_filesystem_permissions.has_full_disk_read_access {
         policy_sections.push(MACOS_SEATBELT_PREFERENCES_POLICY.to_string());
     }
-    if include_platform_defaults {
+    if resolved_filesystem_permissions.include_platform_defaults {
         policy_sections.push(MACOS_RESTRICTED_READ_ONLY_PLATFORM_DEFAULTS.to_string());
         if profile == MacosSeatbeltProfile::Process {
             policy_sections.push("(allow file-read* (subpath \"/Applications\"))".to_string());
@@ -1120,3 +1053,11 @@ mod daemon_socket_tests;
 #[cfg(test)]
 #[path = "seatbelt_fcntl_tests.rs"]
 mod fcntl_tests;
+
+#[cfg(test)]
+#[path = "seatbelt_network_tests.rs"]
+mod network_tests;
+
+#[cfg(test)]
+#[path = "seatbelt_tls_tests.rs"]
+mod tls_tests;

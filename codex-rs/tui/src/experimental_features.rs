@@ -22,6 +22,7 @@ pub(crate) fn fetch(
     request_id: &'static str,
     mut response_tx: oneshot::Sender<Result<Vec<ExperimentalFeature>, String>>,
 ) {
+    let request_id = request_id.into();
     tokio::spawn(async move {
         let discovery = async {
             let mut features = Vec::new();

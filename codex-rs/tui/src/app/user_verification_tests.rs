@@ -12,6 +12,7 @@ fn verification_request() -> ServerRequest {
     ServerRequest::McpServerElicitationRequest {
         request_id: RequestId::Integer(7),
         params: McpServerElicitationRequestParams {
+            environment_id: None,
             thread_id: ThreadId::new().to_string(),
             turn_id: None,
             server_name: "deployments".to_string(),
@@ -152,7 +153,7 @@ async fn run_verification_rpc_scenario(scenario: RpcScenario) -> color_eyre::Res
                 }
             }
         }
-        color_eyre::eyre::bail!("connection closed before the elicitation response")
+        color_eyre::eyre::bail!("connection closed before the elicitation response");
     });
     let client = crate::connect_remote_app_server(endpoint).await?;
     let mode = if scenario == RpcScenario::RemoteWorkspace {

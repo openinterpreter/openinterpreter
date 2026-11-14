@@ -240,7 +240,7 @@ fn build_system_prompt(prompt: &Prompt) -> String {
                         .iter()
                         .filter_map(|item| match item {
                             codex_protocol::models::ContentItem::InputText { text }
-                            | codex_protocol::models::ContentItem::OutputText { text } => {
+                            | codex_protocol::models::ContentItem::OutputText { text, .. } => {
                                 Some(text.as_str())
                             }
                             codex_protocol::models::ContentItem::InputImage { .. }

@@ -5,6 +5,8 @@
 //! history-facing `/status` surface.
 
 use super::*;
+use crate::bottom_pane::StatusLine;
+use crate::status::thread_cost_micros;
 
 impl ChatWidget {
     /// Update the status indicator header and details.
@@ -82,13 +84,8 @@ impl ChatWidget {
     }
 
     /// Sets the currently rendered footer status-line value.
-    pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) {
+    pub(crate) fn set_status_line(&mut self, status_line: Option<StatusLine>) {
         self.bottom_pane.set_status_line(status_line);
-    }
-
-    /// Sets the terminal hyperlink target for the currently rendered footer status line.
-    pub(crate) fn set_status_line_hyperlink(&mut self, url: Option<String>) {
-        self.bottom_pane.set_status_line_hyperlink(url);
     }
 
     /// Forwards the contextual active-agent label into the bottom-pane footer pipeline.
@@ -129,8 +126,12 @@ impl ChatWidget {
             "status line setup confirmed with items: {items:#?}, use_theme_colors: {use_theme_colors}"
         );
         let ids = items.iter().map(ToString::to_string).collect::<Vec<_>>();
+        self.config_panel_tui.status_line = Some(ids.clone());
+        self.config_panel_tui.status_line_use_colors = use_theme_colors;
         self.local_settings.tui.status_line = Some(ids);
         self.local_settings.tui.status_line_use_colors = use_theme_colors;
+        self.status_surface_overrides.status_line = None;
+        self.status_surface_overrides.status_line_use_colors = None;
         self.refresh_status_line();
     }
 
@@ -171,7 +172,9 @@ impl ChatWidget {
         tracing::info!("terminal title setup confirmed with items: {items:#?}");
         let ids = items.iter().map(ToString::to_string).collect::<Vec<_>>();
         self.terminal_title_setup_original_items = None;
+        self.config_panel_tui.terminal_title = Some(ids.clone());
         self.local_settings.tui.terminal_title = Some(ids);
+        self.status_surface_overrides.terminal_title = None;
         self.refresh_terminal_title();
     }
 
@@ -217,7 +220,7 @@ impl ChatWidget {
             .map(|ti| &ti.total_token_usage)
             .unwrap_or(&default_usage);
         let collaboration_mode = self.collaboration_mode_label();
-        let model = self.current_model().to_string();
+        let model = self.selected_model().to_string();
         let model_default_reasoning_effort =
             self.model_catalog
                 .try_list_models()
@@ -228,9 +231,14 @@ impl ChatWidget {
                         .find(|preset| preset.model == model)
                         .map(|preset| preset.default_reasoning_effort)
                 });
+        let configured_reasoning_effort = if self.cloud_picker_selection.is_none() {
+            self.config.model_reasoning_effort.clone()
+        } else {
+            None
+        };
         let reasoning_effort_override = Some(
-            self.effective_reasoning_effort()
-                .or_else(|| self.config.model_reasoning_effort.clone())
+            self.status_reasoning_effort()
+                .or(configured_reasoning_effort)
                 .or(model_default_reasoning_effort),
         );
         let rate_limit_snapshots: Vec<RateLimitSnapshotDisplay> = self
@@ -255,7 +263,7 @@ impl ChatWidget {
             rate_limit_snapshots.as_slice(),
             self.plan_type,
             Local::now(),
-            self.model_display_name(),
+            self.status_model_display_name(),
             collaboration_mode,
             reasoning_effort_override,
             agents_summary,
@@ -379,7 +387,7 @@ impl ChatWidget {
 
         if self
             .estimated_thread_usage()
-            .is_some_and(|usage| usage.estimated_usage_usd_micros.is_none())
+            .is_some_and(|usage| thread_cost_micros(usage, self.plan_type).is_none())
         {
             preview_data.suppress_placeholder(StatusSurfacePreviewItem::EstimatedThreadCost);
         }

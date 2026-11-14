@@ -4,7 +4,6 @@ use pretty_assertions::assert_eq;
 fn request_with_input(input: Vec<ResponseItem>) -> ResponsesApiRequest {
     ResponsesApiRequest {
         model: "gpt-5.6".to_string(),
-        instructions: String::new(),
         input,
         tools: Some(responses_api_tools(vec![json!({
             "type": "function",
@@ -21,8 +20,10 @@ fn request_with_input(input: Vec<ResponseItem>) -> ResponsesApiRequest {
         include: Vec::new(),
         service_tier: None,
         prompt_cache_key: None,
+        prompt_cache_options: None,
         client_metadata: None,
         access_programs: None,
+        request_country: Default::default(),
         text: None,
     }
 }
@@ -53,6 +54,8 @@ fn function_output(call_id: &str, output: &str) -> ResponseItem {
 fn text_message(role: &str, text: &str) -> ResponseItem {
     ResponseItem::Message {
         id: None,
+        status: None,
+        encrypted_content: None,
         role: role.to_string(),
         content: vec![ContentItem::InputText {
             text: text.to_string(),

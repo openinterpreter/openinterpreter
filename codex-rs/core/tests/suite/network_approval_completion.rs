@@ -9,9 +9,13 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core::TurnInputRequest;
+use codex_exec_server::ExecParams;
+use codex_network_proxy::EnvironmentNetworkPolicy;
+use codex_network_proxy::NetworkProxyConfig;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::items::CommandExecutionStatus;
 use codex_protocol::items::TurnItem;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadSettingsOverrides;
@@ -20,14 +24,17 @@ use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
+use core_test_support::responses::mount_response_handler;
 use core_test_support::responses::mount_response_once_match;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::startup::STARTUP_TIMEOUT;
+use core_test_support::test_codex::environment_config_for_selection;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
+use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -80,32 +87,28 @@ async fn remote_local_binding_policy_and_review_cleanup(
             .set_delay(Duration::from_secs(/*secs*/ 60)),
     )
     .await;
-    let final_response = mount_sse_once_match(
-        &server,
-        |request: &wiremock::Request| {
-            let body = review_body(request);
-            body.pointer("/client_metadata/x-openai-subagent") != Some(&json!("guardian"))
-                && body.to_string().contains("pending-network-at-exit")
-        },
-        sse(vec![
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    mount_response_handler(&server, move |request| {
+        let output = request
+            .function_call_output_text(call_id)
+            .expect("exec_command result");
+        result_tx
+            .send(output)
+            .expect("test is waiting for the tool result");
+        sse_response(sse(vec![
             ev_assistant_message("done", "done"),
             ev_completed("done"),
-        ]),
-    )
+        ]))
+    })
     .await;
+    let (allow_exit, exit_allowed) = tokio::sync::oneshot::channel();
     let exec_server = tokio::spawn(async move {
         let mut websocket = accept_initialized_exec_server(listener).await;
-        let start = loop {
-            let request = read_exec_server_json(&mut websocket, STARTUP_TIMEOUT).await;
-            if request["method"] == "process/start" {
-                break request;
-            }
-            respond_setup_request(&mut websocket, &request).await;
-        };
-        assert!(
-            start["params"]["networkProxy"]["policyDecisionTimeoutMs"]
-                .as_u64()
-                .is_some()
+        let hook = accept_process_start(&mut websocket).await;
+        // The owner hook keeps its filesystem access, but must use the command's network policy.
+        assert_eq!(
+            hook.sandbox.expect("owner hook sandbox policy").permissions,
+            PermissionProfile::Disabled
         );
         let allow_local_binding =
             expected_local_binding.expect("invalid MXC config must not launch");
@@ -129,7 +132,7 @@ async fn remote_local_binding_policy_and_review_cleanup(
             "params": {"processId": process_id, "request": {"protocol": "https_connect", "host": host, "port": 443}}
         })).await;
         timeout(Duration::from_secs(/*secs*/ 10), async {
-            while !pending_review.requests().iter().any(|request| {
+            while exit_allowed.is_empty() || !pending_review.requests().iter().any(|request| {
                 request
                     .body_json()
                     .pointer("/client_metadata/x-openai-subagent")
@@ -138,13 +141,17 @@ async fn remote_local_binding_policy_and_review_cleanup(
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_millis(/*millis*/ 10)) => {},
                     request = read_exec_server_json(&mut websocket, Duration::from_secs(/*secs*/ 10)) => {
-                        respond_setup_request(&mut websocket, &request).await;
+                        respond_to_setup_or_hook_request(&mut websocket, &request).await;
                     }
                 }
             }
         })
         .await
-        .expect("Guardian must start before process completion");
+        .expect("command and network review should start before process exit");
+        if matches!(proxy_owner, ProxyOwner::Executor) {
+            // The foreground result must reach the model while the denial grace is frozen.
+            tokio::time::pause();
+        }
         for message in [
             json!({"method": "process/output", "params": {"processId": process_id, "seq": 1, "stream": "stdout", "chunk": BASE64_STANDARD.encode("build complete\n")}}),
             json!({"method": "process/exited", "params": {"processId": process_id, "seq": 2, "exitCode": 0, "sandboxDenied": false}}),
@@ -168,7 +175,7 @@ async fn remote_local_binding_policy_and_review_cleanup(
                     send_exec_server_json(&mut websocket, json!({"id": request["id"], "result": {"chunks": [], "nextSeq": 4, "exited": true, "exitCode": 0, "closed": true, "failure": null, "sandboxDenied": false}})).await;
                 }
                 None => panic!("withdrawn request must not be approved: {request}"),
-                _ => respond_setup_request(&mut websocket, &request).await,
+                _ => respond_to_setup_or_hook_request(&mut websocket, &request).await,
             }
         }
     });
@@ -205,10 +212,46 @@ mode = "full"
         // This test supplies its own fake executor and must not select a CI executor.
         .build(&server)
         .await?;
+    if prefer_mxc {
+        assert_eq!(
+            test.config.effective_local_windows_sandbox_type(),
+            SandboxType::WindowsMxc
+        );
+    }
+    let selection = test
+        .codex
+        .environment_selections()
+        .await
+        .pop()
+        .expect("remote environment");
+    let mut config = environment_config_for_selection(&test.config, &selection);
+    let controller = test.config.permissions.network.as_ref();
+    assert_eq!(
+        controller.is_some(),
+        matches!(proxy_owner, ProxyOwner::Controller(_))
+    );
+    config.network_policy = Some(match controller {
+        Some(spec) => spec.environment_policy(),
+        None => EnvironmentNetworkPolicy::from_config(
+            &NetworkProxyConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            /*managed_allowed_domains_only*/ false,
+        ),
+    });
+    config.environment_hooks = serde_json::from_value(json!({
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "exit 0"}]}],
+    }))?;
+    test.codex.environment_ready(&selection, config).await?;
     let (sandbox_policy, permission_profile) = turn_permission_fields(
         test.session_configured.permission_profile.clone(),
         test.config.cwd.as_path(),
     );
+    // A blocking receive keeps Tokio from advancing the paused clock during socket I/O.
+    // The real-time timeout lets the test fail if exec_command waits for the grace period.
+    let tool_returned =
+        tokio::task::spawn_blocking(move || result_rx.recv_timeout(STARTUP_TIMEOUT));
     test.codex
         .start_or_steer_turn(
             TurnInputRequest::user_input(vec![UserInput::Text {
@@ -273,6 +316,23 @@ mode = "full"
     Ok(())
 }
 
+async fn accept_process_start(websocket: &mut WebSocketStream<TcpStream>) -> ExecParams {
+    loop {
+        let mut request = read_exec_server_json(websocket, STARTUP_TIMEOUT).await;
+        if request["method"] == "process/start" {
+            let start: ExecParams =
+                serde_json::from_value(request["params"].take()).expect("process start");
+            send_exec_server_json(
+                websocket,
+                json!({"id": request["id"], "result": {"processId": start.process_id}}),
+            )
+            .await;
+            return start;
+        }
+        respond_to_setup_or_hook_request(websocket, &request).await;
+    }
+}
+
 fn review_body(request: &wiremock::Request) -> Value {
     let bytes = if request
         .headers
@@ -307,16 +367,13 @@ async fn respond_setup_request(websocket: &mut WebSocketStream<TcpStream>, reque
                 }),
             )
             .await;
+            return;
         }
-        Some("fs/canonicalize") => {
-            send_exec_server_json(
-                websocket,
-                json!({
-                    "id": request["id"],
-                    "result": {"path": request["params"]["path"]}
-                }),
-            )
-            .await;
+        Some("fs/canonicalize") => json!({"path": request["params"]["path"]}),
+        Some("fs/walk") => json!({"entries": [], "errors": [], "truncated": false}),
+        Some("process/write") => json!({"status": "accepted"}),
+        Some("process/read") => {
+            json!({"chunks": [], "nextSeq": 1, "exited": true, "exitCode": 0, "closed": true})
         }
         Some("fs/walk") => {
             send_exec_server_json(

@@ -1,0 +1,10 @@
+---
+source: tui/src/markdown_render/math_display_tests.rs
+assertion_line: 61
+expression: "plain(r\"Inline math: $0$; inline operator: $\\bigwedge_{j=0}^{n}$\n\n$$\nF_{n}(s)\\land\n\\bigwedge_{j=0}^{n}\n\\bigl(R(\\land T \\bigr)\n\\Rightarrow R.\n$$\",\n80)"
+---
+Inline math: 0; inline operator: ⋀ⱼ₌₀ⁿ
+
+        n
+Fₙ(s)∧  ⋀  (R(∧ T ) ⇒ R.
+       j=0

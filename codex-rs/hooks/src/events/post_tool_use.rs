@@ -8,6 +8,7 @@ use codex_protocol::protocol::HookOutputEntryKind;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use serde_json::Value;
 
 use super::common;
@@ -26,6 +27,9 @@ pub struct PostToolUseRequest {
     pub turn_id: String,
     pub subagent: Option<common::SubagentHookContext>,
     pub cwd: AbsolutePathBuf,
+    /// Original local execution cwd for hook stdin. Remote commands leave this
+    /// unset to retain the host cwd. The hook process still runs in `cwd`.
+    pub tool_cwd: Option<PathUri>,
     pub transcript_path: Option<PathBuf>,
     pub model: String,
     pub permission_mode: String,
@@ -40,7 +44,7 @@ pub struct PostToolUseRequest {
 pub struct PostToolUseOutcome {
     pub hook_events: Vec<HookCompletedEvent>,
     pub should_block: bool,
-    pub additional_contexts: Vec<String>,
+    pub additional_contexts: Vec<crate::HookContext>,
     pub feedback_message: Option<String>,
 }
 
@@ -87,8 +91,8 @@ pub(crate) async fn run(
         };
     }
 
-    let input_json = match command_input_json(&request) {
-        Ok(input_json) => input_json,
+    let input = match command_input(&request) {
+        Ok(input) => input,
         Err(error) => {
             let hook_events = common::serialization_failure_hook_events_for_tool_use(
                 matched,
@@ -103,7 +107,7 @@ pub(crate) async fn run(
     let results = dispatcher::execute_handlers(
         engine,
         matched,
-        input_json,
+        &input,
         request.cwd.as_path(),
         Some(request.turn_id.clone()),
         parse_completed,
@@ -147,15 +151,15 @@ pub(crate) async fn run(
 /// the canonical `tool_name` for logs and for consumers that pair pre/post
 /// events across processes. Shell-like tools pass `{ "command": ... }` as
 /// `tool_input`; MCP tools pass their resolved JSON arguments.
-fn command_input_json(request: &PostToolUseRequest) -> Result<String, serde_json::Error> {
+fn command_input(request: &PostToolUseRequest) -> Result<Value, serde_json::Error> {
     let subagent = SubagentCommandInputFields::from(request.subagent.as_ref());
-    serde_json::to_string(&PostToolUseCommandInput {
+    serde_json::to_value(PostToolUseCommandInput {
         session_id: request.session_id.to_string(),
         turn_id: request.turn_id.clone(),
         agent_id: subagent.agent_id,
         agent_type: subagent.agent_type,
         transcript_path: crate::schema::NullableString::from_path(request.transcript_path.clone()),
-        cwd: request.cwd.display().to_string(),
+        cwd: common::command_input_cwd(request.cwd.as_ref(), request.tool_cwd.as_ref()),
         hook_event_name: "PostToolUse".to_string(),
         model: request.model.clone(),
         permission_mode: request.permission_mode.clone(),
@@ -206,6 +210,7 @@ fn parse_completed(
                             &mut additional_contexts_for_model,
                             handler,
                             additional_context,
+                            &run_result.context_metadata,
                         );
                     }
                     if handler.can_apply_control_effects() {
@@ -328,7 +333,7 @@ mod tests {
     use serde_json::json;
 
     use super::PostToolUseHandlerData;
-    use super::command_input_json;
+    use super::command_input;
     use super::parse_completed;
     use super::preview;
     use crate::engine::ConfiguredHandler;
@@ -338,13 +343,27 @@ mod tests {
     use crate::output_spill::AdditionalContextLimit;
 
     #[test]
+    fn command_input_uses_execution_cwd_path_convention() {
+        let mut request = request_for_tool_use("call-cwd");
+        let original = command_input(&request).unwrap();
+        for (uri, expected) in [
+            ("file:///repo-B", "/repo-B"),
+            ("file:///C:/repo-B", r"C:\repo-B"),
+        ] {
+            request.tool_cwd = Some(codex_utils_path_uri::PathUri::parse(uri).unwrap());
+            let actual = command_input(&request).unwrap();
+            let mut expected_input = original.clone();
+            expected_input["cwd"] = serde_json::json!(expected);
+            assert_eq!(actual, expected_input);
+        }
+    }
+
+    #[test]
     fn command_input_uses_request_tool_name() {
         let mut request = request_for_tool_use("call-apply-patch");
         request.tool_name = "apply_patch".to_string();
 
-        let input_json = command_input_json(&request).expect("serialize command input");
-        let input: serde_json::Value =
-            serde_json::from_str(&input_json).expect("parse command input");
+        let input = command_input(&request).expect("serialize command input");
 
         assert_eq!(input["tool_name"], "apply_patch");
     }
@@ -391,7 +410,9 @@ mod tests {
             PostToolUseHandlerData {
                 should_block: false,
                 additional_contexts_for_model: vec![AdditionalContext {
-                    text: "Remember the bash cleanup note.".to_string(),
+                    context: crate::HookContext::harness(
+                        "Remember the bash cleanup note.".to_string()
+                    ),
                     limit: AdditionalContextLimit::from_config(Some(17)),
                 }],
                 feedback_messages_for_model: Vec::new(),
@@ -590,8 +611,9 @@ mod tests {
     fn handler_with_async(r#async: bool) -> ConfiguredHandler {
         ConfiguredHandler {
             builtin: false,
+            plugin_trust: None,
             event_name: HookEventName::PostToolUse,
-            matcher: Some("^Bash$".to_string()),
+            matcher: Some(crate::engine::HookMatcher::new("^Bash$").expect("valid matcher")),
             timeout_sec: 5,
             status_message: Some("running post tool use hook".to_string()),
             additional_context_limit: Default::default(),
@@ -608,6 +630,7 @@ mod tests {
 
     fn run_result(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HandlerRunResult {
         HandlerRunResult {
+            context_metadata: codex_protocol::models::ContentItemMetadata::harness(),
             started_at: 1_700_000_000,
             completed_at: 1_700_000_001,
             duration_ms: 12,
@@ -624,6 +647,7 @@ mod tests {
             turn_id: "turn-1".to_string(),
             subagent: None,
             cwd: test_path_buf("/tmp").abs(),
+            tool_cwd: None,
             transcript_path: None,
             model: "gpt-test".to_string(),
             permission_mode: "default".to_string(),

@@ -1,0 +1,59 @@
+name: publish-r2-release
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      make_latest:
+        required: true
+        type: boolean
+      prerelease:
+        required: true
+        type: boolean
+      stage:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: codex-r2-publisher
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Publish release assets and metadata to R2
+        # R2 exposes an S3-compatible API, so the AWS CLI reads AWS-named variables.
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CODEX_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CODEX_R2_SECRET_ACCESS_KEY }}
+          AWS_ENDPOINT_URL: ${{ vars.CODEX_R2_ENDPOINT_URL }}
+          AWS_REGION: ${{ vars.CODEX_R2_REGION }}
+          AWS_RETRY_MODE: standard
+          AWS_MAX_ATTEMPTS: "6"
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_MAKE_LATEST: ${{ inputs.make_latest }}
+          RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+          RELEASE_STAGE: ${{ inputs.stage }}
+          PYTHONPATH: .github/scripts
+        run: |
+          set -euo pipefail
+          # The publisher parallelizes objects; serialize parts within each object to avoid R2 throttling.
+          aws configure set default.s3.preferred_transfer_client classic
+          aws configure set default.s3.max_concurrent_requests 1
+          python3 .github/scripts/publish_r2_release.py \
+            --tag "${RELEASE_TAG}" \
+            --make-latest "${RELEASE_MAKE_LATEST}" \
+            --prerelease "${RELEASE_PRERELEASE}" \
+            --stage "${RELEASE_STAGE}"

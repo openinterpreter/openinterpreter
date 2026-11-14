@@ -31,7 +31,7 @@ pub(super) struct StreamingRender {
     /// Rendered-line boundary corresponding to `stable_source_len`.
     stable_rendered_len: usize,
     /// Reference-style link definitions can affect any earlier or later markdown block.
-    has_reference_link_definition: bool,
+    pub(super) has_reference_link_definition: bool,
     /// Inline visualization directives require source-wide rewriting once one is committed.
     has_inline_visualization_directive: bool,
     /// Parser state for a directly appendable, open top-level code fence.
@@ -200,6 +200,7 @@ impl StreamingRender {
         }
 
         let final_block_start = pending.last_top_level_block_start.unwrap_or(/*default*/ 0);
+        self.completed_source_len = self.stable_source_len + final_block_start;
         self.open_code_fence = OpenCodeFence::detect(
             &pending_source[final_block_start..],
             raw_source.len(),

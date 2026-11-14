@@ -5,38 +5,58 @@ use crate::NetworkUnixSocketPermissions;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// Traffic restrictions supplied by the owner of one execution environment.
+/// Managed proxy requirements supplied by the owner of one execution environment.
 ///
-/// Proxy enablement, listeners, network mode, MITM, and credentials remain outside
-/// attachment-owned traffic policy.
+/// The owner can require proxy routing without granting direct network access.
+/// Listeners, network mode, MITM, and credentials remain controller-owned.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnvironmentNetworkPolicy {
+    /// Requires managed proxy routing even when direct network access is restricted.
+    /// False or omission leaves activation to the controller and command permissions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requires_proxy: bool,
     pub domains: Option<NetworkDomainPermissions>,
+    /// Managed host selectors inherited by every execution in this environment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_domains: Vec<String>,
     pub unix_sockets: Option<NetworkUnixSocketPermissions>,
     pub allow_upstream_proxy: bool,
     pub dangerously_allow_all_unix_sockets: bool,
-    pub allow_local_binding: bool,
+    /// Omission inherits local-binding policy; an explicit false remains a restriction.
+    pub allow_local_binding: Option<bool>,
     pub managed_allowed_domains_only: bool,
 }
 
 impl EnvironmentNetworkPolicy {
-    /// Captures portable traffic restrictions without exposing controller runtime settings.
+    /// Captures proxy activation and traffic restrictions without controller runtime settings.
     pub fn from_config(config: &NetworkProxyConfig, managed_allowed_domains_only: bool) -> Self {
         Self {
+            requires_proxy: config.enabled,
             domains: config.domains.clone(),
+            review_domains: config.review_domains.clone(),
             unix_sockets: config.unix_sockets.clone(),
             allow_upstream_proxy: config.allow_upstream_proxy,
             dangerously_allow_all_unix_sockets: config
                 .dangerously_allow_all_unix_sockets
                 .unwrap_or(false),
-            allow_local_binding: config.allow_local_binding(),
+            allow_local_binding: config.allow_local_binding,
             managed_allowed_domains_only,
         }
     }
 
     /// Applies attachment-owned traffic settings while preserving inherited denials and proxy setup.
     pub fn apply_to(&self, config: &mut NetworkProxyConfig) {
+        // Neither owner nor controller may remove the other's review selectors.
+        for pattern in &self.review_domains {
+            if !config
+                .review_domains
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(pattern))
+            {
+                config.review_domains.push(pattern.clone());
+            }
+        }
         // Use the owner's domain rules without dropping controller denials.
         let inherited_denials = config.denied_domains().unwrap_or_default();
         config.domains.clone_from(&self.domains);
@@ -82,11 +102,15 @@ impl EnvironmentNetworkPolicy {
             }
         }
 
-        // Enable permissions only when both controller and owner allow them.
+        // Socket and upstream-proxy permissions require both controller and owner grants.
         config.unix_sockets = (!effective_sockets.entries.is_empty()).then_some(effective_sockets);
         config.dangerously_allow_all_unix_sockets =
             Some(inherited_permits_all && owner_permits_all);
         config.allow_upstream_proxy &= self.allow_upstream_proxy;
-        config.allow_local_binding = Some(config.allow_local_binding() && self.allow_local_binding);
+        // Either explicit denial wins; defer unresolved defaults to the executor.
+        config.allow_local_binding = match (config.allow_local_binding, self.allow_local_binding) {
+            (Some(controller), Some(owner)) => Some(controller && owner),
+            (controller, owner) => controller.or(owner),
+        };
     }
 }

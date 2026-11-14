@@ -1,11 +1,21 @@
 //! Exercises classifier fallback, cooldown, and cancellation against local servers.
 
+use super::super::ConversationSample;
 use super::super::LunaSampler;
+use super::super::tests::ProxyPrewarmLimit;
+use super::super::tests::proxy_websocket_servers_with_http;
 use super::super::tests::sample_request;
 use super::super::tests::sampler_config;
 use super::*;
+use crate::async_scorer::request::PreparedRequest;
 use anyhow::Result;
+use codex_guardian_context::TranscriptCursor;
+use codex_history::ResponseItemEnvelope;
 use codex_login::AuthManager;
+use codex_login::WorkspaceRouting;
+use codex_login::WorkspaceRoutingRequest;
+use codex_login::WorkspaceRoutingResolver;
+use codex_model_provider::ModelProviderFuture;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use core_test_support::responses;
@@ -79,6 +89,99 @@ impl Drop for Gateway {
 }
 
 #[tokio::test]
+async fn stalled_handshake_does_not_delay_other_warm_sockets() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let stalled = responses::start_websocket_server_with_headers(vec![
+        responses::WebSocketConnectionConfig {
+            requests: Vec::new(),
+            response_headers: Vec::new(),
+            accept_delay: Some(Duration::from_secs(/*secs*/ 10)),
+            close_after_requests: false,
+        },
+    ])
+    .await;
+    let healthy = responses::start_websocket_server(vec![vec![vec![
+        responses::ev_output_text_delta("low"),
+        responses::ev_completed("score"),
+    ]]])
+    .await;
+    let url = proxy_websocket_servers_with_http(
+        &[&stalled, &healthy],
+        ProxyPrewarmLimit::AllConnections,
+        /*http_url*/ None,
+    )
+    .await?;
+    let sampler = LunaSampler::new(sampler_config(url));
+    let opener = sampler.connections.replenish().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while sampler
+            .connections
+            .idle_connections
+            .lock()
+            .unwrap()
+            .is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert!(!opener.is_finished());
+    assert_eq!(
+        sampler.sample(sample_request("healthy-socket")).await?,
+        "low"
+    );
+    assert_eq!(healthy.single_connection().len(), 1);
+    opener.abort();
+    let _ = opener.await;
+    drop(stalled);
+    healthy.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn replenishes_before_last_idle_socket_is_leased() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let mut servers = Vec::new();
+    for _ in 0..INITIAL_WEBSOCKET_CONNECTIONS + 1 {
+        servers.push(
+            responses::start_websocket_server_with_headers(vec![
+                responses::WebSocketConnectionConfig {
+                    requests: Vec::new(),
+                    response_headers: Vec::new(),
+                    accept_delay: None,
+                    close_after_requests: false,
+                },
+            ])
+            .await,
+        );
+    }
+    let url = proxy_websocket_servers_with_http(
+        &servers.iter().collect::<Vec<_>>(),
+        ProxyPrewarmLimit::AllConnections,
+        /*http_url*/ None,
+    )
+    .await?;
+    let sampler = LunaSampler::new(sampler_config(url));
+    sampler.prewarm().await;
+    let held = sampler.connections.lease().await?;
+    assert!(matches!(held.connection, Connection::Websocket(_)));
+    // A healthy socket remains available, but the next burst needs the reserve restored.
+    sampler.wait_for_prewarm(Duration::from_secs(2)).await?;
+    let mut burst = Vec::new();
+    for _ in 0..INITIAL_WEBSOCKET_CONNECTIONS {
+        let lease = sampler.connections.lease().await?;
+        assert!(matches!(lease.connection, Connection::Websocket(_)));
+        burst.push(lease);
+    }
+    drop(burst);
+    drop(held);
+    for server in servers {
+        server.shutdown().await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn cold_pool_uses_http_during_open_timeout_then_recovers_after_cooldown() -> Result<()> {
     skip_if_no_network!(Ok(()));
     for uses_codex_backend in [false, true] {
@@ -127,7 +230,10 @@ async fn cold_pool_uses_http_during_open_timeout_then_recovers_after_cooldown() 
             sampler.sample(sample_request("parent-turn-2")).await?,
             "low"
         );
-        assert_eq!(gateway.opens.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            gateway.opens.load(Ordering::SeqCst),
+            INITIAL_WEBSOCKET_CONNECTIONS
+        );
         assert!(!opener.is_finished());
         assert!(sampler.connections.replenish().is_none());
 
@@ -140,7 +246,10 @@ async fn cold_pool_uses_http_during_open_timeout_then_recovers_after_cooldown() 
             sampler.sample(sample_request("during-cooldown")).await?,
             "low"
         );
-        assert_eq!(gateway.opens.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            gateway.opens.load(Ordering::SeqCst),
+            INITIAL_WEBSOCKET_CONNECTIONS
+        );
 
         let requests = http_mock.requests();
         let first = &requests[0];
@@ -175,14 +284,14 @@ async fn cold_pool_uses_http_during_open_timeout_then_recovers_after_cooldown() 
         tokio::time::resume();
         sampler.connections.replenish().unwrap().await?;
         assert_eq!(
+            gateway.opens.load(Ordering::SeqCst),
+            2 * INITIAL_WEBSOCKET_CONNECTIONS
+        );
+        assert_eq!(
             sampler.sample(sample_request("after-cooldown")).await?,
             "low"
         );
         assert_eq!(http_mock.requests().len(), 3);
-        assert_eq!(
-            gateway.opens.load(Ordering::SeqCst),
-            1 + INITIAL_WEBSOCKET_CONNECTIONS
-        );
     }
     Ok(())
 }
@@ -205,7 +314,14 @@ async fn cooldown_preserves_healthy_sockets_and_both_transports_share_capacity()
     let sampler = LunaSampler::new(sampler_config(format!("{}/v1", gateway.url)));
     let opener = sampler.connections.replenish().unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while gateway.opens.load(Ordering::SeqCst) < 2 {
+        while gateway.opens.load(Ordering::SeqCst) < 2
+            || sampler
+                .connections
+                .idle_connections
+                .lock()
+                .unwrap()
+                .is_empty()
+        {
             tokio::task::yield_now().await;
         }
     })
@@ -292,7 +408,7 @@ async fn stalled_http_headers_exhaust_the_sampling_retry_budget() -> Result<()> 
 }
 
 #[tokio::test]
-async fn supersession_closes_http_before_headers_and_while_draining_the_body() -> Result<()> {
+async fn cancellation_closes_http_before_headers_and_while_draining_the_body() -> Result<()> {
     skip_if_no_network!(Ok(()));
     // The second case publishes a score, then leaves the response body open forever.
     for response in [
@@ -334,38 +450,458 @@ async fn supersession_closes_http_before_headers_and_while_draining_the_body() -
             }
             Ok::<_, std::io::Error>(())
         });
-        let mut samples = tokio::task::JoinSet::new();
+        let mut request = sample_request("first");
+        let evidence = std::mem::take(&mut request.input)
+            .into_iter()
+            .map(ResponseItemEnvelope::new)
+            .collect();
+        let (input, input_tokens) =
+            LunaSampler::prepare_input(&request, /*history*/ None, evidence);
+        let sample = ConversationSample {
+            input: PreparedRequest {
+                input,
+                input_tokens,
+                existing_context_tokens: 0,
+                cursor: TranscriptCursor {
+                    parent_history_version: 0,
+                    transcript_entry_count: 1,
+                },
+                truncations: Vec::new(),
+                section_costs: Vec::new(),
+            },
+            sampling: request,
+        };
+        let (ready, score) = tokio::sync::oneshot::channel();
         let first = Arc::clone(&sampler);
-        samples.spawn(async move { first.sample(sample_request("first")).await });
+        let pending = tokio::spawn(async move { first.sample_retained(sample, ready).await });
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), requests.recv()).await?,
             Some(1)
         );
         if has_score {
             assert_eq!(
-                tokio::time::timeout(Duration::from_secs(5), samples.join_next())
-                    .await?
-                    .unwrap()??,
+                tokio::time::timeout(Duration::from_secs(5), score)
+                    .await???
+                    .accept(),
                 "low",
             );
             assert!(disconnects.try_recv().is_err());
         }
-        for _ in 0..MAX_CONCURRENT_REQUESTS {
-            let sampler = Arc::clone(&sampler);
-            samples.spawn(async move { sampler.sample(sample_request("newer")).await });
-        }
-        if !has_score {
-            assert!(matches!(
-                tokio::time::timeout(Duration::from_secs(5), samples.join_next())
-                    .await?
-                    .unwrap()?,
-                Err(LunaSamplerError::Superseded)
-            ));
-        }
+        // Conversation expiry cancels the retained future, including its unfinished drain.
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), disconnects.recv()).await?,
             Some(1)
         );
+        assert_eq!(
+            sampler.connections.classifications.available_permits(),
+            MAX_CONCURRENT_REQUESTS
+        );
+    }
+    Ok(())
+}
+
+struct RoutingPolicy(Mutex<Option<WorkspaceRouting>>);
+
+impl WorkspaceRoutingResolver for RoutingPolicy {
+    fn resolve(
+        &self,
+        _request: WorkspaceRoutingRequest,
+    ) -> ModelProviderFuture<'_, std::io::Result<Option<WorkspaceRouting>>> {
+        Box::pin(async { Ok(self.0.lock().unwrap().clone()) })
+    }
+}
+
+#[tokio::test]
+async fn sampling_uses_new_credentials_after_logout_and_login() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let home = tempfile::tempdir()?;
+    let auth = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("initial-key"),
+        home.path().to_path_buf(),
+    );
+    let server = responses::start_mock_server().await;
+    let requests = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                responses::ev_output_text_delta("low"),
+                responses::ev_completed("before-logout"),
+            ]),
+            responses::sse(vec![
+                responses::ev_output_text_delta("low"),
+                responses::ev_completed("after-login"),
+            ]),
+        ],
+    )
+    .await;
+    let mut config = sampler_config(format!("{}/v1", server.uri()));
+    config.provider = create_model_provider(config.provider.info().clone(), Some(auth.clone()));
+    let sampler = LunaSampler::new(config);
+    // Keep both requests on HTTP without starting background WebSocket opens.
+    *sampler.connections.retry_after.lock().unwrap() = Some(Instant::now() + CONNECT_COOLDOWN);
+    assert_eq!(
+        sampler
+            .sample(sample_request("before-logout"))
+            .await
+            .expect("sample before logout"),
+        "low"
+    );
+
+    auth.logout().await?;
+    codex_login::login_with_api_key(
+        home.path(),
+        "replacement-key",
+        codex_login::AuthCredentialsStoreMode::File,
+        codex_login::AuthKeyringBackendKind::default(),
+    )?;
+    auth.reload().await;
+
+    assert_eq!(
+        sampler
+            .sample(sample_request("after-login"))
+            .await
+            .expect("sample after signing in again"),
+        "low"
+    );
+    let requests = requests.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].header("authorization").as_deref(),
+        Some("Bearer initial-key")
+    );
+    assert_eq!(
+        requests[1].header("authorization").as_deref(),
+        Some("Bearer replacement-key")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn http_cache_preserves_no_constraint_redirect_policy_and_configured_headers() -> Result<()> {
+    let base_url = "https://localhost:9/backend-api/codex".to_owned();
+    let auth =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let resolver = Arc::new(RoutingPolicy(Mutex::new(None)));
+    let routing_owner: Arc<dyn WorkspaceRoutingResolver> = resolver.clone();
+    auth.set_workspace_routing_resolver(Arc::downgrade(&routing_owner));
+    let mut config = sampler_config(base_url.clone());
+    config.provider = create_model_provider(
+        ModelProviderInfo::create_openai_provider(Some(base_url)),
+        Some(auth),
+    );
+    let pool = ConnectionPool::new(Arc::new(config));
+    // Exercise HTTP leases without starting a background WebSocket opener.
+    *pool.retry_after.lock().unwrap() = Some(Instant::now() + CONNECT_COOLDOWN);
+    let mut previous: Option<Arc<HttpTransport>> = None;
+    for (routing, expected_policy) in [
+        (None, ClientRedirectPolicy::Default),
+        (Some("NO_CONSTRAINT"), ClientRedirectPolicy::Reject),
+        (Some("NO_CONSTRAINT"), ClientRedirectPolicy::Reject),
+        (None, ClientRedirectPolicy::Default),
+    ] {
+        *resolver.0.lock().unwrap() = routing.map(|account_routing_override| WorkspaceRouting {
+            chatgpt_account_id: "account_id".into(),
+            backend_origin: "https://localhost:9".into(),
+            account_routing_override: account_routing_override.into(),
+        });
+        let setup = pool.client_setup().await?;
+        assert!(!setup.provider.headers.contains_key(ACCOUNT_ROUTING_HEADER));
+        let lease = pool.lease().await?;
+        assert!(matches!(lease.connection, Connection::Http(_)));
+        let cached = Arc::clone(pool.http_transport.lock().unwrap().as_ref().unwrap());
+        assert_eq!(
+            (cached.url.as_str(), cached.redirect_policy),
+            (
+                "https://localhost:9/backend-api/codex/responses",
+                expected_policy
+            ),
+        );
+        if let Some(previous) = previous {
+            assert_eq!(
+                Arc::ptr_eq(&previous, &cached),
+                previous.redirect_policy == expected_policy,
+            );
+        }
+        previous = Some(cached);
+    }
+
+    let mut config = sampler_config("https://localhost:9/v1".into());
+    let mut info = config.provider.info().clone();
+    info.http_headers = Some(std::collections::HashMap::from([(
+        ACCOUNT_ROUTING_HEADER.into(),
+        "us".into(),
+    )]));
+    config.provider = create_model_provider(info, config.provider.auth_manager());
+    let pool = ConnectionPool::new(Arc::new(config));
+    *pool.retry_after.lock().unwrap() = Some(Instant::now() + CONNECT_COOLDOWN);
+    assert_eq!(
+        pool.client_setup().await?.redirect_policy,
+        ClientRedirectPolicy::Default
+    );
+    let lease = pool.lease().await?;
+    assert!(matches!(lease.connection, Connection::Http(_)));
+    assert_eq!(
+        pool.http_transport
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .redirect_policy,
+        ClientRedirectPolicy::Reject,
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_transports_authenticate_each_classification() -> Result<()> {
+    use base64::Engine;
+    use codex_features::RuntimeAuthMode;
+    use codex_login::CodexAuth;
+    use codex_runtime_agent_instance::AgentHostAuthorization;
+    use codex_runtime_agent_instance::RuntimeAuthManager;
+    use codex_runtime_agent_instance::RuntimeRegistrationMetadata;
+    use codex_runtime_agent_instance::RuntimeRole;
+    use serde_json::json;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
+
+    struct MutableAuth(Mutex<CodexAuth>);
+    impl codex_login::ExternalAuth for MutableAuth {
+        fn resolve(&self) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
+            Box::pin(async { Ok(self.0.lock().unwrap().clone()) })
+        }
+
+        fn refresh(
+            &self,
+            _context: codex_login::ExternalAuthRefreshContext,
+        ) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
+            self.resolve()
+        }
+    }
+
+    skip_if_no_network!(Ok(()));
+    for mode in [RuntimeAuthMode::DualHeader, RuntimeAuthMode::AssertionOnly] {
+        for transport in [
+            "http",
+            "websocket",
+            "upgrade_required",
+            "legacy_endpoint",
+            "changed_auth",
+            "denied",
+        ] {
+            let websocket = transport == "websocket";
+            let denied = transport == "denied";
+            let changed_auth = transport == "changed_auth";
+            let source = Arc::new(MutableAuth(Mutex::new(CodexAuth::from_api_key(
+                "guardian-key",
+            ))));
+            let registration = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/register"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "runtime_agent_instance_id": "runtime-guardian",
+                    "agent_host_id": "host-guardian",
+                    "actor": {"kind": "platform", "user_id": "actor", "organization_id": "org", "project_id": null},
+                })))
+                .expect(1)
+                .mount(&registration)
+                .await;
+            let response = vec![
+                responses::ev_output_text_delta("low"),
+                responses::ev_completed("score"),
+            ];
+            let ws = if websocket {
+                // Each peer leaves another response available, so closure cannot force the retry.
+                Some(
+                    responses::start_websocket_server(vec![
+                        vec![response.clone(), response.clone()],
+                        vec![response.clone(), response.clone()],
+                    ])
+                    .await,
+                )
+            } else {
+                None
+            };
+            let http = MockServer::start().await;
+            let upgrade_response = if denied {
+                ResponseTemplate::new(403).set_body_json(json!({"error": {
+                    "code": "runtime_instance_paused", "type": "runtime_agent_error",
+                    "message": "The runtime agent instance is paused."
+                }}))
+            } else if transport == "legacy_endpoint" {
+                ResponseTemplate::new(404)
+            } else {
+                ResponseTemplate::new(426)
+            };
+            let handshake_source = Arc::clone(&source);
+            Mock::given(method("GET"))
+                .and(path("/responses"))
+                .respond_with(move |_request: &wiremock::Request| {
+                    if changed_auth {
+                        *handshake_source.0.lock().unwrap() =
+                            CodexAuth::from_api_key("replacement-key");
+                    }
+                    upgrade_response.clone()
+                })
+                .expect(match transport {
+                    "upgrade_required" | "legacy_endpoint" => 2,
+                    "changed_auth" | "denied" => 1,
+                    _ => 0,
+                })
+                .mount(&http)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/responses"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(responses::sse(response)),
+                )
+                .expect(if websocket || denied {
+                    0
+                } else if changed_auth {
+                    1
+                } else {
+                    2
+                })
+                .mount(&http)
+                .await;
+            let url = ws.as_ref().map_or_else(
+                || http.uri(),
+                |ws| ws.uri().replacen("ws://", "http://", /*count*/ 1),
+            );
+            let mut config = sampler_config(url);
+            let credentials =
+                AuthManager::from_auth_for_testing(CodexAuth::from_api_key("guardian-key"));
+            if changed_auth {
+                credentials.set_external_auth(source.clone()).await?;
+            }
+            let runtime = Arc::new(RuntimeAuthManager::new(
+                Arc::clone(&credentials),
+                AgentHostAuthorization::InstallationId {
+                    installation_id: uuid::Uuid::nil(),
+                },
+                RuntimeRegistrationMetadata {
+                    harness: Some("codex".into()),
+                    harness_version: None,
+                    role: RuntimeRole::Orchestrator,
+                },
+                format!("{}/register", registration.uri()).parse()?,
+            ));
+            let mut info = config.provider.info().clone();
+            info.supports_websockets = transport != "http";
+            config.provider = codex_model_provider::test_support::runtime_model_provider(
+                info,
+                Arc::clone(&credentials),
+                (runtime, mode),
+            );
+            let sampler = LunaSampler::new(config);
+            sampler.prewarm().await;
+            if let Some(ws) = &ws {
+                assert!(
+                    ws.handshakes().is_empty(),
+                    "prewarming must not admit runtime work"
+                );
+            }
+            if denied {
+                let error = sampler.sample(sample_request("denied")).await.unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        LunaSamplerError::Api(ApiError::Transport(TransportError::Http {
+                            status: http::StatusCode::FORBIDDEN,
+                            ..
+                        }))
+                    ),
+                    "{error:?}"
+                );
+            } else {
+                assert_eq!(sampler.sample(sample_request("first")).await?, "low");
+                if changed_auth {
+                    assert_eq!(
+                        credentials.auth().await.unwrap().get_token()?,
+                        "replacement-key"
+                    );
+                } else {
+                    assert_eq!(sampler.sample(sample_request("second")).await?, "low");
+                }
+            }
+            let headers = if let Some(ws) = &ws {
+                assert_eq!(
+                    ws.connections().iter().map(Vec::len).collect::<Vec<_>>(),
+                    vec![1, 1]
+                );
+                ws.handshakes()
+                    .iter()
+                    .map(|h| {
+                        (
+                            h.header("authorization").unwrap(),
+                            h.header("x-openai-agent-assertion"),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                http.received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|request| {
+                        (
+                            request.headers["authorization"]
+                                .to_str()
+                                .unwrap()
+                                .to_owned(),
+                            request
+                                .headers
+                                .get("x-openai-agent-assertion")
+                                .map(|value| value.to_str().unwrap().to_owned()),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let expected_attempts = match transport {
+                "upgrade_required" | "legacy_endpoint" => 4,
+                "denied" => 1,
+                _ => 2,
+            };
+            assert_eq!(headers.len(), expected_attempts);
+            let mut proofs = std::collections::BTreeSet::new();
+            for (authorization, supplemental) in headers {
+                let proof = match mode {
+                    RuntimeAuthMode::DualHeader => {
+                        assert_eq!(authorization, "Bearer guardian-key");
+                        supplemental.unwrap()
+                    }
+                    RuntimeAuthMode::AssertionOnly => {
+                        assert!(supplemental.is_none());
+                        authorization
+                            .strip_prefix("AgentAssertion ")
+                            .unwrap()
+                            .to_owned()
+                    }
+                };
+                let payload: serde_json::Value = serde_json::from_slice(
+                    &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .decode(proof.split('.').nth(/*n*/ 2).unwrap())?,
+                )?;
+                assert_eq!(payload["runtime_agent_instance"], "runtime-guardian");
+                assert!(
+                    proofs.insert(proof),
+                    "each attempt must authenticate afresh"
+                );
+            }
+            registration.verify().await;
+            http.verify().await;
+            drop(sampler);
+            if let Some(ws) = ws {
+                ws.shutdown().await;
+            }
+        }
     }
     Ok(())
 }

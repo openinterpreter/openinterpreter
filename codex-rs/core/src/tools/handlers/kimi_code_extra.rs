@@ -4,17 +4,21 @@ use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use codex_http_client::HttpClientBuilder;
+use codex_http_client::HttpResponse;
 use codex_network_proxy::is_non_public_ip;
 use codex_tools::AdditionalProperties;
 use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiTool;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
+use http::header::LOCATION;
 use regex_lite::Regex;
 use serde::Deserialize;
 use tokio::net::lookup_host;
 use tokio::time::timeout;
 use url::Host;
+use url::Url;
 
 use crate::function_tool::FunctionCallError;
 use crate::tools::context::FunctionToolOutput;
@@ -165,7 +169,7 @@ async fn handle_fetch_url(
     invocation: ToolInvocation,
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
     let args: FetchUrlArgs = parse_invocation_arguments(&invocation)?;
-    let url = reqwest::Url::parse(&args.url)
+    let url = Url::parse(&args.url)
         .map_err(|err| FunctionCallError::RespondToModel(format!("Invalid URL: {err}")))?;
     let body = fetch_url_with_lookup(url, |host, port| async move {
         lookup_host((host.as_str(), port))
@@ -180,7 +184,7 @@ async fn handle_fetch_url(
 }
 
 async fn fetch_url_with_lookup<F, Fut>(
-    mut url: reqwest::Url,
+    mut url: Url,
     mut lookup: F,
 ) -> Result<String, FunctionCallError>
 where
@@ -192,12 +196,14 @@ where
         let target =
             resolve_public_http_url_with_lookup(&url, |host, port| lookup(host, port)).await?;
         let client = fetch_client_builder(target.pinned_dns.as_ref())
-            .build()
+            .build_direct()
             .map_err(|err| FunctionCallError::RespondToModel(format!("FetchURL failed: {err}")))?;
-        let response =
-            client.get(url.clone()).send().await.map_err(|err| {
-                FunctionCallError::RespondToModel(format!("FetchURL failed: {err}"))
-            })?;
+        let response = client
+            .get(url.clone())
+            .timeout(FETCH_URL_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|err| FunctionCallError::RespondToModel(format!("FetchURL failed: {err}")))?;
         let status = response.status();
         if !status.is_redirection() {
             break response;
@@ -207,7 +213,7 @@ where
                 "FetchURL failed: too many redirects.".to_string(),
             ));
         }
-        let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
+        let Some(location) = response.headers().get(LOCATION) else {
             return Err(FunctionCallError::RespondToModel(format!(
                 "FetchURL failed with HTTP {status}."
             )));
@@ -230,10 +236,13 @@ where
     read_fetch_body(response).await
 }
 
-fn fetch_client_builder(pinned_dns: Option<&PinnedDns>) -> reqwest::ClientBuilder {
-    let mut builder = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(FETCH_URL_REQUEST_TIMEOUT);
+fn fetch_client_builder(pinned_dns: Option<&PinnedDns>) -> HttpClientBuilder {
+    // Direct routing is necessary here: a proxy would resolve the destination
+    // independently and invalidate the already checked public-address pin.
+    let mut builder = HttpClientBuilder::new()
+        .without_redirects()
+        .without_request_logging()
+        .connect_timeout(FETCH_URL_REQUEST_TIMEOUT);
     if let Some(PinnedDns { host, addrs }) = pinned_dns {
         builder = builder.resolve_to_addrs(host, addrs);
         let trimmed = host.trim_end_matches('.');
@@ -244,7 +253,7 @@ fn fetch_client_builder(pinned_dns: Option<&PinnedDns>) -> reqwest::ClientBuilde
     builder
 }
 
-async fn read_fetch_body(mut response: reqwest::Response) -> Result<String, FunctionCallError> {
+async fn read_fetch_body(mut response: HttpResponse) -> Result<String, FunctionCallError> {
     if response
         .content_length()
         .is_some_and(|len| len > MAX_FETCH_BODY_BYTES as u64)
@@ -280,7 +289,7 @@ async fn read_fetch_body(mut response: reqwest::Response) -> Result<String, Func
 }
 
 async fn resolve_public_http_url_with_lookup<F, Fut>(
-    url: &reqwest::Url,
+    url: &Url,
     lookup: F,
 ) -> Result<PublicHttpTarget, FunctionCallError>
 where

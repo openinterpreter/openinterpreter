@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LegacyAppPathString": {
+      "type": "string"
+    }
+  },
+  "properties": {
+    "promptHash": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "savedPath": {
+      "$ref": "#/definitions/LegacyAppPathString"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "savedPath",
+    "threadId"
+  ],
+  "title": "FeedbackSaveResponse",
+  "type": "object"
+}

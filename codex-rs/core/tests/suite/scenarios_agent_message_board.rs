@@ -1,5 +1,10 @@
 //! Exercises board tools through the runtime, including resume and active-only notices.
 
+#[path = "scenarios_agent_message_board_http.rs"]
+mod http;
+#[path = "scenarios_agent_message_board_remote.rs"]
+mod remote;
+
 use anyhow::Context;
 use codex_core::TurnInputRequest;
 use codex_features::Feature;
@@ -26,16 +31,17 @@ enum BoardClock {
 }
 
 impl codex_core::TimeProvider for BoardClock {
-    fn current_time(&self, _thread_id: codex_protocol::ThreadId) -> codex_core::TimeFuture<'_> {
-        Box::pin(async move {
-            match self {
-                Self::Available => Ok(chrono::DateTime::parse_from_rfc3339(
-                    "2026-09-18T12:00:00Z",
-                )?
-                .with_timezone(&chrono::Utc)),
-                Self::Unavailable => Err(anyhow::anyhow!("board clock unavailable")),
-            }
-        })
+    fn current_time(
+        &self,
+        _thread_id: codex_protocol::ThreadId,
+    ) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
+        match self {
+            Self::Available => Ok(
+                chrono::DateTime::parse_from_rfc3339("2026-09-18T12:00:00Z")?
+                    .with_timezone(&chrono::Utc),
+            ),
+            Self::Unavailable => Err(anyhow::anyhow!("board clock unavailable")),
+        }
     }
 
     fn sleep(

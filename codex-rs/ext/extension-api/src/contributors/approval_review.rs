@@ -22,20 +22,27 @@ pub enum ApprovalDecision {
 /// Implementations must not reuse an async score. `None` requests the host user
 /// flow when automatic review exhausts its input budget and host policy permits it.
 pub trait SynchronousApprovalReviewer: Send + Sync {
-    fn review(
-        &self,
+    fn review<'a>(
+        &'a self,
         reason: codex_protocol::approvals::GuardianReviewReason,
-    ) -> crate::ExtensionFuture<'_, Option<codex_protocol::protocol::ReviewDecision>>;
+        async_approval: Option<crate::ExtensionFuture<'a, ()>>,
+    ) -> crate::ExtensionFuture<'a, Option<codex_protocol::protocol::ReviewDecision>>;
 }
 
 /// Inputs to Guardian's policy choice. Conversation and scores stay thread-owned.
 pub struct ApprovalDecisionInput<'a> {
+    /// Final serving value for this action. The host still requires fresh review when stale.
+    pub serving_assessment: Option<bool>,
+    /// Host-captured permission evidence for this exact approval action.
+    pub permissions: Option<&'a codex_guardian_context::PermissionContext>,
     pub approval_id: &'a str,
     /// Host tool invocation being approved, absent for approvals without a tool call.
     pub tool_call_id: Option<&'a str>,
     pub action: &'a serde_json::Value,
     pub thread_id: ThreadId,
     pub thread_store: &'a ExtensionData,
+    /// Captured configuration and evidence owned by the requesting turn.
+    pub turn_store: &'a ExtensionData,
     pub category: codex_protocol::openai_models::GuardianScope,
     pub approval_policy: codex_protocol::protocol::AskForApproval,
     pub approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer,

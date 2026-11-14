@@ -77,12 +77,12 @@ for entitlement and reasoning details.
 
 Kimi lists these Kimi Code subscription prices as of July 16, 2026:
 
-| Plan | Monthly | Annual billing, per month | Kimi Code credits | K3 context |
-| --- | ---: | ---: | ---: | --- |
-| Moderato | $19 | $15 | 1× | 256K |
-| Allegretto | $39 | $31 | 5× | Up to 1M |
-| Allegro | $99 | $79 | 15× | Up to 1M |
-| Vivace | $199 | $159 | 30× | Up to 1M |
+| Plan       | Monthly | Annual billing, per month | Kimi Code credits | K3 context |
+| ---------- | ------: | ------------------------: | ----------------: | ---------- |
+| Moderato   |     $19 |                       $15 |                1× | 256K       |
+| Allegretto |     $39 |                       $31 |                5× | Up to 1M   |
+| Allegro    |     $99 |                       $79 |               15× | Up to 1M   |
+| Vivace     |    $199 |                      $159 |               30× | Up to 1M   |
 
 Kimi's direct API pricing for K3 at launch is $0.30 per million cache-hit input
 tokens, $3.00 per million cache-miss input tokens, and $15.00 per million

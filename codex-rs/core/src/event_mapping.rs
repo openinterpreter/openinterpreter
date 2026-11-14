@@ -5,20 +5,16 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::items::WebSearchItem;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::WebSearchAction;
-use codex_protocol::models::is_audio_close_tag_text;
-use codex_protocol::models::is_audio_open_tag_text;
-use codex_protocol::models::is_image_close_tag_text;
-use codex_protocol::models::is_image_open_tag_text;
-use codex_protocol::models::is_local_audio_close_tag_text;
-use codex_protocol::models::is_local_audio_open_tag_text;
-use codex_protocol::models::is_local_image_close_tag_text;
-use codex_protocol::models::is_local_image_open_tag_text;
+use codex_protocol::models::is_closing_media_label;
+use codex_protocol::models::is_opening_media_label;
 use codex_protocol::protocol::APPS_INSTRUCTIONS_OPEN_TAG;
+use codex_protocol::protocol::CATALOG_APPS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::COLLABORATION_MODE_OPEN_TAG;
 use codex_protocol::protocol::CONTEXT_WINDOW_GUIDANCE_OPEN_TAG;
 use codex_protocol::protocol::CONTEXT_WINDOW_OPEN_TAG;
@@ -44,6 +40,7 @@ const CONTEXTUAL_DEVELOPER_PREFIXES: &[&str] = &[
     "<managed_developer_instructions>",
     "<persistent_mode>",
     APPS_INSTRUCTIONS_OPEN_TAG,
+    CATALOG_APPS_INSTRUCTIONS_OPEN_TAG,
     COLLABORATION_MODE_OPEN_TAG,
     "<multi_agent_role>",
     MULTI_AGENT_MODE_OPEN_TAG,
@@ -65,21 +62,18 @@ pub(crate) fn is_contextual_user_message_content(message: &[ContentItem]) -> boo
     message.iter().any(is_contextual_user_fragment)
 }
 
-/// Returns true when a developer message contains any rollback-trimmable contextual fragment.
-///
-/// `build_initial_context` can bundle these fragments together with persistent developer text in a
-/// single developer message, so callers that care about invalidating a stored reference baseline
-/// should pair this with `has_non_contextual_dev_message_content`.
-pub(crate) fn is_contextual_dev_message_content(message: &[ContentItem]) -> bool {
-    message.iter().any(is_contextual_dev_fragment)
-}
-
-/// Returns true when a developer message contains any fragment that is not part of the
-/// rollback-trimmable contextual prefix set.
-pub(crate) fn has_non_contextual_dev_message_content(message: &[ContentItem]) -> bool {
-    message
-        .iter()
-        .any(|content_item| !is_contextual_dev_fragment(content_item))
+/// Classifies each fragment for rollback. A catalog heading can change while its
+/// harness-owned kind stays stable. Older messages only carry the literal text.
+pub(crate) fn contextual_dev_fragments<'a>(
+    message: &'a [ContentItem],
+    kinds: &'a [ContentItemKind],
+) -> impl Iterator<Item = bool> + 'a {
+    message.iter().enumerate().map(|(index, item)| {
+        kinds
+            .get(index)
+            .is_some_and(|kind| kind.0 == crate::context::SAVED_PREFIX_KIND)
+            || is_contextual_dev_fragment(item)
+    })
 }
 
 pub(crate) fn is_contextual_dev_fragment(content_item: &ContentItem) -> bool {
@@ -95,6 +89,30 @@ pub(crate) fn is_contextual_dev_fragment(content_item: &ContentItem) -> bool {
     })
 }
 
+/// User-input parts with their original indices. Media wrapper labels are not
+/// user text; retain the indices so history edits can carry the right annotations.
+pub(crate) fn user_input_parts(
+    message: &[ContentItem],
+) -> impl Iterator<Item = (usize, &ContentItem)> {
+    message
+        .iter()
+        .enumerate()
+        .filter(|(idx, content_item)| match content_item {
+            ContentItem::InputText { text } => {
+                let opens_media = message
+                    .get(idx + 1)
+                    .is_some_and(|part| is_opening_media_label(text, part));
+                let closes_media = idx
+                    .checked_sub(1)
+                    .is_some_and(|i| is_closing_media_label(text, &message[i]));
+                !opens_media && !closes_media
+            }
+            ContentItem::InputImage { .. }
+            | ContentItem::InputAudio { .. }
+            | ContentItem::OutputText { .. } => true,
+        })
+}
+
 fn parse_user_message(message: &[ContentItem]) -> Option<UserMessageItem> {
     if is_contextual_user_message_content(message) {
         return None;
@@ -102,24 +120,9 @@ fn parse_user_message(message: &[ContentItem]) -> Option<UserMessageItem> {
 
     let mut content: Vec<UserInput> = Vec::new();
 
-    for (idx, content_item) in message.iter().enumerate() {
+    for (_, content_item) in user_input_parts(message) {
         match content_item {
             ContentItem::InputText { text } => {
-                let is_image_label = ((is_local_image_open_tag_text(text)
-                    || is_image_open_tag_text(text))
-                    && matches!(message.get(idx + 1), Some(ContentItem::InputImage { .. })))
-                    || (idx > 0
-                        && (is_local_image_close_tag_text(text) || is_image_close_tag_text(text))
-                        && matches!(message.get(idx - 1), Some(ContentItem::InputImage { .. })));
-                let is_audio_label = ((is_local_audio_open_tag_text(text)
-                    || is_audio_open_tag_text(text))
-                    && matches!(message.get(idx + 1), Some(ContentItem::InputAudio { .. })))
-                    || (idx > 0
-                        && (is_local_audio_close_tag_text(text) || is_audio_close_tag_text(text))
-                        && matches!(message.get(idx - 1), Some(ContentItem::InputAudio { .. })));
-                if is_image_label || is_audio_label {
-                    continue;
-                }
                 content.push(UserInput::Text {
                     text: text.clone(),
                     // Model input content does not carry UI element ranges.
@@ -132,12 +135,12 @@ fn parse_user_message(message: &[ContentItem]) -> Option<UserMessageItem> {
                     detail: *detail,
                 });
             }
-            ContentItem::InputAudio { audio_url } => {
+            ContentItem::InputAudio { audio } => {
                 content.push(UserInput::Audio {
-                    audio_url: audio_url.clone(),
+                    audio: audio.clone(),
                 });
             }
-            ContentItem::OutputText { text } => {
+            ContentItem::OutputText { text, .. } => {
                 warn!("Output text in user message: {}", text);
             }
         }
@@ -154,7 +157,7 @@ fn parse_agent_message(
     let mut content: Vec<AgentMessageContent> = Vec::new();
     for content_item in message.iter() {
         match content_item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
                 content.push(AgentMessageContent::Text { text: text.clone() });
             }
             _ => {
@@ -169,6 +172,7 @@ fn parse_agent_message(
         .map(str::to_string)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     AgentMessageItem {
+        moderation: None,
         id,
         content,
         phase,

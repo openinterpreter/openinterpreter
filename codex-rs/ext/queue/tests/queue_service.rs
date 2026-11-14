@@ -1,3 +1,5 @@
+use codex_protocol::models::AudioReference;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -171,18 +173,40 @@ if payload["prompt"] == "blocked":
     );
     std::fs::write(&script_path, script)
         .unwrap_or_else(|error| panic!("write queue hook script: {error}"));
+    let python = if cfg!(windows) {
+        "python.exe"
+    } else {
+        "python3"
+    };
     let hooks = serde_json::json!({
         "hooks": {
             "UserPromptSubmit": [{
                 "hooks": [{
                     "type": "command",
-                    "command": format!("python3 {}", script_path.display()),
+                    "command": format!(r#"{python} "{}""#, script_path.display()),
                 }]
             }]
         }
     });
     std::fs::write(home.join("hooks.json"), hooks.to_string())
         .unwrap_or_else(|error| panic!("write queue hooks: {error}"));
+}
+
+async fn wait_for_hooked_turn(test: &TestCodex) {
+    core_test_support::wait_for_event(test.codex.as_ref(), |event| {
+        match event {
+            EventMsg::HookCompleted(hook) => {
+                eprintln!(
+                    "queue hook finished: {:?} {:?}",
+                    hook.run.status, hook.run.entries
+                );
+            }
+            EventMsg::Error(error) => panic!("queue turn failed: {}", error.message),
+            _ => eprintln!("queue turn event: {event}"),
+        }
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
 }
 
 async fn test_queue() -> anyhow::Result<(Arc<dyn QueueStore>, TempDir)> {
@@ -632,11 +656,28 @@ async fn queued_input_and_unique_event_ids_round_trip() -> anyhow::Result<()> {
     let (queue, _home) = test_queue().await?;
     let sink = Arc::new(RecordingEventSink::default());
     let event_sink: Arc<dyn ExtensionEventSink> = sink.clone();
-    let service = QueuedItemService::new(queue, Weak::new(), event_sink);
+    let service = QueuedItemService::new(Arc::clone(&queue), Weak::new(), event_sink);
     let thread_id = ThreadId::new();
     let input = structured_user_input("structured message");
 
-    let first = service.enqueue(thread_id, input.clone()).await?;
+    let first = service
+        .enqueue_with_metadata(
+            thread_id,
+            input.clone(),
+            Some(HashMap::from([(
+                "client_type".to_string(),
+                "ios_app".to_string(),
+            )])),
+        )
+        .await?;
+    // Old workers still read TurnInput directly from the stored payload.
+    let records = queue
+        .list_page(thread_id, /*offset*/ 0, /*limit*/ 1)
+        .await?;
+    assert_eq!(
+        input,
+        serde_json::from_str::<TurnInput>(&records[0].payload)?
+    );
     let second = service.enqueue(thread_id, user_input("next")).await?;
     let TurnInput::UserInput {
         client_id: Some(generated_client_id),
@@ -678,7 +719,14 @@ async fn editing_reordering_and_deleting_preserve_queue_identity() -> anyhow::Re
     let service = QueuedItemService::new(queue, Weak::new(), Arc::new(NoopExtensionEventSink));
     let thread_id = ThreadId::new();
     let first = service
-        .enqueue(thread_id, structured_user_input("first"))
+        .enqueue_with_metadata(
+            thread_id,
+            structured_user_input("first"),
+            Some(HashMap::from([(
+                "client_type".to_string(),
+                "desktop_app".to_string(),
+            )])),
+        )
         .await?;
     let second = service.enqueue(thread_id, user_input("second")).await?;
     let edited = service
@@ -690,6 +738,21 @@ async fn editing_reordering_and_deleting_preserve_queue_identity() -> anyhow::Re
         anyhow::bail!("edited queue item does not contain user input");
     };
     assert_eq!(Some("stable-client-message"), client_id.as_deref());
+    assert_eq!(
+        first.responsesapi_client_metadata,
+        edited.responsesapi_client_metadata
+    );
+    let mobile_metadata = HashMap::from([("client_type".to_string(), "ios_app".to_string())]);
+    let edited = service
+        .update_with_metadata(
+            thread_id,
+            first.id.clone(),
+            user_input("edited on phone"),
+            Some(mobile_metadata.clone()),
+        )
+        .await?
+        .context("queued item missing")?;
+    assert_eq!(Some(mobile_metadata), edited.responsesapi_client_metadata);
     assert!(matches!(
         service.reorder(thread_id, vec![first.id.clone()]).await,
         Err(QueueServiceError::Storage(
@@ -719,7 +782,14 @@ async fn starting_a_selected_item_preserves_the_remaining_queue() -> anyhow::Res
     let service = QueuedItemService::new(queue, Weak::new(), Arc::new(NoopExtensionEventSink));
     let first = service.enqueue(thread_id, user_input("first")).await?;
     let second = service
-        .enqueue(thread_id, structured_user_input("second"))
+        .enqueue_with_metadata(
+            thread_id,
+            structured_user_input("second"),
+            Some(HashMap::from([(
+                "client_type".to_string(),
+                "ios_app".to_string(),
+            )])),
+        )
         .await?;
 
     let submission = service
@@ -732,7 +802,7 @@ async fn starting_a_selected_item_preserves_the_remaining_queue() -> anyhow::Res
 
     assert!(matches!(
         submission,
-        StartIfIdleSubmission::Started { turn_id } if !turn_id.is_empty()
+        StartIfIdleSubmission::Started { turn_id, .. } if !turn_id.is_empty()
     ));
     assert_eq!(vec![first], service.list(thread_id).await?);
     wait_for_event_match(test.codex.as_ref(), |event| match event {
@@ -748,6 +818,13 @@ async fn starting_a_selected_item_preserves_the_remaining_queue() -> anyhow::Res
             .last()
             .map(String::as_str)
     );
+    let body = response.single_request().body_json();
+    let metadata: serde_json::Value = serde_json::from_str(
+        body["client_metadata"]["x-codex-turn-metadata"]
+            .as_str()
+            .context("missing turn metadata")?,
+    )?;
+    assert_eq!(metadata["client_type"], "ios_app");
     Ok(())
 }
 
@@ -1003,8 +1080,8 @@ async fn externally_changed_queues_dispatch_independently_and_retry_failed_wakes
     .await;
     advance_queue_poll().await;
 
-    assert!(queue.list(thread_id).await?.is_empty());
-    assert!(queue.list(independent_thread.thread_id).await?.is_empty());
+    wait_for_queue_empty(&queue, thread_id).await?;
+    wait_for_queue_empty(&queue, independent_thread.thread_id).await?;
 
     let rollout_path = test.codex.rollout_path().context("rollout path missing")?;
     test.codex.shutdown_and_wait().await?;
@@ -1015,7 +1092,7 @@ async fn externally_changed_queues_dispatch_independently_and_retry_failed_wakes
     advance_queue_poll().await;
     let resumed = test
         .thread_manager
-        .resume_thread_from_rollout(
+        .resume_legacy_thread_from_rollout(
             test.config.clone(),
             rollout_path,
             test.thread_manager.auth_manager(),
@@ -1030,7 +1107,7 @@ async fn externally_changed_queues_dispatch_independently_and_retry_failed_wakes
         Duration::from_secs(/*secs*/ 25),
     )
     .await;
-    assert!(queue.list(thread_id).await?.is_empty());
+    wait_for_queue_empty(&queue, thread_id).await?;
 
     let prompts = model_responses
         .requests()
@@ -1064,6 +1141,7 @@ async fn rejected_queue_messages_are_consumed_without_retrying_or_blocking_follo
     let test = test_codex()
         .with_extensions(extensions)
         .with_pre_build_hook(write_rejecting_prompt_hook)
+        .with_windows_cmd_shell()
         .with_config(trust_discovered_hooks)
         .with_config(|config| config.include_environment_context = false)
         .build_with_auto_env(&server)
@@ -1079,17 +1157,13 @@ async fn rejected_queue_messages_are_consumed_without_retrying_or_blocking_follo
     }
     let queue = install_registered_queue(&test, installed.as_ref())?;
 
-    tokio::time::timeout(Duration::from_secs(10), async {
-        test.submit_text_turn("A").await?;
-        for _ in 0..2 {
-            wait_for_event_match(test.codex.as_ref(), |event| {
-                matches!(event, EventMsg::TurnComplete(_)).then_some(())
-            })
-            .await;
-        }
-        anyhow::Ok(())
-    })
-    .await??;
+    // Each turn runs an external hook. Use the event waits' progress deadlines
+    // instead of sharing one wall-clock deadline across all three turns.
+    test.submit_text_turn("A").await?;
+    for _ in 0..2 {
+        wait_for_hooked_turn(&test).await;
+    }
+    wait_for_queue_empty(&queue, thread_id).await?;
 
     let prompts = responses
         .requests()
@@ -1107,7 +1181,6 @@ async fn rejected_queue_messages_are_consumed_without_retrying_or_blocking_follo
         vec!["A", "blocked", "C"],
         hook_log.lines().collect::<Vec<_>>()
     );
-    assert!(queue.list(thread_id).await?.is_empty());
     assert_eq!(2, responses.requests().len());
     Ok(())
 }
@@ -1119,6 +1192,7 @@ async fn explicitly_started_rejected_queue_messages_are_consumed() -> anyhow::Re
         responses::mount_sse_once(&server, responses::sse_completed("unexpected-turn")).await;
     let test = test_codex()
         .with_pre_build_hook(write_rejecting_prompt_hook)
+        .with_windows_cmd_shell()
         .with_config(trust_discovered_hooks)
         .with_config(|config| config.include_environment_context = false)
         .build_with_auto_env(&server)
@@ -1138,10 +1212,7 @@ async fn explicitly_started_rejected_queue_messages_are_consumed() -> anyhow::Re
     .await?
     .expect("explicitly started input should be submitted");
     assert!(matches!(submission, StartIfIdleSubmission::Started { .. }));
-    wait_for_event_match(test.codex.as_ref(), |event| {
-        matches!(event, EventMsg::TurnComplete(_)).then_some(())
-    })
-    .await;
+    wait_for_hooked_turn(&test).await;
     assert!(queue.list(thread_id).await?.is_empty());
     let hook_log = std::fs::read_to_string(test.codex_home_path().join("queue_prompt_hook.log"))?;
     assert_eq!(vec!["blocked"], hook_log.lines().collect::<Vec<_>>());
@@ -1181,7 +1252,9 @@ async fn local_attachments_are_snapshotted_before_enqueue_and_update() -> anyhow
             detail: Some(ImageDetail::Original),
         },
         UserInput::Audio {
-            audio_url: "data:audio/mpeg;base64,YXVkaW8=".to_string(),
+            audio: AudioReference::Inline {
+                audio_url: "data:audio/mpeg;base64,YXVkaW8=".to_string(),
+            },
         },
     );
 
@@ -1223,7 +1296,9 @@ async fn local_attachments_are_snapshotted_before_enqueue_and_update() -> anyhow
             detail: Some(ImageDetail::High),
         },
         UserInput::Audio {
-            audio_url: "data:audio/mp4;base64,ZWRpdGVkIGF1ZGlv".to_string(),
+            audio: AudioReference::Inline {
+                audio_url: "data:audio/mp4;base64,ZWRpdGVkIGF1ZGlv".to_string(),
+            },
         },
     );
 
@@ -1262,7 +1337,9 @@ async fn invalid_local_attachments_do_not_mutate_queue() -> anyhow::Result<()> {
             detail: Some(ImageDetail::Original),
         },
         UserInput::Audio {
-            audio_url: "data:audio/mpeg;base64,YXVkaW8=".to_string(),
+            audio: AudioReference::Inline {
+                audio_url: "data:audio/mpeg;base64,YXVkaW8=".to_string(),
+            },
         },
     );
 
@@ -1409,7 +1486,8 @@ async fn invalid_head_is_skipped_and_a_live_user_turn_is_accepted() -> anyhow::R
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resumed_idle_dispatches_input_without_a_loaded_manager() -> anyhow::Result<()> {
     let server = start_mock_server().await;
-    responses::mount_sse_once(&server, responses::sse_completed("resumed-turn")).await;
+    let response =
+        responses::mount_sse_once(&server, responses::sse_completed("resumed-turn")).await;
     let test = test_codex().build_with_auto_env(&server).await?;
     let thread_id = test.session_configured.thread_id;
     let queue = loaded_thread_queue(&test)?;
@@ -1418,7 +1496,14 @@ async fn resumed_idle_dispatches_input_without_a_loaded_manager() -> anyhow::Res
         Weak::new(),
         Arc::new(NoopExtensionEventSink),
     )
-    .enqueue(thread_id, user_input("queued while unloaded"))
+    .enqueue_with_metadata(
+        thread_id,
+        user_input("queued while unloaded"),
+        Some(HashMap::from([(
+            "client_type".to_string(),
+            "ios_app".to_string(),
+        )])),
+    )
     .await?;
     let service = QueuedItemService::new(
         queue,
@@ -1427,5 +1512,17 @@ async fn resumed_idle_dispatches_input_without_a_loaded_manager() -> anyhow::Res
     );
     emit_idle(&service, thread_id).await;
     assert!(service.list(thread_id).await?.is_empty());
+    wait_for_event_match(test.codex.as_ref(), |event| match event {
+        EventMsg::TurnComplete(_) => Some(()),
+        _ => None,
+    })
+    .await;
+    let body = response.single_request().body_json();
+    let metadata: serde_json::Value = serde_json::from_str(
+        body["client_metadata"]["x-codex-turn-metadata"]
+            .as_str()
+            .context("missing turn metadata")?,
+    )?;
+    assert_eq!(metadata["client_type"], "ios_app");
     Ok(())
 }

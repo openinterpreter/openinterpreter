@@ -6,12 +6,13 @@
 use std::path::PathBuf;
 
 use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::ThreadEnvironment;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationMode;
-use codex_protocol::config_types::Personality;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::PermissionProfile;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -28,6 +29,11 @@ pub(crate) struct MessageHistoryMetadata {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ThreadSessionState {
+    /// This TUI opened saved history without a live attachment.
+    pub(crate) read_only_history: bool,
+    /// Inferred child settings are not confirmed until their server response arrives.
+    pub(crate) thread_settings_confirmed: bool,
+    pub(crate) daybreak_enabled: bool,
     pub(crate) windows_sandbox_host: crate::app::WindowsSandboxHost,
     pub(crate) thread_id: ThreadId,
     pub(crate) forked_from_id: Option<ThreadId>,
@@ -48,17 +54,41 @@ pub(crate) struct ThreadSessionState {
     /// when the server knows it.
     pub(crate) active_permission_profile: Option<ActivePermissionProfile>,
     pub(crate) cwd: AbsolutePathBuf,
+    /// Native cwd of the primary executor, distinct from the app-server cwd.
+    pub(crate) primary_environment_cwd: Option<EnvironmentCwd>,
     pub(crate) runtime_workspace_roots: Vec<AbsolutePathBuf>,
     pub(crate) instruction_source_paths: Vec<PathUri>,
     pub(crate) reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
     pub(crate) collaboration_mode: Option<Box<CollaborationMode>>,
-    pub(crate) personality: Option<Personality>,
     pub(crate) message_history: Option<MessageHistoryMetadata>,
     pub(crate) network_proxy: Option<SessionNetworkProxyRuntime>,
     pub(crate) rollout_path: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EnvironmentCwd {
+    pub(crate) path: LegacyAppPathString,
+    pub(crate) is_server_local: bool,
+}
+
+pub(crate) fn primary_environment_cwd(
+    environments: &[ThreadEnvironment],
+) -> Option<EnvironmentCwd> {
+    environments.first().map(|primary| EnvironmentCwd {
+        path: primary.cwd.clone(),
+        is_server_local: primary.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID,
+    })
+}
+
 impl ThreadSessionState {
+    pub(crate) fn set_fork_parent(&mut self, parent: Option<&str>) {
+        let parent = parent.and_then(|id| ThreadId::from_string(id).ok());
+        if self.forked_from_id != parent {
+            self.fork_parent_title = None;
+        }
+        self.forked_from_id = parent;
+    }
+
     pub(crate) fn set_cwd_retargeting_implicit_runtime_workspace_root(
         &mut self,
         cwd: AbsolutePathBuf,

@@ -427,6 +427,18 @@ impl App {
                     self.transcript_view.jump_to_latest();
                 }
             }
+            ViewAction::CopyOnSelect(_) | ViewAction::PrimarySelection(_) => {
+                if let Some((characters, result)) = self.transcript_view.copy_action(
+                    tui,
+                    &self.transcript_cells,
+                    &action,
+                    crate::clipboard_copy::CopyFormat::PlainText,
+                ) {
+                    self.transcript_view.show_copy_feedback(&result, characters);
+                }
+            }
+            // Select mode has already ended its pinned revision while handling the key.
+            ViewAction::ExitSelectMode => {}
             ViewAction::OpenLink(url) => self.open_url_in_browser(url),
         }
         self.request_owned_history(tui, app_server);

@@ -1,32 +1,31 @@
-use std::ffi::OsStr;
 use std::fs::File;
-use std::fs::Permissions;
 use std::io;
 use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 
+mod access_metadata;
+mod blocking_reader;
 mod error_metrics;
+mod path_metadata;
+mod read_diagnostics;
 mod read_metrics;
 
+pub(crate) use blocking_reader::read_rollout_lines;
 use error_metrics::FailureMetric;
+pub(crate) use path_metadata::existing_rollout_with_metadata_sync;
+use read_metrics::ReadFailureSource;
 use read_metrics::ReadMetrics;
 
 const COMPRESSED_SUFFIX: &str = ".zst";
 const MAX_NOT_FOUND_RETRIES: usize = 3;
 const OPEN_ROLLOUT_LINE_READER_RETRY_DELAY: Duration = Duration::from_millis(50);
-const TEMP_SUFFIX: &str = ".tmp";
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The entry point that requested a compression pass, not a Statsig cohort.
 #[derive(Clone, Copy, Debug)]
@@ -85,7 +84,7 @@ pub async fn open_rollout_line_reader(path: &Path) -> io::Result<RolloutLineRead
     match result {
         Ok(inner) => Ok(RolloutLineReader { inner, metrics }),
         Err(err) => {
-            metrics.failed("open", &err);
+            metrics.failed("open", ReadFailureSource::Stream, &err);
             Err(err)
         }
     }
@@ -126,40 +125,45 @@ pub(crate) fn materialize_rollout_for_append_blocking(path: &Path) -> io::Result
     }
 
     let started_at = Instant::now();
-    let temp_path = temp_path_for(plain_path.as_path(), "decompress");
     let mut stage = "prepare_directory";
     let result: io::Result<()> = (|| {
         if let Some(parent) = plain_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        stage = "read_metadata";
-        let metadata = std::fs::metadata(compressed_path.as_path())?;
-        let permissions = metadata.permissions();
+        stage = "open_source";
+        let input = File::open(compressed_path.as_path())?;
         stage = "create_temp";
-        let mut output = create_file_with_permissions(temp_path.as_path(), &permissions)?;
+        // Restoring mtime makes this file look stale before publication. Older
+        // workers delete *.tmp without coordinating with materialization.
+        let mut output = tempfile::Builder::new()
+            .prefix(".rollout-materialize-")
+            .make_in(
+                plain_path.parent().unwrap_or_else(|| Path::new(".")),
+                |path| {
+                    // Hard-link publication must not retain Windows' temporary-file attribute.
+                    let mut options = std::fs::OpenOptions::new();
+                    options.write(true).create_new(true);
+                    #[cfg(unix)]
+                    options.mode(0o600);
+                    options.open(path)
+                },
+            )?;
         {
-            stage = "open_source";
-            let input = File::open(compressed_path.as_path())?;
             stage = "decode_and_write";
-            let mut decoder = zstd::stream::read::Decoder::new(input)?;
+            let mut decoder = zstd::stream::read::Decoder::new(&input)?;
             io::copy(&mut decoder, &mut output)?;
         }
         stage = "flush";
         output.flush()?;
-        stage = "sync";
-        output.sync_all()?;
-        stage = "publish";
-        match std::fs::hard_link(temp_path.as_path(), plain_path.as_path()) {
-            Ok(()) => {}
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(_) => persist_temp_file_noclobber(temp_path.as_path(), plain_path.as_path())?,
-        }
         stage = "set_metadata";
-        output.set_times(std::fs::FileTimes::new().set_modified(metadata.modified()?))?;
+        access_metadata::copy(&input, output.as_file())?;
+        stage = "verify";
+        File::open(output.path())?;
         stage = "sync";
-        output.sync_all()?;
-        drop(output);
-        let _ = std::fs::remove_file(temp_path.as_path());
+        output.as_file().sync_all()?;
+        stage = "publish";
+        persist_temp_file_noclobber(output, plain_path.as_path())?;
+        drop(input);
         stage = "remove_source";
         match std::fs::remove_file(compressed_path.as_path()) {
             Ok(()) => {}
@@ -169,7 +173,6 @@ pub(crate) fn materialize_rollout_for_append_blocking(path: &Path) -> io::Result
         Ok(())
     })();
     if let Err(err) = &result {
-        let _ = std::fs::remove_file(temp_path.as_path());
         FailureMetric::Materialize.record(stage, err);
         metrics::materialize_duration("failed", started_at.elapsed());
     }
@@ -179,10 +182,17 @@ pub(crate) fn materialize_rollout_for_append_blocking(path: &Path) -> io::Result
     Ok(plain_path)
 }
 
-fn persist_temp_file_noclobber(temp_path: &Path, destination: &Path) -> io::Result<()> {
-    let temp_path = tempfile::TempPath::try_from_path(temp_path)?;
-    match temp_path.persist_noclobber(destination) {
-        Ok(()) => Ok(()),
+fn persist_temp_file_noclobber(
+    temp_file: tempfile::NamedTempFile,
+    destination: &Path,
+) -> io::Result<()> {
+    match std::fs::hard_link(temp_file.path(), destination) {
+        Ok(()) => return Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(_) => {}
+    }
+    match temp_file.persist_noclobber(destination) {
+        Ok(_) => Ok(()),
         Err(err) if err.error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
         Err(err) => Err(err.error),
     }
@@ -265,17 +275,22 @@ impl RolloutLineReader {
     pub async fn next_line(&mut self) -> io::Result<Option<String>> {
         let started_at = Instant::now();
         self.metrics.reached_eof = false;
+        let mut failure_source = ReadFailureSource::Stream;
         let result = async {
             match &mut self.inner {
                 RolloutLineReaderInner::Plain(lines) => lines.next_line().await,
                 RolloutLineReaderInner::Blocking(slot) => {
                     let Some(mut reader) = slot.take() else {
+                        failure_source = ReadFailureSource::ReaderBusy;
                         return Err(io::Error::other("compressed rollout reader is busy"));
                     };
                     let (line, reader) =
                         tokio::task::spawn_blocking(move || (reader.next().transpose(), reader))
                             .await
-                            .map_err(io::Error::other)?;
+                            .map_err(|err| {
+                                failure_source = ReadFailureSource::TaskJoin;
+                                io::Error::other(err)
+                            })?;
                     *slot = Some(reader);
                     line
                 }
@@ -284,10 +299,37 @@ impl RolloutLineReader {
         .await;
         self.metrics.duration = self.metrics.duration.saturating_add(started_at.elapsed());
         match &result {
-            Ok(line) => self.metrics.reached_eof = line.is_none(),
-            Err(err) => self.metrics.failed("read", err),
+            Ok(line) => {
+                self.metrics.reached_eof = line.is_none();
+                self.metrics.read_any_line |= line.is_some();
+            }
+            Err(err) => self.metrics.failed("read", failure_source, err),
         }
         result
+    }
+
+    /// Keeps a compressed scan on one worker while retaining this reader's format and I/O metrics.
+    pub(crate) async fn find_map<T: Send + 'static>(
+        mut self,
+        mut find: impl FnMut(&str) -> Option<T> + Send + 'static,
+    ) -> io::Result<Option<T>> {
+        let RolloutLineReaderInner::Blocking(Some(reader)) = self.inner else {
+            while let Some(line) = self.next_line().await? {
+                if let Some(found) = find(&line) {
+                    return Ok(Some(found));
+                }
+            }
+            return Ok(None);
+        };
+        blocking_reader::scan_lines(reader, self.metrics, move |lines| {
+            for line in lines {
+                if let Some(found) = find(&line?) {
+                    return Ok(Some(found));
+                }
+            }
+            Ok(None)
+        })
+        .await
     }
 }
 
@@ -296,10 +338,11 @@ type BlockingLineReader = std::io::Lines<std::io::BufReader<Box<dyn Read + Send>
 mod worker {
     use std::ffi::OsStr;
     use std::fs::File;
-    use std::fs::FileTimes;
     use std::fs::Permissions;
     use std::io;
     use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
     use std::path::Path;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -318,6 +361,7 @@ mod worker {
 
     use super::RolloutCompressionTrigger;
     use super::RolloutFile;
+    use super::access_metadata;
     use super::error_metrics::FailureMetric;
     use super::metrics;
     use super::path;
@@ -845,14 +889,14 @@ mod worker {
             .suffix(TEMP_SUFFIX)
             .tempfile_in(temp_dir)
             .inspect_err(|err| FailureMetric::File(trigger).record("create_temp", err))?;
-        encode_zstd_to_writer(path, temp_file.as_file_mut())
+        let input = File::open(path)
+            .inspect_err(|err| FailureMetric::File(trigger).record("open_source", err))?;
+        encode_zstd_to_writer(&input, temp_file.as_file_mut())
             .inspect_err(|err| FailureMetric::File(trigger).record("encode_and_write", err))?;
         temp_file
             .as_file_mut()
             .flush()
             .inspect_err(|err| FailureMetric::File(trigger).record("flush", err))?;
-        verify_zstd(temp_file.path())
-            .inspect_err(|err| FailureMetric::File(trigger).record("verify", err))?;
         if !same_file_state(path, &before)
             .inspect_err(|err| FailureMetric::File(trigger).record("recheck_source", err))?
         {
@@ -862,8 +906,12 @@ mod worker {
                 /*compressed_bytes*/ None,
             ));
         }
-        set_file_metadata(temp_file.as_file(), before.modified, &before.permissions)
+        access_metadata::copy(&input, temp_file.as_file())
             .inspect_err(|err| FailureMetric::File(trigger).record("set_metadata", err))?;
+        // Reopen after applying final access metadata: verifying the initial
+        // owner-only temporary would miss an inaccessible published file.
+        verify_zstd(temp_file.path())
+            .inspect_err(|err| FailureMetric::File(trigger).record("verify", err))?;
         temp_file
             .as_file()
             .sync_all()
@@ -933,6 +981,8 @@ mod worker {
         len: u64,
         modified: SystemTime,
         permissions: Permissions,
+        #[cfg(unix)]
+        change_time: (i64, i64),
     }
 
     fn cold_file_state(path: &Path) -> io::Result<ColdFileState> {
@@ -951,6 +1001,8 @@ mod worker {
             len: metadata.len(),
             modified,
             permissions: metadata.permissions(),
+            #[cfg(unix)]
+            change_time: (metadata.ctime(), metadata.ctime_nsec()),
         };
         let age = SystemTime::now()
             .duration_since(modified)
@@ -963,16 +1015,23 @@ mod worker {
 
     fn same_file_state(path: &Path, expected: &FileState) -> io::Result<bool> {
         match std::fs::metadata(path) {
-            Ok(metadata) => Ok(metadata.len() == expected.len
-                && metadata.modified()? == expected.modified
-                && metadata.permissions() == expected.permissions),
+            Ok(metadata) => {
+                // Ownership and ACL edits change ctime even when mode, length
+                // and mtime are unchanged. Do not publish stale access metadata.
+                #[cfg(unix)]
+                if (metadata.ctime(), metadata.ctime_nsec()) != expected.change_time {
+                    return Ok(false);
+                }
+                Ok(metadata.len() == expected.len
+                    && metadata.modified()? == expected.modified
+                    && metadata.permissions() == expected.permissions)
+            }
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(err) => Err(err),
         }
     }
 
-    fn encode_zstd_to_writer(source: &Path, output: impl Write) -> io::Result<()> {
-        let mut input = File::open(source)?;
+    fn encode_zstd_to_writer(mut input: &File, output: impl Write) -> io::Result<()> {
         let mut encoder = zstd::stream::write::Encoder::new(output, COMPRESSION_LEVEL)?;
         // Preserve fast byte-bound checks for paginated history without decoding the whole file.
         encoder.set_pledged_src_size(Some(input.metadata()?.len()))?;
@@ -987,15 +1046,6 @@ mod worker {
         let mut sink = io::sink();
         io::copy(&mut decoder, &mut sink)?;
         Ok(())
-    }
-
-    fn set_file_metadata(
-        file: &File,
-        modified: SystemTime,
-        permissions: &Permissions,
-    ) -> io::Result<()> {
-        file.set_times(FileTimes::new().set_modified(modified))?;
-        file.set_permissions(permissions.clone())
     }
 
     async fn cleanup_stale_temps(
@@ -1295,19 +1345,11 @@ mod path {
     ///
     /// Returning the metadata lets callers inspect the selected file without a second stat.
     pub(super) async fn existing_rollout_with_metadata(path: &Path) -> Option<(PathBuf, Metadata)> {
-        let plain_path = plain_rollout_path(path);
-        if let Ok(metadata) = tokio::fs::metadata(plain_path.as_path()).await
-            && metadata.is_file()
-        {
-            return Some((plain_path, metadata));
-        }
-        let compressed_path = compressed_rollout_path(plain_path.as_path());
-        if let Ok(metadata) = tokio::fs::metadata(compressed_path.as_path()).await
-            && metadata.is_file()
-        {
-            return Some((compressed_path, metadata));
-        }
-        None
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || super::existing_rollout_with_metadata_sync(&path))
+            .await
+            .ok()
+            .flatten()
     }
 }
 
@@ -1331,6 +1373,7 @@ mod reader {
     use std::io::Read;
     use std::path::Path;
 
+    use super::ReadFailureSource;
     use super::ReadMetrics;
     use super::RolloutLineReaderInner;
     use super::path;
@@ -1347,13 +1390,14 @@ mod reader {
             metrics.format = "zstd";
             let reader = tokio::task::spawn_blocking(move || {
                 let input = File::open(path.as_path())?;
-                let decoder = zstd::stream::read::Decoder::new(input)?;
+                let decoder = super::read_diagnostics::DiagnosticDecoder::new(input)?;
                 Ok::<_, io::Error>(
                     io::BufReader::new(Box::new(decoder) as Box<dyn Read + Send>).lines(),
                 )
             })
             .await
-            .map_err(io::Error::other)??;
+            .map_err(io::Error::other)
+            .inspect_err(|err| metrics.failed("open", ReadFailureSource::TaskJoin, err))??;
             return Ok(RolloutLineReaderInner::Blocking(Some(reader)));
         }
         metrics.format = "plain";
@@ -1362,40 +1406,6 @@ mod reader {
             tokio::io::BufReader::new(file).lines(),
         ))
     }
-}
-
-#[cfg(unix)]
-fn create_file_with_permissions(path: &Path, permissions: &Permissions) -> io::Result<File> {
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(permissions.mode() & 0o7777)
-        .open(path)?;
-    file.set_permissions(permissions.clone())?;
-    Ok(file)
-}
-
-#[cfg(not(unix))]
-fn create_file_with_permissions(path: &Path, permissions: &Permissions) -> io::Result<File> {
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-    file.set_permissions(permissions.clone())?;
-    Ok(file)
-}
-
-fn temp_path_for(path: &Path, operation: &str) -> PathBuf {
-    let mut file_name = path
-        .file_name()
-        .map(OsStr::to_os_string)
-        .unwrap_or_else(|| OsStr::new("rollout").to_os_string());
-    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    file_name.push(format!(
-        ".{operation}.{}.{counter}{TEMP_SUFFIX}",
-        std::process::id()
-    ));
-    path.with_file_name(file_name)
 }
 
 #[cfg(test)]

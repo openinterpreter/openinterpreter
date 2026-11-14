@@ -1,0 +1,34 @@
+---
+source: tui/src/transcript_view/markdown_copy_tests.rs
+assertion_line: 460
+expression: "copies.join(\"\\n---\\n\")"
+---
+Before
+
+> | A | B |
+> |---|---|
+> | one | two |
+<p>Before</p>
+<blockquote>
+<table><thead><tr><th>A</th><th>B</th></tr></thead><tbody>
+<tr><td>one</td><td>two</td></tr>
+</tbody></table>
+</blockquote>
+
+---
+Before
+
+- intro
+
+  | A | B |
+  |---|---|
+  | one | two |
+<p>Before</p>
+<ul>
+<li>
+<p>intro</p>
+<table><thead><tr><th>A</th><th>B</th></tr></thead><tbody>
+<tr><td>one</td><td>two</td></tr>
+</tbody></table>
+</li>
+</ul>

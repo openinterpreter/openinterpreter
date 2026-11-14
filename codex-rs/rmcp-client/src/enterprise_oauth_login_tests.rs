@@ -64,6 +64,8 @@ async fn login(issuer: &str, callback_url: Option<&str>) -> Result<EnterpriseOAu
         credential_name: CREDENTIAL_NAME,
         issuer,
         client_id: "enterprise-client",
+        client_secret: None,
+        token_endpoint_auth_method: None,
         keyring_backend_kind: AuthKeyringBackendKind::Direct,
         callback_port: None,
         callback_url,

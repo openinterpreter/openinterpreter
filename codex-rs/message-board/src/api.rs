@@ -1,0 +1,316 @@
+//! Operations on one board. Requests describe intent independently of tool schemas.
+//! Channel descriptions enforce their byte limit at construction and deserialization.
+
+use crate::BoardReadView;
+use crate::ChannelPage;
+use crate::ChannelSummary;
+use crate::Page;
+use crate::PostContent;
+use crate::PostMetadata;
+use crate::PostPreview;
+use crate::SubscriptionState;
+use crate::ThreadPage;
+use crate::ThreadSummary;
+use codex_protocol::AgentPath;
+use codex_protocol::SessionId;
+use codex_protocol::ThreadId;
+use codex_protocol::error::CodexErr;
+use codex_protocol::error::Result;
+use futures::future::BoxFuture;
+use serde::Deserialize;
+use serde::Serialize;
+use std::collections::BTreeMap;
+use std::num::NonZeroU32;
+use std::sync::Arc;
+use uuid::Uuid;
+
+// Local and remote implementations must remain usable through the same handle.
+const _: Option<&dyn AgentMessageBoard> = None;
+
+/// Stores discussions and subscriptions for one board.
+///
+/// Every operation validates caller membership. IDs are scoped to this board;
+/// an agent runtime's ThreadId is distinct from a discussion's root post UUID.
+/// Mutation success acknowledges acceptance, not that recipients read a post.
+/// Implementations enforce hard input/output limits and return backend failures
+/// as errors. They own atomic subscription changes, posting and recipient
+/// selection, excluding the post author even when explicitly targeted.
+/// Notification delivery follows the host's scheduling and wake policy and may
+/// be buffered for an idle recipient; see [`crate::MessageBoardHost`].
+///
+/// Boxed Send futures support an Arc<dyn AgentMessageBoard>, like AgentControl.
+pub trait AgentMessageBoard: Send + Sync {
+    fn identity(&self) -> SessionId;
+
+    /// The host-selected storage namespace, if this backend identifies one.
+    fn storage_namespace(&self) -> Option<&str> {
+        None
+    }
+
+    /// Capture a live board's channel summaries and post boundary together for read-only access.
+    fn read_view(&self, _caller: ThreadId) -> BoxFuture<'_, Result<Arc<dyn BoardReadView>>> {
+        unsupported("capturing a board read view")
+    }
+
+    fn create_channel(
+        &self,
+        caller: ThreadId,
+        request: CreateChannelRequest,
+    ) -> BoxFuture<'_, Result<ChannelSummary>>;
+
+    /// Creates a channel or replaces only its description. Preserves existing
+    /// posts, authorship, creation time and subscriptions; never sends notices.
+    /// Backends without upsert support must reject this rather than substitute creation.
+    fn upsert_channel(
+        &self,
+        caller: ThreadId,
+        request: UpsertChannelRequest,
+    ) -> BoxFuture<'_, Result<()>>;
+
+    fn list_channels(
+        &self,
+        caller: ThreadId,
+        query: ChannelQuery,
+    ) -> BoxFuture<'_, Result<ChannelPage>>;
+
+    /// Uses the caller's configured clock; clock failures must not create a post.
+    /// The request ID identifies a logical call across retries. A retry with
+    /// different input is an error; a successful retry returns the same metadata.
+    /// Creating a channel while posting also subscribes its author to new roots there.
+    fn post(&self, caller: ThreadId, request: PostRequest) -> BoxFuture<'_, Result<PostMetadata>>;
+
+    /// Writes without automatic subscriptions or notifications. Uses caller-scoped
+    /// retry IDs shared with posting; changing the operation or payload is an error.
+    /// Backends without silent-write support must reject this, never fall back to posting.
+    fn append(
+        &self,
+        caller: ThreadId,
+        request: AppendRequest,
+    ) -> BoxFuture<'_, Result<PostMetadata>>;
+
+    fn list_threads(
+        &self,
+        caller: ThreadId,
+        query: ThreadQuery,
+    ) -> BoxFuture<'_, Result<Page<ThreadSummary>>>;
+
+    fn search_posts(
+        &self,
+        caller: ThreadId,
+        query: PostQuery,
+    ) -> BoxFuture<'_, Result<Page<PostPreview>>>;
+
+    fn read_thread(
+        &self,
+        caller: ThreadId,
+        request: ReadThreadRequest,
+    ) -> BoxFuture<'_, Result<ThreadPage>>;
+
+    fn read_post(
+        &self,
+        caller: ThreadId,
+        request: ReadPostRequest,
+    ) -> BoxFuture<'_, Result<PostContent>>;
+
+    /// Channel subscriptions concern new roots; thread subscriptions concern
+    /// replies. Changing one does not change the other. Any member may change
+    /// another member's subscription. Posting subscribes its author to the thread
+    /// by default, but preserves an explicit unsubscribe until subscribed again.
+    fn set_subscription(
+        &self,
+        caller: ThreadId,
+        request: SubscriptionRequest,
+    ) -> BoxFuture<'_, Result<SubscriptionState>>;
+
+    /// List a caller's current channel subscriptions on a live board.
+    fn subscribed_channels(
+        &self,
+        _caller: ThreadId,
+        _page: PageRequest,
+    ) -> BoxFuture<'_, Result<Page<String>>> {
+        unsupported("listing channel subscriptions")
+    }
+
+    /// Set the caller's membership in the supplied channels as one atomic change.
+    /// Other channels and thread subscriptions retain their current membership.
+    fn set_subscriptions<'a>(
+        &'a self,
+        _caller: ThreadId,
+        _channels: &'a BTreeMap<&str, SubscriptionChange>,
+    ) -> BoxFuture<'a, Result<()>> {
+        unsupported("setting channel subscriptions in bulk")
+    }
+}
+
+fn unsupported<T>(operation: &'static str) -> BoxFuture<'static, Result<T>> {
+    Box::pin(async move { Err(CodexErr::UnsupportedOperation(operation.into())) })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageRequest {
+    pub cursor: Option<String>,
+    pub limit: NonZeroU32,
+}
+
+impl Default for PageRequest {
+    fn default() -> Self {
+        Self {
+            cursor: None,
+            limit: NonZeroU32::new(20).unwrap_or(NonZeroU32::MIN),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SortDirection {
+    NewestFirst,
+    OldestFirst,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubscriptionChange {
+    Subscribe,
+    Unsubscribe,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateChannelRequest {
+    pub channel_name: String,
+    /// Optional channel purpose, at most 512 UTF-8 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<ChannelDescription>,
+    pub subscription: SubscriptionChange,
+}
+
+/// Creates or updates navigation metadata without changing stored evidence or delivery.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpsertChannelRequest {
+    pub channel_name: String,
+    pub description: ChannelDescription,
+}
+
+/// A channel purpose containing at most 512 UTF-8 bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct ChannelDescription(String);
+
+impl TryFrom<String> for ChannelDescription {
+    type Error = CodexErr;
+
+    fn try_from(text: String) -> Result<Self> {
+        if text.len() > 512 {
+            return Err(CodexErr::InvalidRequest(
+                "channel descriptions must contain at most 512 UTF-8 bytes".into(),
+            ));
+        }
+        Ok(Self(text))
+    }
+}
+
+impl ChannelDescription {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<ChannelDescription> for String {
+    fn from(description: ChannelDescription) -> Self {
+        description.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelQuery {
+    pub query: Option<String>,
+    pub direction: SortDirection,
+    pub page: PageRequest,
+}
+
+/// Exactly one destination; discussion threads use their root post's ID.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PostDestination {
+    Channel(String),
+    NewChannel(String),
+    Thread(Uuid),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostRequest {
+    /// Host-generated tool invocation identity, never a model argument.
+    pub request_id: String,
+    pub destination: PostDestination,
+    pub text: String,
+    /// Resolved paths in this board's tree; duplicates notify only once.
+    pub agents_to_notify: Vec<AgentPath>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PostBehavior {
+    Discussion,
+    SilentAppend,
+}
+
+/// Request to append evidence without subscribing its author or notifying anyone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppendRequest {
+    /// Caller-scoped invocation identity, shared with posting to reject conflicting retries.
+    pub request_id: String,
+    pub destination: PostDestination,
+    pub text: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadSort {
+    Created,
+    Activity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadQuery {
+    pub channel_name: String,
+    pub sort: ThreadSort,
+    pub direction: SortDirection,
+    pub page: PageRequest,
+    pub max_chars_per_post: NonZeroU32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostQuery {
+    pub channel_name: Option<String>,
+    pub query: Option<String>,
+    pub after_message_id: Option<Uuid>,
+    pub author: Option<AgentPath>,
+    pub page: PageRequest,
+    pub max_chars_per_post: NonZeroU32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadThreadRequest {
+    pub thread_id: Uuid,
+    pub page: PageRequest,
+    pub max_chars_per_post: NonZeroU32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReadPostRequest {
+    pub message_id: Uuid,
+    /// Offsets and lengths count Unicode scalar values, not UTF-8 bytes.
+    pub offset_chars: u32,
+    pub limit_chars: NonZeroU32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum SubscriptionTarget {
+    Channel(String),
+    Thread(Uuid),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubscriptionRequest {
+    pub target: SubscriptionTarget,
+    /// None changes the caller's subscription.
+    pub target_agent: Option<AgentPath>,
+    pub change: SubscriptionChange,
+}

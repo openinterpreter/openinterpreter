@@ -1,14 +1,42 @@
-//! Task grouping modes share model labels and group membership across rendering and navigation.
+//! Command Center grouping, including restoration and client-local preference persistence.
+//! Directory is view-local so selecting it never writes a value that older clients reject.
 
+use super::super::App;
+use super::super::agents_overview::AgentsOverviewState;
+use super::super::agents_overview_discovery::matches_query;
 use super::AgentsOverviewView;
+use crate::legacy_core::config::edit::ConfigEdit;
+use crate::legacy_core::config::edit::ConfigEditsBuilder;
 use codex_app_server_protocol::Thread;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(in super::super) enum AgentsOverviewGrouping {
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub(in crate::app) enum AgentsOverviewGrouping {
     #[default]
     Project,
+    Directory,
     Status,
     Model,
+}
+
+impl From<codex_config::types::AgentsOverviewGrouping> for AgentsOverviewGrouping {
+    fn from(grouping: codex_config::types::AgentsOverviewGrouping) -> Self {
+        match grouping {
+            codex_config::types::AgentsOverviewGrouping::Project => Self::Project,
+            codex_config::types::AgentsOverviewGrouping::Status => Self::Status,
+            codex_config::types::AgentsOverviewGrouping::Model => Self::Model,
+        }
+    }
+}
+
+impl AgentsOverviewGrouping {
+    pub(super) fn persisted(self) -> Option<codex_config::types::AgentsOverviewGrouping> {
+        match self {
+            Self::Project => Some(codex_config::types::AgentsOverviewGrouping::Project),
+            Self::Directory => None,
+            Self::Status => Some(codex_config::types::AgentsOverviewGrouping::Status),
+            Self::Model => Some(codex_config::types::AgentsOverviewGrouping::Model),
+        }
+    }
 }
 
 pub(super) fn model_name(thread: &Thread) -> &str {
@@ -20,6 +48,61 @@ pub(super) fn model_name(thread: &Thread) -> &str {
 }
 
 impl AgentsOverviewView {
+    pub(super) fn is_pinned(&self, index: usize) -> bool {
+        self.pinned_thread_ranks
+            .as_ref()
+            .is_some_and(|ranks| ranks.contains_key(&self.rows[index].thread_id))
+    }
+
+    pub(in crate::app) fn visible_indices(&self) -> Vec<usize> {
+        let state = self.state();
+        let search = state.search.to_lowercase();
+        let (_, status_group) = super::command_center::TASK_FILTERS[state.status_filter];
+        let (mut pinned, mut visible): (Vec<_>, Vec<_>) = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                (state.rename_target == Some(row.thread_id)
+                    || (state.includes_row(row)
+                        && (search.is_empty() || matches_query(&row.thread, &search))
+                        && status_group.is_none_or(|group| group == row.group)))
+                .then_some(index)
+            })
+            .partition(|index| self.is_pinned(*index));
+        if let Some(ranks) = &self.pinned_thread_ranks {
+            pinned.sort_by_key(|index| ranks.get(&self.rows[*index].thread_id).copied());
+        }
+        match state.grouping {
+            AgentsOverviewGrouping::Project => visible.sort_by_key(|index| {
+                (
+                    &self.project_groups[*index].key,
+                    std::cmp::Reverse(self.rows[*index].thread.updated_at),
+                )
+            }),
+            AgentsOverviewGrouping::Directory => visible.sort_by_key(|index| {
+                (
+                    &self.directory_group_keys[*index],
+                    std::cmp::Reverse(self.rows[*index].thread.updated_at),
+                )
+            }),
+            AgentsOverviewGrouping::Status => {
+                pinned.extend(visible);
+                // Stable grouping preserves pin order, then the supplied newest-first order.
+                pinned.sort_by_key(|index| self.rows[*index].group);
+                return pinned;
+            }
+            AgentsOverviewGrouping::Model => visible.sort_by_key(|index| {
+                (
+                    model_name(&self.rows[*index].thread),
+                    std::cmp::Reverse(self.rows[*index].thread.updated_at),
+                )
+            }),
+        }
+        pinned.extend(visible);
+        pinned
+    }
+
     pub(super) fn same_group(
         &self,
         grouping: AgentsOverviewGrouping,
@@ -27,13 +110,54 @@ impl AgentsOverviewView {
         right: usize,
     ) -> bool {
         match grouping {
+            AgentsOverviewGrouping::Status => self.rows[left].group == self.rows[right].group,
+            _ if self.is_pinned(left) || self.is_pinned(right) => {
+                self.is_pinned(left) && self.is_pinned(right)
+            }
             AgentsOverviewGrouping::Project => {
                 self.project_groups[left].key == self.project_groups[right].key
             }
-            AgentsOverviewGrouping::Status => self.rows[left].group == self.rows[right].group,
+            AgentsOverviewGrouping::Directory => {
+                self.directory_group_keys[left] == self.directory_group_keys[right]
+            }
             AgentsOverviewGrouping::Model => {
                 model_name(&self.rows[left].thread) == model_name(&self.rows[right].thread)
             }
+        }
+    }
+}
+
+impl AgentsOverviewState {
+    pub(in super::super) fn new(grouping: codex_config::types::AgentsOverviewGrouping) -> Self {
+        let state = Self::default();
+        state
+            .view_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .grouping = grouping.into();
+        state
+    }
+}
+
+impl App {
+    pub(in super::super) async fn persist_agents_overview_grouping(
+        &mut self,
+        grouping: codex_config::types::AgentsOverviewGrouping,
+    ) {
+        self.local_settings.tui.agents_overview_grouping = grouping;
+        let edit = ConfigEdit::SetPath {
+            segments: vec!["tui".to_string(), "agents_overview_grouping".to_string()],
+            value: grouping.as_str().into(),
+        };
+        if let Err(err) =
+            ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
+                .with_edits([edit])
+                .apply()
+                .await
+        {
+            self.add_agents_overview_error(format!(
+                "Failed to save Command Center grouping: {err}"
+            ));
         }
     }
 }

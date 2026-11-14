@@ -78,15 +78,22 @@ impl App {
         let permission_profile = self.current_permission_profile();
         let active_permission_profile = self.current_active_permission_profile();
         let mut session = if let Some(mut session) = self.primary_session_configured.clone() {
+            session.read_only_history = true;
             if session.thread_id != thread_id {
                 // `thread/read` does not include all thread settings, so do not carry
                 // thread-scoped state from the currently active session.
                 session.collaboration_mode = None;
-                session.personality = None;
+                session.thread_settings_confirmed = false;
+                session.primary_environment_cwd = None;
+                session.daybreak_enabled = false;
             }
             session
         } else {
             ThreadSessionState {
+                read_only_history: true,
+                thread_settings_confirmed: false,
+                daybreak_enabled: false,
+                primary_environment_cwd: None,
                 windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
                 thread_id,
                 forked_from_id: None,
@@ -106,15 +113,19 @@ impl App {
                 instruction_source_paths: Vec::new(),
                 reasoning_effort: self.chat_widget.current_reasoning_effort(),
                 collaboration_mode: None,
-                personality: None,
                 message_history: None,
                 network_proxy: None,
                 rollout_path: thread.path.clone(),
             }
         };
+        if let Some(environments) = &thread.environments {
+            session.primary_environment_cwd =
+                crate::session_state::primary_environment_cwd(environments);
+        }
         session.windows_sandbox_host =
             crate::windows_sandbox::host_from_environments(thread.environments.as_deref());
         session.thread_id = thread_id;
+        session.daybreak_enabled = thread.daybreak_enabled.unwrap_or(false);
         session.thread_name = thread.name.clone();
         session.model_provider_id = thread.model_provider.clone();
         session.set_cwd_retargeting_implicit_runtime_workspace_root(thread.cwd.clone());
@@ -172,6 +183,10 @@ mod tests {
 
     fn test_thread_session(thread_id: ThreadId, cwd: PathBuf) -> ThreadSessionState {
         ThreadSessionState {
+            read_only_history: false,
+            thread_settings_confirmed: true,
+            daybreak_enabled: false,
+            primary_environment_cwd: None,
             windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
             thread_id,
             forked_from_id: None,
@@ -189,7 +204,6 @@ mod tests {
             instruction_source_paths: Vec::new(),
             reasoning_effort: None,
             collaboration_mode: None,
-            personality: None,
             message_history: None,
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
@@ -417,6 +431,7 @@ mod tests {
             extra: None,
             session_id: read_thread_id.to_string(),
             forked_from_id: None,
+            attached_to_thread_id: None,
             parent_thread_id: None,
             preview: "read thread".to_string(),
             ephemeral: false,

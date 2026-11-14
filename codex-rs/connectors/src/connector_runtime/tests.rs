@@ -371,11 +371,25 @@ fn codex_apps_tools_cache_publishes_newest_shared_snapshot() {
     let newer_tools = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "newer")];
     let older_tools = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "older")];
 
-    let published_tools =
-        cache_context_2.publish_if_newest_accepted(newer_ticket, &server_info, newer_tools);
+    let published_tools = cache_context_2
+        .publish_runtime_if_newest_accepted(
+            newer_ticket,
+            &server_info,
+            newer_tools,
+            /*tool_list_meta*/ None,
+        )
+        .tools()
+        .to_vec();
     assert_eq!(cache_context_1.current_tools(), Some(published_tools));
-    let current_tools =
-        cache_context_1.publish_if_newest_accepted(older_ticket, &server_info, older_tools);
+    let current_tools = cache_context_1
+        .publish_runtime_if_newest_accepted(
+            older_ticket,
+            &server_info,
+            older_tools,
+            /*tool_list_meta*/ None,
+        )
+        .tools()
+        .to_vec();
 
     assert_eq!(current_tools[0].callable_name, "newer");
     assert_eq!(
@@ -403,11 +417,15 @@ fn codex_apps_tools_cache_keeps_live_publish_when_disk_persistence_fails() {
         },
     );
     let tools = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "live")];
-    let published_tools = cache_context.publish_if_newest_accepted(
-        cache_context.begin_fetch(ConnectorRuntimeFetchSource::HardRefresh),
-        &create_test_server_info("Codex Apps"),
-        tools.clone(),
-    );
+    let published_tools = cache_context
+        .publish_runtime_if_newest_accepted(
+            cache_context.begin_fetch(ConnectorRuntimeFetchSource::HardRefresh),
+            &create_test_server_info("Codex Apps"),
+            tools.clone(),
+            /*tool_list_meta*/ None,
+        )
+        .tools()
+        .to_vec();
 
     assert_eq!(published_tools, tools);
     assert_eq!(cache_context.current_tools(), Some(tools));
@@ -450,11 +468,15 @@ fn connector_runtime_without_cache_publishes_without_writing() {
         },
     );
     let tools = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "live")];
-    let published_tools = context.publish_if_newest_accepted(
-        context.begin_fetch(ConnectorRuntimeFetchSource::HardRefresh),
-        &create_test_server_info("Codex Apps"),
-        tools.clone(),
-    );
+    let published_tools = context
+        .publish_runtime_if_newest_accepted(
+            context.begin_fetch(ConnectorRuntimeFetchSource::HardRefresh),
+            &create_test_server_info("Codex Apps"),
+            tools.clone(),
+            /*tool_list_meta*/ None,
+        )
+        .tools()
+        .to_vec();
 
     assert_eq!(published_tools, tools);
     assert_eq!(context.current_tools(), Some(tools));
@@ -490,6 +512,49 @@ fn codex_apps_tools_cache_scopes_non_utf8_home_disk_paths() {
     ];
 
     assert_ne!(cache_paths[0], cache_paths[1]);
+}
+
+#[tokio::test]
+async fn startup_returns_its_own_catalog_when_another_scope_fetches_first() -> anyhow::Result<()> {
+    let home = tempdir()?;
+    let context = create_codex_apps_tools_cache_context(
+        home.path().into(),
+        Some("account"),
+        /*chatgpt_user_id*/ None,
+    );
+    let first = context.clone().with_live_scope("one".into());
+    let other = context.with_live_scope("two".into());
+    let server = create_test_server_info("Apps");
+    let tools = vec![create_test_tool("apps", "one")];
+    let meta = Some(Arc::new(serde_json::json!({"version": "one"})));
+    let (release, wait) = tokio::sync::oneshot::channel();
+    let mut list = std::pin::pin!(first.fetch_startup_tools(&server, async {
+        wait.await?;
+        Ok((tools.clone(), meta.clone()))
+    }));
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(list.as_mut().poll(&mut cx).is_pending());
+    let other_reply = tokio::time::timeout(
+        Duration::from_secs(5),
+        other.fetch_startup_tools(&server, async {
+            Ok((vec![create_test_tool("apps", "other")], None))
+        }),
+    )
+    .await??;
+    assert_eq!(other_reply.0.as_ref(), [create_test_tool("apps", "other")]);
+    release.send(()).unwrap();
+    let (listed, listed_meta) = list.await?;
+    assert_eq!(
+        (listed.as_ref(), listed_meta.as_deref()),
+        (tools.as_slice(), meta.as_deref())
+    );
+
+    let updated = vec![create_test_tool("apps", "updated")];
+    let (fresh, _) = first
+        .fetch_startup_tools(&server, async { Ok((updated.clone(), None)) })
+        .await?;
+    assert_eq!(fresh.as_ref(), updated);
+    Ok(())
 }
 
 #[test]
@@ -552,6 +617,7 @@ fn contexts_for_different_identities_keep_isolated_snapshots() {
         context_a.begin_fetch(ConnectorRuntimeFetchSource::HardRefresh),
         &create_test_server_info("Codex Apps"),
         tools_a.clone(),
+        /*tool_list_meta*/ None,
     );
     let older_ticket_a = context_a.begin_fetch(ConnectorRuntimeFetchSource::Startup);
     let context_b = manager.context(
@@ -587,17 +653,20 @@ fn contexts_for_different_identities_keep_isolated_snapshots() {
         context_b.begin_fetch(ConnectorRuntimeFetchSource::HardRefresh),
         &create_test_server_info("Codex Apps"),
         tools_b.clone(),
+        /*tool_list_meta*/ None,
     );
     let newer_tools_a = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "newer-a")];
     let newer_snapshot_a = same_context_a.publish_runtime_if_newest_accepted(
         same_context_a.begin_fetch(ConnectorRuntimeFetchSource::HardRefresh),
         &create_test_server_info("Codex Apps"),
         newer_tools_a.clone(),
+        /*tool_list_meta*/ None,
     );
     let stale_snapshot_a = context_a.publish_runtime_if_newest_accepted(
         older_ticket_a,
         &create_test_server_info("Codex Apps"),
         vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "stale-a")],
+        /*tool_list_meta*/ None,
     );
 
     assert_eq!(snapshot_a.tools(), &tools_a);
@@ -657,6 +726,7 @@ fn live_provider_reuses_equal_tools_only_within_its_scope() {
             context.begin_fetch(ConnectorRuntimeFetchSource::Startup),
             &create_test_server_info("Apps"),
             tools.clone(),
+            /*tool_list_meta*/ None,
         )
     };
     let original = publish(&first);
@@ -678,6 +748,34 @@ fn live_provider_reuses_equal_tools_only_within_its_scope() {
         .with_live_scope("capabilities".into());
     assert!(restarted.current_snapshot().is_some());
     assert!(restarted.subscribe().unwrap().borrow().is_none());
+}
+
+#[test]
+fn runtime_snapshot_retains_discovery_scope_and_tool_list_metadata() {
+    let manager = ConnectorRuntimeManager::<TestTool>::new_without_cache();
+    let context = manager.context(
+        PathBuf::from("unused"),
+        ConnectorRuntimeContextKey::personal(None, None),
+    );
+    let scoped = context.clone().with_live_scope("endpoint-a".into());
+    let metadata = Arc::new(serde_json::json!({"cursor": "next"}));
+    let snapshot = scoped.publish_runtime_if_newest_accepted(
+        scoped.begin_fetch(ConnectorRuntimeFetchSource::Startup),
+        &create_test_server_info("Apps"),
+        vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "search")],
+        Some(Arc::clone(&metadata)),
+    );
+    assert_eq!(snapshot.shared_tool_list_meta(), Some(metadata));
+    assert_eq!(
+        scoped.current_catalog_snapshot().as_ref().map(Arc::as_ptr),
+        Some(Arc::as_ptr(&snapshot))
+    );
+    assert!(
+        context
+            .with_live_scope("endpoint-b".into())
+            .current_catalog_snapshot()
+            .is_none()
+    );
 }
 
 #[test]
@@ -746,6 +844,7 @@ fn accepted_generations_finish_persistence_in_order() {
             older_ticket,
             &create_test_server_info("Codex Apps"),
             vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "older")],
+            /*tool_list_meta*/ None,
             move |_, _, _| {
                 older_persisting_tx
                     .send(())
@@ -765,6 +864,7 @@ fn accepted_generations_finish_persistence_in_order() {
             newer_ticket,
             &create_test_server_info("Codex Apps"),
             vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "newer")],
+            /*tool_list_meta*/ None,
             move |_, _, _| {
                 newer_persisting_tx
                     .send(())
@@ -807,6 +907,7 @@ fn personal_and_workspace_contexts_are_distinct_even_with_matching_ids() {
         personal_context.begin_fetch(ConnectorRuntimeFetchSource::Startup),
         &create_test_server_info("Codex Apps"),
         personal_tools.clone(),
+        /*tool_list_meta*/ None,
     );
 
     let workspace_context = manager.context(
@@ -823,6 +924,7 @@ fn personal_and_workspace_contexts_are_distinct_even_with_matching_ids() {
         workspace_context.begin_fetch(ConnectorRuntimeFetchSource::Startup),
         &create_test_server_info("Codex Apps"),
         workspace_tools.clone(),
+        /*tool_list_meta*/ None,
     );
 
     assert_eq!(personal_context.current_tools(), Some(personal_tools));
@@ -848,6 +950,7 @@ fn live_publish_sets_timestamp_and_stale_publish_preserves_it() {
         current_ticket,
         &create_test_server_info("Codex Apps"),
         vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "current")],
+        /*tool_list_meta*/ None,
     );
     let after = SystemTime::now();
 
@@ -858,6 +961,7 @@ fn live_publish_sets_timestamp_and_stale_publish_preserves_it() {
         stale_ticket,
         &create_test_server_info("Codex Apps"),
         vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "stale")],
+        /*tool_list_meta*/ None,
     );
     assert!(Arc::ptr_eq(&current, &stale));
     assert_eq!(stale.refreshed_at(), current.refreshed_at());

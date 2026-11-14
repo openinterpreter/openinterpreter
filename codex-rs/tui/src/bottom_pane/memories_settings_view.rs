@@ -80,19 +80,19 @@ impl MemoriesSettingsView {
                 MemoriesMenuItem::Setting {
                     setting: MemoriesSetting::Use,
                     name: "Use memories",
-                    description: "Use memories in the following threads. Applied at next thread.",
+                    description: "Use memories starting with the next thread",
                     enabled: use_memories,
                 },
                 MemoriesMenuItem::Setting {
                     setting: MemoriesSetting::Generate,
                     name: "Generate memories",
-                    description: "Generate memories from the following threads. Current thread included.",
+                    description: "Generate memories from this thread and future threads",
                     enabled: generate_memories,
                 },
                 MemoriesMenuItem::Action {
                     action: MemoriesAction::Reset,
                     name: "Reset all memories",
-                    description: "Clear local memory files and summaries. Existing threads stay intact.",
+                    description: "Clear local memory files and summaries without changing existing threads",
                 },
             ],
             state: ScrollState::new(),
@@ -177,8 +177,8 @@ impl MemoriesSettingsView {
                         format!("  {name}")
                     },
                     description: Some(match idx {
-                        0 => "Delete local memory files and rollout summaries.".to_string(),
-                        1 => "Return to memory settings.".to_string(),
+                        0 => "Delete local memory files and rollout summaries".to_string(),
+                        1 => "Return to memory settings".to_string(),
                         _ => unreachable!("reset confirmation only renders two rows"),
                     }),
                     ..Default::default()
@@ -223,50 +223,6 @@ impl MemoriesSettingsView {
                 }
             })
             .collect()
-    }
-
-    fn move_up(&mut self) {
-        let len = self.visible_len();
-        if len == 0 {
-            return;
-        }
-        let state = self.active_state_mut();
-        state.move_up_wrap(len);
-        state.ensure_visible(len, MAX_POPUP_ROWS.min(len));
-    }
-
-    fn move_down(&mut self) {
-        let len = self.visible_len();
-        if len == 0 {
-            return;
-        }
-        let state = self.active_state_mut();
-        state.move_down_wrap(len);
-        state.ensure_visible(len, MAX_POPUP_ROWS.min(len));
-    }
-
-    fn page_up(&mut self) {
-        let len = self.visible_len();
-        let visible = MAX_POPUP_ROWS.min(len);
-        self.active_state_mut().page_up_clamped(len, visible);
-    }
-
-    fn page_down(&mut self) {
-        let len = self.visible_len();
-        let visible = MAX_POPUP_ROWS.min(len);
-        self.active_state_mut().page_down_clamped(len, visible);
-    }
-
-    fn jump_top(&mut self) {
-        let len = self.visible_len();
-        let visible = MAX_POPUP_ROWS.min(len);
-        self.active_state_mut().jump_top(len, visible);
-    }
-
-    fn jump_bottom(&mut self) {
-        let len = self.visible_len();
-        let visible = MAX_POPUP_ROWS.min(len);
-        self.active_state_mut().jump_bottom(len, visible);
     }
 
     fn toggle_selected(&mut self) {
@@ -323,13 +279,22 @@ impl BottomPaneView for MemoriesSettingsView {
     }
 
     fn handle_key_event(&mut self, key_event: KeyEvent) {
+        if let Some(action) = self.keymap.vertical_action_for(key_event) {
+            let len = self.visible_len();
+            if len == 0
+                && matches!(
+                    action,
+                    crate::keymap::ListAction::MoveUp | crate::keymap::ListAction::MoveDown
+                )
+            {
+                return;
+            }
+            self.active_state_mut()
+                .apply_vertical_action(action, len, MAX_POPUP_ROWS.min(len));
+            return;
+        }
+
         match key_event {
-            _ if self.keymap.move_up.is_pressed(key_event) => self.move_up(),
-            _ if self.keymap.move_down.is_pressed(key_event) => self.move_down(),
-            _ if self.keymap.page_up.is_pressed(key_event) => self.page_up(),
-            _ if self.keymap.page_down.is_pressed(key_event) => self.page_down(),
-            _ if self.keymap.jump_top.is_pressed(key_event) => self.jump_top(),
-            _ if self.keymap.jump_bottom.is_pressed(key_event) => self.jump_bottom(),
             KeyEvent {
                 code: KeyCode::Char(' '),
                 modifiers: KeyModifiers::NONE,

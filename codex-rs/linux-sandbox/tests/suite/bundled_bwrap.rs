@@ -2,7 +2,9 @@
 
 use codex_linux_sandbox::BUNDLED_BWRAP_DIGEST_VERIFICATION_FAILURE_EXIT_CODE;
 use codex_protocol::models::PermissionProfile;
+use codex_utils_cargo_bin::copy_executable;
 use pretty_assertions::assert_eq;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -27,11 +29,14 @@ fn bazel_build_rejects_tampered_bundled_bwrap() {
     std::fs::create_dir(&resources).expect("package resource directory should be created");
 
     let sandbox_binary = package.path().join("codex-linux-sandbox");
-    std::fs::copy(env!("CARGO_BIN_EXE_codex-linux-sandbox"), &sandbox_binary)
-        .expect("sandbox binary should be copied into the package");
+    copy_executable(
+        Path::new(env!("CARGO_BIN_EXE_codex-linux-sandbox")),
+        &sandbox_binary,
+    )
+    .expect("sandbox binary should be copied into the package");
 
     let bundled_bwrap = resources.join("bwrap");
-    std::fs::copy(&bwrap_binary, &bundled_bwrap)
+    copy_executable(&bwrap_binary, &bundled_bwrap)
         .expect("built bwrap should be copied into the package");
 
     let permission_profile = serde_json::to_string(&PermissionProfile::read_only())
@@ -61,7 +66,11 @@ fn bazel_build_rejects_tampered_bundled_bwrap() {
     std::fs::remove_file(&bundled_bwrap).expect("read-only bundled bwrap should be replaceable");
     let mut tampered_bwrap_bytes = original_bwrap_bytes;
     tampered_bwrap_bytes.push(0);
-    std::fs::write(&bundled_bwrap, &tampered_bwrap_bytes)
+    // Write data to a separate inode, then publish it through the descriptor-safe helper.
+    let tampered_data = package.path().join("tampered-bwrap-data");
+    std::fs::write(&tampered_data, &tampered_bwrap_bytes)
+        .expect("modified bwrap data should be written");
+    copy_executable(&tampered_data, &bundled_bwrap)
         .expect("modified bwrap should be copied into the package");
     let bwrap_permissions = std::fs::metadata(&bwrap_binary)
         .expect("built bwrap metadata should be readable")

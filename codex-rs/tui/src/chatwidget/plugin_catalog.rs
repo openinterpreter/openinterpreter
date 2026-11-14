@@ -47,6 +47,7 @@ use codex_core_plugins::remote::REMOTE_WORKSPACE_SHARED_WITH_ME_PRIVATE_MARKETPL
 use codex_core_plugins::remote::REMOTE_WORKSPACE_SHARED_WITH_ME_UNLISTED_MARKETPLACE_NAME;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use crossterm::event::KeyCode;
+use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::Widget;
@@ -69,7 +70,7 @@ const REMOTE_LOADING_TAB_ID_PREFIX: &str = "remote-loading:";
 const REMOTE_EMPTY_TAB_ID_PREFIX: &str = "remote-empty:";
 const REMOTE_ERROR_TAB_ID_PREFIX: &str = "remote-error:";
 const OPENAI_CURATED_LOADING_DESCRIPTION: &str =
-    "This updates when OpenAI Curated plugins finish loading.";
+    "This updates when OpenAI Curated plugins finish loading";
 const WORKSPACE_SECTION_TAB_ORDER: u8 = 0;
 const SHARED_WITH_ME_SECTION_TAB_ORDER: u8 = 1;
 const SHARED_WITH_ME_LINK_SECTION_TAB_ORDER: u8 = 2;
@@ -170,18 +171,18 @@ const REMOTE_MARKETPLACE_SECTIONS: [RemoteMarketplaceSection; 2] = [
         id: "workspace",
         label: "Workspace",
         loading_tab_id: "workspace-loading",
-        loading_item_description: "This updates when workspace plugins finish loading.",
+        loading_item_description: "This updates when workspace plugins finish loading",
         marketplace_names: &[REMOTE_WORKSPACE_MARKETPLACE_NAME],
         show_empty_tab: true,
         empty_item_name: "No workspace plugins available",
-        empty_item_description: "No workspace directory plugins are available.",
+        empty_item_description: "No workspace directory plugins are available",
         tab_order: WORKSPACE_SECTION_TAB_ORDER,
     },
     RemoteMarketplaceSection {
         id: "shared-with-me",
         label: "Shared with me",
         loading_tab_id: "shared-with-me-loading",
-        loading_item_description: "This updates when shared plugins finish loading.",
+        loading_item_description: "This updates when shared plugins finish loading",
         marketplace_names: &[
             REMOTE_WORKSPACE_SHARED_WITH_ME_MARKETPLACE_NAME,
             REMOTE_WORKSPACE_SHARED_WITH_ME_PRIVATE_MARKETPLACE_NAME,
@@ -189,7 +190,7 @@ const REMOTE_MARKETPLACE_SECTIONS: [RemoteMarketplaceSection; 2] = [
         ],
         show_empty_tab: false,
         empty_item_name: "No shared plugins available",
-        empty_item_description: "No plugins have been shared with you.",
+        empty_item_description: "No plugins have been shared with you",
         tab_order: SHARED_WITH_ME_SECTION_TAB_ORDER,
     },
 ];
@@ -349,7 +350,7 @@ impl ChatWidget {
             )),
             items: vec![SelectionItem {
                 name: "Loading plugins...".to_string(),
-                description: Some("This updates when the marketplace list is ready.".to_string()),
+                description: Some("This updates when the marketplace list is ready".to_string()),
                 is_disabled: true,
                 ..Default::default()
             }],
@@ -369,7 +370,7 @@ impl ChatWidget {
             items: vec![SelectionItem {
                 name: "Adding marketplace...".to_string(),
                 description: Some(
-                    "This updates when marketplace installation completes.".to_string(),
+                    "This updates when marketplace installation completes".to_string(),
                 ),
                 is_disabled: true,
                 ..Default::default()
@@ -417,10 +418,10 @@ impl ChatWidget {
                 SelectionItem {
                     name: "Remove marketplace".to_string(),
                     description: Some(
-                        "Remove this marketplace from the available plugin list.".to_string(),
+                        "Remove this marketplace from the available plugin list".to_string(),
                     ),
                     selected_description: Some(
-                        "Remove this marketplace from the available plugin list.".to_string(),
+                        "Remove this marketplace from the available plugin list".to_string(),
                     ),
                     actions: vec![Box::new(move |tx| {
                         tx.send(AppEvent::OpenMarketplaceRemoveLoading {
@@ -436,8 +437,8 @@ impl ChatWidget {
                 },
                 SelectionItem {
                     name: "Back to plugins".to_string(),
-                    description: Some("Keep this marketplace installed.".to_string()),
-                    selected_description: Some("Keep this marketplace installed.".to_string()),
+                    description: Some("Keep this marketplace installed".to_string()),
+                    selected_description: Some("Keep this marketplace installed".to_string()),
                     actions: vec![Box::new(move |tx| {
                         tx.send(AppEvent::OpenPluginsList {
                             cwd: cwd_for_cancel.clone(),
@@ -467,7 +468,7 @@ impl ChatWidget {
             subtitle: Some(format!("Removing {marketplace_display_name}...")),
             items: vec![SelectionItem {
                 name: "Removing marketplace...".to_string(),
-                description: Some("This updates when marketplace removal completes.".to_string()),
+                description: Some("This updates when marketplace removal completes".to_string()),
                 is_disabled: true,
                 ..Default::default()
             }],
@@ -492,7 +493,7 @@ impl ChatWidget {
             )),
             items: vec![SelectionItem {
                 name: loading_text,
-                description: Some("This updates when marketplace upgrade completes.".to_string()),
+                description: Some("This updates when marketplace upgrade completes".to_string()),
                 is_disabled: true,
                 ..Default::default()
             }],
@@ -514,7 +515,7 @@ impl ChatWidget {
             )),
             items: vec![SelectionItem {
                 name: "Loading plugin details...".to_string(),
-                description: Some("This updates when plugin details load.".to_string()),
+                description: Some("This updates when plugin details load".to_string()),
                 is_disabled: true,
                 ..Default::default()
             }],
@@ -532,7 +533,7 @@ impl ChatWidget {
             subtitle: Some(format!("Installing {plugin_display_name}...")),
             items: vec![SelectionItem {
                 name: "Installing plugin...".to_string(),
-                description: Some("This updates when plugin installation completes.".to_string()),
+                description: Some("This updates when plugin installation completes".to_string()),
                 is_disabled: true,
                 ..Default::default()
             }],
@@ -550,7 +551,7 @@ impl ChatWidget {
             subtitle: Some(format!("Uninstalling {plugin_display_name}...")),
             items: vec![SelectionItem {
                 name: "Uninstalling plugin...".to_string(),
-                description: Some("This updates when the plugin removal completes.".to_string()),
+                description: Some("This updates when the plugin removal completes".to_string()),
                 is_disabled: true,
                 ..Default::default()
             }],
@@ -577,16 +578,14 @@ impl ChatWidget {
         let mut items = vec![
             SelectionItem {
                 name: "Marketplace add failed".to_string(),
-                description: Some(
-                    "Failed to add marketplace from the provided source.".to_string(),
-                ),
+                description: Some("Failed to add marketplace from the provided source".to_string()),
                 is_disabled: true,
                 ..Default::default()
             },
             SelectionItem {
                 name: "Try again".to_string(),
-                description: Some("Enter a marketplace source.".to_string()),
-                selected_description: Some("Enter a marketplace source.".to_string()),
+                description: Some("Enter a marketplace source".to_string()),
+                selected_description: Some("Enter a marketplace source".to_string()),
                 actions: vec![Box::new(|tx| {
                     tx.send(AppEvent::OpenMarketplaceAddPrompt);
                 })],
@@ -598,8 +597,8 @@ impl ChatWidget {
             let cwd = self.config.cwd.to_path_buf();
             items.push(SelectionItem {
                 name: "Back to plugins".to_string(),
-                description: Some("Return to the plugin list.".to_string()),
-                selected_description: Some("Return to the plugin list.".to_string()),
+                description: Some("Return to the plugin list".to_string()),
+                selected_description: Some("Return to the plugin list".to_string()),
                 actions: vec![Box::new(move |tx| {
                     tx.send(AppEvent::OpenPluginsList {
                         cwd: cwd.clone(),
@@ -630,14 +629,14 @@ impl ChatWidget {
         let mut items = vec![
             SelectionItem {
                 name: "Marketplace removal failed".to_string(),
-                description: Some("Failed to remove the selected marketplace.".to_string()),
+                description: Some("Failed to remove the selected marketplace".to_string()),
                 is_disabled: true,
                 ..Default::default()
             },
             SelectionItem {
                 name: "Try again".to_string(),
-                description: Some("Review the confirmation prompt again.".to_string()),
-                selected_description: Some("Review the confirmation prompt again.".to_string()),
+                description: Some("Review the confirmation prompt again".to_string()),
+                selected_description: Some("Review the confirmation prompt again".to_string()),
                 actions: vec![Box::new(move |tx| {
                     tx.send(AppEvent::OpenMarketplaceRemoveConfirm {
                         marketplace_name: marketplace_name.clone(),
@@ -652,8 +651,8 @@ impl ChatWidget {
             let cwd = self.config.cwd.to_path_buf();
             items.push(SelectionItem {
                 name: "Back to plugins".to_string(),
-                description: Some("Return to the plugin list.".to_string()),
-                selected_description: Some("Return to the plugin list.".to_string()),
+                description: Some("Return to the plugin list".to_string()),
+                selected_description: Some("Return to the plugin list".to_string()),
                 actions: vec![Box::new(move |tx| {
                     tx.send(AppEvent::OpenPluginsList {
                         cwd: cwd.clone(),
@@ -689,8 +688,8 @@ impl ChatWidget {
             let cwd = self.config.cwd.to_path_buf();
             items.push(SelectionItem {
                 name: "Back to plugins".to_string(),
-                description: Some("Return to the plugin list.".to_string()),
-                selected_description: Some("Return to the plugin list.".to_string()),
+                description: Some("Return to the plugin list".to_string()),
+                selected_description: Some("Return to the plugin list".to_string()),
                 actions: vec![Box::new(move |tx| {
                     tx.send(AppEvent::OpenPluginsList {
                         cwd: cwd.clone(),
@@ -747,7 +746,7 @@ impl ChatWidget {
             &preferred_local_sources,
             /*include_marketplace_names*/ true,
             "No marketplace plugins available",
-            "No plugins are available in the discovered marketplaces.",
+            "No plugins are available in the discovered marketplaces",
         );
 
         tabs.push(SelectionTab {
@@ -772,7 +771,7 @@ impl ChatWidget {
                 &preferred_local_sources,
                 /*include_marketplace_names*/ true,
                 "No installed plugins",
-                "No installed plugins.",
+                "No installed plugins",
             ),
         });
 
@@ -803,7 +802,7 @@ impl ChatWidget {
             } else {
                 (
                     "No OpenAI Curated plugins available",
-                    "No OpenAI Curated plugins available.",
+                    "No OpenAI Curated plugins available",
                 )
             };
         let mut curated_items = self.plugin_selection_items(
@@ -884,7 +883,7 @@ impl ChatWidget {
             if can_remove_marketplace || can_upgrade_marketplace {
                 tab_footer_hints.push((
                     tab_id.clone(),
-                    plugins_popup_hint_line(
+                    self.plugins_popup_hint_line(
                         /*can_remove_marketplace*/ can_remove_marketplace,
                         /*can_upgrade_marketplace*/ can_upgrade_marketplace,
                     ),
@@ -915,7 +914,7 @@ impl ChatWidget {
                         &preferred_local_sources,
                         /*include_marketplace_names*/ false,
                         "No plugins available in this marketplace",
-                        "No plugins available in this marketplace.",
+                        "No plugins available in this marketplace",
                     ),
                 },
             ));
@@ -930,7 +929,7 @@ impl ChatWidget {
         SelectionViewParams {
             view_id: Some(PLUGINS_SELECTION_VIEW_ID),
             header: Box::new(()),
-            footer_hint: Some(plugins_popup_hint_line(
+            footer_hint: Some(self.plugins_popup_hint_line(
                 /*can_remove_marketplace*/ false, /*can_upgrade_marketplace*/ false,
             )),
             tab_footer_hints,
@@ -938,6 +937,7 @@ impl ChatWidget {
             reserve_result_rows: true,
             initial_tab_id,
             is_searchable: true,
+            search_toggle_key: Some(crate::key_hint::plain(KeyCode::Tab)),
             search_placeholder: Some("Type to search plugins".to_string()),
             col_width_mode: ColumnWidthMode::AutoAllRows,
             row_display: SelectionRowDisplay::SingleLine,
@@ -958,11 +958,9 @@ impl ChatWidget {
             items: vec![SelectionItem {
                 name: "Add marketplace".to_string(),
                 description: Some(
-                    "Enter owner/repo, a Git URL, or a local marketplace path.".to_string(),
+                    "Enter owner/repo, a Git URL, or a local marketplace path".to_string(),
                 ),
-                selected_description: Some(
-                    "Press Enter to enter a marketplace source.".to_string(),
-                ),
+                selected_description: Some("Press Enter to enter a marketplace source".to_string()),
                 actions: vec![Box::new(|tx| {
                     tx.send(AppEvent::OpenMarketplaceAddPrompt);
                 })],
@@ -1020,8 +1018,8 @@ impl ChatWidget {
         let plugins_response = plugins_response.clone();
         let mut items = vec![SelectionItem {
             name: "Back to plugins".to_string(),
-            description: Some("Return to the plugin list.".to_string()),
-            selected_description: Some("Return to the plugin list.".to_string()),
+            description: Some("Return to the plugin list".to_string()),
+            selected_description: Some("Return to the plugin list".to_string()),
             actions: vec![Box::new(move |tx| {
                 tx.send(AppEvent::OpenPluginsList {
                     cwd: cwd.clone(),
@@ -1036,7 +1034,7 @@ impl ChatWidget {
                 items.push(SelectionItem {
                     name: "Installed by admin".to_string(),
                     description: Some(
-                        "This plugin is installed by your workspace admin.".to_string(),
+                        "This plugin is installed by your workspace admin".to_string(),
                     ),
                     is_disabled: true,
                     ..Default::default()
@@ -1046,8 +1044,8 @@ impl ChatWidget {
                 let plugin_display_name = display_name;
                 items.push(SelectionItem {
                     name: "Uninstall plugin".to_string(),
-                    description: Some("Remove this plugin now.".to_string()),
-                    selected_description: Some("Remove this plugin now.".to_string()),
+                    description: Some("Remove this plugin now".to_string()),
+                    selected_description: Some("Remove this plugin now".to_string()),
                     actions: vec![Box::new(move |tx| {
                         tx.send(AppEvent::OpenPluginUninstallLoading {
                             plugin_display_name: plugin_display_name.clone(),
@@ -1064,7 +1062,7 @@ impl ChatWidget {
                 items.push(SelectionItem {
                     name: "Uninstall plugin".to_string(),
                     description: Some(
-                        "This remote plugin did not provide an uninstall identity.".to_string(),
+                        "This remote plugin did not provide an uninstall identity".to_string(),
                     ),
                     is_disabled: true,
                     ..Default::default()
@@ -1073,7 +1071,7 @@ impl ChatWidget {
         } else if plugin.summary.availability == PluginAvailability::DisabledByAdmin {
             items.push(SelectionItem {
                 name: "Install plugin".to_string(),
-                description: Some("This plugin is disabled by your workspace admin.".to_string()),
+                description: Some("This plugin is disabled by your workspace admin".to_string()),
                 is_disabled: true,
                 ..Default::default()
             });
@@ -1081,7 +1079,7 @@ impl ChatWidget {
             items.push(SelectionItem {
                 name: "Install plugin".to_string(),
                 description: Some(
-                    "This plugin is not installable from this marketplace.".to_string(),
+                    "This plugin is not installable from this marketplace".to_string(),
                 ),
                 is_disabled: true,
                 ..Default::default()
@@ -1092,8 +1090,8 @@ impl ChatWidget {
             let plugin_display_name = display_name;
             items.push(SelectionItem {
                 name: "Install plugin".to_string(),
-                description: Some("Install this plugin now.".to_string()),
-                selected_description: Some("Install this plugin now.".to_string()),
+                description: Some("Install this plugin now".to_string()),
+                selected_description: Some("Install this plugin now".to_string()),
                 actions: vec![Box::new(move |tx| {
                     tx.send(AppEvent::OpenPluginInstallLoading {
                         plugin_display_name: plugin_display_name.clone(),
@@ -1110,7 +1108,7 @@ impl ChatWidget {
         } else {
             items.push(SelectionItem {
                 name: "Install plugin".to_string(),
-                description: Some("This plugin did not provide an install location.".to_string()),
+                description: Some("This plugin did not provide an install location".to_string()),
                 is_disabled: true,
                 ..Default::default()
             });
@@ -1185,27 +1183,25 @@ impl ChatWidget {
                 && plugin.install_policy != PluginInstallPolicy::InstalledByDefault
                 && !disabled_by_admin;
             let selected_status_label = format!("{status_label:<status_label_width$}");
-            let selected_description = if can_toggle_plugin {
+            let selected_description = if can_toggle_plugin && self.plugin_toggle_key_available() {
                 let toggle_action = if plugin.enabled { "disable" } else { "enable" };
                 if can_view_details {
-                    format!(
-                        "{selected_status_label}   Space to {toggle_action}; Enter view details."
-                    )
+                    format!("{selected_status_label}   Tab to {toggle_action}; Enter view details")
                 } else {
-                    format!("{selected_status_label}   Space to {toggle_action}.")
+                    format!("{selected_status_label}   Tab to {toggle_action}")
                 }
             } else if disabled_by_admin && can_view_details {
-                format!("{selected_status_label}   Press Enter to view plugin details.")
+                format!("{selected_status_label}   Press Enter to view plugin details")
             } else if disabled_by_admin {
-                format!("{selected_status_label}   Plugin details are unavailable.")
+                format!("{selected_status_label}   Plugin details are unavailable")
             } else if plugin.installed && can_view_details {
-                format!("{selected_status_label}   Press Enter to view plugin details.")
+                format!("{selected_status_label}   Press Enter to view plugin details")
             } else if plugin.installed {
-                format!("{selected_status_label}   Plugin details are unavailable.")
+                format!("{selected_status_label}   Plugin details are unavailable")
             } else if can_view_details {
-                format!("{selected_status_label}   Press Enter to install or view plugin details.")
+                format!("{selected_status_label}   Press Enter to install or view plugin details")
             } else {
-                format!("{selected_status_label}   Remote plugin details are not available yet.")
+                format!("{selected_status_label}   Remote plugin details are not available yet")
             };
             let search_value = format!(
                 "{display_name} {} {} {} {} {}",
@@ -1284,21 +1280,42 @@ impl ChatWidget {
     }
 }
 
-fn plugins_popup_hint_line(
-    can_remove_marketplace: bool,
-    can_upgrade_marketplace: bool,
-) -> Line<'static> {
-    match (can_remove_marketplace, can_upgrade_marketplace) {
-        (true, true) => Line::from(
-            "ctrl+u upgrade · ctrl+r remove · space toggle · ←/→ tabs · enter details · esc close",
-        ),
-        (true, false) => {
-            Line::from("ctrl+r remove · space toggle · ←/→ tabs · enter details · esc close")
+impl ChatWidget {
+    fn plugin_toggle_key_available(&self) -> bool {
+        self.bottom_pane
+            .list_keymap()
+            .action_for(KeyEvent::from(KeyCode::Tab))
+            .is_none()
+    }
+
+    fn plugins_popup_hint_line(
+        &self,
+        can_remove_marketplace: bool,
+        can_upgrade_marketplace: bool,
+    ) -> Line<'static> {
+        let mut hints = Vec::new();
+        if can_upgrade_marketplace {
+            hints.push(format!(
+                "{} upgrade",
+                crate::key_hint::ctrl(KeyCode::Char('u')).display_label()
+            ));
         }
-        (false, true) => {
-            Line::from("ctrl+u upgrade · space toggle · ←/→ tabs · enter details · esc close")
+        if can_remove_marketplace {
+            hints.push(format!(
+                "{} remove",
+                crate::key_hint::ctrl(KeyCode::Char('r')).display_label()
+            ));
         }
-        (false, false) => Line::from("←/→ tabs · enter details · space toggle · esc close"),
+        let toggle_available = self.plugin_toggle_key_available();
+        if (can_remove_marketplace || can_upgrade_marketplace) && toggle_available {
+            hints.push("tab toggle".to_string());
+        }
+        hints.extend(["←/→ tabs", "enter details"].map(str::to_string));
+        if !can_remove_marketplace && !can_upgrade_marketplace && toggle_available {
+            hints.push("tab toggle".to_string());
+        }
+        hints.push("esc close".to_string());
+        Line::from(hints.join(" · "))
     }
 }
 
@@ -1998,7 +2015,7 @@ fn plugin_detail_description(plugin: &PluginDetail) -> Option<String> {
 
 fn plugin_skill_summary(plugin: &PluginDetail) -> String {
     if plugin.skills.is_empty() {
-        "No plugin skills.".to_string()
+        "No plugin skills".to_string()
     } else {
         plugin
             .skills
@@ -2011,7 +2028,7 @@ fn plugin_skill_summary(plugin: &PluginDetail) -> String {
 
 fn plugin_app_summary(plugin: &PluginDetail) -> String {
     if plugin.apps.is_empty() {
-        "No plugin apps.".to_string()
+        "No plugin apps".to_string()
     } else {
         plugin
             .apps
@@ -2024,7 +2041,7 @@ fn plugin_app_summary(plugin: &PluginDetail) -> String {
 
 fn plugin_hook_summary(plugin: &PluginDetail) -> String {
     if plugin.hooks.is_empty() {
-        "No plugin hooks.".to_string()
+        "No plugin hooks".to_string()
     } else {
         let mut event_counts = Vec::<(codex_app_server_protocol::HookEventName, usize)>::new();
         for hook in &plugin.hooks {
@@ -2047,7 +2064,7 @@ fn plugin_hook_summary(plugin: &PluginDetail) -> String {
 
 fn plugin_mcp_summary(plugin: &PluginDetail) -> String {
     if plugin.mcp_servers.is_empty() {
-        "No plugin MCP servers.".to_string()
+        "No plugin MCP servers".to_string()
     } else {
         plugin.mcp_servers.join(", ")
     }

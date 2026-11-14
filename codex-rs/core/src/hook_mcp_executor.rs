@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
+use anyhow::Context;
 use anyhow::bail;
 use codex_hooks::HookMcpCall;
 use codex_hooks::HookMcpExecutor;
+use codex_hooks::HookMcpOutput;
 use codex_mcp::McpRuntime;
+use codex_mcp::McpToolStartup;
 use codex_protocol::ThreadId;
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -16,7 +19,7 @@ pub(crate) struct CoreHookMcpExecutor {
 }
 
 impl HookMcpExecutor for CoreHookMcpExecutor {
-    fn execute(&self, call: HookMcpCall) -> BoxFuture<'_, anyhow::Result<String>> {
+    fn execute(&self, call: HookMcpCall) -> BoxFuture<'_, anyhow::Result<HookMcpOutput>> {
         async move {
             let mut metadata = call.metadata.unwrap_or_default();
             metadata.insert(
@@ -24,18 +27,25 @@ impl HookMcpExecutor for CoreHookMcpExecutor {
                 Value::String(self.thread_id.to_string()),
             );
 
-            let result = self
-                .runtime
-                .latest_call_tool(
+            let call_result = tokio::time::timeout(
+                call.timeout,
+                self.runtime.latest_call_tool(
                     &call.server,
                     &call.tool,
                     call.environment_id.as_deref(),
                     Some(Value::Object(call.input)),
                     Some(Value::Object(metadata)),
                     Some(call.timeout),
-                    /*wait_for_server*/ false,
-                )
-                .await?;
+                    if call.skip_dormant_repl_cleanup {
+                        McpToolStartup::SkipDormantReplCleanup
+                    } else {
+                        McpToolStartup::Wait
+                    },
+                ),
+            )
+            .await
+            .context("MCP hook timed out")??;
+            let result = call_result.result;
             let text = result
                 .content
                 .iter()
@@ -50,7 +60,10 @@ impl HookMcpExecutor for CoreHookMcpExecutor {
                 bail!("MCP tool returned an error: {text}");
             }
 
-            Ok(text)
+            Ok(HookMcpOutput {
+                text,
+                source_tool_namespace: call_result.source_tool_namespace,
+            })
         }
         .boxed()
     }

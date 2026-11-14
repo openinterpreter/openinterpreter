@@ -32,15 +32,15 @@ current official sources. Availability still depends on the selected account,
 region, plan, and provider `/models` response. Use `/model` to discover what the
 active provider currently offers.
 
-| Provider | Setup | Text model IDs | Wire API |
-| --- | --- | --- | --- |
-| OpenAI presets (upstream and Open Interpreter additions) | Use only where the active provider exposes them | `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Provider default |
-| Google AI Studio | Provider `google` and `GEMINI_API_KEY` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite` | `chat` |
-| DeepSeek | Provider `deepseek` and `DEEPSEEK_API_KEY` | `deepseek-flash`, `deepseek-v4-pro` | `chat` |
-| Anthropic | Provider `anthropic` and `ANTHROPIC_API_KEY` | `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` | Provider default |
-| Z.AI | Provider `zai` and `ZAI_API_KEY` | Use the exact IDs returned by the service's live model endpoint | `chat` |
-| Z.AI Coding Plan | Provider `zai-coding-plan` and `ZAI_API_KEY` | `glm-5.3`, `glm-5.3-flash`, `glm-5.2`, `glm-5.1` | `chat` |
-| Z.AI ZCode | Provider `zai-zcode` and `ZAI_API_KEY` | `glm-5.1`, `glm-5-turbo`, `glm-4.7`, `glm-4.5-air` | `messages` |
+| Provider                                                 | Setup                                           | Text model IDs                                                                                                                   | Wire API         |
+| -------------------------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
+| OpenAI presets (upstream and Open Interpreter additions) | Use only where the active provider exposes them | `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`                          | Provider default |
+| Google AI Studio                                         | Provider `google` and `GEMINI_API_KEY`          | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite` | `chat`           |
+| DeepSeek                                                 | Provider `deepseek` and `DEEPSEEK_API_KEY`      | `deepseek-flash`, `deepseek-v4-pro`                                                                                              | `chat`           |
+| Anthropic                                                | Provider `anthropic` and `ANTHROPIC_API_KEY`    | `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-sonnet-5`, `claude-haiku-4-5-20251001`                       | Provider default |
+| Z.AI                                                     | Provider `zai` and `ZAI_API_KEY`                | Use the exact IDs returned by the service's live model endpoint                                                                  | `chat`           |
+| Z.AI Coding Plan                                         | Provider `zai-coding-plan` and `ZAI_API_KEY`    | `glm-5.3`, `glm-5.3-flash`, `glm-5.2`, `glm-5.1`                                                                                 | `chat`           |
+| Z.AI ZCode                                               | Provider `zai-zcode` and `ZAI_API_KEY`          | `glm-5.1`, `glm-5-turbo`, `glm-4.7`, `glm-4.5-air`                                                                               | `messages`       |
 
 The OpenAI-style presets are based on upstream `models-manager/models.json`;
 the bundled copy includes `gpt-6.1-sol`, `gpt-6-sol`, and `gpt-6-luna`. Preset metadata
@@ -66,13 +66,13 @@ Anthropic's [current model overview](https://platform.claude.com/docs/en/models/
 Open Interpreter does not keep one hand-written Rust list of every model.
 Metadata is layered:
 
-| Source | Role |
-| --- | --- |
-| Provider `/models` endpoint | Live model ids for the active provider when the endpoint is available. |
-| `model-provider-info/provider_catalog.json` | Bundled provider/model seed data generated from `models.dev` and configured live provider model sources. |
+| Source                                       | Role                                                                                                         |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Provider `/models` endpoint                  | Live model ids for the active provider when the endpoint is available.                                       |
+| `model-provider-info/provider_catalog.json`  | Bundled provider/model seed data generated from `models.dev` and configured live provider model sources.     |
 | `codex-api/model_compatibility_catalog.json` | Compatibility metadata such as supported parameters, search support, reasoning levels, and input modalities. |
-| `models-manager/models.json` | OpenAI-style model preset metadata used by the manager. |
-| Config `model_catalog` | Optional user-supplied static catalog for a provider/session. |
+| `models-manager/models.json`                 | OpenAI-style model preset metadata used by the manager.                                                      |
+| Config `model_catalog`                       | Optional user-supplied static catalog for a provider/session.                                                |
 
 The model manager asks the active provider for models, then uses bundled data
 when it can identify the provider by Anthropic identity, base URL, provider
@@ -96,25 +96,25 @@ Model metadata can control:
 Reasoning is not a single boolean in the UI. The protocol has these control
 shapes:
 
-| Control | Meaning |
-| --- | --- |
-| `none` | No known reasoning control. |
-| `fixed` | The model reasons, but the UI should not expose a control. |
-| `effort` | OpenAI-style effort control. |
-| `thinking_toggle` | Boolean thinking on/off control. |
-| `thinking_budget` | Token-budget thinking control. |
+| Control           | Meaning                                                    |
+| ----------------- | ---------------------------------------------------------- |
+| `none`            | No known reasoning control.                                |
+| `fixed`           | The model reasons, but the UI should not expose a control. |
+| `effort`          | OpenAI-style effort control.                               |
+| `thinking_toggle` | Boolean thinking on/off control.                           |
+| `thinking_budget` | Token-budget thinking control.                             |
 
 ## Reasoning Effort
 
 When a model exposes effort controls, Open Interpreter uses these values:
 
-| Value | Use for |
-| --- | --- |
-| `minimal` | Fast, simple edits. |
-| `low` | Routine implementation. |
-| `medium` | Default balanced work. |
-| `high` | Hard debugging, refactors, reviews. |
-| `xhigh` | Model-dependent extra reasoning. |
+| Value     | Use for                             |
+| --------- | ----------------------------------- |
+| `minimal` | Fast, simple edits.                 |
+| `low`     | Routine implementation.             |
+| `medium`  | Default balanced work.              |
+| `high`    | Hard debugging, refactors, reviews. |
+| `xhigh`   | Model-dependent extra reasoning.    |
 
 Harnesses may map these values to provider-specific fields. For example,
 `kimi-cli` maps `minimal` and `low` to low reasoning, `medium` to medium, and
@@ -127,9 +127,9 @@ provider behavior.
 
 The canonical input modality tags are:
 
-| Value | Meaning |
-| --- | --- |
-| `text` | Normal user turns and tool payloads. |
+| Value   | Meaning                                       |
+| ------- | --------------------------------------------- |
+| `text`  | Normal user turns and tool payloads.          |
 | `image` | Image attachments from commands such as `-i`. |
 
 Attach images:
@@ -146,10 +146,10 @@ the real modalities when known.
 
 Open Interpreter has two built-in local OSS providers:
 
-| Provider | Default base URL | Override |
-| --- | --- | --- |
-| `ollama` | `http://localhost:11434/v1` | `CODEX_OSS_PORT` or `CODEX_OSS_BASE_URL` |
-| `lmstudio` | `http://localhost:1234/v1` | `CODEX_OSS_PORT` or `CODEX_OSS_BASE_URL` |
+| Provider   | Default base URL            | Override                                 |
+| ---------- | --------------------------- | ---------------------------------------- |
+| `ollama`   | `http://localhost:11434/v1` | `CODEX_OSS_PORT` or `CODEX_OSS_BASE_URL` |
+| `lmstudio` | `http://localhost:1234/v1`  | `CODEX_OSS_PORT` or `CODEX_OSS_BASE_URL` |
 
 Start the local service before Open Interpreter, then launch the provider
 directly:
@@ -216,12 +216,12 @@ model-specific controls or behavior may be unavailable.
 
 Some model families get a default harness when no explicit harness is set:
 
-| Model/provider family | Default harness |
-| --- | --- |
-| Claude/Anthropic/Messages | `claude-code` |
-| Kimi/Moonshot | `kimi-code` |
-| Qwen/QwQ/DashScope | `qwen-code` |
-| DeepSeek | `claude-code-bare` |
+| Model/provider family     | Default harness    |
+| ------------------------- | ------------------ |
+| Claude/Anthropic/Messages | `claude-code`      |
+| Kimi/Moonshot             | `kimi-code`        |
+| Qwen/QwQ/DashScope        | `qwen-code`        |
+| DeepSeek                  | `claude-code-bare` |
 
 See [Harness](/docs/harness) for the wire-api compatibility matrix and
 [Model providers](/docs/providers) for provider-specific setup guides.

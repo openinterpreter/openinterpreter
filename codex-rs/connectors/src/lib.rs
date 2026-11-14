@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
@@ -31,6 +32,7 @@ pub use app_tool_policy::AppToolPolicyEvaluator;
 pub use app_tool_policy::AppToolPolicyInput;
 pub use app_tool_policy::app_is_enabled;
 pub use app_tool_policy::apps_config_from_layer_stack;
+pub use app_tool_policy::apps_config_origins_from_layer_stack;
 pub use connector_runtime::ConnectorRuntimeContext;
 pub use connector_runtime::ConnectorRuntimeContextKey;
 pub use connector_runtime::ConnectorRuntimeFetchSource;
@@ -85,7 +87,7 @@ impl ConnectorDirectoryCacheKey {
 struct CachedConnectorDirectory {
     key: ConnectorDirectoryCacheKey,
     expires_at: Instant,
-    connectors: Vec<AppInfo>,
+    connectors: Arc<[AppInfo]>,
 }
 
 static CONNECTOR_DIRECTORY_CACHE: LazyLock<StdMutex<Option<CachedConnectorDirectory>>> =
@@ -122,7 +124,7 @@ pub struct DirectoryApp {
 
 pub fn cached_directory_connectors(
     cache_context: &ConnectorDirectoryCacheContext,
-) -> Option<Vec<AppInfo>> {
+) -> Option<Arc<[AppInfo]>> {
     if let Some(cached_connectors) = cached_directory_connectors_in_memory(&cache_context.cache_key)
     {
         return Some(cached_connectors);
@@ -133,9 +135,10 @@ pub fn cached_directory_connectors(
     else {
         return None;
     };
+    let connectors = Arc::from(connectors);
     write_cached_directory_connectors_in_memory(
         cache_context.cache_key.clone(),
-        &connectors,
+        Arc::clone(&connectors),
         Duration::ZERO,
     );
     Some(connectors)
@@ -143,25 +146,25 @@ pub fn cached_directory_connectors(
 
 fn cached_directory_connectors_in_memory(
     cache_key: &ConnectorDirectoryCacheKey,
-) -> Option<Vec<AppInfo>> {
+) -> Option<Arc<[AppInfo]>> {
     let cache_guard = CONNECTOR_DIRECTORY_CACHE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     cache_guard
         .as_ref()
         .filter(|cached| cached.key == *cache_key)
-        .map(|cached| cached.connectors.clone())
+        .map(|cached| Arc::clone(&cached.connectors))
 }
 
 fn unexpired_directory_connectors_in_memory(
     cache_key: &ConnectorDirectoryCacheKey,
-) -> Option<Vec<AppInfo>> {
+) -> Option<Arc<[AppInfo]>> {
     let cache_guard = CONNECTOR_DIRECTORY_CACHE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let cached = cache_guard.as_ref()?;
     if cached.key == *cache_key && Instant::now() < cached.expires_at {
-        return Some(cached.connectors.clone());
+        return Some(Arc::clone(&cached.connectors));
     }
     None
 }
@@ -180,7 +183,7 @@ where
         && let Some(cached_connectors) =
             unexpired_directory_connectors_in_memory(&cache_context.cache_key)
     {
-        return Ok(cached_connectors);
+        return Ok(cached_connectors.to_vec());
     }
 
     let apps = if is_workspace_account {
@@ -235,7 +238,7 @@ fn write_cached_directory_connectors(
 ) {
     write_cached_directory_connectors_in_memory(
         cache_context.cache_key.clone(),
-        connectors,
+        Arc::from(connectors),
         CONNECTORS_CACHE_TTL,
     );
     directory_cache::write_cached_directory_connectors_to_disk(cache_context, connectors);
@@ -243,7 +246,7 @@ fn write_cached_directory_connectors(
 
 fn write_cached_directory_connectors_in_memory(
     cache_key: ConnectorDirectoryCacheKey,
-    connectors: &[AppInfo],
+    connectors: Arc<[AppInfo]>,
     ttl: Duration,
 ) {
     let mut cache_guard = CONNECTOR_DIRECTORY_CACHE
@@ -252,7 +255,7 @@ fn write_cached_directory_connectors_in_memory(
     *cache_guard = Some(CachedConnectorDirectory {
         key: cache_key,
         expires_at: Instant::now() + ttl,
-        connectors: connectors.to_vec(),
+        connectors,
     });
 }
 
@@ -526,7 +529,6 @@ fn normalize_connector_value(value: Option<&str>) -> Option<String> {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
-    use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -849,7 +851,9 @@ mod tests {
         let second = cached_directory_connectors(&cache_context).expect("disk cache should load");
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(first, second);
+        assert_eq!(first.as_slice(), second.as_ref());
+        let cached = cached_directory_connectors(&cache_context).expect("memory cache should hit");
+        assert!(Arc::ptr_eq(&second, &cached));
         Ok(())
     }
 
@@ -891,8 +895,8 @@ mod tests {
             &cached_expected.id,
         ));
         assert_eq!(
-            cached_directory_connectors(&cache_context),
-            Some(vec![cached_expected])
+            cached_directory_connectors(&cache_context).as_deref(),
+            Some([cached_expected].as_slice())
         );
         let refreshed_calls = Arc::clone(&calls);
 

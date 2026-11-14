@@ -15,6 +15,7 @@ use codex_extension_api::ToolLifecycleFuture;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
+use codex_protocol::SessionId;
 use codex_protocol::approvals::ElicitationRequest;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::items::McpToolCallStatus;
@@ -258,7 +259,7 @@ approvals_reviewer = "user"
         "model": session.model, "modelProvider": session.model_provider_id, "cwd": session.cwd,
         "approvalPolicy": app::AskForApproval::from(session.approval_policy),
         "approvalsReviewer": app::ApprovalsReviewer::from(session.approvals_reviewer),
-        "sandbox": app::SandboxPolicy::from(test.config.legacy_sandbox_policy()),
+        "sandbox": app::SandboxPolicy::from(test.config.permissions.effective_permission_profile().to_legacy_sandbox_policy(test.config.cwd.as_path())?),
     }))?;
     client.track_response(
         /*connection_id*/ 1,
@@ -273,7 +274,7 @@ approvals_reviewer = "user"
             text_elements: Vec::new(),
         }]))
         .await?;
-    let TurnInputSubmission::Started { turn_id } = submitted else {
+    let TurnInputSubmission::Started { turn_id, .. } = submitted else {
         anyhow::bail!("expected a new turn, got {submitted:?}");
     };
 

@@ -8,10 +8,12 @@ use codex_core::context::ContextualUserFragment;
 use codex_core::context::GuardianContextMode;
 use codex_core::context::InternalContextSource;
 use codex_core::context::InternalModelContextFragment;
+use codex_core::context::UserGoalUpdate;
 use codex_features::Feature;
 use codex_history::RolloutItem;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::models::ImageReference;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::GuardianAssessmentStatus;
@@ -21,13 +23,14 @@ use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::request_user_input::RequestUserInputAnswer;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_protocol::user_input::UserInput;
+use codex_protocol_test_support::ContentItemTestExt;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_sandbox;
 use core_test_support::skip_if_wine_exec;
 use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::start_streaming_sse_server;
-use core_test_support::test_codex::local_selections;
+use core_test_support::test_codex::local_requests;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_match;
@@ -145,11 +148,24 @@ async fn guardian_revalidates_owning_session_before_allow(
             config.model_provider.base_url = Some(base_url);
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+            config.workspace_roots_explicit = false;
+            let permission_profile = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
+                &SandboxPolicy::new_workspace_write_policy(),
+                config.cwd.as_path(),
+            );
             config
-                .set_legacy_sandbox_policy(SandboxPolicy::new_workspace_write_policy())
-                .expect("set sandbox policy");
+                .permissions
+                .can_set_permission_profile(&permission_profile)
+                .expect("set permission profile");
+            config
+                .permissions
+                .set_workspace_roots(vec![config.cwd.clone()]);
+            config
+                .permissions
+                .set_permission_profile(permission_profile)
+                .expect("set permission profile");
+            config.workspace_roots = config.permissions.workspace_roots().to_vec();
             for feature in [
-                Feature::GuardianThreadContext,
                 Feature::CodeMode,
                 Feature::CodeModeInterrupt,
                 Feature::DefaultModeRequestUserInput,
@@ -190,7 +206,7 @@ async fn guardian_revalidates_owning_session_before_allow(
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(test.config.cwd.clone())),
+                environments: Some(local_requests(test.config.cwd.clone())),
                 ..Default::default()
             }),
         )
@@ -305,10 +321,20 @@ async fn guardian_authorization_revision_survives_compaction_not_user_input() ->
         InternalContextSource::from_static("goal"),
         "Inspecting the deployment.",
     );
-    let notification_text = internal_context.render();
+    let notification_text = internal_context.render().expect_text();
     test.codex
         .inject_response_items(vec![ContextualUserFragment::into(internal_context)])
         .await?;
+    assert_eq!(test.codex.guardian_authorization_version().await, expected);
+
+    // An explicit user goal edit invalidates cached authorization, unlike its continuation.
+    test.codex
+        .record_user_goal_update(UserGoalUpdate::Set {
+            objective: Some("Do not deploy; inspect only.".to_owned()),
+            status: None,
+        })
+        .await?;
+    expected.user_message_revision += 1;
     assert_eq!(test.codex.guardian_authorization_version().await, expected);
 
     // The same text submitted by the user must invalidate, even if it looks internal.

@@ -1,5 +1,6 @@
 use codex_client::Request;
 use codex_client::TransportError;
+use codex_http_client::NetworkPolicyDenied;
 use http::HeaderMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -8,6 +9,8 @@ use std::sync::Arc;
 /// Error returned while applying authentication to an outbound request.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
+    #[error(transparent)]
+    Policy(#[from] NetworkPolicyDenied),
     #[error("request auth build error: {0}")]
     Build(String),
     #[error("transient auth error: {0}")]
@@ -17,6 +20,7 @@ pub enum AuthError {
 impl From<AuthError> for TransportError {
     fn from(error: AuthError) -> Self {
         match error {
+            AuthError::Policy(denied) => TransportError::Policy(denied),
             AuthError::Build(message) => TransportError::Build(message),
             AuthError::Transient(message) => TransportError::Network(message),
         }
@@ -31,23 +35,48 @@ pub trait AuthProvider: Send + Sync {
     /// Adds any auth headers that are available without request body access.
     ///
     /// Implementations should be cheap and non-blocking. This method is also
-    /// used by telemetry and non-HTTP request paths.
-    fn add_auth_headers(&self, headers: &mut HeaderMap);
+    /// used by telemetry and non-HTTP request paths. Providers that require async
+    /// work must return an error here and override `apply_auth_headers`.
+    /// Callers must not send the request if this returns an error.
+    fn add_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), AuthError>;
 
     /// Returns any auth headers that are available without request body access.
-    fn to_auth_headers(&self) -> HeaderMap {
+    fn to_auth_headers(&self) -> Result<HeaderMap, AuthError> {
         let mut headers = HeaderMap::new();
-        self.add_auth_headers(&mut headers);
-        headers
+        self.add_auth_headers(&mut headers)?;
+        Ok(headers)
     }
 
-    /// Resolves auth headers for an outbound request.
+    /// Describes headers expected on a successful request without refreshing or registering auth.
+    /// Async providers should override this rather than resolving credentials for telemetry.
+    fn auth_header_telemetry(&self) -> Result<AuthHeaderTelemetry, AuthError> {
+        let headers = self.to_auth_headers()?;
+        let name = headers
+            .contains_key(http::header::AUTHORIZATION)
+            .then_some("authorization");
+        Ok(AuthHeaderTelemetry {
+            attached: name.is_some(),
+            name,
+        })
+    }
+
+    /// Refreshes credentials after an explicit HTTP 401. Returns whether the caller
+    /// may retry with new credentials. Callers must bound retries and pass the headers
+    /// of the rejected request so concurrent failures can reuse an earlier refresh.
+    fn refresh_after_unauthorized(&self, _rejected_headers: HeaderMap) -> AuthRefreshFuture<'_> {
+        Box::pin(async { false })
+    }
+
+    /// Authenticates a header-only request, including removing credentials it supersedes.
     ///
-    /// Unlike [`Self::to_auth_headers`], implementations may perform asynchronous work to refresh
-    /// credentials before returning. Header-only providers with static credentials can rely on the
-    /// default implementation.
-    fn resolve_auth_headers(&self) -> AuthHeadersFuture<'_> {
-        Box::pin(async { Ok(self.to_auth_headers()) })
+    /// Implementations may refresh credentials asynchronously. Providers with static credentials
+    /// can rely on the default implementation.
+    /// Callers must use the returned map rather than overlaying resolved headers.
+    fn apply_auth_headers(&self, mut headers: HeaderMap) -> AuthHeadersFuture<'_> {
+        Box::pin(async move {
+            headers.extend(self.to_auth_headers()?);
+            Ok(headers)
+        })
     }
 
     /// Applies auth to a complete outbound request and returns the request to send.
@@ -64,7 +93,7 @@ pub trait AuthProvider: Send + Sync {
     fn apply_auth(&self, request: Request) -> AuthProviderFuture<'_> {
         Box::pin(async move {
             let mut request = request;
-            request.headers.extend(self.resolve_auth_headers().await?);
+            request.headers = self.apply_auth_headers(request.headers).await?;
             Ok(request)
         })
     }
@@ -75,6 +104,8 @@ pub type AuthProviderFuture<'a> =
 
 pub type AuthHeadersFuture<'a> =
     Pin<Box<dyn Future<Output = Result<HeaderMap, AuthError>> + Send + 'a>>;
+
+pub type AuthRefreshFuture<'a> = Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
 
 /// Shared auth handle passed through API clients.
 pub type SharedAuthProvider = Arc<dyn AuthProvider>;

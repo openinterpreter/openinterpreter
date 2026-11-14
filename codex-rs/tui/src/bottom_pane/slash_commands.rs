@@ -60,6 +60,7 @@ pub(crate) struct BuiltinCommandFlags {
     pub(crate) plugins_command_enabled: bool,
     pub(crate) token_activity_command_enabled: bool,
     pub(crate) service_tier_commands_enabled: bool,
+    pub(crate) daybreak_command_description: Option<&'static str>,
     pub(crate) goal_command_enabled: bool,
     pub(crate) voice_command_enabled: bool,
     pub(crate) worktrees_enabled: bool,
@@ -119,6 +120,7 @@ pub(crate) fn find_builtin_command(name: &str, flags: BuiltinCommandFlags) -> Op
     })?;
     builtins_for_input(BuiltinCommandFlags {
         token_activity_command_enabled: true,
+        daybreak_command_description: Some(""),
         side_conversation_active: false,
         ..flags
     })
@@ -153,9 +155,17 @@ pub(crate) fn has_slash_command_prefix(
     flags: BuiltinCommandFlags,
     service_tier_commands: &[ServiceTierCommand],
 ) -> bool {
-    commands_for_input(flags, service_tier_commands)
-        .into_iter()
-        .any(|command| fuzzy_match(command.command(), name).is_some())
+    // A side conversation can describe a known command as unavailable in the
+    // popup, even though dispatch must continue to reject it.
+    commands_for_input(
+        BuiltinCommandFlags {
+            side_conversation_active: false,
+            ..flags
+        },
+        service_tier_commands,
+    )
+    .into_iter()
+    .any(|command| fuzzy_match(command.command(), name).is_some())
 }
 
 #[cfg(test)]
@@ -171,6 +181,7 @@ mod tests {
             plugins_command_enabled: true,
             token_activity_command_enabled: true,
             service_tier_commands_enabled: true,
+            daybreak_command_description: Some(""),
             goal_command_enabled: true,
             voice_command_enabled: true,
             worktrees_enabled: true,
@@ -338,6 +349,7 @@ mod tests {
             commands,
             vec![
                 SlashCommand::Ide,
+                SlashCommand::Rename,
                 SlashCommand::Agents,
                 SlashCommand::Copy,
                 SlashCommand::Export,

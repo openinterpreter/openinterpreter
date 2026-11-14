@@ -1,9 +1,11 @@
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseInputItem;
+use codex_utils_path_uri::PathUri;
 use serde_json::Value as JsonValue;
 
 use crate::ToolPayload;
@@ -28,6 +30,11 @@ pub trait ToolOutput: Send {
         false
     }
 
+    /// Whether the complete model-visible result was already limited by its producer.
+    fn output_budget_applied(&self) -> bool {
+        false
+    }
+
     /// Overrides history's fallback token limit after tool-specific truncation.
     /// Include any serialization allowance; history uses this limit unchanged.
     fn fallback_token_limit_override(&self) -> Option<usize> {
@@ -39,6 +46,13 @@ pub trait ToolOutput: Send {
     /// Returns the tool call id exposed to `PostToolUse` hooks for this output.
     fn post_tool_use_id(&self, call_id: &str) -> String {
         call_id.to_string()
+    }
+
+    /// Returns the original local execution cwd for hook input, including delayed
+    /// results. Remote commands return `None` to retain the host hook cwd.
+    /// This does not change the local directory used to launch the hook process.
+    fn post_tool_use_cwd(&self) -> Option<PathUri> {
+        None
     }
 
     /// Returns the tool input exposed to `PostToolUse` hooks for this output.
@@ -87,6 +101,10 @@ where
         (**self).contains_external_context()
     }
 
+    fn output_budget_applied(&self) -> bool {
+        (**self).output_budget_applied()
+    }
+
     fn fallback_token_limit_override(&self) -> Option<usize> {
         (**self).fallback_token_limit_override()
     }
@@ -97,6 +115,10 @@ where
 
     fn post_tool_use_id(&self, call_id: &str) -> String {
         (**self).post_tool_use_id(call_id)
+    }
+
+    fn post_tool_use_cwd(&self) -> Option<PathUri> {
+        (**self).post_tool_use_cwd()
     }
 
     fn post_tool_use_input(&self, payload: &ToolPayload) -> Option<JsonValue> {
@@ -225,7 +247,7 @@ fn response_input_to_code_mode_result(response: ResponseInputItem) -> JsonValue 
                 .into_iter()
                 .map(|item| match item {
                     codex_protocol::models::ContentItem::InputText { text }
-                    | codex_protocol::models::ContentItem::OutputText { text } => {
+                    | codex_protocol::models::ContentItem::OutputText { text, .. } => {
                         FunctionCallOutputContentItem::InputText { text }
                     }
                     codex_protocol::models::ContentItem::InputImage { image, detail } => {
@@ -234,8 +256,8 @@ fn response_input_to_code_mode_result(response: ResponseInputItem) -> JsonValue 
                             detail: detail.or(Some(DEFAULT_IMAGE_DETAIL)),
                         }
                     }
-                    codex_protocol::models::ContentItem::InputAudio { audio_url } => {
-                        FunctionCallOutputContentItem::InputAudio { audio_url }
+                    codex_protocol::models::ContentItem::InputAudio { audio } => {
+                        FunctionCallOutputContentItem::InputAudio { audio }
                     }
                 })
                 .collect::<Vec<_>>(),
@@ -271,11 +293,12 @@ fn content_items_to_code_mode_result(items: &[FunctionCallOutputContentItem]) ->
                     image: ImageReference::File { file_id },
                     ..
                 } if !file_id.trim().is_empty() => Some(file_id.clone()),
-                FunctionCallOutputContentItem::InputAudio { audio_url }
-                    if !audio_url.trim().is_empty() =>
-                {
-                    Some(audio_url.clone())
-                }
+                FunctionCallOutputContentItem::InputAudio {
+                    audio: AudioReference::Inline { audio_url },
+                } if !audio_url.trim().is_empty() => Some(audio_url.clone()),
+                FunctionCallOutputContentItem::InputAudio {
+                    audio: AudioReference::File { file_id },
+                } if !file_id.trim().is_empty() => Some(file_id.clone()),
                 FunctionCallOutputContentItem::InputVideo { video_url, .. }
                     if !video_url.trim().is_empty() =>
                 {

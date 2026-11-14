@@ -1,0 +1,108 @@
+name: Bazel lock reconciliation candidate (review only)
+
+on:
+  # A newly introduced workflow_dispatch file is not registered until it
+  # exists on default. Run this review-only job from the scoped source PR.
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+    paths:
+      - .github/workflows/bazel-lock-regeneration.yml
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact 40-character PR head to reconcile (must match dispatch ref)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    name: Generate review-only MODULE.bazel.lock
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.number == 1981 && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'interpreterwork/codex-main-integration-publish-20261112') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment:
+      name: bazel
+      deployment: false
+    env:
+      EXPECTED_SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.source_sha }}
+    steps:
+      - name: Require exact dispatch source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$GITHUB_SHA" == "$EXPECTED_SOURCE_SHA" ]]
+          else
+            [[ "$GITHUB_EVENT_NAME" == pull_request ]]
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ env.EXPECTED_SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Check source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SOURCE_SHA" ]]
+          [[ -z "$(git status --porcelain)" ]]
+
+      - name: Prepare Bazel CI
+        uses: ./.github/actions/prepare-bazel-ci
+        with:
+          target: x86_64-unknown-linux-gnu
+          cache-scope: bazel-lock-review
+
+      - name: Generate candidate and verify it under error mode
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./.github/scripts/run_bazel.py mod deps --lockfile_mode=update
+          ./.github/scripts/run_bazel.py mod deps --lockfile_mode=error
+          if git diff --quiet -- MODULE.bazel.lock; then
+            # An already-reconciled lock is a successful no-op, not an
+            # artifact to package as though it changed.
+            [[ -z "$(git status --porcelain)" ]]
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bind candidate to source and package review artifact
+        if: steps.candidate.outputs.changed == 'true'
+        shell: bash
+        env:
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/verify_bazel_lock_regeneration.py \
+            --source-sha "$EXPECTED_SOURCE_SHA" \
+            --run-id "$WORKFLOW_RUN_ID" \
+            --run-attempt "$WORKFLOW_RUN_ATTEMPT" \
+            --output-dir "$RUNNER_TEMP/bazel-lock-review"
+
+      - name: Upload review-only candidate (never commit or publish)
+        if: steps.candidate.outputs.changed == 'true'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: bazel-lock-review-${{ env.EXPECTED_SOURCE_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bazel-lock-review/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Check for a clean worktree after candidate
+        if: always() && !cancelled()
+        shell: bash
+        run: |
+          # The candidate may change exactly this one file; no other tracked
+          # source may be modified by the generator.
+          unexpected="$(git diff --name-only -- . ':!MODULE.bazel.lock')"
+          [[ -z "$unexpected" ]]

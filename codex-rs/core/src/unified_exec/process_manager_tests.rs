@@ -1,6 +1,10 @@
 use super::*;
+use crate::tools::handlers::unified_exec::preparation::ExecCommandLifetime;
+use crate::tools::handlers::unified_exec::preparation::ParsedExecCommand;
 use crate::unified_exec::clamp_yield_time;
+use codex_exec_server::ExecOutputStream;
 use codex_network_proxy::ManagedNetworkSandboxContext;
+use core_test_support::assert_regex_match;
 use pretty_assertions::assert_eq;
 use tokio::sync::Notify;
 use tokio::time::Duration;
@@ -249,7 +253,11 @@ fn exec_server_params_use_path_uri_and_env_policy_overlay_contract() {
     };
     let params = params_for_request(&request);
 
-    assert_eq!(params.process_id.as_str(), "123");
+    assert_regex_match(
+        r"^123-[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+        params.process_id.as_str(),
+    );
+    assert_ne!(params.process_id, params_for_request(&request).process_id);
     assert_eq!(params.metadata, None);
     assert_eq!(params.cwd, request.cwd);
     assert!(params.enforce_managed_network);
@@ -336,7 +344,7 @@ fn initial_exec_yield_time_has_no_platform_floor() {
 #[tokio::test]
 async fn output_collection_stays_bounded_across_repeated_drains() {
     let chunks: [&[u8]; 4] = [b"01234567", b"89ABCDEF", b"ghijklmnopq", b"rs"];
-    let output_buffer = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::<10>::default()));
+    let output_buffer = Arc::new(tokio::sync::Mutex::new(OutputBuffers::<10>::default()));
     let output_notify = Arc::new(Notify::new());
     let output_closed = Arc::new(AtomicBool::new(false));
     let output_closed_notify = Arc::new(Notify::new());
@@ -350,6 +358,8 @@ async fn output_collection_stays_bounded_across_repeated_drains() {
         output_closed: Arc::clone(&output_closed),
         output_closed_notify: Arc::clone(&output_closed_notify),
         cancellation_token: cancellation_token.clone(),
+        collection_finished: CancellationToken::new(),
+        drain_policy: OutputDrainPolicy::BoundedAfterExit,
     };
 
     let collect = UnifiedExecProcessManager::collect_output_until_deadline(
@@ -359,11 +369,14 @@ async fn output_collection_stays_bounded_across_repeated_drains() {
     );
     let produce = async {
         for chunk in chunks {
-            output_buffer.lock().await.push_chunk(chunk);
+            output_buffer
+                .lock()
+                .await
+                .push_chunk(ExecOutputStream::Stdout, chunk);
             output_notify.notify_one();
             tokio::time::timeout(Duration::from_secs(1), async {
                 loop {
-                    if output_buffer.lock().await.retained_bytes() == 0 {
+                    if output_buffer.lock().await.pending.retained_bytes() == 0 {
                         break;
                     }
                     tokio::task::yield_now().await;
@@ -385,13 +398,14 @@ async fn output_collection_stays_bounded_across_repeated_drains() {
         expected.push_chunk(chunk);
     }
     assert_eq!(collected, expected);
+    assert_eq!(output_buffer.lock().await.transcript, expected);
 }
 
 #[tokio::test]
 async fn output_collection_preserves_omissions_from_drained_buffer() {
-    let mut buffered_output = HeadTailBuffer::<10>::default();
-    buffered_output.push_chunk(&[b'a'; 10]);
-    buffered_output.push_chunk(b"overflow");
+    let mut buffered_output = OutputBuffers::<10>::default();
+    buffered_output.push_chunk(ExecOutputStream::Stdout, &[b'a'; 10]);
+    buffered_output.push_chunk(ExecOutputStream::Stdout, b"overflow");
     let mut expected = HeadTailBuffer::<10>::default();
     expected.push_chunk(&[b'a'; 10]);
     expected.push_chunk(b"overflow");
@@ -410,6 +424,8 @@ async fn output_collection_preserves_omissions_from_drained_buffer() {
         output_closed,
         output_closed_notify,
         cancellation_token,
+        collection_finished: CancellationToken::new(),
+        drain_policy: OutputDrainPolicy::BoundedAfterExit,
     };
 
     let collected = UnifiedExecProcessManager::collect_output_until_deadline(
@@ -432,16 +448,121 @@ async fn network_denial_fallback_message_names_sandbox_network_proxy() {
     );
 }
 
-#[tokio::test]
-async fn late_network_denial_grace_observes_cancellation_after_exit() {
-    let cancellation = CancellationToken::new();
-    let cancellation_for_task = cancellation.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        cancellation_for_task.cancel();
-    });
+#[tokio::test(start_paused = true)]
+async fn late_network_denial_grace_observes_cancellation_after_exit() -> anyhow::Result<()> {
+    use crate::environment_selection::EnvironmentAttachment;
+    use crate::environment_selection::TurnEnvironmentSnapshot;
+    use crate::environment_selection::TurnEnvironmentState;
+    use crate::guardian::GuardianNetworkAccessTrigger;
+    use crate::tools::network_approval::NetworkApprovalSpec;
+    use crate::tools::network_approval::begin_network_approval;
+    use crate::tools::network_approval::build_blocked_request_observer;
+    use codex_network_proxy::BlockedRequest;
+    use codex_network_proxy::BlockedRequestArgs;
+    use codex_network_proxy::EnvironmentNetworkPolicy;
+    use codex_tools::ToolName;
 
-    assert!(wait_for_late_network_denial(Some(cancellation)).await);
+    let (session, mut turn) = crate::session::tests::make_session_and_context().await;
+    let session = Arc::new(session);
+    Arc::make_mut(&mut turn.config).permissions.network = None;
+    let mut remote = turn
+        .initial_environments
+        .primary()
+        .expect("primary environment")
+        .clone();
+    let remote_id = codex_exec_server::REMOTE_ENVIRONMENT_ID;
+    let (attachment, _guard, _) = EnvironmentAttachment::new(
+        remote_id,
+        Arc::new(codex_exec_server::Environment::create_for_tests(Some(
+            "ws://127.0.0.1:1".into(),
+        ))?),
+    );
+    remote.attachment = attachment;
+    remote.selection.environment_id = remote_id.to_string();
+    remote.config_mut().permission_profile =
+        codex_protocol::models::PermissionProfileSnapshot::legacy(
+            codex_protocol::models::PermissionProfile::workspace_write(),
+        );
+    remote.config_mut().network_policy = Some(EnvironmentNetworkPolicy::from_config(
+        &codex_network_proxy::NetworkProxyConfig {
+            enabled: true,
+            ..Default::default()
+        },
+        /*managed_allowed_domains_only*/ false,
+    ));
+    let environments = TurnEnvironmentSnapshot {
+        environments: vec![TurnEnvironmentState::Ready(remote)],
+    };
+    let remote = environments.primary().expect("remote environment");
+
+    for register_shared_listener in [false, true] {
+        let approval = begin_network_approval(
+            &session,
+            &turn,
+            &environments,
+            /*managed_network_active*/ true,
+            Some(NetworkApprovalSpec {
+                network: None,
+                environment_id: remote_id.to_string(),
+                tool_name: ToolName::plain("exec_command"),
+                command: "pwd".into(),
+                trigger: GuardianNetworkAccessTrigger {
+                    call_id: "exec".into(),
+                    tool_name: "exec_command".into(),
+                    command: vec!["pwd".into()],
+                    cwd: remote.cwd().clone(),
+                    sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
+                    additional_permissions: None,
+                    justification: None,
+                    tty: None,
+                },
+                permission_profile: remote.permission_profile().clone(),
+                network_policy: remote.config().network_policy.clone(),
+            }),
+        )
+        .await
+        .expect("build network proxy")
+        .expect("network approval");
+        let callback = approval
+            .execution_proxy()
+            .remote_policy_decider(/*allow_local_binding*/ true)
+            .expect("remote policy callback");
+        let finish = finish_deferred_network_approval_after_process_exit_for_session(
+            Some(&session),
+            approval.into_deferred(),
+        );
+        tokio::pin!(finish);
+        assert!(futures::poll!(&mut finish).is_pending());
+
+        let observer = register_shared_listener.then(|| {
+            build_blocked_request_observer(Arc::clone(&session.services.network_approval))
+        });
+        drop(callback);
+        if let Some(observer) = observer {
+            // A shared listener started during the command and can report an untagged denial.
+            tokio::time::advance(Duration::from_millis(10)).await;
+            assert!(futures::poll!(&mut finish).is_pending());
+            let blocked = BlockedRequest::new(BlockedRequestArgs {
+                host: "blocked.example".into(),
+                protocol: "http".into(),
+                port: Some(80),
+                reason: "not_allowed".into(),
+                decision: Some("deny".into()),
+                source: Some("decider".into()),
+                client: None,
+                method: None,
+                mode: None,
+            });
+            let expected = crate::network_policy_decision::denied_network_policy_message(&blocked)
+                .expect("blocked request must describe the denied host");
+            observer.on_blocked_request(blocked).await;
+            assert_eq!(finish.await, Err(expected));
+        } else {
+            assert_eq!(futures::poll!(&mut finish), std::task::Poll::Ready(Ok(())));
+        }
+    }
+
+    Ok(())
 }
 
 #[tokio::test]
@@ -453,47 +574,39 @@ async fn failed_initial_end_for_unstored_process_uses_fallback_output() {
         tokio_util::sync::CancellationToken::new(),
         "call-unified-denied".to_string(),
     );
+    let environment = turn
+        .initial_environments
+        .primary()
+        .expect("primary environment");
+    let prepared = ParsedExecCommand::parse(
+        r#"{"cmd":"echo before"}"#,
+        &session,
+        &context.step_context,
+        environment,
+    )
+    .expect("parse command")
+    .prepare(ExecCommandLifetime::Interactive)
+    .expect("prepare command");
     let request = ExecCommandRequest {
-        command: vec![
-            "sh".to_string(),
-            "-lc".to_string(),
-            "echo before".to_string(),
-        ],
-        shell_type: crate::shell::ShellType::Sh,
-        hook_command: "echo before".to_string(),
+        prepared,
         process_id: 123,
-        yield_time_ms: 1000,
-        max_output_tokens: None,
-        #[allow(deprecated)]
-        cwd: turn.cwd.clone().into(),
-        #[allow(deprecated)]
-        sandbox_cwd: turn.cwd.clone().into(),
-        turn_environment: turn
-            .initial_environments
-            .primary()
-            .cloned()
-            .expect("primary environment"),
-        shell_mode: codex_tools::UnifiedExecShellMode::Direct,
         network: None,
-        tty: true,
-        sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
-        additional_permissions: None,
-        additional_permissions_preapproved: false,
-        justification: None,
-        prefix_rule: None,
     };
 
-    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
-    transcript.lock().await.push_chunk(b"PARTIAL_TRANSCRIPT");
+    let output_buffer = Arc::new(tokio::sync::Mutex::new(OutputBuffers::default()));
+    output_buffer
+        .lock()
+        .await
+        .push_chunk(ExecOutputStream::Stdout, b"PARTIAL_TRANSCRIPT");
 
     emit_failed_initial_exec_end_if_unstored(
-        /*process_started_alive*/ false,
+        /*process_stored*/ false,
+        Some(codex_protocol::sandbox::SandboxType::WindowsMxc),
         &context,
         &request,
-        #[allow(deprecated)]
-        turn.cwd.clone().into(),
+        request.prepared.cwd.clone(),
         /*plugin_attribution*/ None,
-        transcript,
+        output_buffer,
         "PRE_DENIAL_MARKER".to_string(),
         "Network access denied".to_string(),
         Duration::from_millis(7),
@@ -511,6 +624,10 @@ async fn failed_initial_end_for_unstored_process_uses_fallback_output() {
         panic!("expected CommandExecution item");
     };
     assert_eq!(item.id, "call-unified-denied");
+    assert_eq!(
+        item.sandbox_type,
+        Some(codex_protocol::sandbox::SandboxType::WindowsMxc)
+    );
     assert_eq!(
         item.status,
         codex_protocol::items::CommandExecutionStatus::Failed

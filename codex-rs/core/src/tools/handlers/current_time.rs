@@ -28,7 +28,7 @@ struct CurrentTimeOutput(CurrentTimeReminder);
 
 impl ToolOutput for CurrentTimeOutput {
     fn log_output(&self) -> String {
-        self.0.body()
+        self.0.body().into_text().unwrap_or_default()
     }
 
     fn success_for_logging(&self) -> bool {
@@ -36,7 +36,8 @@ impl ToolOutput for CurrentTimeOutput {
     }
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
-        FunctionToolOutput::from_text(self.0.body(), Some(true)).to_response_item(call_id, payload)
+        FunctionToolOutput::from_content(vec![self.0.body().into()], Some(true))
+            .to_response_item(call_id, payload)
     }
 
     fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {
@@ -51,6 +52,10 @@ pub struct CurrentTimeHandler;
 impl ToolExecutor<ToolInvocation> for CurrentTimeHandler {
     fn tool_name(&self) -> ToolName {
         ToolName::namespaced(NAMESPACE, TOOL_NAME)
+    }
+
+    fn supports_parallel_tool_calls(&self) -> bool {
+        true
     }
 
     fn spec(&self) -> ToolSpec {

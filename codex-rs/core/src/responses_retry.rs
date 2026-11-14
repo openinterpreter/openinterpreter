@@ -1,16 +1,23 @@
 //! Shared retry and transport fallback decisions for Responses requests.
+//! Content-filter guidance is recorded for sampling requests before retry decisions.
+//! Server advice controls timing without extending configured retry limits.
 
 use std::time::Duration;
 
 use crate::client::ModelClientSession;
+use crate::context::ContentFilterGuidance;
+use crate::context::ContextualUserFragment;
 use crate::session::session::Session;
+use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use codex_client::RetryOperation;
 use codex_features::Feature;
+use codex_http_client::RetryAfter;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::WarningEvent;
+use tokio::time::Instant;
 use tracing::warn;
 
 const INITIAL_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -20,6 +27,18 @@ const MAX_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(60);
 pub(crate) enum ResponsesStreamRequest {
     Sampling,
     RemoteCompactionV2,
+}
+
+/// A new generation cannot repair a terminal provider response or settle the
+/// previous attempt's bill. Preserve these outcomes across transport retries,
+/// same-turn steering, and compaction's fallback to another model.
+pub(crate) fn is_terminal_sampling_outcome(error: &CodexErr) -> bool {
+    matches!(
+        error.details(),
+        CodexErrorDetails::ResponseIncomplete(_)
+            | CodexErrorDetails::SessionBudgetExceeded
+            | CodexErrorDetails::InferenceHookDenied { .. }
+    )
 }
 
 pub(crate) struct ResponsesStreamRetryState {
@@ -53,9 +72,26 @@ pub(crate) async fn handle_response_stream_error(
     err: CodexErr,
     client_session: &mut ModelClientSession,
     sess: &Session,
-    turn_context: &TurnContext,
+    step_context: &StepContext,
     request: ResponsesStreamRequest,
 ) -> Result<(), CodexErr> {
+    let turn_context = &step_context.turn;
+    if matches!(request, ResponsesStreamRequest::Sampling)
+        && matches!(err.details(), CodexErrorDetails::ContentFilter)
+    {
+        let model_info = &step_context.settings.model_info;
+        let guidance = ContentFilterGuidance {
+            text: codex_prompts::ResolvedModelMessages::from_model(model_info)
+                .content_filter_guidance()
+                .to_string(),
+        };
+        sess.record_conversation_items(
+            turn_context,
+            model_info,
+            &[ContextualUserFragment::into(guidance)],
+        )
+        .await;
+    }
     let operation = match request {
         ResponsesStreamRequest::Sampling => RetryOperation::Sampling,
         ResponsesStreamRequest::RemoteCompactionV2 => RetryOperation::RemoteCompactionV2,
@@ -64,6 +100,7 @@ pub(crate) async fn handle_response_stream_error(
     let Some(delay) = err.retry_delay(retry_count) else {
         return Err(err);
     };
+    let retry_after = err.retry_after();
 
     if turn_context
         .config
@@ -93,12 +130,17 @@ pub(crate) async fn handle_response_stream_error(
     }
 
     // TODO(anp): Respect server retry advice before issuing the fallback HTTP request.
-    if retry_state.retries >= max_retries
+    let requires_http_fallback = err.requires_http_fallback();
+    let switched = (requires_http_fallback || retry_state.retries >= max_retries)
         && client_session.try_switch_fallback_transport(
             &turn_context.session_telemetry,
             turn_context.model_info(),
-        )
-    {
+        );
+    if switched {
+        // Changing transport must not bypass the server's retry deadline.
+        if let Some(retry_after) = retry_after {
+            tokio::time::sleep_until(retry_after.deadline()).await;
+        }
         sess.send_event(
             turn_context,
             EventMsg::Warning(WarningEvent {
@@ -106,6 +148,9 @@ pub(crate) async fn handle_response_stream_error(
             }),
         )
         .await;
+    }
+    // Another request can already have switched this session to HTTP.
+    if switched || requires_http_fallback {
         retry_state.retries = 0;
         return Ok(());
     }
@@ -129,8 +174,12 @@ pub(crate) async fn handle_response_stream_error(
             )
             .await;
         }
+        // Use one clock sample so local backoff telemetry retains the selected delay.
+        let now = Instant::now();
+        let retry_at = retry_after.map(RetryAfter::deadline).unwrap_or(now + delay);
+        let delay = retry_at.saturating_duration_since(now);
         codex_client::record_retry!(retry_count, delay, operation);
-        tokio::time::sleep(delay).await;
+        tokio::time::sleep_until(retry_at).await;
         return Ok(());
     }
 

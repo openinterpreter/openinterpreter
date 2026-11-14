@@ -4,6 +4,7 @@ use crate::config::Config;
 use crate::config::TokenBudgetConfig;
 use crate::config::resolve_token_budget_config;
 use crate::context::ContextualUserFragment;
+use codex_config::config_toml::ConfigToml;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_protocol::account::PlanType;
@@ -14,7 +15,7 @@ fn experimental_context_is_eligible(auth_mode: AuthMode, plan_type: Option<PlanT
     auth_mode == AuthMode::Chatgpt
         && matches!(
             plan_type,
-            Some(PlanType::Plus | PlanType::Pro | PlanType::ProLite)
+            Some(PlanType::Plus | PlanType::Pro | PlanType::ProLite | PlanType::ProMax)
         )
 }
 
@@ -42,10 +43,7 @@ pub(super) fn apply_experimental_context(
     }
 
     if config.token_budget.is_none() {
-        let config_toml = config
-            .config_layer_stack
-            .effective_config()
-            .try_into()
+        let config_toml = ConfigToml::try_from(config.config_layer_stack.effective_config())
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
         config.token_budget = resolve_token_budget_config(&config_toml, &config.features)?;
     }
@@ -66,13 +64,17 @@ pub(super) fn has_explicit_settings(config: &Config) -> bool {
         .and_then(|features| features.get("token_budget"))
         .and_then(|token_budget| token_budget.as_table())
         .is_some_and(|settings| {
-            settings
-                .keys()
-                .any(|key| !matches!(key.as_str(), "enabled" | "use_history_notes_extension"))
+            settings.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "enabled" | "use_history_notes_extension" | "context_window_as_tool_output"
+                )
+            })
         })
         || config.token_budget.as_ref().is_some_and(|token_budget| {
             let mut settings = token_budget.clone();
             settings.use_history_notes_extension = false;
+            settings.context_window_as_tool_output = false;
             settings != TokenBudgetConfig::default()
         })
 }
@@ -96,6 +98,8 @@ pub(super) fn resolve_token_budget(
     };
 
     let token_budget = TokenBudgetConfig {
+        context_window_as_tool_output: configured_token_budget
+            .is_some_and(|budget| budget.context_window_as_tool_output),
         use_history_notes_extension: configured_token_budget
             .is_some_and(|token_budget| token_budget.use_history_notes_extension),
         reminder_threshold_tokens: Some(model_defaults.reminder_threshold_tokens),
@@ -235,6 +239,7 @@ mod tests {
             (AuthMode::Chatgpt, PlanType::Plus, true),
             (AuthMode::Chatgpt, PlanType::Pro, true),
             (AuthMode::Chatgpt, PlanType::ProLite, true),
+            (AuthMode::Chatgpt, PlanType::ProMax, true),
             (AuthMode::Chatgpt, PlanType::Free, false),
             (AuthMode::Chatgpt, PlanType::Enterprise, false),
             (AuthMode::ApiKey, PlanType::Pro, false),

@@ -1,11 +1,10 @@
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 
 pub(crate) fn write_fake_bwrap(bin_dir: &Path) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(bin_dir)?;
     let fake_bwrap = bin_dir.join("bwrap");
-    std::fs::write(
+    codex_utils_cargo_bin::write_executable(
         &fake_bwrap,
         r#"#!/bin/bash
 set -euo pipefail
@@ -55,8 +54,5 @@ fi
 exec "${cmd[@]}"
 "#,
     )?;
-    let mut permissions = std::fs::metadata(&fake_bwrap)?.permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_bwrap, permissions)?;
     Ok(fake_bwrap)
 }

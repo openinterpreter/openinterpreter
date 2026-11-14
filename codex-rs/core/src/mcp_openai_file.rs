@@ -20,9 +20,9 @@ use codex_exec_server::GetMetadataOptions;
 use codex_login::CodexAuth;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy;
-use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 struct FileArgumentLocation<'a> {
     field_name: &'a str,
@@ -161,14 +161,8 @@ async fn build_uploaded_argument_value(
         .cwd()
         .join(file_path)
         .map_err(|error| contextualize_error(error.to_string()))?;
-    let additional_permissions = merge_permission_profiles(
-        sess.granted_session_permissions(&turn_environment.selection.environment_id)
-            .await
-            .as_ref(),
-        sess.granted_turn_permissions(&turn_environment.selection.environment_id)
-            .await
-            .as_ref(),
-    );
+    let additional_permissions =
+        turn_context.granted_permissions(&turn_environment.selection.environment_id);
     let file_system_policy = effective_file_system_sandbox_policy(
         &turn_environment
             .permission_profile()
@@ -184,7 +178,7 @@ async fn build_uploaded_argument_value(
         requires_sandbox.then(|| turn_environment.sandbox_context(additional_permissions));
     if sandbox.is_some() {
         let environment_info = turn_environment
-            .environment
+            .environment()
             .info()
             .await
             .map_err(|error| contextualize_error(error.to_string()))?;
@@ -194,7 +188,7 @@ async fn build_uploaded_argument_value(
             ));
         }
     }
-    let fs = turn_environment.environment.get_filesystem();
+    let fs = turn_environment.environment().get_filesystem();
     let metadata = fs
         .get_metadata(&path_uri, GetMetadataOptions::default(), sandbox.as_ref())
         .await
@@ -213,10 +207,12 @@ async fn build_uploaded_argument_value(
             OPENAI_FILE_UPLOAD_LIMIT_BYTES,
         )));
     }
-    let contents = fs
-        .read_file_stream(&path_uri, sandbox.as_ref())
-        .await
-        .map_err(|error| contextualize_error(error.to_string()))?;
+    // Keep the initial read permission check before allocating a remote file record.
+    let mut first_contents = Some(
+        fs.read_file_stream(&path_uri, sandbox.as_ref())
+            .await
+            .map_err(|error| contextualize_error(error.to_string()))?,
+    );
     let file_name = path_uri
         .basename()
         .or_else(|| {
@@ -228,14 +224,53 @@ async fn build_uploaded_argument_value(
             })
         })
         .unwrap_or_else(|| "file".to_string());
-    let upload_auth = codex_model_provider::auth_provider_from_auth(auth);
+    let open_contents = move || {
+        let first_contents = first_contents.take();
+        let fs = Arc::clone(&fs);
+        let path_uri = path_uri.clone();
+        let sandbox = sandbox.clone();
+        async move {
+            match first_contents {
+                Some(contents) => Ok(contents),
+                None => fs.read_file_stream(&path_uri, sandbox.as_ref()).await,
+            }
+        }
+    };
+    let runtime = if turn_context
+        .config
+        .features
+        .enabled(codex_features::Feature::RuntimeAgentInstances)
+        && codex_http_client::classify_openai_api_url(&turn_context.config.chatgpt_base_url)
+            != codex_http_client::OpenAiDestination::Other
+    {
+        codex_model_provider::validate_runtime_destination(Some(
+            &turn_context.config.chatgpt_base_url,
+        ))
+        .map_err(|error| contextualize_error(error.to_string()))?;
+        let manager = sess.services.runtime_auth.get().ok_or_else(|| {
+            contextualize_error("runtime authentication has not been initialized".to_string())
+        })?;
+        Some((Arc::clone(manager), turn_context.config.runtime_auth_mode))
+    } else {
+        None
+    };
+    let upload_auth = codex_model_provider::auth_provider_for_request(
+        auth,
+        runtime.as_ref(),
+        &http::HeaderMap::new(),
+    )
+    .await
+    .map_err(|error| contextualize_error(error.to_string()))?;
+    let upload_clients = upload_auth
+        .bind_http_client_pool(&sess.services.openai_file_upload_client_pool)
+        .map_err(|error| contextualize_error(error.to_string()))?;
     let uploaded = upload_openai_file(
         turn_context.config.chatgpt_base_url.trim_end_matches('/'),
-        upload_auth.as_ref(),
-        &sess.services.openai_file_upload_client_pool,
+        upload_auth.auth.as_ref(),
+        &upload_clients,
         file_name,
         metadata.size,
-        contents,
+        open_contents,
         hosted_upload,
     )
     .await
@@ -370,10 +405,14 @@ mod tests {
             .expect("ready primary environment");
         let selection = environment.selection();
         let environment_config = environment.config().clone();
+        let local_windows_sandbox_type = environment_config.windows_sandbox_type;
         let environments = crate::environment_selection::ThreadEnvironments::new(
             session.services.turn_environments.environment_manager(),
             crate::shell::default_user_shell(),
-            environment_config.clone(),
+            crate::session::ThreadEnvironmentDefaults::new(
+                environment_config,
+                local_windows_sandbox_type,
+            ),
             crate::shell_snapshot::ShellSnapshot::disabled(),
             Default::default(),
             /*non_blocking_snapshots*/ true,

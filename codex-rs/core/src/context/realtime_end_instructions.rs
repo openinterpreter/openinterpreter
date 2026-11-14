@@ -1,6 +1,8 @@
 use super::ContextualUserFragment;
 use codex_prompts::END_INSTRUCTIONS;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 use codex_protocol::protocol::REALTIME_CONVERSATION_CLOSE_TAG;
 use codex_protocol::protocol::REALTIME_CONVERSATION_OPEN_TAG;
 
@@ -41,11 +43,11 @@ impl ContextualUserFragment for RealtimeEndInstructions {
         )
     }
 
-    fn body(&self) -> String {
+    fn body(&self) -> ContentItem {
         let instructions = self
             .instructions
             .as_deref()
             .unwrap_or_else(|| END_INSTRUCTIONS.trim());
-        format!("\n{instructions}\n")
+        input_text(format!("\n{instructions}\n"))
     }
 }

@@ -1,4 +1,3 @@
-use codex_utils_absolute_path::AbsolutePathBuf;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
@@ -15,6 +14,7 @@ use ratatui::widgets::Wrap;
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
+use crate::clipboard_paste::normalize_pasted_search_query;
 use crate::key_hint;
 use crate::key_hint::KeyBindingListExt;
 use crate::key_hint::ShortcutHint;
@@ -25,6 +25,7 @@ use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
 use crate::skills_helpers::match_skill;
 use crate::style::user_message_style;
+use codex_utils_path_uri::PathUri;
 
 use super::CancellationEvent;
 use super::bottom_pane_view::BottomPaneView;
@@ -40,7 +41,7 @@ pub(crate) struct SkillsToggleItem {
     pub skill_name: String,
     pub description: String,
     pub enabled: bool,
-    pub path: AbsolutePathBuf,
+    pub path: PathUri,
 }
 
 pub(crate) struct SkillsToggleView {
@@ -162,44 +163,6 @@ impl SkillsToggleView {
             .collect()
     }
 
-    fn move_up(&mut self) {
-        let len = self.visible_len();
-        self.state.move_up_wrap(len);
-        let visible = Self::max_visible_rows(len);
-        self.state.ensure_visible(len, visible);
-    }
-
-    fn move_down(&mut self) {
-        let len = self.visible_len();
-        self.state.move_down_wrap(len);
-        let visible = Self::max_visible_rows(len);
-        self.state.ensure_visible(len, visible);
-    }
-
-    fn page_up(&mut self) {
-        let len = self.visible_len();
-        let visible = Self::max_visible_rows(len);
-        self.state.page_up_clamped(len, visible);
-    }
-
-    fn page_down(&mut self) {
-        let len = self.visible_len();
-        let visible = Self::max_visible_rows(len);
-        self.state.page_down_clamped(len, visible);
-    }
-
-    fn jump_top(&mut self) {
-        let len = self.visible_len();
-        let visible = Self::max_visible_rows(len);
-        self.state.jump_top(len, visible);
-    }
-
-    fn jump_bottom(&mut self) {
-        let len = self.visible_len();
-        let visible = Self::max_visible_rows(len);
-        self.state.jump_bottom(len, visible);
-    }
-
     fn toggle_selected(&mut self) {
         let Some(idx) = self.state.selected_idx else {
             return;
@@ -243,25 +206,16 @@ impl BottomPaneView for SkillsToggleView {
         // plain j/k only apply through non-text events or modified bindings.
         let allow_plain_char_navigation = !is_plain_text_key_event(key_event);
 
+        if allow_plain_char_navigation
+            && let Some(action) = self.keymap.vertical_action_for(key_event)
+        {
+            let len = self.visible_len();
+            self.state
+                .apply_vertical_action(action, len, Self::max_visible_rows(len));
+            return;
+        }
+
         match key_event {
-            _ if allow_plain_char_navigation && self.keymap.move_up.is_pressed(key_event) => {
-                self.move_up()
-            }
-            _ if allow_plain_char_navigation && self.keymap.move_down.is_pressed(key_event) => {
-                self.move_down()
-            }
-            _ if allow_plain_char_navigation && self.keymap.page_up.is_pressed(key_event) => {
-                self.page_up()
-            }
-            _ if allow_plain_char_navigation && self.keymap.page_down.is_pressed(key_event) => {
-                self.page_down()
-            }
-            _ if allow_plain_char_navigation && self.keymap.jump_top.is_pressed(key_event) => {
-                self.jump_top()
-            }
-            _ if allow_plain_char_navigation && self.keymap.jump_bottom.is_pressed(key_event) => {
-                self.jump_bottom()
-            }
             KeyEvent {
                 code: KeyCode::Backspace,
                 ..
@@ -290,6 +244,15 @@ impl BottomPaneView for SkillsToggleView {
             }
             _ => {}
         }
+    }
+
+    fn handle_paste(&mut self, pasted: String) -> bool {
+        let Some(pasted) = normalize_pasted_search_query(&pasted) else {
+            return false;
+        };
+        self.search_query.push_str(&pasted);
+        self.apply_filter();
+        true
     }
 
     fn is_complete(&self) -> bool {
@@ -441,14 +404,18 @@ mod tests {
                 skill_name: "polish:superpowers-systematic-debugging".to_string(),
                 description: "Find root causes before fixing bugs".to_string(),
                 enabled: true,
-                path: test_path_buf("/tmp/skills/systematic-debugging/SKILL.md").abs(),
+                path: test_path_buf("/tmp/skills/systematic-debugging/SKILL.md")
+                    .abs()
+                    .into(),
             },
             SkillsToggleItem {
                 name: "superpowers-verification-before-completion (polish)".to_string(),
                 skill_name: "polish:superpowers-verification-before-completion".to_string(),
                 description: "Verify completion before claiming success".to_string(),
                 enabled: false,
-                path: test_path_buf("/tmp/skills/verification-before-completion/SKILL.md").abs(),
+                path: test_path_buf("/tmp/skills/verification-before-completion/SKILL.md")
+                    .abs()
+                    .into(),
             },
         ]
     }
@@ -463,14 +430,16 @@ mod tests {
                 skill_name: "repo_scout".to_string(),
                 description: "Summarize the repo layout".to_string(),
                 enabled: true,
-                path: test_path_buf("/tmp/skills/repo_scout.toml").abs(),
+                path: test_path_buf("/tmp/skills/repo_scout.toml").abs().into(),
             },
             SkillsToggleItem {
                 name: "Changelog Writer".to_string(),
                 skill_name: "changelog_writer".to_string(),
                 description: "Draft release notes".to_string(),
                 enabled: false,
-                path: test_path_buf("/tmp/skills/changelog_writer.toml").abs(),
+                path: test_path_buf("/tmp/skills/changelog_writer.toml")
+                    .abs()
+                    .into(),
             },
         ];
         let view = SkillsToggleView::new(items, tx, crate::keymap::RuntimeKeymap::defaults().list);
@@ -511,8 +480,14 @@ mod tests {
             tx,
             crate::keymap::RuntimeKeymap::defaults().list,
         );
-        view.search_query = "completion".to_string();
-        view.apply_filter();
+        view.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(view.handle_paste("  ompletion\r\n\t ".to_string()));
+        assert_eq!(view.search_query, "completion");
+
+        let rendered = render_lines(&view, /*width*/ 96);
+        assert_snapshot!("skills_toggle_pasted_search", rendered);
+        assert!(!view.handle_paste(" \r\n\t ".to_string()));
+        assert_eq!(render_lines(&view, /*width*/ 96), rendered);
 
         let row_names = view
             .build_rows()

@@ -16,9 +16,278 @@ use tempfile::TempDir;
 use super::*;
 use crate::CreateThreadParams;
 use crate::LiveThread;
+use crate::PersistContext;
 use crate::ThreadPersistenceMetadata;
 use crate::UpdateThreadMetadataParams;
 use crate::local::test_support::test_config;
+
+#[tokio::test]
+async fn paginated_metadata_write_failure_stays_pending_until_retry() {
+    let (_home, store, runtime) = store_with_runtime().await;
+    let thread_id = ThreadId::new();
+    let mut params = create_thread_params(thread_id);
+    params.history_mode = ThreadHistoryMode::Paginated;
+    let live_thread = LiveThread::create(store.clone(), params)
+        .await
+        .expect("create live thread");
+    let pool = store
+        .config
+        .sqlite
+        .open_read_write_pool(&store.config.sqlite.state_db_path())
+        .await
+        .expect("open SQL observer");
+    sqlx::query(
+        "CREATE TRIGGER reject_metadata BEFORE INSERT ON threads BEGIN SELECT RAISE(ABORT, 'metadata write rejected'); END",
+    )
+    .execute(&pool)
+    .await
+    .expect("reject index writes");
+
+    let error = live_thread
+        .persist(PersistContext::Standard)
+        .await
+        .expect_err("failed index writes must remain pending");
+    assert!(error.to_string().contains("metadata write rejected"));
+    assert_eq!(
+        runtime.get_thread(thread_id).await.expect("read index"),
+        None
+    );
+
+    sqlx::query("DROP TRIGGER reject_metadata")
+        .execute(&pool)
+        .await
+        .expect("allow index writes");
+    live_thread
+        .persist(PersistContext::Standard)
+        .await
+        .expect("retry pending metadata");
+    let metadata = runtime
+        .get_thread(thread_id)
+        .await
+        .expect("read index")
+        .expect("pending metadata was indexed");
+    assert_eq!(
+        (metadata.id, metadata.history_mode, metadata.model_provider),
+        (
+            thread_id,
+            ThreadHistoryMode::Paginated,
+            "test-provider".to_string()
+        )
+    );
+    live_thread
+        .shutdown()
+        .await
+        .expect("shutdown indexed thread");
+}
+
+#[tokio::test]
+async fn metadata_patch_failure_does_not_partially_apply() {
+    let (_home, store, runtime) = store_with_runtime().await;
+    let thread_id = ThreadId::new();
+    let mut params = create_thread_params(thread_id);
+    params.history_mode = ThreadHistoryMode::Paginated;
+    let live_thread = LiveThread::create(store.clone(), params)
+        .await
+        .expect("create thread");
+    live_thread
+        .persist(PersistContext::Standard)
+        .await
+        .expect("persist thread");
+    let before = runtime.get_thread(thread_id).await.expect("read metadata");
+    let pool = store
+        .config
+        .sqlite
+        .open_read_write_pool(&store.config.sqlite.state_db_path())
+        .await
+        .expect("open SQL observer");
+    sqlx::query("CREATE TRIGGER reject_memory_mode BEFORE UPDATE OF memory_mode ON threads BEGIN SELECT RAISE(ABORT, 'memory mode rejected'); END")
+        .execute(&pool).await.expect("reject memory preference update");
+    let patch = ThreadMetadataPatch {
+        model: Some("changed-model".to_string()),
+        memory_mode: Some(ThreadMemoryMode::Disabled),
+        ..Default::default()
+    };
+    live_thread
+        .update_metadata(patch.clone(), /*include_archived*/ false)
+        .await
+        .expect_err("reject the entire patch");
+    assert_eq!(
+        runtime.get_thread(thread_id).await.expect("read metadata"),
+        before
+    );
+
+    sqlx::query("DROP TRIGGER reject_memory_mode")
+        .execute(&pool)
+        .await
+        .expect("allow update");
+    live_thread
+        .update_metadata(patch, /*include_archived*/ false)
+        .await
+        .expect("retry patch");
+    let metadata = runtime
+        .get_thread(thread_id)
+        .await
+        .expect("read metadata")
+        .expect("thread");
+    assert_eq!(
+        (
+            metadata.model,
+            runtime
+                .get_thread_memory_mode(thread_id)
+                .await
+                .expect("memory mode")
+        ),
+        (
+            Some("changed-model".to_string()),
+            Some("disabled".to_string())
+        )
+    );
+    live_thread.shutdown().await.expect("shutdown thread");
+}
+
+#[tokio::test]
+async fn naming_empty_paginated_thread_materializes_rollout() {
+    let (_home, store, runtime) = store_with_runtime().await;
+    let thread_id = ThreadId::new();
+    let mut params = create_thread_params(thread_id);
+    params.history_mode = ThreadHistoryMode::Paginated;
+    let live_thread = LiveThread::create(store.clone(), params)
+        .await
+        .expect("create live thread");
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("live rollout path");
+    assert!(!rollout_path.exists());
+
+    let named = live_thread
+        .update_metadata(
+            ThreadMetadataPatch {
+                name: Some(Some("Scheduled task".to_string())),
+                memory_mode: Some(ThreadMemoryMode::Disabled),
+                ..Default::default()
+            },
+            /*include_archived*/ false,
+        )
+        .await
+        .expect("name empty thread");
+
+    assert!(rollout_path.exists());
+    assert_eq!(named.name.as_deref(), Some("Scheduled task"));
+    assert_eq!(named.history_mode, ThreadHistoryMode::Paginated);
+    assert_eq!(
+        runtime
+            .get_thread_memory_mode(thread_id)
+            .await
+            .expect("read memory mode")
+            .as_deref(),
+        Some("disabled")
+    );
+    live_thread.shutdown().await.expect("shutdown named thread");
+    let stored = store
+        .read_thread(ReadThreadParams {
+            thread_id,
+            include_archived: false,
+            include_history: false,
+        })
+        .await
+        .expect("read durable empty thread");
+    assert_eq!(stored.thread_id, thread_id);
+    assert_eq!(stored.name, named.name);
+    assert_eq!(stored.history_mode, ThreadHistoryMode::Paginated);
+}
+
+#[tokio::test]
+async fn naming_empty_paginated_thread_propagates_rollout_persistence_failure() {
+    let (_home, store, runtime) = store_with_runtime().await;
+    let thread_id = ThreadId::new();
+    let mut params = create_thread_params(thread_id);
+    params.history_mode = ThreadHistoryMode::Paginated;
+    let live_thread = LiveThread::create(store.clone(), params)
+        .await
+        .expect("create live thread");
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("live rollout path");
+    std::fs::create_dir_all(&rollout_path).expect("block rollout file creation");
+
+    live_thread
+        .update_metadata(
+            ThreadMetadataPatch {
+                name: Some(Some("Unpersistable task".to_string())),
+                ..Default::default()
+            },
+            /*include_archived*/ false,
+        )
+        .await
+        .expect_err("naming must fail when the thread cannot be persisted");
+    assert_eq!(
+        runtime
+            .get_thread(thread_id)
+            .await
+            .expect("read thread metadata")
+            .and_then(|metadata| metadata.name),
+        None
+    );
+}
+
+#[tokio::test]
+async fn saved_daybreak_preference_survives_materialization_and_prefers_the_stored_choice() {
+    let (_home, store, _runtime) = store_with_runtime().await;
+    for (staged, persisted) in [
+        (Some(false), Some(true)),
+        (Some(true), Some(false)),
+        (None, None),
+    ] {
+        let thread_id = ThreadId::new();
+        if staged.is_some() {
+            store
+                .stage_pending_thread_metadata(
+                    thread_id,
+                    ThreadMetadataPatch {
+                        daybreak_enabled: staged,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("stage Daybreak preference");
+        }
+        let pending = crate::PendingDaybreakPreference::read(store.as_ref(), thread_id)
+            .await
+            .expect("read staged preference");
+        let live = LiveThread::create(store.clone(), create_thread_params(thread_id))
+            .await
+            .expect("create thread");
+        live.append_items(&[user_message_item("materialize the saved preference")])
+            .await
+            .expect("materialize thread");
+        assert_pending_metadata_consumed(&store, thread_id).await;
+        assert_eq!(pending.resolve(/*stored*/ None), staged);
+
+        if persisted.is_some() {
+            store
+                .update_thread_metadata(UpdateThreadMetadataParams {
+                    thread_id,
+                    patch: ThreadMetadataPatch {
+                        daybreak_enabled: persisted,
+                        ..Default::default()
+                    },
+                    include_archived: false,
+                })
+                .await
+                .expect("save new preference");
+        }
+        let row = live
+            .read_thread(
+                /*include_archived*/ false, /*include_history*/ false,
+            )
+            .await
+            .expect("read stored preference");
+        assert_eq!(row.daybreak_enabled, persisted);
+        assert_eq!(pending.resolve(row.daybreak_enabled), persisted);
+    }
+}
 
 #[tokio::test]
 async fn pending_thread_metadata_is_consumed_by_first_metadata_update() {
@@ -147,6 +416,97 @@ async fn pending_rollout_compatible_metadata_is_written_with_observed_update() {
 }
 
 #[tokio::test]
+async fn deferred_reads_preserve_creation_metadata_and_updates() {
+    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+        let (_home, store, runtime) = store_with_runtime().await;
+        let thread_id = ThreadId::new();
+        let mut params = create_thread_params(thread_id);
+        params.history_mode = history_mode;
+        params.forked_from_id = Some(ThreadId::new());
+        params.parent_thread_id = Some(ThreadId::new());
+        let live_thread = LiveThread::create(store.clone(), params.clone())
+            .await
+            .expect("create live thread");
+        let rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("live rollout path");
+        let initial = live_thread
+            .read_thread(
+                /*include_archived*/ false, /*include_history*/ false,
+            )
+            .await
+            .expect_err("untouched threads still have no stored record");
+        assert!(matches!(
+            initial,
+            ThreadStoreError::InvalidRequest { message }
+                if message == format!("no rollout found for thread id {thread_id}")
+        ));
+        assert!(!rollout_path.exists());
+        assert_eq!(
+            runtime.get_thread(thread_id).await.expect("read index"),
+            None
+        );
+
+        let updated = live_thread
+            .update_metadata(
+                ThreadMetadataPatch {
+                    daybreak_enabled: Some(true),
+                    ..Default::default()
+                },
+                /*include_archived*/ false,
+            )
+            .await
+            .expect("update metadata without materializing history");
+        let read = live_thread
+            .read_thread(
+                /*include_archived*/ false, /*include_history*/ false,
+            )
+            .await
+            .expect("read updated metadata");
+        assert_eq!(
+            serde_json::to_value(read).expect("serialize metadata read"),
+            serde_json::to_value(&updated).expect("serialize update result")
+        );
+        assert_eq!(
+            (
+                updated.forked_from_id,
+                updated.parent_thread_id,
+                updated.originator.clone(),
+                updated.history_mode,
+                updated.daybreak_enabled,
+            ),
+            (
+                params.forked_from_id,
+                params.parent_thread_id,
+                Some(params.originator),
+                history_mode,
+                Some(true),
+            )
+        );
+        assert!(!rollout_path.exists());
+
+        live_thread
+            .persist(PersistContext::Standard)
+            .await
+            .expect("persist history");
+        live_thread.shutdown().await.expect("shutdown writer");
+        let durable = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: false,
+            })
+            .await
+            .expect("read durable metadata");
+        assert_eq!(
+            serde_json::to_value(durable).expect("serialize durable metadata"),
+            serde_json::to_value(updated).expect("serialize initial metadata")
+        );
+    }
+}
+
+#[tokio::test]
 async fn idle_shutdown_clears_pending_thread_metadata_without_materializing() {
     let (_home, store, runtime) = store_with_runtime().await;
     let thread_id = ThreadId::new();
@@ -158,6 +518,24 @@ async fn idle_shutdown_clears_pending_thread_metadata_without_materializing() {
     let live_thread = LiveThread::create(store.clone(), create_thread_params(thread_id))
         .await
         .expect("create live thread");
+    let read_error = live_thread
+        .read_thread(
+            /*include_archived*/ false, /*include_history*/ false,
+        )
+        .await
+        .expect_err("untouched threads still have no stored record");
+    assert!(matches!(
+        read_error,
+        ThreadStoreError::InvalidRequest { message }
+            if message == format!("no rollout found for thread id {thread_id}")
+    ));
+    assert!(
+        !store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("live rollout path")
+            .exists()
+    );
     live_thread.shutdown().await.expect("shutdown idle thread");
 
     assert_eq!(
@@ -261,6 +639,9 @@ fn staged_model_patch() -> ThreadMetadataPatch {
 
 fn create_thread_params(thread_id: ThreadId) -> CreateThreadParams {
     CreateThreadParams {
+        attached_thread: false,
+        creator_user_id: None,
+        creator_account_id: None,
         session_id: thread_id.into(),
         thread_id,
         extra_config: None,
@@ -276,7 +657,7 @@ fn create_thread_params(thread_id: ThreadId) -> CreateThreadParams {
         history_mode: ThreadHistoryMode::Legacy,
         history_base: None,
         subagent_history_start_ordinal: None,
-        initial_window_id: uuid::Uuid::now_v7().to_string(),
+        initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
         runtime_workspace_roots: None,
         metadata: ThreadPersistenceMetadata {
             cwd: Some(std::env::current_dir().expect("cwd")),

@@ -21,8 +21,8 @@ use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_login::auth_env_telemetry::collect_auth_env_telemetry;
 use codex_login::default_client::originator;
 use codex_model_provider::ModelProvider;
+use codex_model_provider::ProviderAuthContext;
 use codex_model_provider::SharedModelProvider;
-use codex_model_provider::create_model_provider;
 use codex_otel::SessionTelemetry;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::MemoryVersion;
@@ -119,7 +119,7 @@ fn build_session_telemetry(
         &config.model_provider,
         auth_manager.codex_api_key_env_enabled(),
     );
-    SessionTelemetry::new(
+    let mut session_telemetry = SessionTelemetry::new(
         thread_id,
         model,
         model,
@@ -131,25 +131,30 @@ fn build_session_telemetry(
         user_agent(),
         source,
     )
-    .with_auth_env(auth_env_telemetry.to_otel_metadata())
+    .with_auth_env(auth_env_telemetry.to_otel_metadata());
+    if !config.otel.log_sse_deltas {
+        session_telemetry = session_telemetry.without_sse_delta_logs();
+    }
+    session_telemetry
 }
 
 impl MemoryStartupContext {
+    pub(crate) fn item_id_generator(&self) -> &codex_protocol::ItemIdGenerator {
+        self.thread.item_id_generator()
+    }
+
     pub(crate) fn new(
         thread_manager: Arc<ThreadManager>,
-        auth_manager: Arc<AuthManager>,
+        auth: Arc<ProviderAuthContext>,
         thread_id: ThreadId,
         thread: Arc<CodexThread>,
         config: &Config,
         source: SessionSource,
     ) -> Self {
-        let provider = create_model_provider(
-            config.model_provider.clone(),
-            Some(Arc::clone(&auth_manager)),
-        );
+        let provider = auth.model_provider(config.model_provider.clone());
         Self::new_with_provider(
             thread_manager,
-            auth_manager,
+            Arc::clone(&auth.credentials),
             thread_id,
             thread,
             config,
@@ -286,9 +291,8 @@ impl MemoryStartupContext {
     ) -> StageOneRequestContext {
         let config_snapshot = self.thread.config_snapshot().await;
         let model_info = self
-            .thread_manager
-            .get_models_manager()
-            .get_model_info(model_name, &config.to_models_manager_config())
+            .thread
+            .model_info(model_name, &config.to_models_manager_config())
             .await;
         let reasoning_summary = config
             .model_reasoning_summary
@@ -296,7 +300,7 @@ impl MemoryStartupContext {
 
         StageOneRequestContext {
             version: self.version,
-            model_info,
+            model_info: model_info.model.as_ref().clone(),
             session_telemetry: build_session_telemetry(
                 &self.auth_manager,
                 self.thread_id,
@@ -314,7 +318,7 @@ impl MemoryStartupContext {
     pub(crate) async fn stream_stage_one_prompt(
         &self,
         config: &Config,
-        prompt: &Prompt,
+        prompt: Prompt,
         context: &StageOneRequestContext,
     ) -> anyhow::Result<(String, Option<TokenUsage>)> {
         let installation_id = resolve_installation_id(&config.codex_home).await?;
@@ -323,10 +327,10 @@ impl MemoryStartupContext {
         let session_id = SessionId::from(self.thread_id);
         let session_id_string = session_id.to_string();
         let model_client = ModelClient::new(
-            Some(Arc::clone(&self.auth_manager)),
+            Arc::clone(&self.provider),
             AgentIdentityAuthPolicy::JwtOnly,
             self.thread_id,
-            config.model_provider.clone(),
+            Arc::clone(self.item_id_generator()),
             session_source.clone(),
             config_snapshot.originator,
             config.model_verbosity,
@@ -336,9 +340,11 @@ impl MemoryStartupContext {
             config.features.enabled(Feature::RuntimeMetrics),
             /*beta_features_header*/ None,
             /*concurrent_reasoning_summaries_enabled*/ false,
+            /*output_token_replay_enabled*/ false,
             /*attestation_provider*/ None,
             config.http_client_factory(),
             config.workspace_routing_context(),
+            Vec::new(),
         );
 
         let mut client_session = model_client.new_session();
@@ -357,7 +363,7 @@ impl MemoryStartupContext {
         .await;
         let mut stream = client_session
             .stream(
-                prompt,
+                &Arc::new(prompt),
                 &context.model_info,
                 &context.session_telemetry,
                 context.reasoning_effort.clone(),
@@ -398,6 +404,7 @@ impl MemoryStartupContext {
         &self,
         config: Config,
         prompt: Vec<UserInput>,
+        workspace_lock: Arc<crate::MemoryWorkspaceLock>,
     ) -> anyhow::Result<SpawnedConsolidationAgent> {
         let NewThread {
             thread_id, thread, ..
@@ -411,6 +418,15 @@ impl MemoryStartupContext {
                 ..StartThreadOptions::new(config)
             })
             .await?;
+
+        // Cancellation or a shutdown timeout must not release workspace ownership
+        // while the agent can still write. The phase-2 handler keeps another owner
+        // through the final baseline reset after this thread has terminated.
+        let running_thread = Arc::clone(&thread);
+        tokio::spawn(async move {
+            running_thread.wait_until_terminated().await;
+            drop(workspace_lock);
+        });
 
         let agent = SpawnedConsolidationAgent { thread_id, thread };
         let submit_result = match agent

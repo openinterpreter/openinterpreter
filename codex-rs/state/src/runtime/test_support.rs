@@ -5,11 +5,11 @@ use chrono::Utc;
 #[cfg(test)]
 use codex_protocol::ThreadId;
 #[cfg(test)]
+use codex_protocol::models::PermissionProfile;
+#[cfg(test)]
 use codex_protocol::openai_models::ReasoningEffort;
 #[cfg(test)]
 use codex_protocol::protocol::AskForApproval;
-#[cfg(test)]
-use codex_protocol::protocol::SandboxPolicy;
 #[cfg(test)]
 use codex_protocol::protocol::ThreadHistoryMode;
 #[cfg(test)]
@@ -45,6 +45,9 @@ pub(super) fn test_thread_metadata(
 ) -> ThreadMetadata {
     let now = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).expect("timestamp");
     ThreadMetadata {
+        creator_user_id: None,
+        attached_thread_parent_id: None,
+        creator_account_id: None,
         originator: None,
         id: thread_id,
         rollout_path: codex_home.join(format!("rollout-{thread_id}.jsonl")),
@@ -65,7 +68,7 @@ pub(super) fn test_thread_metadata(
         title: String::new(),
         name: None,
         preview: Some("hello".to_string()),
-        sandbox_policy: crate::extract::enum_to_string(&SandboxPolicy::new_read_only_policy()),
+        sandbox_policy: serde_json::to_string(&PermissionProfile::read_only()).unwrap_or_default(),
         approval_mode: crate::extract::enum_to_string(&AskForApproval::OnRequest),
         tokens_used: 0,
         first_user_message: Some("hello".to_string()),

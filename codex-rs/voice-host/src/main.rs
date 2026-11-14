@@ -32,6 +32,8 @@ use std::io::Write;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use codex_realtime_webrtc::AudioDevice;
+use codex_realtime_webrtc::AudioDeviceKind;
 use codex_realtime_webrtc::HelperExitStage;
 use codex_realtime_webrtc::Message;
 use codex_realtime_webrtc::encode_frame;
@@ -154,6 +156,10 @@ fn run(
                 .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
         };
         let reply = match message {
+            Ok(Message::ListDevices { kind }) => {
+                phase.set(HelperExitStage::Device);
+                device_list_reply(kind, devices::list_devices)?
+            }
             Ok(Message::InspectAudio {}) => {
                 phase.set(HelperExitStage::InspectAudio);
                 if answered && transport.as_ref().is_none_or(|peer| !*peer.ready.borrow()) {
@@ -168,9 +174,11 @@ fn run(
                         .unwrap_or_default(),
                 }
             }
-            Ok(Message::OpenDevices {}) if devices.is_none() && runtime.is_some() && answered => {
+            Ok(Message::OpenDevices { selection })
+                if devices.is_none() && runtime.is_some() && answered =>
+            {
                 phase.set(HelperExitStage::OpenDevices);
-                devices = Some(devices::Devices::open()?);
+                devices = Some(devices::Devices::open(selection)?);
                 Message::DevicesOpened {}
             }
             Ok(Message::SetAudioControls { controls }) => {
@@ -248,7 +256,8 @@ fn run(
                 | Message::Offer { .. }
                 | Message::TransportReady {}
                 | Message::TransportTimedOut {}
-                | Message::OpenDevices {}
+                | Message::DeviceList { .. }
+                | Message::OpenDevices { .. }
                 | Message::DevicesOpened {}
                 | Message::AudioControlsApplied {}
                 | Message::AudioState { .. }
@@ -259,6 +268,15 @@ fn run(
         output.write_all(&encode_frame(&reply)?)?;
         output.flush()?;
     }
+}
+
+fn device_list_reply(
+    kind: AudioDeviceKind,
+    list_devices: impl FnOnce(AudioDeviceKind) -> io::Result<Vec<AudioDevice>>,
+) -> io::Result<Message> {
+    Ok(Message::DeviceList {
+        devices: list_devices(kind)?,
+    })
 }
 
 // Pending privacy controls and shutdown always precede the next capture batch.

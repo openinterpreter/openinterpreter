@@ -181,7 +181,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = HttpClient::new(reqwest::Client::new());
+        let client = codex_http_client::HttpClientBuilder::new()
+            .build_direct()
+            .expect("local HTTP test client");
         let endpoint = format!("{}/oauth/revoke", server.uri());
         let error = revoke_oauth_token(
             &client,

@@ -35,6 +35,7 @@ fn compaction_event_serializes_expected_shape() {
         event_type: "codex_compaction_event",
         event_params: crate::events::codex_compaction_event_params(
             CodexCompactionEvent {
+                usage_limit_window_minutes: None,
                 thread_id: "thread-1".to_string(),
                 turn_id: "turn-1".to_string(),
                 trigger: CompactionTrigger::Auto,
@@ -139,6 +140,8 @@ async fn compaction_event_ingests_custom_fact() {
                         version: "1.0.0".to_string(),
                     },
                     capabilities: Some(InitializeCapabilities {
+                        explicit_gateway_oauth: false,
+                        required_human_approval: false,
                         experimental_api: false,
                         request_attestation: false,
                         opt_out_notification_methods: None,
@@ -179,10 +182,33 @@ async fn compaction_event_ingests_custom_fact() {
         .await;
     events.clear();
 
+    // The compaction fact arrives after the voice session closes, but its start
+    // timestamp still falls inside the closed window.
+    reducer
+        .ingest(
+            AnalyticsFact::RealtimeSessionStarted {
+                thread_id: "thread-1".to_string(),
+                realtime_session_id: Some("voice-session".to_string()),
+                started_at: 90,
+            },
+            &mut events,
+        )
+        .await;
+    reducer
+        .ingest(
+            AnalyticsFact::RealtimeSessionClosed {
+                thread_id: "thread-1".to_string(),
+                closed_at: 105,
+            },
+            &mut events,
+        )
+        .await;
+
     reducer
         .ingest(
             AnalyticsFact::Custom(CustomAnalyticsFact::Compaction(Box::new(
                 CodexCompactionEvent {
+                    usage_limit_window_minutes: None,
                     thread_id: "thread-1".to_string(),
                     turn_id: "turn-compact".to_string(),
                     trigger: CompactionTrigger::Manual,
@@ -214,6 +240,10 @@ async fn compaction_event_ingests_custom_fact() {
     assert_eq!(payload[0]["event_params"]["session_id"], "session-thread-1");
     assert_eq!(payload[0]["event_params"]["thread_id"], "thread-1");
     assert_eq!(payload[0]["event_params"]["turn_id"], "turn-compact");
+    assert_eq!(
+        payload[0]["event_params"]["voice_session_id"],
+        "voice-session"
+    );
     assert_eq!(
         payload[0]["event_params"]["codex_error_kind"],
         json!("context_window_exceeded")

@@ -8,8 +8,10 @@ use crate::session::turn_context::TurnContext;
 use crate::session::turn_context::TurnEnvironment;
 use crate::tools::approvals::ApprovalAction;
 use crate::tools::approvals::ApprovalContext;
+use crate::tools::approvals::ApprovalResolution;
 use crate::tools::events::truncate_rejection_message;
 use crate::tools::sandboxing::ToolError;
+use codex_features::Feature;
 use codex_network_proxy::BlockedRequest;
 use codex_network_proxy::BlockedRequestObserver;
 use codex_network_proxy::EnvironmentNetworkPolicy;
@@ -21,9 +23,12 @@ use codex_network_proxy::NetworkProxy;
 use codex_network_proxy::NetworkRequestCancellation;
 use codex_network_proxy::NetworkRequestCancellationReason;
 use codex_network_proxy::NetworkRequestDisconnect;
+use codex_network_proxy::RemoteCredentialMasking;
+use codex_network_proxy::RemoteNetworkProxyLaunchConfig;
 use codex_protocol::approvals::NetworkApprovalContext;
 use codex_protocol::approvals::NetworkApprovalProtocol;
 use codex_protocol::approvals::NetworkPolicyRuleAction;
+use codex_protocol::error::CodexErr;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::Event;
@@ -40,15 +45,20 @@ use std::io;
 use std::sync::Arc;
 use std::sync::Mutex as SyncMutex;
 use std::sync::OnceLock as SyncOnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::OnceCell;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::RwLock;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::warn;
 use uuid::Uuid;
 
+const REASON_NOT_ALLOWED: &str = "not_allowed";
 const ABANDONED_NETWORK_APPROVAL_MESSAGE: &str =
     "network approval was cancelled before a decision was returned";
 
@@ -65,11 +75,19 @@ pub(crate) struct NetworkApprovalSpec {
 }
 
 #[derive(Clone, Debug)]
+struct NetworkApprovalProxy {
+    proxy: NetworkProxy,
+    // Only an executor-owned remote proxy can drain its decisions. A shared listener
+    // can also attribute untagged traffic to this execution, even after a config refresh.
+    shared_ingress_for_remote: Option<Arc<AtomicBool>>,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct DeferredNetworkApproval {
     registration_id: String,
     cancellation_token: CancellationToken,
     finish_outcome: Arc<OnceCell<Option<String>>>,
-    _execution_proxy: Option<NetworkProxy>,
+    _execution_proxy: Option<NetworkApprovalProxy>,
 }
 
 impl DeferredNetworkApproval {
@@ -83,6 +101,20 @@ impl DeferredNetworkApproval {
 
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancellation_token.is_cancelled()
+    }
+
+    pub(crate) async fn remote_decisions_drained(&self) {
+        if let Some(NetworkApprovalProxy {
+            proxy,
+            shared_ingress_for_remote: Some(shared_ingress),
+        }) = &self._execution_proxy
+        {
+            proxy.wait_for_remote_policy_deciders().await;
+            if !shared_ingress.load(Ordering::Acquire) {
+                return;
+            }
+        }
+        std::future::pending().await
     }
 
     async fn finish(&self, service: &NetworkApprovalService) -> Result<(), ToolError> {
@@ -101,7 +133,7 @@ impl DeferredNetworkApproval {
 pub(crate) struct ActiveNetworkApproval {
     registration_id: Option<String>,
     cancellation_token: CancellationToken,
-    execution_proxy: NetworkProxy,
+    execution_proxy: NetworkApprovalProxy,
 }
 
 impl ActiveNetworkApproval {
@@ -110,7 +142,7 @@ impl ActiveNetworkApproval {
     }
 
     pub(crate) fn execution_proxy(&self) -> &NetworkProxy {
-        &self.execution_proxy
+        &self.execution_proxy.proxy
     }
 
     pub(crate) fn into_deferred(self) -> Option<DeferredNetworkApproval> {
@@ -200,7 +232,7 @@ impl PendingApprovalDecision {
     fn to_network_decision(self) -> NetworkDecision {
         match self {
             Self::AllowOnce | Self::AllowForSession => NetworkDecision::Allow,
-            Self::Deny => NetworkDecision::deny("not_allowed"),
+            Self::Deny => NetworkDecision::deny(REASON_NOT_ALLOWED),
         }
     }
 }
@@ -264,11 +296,18 @@ struct NetworkApprovalCallState {
     call_outcomes: HashMap<String, String>,
 }
 
+#[derive(Default)]
+struct PendingNetworkApprovals {
+    executions: HashMap<PendingHostApprovalKey, Arc<PendingHostApproval>>,
+    manual_prompts: HashMap<HostApprovalKey, Arc<Semaphore>>,
+}
+
 pub(crate) struct NetworkApprovalService {
+    shared_ingress_registered: Arc<AtomicBool>,
     // Pending-request cleanup must publish a tool outcome synchronously before cancelling it.
     calls: SyncMutex<NetworkApprovalCallState>,
     // Owner cleanup runs from Drop, so this lock cannot require an async task.
-    pending_host_approvals: SyncMutex<HashMap<PendingHostApprovalKey, Arc<PendingHostApproval>>>,
+    pending_host_approvals: SyncMutex<PendingNetworkApprovals>,
     // Keep persisted session policy and the in-memory approval caches in the same order.
     session_policy_commit_lock: Mutex<()>,
     session_approved_hosts: Mutex<HashSet<HostApprovalKey>>,
@@ -287,6 +326,7 @@ struct PendingHostApprovalOwner<'a> {
     disconnect: Option<NetworkRequestDisconnect>,
     cancellation: Option<NetworkRequestCancellation>,
     decision_on_drop: PendingApprovalDecision,
+    prompt_permit: Option<OwnedSemaphorePermit>,
     completed: bool,
 }
 
@@ -305,7 +345,59 @@ impl<'a> PendingHostApprovalOwner<'a> {
             disconnect: None,
             cancellation: None,
             decision_on_drop: PendingApprovalDecision::Deny,
+            prompt_permit: None,
             completed: false,
+        }
+    }
+
+    /// Keep the endpoint's prompt until this execution commits or abandons its decision.
+    async fn review_user_prompt(
+        &mut self,
+        session: &Session,
+        turn: &TurnContext,
+        timing_call_id: Option<&str>,
+        policy_denial: &str,
+        prompt: impl Future<Output = ApprovalResolution>,
+    ) -> ApprovalResolution {
+        let queued = {
+            let mut approvals = self
+                .service
+                .pending_host_approvals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let queue = approvals
+                .manual_prompts
+                .entry(self.key.host.clone())
+                .or_insert_with(|| Arc::new(Semaphore::new(/*permits*/ 1)));
+            if let Ok(permit) = Arc::clone(queue).try_acquire_owned() {
+                self.prompt_permit = Some(permit);
+                None
+            } else {
+                Some((
+                    Arc::clone(queue),
+                    session.hold_queued_network_approval(turn, timing_call_id),
+                ))
+            }
+        };
+        // Keep the queue's elicitation and timing guards through any handoff to the visible prompt.
+        if let Some((queue, _hold)) = &queued {
+            tracing::debug!(
+                name: "codex.network_approval.queued",
+                execution_id = self.key.execution_id.as_deref(),
+                "waiting for the current endpoint approval"
+            );
+            let Ok(permit) = Arc::clone(queue).acquire_owned().await else {
+                // The prompt owner closes the queue when it commits a session grant.
+                return ApprovalResolution::user(ReviewDecision::Approved);
+            };
+            self.prompt_permit = Some(permit);
+        }
+        match self.service.session_host_decision(&self.key.host).await {
+            Some(NetworkDecision::Allow) => ApprovalResolution::user(ReviewDecision::Approved),
+            Some(NetworkDecision::Deny { .. }) => {
+                ApprovalResolution::user(ReviewDecision::denied(policy_denial))
+            }
+            None => prompt.await,
         }
     }
 
@@ -327,7 +419,7 @@ impl<'a> PendingHostApprovalOwner<'a> {
         }
     }
 
-    fn publish_and_remove(&self, decision: PendingApprovalDecision) {
+    fn publish_and_remove(&mut self, decision: PendingApprovalDecision) {
         // Remove this generation before waking its waiters so a concurrent retry
         // cannot attach to an already-completed approval.
         let mut approvals = self
@@ -335,11 +427,24 @@ impl<'a> PendingHostApprovalOwner<'a> {
             .pending_host_approvals
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(queue) = approvals.manual_prompts.get(&self.key.host) {
+            let permit = self.prompt_permit.take();
+            if permit.is_some() && decision == PendingApprovalDecision::AllowForSession {
+                queue.close();
+            }
+            // Returning the permit lets one waiter take over the prompt.
+            drop(permit);
+            // Each queued or active execution holds a reference in addition to this map.
+            if queue.is_closed() || Arc::strong_count(queue) == 1 {
+                approvals.manual_prompts.remove(&self.key.host);
+            }
+        }
         if approvals
+            .executions
             .get(&self.key)
             .is_some_and(|current| Arc::ptr_eq(current, &self.pending))
         {
-            approvals.remove(&self.key);
+            approvals.executions.remove(&self.key);
         }
         drop(approvals);
         self.pending.set_decision(decision);
@@ -381,8 +486,9 @@ impl Drop for PendingHostApprovalOwner<'_> {
 impl Default for NetworkApprovalService {
     fn default() -> Self {
         Self {
+            shared_ingress_registered: Arc::default(),
             calls: SyncMutex::new(NetworkApprovalCallState::default()),
-            pending_host_approvals: SyncMutex::new(HashMap::new()),
+            pending_host_approvals: SyncMutex::default(),
             session_policy_commit_lock: Mutex::new(()),
             session_approved_hosts: Mutex::new(HashSet::new()),
             session_denied_hosts: Mutex::new(HashSet::new()),
@@ -516,13 +622,29 @@ impl NetworkApprovalService {
             .pending_host_approvals
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(existing) = pending.get(&key).cloned() {
+        if let Some(existing) = pending.executions.get(&key).cloned() {
             return (existing, false);
         }
 
         let created = Arc::new(PendingHostApproval::new());
-        pending.insert(key, Arc::clone(&created));
+        pending.executions.insert(key, Arc::clone(&created));
         (created, true)
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "read both host caches under the session policy commit lock"
+    )]
+    async fn session_host_decision(&self, key: &HostApprovalKey) -> Option<NetworkDecision> {
+        let _commit_guard = self.session_policy_commit_lock.lock().await;
+        if self.session_denied_hosts.lock().await.contains(key) {
+            return Some(NetworkDecision::deny(REASON_NOT_ALLOWED));
+        }
+        self.session_approved_hosts
+            .lock()
+            .await
+            .contains(key)
+            .then_some(NetworkDecision::Allow)
     }
 
     #[cfg(test)]
@@ -618,17 +740,11 @@ impl NetworkApprovalService {
         )
     }
 
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "persisted session policy and its in-memory caches must commit atomically"
-    )]
     pub(crate) async fn handle_inline_policy_request(
         &self,
         session: Arc<Session>,
         request: NetworkPolicyRequest,
     ) -> NetworkDecision {
-        const REASON_NOT_ALLOWED: &str = "not_allowed";
-
         let protocol = match request.protocol {
             NetworkProtocol::Http => NetworkApprovalProtocol::Http,
             NetworkProtocol::HttpsConnect => NetworkApprovalProtocol::Https,
@@ -648,13 +764,7 @@ impl NetworkApprovalService {
         {
             return NetworkDecision::deny(REASON_NOT_ALLOWED);
         }
-        let active_turn = session
-            .active_turn_context_and_strict_auto_review()
-            .await
-            .map(|(turn, inputs, strict)| {
-                let environments = inputs.environments.refresh_readiness();
-                (turn, inputs, environments, strict)
-            });
+        let active_turn = session.active_turn_context_and_strict_auto_review().await;
         let Some(environment_id) = active_environment_id.or_else(|| {
             active_turn
                 .as_ref()
@@ -665,28 +775,16 @@ impl NetworkApprovalService {
         };
         let key = HostApprovalKey::from_request(&request, protocol, environment_id.clone());
 
-        {
-            let _commit_guard = self.session_policy_commit_lock.lock().await;
-            {
-                let denied_hosts = self.session_denied_hosts.lock().await;
-                if denied_hosts.contains(&key) {
-                    return NetworkDecision::deny(REASON_NOT_ALLOWED);
-                }
-            }
-
-            let approved_hosts = self.session_approved_hosts.lock().await;
-            if approved_hosts.contains(&key) {
-                return NetworkDecision::Allow;
-            }
+        if let Some(decision) = self.session_host_decision(&key).await {
+            return decision;
         }
 
         let target = Self::format_network_target(key.protocol, request.host.as_str(), key.port);
         let policy_denial_message =
             format!("Network access to \"{target}\" was blocked by policy.");
-        let prompt_reason = format!("{} is not in the allowed_domains", request.host);
+        let prompt_reason = format!("Network access to {} requires approval", request.host);
 
-        let Some((turn_context, step_inputs, active_environments, strict_auto_review)) =
-            active_turn
+        let Some((turn_context, settings, active_environments, strict_auto_review)) = active_turn
         else {
             if let Some(owner_call) = owner_call.as_ref() {
                 self.record_call_outcome(&owner_call.registration_id, policy_denial_message);
@@ -739,7 +837,7 @@ impl NetworkApprovalService {
         }
         let review_context = GuardianReviewContext::from_resolved_settings(
             Arc::clone(&turn_context),
-            &step_inputs.settings,
+            &settings,
             review_environments,
         );
         if !allows_network_approval_flow(review_context.approval_policy) {
@@ -802,6 +900,7 @@ impl NetworkApprovalService {
             cwd,
         };
         let approval_context = ApprovalContext {
+            exec_requirement: None,
             review_context,
             cancellation_token: None,
             call_id: approval_call_id,
@@ -811,7 +910,17 @@ impl NetworkApprovalService {
             retry_reason: Some(policy_denial_message.clone()),
             network_approval_context: Some(network_approval_context.clone()),
         };
-        let approval = session.request_approval(action, approval_context);
+        let user_prompt = pending_owner.review_user_prompt(
+            &session,
+            &turn_context,
+            owner_call
+                .as_ref()
+                .map(|call| call.trigger.call_id.as_str()),
+            &policy_denial_message,
+            session.request_user_approval(&action, &approval_context),
+        );
+        let approval =
+            session.request_approval_with_user_prompt(&action, &approval_context, user_prompt);
         let approval_result = if let Some(owner_call) = &owner_call {
             // A ready review result takes precedence over concurrent cancellation.
             let Some(result) = owner_call
@@ -826,7 +935,7 @@ impl NetworkApprovalService {
         } else {
             approval.await
         };
-        let approval_decision = match approval_result {
+        let approval_decision = match approval_result.result {
             Ok(decision) => decision,
             Err(ToolError::Rejected(rejection)) => {
                 if let Some(owner_call) = owner_call.as_ref() {
@@ -1072,6 +1181,9 @@ impl NetworkApprovalService {
 pub(crate) fn build_blocked_request_observer(
     network_approval: Arc<NetworkApprovalService>,
 ) -> Arc<dyn BlockedRequestObserver> {
+    network_approval
+        .shared_ingress_registered
+        .store(true, Ordering::Release);
     Arc::new(move |blocked: BlockedRequest| {
         let network_approval = Arc::clone(&network_approval);
         async move {
@@ -1122,18 +1234,84 @@ pub(crate) async fn begin_network_approval(
         return Ok(None);
     }
 
-    let controller = turn.config.permissions.network.as_ref();
+    let fallback_policy_decider = network_policy.as_ref().map(|_| {
+        build_network_policy_decider(
+            Arc::clone(&session.services.network_approval),
+            Arc::new(RwLock::new(Arc::downgrade(session))),
+        )
+    });
+    let registration_id = Uuid::new_v4().to_string();
     let environment = environments
         .turn_environments()
         .find(|environment| environment.selection.environment_id == environment_id);
+    let executor_owns_proxy = network_policy.is_some()
+        && turn.config.permissions.network.is_none()
+        && environment.is_some_and(|environment| environment.environment().is_remote());
+    let Some(proxy) = execution_network_proxy(
+        session,
+        turn,
+        environment,
+        network,
+        &environment_id,
+        &permission_profile,
+        network_policy.as_ref(),
+        &registration_id,
+        fallback_policy_decider,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let cancellation_token = CancellationToken::new();
+    session
+        .services
+        .network_approval
+        .register_call(ActiveNetworkApprovalCall {
+            registration_id: registration_id.clone(),
+            turn_id: turn.sub_id.clone(),
+            trigger,
+            tool_name,
+            command,
+            environment_id,
+            permission_profile,
+            environments: environments.clone(),
+            cancellation_token: cancellation_token.clone(),
+        })
+        .await;
+
+    Ok(Some(ActiveNetworkApproval {
+        registration_id: Some(registration_id),
+        cancellation_token,
+        execution_proxy: NetworkApprovalProxy {
+            proxy,
+            shared_ingress_for_remote: executor_owns_proxy
+                .then(|| Arc::clone(&session.services.network_approval.shared_ingress_registered)),
+        },
+    }))
+}
+
+/// Resolve the issuing environment's network policy under controller requirements and
+/// return a proxy with unique execution attribution. Does not register an approval flow.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execution_network_proxy(
+    session: &Session,
+    turn: &TurnContext,
+    environment: Option<&TurnEnvironment>,
+    network: Option<NetworkProxy>,
+    environment_id: &str,
+    permission_profile: &PermissionProfile,
+    network_policy: Option<&EnvironmentNetworkPolicy>,
+    registration_id: &str,
+    fallback_policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
+) -> Result<Option<NetworkProxy>, ToolError> {
+    let controller = turn.config.permissions.network.as_ref();
     let owner_spec = network_policy
-        .as_ref()
         .map(|policy| {
             // Resolve owner policy once, where the command's actual enforcing proxy is built.
             NetworkProxySpec::for_environment(
                 controller,
                 policy,
-                &permission_profile,
+                permission_profile,
                 session.services.exec_policy.current().as_ref(),
                 environment.map_or(
                     codex_network_proxy::LocalBindingPolicy::DefaultFalse,
@@ -1201,49 +1379,62 @@ pub(crate) async fn begin_network_approval(
         return Ok(None);
     };
     let environment_policy = owner_spec.map(|spec| spec.environment_policy());
-    let fallback_policy_decider = environment_policy.as_ref().map(|_| {
-        build_network_policy_decider(
-            Arc::clone(&session.services.network_approval),
-            Arc::new(RwLock::new(Arc::downgrade(session))),
-        )
-    });
-    let registration_id = Uuid::new_v4().to_string();
     let attribution_token = Uuid::new_v4().to_string();
     let execution_proxy = network
         .for_execution(
-            &environment_id,
-            &registration_id,
+            environment_id,
+            registration_id,
             attribution_token,
             environment_policy,
             fallback_policy_decider,
         )
         .map_err(|err| {
-            ToolError::Codex(codex_protocol::error::CodexErr::Io(io::Error::other(
-                format!("failed to create execution-scoped network proxy: {err}"),
-            )))
+            ToolError::Codex(CodexErr::Io(io::Error::other(format!(
+                "failed to create execution-scoped network proxy: {err}"
+            ))))
         })?;
-    let cancellation_token = CancellationToken::new();
-    session
-        .services
-        .network_approval
-        .register_call(ActiveNetworkApprovalCall {
-            registration_id: registration_id.clone(),
-            turn_id: turn.sub_id.clone(),
-            trigger,
-            tool_name,
-            command,
-            environment_id,
-            permission_profile,
-            environments: environments.clone(),
-            cancellation_token: cancellation_token.clone(),
-        })
-        .await;
+    Ok(Some(execution_proxy))
+}
 
-    Ok(Some(ActiveNetworkApproval {
-        registration_id: Some(registration_id),
-        cancellation_token,
-        execution_proxy,
-    }))
+/// Resolve a proxy launch against the executor's capabilities, failing closed if required.
+pub(crate) async fn remote_network_proxy_launch(
+    environment: &TurnEnvironment,
+    network: &NetworkProxy,
+    turn: &TurnContext,
+) -> Result<(RemoteNetworkProxyLaunchConfig, RemoteCredentialMasking), ToolError> {
+    let network_proxy = environment
+        .environment()
+        .info()
+        .await
+        .map_err(|err| {
+            ToolError::Codex(CodexErr::Io(io::Error::other(format!(
+                "failed to query exec-server capabilities: {err}"
+            ))))
+        })?
+        .capabilities
+        .network_proxy();
+    let credential_masking = if turn.config.features.enabled(Feature::CredentialMasking) {
+        network_proxy.credential_masking
+    } else {
+        RemoteCredentialMasking::Disabled
+    };
+    let launch = network
+        .remote_launch_config(
+            crate::windows_sandbox::local_binding_policy_for_sandbox(
+                environment.config().windows_sandbox_type,
+                environment.executor_platform_os.as_deref(),
+            ),
+            credential_masking,
+        )
+        .await
+        .map_err(|err| ToolError::Codex(CodexErr::Io(io::Error::other(err))))?;
+    if launch.proxy.enabled && !network_proxy.launch {
+        return Err(ToolError::Rejected(
+            "selected exec-server does not support executor-local network proxy launches"
+                .to_string(),
+        ));
+    }
+    Ok((launch, credential_masking))
 }
 
 pub(crate) async fn finish_deferred_network_approval(

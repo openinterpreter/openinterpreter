@@ -1,4 +1,7 @@
+use codex_api::AuthError;
 use codex_api::AuthProvider;
+use codex_http_client::CHATGPT_ACCOUNT_ID_HEADER;
+use codex_login::auth::is_fedramp_api_key;
 use http::HeaderMap;
 use http::HeaderValue;
 
@@ -14,10 +17,11 @@ pub struct BearerAuthProvider {
 
 impl BearerAuthProvider {
     pub fn new(token: String) -> Self {
+        let is_fedramp_account = is_fedramp_api_key(&token);
         Self {
             token: Some(token),
             account_id: None,
-            is_fedramp_account: false,
+            is_fedramp_account,
             token_header_name: None,
             use_bearer_prefix: true,
         }
@@ -35,7 +39,7 @@ impl BearerAuthProvider {
 }
 
 impl AuthProvider for BearerAuthProvider {
-    fn add_auth_headers(&self, headers: &mut HeaderMap) {
+    fn add_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), AuthError> {
         if let Some(token) = self.token.as_ref() {
             let header_value = if self.use_bearer_prefix {
                 format!("Bearer {token}")
@@ -50,11 +54,12 @@ impl AuthProvider for BearerAuthProvider {
         if let Some(account_id) = self.account_id.as_ref()
             && let Ok(header) = HeaderValue::from_str(account_id)
         {
-            let _ = headers.insert("ChatGPT-Account-ID", header);
+            let _ = headers.insert(CHATGPT_ACCOUNT_ID_HEADER, header);
         }
         if self.is_fedramp_account {
             let _ = headers.insert("X-OpenAI-Fedramp", HeaderValue::from_static("true"));
         }
+        Ok(())
     }
 }
 
@@ -87,7 +92,7 @@ mod tests {
         let auth = BearerAuthProvider::for_test(Some("access-token"), Some("workspace-123"));
         let mut headers = HeaderMap::new();
 
-        auth.add_auth_headers(&mut headers);
+        auth.add_auth_headers(&mut headers).unwrap();
 
         assert_eq!(
             headers
@@ -114,7 +119,7 @@ mod tests {
         };
         let mut headers = HeaderMap::new();
 
-        auth.add_auth_headers(&mut headers);
+        auth.add_auth_headers(&mut headers).unwrap();
 
         assert_eq!(
             headers
@@ -122,6 +127,32 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("true")
         );
+    }
+
+    #[test]
+    fn api_key_constructor_preserves_fedramp_routing_without_exposing_token() {
+        for (key, expected_fedramp) in [
+            ("sk-proj-fedramp-synthetic", true),
+            ("sk-svcacct-fedramp-synthetic", true),
+            ("sk-proj-synthetic", false),
+        ] {
+            let auth = BearerAuthProvider::new(key.to_string());
+            let mut headers = HeaderMap::new();
+            auth.add_auth_headers(&mut headers)
+                .expect("valid test API key");
+            assert_eq!(
+                headers
+                    .get("X-OpenAI-Fedramp")
+                    .and_then(|v| v.to_str().ok()),
+                expected_fedramp.then_some("true")
+            );
+            assert_eq!(
+                headers[http::header::AUTHORIZATION]
+                    .to_str()
+                    .expect("ASCII test API key"),
+                format!("Bearer {key}")
+            );
+        }
     }
 
     #[test]
@@ -135,7 +166,7 @@ mod tests {
         };
         let mut headers = HeaderMap::new();
 
-        auth.add_auth_headers(&mut headers);
+        auth.add_auth_headers(&mut headers).unwrap();
 
         assert_eq!(
             headers

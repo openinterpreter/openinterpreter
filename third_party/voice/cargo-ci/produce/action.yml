@@ -1,0 +1,85 @@
+name: Build Cargo voice inputs
+description: Build and upload same-commit native voice SDK and runtime inputs.
+inputs:
+  target:
+    description: Native target triple matching the runner
+    required: true
+  windows-tools:
+    description: Directory containing the public Windows voice bootstrap
+    default: .github/scripts
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      with:
+        python-version: "3.12"
+        architecture: ${{ contains(inputs.target, 'aarch64') && 'arm64' || 'x64' }}
+    - uses: ./.github/actions/prepare-bazel-ci
+      with:
+        target: ${{ inputs.target }}
+        cache-scope: cargo-voice-native
+    - name: Set up Windows voice build tools
+      if: runner.os == 'Windows'
+      uses: ./.github/actions/setup-bazel-windows
+      with:
+        target: ${{ inputs.target }}
+        windows-tools: ${{ inputs.windows-tools }}
+    - name: Build and stage native dependencies
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: |
+        set -euo pipefail
+        arch="${TARGET%%-*}"
+        case "$RUNNER_OS" in
+          Windows) prefix="windows_$arch"; temp="$(cygpath -u "$RUNNER_TEMP")" ;;
+          macOS) prefix="macos_$arch"; temp="$RUNNER_TEMP" ;;
+          Linux) prefix="linux_$arch"; temp="$RUNNER_TEMP" ;;
+          *) echo "Unsupported runner OS: $RUNNER_OS" >&2; exit 1 ;;
+        esac
+        wrapper=(--remote-download-toplevel --print-failed-action-summary)
+        flags=(--config=release --build_metadata="COMMIT_SHA=$GITHUB_SHA")
+        if [[ "$RUNNER_OS" == Windows ]]; then
+          wrapper+=(--windows-msvc-host-platform)
+          flags+=(--platforms=//:local_windows_msvc
+            --extra_toolchains=//third_party/voice:windows_pkg_config_toolchain,//third_party/voice:windows_cmake_toolchain
+            --repo_env=BAZEL_MSVC_RUNTIME_VISUAL_STUDIO_EULA=1
+            --inject_repository="voice_windows_tools=$VOICE_WINDOWS_BAZEL_REPOSITORY"
+            --//third_party/voice:windows_installed_tools=@voice_windows_tools//:tools
+            --action_env="SystemRoot=$VOICE_WINDOWS_SYSTEM_ROOT" --host_action_env="SystemRoot=$VOICE_WINDOWS_SYSTEM_ROOT"
+            --action_env="PROCESSOR_ARCHITECTURE=$VOICE_WINDOWS_HOST_ARCH" --host_action_env="PROCESSOR_ARCHITECTURE=$VOICE_WINDOWS_HOST_ARCH"
+            --workspace_status_command=./scripts/workspace-status.cmd)
+        elif [[ "$RUNNER_OS" == macOS ]]; then
+          flags+=(--macos_minimum_os=14.0)
+        fi
+        ./.github/scripts/run-bazel-ci.sh "${wrapper[@]}" -- build "${flags[@]}" -- \
+          //third_party/voice:native_sdk //third_party/voice:native_runtime
+        runtime="bazel-bin/third_party/voice/native_runtime_${prefix}"
+        output="$temp/cargo-voice-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+        python third_party/voice/cargo_ci.py stage --sdk "${runtime}_sdk" --runtime "$runtime" --output "$output" --target "$TARGET"
+        tar -czf "$temp/cargo-voice.tar.gz" -C "$output" sdk runtime
+    - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      with:
+        name: cargo-voice-${{ inputs.target }}
+        path: ${{ runner.temp }}/cargo-voice.tar.gz
+        if-no-files-found: error
+        overwrite: true
+    - name: Stage verified native pkgconf, support DLLs, and license
+      if: runner.os == 'Windows'
+      id: pkgconf
+      shell: pwsh
+      run: |
+        $directory = Split-Path -Parent $env:VOICE_PKG_CONFIG
+        $license = Join-Path $directory "COPYING"
+        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pkgconf/pkgconf/d97cae4e2a169916f77d9ee8a46c011b69e42a7b/COPYING" -OutFile $license
+        if ((Get-FileHash $license -Algorithm SHA256).Hash.ToLowerInvariant() -ne "055a265b839672a62f590869b0a1f8e4f5147e8f073c9ba77b17b8d7ad653966") {
+          throw "Pinned pkgconf license mismatch"
+        }
+        "directory=$directory" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+    - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      if: runner.os == 'Windows'
+      with:
+        name: cargo-voice-pkgconf-${{ runner.arch }}
+        path: ${{ steps.pkgconf.outputs.directory }}
+        if-no-files-found: error
+        overwrite: true

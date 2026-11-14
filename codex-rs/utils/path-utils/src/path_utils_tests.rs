@@ -22,8 +22,26 @@ fn replace_path_and_deduplicate_preserves_other_paths_and_order() {
 #[cfg(unix)]
 mod symlinks {
     use super::super::resolve_symlink_write_paths;
+    use super::super::symlink_metadata_if_exists;
     use pretty_assertions::assert_eq;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn symlink_metadata_if_exists_preserves_links_with_and_without_targets() -> std::io::Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let target = directory.path().join("target");
+        let link = directory.path().join("link");
+        std::fs::write(&target, "contents")?;
+        symlink(&target, &link)?;
+
+        let linked_metadata = symlink_metadata_if_exists(&link)?.expect("symlink exists");
+        std::fs::remove_file(target)?;
+        let dangling_metadata = symlink_metadata_if_exists(&link)?.expect("symlink still exists");
+        assert!(linked_metadata.is_symlink());
+        assert_eq!(dangling_metadata.file_type(), linked_metadata.file_type());
+        Ok(())
+    }
 
     #[test]
     fn symlink_cycles_fall_back_to_root_write_path() -> std::io::Result<()> {

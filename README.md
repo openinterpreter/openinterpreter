@@ -1,9 +1,9 @@
 <h1 align="center">Open Interpreter</h1>
 
-<p align="center">A coding agent optimized for low-cost models. <a href="https://www.openinterpreter.com/blog/open-interpreter?utm_source=github&amp;utm_medium=referral&amp;utm_campaign=readme&amp;utm_content=hero_text"><strong>Blog post ↗</strong></a></p>
+<p align="center">A coding agent optimized for low-cost models. <a href="https://www.openinterpreter.com/blog/open-interpreter?utm_source=github&amp;utm_medium=referral&amp;utm_campaign=readme&amp;utm_content=hero_text"><strong>Blog post &#8599;</strong></a></p>
 
 <p align="center">
-  <b>English</b> • <a href="README_ES.md">Español</a> • <a href="README_ZH.md">简体中文</a> • <a href="README_JA.md">日本語</a>
+  <b>English</b> &#8226; <a href="README_ES.md">Espa&#241;ol</a> &#8226; <a href="README_ZH.md">&#31616;&#20307;&#20013;&#25991;</a> &#8226; <a href="README_JA.md">&#26085;&#26412;&#35486;</a>
 </p>
 
 <p align="center">
@@ -12,11 +12,10 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache--2.0-white?style=flat-square" /></a>
 </p>
 
-> [!NOTE]
-> **Today: Kimi K3 is here.** We have reimplemented the provider-recommended
+> [!NOTE] > **Today: Kimi K3 is here.** We have reimplemented the provider-recommended
 > [Kimi Code](https://www.kimi.com/coding/en) harness in Rust, giving you
 > maximum K3 performance with a Codex-like interface.
-> [**Kimi Docs →**](https://www.openinterpreter.com/docs/terminal/kimi-k3?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=kimi_k3_note)
+> [**Kimi Docs &#8594;**](https://www.openinterpreter.com/docs/terminal/kimi-k3?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=kimi_k3_note)
 
 <br>
 
@@ -142,7 +141,6 @@ Provider and model membership is generated, not maintained as Rust lists. From
 `--provider <provider-id>` to update only selected provider entries. Live model
 sources require the provider credentials documented in the
 [provider docs](https://www.openinterpreter.com/docs/terminal/providers?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=provider_catalog_generation).
-
 
 > [!NOTE]
 > This is the new Rust version of Open Interpreter, based on Codex. Looking for the original Python project? It lives on as a community-maintained fork at [endolith/open-interpreter](https://github.com/endolith/open-interpreter).

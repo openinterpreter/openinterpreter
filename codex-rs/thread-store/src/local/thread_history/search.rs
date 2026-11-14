@@ -1,7 +1,8 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use codex_app_server_protocol::ThreadItem;
+use caseless::Caseless;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::UserInput;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::strip_user_message_prefix;
@@ -74,7 +75,9 @@ pub(in crate::local) async fn search_thread_occurrences(
         &params.search_term,
     )?;
     let matcher = LiteralMatcher::new(params.search_term.as_str());
-    let lineage = store.resolve_rollout_lineage(params.thread_id).await?;
+    let lineage = store
+        .resolve_rollout_lineage_for_history_page(params.thread_id)
+        .await?;
     let cursor_segment = cursor
         .as_ref()
         .map(|cursor| {
@@ -123,7 +126,13 @@ FROM (
       ON turns.thread_id = items.thread_id
      AND turns.turn_id = items.turn_id
     WHERE items.thread_id = ?
-      AND items.item_type = 'userMessage'
+      AND (
+          items.item_type = 'userMessage'
+          OR (
+              items.item_type = 'agentMessage'
+              AND json_extract(items.item_json, '$.phase') = 'partial_answer'
+          )
+      )
       AND items.rollout_ordinal >= ?
       AND items.rollout_ordinal < ?
       AND turns.rollout_ordinal >= ?
@@ -168,12 +177,11 @@ ORDER BY rollout_ordinal ASC
         let mut matching_occurrences = 0_usize;
         while let Some(row) = rows.try_next().await.map_err(thread_history_error)? {
             let row = candidate_row(row)?;
-            let item =
-                serde_json::from_str::<ThreadItem>(row.item_json.as_str()).map_err(|err| {
-                    ThreadStoreError::Internal {
-                        message: format!("failed to deserialize stored thread item: {err}"),
-                    }
-                })?;
+            let item = serde_json::from_str::<ThreadItemPayload>(row.item_json.as_str()).map_err(
+                |err| ThreadStoreError::Internal {
+                    message: format!("failed to deserialize stored thread item: {err}"),
+                },
+            )?;
             let Some(text) = searchable_text(&item) else {
                 continue;
             };
@@ -301,9 +309,9 @@ fn invalid_cursor(cursor: &str) -> ThreadStoreError {
     }
 }
 
-fn searchable_text(item: &ThreadItem) -> Option<Cow<'_, str>> {
+fn searchable_text(item: &ThreadItemPayload) -> Option<Cow<'_, str>> {
     match item {
-        ThreadItem::UserMessage { content, .. } => {
+        ThreadItemPayload::UserMessage { content, .. } => {
             let mut text_parts = content
                 .iter()
                 .filter_map(|input| match input {
@@ -327,27 +335,27 @@ fn searchable_text(item: &ThreadItem) -> Option<Cow<'_, str>> {
                 }
             }
         }
-        ThreadItem::AgentMessage { text, .. } => {
+        ThreadItemPayload::AgentMessage { text, .. } => {
             let text = markdown_to_search_text(text);
             (!text.is_empty()).then_some(Cow::Owned(text))
         }
-        ThreadItem::HookPrompt { .. }
-        | ThreadItem::FunctionCallOutput { .. }
-        | ThreadItem::Plan { .. }
-        | ThreadItem::Reasoning { .. }
-        | ThreadItem::CommandExecution { .. }
-        | ThreadItem::FileChange { .. }
-        | ThreadItem::McpToolCall { .. }
-        | ThreadItem::DynamicToolCall { .. }
-        | ThreadItem::CollabAgentToolCall { .. }
-        | ThreadItem::SubAgentActivity { .. }
-        | ThreadItem::WebSearch(_)
-        | ThreadItem::ImageView { .. }
-        | ThreadItem::Sleep(_)
-        | ThreadItem::ImageGeneration(_)
-        | ThreadItem::EnteredReviewMode { .. }
-        | ThreadItem::ExitedReviewMode { .. }
-        | ThreadItem::ContextCompaction { .. } => None,
+        ThreadItemPayload::HookPrompt { .. }
+        | ThreadItemPayload::FunctionCallOutput { .. }
+        | ThreadItemPayload::Plan { .. }
+        | ThreadItemPayload::Reasoning { .. }
+        | ThreadItemPayload::CommandExecution { .. }
+        | ThreadItemPayload::FileChange { .. }
+        | ThreadItemPayload::McpToolCall { .. }
+        | ThreadItemPayload::DynamicToolCall { .. }
+        | ThreadItemPayload::CollabAgentToolCall { .. }
+        | ThreadItemPayload::SubAgentActivity { .. }
+        | ThreadItemPayload::WebSearch(_)
+        | ThreadItemPayload::ImageView { .. }
+        | ThreadItemPayload::Sleep(_)
+        | ThreadItemPayload::ImageGeneration(_)
+        | ThreadItemPayload::EnteredReviewMode { .. }
+        | ThreadItemPayload::ExitedReviewMode { .. }
+        | ThreadItemPayload::ContextCompaction { .. } => None,
     }
 }
 
@@ -391,49 +399,50 @@ fn markdown_to_search_text(markdown: &str) -> String {
 }
 
 struct LiteralMatcher {
-    lowercase_needle: String,
+    folded_needle: String,
+}
+
+fn fold_char(character: char) -> impl Iterator<Item = char> {
+    // Rust's lowercase mappings can cover newer Unicode characters than the folding tables.
+    character.to_lowercase().default_case_fold()
 }
 
 impl LiteralMatcher {
     fn new(needle: &str) -> Self {
         Self {
-            lowercase_needle: needle.to_lowercase(),
+            folded_needle: needle.chars().flat_map(fold_char).collect(),
         }
     }
 
     fn find_ranges(&self, text: &str, limit: usize) -> Vec<std::ops::Range<usize>> {
-        let lowercase_text = text.to_lowercase();
-        let mut spans = Vec::with_capacity(text.chars().count());
-        let mut lowercase_start = 0;
+        let mut folded_text = String::with_capacity(text.len());
+        let mut boundaries = Vec::with_capacity(text.chars().count() + 1);
         for (original_start, character) in text.char_indices() {
-            let lowercase_end =
-                lowercase_start + character.to_lowercase().map(char::len_utf8).sum::<usize>();
-            spans.push((
-                lowercase_start..lowercase_end,
-                original_start..original_start + character.len_utf8(),
-            ));
-            lowercase_start = lowercase_end;
+            boundaries.push((folded_text.len(), original_start));
+            folded_text.extend(fold_char(character));
         }
+        boundaries.push((folded_text.len(), text.len()));
 
-        // Use two-pointer method to find matches in linear time.
-        let mut start_span = 0;
-        let mut end_span = 0;
-        lowercase_text
-            .match_indices(self.lowercase_needle.as_str())
-            .take(limit)
-            .filter_map(|(start, matched)| {
-                let end = start.saturating_add(matched.len());
-                while spans.get(start_span)?.0.end <= start {
-                    start_span += 1;
-                }
-                while spans.get(end_span)?.0.end <= end.saturating_sub(1) {
-                    end_span += 1;
-                }
-                let original_start = spans.get(start_span)?.1.start;
-                let original_end = spans.get(end_span)?.1.end;
-                Some(original_start..original_end)
-            })
-            .collect()
+        // Advance through source character boundaries even when a match ends partway through a fold.
+        let mut cursor = 0;
+        let mut matches = Vec::new();
+        while matches.len() < limit {
+            let offset = boundaries[cursor].0;
+            let Some(relative_start) = folded_text[offset..].find(&self.folded_needle) else {
+                break;
+            };
+            let start = offset + relative_start;
+            let end = start + self.folded_needle.len();
+            while boundaries[cursor + 1].0 <= start {
+                cursor += 1;
+            }
+            let original_start = boundaries[cursor].1;
+            while boundaries[cursor].0 < end {
+                cursor += 1;
+            }
+            matches.push(original_start..boundaries[cursor].1);
+        }
+        matches
     }
 }
 

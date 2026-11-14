@@ -1,12 +1,15 @@
 //! Shared tool definitions and Responses API tool primitives that can live
 //! outside `codex-core`.
 
+mod catalog_tool_message;
 mod code_mode;
 mod deepseek_tui_tool;
 mod dynamic_tool;
 mod function_call_error;
+mod functions_namespace_function_prefixes;
 mod harness;
 mod image_detail;
+mod indirect_namespace_prefixes;
 mod json_schema;
 mod mcp_tool;
 mod output_schema;
@@ -23,6 +26,7 @@ mod tool_payload;
 mod tool_search;
 mod tool_spec;
 
+pub use catalog_tool_message::with_catalog_tool_message;
 pub use code_mode::augment_tool_spec_for_code_mode;
 pub use code_mode::code_mode_name_for_tool_name;
 pub use code_mode::collect_code_mode_exec_prompt_tool_definitions;
@@ -33,14 +37,18 @@ pub use deepseek_tui_tool::create_deepseek_tui_chat_tools_json;
 pub use deepseek_tui_tool::create_deepseek_tui_tools;
 pub use dynamic_tool::parse_dynamic_tool;
 pub use function_call_error::FunctionCallError;
+pub use functions_namespace_function_prefixes::FunctionsNamespaceFunctionPrefixes;
 pub use harness::Harness;
 pub use image_detail::can_request_original_image_detail;
 pub use image_detail::normalize_output_image_detail;
 pub use image_detail::sanitize_original_image_detail;
+pub use indirect_namespace_prefixes::IndirectNamespacePrefixConflict;
+pub use indirect_namespace_prefixes::IndirectNamespacePrefixes;
 pub use json_schema::AdditionalProperties;
 pub use json_schema::JsonSchema;
 pub use json_schema::JsonSchemaPrimitiveType;
 pub use json_schema::JsonSchemaType;
+pub use json_schema::parse_catalog_tool_parameters;
 pub use json_schema::parse_tool_input_schema;
 pub use json_schema::parse_tool_input_schema_without_compaction;
 pub use mcp_tool::mcp_call_tool_result_output_schema;

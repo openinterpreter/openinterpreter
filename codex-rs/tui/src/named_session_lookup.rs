@@ -51,30 +51,31 @@ pub(super) async fn lookup(
     name: &str,
     collections: &[SessionCollection],
     source_kind_filters: &[Vec<ThreadSourceKind>],
-    model_provider: Option<&str>,
+    model_providers: Option<Vec<String>>,
 ) -> Result<Option<Thread>> {
     if name.trim().is_empty() {
         return Ok(None);
     }
     let mut matched: Option<Thread> = None;
-    let mut paginated = false;
+    let mut unverified_pagination = false;
     for collection in collections {
         for source_kinds in source_kind_filters {
             let mut cursor = None;
-            let sort_key = if app_server.uses_embedded_app_server() {
-                ThreadSortKey::RecencyAt
-            } else {
-                ThreadSortKey::UpdatedAt
-            };
             loop {
                 let response = app_server
                     .thread_list(ThreadListParams {
+                        include_attached_threads: false,
+                        current_account_only: false,
+                        included_thread_ids: None,
+                        excluded_thread_ids: None,
+                        attached_to_thread_id: None,
                         originators: None,
                         cursor,
                         limit: Some(100),
-                        sort_key: Some(sort_key),
+                        // Activity must not move an unread thread ahead of the cursor.
+                        sort_key: Some(ThreadSortKey::CreatedAt),
                         sort_direction: None,
-                        model_providers: model_provider.map(|provider| vec![provider.to_string()]),
+                        model_providers: model_providers.clone(),
                         source_kinds: Some(source_kinds.clone()),
                         archived: Some(matches!(collection, SessionCollection::Archived)),
                         section_id: None,
@@ -82,12 +83,14 @@ pub(super) async fn lookup(
                         parent_thread_id: None,
                         ancestor_thread_id: None,
                         cwd: None,
-                        use_state_db_only: false,
+                        use_state_db_only: true,
                         search_term: None,
                     })
                     .await
                     .wrap_err("failed to list sessions while resolving session label")?;
-                paginated |= response.next_cursor.is_some();
+                unverified_pagination |= response.next_cursor.as_deref().is_some_and(|cursor| {
+                    !cursor.contains('|') || codex_rollout::parse_cursor(cursor).is_none()
+                });
                 for thread in response.data {
                     if display_label(&thread) != name {
                         continue;
@@ -120,12 +123,8 @@ pub(super) async fn lookup(
                             else {
                                 return Err(err);
                             };
-                            if source.message == format!("thread not loaded: {thread_id}") {
-                                if app_server.uses_embedded_app_server() {
-                                    continue;
-                                }
-                                thread.clone()
-                            } else if (source.message.starts_with("failed to read thread: thread-store internal error: session metadata ")
+                            if source.message == format!("thread not loaded: {thread_id}")
+                                || (source.message.starts_with("failed to read thread: thread-store internal error: session metadata ")
                                 && source.message.contains(" belongs to thread ")
                                 && source.message.ends_with(&format!(", expected {thread_id}")))
                                 || thread.path.as_ref().is_some_and(|path| {
@@ -136,9 +135,8 @@ pub(super) async fn lookup(
                                 })
                             {
                                 continue;
-                            } else {
-                                return Err(err);
                             }
+                            return Err(err);
                         }
                     };
                     if current.id != thread.id || display_label(&current) != name {
@@ -165,7 +163,7 @@ pub(super) async fn lookup(
     }
     // Older server cursors can skip equal timestamps at a page boundary.
     if let Some(thread) = matched.as_ref()
-        && paginated
+        && unverified_pagination
     {
         return Err(AmbiguousSessionName::Paginated(thread.id.clone()).into());
     }

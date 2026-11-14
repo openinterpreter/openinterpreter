@@ -1,14 +1,77 @@
 use super::*;
+use crossterm::event::KeyModifiers;
 use pretty_assertions::assert_eq;
 
-fn render_visible(state: &BedrockState) -> String {
+#[test]
+fn gov_cloud_guidance_requires_acknowledgement() {
+    let mut state = BedrockState::guidance();
+    insta::assert_snapshot!("gov_cloud_warning", render_visible(&state));
+    assert!(!state.handle_guidance_key_event(&KeyEvent::new_with_kind(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        KeyEventKind::Repeat,
+    )));
+    assert!(state.handle_guidance_key_event(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
     let area = Rect::new(0, 0, 72, 24);
+    let mut buffer = Buffer::empty(area);
+    state.render(area, &mut buffer, /*error*/ None);
+    assert!(
+        buffer
+            .content
+            .iter()
+            .any(|cell| cell.symbol().contains(GOV_CLOUD_GUIDANCE_URL))
+    );
+}
+
+#[test]
+fn gov_cloud_guidance_scrolls_in_short_panes() {
+    let mut state = BedrockState::guidance();
+    let area = Rect::new(0, 0, 24, 6);
+    let initial = render_visible_at(&state, area);
+    insta::assert_snapshot!("gov_cloud_warning_short", initial);
+
+    // Even a one-row disclosure viewport must expose every line and the link.
+    for height in [6, 2] {
+        let area = Rect::new(0, 0, 24, height);
+        let mut seen = String::new();
+        for _ in 0..20 {
+            let mut buffer = Buffer::empty(area);
+            state.render(area, &mut buffer, /*error*/ None);
+            seen.extend(buffer.content.iter().map(ratatui::buffer::Cell::symbol));
+            assert!(render_visible_at(&state, area).contains("Acknowledge"));
+            assert!(
+                !state.handle_guidance_key_event(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            );
+        }
+        assert!(seen.contains("Using Codex with AWS"));
+        assert!(seen.contains("proceeding."));
+        assert!(seen.contains(GOV_CLOUD_GUIDANCE_URL));
+        for _ in 0..20 {
+            state.handle_guidance_key_event(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+            render_visible_at(&state, area);
+        }
+        assert!(render_visible_at(&state, area).starts_with("Using Codex with AWS"));
+    }
+    assert_eq!(render_visible_at(&state, area), initial);
+    state.handle_guidance_key_event(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    render_visible(&state);
+    assert_eq!(render_visible_at(&state, area), initial);
+}
+
+fn render_visible(state: &BedrockState) -> String {
+    render_visible_at(state, Rect::new(0, 0, 72, 24))
+}
+
+fn render_visible_at(state: &BedrockState, area: Rect) -> String {
     let mut buffer = Buffer::empty(area);
     state.render(area, &mut buffer, /*error*/ None);
     let mut rows = (area.top()..area.bottom())
         .map(|row| {
             (area.left()..area.right())
-                .map(|column| buffer[(column, row)].symbol())
+                .map(|column| {
+                    crate::terminal_hyperlinks::strip_osc8(buffer[(column, row)].symbol())
+                })
                 .collect::<String>()
                 .trim_end()
                 .to_string()
@@ -21,7 +84,7 @@ fn render_visible(state: &BedrockState) -> String {
 }
 
 #[test]
-fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
+fn discovery_prioritizes_profiles_and_groups_other_sign_in_methods() {
     let discovering = BedrockState::discovering(RequestId::Integer(1));
     insta::assert_snapshot!(render_visible(&discovering), @r###"
     > Set up Amazon Bedrock
@@ -64,7 +127,6 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
                 BedrockMethod::Profile(0),
                 BedrockMethod::Environment,
                 BedrockMethod::OtherMethods,
-                BedrockMethod::ApiKey,
             ],
         ),
         (
@@ -81,17 +143,12 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
                 BedrockMethod::Profile(1),
                 BedrockMethod::Environment,
                 BedrockMethod::OtherMethods,
-                BedrockMethod::ApiKey,
             ],
         ),
         (
             Vec::new(),
             vec![environment],
-            vec![
-                BedrockMethod::Environment,
-                BedrockMethod::OtherMethods,
-                BedrockMethod::ApiKey,
-            ],
+            vec![BedrockMethod::Environment, BedrockMethod::OtherMethods],
         ),
         (
             Vec::new(),
@@ -124,7 +181,6 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
             BedrockMethod::Profile(0),
             BedrockMethod::Environment,
             BedrockMethod::OtherMethods,
-            BedrockMethod::ApiKey,
         ]
     );
     insta::assert_snapshot!(render_visible(&profile_and_bearer), @r###"
@@ -137,13 +193,11 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
          Use your existing AWS credentials
 
       2. Continue with detected credentials
-         Use your existing Amazon Bedrock API key
+         Use the Bedrock API key from the server environment
 
       3. Other AWS sign-in methods
-         Use another profile, access keys, or environment variables
-
-      4. Bedrock API key
-         Enter a Bedrock API key
+         Use another profile, access keys, environment variables, or a
+    Bedrock API key
 
 
       Press enter to continue
@@ -156,9 +210,10 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
             BedrockMethod::ManualProfile,
             BedrockMethod::AccessKeys,
             BedrockMethod::EnvironmentInstructions,
+            BedrockMethod::ApiKey,
         ]
     );
-    insta::assert_snapshot!(render_visible(&profile_and_bearer), @r###"
+    insta::assert_snapshot!(render_visible(&profile_and_bearer), @r"
     > Set up Amazon Bedrock
 
       Choose how you authenticate with AWS.
@@ -170,12 +225,15 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
          Enter an access key ID and secret access key
 
       3. Environment variables
-         Configure AWS credentials in your environment, then return here.
+         Use AWS credentials exported in your shell
+
+      4. Bedrock API key
+         Enter a Bedrock API key
 
 
       Press enter to continue
       Press esc to go back
-    "###);
+    ");
 
     let profile_state = BedrockState::discovered(BedrockDiscoverResponse {
         profiles: vec![profile],
@@ -191,10 +249,8 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
          Use your existing AWS credentials
 
       2. Other AWS sign-in methods
-         Use another profile, access keys, or environment variables
-
-      3. Bedrock API key
-         Enter a Bedrock API key
+         Use another profile, access keys, environment variables, or a
+    Bedrock API key
 
 
       Press enter to continue
@@ -226,10 +282,8 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
          us-west-2
 
       3. Other AWS sign-in methods
-         Use another profile, access keys, or environment variables
-
-      4. Bedrock API key
-         Enter a Bedrock API key
+         Use another profile, access keys, environment variables, or a
+    Bedrock API key
 
 
       Press enter to continue
@@ -246,13 +300,11 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
     insta::assert_snapshot!(render_visible(&environment_state), @r###"
     > Set up Amazon Bedrock
 
-      AWS credentials detected in your environment.
+      AWS credentials detected in the server environment.
 
     > 1. Continue with detected credentials
 
       2. Other AWS sign-in methods
-
-      3. Bedrock API key
 
 
       Press enter to continue
@@ -263,7 +315,7 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
         profiles: Vec::new(),
         environment_credentials: Vec::new(),
     });
-    insta::assert_snapshot!(render_visible(&empty_state), @r###"
+    insta::assert_snapshot!(render_visible(&empty_state), @r"
     > Set up Amazon Bedrock
 
       No AWS credentials found.
@@ -276,7 +328,7 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
          Enter an access key ID and secret access key
 
       3. Environment variables
-         Configure AWS credentials in your environment, then return here.
+         Use AWS credentials exported in your shell
 
       4. Bedrock API key
          Enter a Bedrock API key
@@ -284,7 +336,7 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
 
       Press enter to continue
       Press esc to go back
-    "###);
+    ");
 
     let mut many_profiles = BedrockState::discovered(BedrockDiscoverResponse {
         profiles: (0..12)
@@ -303,7 +355,7 @@ fn discovery_prioritizes_profiles_and_keeps_bedrock_api_key_last() {
         .flat_map(|row| (area.left()..area.right()).map(move |column| (column, row)))
         .map(|position| buffer[position].symbol())
         .collect::<String>();
-    assert!(visible.contains("Bedrock API key"));
+    assert!(visible.contains("Other AWS sign-in methods"));
     assert!(visible.contains("Press enter to continue"));
     assert!(visible.contains("Press esc to go back"));
 
@@ -364,9 +416,9 @@ fn credential_entries_share_region_and_keep_aws_secrets_hidden() {
     });
     access_keys.view = BedrockView::AccessKeyEntry {
         values: [
-            "AKIAEXAMPLE".to_string(),
-            "secret-value".to_string(),
-            "session-value".to_string(),
+            "AKIAEXAMPLE".into(),
+            "secret-value".into(),
+            "session-value".into(),
         ],
         selected_field: 1,
     };
@@ -408,7 +460,18 @@ fn credential_entries_share_region_and_keep_aws_secrets_hidden() {
     assert!(!visible.contains("secret-value"));
     assert!(!visible.contains("session-value"));
 
-    access_keys.view = BedrockView::ApiKeyEntry("bedrock-api-key".to_string());
+    access_keys.view = BedrockView::ApiKeyEntry("old-key".into());
+    access_keys.handle_key_event(&KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    for _ in 0..3 {
+        access_keys.handle_key_event(&KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    }
+    access_keys.handle_key_event(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    access_keys.active_input_mut().unwrap().paste("bedrock-api");
+    assert_eq!(
+        access_keys.active_input_mut().unwrap().value().as_deref(),
+        Some("bedrock-api-key")
+    );
+    access_keys.handle_key_event(&KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
     let visible = render_visible(&access_keys);
     insta::assert_snapshot!(visible, @r###"
     > Set up Amazon Bedrock
@@ -424,7 +487,7 @@ fn credential_entries_share_region_and_keep_aws_secrets_hidden() {
     access_keys.handle_key_event(&KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
     assert!(render_visible(&access_keys).contains("Bedrock API key: •••••••••••••••z"));
 
-    access_keys.view = BedrockView::ProfileEntry("engineering".to_string());
+    access_keys.view = BedrockView::ProfileEntry("engineering".into());
     insta::assert_snapshot!(render_visible(&access_keys), @r###"
     > Set up Amazon Bedrock
 
@@ -436,7 +499,7 @@ fn credential_entries_share_region_and_keep_aws_secrets_hidden() {
       Press esc to go back
     "###);
 
-    access_keys.enter_region(BedrockCredential::Environment, "us-west-1".to_string());
+    access_keys.enter_region(BedrockCredential::Environment, "us-west-1");
     insta::assert_snapshot!(render_visible(&access_keys), @r###"
     > Set up Amazon Bedrock
 
@@ -452,7 +515,7 @@ fn credential_entries_share_region_and_keep_aws_secrets_hidden() {
     insta::assert_snapshot!(render_visible(&access_keys), @r###"
     > Set up Amazon Bedrock
 
-      Configure AWS credentials in your environment, then restart Codex.
+      Export AWS credentials, then run `codex --no-daemon` in that shell.
 
       Setup guide: https://learn.chatgpt.com/docs/amazon-bedrock
 
@@ -464,11 +527,11 @@ fn credential_entries_share_region_and_keep_aws_secrets_hidden() {
     "###);
 
     for view in [
-        BedrockView::ProfileEntry(String::new()),
-        BedrockView::ApiKeyEntry(String::new()),
+        BedrockView::ProfileEntry(ProviderInput::default()),
+        BedrockView::ApiKeyEntry(ProviderInput::default()),
         BedrockView::RegionEntry {
             credential: BedrockCredential::Environment,
-            value: String::new(),
+            value: ProviderInput::default(),
         },
         BedrockView::AccessKeyEntry {
             values: Default::default(),
@@ -489,10 +552,10 @@ fn credential_entries_share_region_and_keep_aws_secrets_hidden() {
         },
         BedrockCredential::ApiKey("bedrock-api-key".to_string()),
     ] {
-        access_keys.enter_region(credential, "us-west-1".to_string());
+        access_keys.enter_region(credential, "us-west-1");
         assert!(matches!(
             &access_keys.view,
-            BedrockView::RegionEntry { value, .. } if value == "us-west-1"
+            BedrockView::RegionEntry { value, .. } if value.value().as_deref() == Some("us-west-1")
         ));
     }
 }

@@ -16,7 +16,7 @@ use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::RequestId;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
@@ -26,6 +26,7 @@ use codex_app_server_protocol::TurnSteerResponse;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS;
 use core_test_support::skip_if_remote;
+use pretty_assertions::assert_eq;
 use serde_json::Value;
 use std::collections::HashMap;
 use tempfile::TempDir;
@@ -72,6 +73,7 @@ async fn turn_steer_requires_active_turn() -> Result<()> {
                 text_elements: Vec::new(),
             }],
             responsesapi_client_metadata: None,
+            responsesapi_client_metadata_patch: None,
             additional_context: None,
             expected_turn_id: "turn-does-not-exist".to_string(),
         })
@@ -97,6 +99,41 @@ async fn turn_steer_requires_active_turn() -> Result<()> {
         serde_json::Value::Null
     );
     assert_eq!(event["event_params"]["rejection_reason"], "no_active_turn");
+
+    let malformed_request = mcp
+        .send_turn_steer_request(TurnSteerParams {
+            thread_id: thread.id,
+            client_user_message_id: None,
+            input: vec![V2UserInput::Text {
+                text: "rejected input".to_owned(),
+                text_elements: Vec::new(),
+            }],
+            responsesapi_client_metadata: None,
+            responsesapi_client_metadata_patch: None,
+            additional_context: Some(HashMap::from([(
+                "browser_info".to_owned(),
+                AdditionalContextEntry {
+                    value: "rejected context".to_owned(),
+                    kind: AdditionalContextKind::Untrusted,
+                    name: Some("agent.browser".to_owned()),
+                },
+            )])),
+            expected_turn_id: "turn-does-not-exist".to_owned(),
+        })
+        .await?;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(malformed_request)),
+    )
+    .await??;
+    assert_eq!(
+        error.error,
+        codex_app_server_protocol::JSONRPCErrorError {
+            code: -32600,
+            message: "additional context name must match [a-z][a-z0-9_]{0,63}".to_owned(),
+            data: None,
+        }
+    );
 
     Ok(())
 }
@@ -185,6 +222,7 @@ async fn turn_steer_rejects_oversized_text_input() -> Result<()> {
                 text_elements: Vec::new(),
             }],
             responsesapi_client_metadata: None,
+            responsesapi_client_metadata_patch: None,
             additional_context: None,
             expected_turn_id: turn.id.clone(),
         })
@@ -214,8 +252,10 @@ async fn turn_steer_rejects_oversized_text_input() -> Result<()> {
     Ok(())
 }
 
+#[test_case::test_case(false; "legacy_context")]
+#[test_case::test_case(true; "named_context")]
 #[tokio::test]
-async fn turn_steer_returns_active_turn_id() -> Result<()> {
+async fn turn_steer_returns_active_turn_id(tool_outputs: bool) -> Result<()> {
     // TODO(anp): Remove after the active-turn fixture can run in the selected remote environment.
     skip_if_remote!(
         Ok(()),
@@ -263,6 +303,10 @@ async fn turn_steer_returns_active_turn_id() -> Result<()> {
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
             model: Some("mock-model".to_string()),
+            config: Some(HashMap::from([(
+                "features.untrusted_as_tool_output".to_owned(),
+                serde_json::json!(tool_outputs),
+            )])),
             ..Default::default()
         })
         .await?;
@@ -300,7 +344,15 @@ async fn turn_steer_returns_active_turn_id() -> Result<()> {
                     text_elements: Vec::new(),
                 }],
                 responsesapi_client_metadata: None,
-                additional_context: None,
+                responsesapi_client_metadata_patch: None,
+                additional_context: Some(HashMap::from([(
+                    "browser_info".to_owned(),
+                    AdditionalContextEntry {
+                        value: "tab one".to_owned(),
+                        kind: AdditionalContextKind::Untrusted,
+                        name: Some("browser".to_owned()),
+                    },
+                )])),
                 expected_turn_id: turn.id.clone(),
             },
         })
@@ -315,9 +367,9 @@ async fn turn_steer_returns_active_turn_id() -> Result<()> {
             let params = notification.params.expect("item/started params");
             let item_started: ItemStartedNotification =
                 serde_json::from_value(params).expect("deserialize item/started notification");
-            let ThreadItem::UserMessage {
+            let ThreadItemPayload::UserMessage {
                 client_id, content, ..
-            } = item_started.item
+            } = item_started.item.payload
             else {
                 continue;
             };
@@ -353,6 +405,44 @@ async fn turn_steer_returns_active_turn_id() -> Result<()> {
         mcp.read_stream_until_notification_message("turn/completed"),
     )
     .await??;
+
+    let requests = server
+        .received_requests()
+        .await
+        .context("recorded requests")?;
+    let body = requests
+        .iter()
+        .rfind(|request| request.url.path().ends_with("/responses"))
+        .context("model request after steering")?
+        .body_json::<Value>()?;
+    let input = body["input"].as_array().context("input array")?;
+    let context_index = if tool_outputs {
+        input.iter().position(|item| {
+            item["type"] == "function_call_output"
+                && item["namespace"] == "agent"
+                && item["name"] == "browser"
+                && item["output"] == "tab one"
+        })
+    } else {
+        input.iter().position(|item| {
+            item["content"].as_array().is_some_and(|content| {
+                content.iter().any(|part| {
+                    part["text"] == "<external_browser_info>tab one</external_browser_info>"
+                })
+            })
+        })
+    }
+    .context("steered context")?;
+    let user_index = input
+        .iter()
+        .position(|item| {
+            item["role"] == "user"
+                && item["content"]
+                    .as_array()
+                    .is_some_and(|content| content.iter().any(|part| part["text"] == "steer"))
+        })
+        .context("steered user input")?;
+    assert!(context_index < user_index);
 
     Ok(())
 }
@@ -427,6 +517,7 @@ async fn turn_steer_rejects_context_only_input_without_merging_context() -> Resu
         AdditionalContextEntry {
             value: "tab one".to_string(),
             kind: AdditionalContextKind::Untrusted,
+            name: None,
         },
     )]));
     let steer_req = mcp
@@ -435,6 +526,7 @@ async fn turn_steer_rejects_context_only_input_without_merging_context() -> Resu
             client_user_message_id: None,
             input: Vec::new(),
             responsesapi_client_metadata: None,
+            responsesapi_client_metadata_patch: None,
             additional_context,
             expected_turn_id: turn.id,
         })
@@ -465,11 +557,7 @@ async fn turn_steer_rejects_context_only_input_without_merging_context() -> Resu
     let body = response_requests[1]
         .body_json::<Value>()
         .context("request body should be JSON")?;
-    assert!(
-        !body
-            .to_string()
-            .contains("<external_browser_info>tab one</external_browser_info>")
-    );
+    assert!(!body.to_string().contains("tab one"));
 
     Ok(())
 }

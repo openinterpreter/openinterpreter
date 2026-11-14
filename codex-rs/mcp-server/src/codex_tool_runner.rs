@@ -106,7 +106,7 @@ pub async fn run_codex_tool_session(
         .start_turn_if_idle(prompt_request(initial_prompt))
         .await
     {
-        Ok(StartIfIdleSubmission::Started { turn_id }) => turn_id,
+        Ok(StartIfIdleSubmission::Started { turn_id, .. }) => turn_id,
         Ok(StartIfIdleSubmission::NotSubmitted { reason }) => {
             tracing::error!("Failed to submit initial prompt: {reason:?}");
             let result = create_call_tool_result_with_thread_id(
@@ -142,8 +142,22 @@ pub async fn run_codex_tool_session_reply(
     active_turns: Arc<ActiveTurnRegistry>,
 ) {
     let turn_id = match thread.start_or_steer_turn(prompt_request(prompt)).await {
-        Ok(TurnInputSubmission::Started { turn_id } | TurnInputSubmission::Steered { turn_id }) => {
-            turn_id
+        Ok(
+            TurnInputSubmission::Started { turn_id, .. }
+            | TurnInputSubmission::Steered { turn_id, .. },
+        ) => turn_id,
+        Ok(TurnInputSubmission::Accepted) => {
+            // This user-input route must provide a turn ID before the MCP call
+            // can register its event stream; do not invent an active turn.
+            outgoing.send_response(
+                request_id.clone(),
+                create_call_tool_result_with_thread_id(
+                    thread_id,
+                    "User input was accepted without a turn ID".to_string(),
+                    Some(true),
+                ),
+            );
+            return;
         }
         Ok(TurnInputSubmission::NotSubmitted { reason }) => {
             tracing::error!("Failed to submit user input: {reason:?}");
@@ -375,6 +389,9 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::RealtimeConversationSdp(_)
                     | EventMsg::RealtimeConversationRealtime(_)
                     | EventMsg::RealtimeConversationClosed(_)
+                    | EventMsg::NetworkApprovalResolved { .. }
+                    | EventMsg::ElicitationAbandoned(_)
+                    | EventMsg::PrivateSessionEvent(_)
                     | EventMsg::DeprecationNotice(_) => {
                         // For now, we do not do anything extra for these
                         // events. Note that

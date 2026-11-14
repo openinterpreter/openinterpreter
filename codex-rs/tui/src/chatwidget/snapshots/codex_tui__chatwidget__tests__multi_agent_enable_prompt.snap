@@ -2,8 +2,8 @@
 source: tui/src/chatwidget/tests/popups_and_settings.rs
 expression: "render_bottom_popup(&chat, 80)"
 ---
-  Enable subagents?
-  Subagents are disabled in this TUI session.
+      Enable subagents?
+› As  Subagents are disabled in this TUI session.
 
 
 › 1. Yes, enable  Save on the server for new threads. This thread is unchanged.

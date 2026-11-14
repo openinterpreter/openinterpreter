@@ -34,6 +34,10 @@ fn user_cell(message: &str) -> Arc<dyn HistoryCell> {
 
 fn attach_thread(app: &mut App, thread_id: ThreadId) {
     app.chat_widget.handle_thread_session(ThreadSessionState {
+        read_only_history: false,
+        thread_settings_confirmed: true,
+        daybreak_enabled: false,
+        primary_environment_cwd: None,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
@@ -457,6 +461,7 @@ async fn owned_details_escape_interrupts_work_without_starting_backtrack() -> Re
             thread_id: thread_id.to_string(),
             turn: codex_app_server_protocol::Turn {
                 id: "active-turn".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: codex_app_server_protocol::TurnStatus::InProgress,

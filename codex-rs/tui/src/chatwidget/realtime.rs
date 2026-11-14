@@ -2,8 +2,14 @@
 //! Completed captions and both speakers' partials stay bounded across widget replacement.
 //! Interleaved speakers retain separate displays so settled caption text never reanimates.
 
+mod failure_metrics;
+#[path = "realtime_navigation.rs"]
+mod navigation;
 mod recording_controls;
+mod session_lock;
 mod transcript_replay;
+
+pub(crate) use failure_metrics::RealtimeFailureCause;
 
 use super::ChatWidget;
 use super::HistoryCell;
@@ -17,7 +23,8 @@ use crate::bottom_pane::VoiceStripState;
 use crate::history_cell;
 use crate::key_hint::KeyBindingListExt;
 use crate::motion::MotionMode;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload as ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::UserInput;
 use codex_features::Feature;
 use codex_protocol::ThreadId;
@@ -61,6 +68,7 @@ const INTERRUPTION_ACKNOWLEDGMENT: Duration = Duration::from_millis(400);
 static NEXT_REALTIME_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_REALTIME_SPEECH_DELIVERY_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone)]
 struct PendingRealtimeSpeech {
     state: PendingSpeechState,
     captioned: bool,
@@ -216,10 +224,10 @@ pub(crate) fn realtime_delegation_input(items: &[UserInput]) -> Option<&str> {
 }
 
 pub(crate) fn is_private_realtime_agent_item(item: &ThreadItem) -> bool {
-    if matches!(item, ThreadItem::Reasoning { .. }) {
+    if matches!(item, ThreadItemPayload::Reasoning { .. }) {
         return true;
     }
-    let ThreadItem::AgentMessage { text, phase, .. } = item else {
+    let ThreadItemPayload::AgentMessage { text, phase, .. } = item else {
         return false;
     };
     let text = text.trim_start();
@@ -355,7 +363,7 @@ impl ChatWidget {
                 return;
             };
             if !self.submit_op(AppCommand::RealtimeConversationStop { thread_id }) {
-                self.record_realtime_failure();
+                self.record_realtime_failure(RealtimeFailureCause::AppServerRequest);
                 self.reset_realtime_conversation();
             }
         } else {
@@ -393,6 +401,7 @@ impl ChatWidget {
             && let Err(error) = offer.handle.set_microphone_muted(/*muted*/ true)
         {
             offer.handle.close();
+            self.record_realtime_failure(RealtimeFailureCause::AudioControls);
             self.on_realtime_error(format!("Failed to restore microphone mute: {error}"));
             return;
         }
@@ -405,7 +414,7 @@ impl ChatWidget {
             thread_id,
             offer_sdp: offer.offer_sdp.into(),
         }) {
-            self.record_realtime_failure();
+            self.record_realtime_failure(RealtimeFailureCause::AppServerRequest);
             self.reset_realtime_conversation();
         }
     }
@@ -462,7 +471,7 @@ impl ChatWidget {
                 self.realtime_conversation.startup_retry = StartupRetry::WaitingForStop;
                 self.refresh_terminal_title();
                 if !self.submit_op(AppCommand::RealtimeConversationStop { thread_id }) {
-                    self.record_realtime_failure();
+                    self.record_realtime_failure(RealtimeFailureCause::AppServerRequest);
                     self.reset_realtime_conversation();
                 } else {
                     self.add_info_message(
@@ -472,7 +481,9 @@ impl ChatWidget {
                 }
                 return;
             }
-            self.on_realtime_error(format!("Failed to connect voice mode: {error}"));
+            let message = format!("Failed to connect voice mode: {error}");
+            self.record_realtime_failure(error.into());
+            self.on_realtime_error(message);
             return;
         }
 
@@ -791,7 +802,7 @@ impl ChatWidget {
         item: &ThreadItem,
         from_replay: bool,
     ) -> bool {
-        let ThreadItem::AgentMessage {
+        let ThreadItemPayload::AgentMessage {
             id: item_id,
             text,
             phase,
@@ -875,7 +886,7 @@ impl ChatWidget {
     }
 
     pub(super) fn speak_completed_realtime_delegation(&mut self, turn_id: &str, item: &ThreadItem) {
-        let ThreadItem::AgentMessage {
+        let ThreadItemPayload::AgentMessage {
             id: item_id, text, ..
         } = item
         else {
@@ -949,7 +960,7 @@ impl ChatWidget {
             .iter_mut()
             .position(|pending| {
                 pending.turn_id == turn_id
-                    && matches!(&pending.item, ThreadItem::AgentMessage { id, .. } if id == item_id)
+                    && matches!(&pending.item, ThreadItemPayload::AgentMessage { id, .. } if id == item_id)
                     && pending.state == PendingSpeechState::AwaitingTurn
             });
         let index = match index {
@@ -1173,7 +1184,7 @@ impl ChatWidget {
         self.realtime_conversation.pending_speech.retain(|pending| {
             pending.turn_id != turn_id
                 || pending.state != PendingSpeechState::AwaitingTurn
-                || !matches!(&pending.item, ThreadItem::AgentMessage { id, .. } if id == item_id)
+                || !matches!(&pending.item, ThreadItemPayload::AgentMessage { id, .. } if id == item_id)
         });
     }
 
@@ -1445,7 +1456,7 @@ impl ChatWidget {
                             !delivery.captioned
                                 && delivery.input_generation == caption_generation
                                 && delivery.state != PendingSpeechState::AwaitingTurn
-                                && matches!(&delivery.item, ThreadItem::AgentMessage { text: answer, .. }
+                                && matches!(&delivery.item, ThreadItemPayload::AgentMessage { text: answer, .. }
                                     if answer.trim().strip_prefix("[FINAL]").unwrap_or(answer.trim())
                                         .split_whitespace().eq(text.split_whitespace()))
                         })
@@ -1616,17 +1627,6 @@ impl ChatWidget {
         cells
     }
 
-    pub(crate) fn record_realtime_failure(&mut self) {
-        if self.realtime_conversation.phase == RealtimeConversationPhase::Inactive
-            || self.realtime_conversation.failure_recorded
-        {
-            return;
-        }
-        self.realtime_conversation.failure_recorded = true;
-        self.session_telemetry
-            .counter("codex.voice.session.failure", /*inc*/ 1, &[]);
-    }
-
     pub(super) fn realtime_retry_cleanup_pending(&self) -> bool {
         self.realtime_conversation.startup_retry == StartupRetry::WaitingForStop
     }
@@ -1638,7 +1638,7 @@ impl ChatWidget {
         if self.realtime_conversation.phase != RealtimeConversationPhase::Stopping
             || self.realtime_retry_cleanup_pending()
         {
-            self.record_realtime_failure();
+            self.record_realtime_failure(RealtimeFailureCause::Backend);
         }
         self.stop_realtime_conversation();
         self.add_error_message(message);
@@ -1677,7 +1677,13 @@ impl ChatWidget {
         if retry_thread_id.is_none()
             && (reason.is_none() || matches!(reason.as_deref(), Some("transport_closed" | "error")))
         {
-            self.record_realtime_failure();
+            let cause = match reason.as_deref() {
+                Some("transport_closed") => RealtimeFailureCause::TransportClosed,
+                Some("error") => RealtimeFailureCause::Backend,
+                None => RealtimeFailureCause::UnknownClose,
+                Some(_) => RealtimeFailureCause::Backend,
+            };
+            self.record_realtime_failure(cause);
         }
         let failed = self.realtime_conversation.failure_recorded;
         self.reset_realtime_conversation();

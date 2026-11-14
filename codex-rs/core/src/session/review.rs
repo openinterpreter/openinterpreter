@@ -1,8 +1,6 @@
-use super::step_context::StepInputs;
 use super::step_settings::ResolvedStepSettings;
 use super::*;
-use arc_swap::ArcSwap;
-use std::sync::atomic::AtomicBool;
+use codex_protocol::openai_models::ModelOrigin;
 
 /// Spawn a review thread using the given prompt.
 pub(super) async fn spawn_review_thread(
@@ -35,16 +33,8 @@ pub(super) async fn spawn_review_thread(
     let _ = review_features.disable(Feature::WebSearchCached);
     let _ = review_features.disable(Feature::Goals);
     let review_web_search_mode = WebSearchMode::Disabled;
-    let unified_exec_shell_mode = UnifiedExecShellMode::for_session(
-        review_features.get(),
-        crate::tools::tool_user_shell_type(sess.services.user_shell.as_ref()),
-        sess.services.shell_zsh_path.as_ref(),
-        sess.services.main_execve_wrapper_exe.as_ref(),
-    );
 
     let review_prompt = resolved.prompt.clone();
-    let provider = parent_turn_context.provider.clone();
-    let auth_manager = parent_turn_context.auth_manager.clone();
     let model_info = review_model_info.clone();
     let mut selected = parent_turn_context.initial_settings.selected().clone();
     let mut reasoning_effort = selected.collaboration_mode.reasoning_effort();
@@ -56,7 +46,7 @@ pub(super) async fn spawn_review_thread(
     per_turn_config.features = review_features.clone();
     if let Some(current_effort) = reasoning_effort.as_ref()
         && review_model_info.slug != parent_turn_context.model_info().slug
-        && !review_model_info.used_fallback_model_metadata
+        && review_model_info.origin != ModelOrigin::Synthetic
         && !review_model_info
             .supported_reasoning_levels
             .iter()
@@ -78,8 +68,6 @@ pub(super) async fn spawn_review_thread(
         );
     }
 
-    let auth_manager_for_context = auth_manager.clone();
-    let provider_for_context = provider.clone();
     let session_source = parent_turn_context.session_source.clone();
     let (forked_from_thread_id, thread_source, service_tier) = {
         let state = sess.state.lock().await;
@@ -106,13 +94,11 @@ pub(super) async fn spawn_review_thread(
     let step_settings = Arc::new(ResolvedStepSettings::new(
         Arc::new(selected),
         Arc::new(model_info.clone()),
-        review_features.enabled(Feature::FastMode),
+        &review_features,
     ));
     per_turn_config.model = Some(model);
     per_turn_config.model_reasoning_effort = reasoning_effort;
     per_turn_config.service_tier = step_settings.service_tier.clone();
-    let session_telemetry_for_context =
-        step_settings.telemetry(&parent_turn_context.session_telemetry);
     let per_turn_config = Arc::new(per_turn_config);
     let review_turn_id = sub_id.to_string();
     #[allow(deprecated)]
@@ -122,7 +108,9 @@ pub(super) async fn spawn_review_thread(
         .map(TurnEnvironment::windows_sandbox_selection_for_turn_metadata)
         .unwrap_or_else(|| {
             crate::tools::sandboxing::configured_windows_sandbox_selection(
-                parent_turn_context.config.permissions.windows_sandbox_type,
+                parent_turn_context
+                    .config
+                    .effective_local_windows_sandbox_type(),
                 parent_turn_context.windows_sandbox_level,
                 &codex_utils_path_uri::PathUri::from_abs_path(&parent_turn_context.cwd),
             )
@@ -144,60 +132,17 @@ pub(super) async fn spawn_review_thread(
         &model_info,
     ));
 
-    let extension_data = Arc::new(codex_extension_api::ExtensionData::new(
-        review_turn_id.clone(),
-    ));
-    extension_data.insert(parent_turn_context.skills_snapshot().as_ref().clone());
-
-    let review_turn_context = TurnContext {
-        sub_id: review_turn_id.clone(),
-        trace_id: current_span_trace_id(),
-        realtime_active: parent_turn_context.realtime_active,
-        code_mode_available: parent_turn_context.code_mode_available,
-        configured_token_budget: per_turn_config.token_budget.clone(),
-        use_model_token_budget_defaults: per_turn_config.features.enabled(Feature::TokenBudget)
-            && !super::token_budget::has_explicit_settings(&per_turn_config),
-        config: per_turn_config,
-        auth_manager: auth_manager_for_context,
-        initial_settings: Arc::clone(&step_settings),
-        disabled_plugin_ids: parent_turn_context.disabled_plugin_ids.clone(),
-        active_host_plugin_identities: None,
-        next_step_input: ArcSwap::from_pointee(StepInputs {
-            settings: step_settings,
-            environments: parent_turn_context.initial_environments.clone(),
-        }),
-        session_telemetry: session_telemetry_for_context,
-        provider: provider_for_context,
-        session_source,
-        history_mode: parent_turn_context.history_mode,
-        parent_thread_id: parent_turn_context.parent_thread_id,
-        originator: parent_turn_context.originator.clone(),
-        initial_environments: parent_turn_context.initial_environments.clone(),
+    let review_turn_context = parent_turn_context.for_review(
+        review_turn_id,
+        per_turn_config,
+        step_settings,
         available_models,
-        unified_exec_shell_mode,
-        current_date: parent_turn_context.current_date.clone(),
-        timezone: parent_turn_context.timezone.clone(),
-        app_server_client_name: parent_turn_context.app_server_client_name.clone(),
-        developer_instructions: None,
-        multi_agent_version: MultiAgentVersion::Disabled,
-        network: parent_turn_context.network.clone(),
-        windows_sandbox_level: parent_turn_context.windows_sandbox_level,
-        #[allow(deprecated)]
-        cwd: parent_turn_context.cwd.clone(),
-        final_output_json_schema: None,
-        dynamic_tools: parent_turn_context.dynamic_tools.clone(),
         turn_metadata_state,
-        extension_data,
-        turn_timing_state: Arc::new(TurnTimingState::default()),
-        terminal_error: Arc::new(Mutex::new(None)),
-        server_model_warning_emitted: AtomicBool::new(false),
-        model_verification_emitted: AtomicBool::new(false),
-        cyber_access_program: None,
-    };
+    );
 
     // Seed the child task with the review prompt as the initial user message.
     let input = vec![TurnInput::UserInput {
-        acceptance_order: None,
+        metadata: Default::default(),
         content: vec![UserInput::Text {
             text: review_prompt,
             // Review prompt is synthesized; no UI element ranges to preserve.
@@ -214,11 +159,8 @@ pub(super) async fn spawn_review_thread(
         tc.turn_metadata_state
             .spawn_git_enrichment_task(Arc::clone(&sess.services.git_root_discovery));
     }
-    // TODO(ccunningham): Review turns currently rely on `spawn_task` for TurnComplete but do not
-    // emit a parent TurnStarted. Consider giving review a full parent turn lifecycle
-    // (TurnStarted + TurnComplete) for consistency with other standalone tasks.
-    sess.spawn_task(Arc::clone(&tc), input, ReviewTask::new())
-        .await;
+    sess.abort_all_tasks(TurnAbortReason::Replaced).await;
+    sess.clear_connector_selection().await;
 
     // Announce entering review mode so UIs can switch modes.
     let item = TurnItem::EnteredReviewMode(EnteredReviewModeItem {
@@ -228,4 +170,10 @@ pub(super) async fn spawn_review_thread(
     });
     sess.emit_turn_item_started(&tc, &item).await;
     sess.emit_turn_item_completed(&tc, item).await;
+
+    // TODO(ccunningham): Review turns currently rely on `spawn_task` for TurnComplete but do not
+    // emit a parent TurnStarted. Consider giving review a full parent turn lifecycle
+    // (TurnStarted + TurnComplete) for consistency with other standalone tasks.
+    sess.start_task(Arc::clone(&tc), input, ReviewTask::new())
+        .await;
 }

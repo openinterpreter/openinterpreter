@@ -10,9 +10,9 @@ impl ChatWidget {
         current: Option<RealtimeVoice>,
         voices: RealtimeVoicesList,
     ) {
-        // The TUI uses V3, which shares the V1 voice catalog.
+        // The TUI uses V3, whose catalog may differ from V1.
         let items = voices
-            .v1
+            .v3
             .into_iter()
             .map(|voice| SelectionItem {
                 name: voice.wire_name().to_string(),

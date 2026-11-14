@@ -25,6 +25,12 @@ const FOCUS_PROBE_INPUT: &str = "focus-palette-24527";
 #[path = "tui_mode_picker_tests.rs"]
 mod tui_mode_picker;
 
+#[path = "external_editor_tests.rs"]
+mod external_editor_tests;
+
+#[path = "gov_cloud_guidance_tests.rs"]
+mod gov_cloud_guidance_tests;
+
 #[test]
 fn focus_gained_with_unanswered_palette_queries_preserves_immediate_input() -> Result<()> {
     let repo_root = codex_utils_cargo_bin::repo_root()?;
@@ -274,6 +280,7 @@ fn fullscreen_transcript_defaults_to_terminal_scrollback() -> Result<()> {
 
 pub(super) struct PtyCodex {
     master: File,
+    slave: File,
     child: Child,
     parser: vt100::Parser,
     output: Vec<u8>,
@@ -357,12 +364,13 @@ impl PtyCodex {
             .env("CODEX_HOME", codex_home.path())
             .stdin(stdin)
             .stdout(stdout)
-            .stderr(slave)
+            .stderr(slave.try_clone()?)
             .spawn()
             .context("start Codex in focus-test pseudo-terminal")?;
 
         Ok(Self {
             master,
+            slave,
             child,
             parser: vt100::Parser::new(
                 /*rows*/ 32, /*cols*/ 120, /*scrollback_len*/ 0,

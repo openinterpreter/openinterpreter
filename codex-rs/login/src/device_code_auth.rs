@@ -1,4 +1,5 @@
-use reqwest::StatusCode;
+use codex_http_client::HttpClient;
+use http::StatusCode;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::Deserializer;
@@ -6,7 +7,7 @@ use serde::de::{self};
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::default_client::build_raw_auth_reqwest_client;
+use crate::default_client::create_raw_auth_client;
 use crate::pkce::PkceCodes;
 use crate::server::ServerOptions;
 use std::io;
@@ -60,7 +61,7 @@ struct CodeSuccessResp {
 
 /// Request the user code and polling interval.
 async fn request_user_code(
-    client: &reqwest::Client,
+    client: &HttpClient,
     auth_base_url: &str,
     client_id: &str,
 ) -> std::io::Result<UserCodeResp> {
@@ -97,7 +98,7 @@ async fn request_user_code(
 
 /// Poll token endpoint until a code is issued or timeout occurs.
 async fn poll_for_token(
-    client: &reqwest::Client,
+    client: &HttpClient,
     auth_base_url: &str,
     device_auth_id: &str,
     user_code: &str,
@@ -163,10 +164,11 @@ fn print_device_code_prompt(verification_url: &str, code: &str) {
 
 pub async fn request_device_code(opts: &ServerOptions) -> std::io::Result<DeviceCode> {
     let base_url = opts.issuer.trim_end_matches('/');
-    // The route selected for the issuer is reused for all device-auth endpoint paths; the endpoint
-    // paths are not resolved separately.
-    let client = build_raw_auth_reqwest_client(base_url, &opts.auth_route_config)?;
     let api_base_url = format!("{base_url}/api/accounts");
+    let client = create_raw_auth_client(
+        &format!("{api_base_url}/deviceauth/usercode"),
+        &opts.auth_route_config,
+    )?;
     let uc = request_user_code(&client, &api_base_url, &opts.client_id).await?;
 
     Ok(DeviceCode {
@@ -182,8 +184,11 @@ pub async fn complete_device_code_login(
     device_code: DeviceCode,
 ) -> std::io::Result<()> {
     let base_url = opts.issuer.trim_end_matches('/');
-    let client = build_raw_auth_reqwest_client(base_url, &opts.auth_route_config)?;
     let api_base_url = format!("{base_url}/api/accounts");
+    let client = create_raw_auth_client(
+        &format!("{api_base_url}/deviceauth/token"),
+        &opts.auth_route_config,
+    )?;
 
     let code_resp = poll_for_token(
         &client,
@@ -218,16 +223,7 @@ pub async fn complete_device_code_login(
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, message));
     }
 
-    crate::server::persist_tokens_async(
-        &opts.codex_home,
-        /*api_key*/ None,
-        tokens.id_token,
-        tokens.access_token,
-        tokens.refresh_token,
-        opts.cli_auth_credentials_store_mode,
-        opts.auth_keyring_backend_kind,
-    )
-    .await
+    crate::server::persist_tokens_async(&opts, /*api_key*/ None, &tokens).await
 }
 
 pub async fn run_device_code_login(opts: ServerOptions) -> std::io::Result<()> {

@@ -14,6 +14,7 @@ use std::io;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 #[cfg(unix)]
@@ -29,6 +30,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 use tokio::io::BufWriter;
 
+use super::MigrationLocks;
 use super::migration_error;
 use crate::ThreadStoreResult;
 
@@ -90,10 +92,13 @@ fn staged_path(rollout_path: &Path, suffix: &str) -> ThreadStoreResult<PathBuf> 
 pub(super) async fn decompress_rollout_to_path(
     compressed_path: &Path,
     plain_path: &Path,
+    locks: &Arc<MigrationLocks>,
 ) -> ThreadStoreResult<()> {
     let compressed_path = compressed_path.to_path_buf();
     let plain_path = plain_path.to_path_buf();
+    let locks = Arc::clone(locks);
     tokio::task::spawn_blocking(move || -> io::Result<()> {
+        let _locks = locks;
         let input = std::fs::File::open(compressed_path)?;
         let mut decoder = zstd::stream::read::Decoder::new(input)?;
         let mut options = std::fs::OpenOptions::new();
@@ -116,10 +121,13 @@ pub(super) async fn compress_rollout_to_path(
     compressed_path: &Path,
     permissions: Permissions,
     modified_at: Option<SystemTime>,
+    locks: &Arc<MigrationLocks>,
 ) -> ThreadStoreResult<()> {
     let plain_path = plain_path.to_path_buf();
     let compressed_path = compressed_path.to_path_buf();
+    let locks = Arc::clone(locks);
     tokio::task::spawn_blocking(move || -> io::Result<()> {
+        let _locks = locks;
         let mut input = std::fs::File::open(plain_path)?;
         let output = std::fs::OpenOptions::new()
             .create(true)

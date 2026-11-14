@@ -1,9 +1,25 @@
-load("//:defs.bzl", "codex_rust_crate")
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("//:defs.bzl", "WINDOWS_RUSTC_LINK_FLAGS", "codex_rust_crate")
+load("//bazel/rules:schema_bundle.bzl", "schema_sources")
+
+schema_sources(
+    name = "schema-sources",
+    srcs = glob(["src/**/*.rs"]),
+    schema = "//bazel/schema:app-server",
+)
+
+filegroup(
+    name = "schema-precomputed",
+    srcs = [":schema-sources"],
+    output_group = "precomputed",
+)
 
 codex_rust_crate(
     name = "app-server-protocol",
-    compile_data = glob(["schema/precomputed/**"]),
+    compile_data = [":schema-precomputed"],
     crate_name = "codex_app_server_protocol",
+    crate_srcs = [":schema-sources"],
     test_data_extra = glob(
         ["schema/**"],
         allow_empty = True,
@@ -16,4 +32,55 @@ alias(
     actual = ":app-server-protocol-unit-tests-bin",
     tags = ["manual"],
     visibility = ["//bazel/schema:__pkg__"],
+)
+
+schema_sources(
+    name = "schema-generator-sources",
+    srcs = ["schema_generator.rs"] + glob(["src/**/*.rs"]),
+    crate_root = "schema_generator.rs",
+    tags = ["manual"],
+)
+
+filegroup(
+    name = "schema-generator-root",
+    srcs = [":schema-generator-sources"],
+    output_group = "crate_root",
+    tags = ["manual"],
+)
+
+filegroup(
+    name = "schema-generator-placeholders",
+    srcs = [":schema-generator-sources"],
+    output_group = "precomputed",
+    tags = ["manual"],
+)
+
+# Compile the test-only schema derives without registering or compiling tests.
+rust_binary(
+    name = "schema-generator-on-demand",
+    srcs = [":schema-generator-sources"],
+    compile_data = [":schema-generator-placeholders"],
+    crate_name = "codex_app_server_protocol",
+    crate_root = ":schema-generator-root",
+    edition = "2024",
+    rustc_env = {
+        "BAZEL_PACKAGE": "codex-rs/app-server-protocol",
+        "CARGO_PKG_NAME": "codex-app-server-protocol",
+    },
+    # This short-lived exporter sits on application builds' critical path. Avoid
+    # optimizing the exporter, retaining exec-mode assertion behavior.
+    rustc_flags = [
+        "--cfg=test",
+        "-Copt-level=0",
+        "-Cdebug-assertions=no",
+        # Debug metadata is unused by this short-lived build tool.
+        "-Cdebuginfo=0",
+        "-Cstrip=debuginfo",
+    ] + WINDOWS_RUSTC_LINK_FLAGS,
+    tags = ["manual"],
+    visibility = ["//bazel/schema:__pkg__"],
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
 )

@@ -1,7 +1,10 @@
 use crate::AnnotatedContent;
+use crate::message_from_parts;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
-use codex_protocol::models::InternalChatMessageMetadataPassthrough;
+use codex_protocol::models::ContentItemMetadata;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::models::input_text;
 
 /// A rendered contextual fragment and the role that owns its annotated content.
 #[derive(Clone, Debug, PartialEq)]
@@ -35,20 +38,7 @@ impl RenderedFragment {
 impl From<RenderedFragment> for ResponseItem {
     fn from(fragment: RenderedFragment) -> Self {
         let (role, annotated_content) = fragment.into_parts();
-        let (content, content_kind) = annotated_content.into_parts();
-
-        Self::Message {
-            id: None,
-            role: role.to_string(),
-            content: vec![content],
-            phase: None,
-            internal_chat_message_metadata_passthrough: Some(
-                InternalChatMessageMetadataPassthrough {
-                    content_item_kinds: Some(vec![content_kind]),
-                    ..Default::default()
-                },
-            ),
-        }
+        message_from_parts(role, vec![annotated_content])
     }
 }
 
@@ -56,25 +46,38 @@ impl From<RenderedFragment> for ResponseItem {
 ///
 /// Implementations own the response role and provide the exact fragment body.
 /// Marked fragments also provide start/end markers used to recognize injected
-/// context later. `render()` concatenates markers and body without adding
-/// separators, so implementations should include any whitespace they need
-/// between tags in `body()`. Unmarked fragments should leave both markers empty,
-/// in which case the default helpers render only the body and never match
-/// arbitrary text.
+/// context later. `render()` concatenates markers and `InputText` bodies without
+/// adding separators, so implementations should include any whitespace they need
+/// between tags in `body()`. All other content passes through unchanged. Unmarked
+/// fragments should leave both markers empty and never match arbitrary text.
+/// Producers must enforce size bounds for all model-visible content before rendering.
+/// User-role non-text content is currently classified as ordinary user media because
+/// contextual-user-message recognition relies on text markers.
 pub trait ContextualUserFragment {
     fn role(&self) -> &'static str;
+
+    /// Attribution is supplied when the fragment is produced, never inferred from rendered text.
+    fn content_metadata(&self) -> ContentItemMetadata {
+        ContentItemMetadata::harness()
+    }
+
+    /// Binds producer attribution before this fragment is rendered or persisted.
+    fn with_metadata(self, metadata: ContentItemMetadata) -> AttributedFragment<Self>
+    where
+        Self: Sized,
+    {
+        AttributedFragment {
+            fragment: self,
+            metadata,
+        }
+    }
 
     /// Returns a stable `<feature>.<name>` classification, using `generic` for shared fragments.
     fn content_kind(&self) -> ContentItemKind;
 
-    /// Whether this fragment must be recorded as its own response item.
-    fn requires_separate_message(&self) -> bool {
-        false
-    }
-
     fn markers(&self) -> (&'static str, &'static str);
 
-    fn body(&self) -> String;
+    fn body(&self) -> ContentItem;
 
     fn type_markers() -> (&'static str, &'static str)
     where
@@ -88,21 +91,30 @@ pub trait ContextualUserFragment {
         matches_marked_text(start_marker, end_marker, text)
     }
 
-    fn render(&self) -> String {
+    fn render(&self) -> ContentItem {
         let (start_marker, end_marker) = self.markers();
         let body = self.body();
         if start_marker.is_empty() && end_marker.is_empty() {
             return body;
         }
 
-        format!("{start_marker}{body}{end_marker}")
+        match body {
+            ContentItem::InputText { text } => {
+                input_text(format!("{start_marker}{text}{end_marker}"))
+            }
+            content => content,
+        }
     }
 
     /// Renders the role, model-visible content, and classification together.
     fn render_fragment(&self) -> RenderedFragment {
         RenderedFragment::new(
             self.role(),
-            AnnotatedContent::input_text(self.render(), self.content_kind()),
+            AnnotatedContent::from_parts(
+                self.render(),
+                self.content_kind(),
+                self.content_metadata(),
+            ),
         )
     }
 
@@ -115,6 +127,36 @@ pub trait ContextualUserFragment {
 
     fn into_boxed_response_item(self: Box<Self>) -> ResponseItem {
         ResponseItem::from(self.render_fragment())
+    }
+}
+
+/// A contextual fragment with attribution supplied by its producer.
+pub struct AttributedFragment<F> {
+    fragment: F,
+    metadata: ContentItemMetadata,
+}
+
+impl<F: ContextualUserFragment> ContextualUserFragment for AttributedFragment<F> {
+    fn role(&self) -> &'static str {
+        self.fragment.role()
+    }
+    fn content_kind(&self) -> ContentItemKind {
+        self.fragment.content_kind()
+    }
+    fn markers(&self) -> (&'static str, &'static str) {
+        self.fragment.markers()
+    }
+    fn type_markers() -> (&'static str, &'static str) {
+        F::type_markers()
+    }
+    fn body(&self) -> ContentItem {
+        self.fragment.body()
+    }
+    fn render(&self) -> ContentItem {
+        self.fragment.render()
+    }
+    fn content_metadata(&self) -> ContentItemMetadata {
+        self.metadata.clone()
     }
 }
 

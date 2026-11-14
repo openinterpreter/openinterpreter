@@ -23,3 +23,49 @@ fn drain_rejects_new_work_without_waiting_for_admitted_work() {
     drop(automatic);
     assert_eq!(*active.borrow(), 0);
 }
+
+#[tokio::test]
+async fn account_pause_waits_for_existing_work_and_resumes_on_drop() {
+    let admission = TurnAdmission::default();
+    let in_flight = admission.admit().expect("admitted before pause");
+    let owner = admission.clone();
+    let pause_task = tokio::spawn(async move { owner.pause().await });
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while admission.admit().is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("pause closes admission");
+    assert!(!pause_task.is_finished());
+    drop(in_flight);
+    let pause = pause_task
+        .await
+        .expect("pause task")
+        .expect("exclusive pause");
+    assert!(admission.admit_turn_start().is_none());
+    drop(pause);
+    assert!(admission.admit().is_ok());
+}
+
+#[tokio::test]
+async fn cancelled_pause_restores_admission_without_reopening_drain() {
+    let admission = TurnAdmission::default();
+    let in_flight = admission.admit().expect("admitted before pause");
+    let owner = admission.clone();
+    let pause_task = tokio::spawn(async move { owner.pause().await });
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while admission.admit().is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("pause closes admission");
+    pause_task.abort();
+    let _ = pause_task.await;
+    drop(in_flight);
+    assert!(admission.admit().is_ok());
+    admission.begin_drain();
+    assert!(admission.pause().await.is_err());
+    assert!(admission.admit().is_err());
+}

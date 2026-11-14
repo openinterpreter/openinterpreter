@@ -7,6 +7,7 @@ use crate::test_support::responses_metadata as test_responses_metadata;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
 use codex_login::auth::AgentIdentityAuthPolicy;
+use codex_model_provider::create_model_provider;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
 use codex_otel::SessionTelemetry;
@@ -17,6 +18,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol_test_support::uuid_v7_item_id_generator_for_test;
 use codex_rollout_trace::InferenceTraceContext;
 use codex_tools::Harness;
 use futures::StreamExt;
@@ -76,6 +78,8 @@ fn test_session_telemetry() -> SessionTelemetry {
 fn user_prompt(text: &str) -> Prompt {
     Prompt {
         input: vec![ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -166,10 +170,10 @@ fn bash_tool_call_sse(id: &str, model: &str, call_id: &str) -> String {
 fn chat_model_client(base_url: &str, harness: Harness) -> ModelClient {
     let provider = create_oss_provider_with_base_url(base_url, WireApi::Chat);
     ModelClient::new(
-        /*auth_manager*/ None,
+        create_model_provider(provider, /*auth_manager*/ None),
         AgentIdentityAuthPolicy::JwtOnly,
         ThreadId::new(),
-        provider,
+        uuid_v7_item_id_generator_for_test(),
         SessionSource::Cli,
         "test_originator".to_string(),
         /*model_verbosity*/ None,
@@ -179,11 +183,13 @@ fn chat_model_client(base_url: &str, harness: Harness) -> ModelClient {
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
         /*concurrent_reasoning_summaries_enabled*/ false,
+        /*output_token_replay_enabled*/ false,
         /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         codex_model_provider::WorkspaceRoutingContext::new(
             "https://chatgpt.com/backend-api".into(),
         ),
+        /*request_contributors*/ Vec::new(),
     )
     .with_harness(harness, /*harness_guidance*/ true)
 }
@@ -191,10 +197,10 @@ fn chat_model_client(base_url: &str, harness: Harness) -> ModelClient {
 fn messages_model_client(base_url: &str, harness: Harness) -> ModelClient {
     let provider = create_oss_provider_with_base_url(base_url, WireApi::Messages);
     ModelClient::new(
-        /*auth_manager*/ None,
+        create_model_provider(provider, /*auth_manager*/ None),
         AgentIdentityAuthPolicy::JwtOnly,
         ThreadId::new(),
-        provider,
+        uuid_v7_item_id_generator_for_test(),
         SessionSource::Cli,
         "test_originator".to_string(),
         /*model_verbosity*/ None,
@@ -204,11 +210,13 @@ fn messages_model_client(base_url: &str, harness: Harness) -> ModelClient {
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
         /*concurrent_reasoning_summaries_enabled*/ false,
+        /*output_token_replay_enabled*/ false,
         /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         codex_model_provider::WorkspaceRoutingContext::new(
             "https://chatgpt.com/backend-api".into(),
         ),
+        /*request_contributors*/ Vec::new(),
     )
     .with_harness(harness, /*harness_guidance*/ true)
 }
@@ -394,7 +402,7 @@ async fn chat_wire_native_hello_uses_chat_completions() -> anyhow::Result<()> {
             ResponseEvent::OutputItemDone(ResponseItem::Message { content, .. })
                 if content.iter().any(|item| matches!(
                     item,
-                    ContentItem::OutputText { text } if text.contains("hello")
+                    ContentItem::OutputText { text, .. } if text.contains("hello")
                 ))
         )),
         "expected assistant hello in stream: {events:?}"

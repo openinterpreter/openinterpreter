@@ -12,11 +12,11 @@ Use `/permissions` in the TUI to inspect or change the active posture.
 
 ## Sandbox Modes
 
-| Mode | Behavior |
-| ---- | -------- |
-| `read-only` | Commands can inspect allowed files but cannot write. |
-| `workspace-write` | Commands can write inside the active workspace roots. Network is off unless enabled. |
-| `danger-full-access` | No local sandbox boundary. Use only in an environment you intentionally trust. |
+| Mode                 | Behavior                                                                             |
+| -------------------- | ------------------------------------------------------------------------------------ |
+| `read-only`          | Commands can inspect allowed files but cannot write.                                 |
+| `workspace-write`    | Commands can write inside the active workspace roots. Network is off unless enabled. |
+| `danger-full-access` | No local sandbox boundary. Use only in an environment you intentionally trust.       |
 
 Set a default:
 
@@ -32,11 +32,11 @@ interpreter --sandbox read-only "audit the auth flow"
 
 ## Approval Policies
 
-| Policy | Behavior |
-| ------ | -------- |
-| `untrusted` | Ask before actions that could change state. |
+| Policy       | Behavior                                          |
+| ------------ | ------------------------------------------------- |
+| `untrusted`  | Ask before actions that could change state.       |
 | `on-request` | Run inside the sandbox and ask before escalation. |
-| `never` | Do not ask. The sandbox is the only guardrail. |
+| `never`      | Do not ask. The sandbox is the only guardrail.    |
 
 ```toml
 approval_policy = "on-request"
@@ -74,22 +74,22 @@ needs to change them, review the request closely.
 Open Interpreter uses the same local sandbox architecture as the Codex CLI
 surface:
 
-| Platform | Enforcement model |
-| -------- | ----------------- |
-| macOS | Seatbelt profiles. |
-| Linux / WSL | Bubblewrap, seccomp, and related kernel sandboxing where available. |
-| Windows | Native Windows sandboxing where configured; WSL uses the Linux model. |
+| Platform    | Enforcement model                                                     |
+| ----------- | --------------------------------------------------------------------- |
+| macOS       | Seatbelt profiles.                                                    |
+| Linux / WSL | Bubblewrap, seccomp, and related kernel sandboxing where available.   |
+| Windows     | Native Windows sandboxing where configured; WSL uses the Linux model. |
 
 When a requested policy cannot be enforced, Open Interpreter should fail closed
 rather than silently running unsandboxed.
 
 ## Recommended Defaults
 
-| Situation | Suggested settings |
-| --------- | ------------------ |
-| Inspecting unfamiliar code | `sandbox_mode = "read-only"`, `approval_policy = "on-request"` |
-| Day-to-day trusted repo work | `workspace-write` plus `on-request` |
-| CI in an isolated runner | `workspace-write` plus `never` |
-| Disposable full-access environment | `danger-full-access` plus `never` |
+| Situation                          | Suggested settings                                             |
+| ---------------------------------- | -------------------------------------------------------------- |
+| Inspecting unfamiliar code         | `sandbox_mode = "read-only"`, `approval_policy = "on-request"` |
+| Day-to-day trusted repo work       | `workspace-write` plus `on-request`                            |
+| CI in an isolated runner           | `workspace-write` plus `never`                                 |
+| Disposable full-access environment | `danger-full-access` plus `never`                              |
 
 If you are unsure, start with workspace-write and on-request.

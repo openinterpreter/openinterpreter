@@ -89,8 +89,10 @@ fn additional_tools(body: &Value) -> Result<&[Value]> {
         .context("additional_tools tools should be an array")
 }
 
+#[test_case::test_case(false; "standard")]
+#[test_case::test_case(true; "responses_lite")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn responses_lite_uses_input_items_for_instructions_and_tools() -> Result<()> {
+async fn base_instructions_use_input_items(responses_lite: bool) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -105,8 +107,8 @@ async fn responses_lite_uses_input_items_for_instructions_and_tools() -> Result<
 
     let builder = || {
         test_codex()
-            .with_model_info_override("gpt-5.4", |model_info| {
-                model_info.use_responses_lite = true;
+            .with_model_info_override("gpt-5.4", move |model_info| {
+                model_info.use_responses_lite = responses_lite;
                 model_info.tool_mode = Some(ToolMode::CodeMode);
             })
             .with_config(|config| {
@@ -120,53 +122,73 @@ async fn responses_lite_uses_input_items_for_instructions_and_tools() -> Result<
 
     let body = response_mock.single_request().body_json();
     assert!(body.get("instructions").is_none());
-    assert!(body.get("tools").is_none());
 
     let input = body["input"]
         .as_array()
         .context("Responses request input should be an array")?;
-    assert_eq!(input[0]["type"], "additional_tools");
-    assert_eq!(input[0]["role"], "developer");
+    let instructions_index = usize::from(responses_lite);
+    let instructions = &input[instructions_index];
     assert!(
-        input[0]["id"]
-            .as_str()
-            .is_some_and(|id| id.starts_with("at_"))
-    );
-    assert!(
-        input[1]["id"]
+        instructions["id"]
             .as_str()
             .is_some_and(|id| id.starts_with("msg_"))
     );
-    assert_eq!(
-        input[1],
-        serde_json::json!({
-            "id": input[1]["id"],
-            "type": "message",
-            "role": "developer",
-            "content": [{
-                "type": "input_text",
-                "text": "test instructions",
-            }],
-            "internal_chat_message_metadata_passthrough": {
-                "content_item_kinds": ["model.base_instructions"],
-            },
-        })
-    );
+    let mut expected_instructions = serde_json::json!({
+        "id": instructions["id"],
+        "type": "message",
+        "role": "developer",
+        "content": [{
+            "type": "input_text",
+            "text": "test instructions",
+        }],
+        "internal_chat_message_metadata_passthrough": {
+            "content_item_kinds": ["model.base_instructions"],
+        },
+    });
+    let mut actual_instructions = instructions.clone();
+    if responses_lite {
+        expected_instructions["internal_chat_message_metadata_passthrough"]["content_item_metadata"] =
+            serde_json::json!([{"provenance": {"type": "harness", "hook": false}}]);
+        actual_instructions["internal_chat_message_metadata_passthrough"]
+            .as_object_mut()
+            .context("base instructions should carry content metadata")?
+            .retain(|key, _| !matches!(key.as_str(), "turn_id" | "create_time"));
+    }
+    assert_eq!(actual_instructions, expected_instructions);
 
-    let tools = additional_tools(&body)?;
-    let functions_namespaces = tools
-        .iter()
-        .filter(|tool| tool["type"] == "namespace" && tool["name"] == "functions")
-        .collect::<Vec<_>>();
-    assert_eq!(functions_namespaces.len(), 1);
-    assert_eq!(functions_namespaces[0]["description"], "");
-    assert!(has_namespaced_tool(tools, "functions", "wait"));
-    assert!(has_namespaced_tool(tools, "functions", "exec"));
-    assert!(
-        tools
+    let tools = if responses_lite {
+        assert!(body.get("tools").is_none());
+        assert_eq!(input[0]["type"], "additional_tools");
+        assert_eq!(input[0]["role"], "developer");
+        assert!(
+            input[0]["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("at_"))
+        );
+        additional_tools(&body)?
+    } else {
+        body["tools"]
+            .as_array()
+            .context("standard Responses tools should remain at the top level")?
+    };
+    if responses_lite {
+        let functions_namespaces = tools
             .iter()
-            .all(|tool| { !matches!(tool["type"].as_str(), Some("function" | "custom")) })
-    );
+            .filter(|tool| tool["type"] == "namespace" && tool["name"] == "functions")
+            .collect::<Vec<_>>();
+        assert_eq!(functions_namespaces.len(), 1);
+        assert_eq!(functions_namespaces[0]["description"], "");
+        assert!(has_namespaced_tool(tools, "functions", "wait"));
+        assert!(has_namespaced_tool(tools, "functions", "exec"));
+        assert!(
+            tools
+                .iter()
+                .all(|tool| { !matches!(tool["type"].as_str(), Some("function" | "custom")) })
+        );
+    } else {
+        assert!(tools.iter().any(|tool| tool["name"] == "exec"));
+        assert!(tools.iter().any(|tool| tool["name"] == "wait"));
+    }
     let client_metadata = body["client_metadata"]
         .as_object()
         .context("Responses request should include client metadata")?;
@@ -185,7 +207,14 @@ async fn responses_lite_uses_input_items_for_instructions_and_tools() -> Result<
     .await;
     let resumed = builder().restart(&server, &test).await?;
     resumed.submit_turn("continue").await?;
-    assert_eq!(&followup.single_request().input()[..2], &input[..2]);
+    assert_eq!(
+        &followup.single_request().input()[..=instructions_index],
+        &input[..=instructions_index]
+    );
+    assert_eq!(
+        followup.single_request().body_json()["tools"],
+        body["tools"]
+    );
 
     Ok(())
 }

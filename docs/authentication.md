@@ -34,9 +34,9 @@ Other providers use their own environment variables, such as
 
 Use local runners when you want model traffic to stay on your machine:
 
-| Provider | Notes |
-| -------- | ----- |
-| Ollama | Start Ollama and choose it from `/model`, or use `--oss`. |
+| Provider  | Notes                                                      |
+| --------- | ---------------------------------------------------------- |
+| Ollama    | Start Ollama and choose it from `/model`, or use `--oss`.  |
 | LM Studio | Start the local server and choose LM Studio from `/model`. |
 
 ```bash

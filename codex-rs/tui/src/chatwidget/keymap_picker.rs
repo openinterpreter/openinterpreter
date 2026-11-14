@@ -12,10 +12,9 @@
 //! appear to accept a remap while some handlers still respond to the old keys.
 
 use codex_config::types::TuiKeymap;
-use codex_terminal_detection::terminal_info;
+use codex_features::Feature;
 
 use super::ChatWidget;
-use super::queued_message_edit_hint_binding;
 use crate::app_event::KeymapCaptureMode;
 use crate::app_event::KeymapEditIntent;
 use crate::keymap::RuntimeKeymap;
@@ -29,7 +28,10 @@ impl ChatWidget {
     /// overrides. If the config is invalid, the user sees the parse error instead of a partial
     /// picker that could commit edits against stale runtime state.
     pub(crate) fn open_keymap_picker(&mut self) {
-        match RuntimeKeymap::from_config(&self.local_settings.tui.keymap) {
+        match RuntimeKeymap::for_session(
+            &self.local_settings.tui.keymap,
+            self.local_settings.workspace_enabled(self.config_ref()),
+        ) {
             Ok(runtime_keymap) => {
                 let params = keymap_setup::build_keymap_picker_params_with_filter(
                     &runtime_keymap,
@@ -156,6 +158,8 @@ impl ChatWidget {
     fn keymap_action_filter(&self) -> keymap_setup::KeymapActionFilter {
         keymap_setup::KeymapActionFilter {
             fast_mode_enabled: self.fast_mode_enabled(),
+            multi_backend_enabled: self.config.features.enabled(Feature::TuiMultiBackend),
+            workspace_enabled: self.local_settings.workspace_enabled(self.config_ref()),
         }
     }
 
@@ -173,10 +177,6 @@ impl ChatWidget {
         self.local_settings.tui.keymap = keymap_config;
         self.copy_last_response_binding = runtime_keymap.app.copy.clone();
         self.chat_keymap = runtime_keymap.chat.clone();
-        self.queued_message_edit_hint_binding =
-            queued_message_edit_hint_binding(runtime_keymap, terminal_info());
-        self.bottom_pane
-            .set_queued_message_edit_binding(self.queued_message_edit_hint_binding);
         self.bottom_pane.set_keymap_bindings(runtime_keymap);
         self.update_realtime_footer();
         self.request_redraw();

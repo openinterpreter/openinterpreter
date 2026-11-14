@@ -1,3 +1,4 @@
+use codex_mcp::McpServerKey;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -5,14 +6,25 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
+use codex_config::McpStartupReadiness;
 use codex_config::types::AppToolApproval;
 use codex_config::types::ApprovalsReviewer;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
+use codex_core::StartThreadOptions;
+use codex_core::TurnInputRequest;
 use codex_core::config::Config;
 use codex_features::Feature;
+use codex_protocol::mcp::McpServerConnectionStatus;
+use codex_protocol::models::ContentItemMetadata;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::HookEventName;
+use codex_protocol::protocol::HookRunStatus;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::user_input::UserInput;
 use codex_utils_path_uri::LegacyAppPathString;
 use core_test_support::hooks::trust_discovered_hooks;
 use core_test_support::responses::ev_assistant_message;
@@ -21,12 +33,15 @@ use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
+use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_wine_exec;
 use core_test_support::stdio_server_bin;
 use core_test_support::test_codex::test_codex;
+use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_match;
 use core_test_support::wait_for_mcp_server;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -291,7 +306,9 @@ fn insert_rmcp_test_server(
             environment_id,
             enabled: true,
             required: false,
+            startup_readiness: Default::default(),
             supports_parallel_tool_calls: false,
+            tool_input_schema_max_bytes: None,
             omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: Some(Duration::from_secs(10)),
@@ -505,8 +522,200 @@ async fn mcp_tool_hook_interpolates_prompt_and_runs_without_tool_approval() -> R
     Ok(())
 }
 
+#[test_case::test_case(McpStartupReadiness::Connection, "browser", "node_repl"; "connection")]
+#[test_case::test_case(McpStartupReadiness::Catalog, "unified-computer-use", "cua_repl"; "catalog")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_tool_hook_passes_thread_metadata_to_model_hidden_tools() -> Result<()> {
+async fn mcp_tool_hook_starts_cached_model_hidden_tools(
+    startup_readiness: McpStartupReadiness,
+    plugin: &'static str,
+    repl: &'static str,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let response = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg-1", "thread context received"),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let rmcp_test_server_bin = stdio_server_bin()?;
+    let test = test_codex()
+        .with_model_info_override("gpt-5.5", |model| model.use_responses_lite = true)
+        .with_pre_build_hook(move |home| {
+            let hooks = json!({
+                "hooks": {
+                    "UserPromptSubmit": [{
+                        "hooks": [{
+                            "type": "mcp_tool",
+                            "server": RMCP_SERVER,
+                            "tool": "thread_hint",
+                            "input": {},
+                            "timeout": 5,
+                        }],
+                    }],
+                },
+            });
+            fs::write(home.join("hooks.json"), hooks.to_string())
+                .expect("write model-hidden MCP tool hook config");
+            let manifest_dir = home.join(format!(
+                "plugins/cache/openai-bundled/{plugin}/local/.codex-plugin"
+            ));
+            fs::create_dir_all(&manifest_dir).expect("create bundled plugin fixture");
+            let manifest = json!({
+                "name": plugin,
+                "hooks": {"hooks": {"SubagentStop": [{"hooks": [{
+                    "type": "mcp_tool",
+                    "server": repl,
+                    "tool": "turn_ended",
+                }]}]}},
+            });
+            fs::write(manifest_dir.join("plugin.json"), manifest.to_string())
+                .expect("write bundled cleanup hook");
+            fs::write(
+                home.join("config.toml"),
+                format!("[plugins.\"{plugin}@openai-bundled\"]\nenabled = true\n"),
+            )
+            .expect("enable bundled plugin fixture");
+        })
+        .with_config(move |config| {
+            config
+                .features
+                .enable(Feature::Plugins)
+                .expect("enable plugins");
+            config
+                .features
+                .disable(Feature::ExecutorCapabilityDiscovery)
+                .expect("use legacy MCP for the local fixtures");
+            enable_hooks_and_rmcp_server(
+                config,
+                rmcp_test_server_bin,
+                AppToolApproval::Prompt,
+                /*prefix_mcp_tool_names*/ true,
+            );
+            let mut servers = config.mcp_servers.get().clone();
+            let mcp_server = servers.get_mut(RMCP_SERVER).expect("test MCP server");
+            mcp_server.enabled_tools = Some(vec!["thread_hint".to_string()]);
+            mcp_server.startup_readiness = startup_readiness;
+            let mut cleanup_server = mcp_server.clone();
+            cleanup_server.enabled_tools = None;
+            servers.insert(repl.to_string(), cleanup_server);
+            config.mcp_servers.set(servers).expect("test MCP servers");
+        })
+        .build(&server)
+        .await?;
+    let startup = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::McpStartupComplete(summary) => Some(summary.clone()),
+        _ => None,
+    })
+    .await;
+    for server in [RMCP_SERVER, repl] {
+        assert!(
+            startup.ready.iter().any(|ready| ready == server),
+            "expected {server} to be ready: {startup:?}",
+        );
+    }
+
+    let subagent = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: test.session_configured.thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            ..test.start_thread_options().await
+        })
+        .await?;
+    wait_for_event(&subagent.thread, |event| {
+        matches!(event, EventMsg::McpStartupComplete(_))
+    })
+    .await;
+    let (mcp_config, _) = subagent
+        .thread
+        .current_mcp_config_and_runtime_context()
+        .await;
+    let plugin_id = format!("{plugin}@openai-bundled");
+    assert!(
+        subagent.thread.list_hooks().hooks.iter().any(|hook| {
+            hook.builtin
+                && hook.enabled
+                && hook.event_name == HookEventName::SubagentStop
+                && hook.plugin_id.as_deref() == Some(plugin_id.as_str())
+        }),
+        "the child must load the bundled cleanup hook",
+    );
+    let repl_key = McpServerKey::unscoped(repl);
+    let statuses = subagent.thread.mcp_connection_statuses(&mcp_config).await;
+    for key in [McpServerKey::unscoped(RMCP_SERVER), repl_key.clone()] {
+        assert_eq!(
+            statuses.get(&key),
+            Some(&McpServerConnectionStatus::NotStarted),
+        );
+    }
+    subagent
+        .thread
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "load thread context".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let EventMsg::HookCompleted(hook) = wait_for_event(&subagent.thread, |event| {
+        matches!(event, EventMsg::HookCompleted(_))
+    })
+    .await
+    else {
+        unreachable!("event predicate guarantees hook completion");
+    };
+    assert_eq!(hook.run.status, HookRunStatus::Completed);
+    wait_for_event(&subagent.thread, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    assert_eq!(
+        subagent
+            .thread
+            .mcp_connection_statuses(&mcp_config)
+            .await
+            .get(&repl_key),
+        Some(&McpServerConnectionStatus::NotStarted),
+        "bundled cleanup must leave an unused cached REPL dormant",
+    );
+    let request = response.single_request();
+    let expected_context = format!(
+        "manual history hint for thread {}\nunstructured notes/thread_hint fixture result",
+        subagent.thread_id,
+    );
+    let hint = request
+        .input()
+        .into_iter()
+        .find(|item| item["content"][0]["text"] == expected_context)
+        .expect("hook context in the model request");
+    assert_eq!(
+        hint["internal_chat_message_metadata_passthrough"]["content_item_metadata"],
+        json!([ContentItemMetadata::tool(Some(
+            RMCP_PREFIXED_NAMESPACE.to_string().into()
+        ))]),
+    );
+    let tools = request.inputs_of_type("additional_tools");
+    assert_eq!(tools.len(), 1);
+    assert!(
+        namespace_child_tool(&tools[0], RMCP_PREFIXED_NAMESPACE, "thread_hint").is_none(),
+        "the hook tool must remain hidden from the model"
+    );
+    subagent.thread.shutdown_and_wait().await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_tool_hook_timeout_includes_cached_server_startup() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -530,7 +739,7 @@ async fn mcp_tool_hook_passes_thread_metadata_to_model_hidden_tools() -> Result<
                             "server": RMCP_SERVER,
                             "tool": "thread_hint",
                             "input": {},
-                            "timeout": 5,
+                            "timeout": 1,
                         }],
                     }],
                 },
@@ -545,29 +754,96 @@ async fn mcp_tool_hook_passes_thread_metadata_to_model_hidden_tools() -> Result<
                 AppToolApproval::Prompt,
                 /*prefix_mcp_tool_names*/ true,
             );
+            let mut servers = config.mcp_servers.get().clone();
+            let mcp_server = servers.get_mut(RMCP_SERVER).expect("test MCP server");
+            mcp_server.enabled_tools = Some(vec!["thread_hint".to_string()]);
+            let McpServerTransportConfig::Stdio { env, .. } = &mut mcp_server.transport else {
+                unreachable!("test server uses stdio");
+            };
+            let barrier_file = config.cwd.join("allow-initialize");
+            fs::write(&barrier_file, "ready").expect("allow parent server initialization");
+            *env = Some(HashMap::from([(
+                "MCP_TEST_INITIALIZE_BARRIER_FILE".to_string(),
+                barrier_file.to_string_lossy().into_owned(),
+            )]));
+            config.mcp_servers.set(servers).expect("test MCP servers");
         })
         .build(&server)
         .await?;
     wait_for_mcp_server(&test.codex, RMCP_SERVER).await?;
 
-    test.submit_turn("load thread context").await?;
+    let barrier_file = test.config.cwd.join("allow-initialize");
+    fs::remove_file(&barrier_file)?;
 
-    let request = response.single_request();
-    let expected_context = format!(
-        "manual history hint for thread {}\nunstructured notes/thread_hint fixture result",
-        test.session_configured.thread_id,
+    let subagent = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: test.session_configured.thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            ..test.start_thread_options().await
+        })
+        .await?;
+    wait_for_event(&subagent.thread, |event| {
+        matches!(event, EventMsg::McpStartupComplete(_))
+    })
+    .await;
+    let (mcp_config, _) = subagent
+        .thread
+        .current_mcp_config_and_runtime_context()
+        .await;
+    assert_eq!(
+        subagent
+            .thread
+            .mcp_connection_statuses(&mcp_config)
+            .await
+            .get(&McpServerKey::unscoped(RMCP_SERVER)),
+        Some(&McpServerConnectionStatus::NotStarted),
     );
+    subagent
+        .thread
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "load thread context".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let EventMsg::HookCompleted(hook) = tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_event(&subagent.thread, |event| {
+            matches!(event, EventMsg::HookCompleted(_))
+        }),
+    )
+    .await
+    .context("hook must finish before the server's ten-second startup timeout")?
+    else {
+        unreachable!("event predicate guarantees hook completion");
+    };
+    assert_eq!(hook.run.status, HookRunStatus::Failed);
     assert!(
-        request
+        hook.run
+            .entries
+            .iter()
+            .any(|entry| entry.text.contains("MCP hook timed out"))
+    );
+    fs::write(&barrier_file, "ready")?;
+    wait_for_event(&subagent.thread, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    assert!(
+        !response
+            .single_request()
             .message_input_texts("developer")
-            .contains(&expected_context)
+            .iter()
+            .any(|text| text.contains("manual history hint")),
+        "a timed-out hook must not inject context"
     );
-    assert!(
-        request
-            .tool_by_name(RMCP_PREFIXED_NAMESPACE, "thread_hint")
-            .is_none(),
-        "the hook tool must remain hidden from the model"
-    );
+    subagent.thread.shutdown_and_wait().await?;
 
     Ok(())
 }

@@ -16,6 +16,7 @@ use std::time::Instant;
 
 use super::super::footer::footer_height;
 use super::super::footer::shows_passive_footer_line;
+use super::super::status_line::StatusLine;
 use super::ActivePopup;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -30,6 +31,7 @@ use crate::bottom_pane::footer::FooterMode;
 use crate::bottom_pane::footer::GoalStatusIndicator;
 use crate::key_hint::KeyBinding;
 use crate::key_hint::ShortcutHint;
+use crate::style::secondary_text_style;
 use std::time::Duration;
 
 /// Resolved rectangles shared by painting and cursor placement, without retained layout state.
@@ -66,6 +68,8 @@ pub(crate) struct ComposerRenderOptions<'a> {
     pub(crate) textarea_right_reserve: u16,
     /// Keep configured status below the composer while hints occupy the final row.
     pub(crate) separate_status_line: bool,
+    /// The passive pane retains status but does not claim input or hint focus.
+    pub(crate) unfocused: bool,
     pub(crate) command_popup_placement: CommandPopupPlacement,
     pub(crate) footer: Option<&'a TranscriptFooter>,
 }
@@ -206,12 +210,12 @@ pub(super) struct FooterState {
     pub(super) flash: Option<FooterFlash>,
     pub(super) context_window_percent: Option<i64>,
     pub(super) context_window_used_tokens: Option<i64>,
-    pub(super) context_window_pending: bool,
+    pub(super) context_window_hidden: bool,
     pub(super) collaboration_mode_indicator: Option<CollaborationModeIndicator>,
     pub(super) goal_status_indicator: Option<GoalStatusIndicator>,
     pub(super) ide_context_active: bool,
-    pub(super) status_line_value: Option<Line<'static>>,
-    pub(super) status_line_hyperlink_url: Option<String>,
+    pub(super) status_line_value: Option<StatusLine>,
+    pub(super) labeled_status_line: std::cell::RefCell<Option<StatusLine>>,
     pub(super) status_line_enabled: bool,
     pub(super) side_conversation_context_label: Option<String>,
     pub(super) active_agent_label: Option<String>,
@@ -226,6 +230,7 @@ pub(super) struct FooterState {
     pub(super) history_search_key: Option<ShortcutHint>,
     pub(super) reasoning_down_key: Option<ShortcutHint>,
     pub(super) reasoning_up_key: Option<ShortcutHint>,
+    pub(super) toggle_voice_key: Option<ShortcutHint>,
 }
 
 #[derive(Clone, Debug)]
@@ -246,16 +251,6 @@ impl FooterState {
             .checked_add(duration)
             .unwrap_or_else(Instant::now);
         self.flash = Some(FooterFlash { line, expires_at });
-    }
-
-    #[cfg(test)]
-    pub(super) fn status_line_text(&self) -> Option<String> {
-        self.status_line_value.as_ref().map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        })
     }
 }
 

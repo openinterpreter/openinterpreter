@@ -1,10 +1,13 @@
 use super::*;
+use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use pretty_assertions::assert_eq;
 
 fn user_verification_server_request(thread_id: ThreadId, request_id: i64) -> ServerRequest {
     ServerRequest::McpServerElicitationRequest {
         request_id: AppServerRequestId::Integer(request_id),
         params: McpServerElicitationRequestParams {
+            environment_id: None,
             thread_id: thread_id.to_string(),
             turn_id: Some("turn-verification".to_string()),
             server_name: "deployments".to_string(),
@@ -40,7 +43,11 @@ async fn inactive_thread_user_verification_replays_queued_request_once() -> Resu
     let primary_thread_id = ThreadId::new();
     let side_thread_id = ThreadId::new();
     let thread_id = ThreadId::new();
-    let request = user_verification_server_request(thread_id, /*request_id*/ 11);
+    let mut request = user_verification_server_request(thread_id, /*request_id*/ 11);
+    let ServerRequest::McpServerElicitationRequest { params, .. } = &mut request else {
+        panic!("expected MCP elicitation request");
+    };
+    params.environment_id = Some("env-b".to_string());
 
     app.primary_thread_id = Some(primary_thread_id);
     app.active_thread_id = Some(side_thread_id);
@@ -242,15 +249,17 @@ async fn inactive_thread_user_verification_preserves_foreground_stream() -> Resu
         ServerNotification::ItemCompleted(codex_app_server_protocol::ItemCompletedNotification {
             thread_id: foreground_thread_id.to_string(),
             turn_id: "turn-foreground".to_string(),
+            content_token_count: None,
             completed_at_ms: 0,
-            item: ThreadItem::AgentMessage {
+            item: ThreadItem::untimed(ThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: "message-foreground".to_string(),
                 text: "The foreground answer continues.".to_string(),
                 phase: None,
                 memory_citation: None,
                 delivery: None,
                 questions: None,
-            },
+            }),
         }),
         /*replay_kind*/ None,
     );

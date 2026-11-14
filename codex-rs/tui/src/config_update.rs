@@ -31,6 +31,7 @@ use codex_protocol::config_types::TrustLevel;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathConvention;
+use codex_utils_path_uri::PathUri;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
 use serde_json::Value as JsonValue;
@@ -216,12 +217,28 @@ pub(crate) async fn read_effective_config(
         .wrap_err("config/read failed in TUI")
 }
 
+pub(crate) async fn read_mcp_servers(
+    handle: &AppServerRequestHandle,
+    cwd: String,
+) -> Result<serde_json::Map<String, JsonValue>> {
+    let mut response = read_effective_config(handle.clone(), cwd).await?;
+    Ok(match response.config.additional.remove("mcp_servers") {
+        Some(JsonValue::Object(servers)) => servers,
+        _ => serde_json::Map::new(),
+    })
+}
+
 pub(crate) async fn read_remote_project_trust(
     request_handle: AppServerRequestHandle,
     cwd: &Path,
     host: ProjectTrustHost,
 ) -> Result<Option<RemoteProjectTrust>> {
-    let cwd_string = cwd.to_string_lossy().into_owned();
+    let cwd_string = cwd
+        .to_str()
+        .ok_or_else(|| {
+            color_eyre::eyre::eyre!("Cannot check folder trust: directory path is not valid UTF-8")
+        })?
+        .to_owned();
     let cwd = match LegacyAppPathString::from_string(cwd_string.clone()).to_inferred_path_uri() {
         Some(cwd) => cwd,
         None => {
@@ -405,9 +422,12 @@ pub(crate) async fn read_remote_project_trust(
 
 pub(crate) async fn write_skill_enabled(
     request_handle: AppServerRequestHandle,
-    path: AbsolutePathBuf,
+    path: PathUri,
     enabled: bool,
 ) -> Result<()> {
+    // TODO(anp): Support foreign skill paths through skills/config/write and persisted config.
+    // Both still require host-native paths, so retain that restriction here.
+    let path = path.to_abs_path()?;
     let request_id = RequestId::String(format!("tui-skill-config-write-{}", Uuid::new_v4()));
     let _: SkillsConfigWriteResponse = request_handle
         .request_typed(ClientRequest::SkillsConfigWrite {
@@ -426,6 +446,29 @@ pub(crate) async fn write_skill_enabled(
 #[cfg(test)]
 #[path = "config_update_tests.rs"]
 mod tests;
+
+/// Settings and layer kinds used by the TUI; ignore server-native paths and origins.
+#[derive(serde::Deserialize)]
+pub(crate) struct EffectiveConfig {
+    pub config: codex_app_server_protocol::Config,
+    pub layers: Option<Vec<JsonValue>>,
+}
+
+pub(crate) async fn read_effective_config_with_layers(
+    request_handle: &AppServerRequestHandle,
+    cwd: String,
+) -> Result<EffectiveConfig> {
+    request_handle
+        .request_typed(ClientRequest::ConfigRead {
+            request_id: RequestId::String(format!("tui-config-read-{}", Uuid::new_v4())),
+            params: ConfigReadParams {
+                include_layers: true,
+                cwd: Some(cwd),
+            },
+        })
+        .await
+        .wrap_err("config/read failed in TUI")
+}
 
 /// Read effective server settings, retaining compatibility with servers without config/read.
 pub(crate) async fn read_effective_config_if_supported(

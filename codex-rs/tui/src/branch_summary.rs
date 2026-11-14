@@ -480,11 +480,7 @@ async fn run_git_command(
     argv.push(codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string());
     argv.extend(args.iter().map(|arg| (*arg).to_string()));
     runner
-        .run(
-            WorkspaceCommand::new(argv)
-                .cwd(cwd.to_path_buf())
-                .env("GIT_OPTIONAL_LOCKS", "0"),
-        )
+        .run(WorkspaceCommand::new(argv, cwd.to_path_buf()).env("GIT_OPTIONAL_LOCKS", "0"))
         .await
 }
 
@@ -502,8 +498,7 @@ async fn run_gh_command(
     argv.extend(args.iter().map(|arg| (*arg).to_string()));
     runner
         .run(
-            WorkspaceCommand::new(argv)
-                .cwd(cwd.to_path_buf())
+            WorkspaceCommand::new(argv, cwd.to_path_buf())
                 .env("GH_PROMPT_DISABLED", "1")
                 .env("GIT_TERMINAL_PROMPT", "0"),
         )

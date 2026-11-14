@@ -31,7 +31,7 @@ use codex_app_server_protocol::SandboxPolicy as AppServerSandboxPolicy;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::SessionSource as AppServerSessionSource;
 use codex_app_server_protocol::Thread;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload as ThreadItem;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadSource as AppServerThreadSource;
 use codex_app_server_protocol::ThreadStartResponse;
@@ -92,6 +92,7 @@ pub(super) fn test_tracking_context(thread_id: &str, turn_id: &str) -> TrackEven
         thread_id: thread_id.to_string(),
         turn_id: turn_id.to_string(),
         product_client_id: TEST_PRODUCT_CLIENT_ID.to_string(),
+        turn_metadata: Some(test_turn_metadata(None)),
     }
 }
 
@@ -103,6 +104,7 @@ pub(super) fn sample_thread_with_metadata(
     parent_thread_id: Option<String>,
 ) -> Thread {
     Thread {
+        attached_to_thread_id: None,
         originator: None,
         environments: None,
         id: thread_id.to_string(),
@@ -263,6 +265,7 @@ pub(super) fn sample_turn_start_request(thread_id: &str, request_id: i64) -> Cli
 pub(super) fn sample_turn_start_response(turn_id: &str) -> ClientResponsePayload {
     ClientResponsePayload::TurnStart(codex_app_server_protocol::TurnStartResponse {
         turn: Turn {
+            root_turn_id: None,
             id: turn_id.to_string(),
             items_view: codex_app_server_protocol::TurnItemsView::Full,
             items: vec![],
@@ -282,6 +285,7 @@ pub(super) fn sample_turn_started_notification(
     ServerNotification::TurnStarted(TurnStartedNotification {
         thread_id: thread_id.to_string(),
         turn: Turn {
+            root_turn_id: None,
             id: turn_id.to_string(),
             items_view: codex_app_server_protocol::TurnItemsView::Full,
             items: vec![],
@@ -319,6 +323,7 @@ pub(super) fn sample_turn_completed_notification(
     ServerNotification::TurnCompleted(TurnCompletedNotification {
         thread_id: thread_id.to_string(),
         turn: Turn {
+            root_turn_id: None,
             id: turn_id.to_string(),
             items_view: codex_app_server_protocol::TurnItemsView::Full,
             items: vec![],
@@ -341,6 +346,7 @@ pub(super) fn sample_turn_resolved_config(
     turn_id: &str,
 ) -> TurnResolvedConfigFact {
     TurnResolvedConfigFact {
+        multi_agent_version: codex_protocol::protocol::MultiAgentVersion::Disabled,
         turn_id: turn_id.to_string(),
         thread_id: thread_id.to_string(),
         turn_metadata: test_turn_metadata(/*root_turn_id*/ None),
@@ -369,6 +375,8 @@ pub(super) fn sample_turn_resolved_config(
 
 pub(super) fn sample_turn_profile() -> TurnProfile {
     TurnProfile {
+        critical_path: crate::TurnCriticalPath::Disabled,
+        tools_change_count: 0,
         before_first_sampling_ms: 100,
         sampling_ms: 700,
         compaction_ms: 40,
@@ -543,11 +551,13 @@ pub(super) async fn ingest_completed_command_execution_item(
                     thread_id: thread_id.to_string(),
                     turn_id: "turn-1".to_string(),
                     started_at_ms: 1_000,
-                    item: sample_command_execution_item_with_id(
-                        item_id,
-                        CommandExecutionStatus::InProgress,
-                        /*exit_code*/ None,
-                        /*duration_ms*/ None,
+                    item: codex_app_server_protocol::ThreadItem::untimed(
+                        sample_command_execution_item_with_id(
+                            item_id,
+                            CommandExecutionStatus::InProgress,
+                            /*exit_code*/ None,
+                            /*duration_ms*/ None,
+                        ),
                     ),
                 },
             ))),
@@ -558,14 +568,17 @@ pub(super) async fn ingest_completed_command_execution_item(
         .ingest(
             AnalyticsFact::Notification(Box::new(ServerNotification::ItemCompleted(
                 ItemCompletedNotification {
+                    content_token_count: None,
                     thread_id: thread_id.to_string(),
                     turn_id: "turn-1".to_string(),
                     completed_at_ms: 1_042,
-                    item: sample_command_execution_item_with_id(
-                        item_id,
-                        CommandExecutionStatus::Completed,
-                        Some(0),
-                        Some(42),
+                    item: codex_app_server_protocol::ThreadItem::untimed(
+                        sample_command_execution_item_with_id(
+                            item_id,
+                            CommandExecutionStatus::Completed,
+                            Some(0),
+                            Some(42),
+                        ),
                     ),
                 },
             ))),
@@ -584,6 +597,8 @@ pub(super) fn sample_initialize_fact(connection_id: u64) -> AnalyticsFact {
                 version: "1.0.0".to_string(),
             },
             capabilities: Some(InitializeCapabilities {
+                explicit_gateway_oauth: false,
+                required_human_approval: false,
                 experimental_api: false,
                 request_attestation: false,
                 opt_out_notification_methods: None,

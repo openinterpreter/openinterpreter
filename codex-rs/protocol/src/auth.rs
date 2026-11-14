@@ -78,6 +78,7 @@ impl PlanType {
             "plus" => Self::Known(KnownPlan::Plus),
             "pro" => Self::Known(KnownPlan::Pro),
             "prolite" => Self::Known(KnownPlan::ProLite),
+            "promax" => Self::Known(KnownPlan::ProMax),
             "team" => Self::Known(KnownPlan::Team),
             "self_serve_business_prolite" => Self::Known(KnownPlan::SelfServeBusinessProLite),
             "self_serve_business_usage_based" => {
@@ -91,6 +92,8 @@ impl PlanType {
             "education" | "edu" => Self::Known(KnownPlan::Edu),
             "edu_plus" => Self::Known(KnownPlan::EduPlus),
             "edu_pro" => Self::Known(KnownPlan::EduPro),
+            "sci" => Self::Known(KnownPlan::Sci),
+            "sci_plus" => Self::Known(KnownPlan::SciPlus),
             _ => Self::Unknown(raw.to_string()),
         }
     }
@@ -104,6 +107,7 @@ pub enum KnownPlan {
     Plus,
     Pro,
     ProLite,
+    ProMax,
     Team,
     #[serde(rename = "self_serve_business_prolite")]
     SelfServeBusinessProLite,
@@ -123,6 +127,9 @@ pub enum KnownPlan {
     EduPlus,
     #[serde(rename = "edu_pro")]
     EduPro,
+    Sci,
+    #[serde(rename = "sci_plus")]
+    SciPlus,
 }
 
 impl KnownPlan {
@@ -131,8 +138,9 @@ impl KnownPlan {
             Self::Free => "Free",
             Self::Go => "Go",
             Self::Plus => "Plus",
-            Self::Pro => "Pro",
-            Self::ProLite => "Pro Lite",
+            Self::Pro => "Pro (More)",
+            Self::ProLite => "Pro",
+            Self::ProMax => "Pro (Max)",
             Self::Team => "Team",
             Self::SelfServeBusinessProLite => "Self Serve Business ProLite",
             Self::SelfServeBusinessUsageBased => "Self Serve Business Usage Based",
@@ -144,6 +152,8 @@ impl KnownPlan {
             Self::Edu => "Edu",
             Self::EduPlus => "Edu Plus",
             Self::EduPro => "Edu Pro",
+            Self::Sci => "Academic Researchers",
+            Self::SciPlus => "Academic Researchers Plus",
         }
     }
 
@@ -154,6 +164,7 @@ impl KnownPlan {
             Self::Plus => "plus",
             Self::Pro => "pro",
             Self::ProLite => "prolite",
+            Self::ProMax => "promax",
             Self::Team => "team",
             Self::SelfServeBusinessProLite => "self_serve_business_prolite",
             Self::SelfServeBusinessUsageBased => "self_serve_business_usage_based",
@@ -165,6 +176,8 @@ impl KnownPlan {
             Self::Edu => "edu",
             Self::EduPlus => "edu_plus",
             Self::EduPro => "edu_pro",
+            Self::Sci => "sci",
+            Self::SciPlus => "sci_plus",
         }
     }
 
@@ -182,6 +195,8 @@ impl KnownPlan {
                 | Self::Edu
                 | Self::EduPlus
                 | Self::EduPro
+                | Self::Sci
+                | Self::SciPlus
         )
     }
 }
@@ -233,8 +248,11 @@ mod tests {
             PlanType::Known(KnownPlan::EnterpriseCbpAutomation)
         );
         for (raw, known) in [
+            ("promax", KnownPlan::ProMax),
             ("edu_plus", KnownPlan::EduPlus),
             ("edu_pro", KnownPlan::EduPro),
+            ("sci", KnownPlan::Sci),
+            ("sci_plus", KnownPlan::SciPlus),
         ] {
             let expected = PlanType::Known(known);
             assert_eq!(PlanType::from_raw_value(raw), expected);

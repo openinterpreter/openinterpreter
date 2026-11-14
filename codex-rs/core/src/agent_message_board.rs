@@ -46,6 +46,12 @@ pub fn install_agent_message_board(
             {
                 return Box::pin(async { Ok(None) });
             }
+            if let Err(error) = validate_board_backend_selection(
+                config.multi_agent_v2.message_board_in_memory,
+                config.multi_agent_v2.message_board_remote.is_some(),
+            ) {
+                return Box::pin(async move { Err(error) });
+            }
             let sqlite = config.sqlite_config().clone();
             let host = Arc::new(LocalBoardHost {
                 manager: manager.clone(),
@@ -58,6 +64,34 @@ pub fn install_agent_message_board(
             })
         },
     );
+}
+
+// Until the host and tools speak the shared remote/MCP board protocol, never
+// silently use a local board for an explicitly selected backend. In particular,
+// this must not route remote requests or credentials into local SQLite storage.
+fn validate_board_backend_selection(in_memory: bool, remote: bool) -> Result<()> {
+    if in_memory || remote {
+        return Err(CodexErr::InvalidRequest(
+            "the configured message-board backend is not supported by this runtime".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod backend_selection_tests {
+    use super::validate_board_backend_selection;
+
+    #[test]
+    fn only_default_local_board_can_open_without_remote_backend_support() {
+        assert!(validate_board_backend_selection(false, false).is_ok());
+        for (in_memory, remote) in [(true, false), (false, true), (true, true)] {
+            assert!(
+                validate_board_backend_selection(in_memory, remote).is_err(),
+                "explicit backend must not silently fall back to local storage"
+            );
+        }
+    }
 }
 
 struct LocalBoardHost {
@@ -83,7 +117,7 @@ impl LocalBoardHost {
             actor
                 .session
                 .services
-                .agent_control
+                .local_agent_runtime
                 .register_session_root(self.caller, /*current_parent_thread_id*/ None);
         }
         Ok(actor)
@@ -97,7 +131,7 @@ impl MessageBoardHost for LocalBoardHost {
                 .await?
                 .session
                 .services
-                .agent_control
+                .local_agent_runtime
                 .ensure_agent_known(caller)?
                 .agent_path
                 .ok_or_else(|| CodexErr::InvalidRequest("agent has no tree path".into()))
@@ -110,9 +144,14 @@ impl MessageBoardHost for LocalBoardHost {
             actor
                 .session
                 .services
-                .agent_control
-                .resolve_agent_reference(self.caller, &actor.session_source, path.as_str())
-                .await
+                .local_agent_runtime
+                .agent_id_for_path(&path)
+                .ok_or_else(|| {
+                    CodexErr::UnsupportedOperation(format!(
+                        "live agent path `{}` not found",
+                        path.as_str()
+                    ))
+                })
         })
     }
 

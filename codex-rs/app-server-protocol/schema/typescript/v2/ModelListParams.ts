@@ -4,6 +4,10 @@
 
 export type ModelListParams = {
 /**
+ * List models for this configured provider instead of the app-server default.
+ */
+modelProvider?: string | null,
+/**
  * Opaque pagination cursor returned by a previous call.
  */
 cursor?: string | null,
@@ -14,8 +18,4 @@ limit?: number | null,
 /**
  * When true, include models that are hidden from the default picker list.
  */
-includeHidden?: boolean | null,
-/**
- * Optional provider id to list models for instead of the active provider.
- */
-modelProvider?: string | null, };
+includeHidden?: boolean | null, };

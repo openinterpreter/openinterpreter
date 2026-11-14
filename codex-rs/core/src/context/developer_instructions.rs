@@ -1,5 +1,8 @@
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::ContentItemMetadata;
+use codex_protocol::models::input_text;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeveloperInstructions {
@@ -15,6 +18,10 @@ impl DeveloperInstructions {
 }
 
 impl ContextualUserFragment for DeveloperInstructions {
+    fn content_metadata(&self) -> ContentItemMetadata {
+        ContentItemMetadata::developer_instructions(/*from_additional_requirements*/ false)
+    }
+
     fn content_kind(&self) -> ContentItemKind {
         ContentItemKind("generic.developer_instructions".to_string())
     }
@@ -31,7 +38,7 @@ impl ContextualUserFragment for DeveloperInstructions {
         ("", "")
     }
 
-    fn body(&self) -> String {
-        self.instructions.clone()
+    fn body(&self) -> ContentItem {
+        input_text(self.instructions.clone())
     }
 }

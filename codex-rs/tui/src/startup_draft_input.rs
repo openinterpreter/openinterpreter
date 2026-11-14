@@ -99,9 +99,24 @@ impl StartupDraftPump {
                         self.pending_paste_newline = Some((Instant::now(), "\n".to_string()));
                     }
                 }
+                if key.code == KeyCode::Enter
+                    && key.modifiers.is_empty()
+                    && self.session_action == super::StartupDraftSessionAction::NewWhileRunning
+                    && !self.bottom_pane.is_in_paste_burst()
+                    && self
+                        .bottom_pane
+                        .has_startup_paste_window(Instant::now().into_std())
+                {
+                    self.bottom_pane.flush_composer_paste_burst();
+                    self.pending_paste_newline = Some((Instant::now(), "\n".to_string()));
+                }
                 if self.initial_screen == StartupDraftInitialScreen::Composer
                     && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
-                    && self.session_action != super::StartupDraftSessionAction::NewFromCommandCenter
+                    && !matches!(
+                        self.session_action,
+                        super::StartupDraftSessionAction::NewFromCommandCenter
+                            | super::StartupDraftSessionAction::NewWhileRunning
+                    )
                     && self.bottom_pane.is_startup_submit_key(key)
                 {
                     self.bottom_pane.flush_composer_paste_burst();
@@ -130,9 +145,11 @@ impl StartupDraftPump {
                 }
                 let previous_text = self.bottom_pane.composer_text();
                 if let Err(error) = handle_startup_draft_key(&mut self.bottom_pane, key)
-                    && !(self.session_action
-                        == super::StartupDraftSessionAction::NewFromCommandCenter
-                        && StartupCancelled::matches(&error))
+                    && !(matches!(
+                        self.session_action,
+                        super::StartupDraftSessionAction::NewFromCommandCenter
+                            | super::StartupDraftSessionAction::NewWhileRunning
+                    ) && StartupCancelled::matches(&error))
                 {
                     if StartupCancelled::matches(&error)
                         && let Err(clear_error) = tui.terminal.clear()

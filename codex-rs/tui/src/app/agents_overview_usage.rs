@@ -34,6 +34,15 @@ pub(super) struct AgentsOverviewUsage {
 }
 
 impl App {
+    pub(super) fn reset_agents_overview_usage_for_backend_switch(&mut self) {
+        // Estimates are scoped to the active backend/account; token totals remain thread-owned.
+        self.agents_overview.usage.retain(|_, usage| {
+            usage.estimate = None;
+            usage.fetched_at = None;
+            usage.tokens.is_some()
+        });
+    }
+
     pub(super) fn refresh_agents_overview_usage(
         &mut self,
         app_server: &AppServerSession,

@@ -134,6 +134,13 @@ pub struct UserVerificationDeleteParams {}
 #[ts(export_to = "v2/")]
 pub struct UserVerificationDeleteResponse {}
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum UserVerificationBiometricType {
+    Fingerprint,
+}
+
 /// Local signing primitive, independent of any pending elicitation.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -152,6 +159,9 @@ pub struct UserVerificationVerifyParams {
 #[ts(export_to = "v2/")]
 pub struct UserVerificationVerifyResponse {
     pub proof: UserVerificationProof,
+    /// Native-reported authentication method for this signature. Older servers omit it.
+    /// This is approval context, not part of the signed proof.
+    pub biometric_type: Option<UserVerificationBiometricType>,
 }
 
 /// Cancels a native verification RPC issued on this connection, not an elicitation.

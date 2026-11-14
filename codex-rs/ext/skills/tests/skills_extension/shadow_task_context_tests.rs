@@ -1,13 +1,57 @@
 use std::collections::BTreeMap;
 
+use opentelemetry_sdk::metrics::data::ResourceMetrics;
+
 use pretty_assertions::assert_eq;
 
 use super::*;
 
+// The runtime reader emits deltas. Retain every snapshot while waiting for the
+// background evaluations so assertions include observations from earlier polls.
+pub(super) async fn collect_shadow_observations(
+    metrics: &MetricsClient,
+    name: &str,
+    expected: u64,
+) -> Result<Vec<ResourceMetrics>, Box<dyn std::error::Error>> {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut snapshots = Vec::new();
+        let mut total = 0;
+        loop {
+            let snapshot = metrics.snapshot()?;
+            total += snapshot
+                .scope_metrics()
+                .flat_map(opentelemetry_sdk::metrics::data::ScopeMetrics::metrics)
+                .find(|metric| metric.name() == name)
+                .map(|metric| match metric.data() {
+                    AggregatedMetrics::U64(MetricData::Sum(sum)) => sum
+                        .data_points()
+                        .map(opentelemetry_sdk::metrics::data::SumDataPoint::value)
+                        .sum::<u64>(),
+                    AggregatedMetrics::F64(MetricData::Histogram(histogram)) => histogram
+                        .data_points()
+                        .map(opentelemetry_sdk::metrics::data::HistogramDataPoint::count)
+                        .sum::<u64>(),
+                    data => panic!("unexpected shadow metric data: {data:?}"),
+                })
+                .unwrap_or(0);
+            snapshots.push(snapshot);
+            if total >= expected {
+                assert_eq!(
+                    expected, total,
+                    "shadow observations must not be duplicated"
+                );
+                return Ok(snapshots);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await?
+}
+
 struct FailedReads(StaticSkillProvider);
 
 impl SkillProvider for FailedReads {
-    fn list(&self, query: SkillListQuery) -> SkillProviderFuture<'_, SkillCatalog> {
+    fn list<'a>(&'a self, query: SkillListQuery<'a>) -> SkillProviderFuture<'a, SkillCatalog> {
         self.0.list(query)
     }
 
@@ -44,6 +88,7 @@ async fn task_context_recovers_prior_requests_and_explicit_intent_without_changi
     opaque.description = "zzzz".to_string();
     let provider = Arc::new(FailedReads(StaticSkillProvider {
         catalog: SkillCatalog {
+            is_partial: false,
             entries: vec![
                 test_entry(
                     SkillSourceKind::Host,
@@ -120,19 +165,28 @@ async fn task_context_recovers_prior_requests_and_explicit_intent_without_changi
             .await;
         let observed_turn = turns.last().ok_or("test needs a turn")?.0;
         for (turn_id, user_input) in turns {
-            let fragments = registry.turn_input_contributors()[0]
-                .contribute(
-                    TurnInputContext {
-                        turn_id: turn_id.to_string(),
-                        user_input,
-                        environments: Vec::new(),
-                    },
-                    /*extension_metrics*/ None,
-                    &session_store,
-                    &thread_store,
-                    &ExtensionData::new(turn_id),
-                )
-                .await;
+            let fragments = prepared_turn_input(
+                &registry,
+                TurnInputContext {
+                    step_store: &ExtensionData::new("step"),
+                    turn_id: turn_id.to_string(),
+                    user_input,
+                    environments: vec![codex_extension_api::TurnInputEnvironment {
+                        environment_id: "test".to_string(),
+                        cwd: PathUri::from_host_native_path(
+                            std::env::current_dir().expect("test cwd"),
+                        )
+                        .expect("absolute cwd"),
+                        is_primary: true,
+                        fs: &FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS),
+                    }],
+                },
+                /*extension_metrics*/ None,
+                &session_store,
+                &thread_store,
+                &ExtensionData::new(turn_id),
+            )
+            .await;
             assert!(fragments.is_empty());
         }
         registry.skill_invocation_contributors()[0]
@@ -154,17 +208,21 @@ async fn task_context_recovers_prior_requests_and_explicit_intent_without_changi
         "lru_plus_character_routing_v1",
         "lru_plus_lexical_character_routing_v1",
     ];
-    let snapshot = metrics.snapshot()?;
-    let metric = snapshot
-        .scope_metrics()
+    let snapshots = collect_shadow_observations(
+        &metrics,
+        "codex.skills.shadow_selection.invocation",
+        /*expected*/ 48,
+    )
+    .await?;
+    let actual = snapshots
+        .iter()
+        .flat_map(ResourceMetrics::scope_metrics)
         .flat_map(opentelemetry_sdk::metrics::data::ScopeMetrics::metrics)
-        .find(|metric| metric.name() == "codex.skills.shadow_selection.invocation")
-        .ok_or("shadow invocation metric should exist")?;
-    let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
-        panic!("unexpected shadow metric: {:?}", metric.data());
-    };
-    let actual = sum
-        .data_points()
+        .filter(|metric| metric.name() == "codex.skills.shadow_selection.invocation")
+        .flat_map(|metric| match metric.data() {
+            AggregatedMetrics::U64(MetricData::Sum(sum)) => sum.data_points(),
+            data => panic!("unexpected shadow metric: {data:?}"),
+        })
         .filter_map(|point| {
             let attribute = |key| {
                 point

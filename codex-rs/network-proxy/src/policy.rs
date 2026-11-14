@@ -1,13 +1,12 @@
 #[cfg(test)]
 use crate::config::NetworkMode;
-use anyhow::Context;
+use crate::domain_matcher::DomainPatternSet;
+use crate::domain_matcher::GlobalWildcard;
+pub(crate) use crate::domain_matcher::is_global_wildcard_domain_pattern;
+pub use crate::domain_matcher::normalize_host;
+pub(crate) use crate::domain_matcher::unscoped_ip_literal;
 use anyhow::Result;
-use anyhow::bail;
 use anyhow::ensure;
-use globset::GlobBuilder;
-use globset::GlobSet;
-use globset::GlobSetBuilder;
-use std::collections::HashSet;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
@@ -29,6 +28,26 @@ impl Host {
     }
 }
 
+/// Interpret numeric host spellings without consulting DNS. System resolvers
+/// also accept shortened, integer, octal and hexadecimal IPv4 forms.
+pub(crate) fn numeric_host_address(host: &str) -> Option<IpAddr> {
+    let host = unscoped_ip_literal(host).unwrap_or(host);
+    if let Ok(ip) = host.parse() {
+        return Some(ip);
+    }
+    if !host.as_bytes().first()?.is_ascii_digit()
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() || matches!(b, b'.' | b'x' | b'X'))
+    {
+        return None;
+    }
+    match UrlHost::parse(host).ok()? {
+        UrlHost::Ipv4(ip) => Some(IpAddr::V4(ip)),
+        _ => None,
+    }
+}
+
 /// Returns true if the host is a loopback hostname or IP literal.
 pub fn is_loopback_host(host: &Host) -> bool {
     let host = host.as_str();
@@ -42,6 +61,12 @@ pub fn is_loopback_host(host: &Host) -> bool {
     false
 }
 
+/// The local-binding exception applies only to localhost and non-public IP literals.
+pub(crate) fn is_local_literal(host: &str) -> bool {
+    let unscoped = unscoped_ip_literal(host).unwrap_or(host);
+    host == "localhost" || unscoped.parse::<IpAddr>().is_ok_and(is_non_public_ip)
+}
+
 /// Matches the destinations in `DEFAULT_NO_PROXY_VALUE`, without resolving DNS.
 pub(crate) fn is_default_proxy_bypass_host(host: &str) -> bool {
     let host = normalize_host(host);
@@ -52,6 +77,7 @@ pub(crate) fn is_default_proxy_bypass_host(host: &str) -> bool {
     }
 }
 
+/// Classifies IP literals excluded from public network destinations; does not resolve DNS.
 pub fn is_non_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => is_non_public_ipv4(ip),
@@ -90,6 +116,18 @@ fn ipv4_in_cidr(ip: Ipv4Addr, base: [u8; 4], prefix: u8) -> bool {
     (ip & mask) == (base & mask)
 }
 
+/// Private unicast ranges that may be reachable through an upstream VPN proxy.
+/// Loopback, link-local, and other special-use addresses retain their normal routing.
+pub(crate) fn is_private_network_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ip.is_private() || ipv4_in_cidr(ip, [100, 64, 0, 0], /*prefix*/ 10),
+        IpAddr::V6(ip) => match ip.to_ipv4() {
+            Some(ip) => is_private_network_ip(IpAddr::V4(ip)),
+            None => ip.is_unique_local(),
+        },
+    }
+}
+
 fn is_non_public_ipv6(ip: Ipv6Addr) -> bool {
     if let Some(v4) = ip.to_ipv4() {
         return is_non_public_ipv4(v4) || ip.is_loopback();
@@ -107,133 +145,12 @@ fn is_non_public_ipv6(ip: Ipv6Addr) -> bool {
         || ip.is_unicast_link_local()
 }
 
-/// Normalize host fragments for policy matching (trim whitespace, strip ports/brackets, lowercase).
-pub fn normalize_host(host: &str) -> String {
-    let host = host.trim();
-    if host.starts_with('[')
-        && let Some(end) = host.find(']')
-    {
-        return normalize_dns_host_or_ip_literal(&host[1..end]);
-    }
-
-    // The proxy stack should typically hand us a host without a port, but be
-    // defensive and strip `:port` when there is exactly one `:`.
-    if host.bytes().filter(|b| *b == b':').count() == 1 {
-        let host = host.split(':').next().unwrap_or_default();
-        return normalize_dns_host_or_ip_literal(host);
-    }
-
-    // Avoid mangling unbracketed IPv6 literals, but strip trailing dots so fully qualified domain
-    // names are treated the same as their dotless variants.
-    normalize_dns_host_or_ip_literal(host)
+pub(crate) fn compile_allowlist(patterns: &[String]) -> Result<DomainPatternSet> {
+    DomainPatternSet::new(patterns, GlobalWildcard::Allow)
 }
 
-fn normalize_dns_host_or_ip_literal(host: &str) -> String {
-    let host = host.to_ascii_lowercase();
-    let host = host.trim_end_matches('.');
-    if let Some(ip) = normalize_ip_literal(host) {
-        return ip;
-    }
-    host.to_string()
-}
-
-pub(crate) fn unscoped_ip_literal(host: &str) -> Option<&str> {
-    let (ip, _) = host.split_once('%')?;
-    ip.parse::<IpAddr>().ok()?;
-    Some(ip)
-}
-
-fn normalize_ip_literal(host: &str) -> Option<String> {
-    if host.parse::<IpAddr>().is_ok() {
-        return Some(host.to_string());
-    }
-    for delimiter in ["%25", "%"] {
-        if let Some((ip, scope)) = host.split_once(delimiter)
-            && ip.parse::<IpAddr>().is_ok()
-        {
-            return Some(format!("{ip}%{scope}"));
-        }
-    }
-    None
-}
-
-fn normalize_pattern(pattern: &str) -> String {
-    let pattern = pattern.trim();
-    if pattern == "*" {
-        return "*".to_string();
-    }
-
-    let (prefix, remainder) = if let Some(domain) = pattern.strip_prefix("**.") {
-        ("**.", domain)
-    } else if let Some(domain) = pattern.strip_prefix("*.") {
-        ("*.", domain)
-    } else {
-        ("", pattern)
-    };
-
-    let remainder = normalize_host(remainder);
-    if prefix.is_empty() {
-        remainder
-    } else {
-        format!("{prefix}{remainder}")
-    }
-}
-
-pub(crate) fn is_global_wildcard_domain_pattern(pattern: &str) -> bool {
-    let normalized = normalize_pattern(pattern);
-    expand_domain_pattern(&normalized)
-        .iter()
-        .any(|candidate| candidate == "*")
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum GlobalWildcard {
-    Allow,
-    Reject,
-}
-
-pub(crate) fn compile_allowlist_globset(patterns: &[String]) -> Result<GlobSet> {
-    compile_globset_with_policy(patterns, GlobalWildcard::Allow)
-}
-
-pub(crate) fn compile_denylist_globset(patterns: &[String]) -> Result<GlobSet> {
-    compile_globset_with_policy(patterns, GlobalWildcard::Reject)
-}
-
-// Browser network-policy matchers implement a subset of this hostname grammar.
-// Keep changes to shared grammar and normalization in sync with their contract
-// cases and the Rust tests below, including compile_globset_supports_question_mark_wildcards.
-fn compile_globset_with_policy(
-    patterns: &[String],
-    global_wildcard: GlobalWildcard,
-) -> Result<GlobSet> {
-    let mut builder = GlobSetBuilder::new();
-    let mut seen = HashSet::new();
-    for pattern in patterns {
-        if global_wildcard == GlobalWildcard::Reject && is_global_wildcard_domain_pattern(pattern) {
-            bail!(
-                "unsupported global wildcard domain pattern \"*\"; use exact hosts or scoped wildcards like *.example.com or **.example.com"
-            );
-        }
-        let pattern = normalize_pattern(pattern);
-        // Supported domain patterns:
-        // - "example.com": match the exact host
-        // - "*.example.com": match any subdomain (not the apex)
-        // - "**.example.com": match the apex and any subdomain
-        // - "api?.example.com": match exactly one character after "api"
-        // - "*": match every host when explicitly enabled for allowlist compilation
-        for candidate in expand_domain_pattern(&pattern) {
-            if !seen.insert(candidate.clone()) {
-                continue;
-            }
-            let glob = GlobBuilder::new(&candidate)
-                .case_insensitive(true)
-                .build()
-                .with_context(|| format!("invalid glob pattern: {candidate}"))?;
-            builder.add(glob);
-        }
-    }
-    Ok(builder.build()?)
+pub(crate) fn compile_denylist(patterns: &[String]) -> Result<DomainPatternSet> {
+    DomainPatternSet::new(patterns, GlobalWildcard::Reject)
 }
 
 #[derive(Debug, Clone)]
@@ -244,24 +161,6 @@ pub(crate) enum DomainPattern {
 }
 
 impl DomainPattern {
-    /// Parse a policy pattern for constraint comparisons.
-    ///
-    /// Validation of glob syntax happens when building the globset; here we only
-    /// decode the wildcard prefixes to keep constraint checks lightweight.
-    pub(crate) fn parse(input: &str) -> Self {
-        let input = input.trim();
-        if input.is_empty() {
-            return Self::Exact(String::new());
-        }
-        if let Some(domain) = input.strip_prefix("**.") {
-            Self::parse_domain(domain, Self::ApexAndSubdomains)
-        } else if let Some(domain) = input.strip_prefix("*.") {
-            Self::parse_domain(domain, Self::SubdomainsOnly)
-        } else {
-            Self::Exact(input.to_string())
-        }
-    }
-
     /// Parse a policy pattern for constraint comparisons, validating domain parts with `url`.
     pub(crate) fn parse_for_constraints(input: &str) -> Self {
         let input = input.trim();
@@ -275,14 +174,6 @@ impl DomainPattern {
             return Self::SubdomainsOnly(parse_domain_for_constraints(domain));
         }
         Self::Exact(parse_domain_for_constraints(input))
-    }
-
-    fn parse_domain(domain: &str, build: impl FnOnce(String) -> Self) -> Self {
-        let domain = domain.trim();
-        if domain.is_empty() {
-            return Self::Exact(String::new());
-        }
-        build(domain.to_string())
     }
 
     pub(crate) fn allows(&self, candidate: &DomainPattern) -> bool {
@@ -329,18 +220,6 @@ fn parse_domain_for_constraints(domain: &str) -> String {
     match UrlHost::parse(host) {
         Ok(host) => host.to_string(),
         Err(_) => String::new(),
-    }
-}
-
-fn expand_domain_pattern(pattern: &str) -> Vec<String> {
-    match DomainPattern::parse(pattern) {
-        DomainPattern::Exact(domain) => vec![domain],
-        DomainPattern::SubdomainsOnly(domain) => {
-            vec![format!("?*.{domain}")]
-        }
-        DomainPattern::ApexAndSubdomains(domain) => {
-            vec![domain.clone(), format!("?*.{domain}")]
-        }
     }
 }
 
@@ -391,7 +270,7 @@ mod tests {
 
     #[test]
     fn compile_globset_normalizes_trailing_dots() {
-        let set = compile_denylist_globset(&["Example.COM.".to_string()]).unwrap();
+        let set = compile_denylist(&["Example.COM.".to_string()]).unwrap();
 
         assert_eq!(true, set.is_match("example.com"));
         assert_eq!(false, set.is_match("api.example.com"));
@@ -399,7 +278,7 @@ mod tests {
 
     #[test]
     fn compile_globset_normalizes_wildcards() {
-        let set = compile_denylist_globset(&["*.Example.COM.".to_string()]).unwrap();
+        let set = compile_denylist(&["*.Example.COM.".to_string()]).unwrap();
 
         assert_eq!(true, set.is_match("api.example.com"));
         assert_eq!(false, set.is_match("example.com"));
@@ -407,7 +286,7 @@ mod tests {
 
     #[test]
     fn compile_globset_supports_mid_label_wildcards() {
-        let set = compile_denylist_globset(&["region*.v2.argotunnel.com".to_string()]).unwrap();
+        let set = compile_denylist(&["region*.v2.argotunnel.com".to_string()]).unwrap();
 
         assert_eq!(true, set.is_match("region1.v2.argotunnel.com"));
         assert_eq!(true, set.is_match("region.v2.argotunnel.com"));
@@ -441,10 +320,7 @@ mod tests {
             (" API?.EXAMPLE.COM. ", "API1.EXAMPLE.COM.", true),
         ] {
             let patterns = [pattern.to_string()];
-            for set in [
-                compile_allowlist_globset(&patterns)?,
-                compile_denylist_globset(&patterns)?,
-            ] {
+            for set in [compile_allowlist(&patterns)?, compile_denylist(&patterns)?] {
                 assert_eq!(
                     set.is_match(normalize_host(host)),
                     expected,
@@ -457,7 +333,7 @@ mod tests {
 
     #[test]
     fn compile_globset_normalizes_apex_and_subdomains() {
-        let set = compile_denylist_globset(&["**.Example.COM.".to_string()]).unwrap();
+        let set = compile_denylist(&["**.Example.COM.".to_string()]).unwrap();
 
         assert_eq!(true, set.is_match("example.com"));
         assert_eq!(true, set.is_match("api.example.com"));
@@ -465,14 +341,14 @@ mod tests {
 
     #[test]
     fn compile_globset_normalizes_bracketed_ipv6_literals() {
-        let set = compile_denylist_globset(&["[::1]".to_string()]).unwrap();
+        let set = compile_denylist(&["[::1]".to_string()]).unwrap();
 
         assert_eq!(true, set.is_match("::1"));
     }
 
     #[test]
     fn compile_globset_preserves_scoped_ipv6_literals() {
-        let set = compile_denylist_globset(&["[fe80::1%25lo0]".to_string()]).unwrap();
+        let set = compile_denylist(&["[fe80::1%25lo0]".to_string()]).unwrap();
 
         assert_eq!(true, set.is_match("fe80::1%lo0"));
         assert_eq!(false, set.is_match("fe80::1%lo1"));
@@ -516,44 +392,5 @@ mod tests {
         assert!(is_non_public_ip("::1".parse().unwrap()));
         assert!(is_non_public_ip("fe80::1".parse().unwrap()));
         assert!(is_non_public_ip("fc00::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn normalize_host_lowercases_and_trims() {
-        assert_eq!(normalize_host("  ExAmPlE.CoM  "), "example.com");
-    }
-
-    #[test]
-    fn normalize_host_strips_port_for_host_port() {
-        assert_eq!(normalize_host("example.com:1234"), "example.com");
-    }
-
-    #[test]
-    fn normalize_host_preserves_unbracketed_ipv6() {
-        assert_eq!(normalize_host("2001:db8::1"), "2001:db8::1");
-    }
-
-    #[test]
-    fn normalize_host_strips_trailing_dot() {
-        assert_eq!(normalize_host("example.com."), "example.com");
-        assert_eq!(normalize_host("ExAmPlE.CoM."), "example.com");
-    }
-
-    #[test]
-    fn normalize_host_strips_trailing_dot_with_port() {
-        assert_eq!(normalize_host("example.com.:443"), "example.com");
-    }
-
-    #[test]
-    fn normalize_host_strips_brackets_for_ipv6() {
-        assert_eq!(normalize_host("[::1]"), "::1");
-        assert_eq!(normalize_host("[::1]:443"), "::1");
-    }
-
-    #[test]
-    fn normalize_host_preserves_ipv6_scope_ids() {
-        assert_eq!(normalize_host("fe80::1%lo0"), "fe80::1%lo0");
-        assert_eq!(normalize_host("[fe80::1%lo0]"), "fe80::1%lo0");
-        assert_eq!(normalize_host("[fe80::1%25lo0]"), "fe80::1%lo0");
     }
 }

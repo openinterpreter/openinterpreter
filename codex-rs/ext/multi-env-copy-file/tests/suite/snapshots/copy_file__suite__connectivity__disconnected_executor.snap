@@ -1,0 +1,14 @@
+---
+source: ext/multi-env-copy-file/tests/suite/connectivity.rs
+expression: outputs
+---
+[
+  {
+    "call_id": "source-disconnected",
+    "output": "could not open copy source: broken pipe"
+  },
+  {
+    "call_id": "target-disconnected",
+    "output": "copy failed; target may be truncated or partially written: broken pipe"
+  }
+]

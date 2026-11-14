@@ -14,7 +14,10 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
+use tokio::time::Instant;
+use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::info;
@@ -28,10 +31,12 @@ use crate::connection::JsonRpcConnectionEvent;
 use crate::connection::JsonRpcTransport;
 use crate::connection::WEBSOCKET_KEEPALIVE_INTERVAL;
 use crate::noise_channel::InitiatorHandshake;
+use crate::noise_channel::NoiseChannelError;
 use crate::noise_channel::NoiseChannelIdentity;
 use crate::noise_channel::NoiseChannelPublicKey;
 use crate::noise_channel::NoiseTransport;
 use crate::noise_channel::noise_channel_prologue;
+use crate::noise_relay::message_framing::ClientJsonRpcMessageDecoder;
 use crate::noise_relay::message_framing::JsonRpcMessageDecoder;
 use crate::noise_relay::message_framing::NOISE_RECORD_PLAINTEXT_LEN;
 use crate::noise_relay::message_framing::frame_jsonrpc_message;
@@ -45,6 +50,11 @@ use crate::relay_proto::RelayMessageFrame;
 use crate::websocket_pong_watchdog::WEBSOCKET_PONG_TIMEOUT;
 use crate::websocket_pong_watchdog::WEBSOCKET_PONG_TIMEOUT_REASON;
 use crate::websocket_pong_watchdog::WebSocketPongWatchdog;
+
+#[path = "harness_diagnostics.rs"]
+mod diagnostics;
+use diagnostics::TransportExitReason;
+use diagnostics::WebsocketWriteError;
 
 /// Values that bind one harness websocket to the intended executor registration.
 ///
@@ -64,7 +74,9 @@ pub(crate) struct NoiseHarnessConnectionArgs {
 /// transport is ready for application messages.
 pub(crate) struct NoiseHarnessConnection {
     pub(crate) connection: JsonRpcConnection,
-    pub(crate) handshake_ready: oneshot::Receiver<()>,
+    pub(crate) handshake_ready: oneshot::Receiver<Result<(), ExecServerError>>,
+    pub(crate) stream_id: String,
+    pub(crate) handshake_started: Instant,
 }
 
 // Reset frames are cleartext relay control and are not authenticated by Noise.
@@ -79,13 +91,16 @@ const MAX_FRAMES_DRAINED_AFTER_PONG_DEADLINE: usize = 32;
 /// Callers that send application messages immediately after opening the
 /// websocket must await handshake_ready first. Dropping that receiver keeps
 /// the legacy fire-and-forget behavior for existing connection owners.
-pub(crate) fn noise_harness_connection_from_websocket_with_readiness<T, E>(
+pub(crate) fn noise_harness_connection_from_websocket_with_readiness<T>(
     stream: T,
     args: NoiseHarnessConnectionArgs,
 ) -> NoiseHarnessConnection
 where
-    T: Sink<Message, Error = E> + Stream<Item = Result<Message, E>> + Unpin + Send + 'static,
-    E: std::fmt::Display + Send + 'static,
+    T: Sink<Message, Error = WebSocketError>
+        + Stream<Item = Result<Message, WebSocketError>>
+        + Unpin
+        + Send
+        + 'static,
 {
     let NoiseHarnessConnectionArgs {
         connection_label,
@@ -96,11 +111,13 @@ where
         harness_key_authorization,
     } = args;
     let stream_id = Uuid::new_v4().to_string();
+    let connection_stream_id = stream_id.clone();
+    let handshake_started = Instant::now();
     let (outgoing_tx, mut outgoing_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let (incoming_tx, incoming_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let (disconnected_tx, disconnected_rx) = watch::channel(false);
     let (handshake_ready_tx, handshake_ready_rx) = oneshot::channel();
-    let stream_span = tracing::debug_span!("noise_relay.stream", noise_side = "harness",);
+    let stream_span = tracing::debug_span!("noise_relay.stream", noise_side = "harness", stream_id);
     debug!(
         environment_id,
         executor_registration_id, stream_id, "Noise harness relay details"
@@ -109,6 +126,23 @@ where
     let websocket_task = tokio::spawn(async move {
         let mut handshake_ready_tx = Some(handshake_ready_tx);
         let mut websocket = stream;
+        // Readiness only carries success; record failures before that signal is dropped.
+        let record_handshake_failure = |reason: &'static str| {
+            tracing::event!(
+                name: "codex.exec_server.noise_handshake_failed",
+                target: "codex_otel.trace_safe",
+                tracing::Level::WARN,
+                event.name = "codex.exec_server.noise_handshake_failed",
+                noise_event = "handshake",
+                noise_outcome = "failed",
+                noise_side = "harness",
+                noise_reason = reason,
+                elapsed_ms = handshake_started.elapsed().as_millis() as u64,
+                environment_id,
+                executor_registration_id,
+                stream_id,
+            );
+        };
 
         // Bind the Noise transcript to the exact environment registration and
         // virtual relay stream before emitting any handshake bytes. A captured
@@ -123,6 +157,7 @@ where
         ) {
             Ok(handshake) => handshake,
             Err(error) => {
+                record_handshake_failure("handshake_start");
                 send_disconnected(
                     &incoming_tx,
                     &disconnected_tx,
@@ -148,6 +183,7 @@ where
                 .await
                 .is_err()
         {
+            record_handshake_failure("websocket_write");
             let _ = disconnected_tx.send(true);
             return;
         }
@@ -157,6 +193,7 @@ where
         // create a plaintext or unauthenticated application path.
         let mut transport = loop {
             let Some(incoming_message) = websocket.next().await else {
+                record_handshake_failure("websocket_ended");
                 send_disconnected(
                     &incoming_tx,
                     &disconnected_tx,
@@ -167,6 +204,7 @@ where
             let message = match incoming_message {
                 Ok(Message::Binary(payload)) => payload,
                 Ok(Message::Close(_)) => {
+                    record_handshake_failure("websocket_close");
                     send_disconnected(
                         &incoming_tx,
                         &disconnected_tx,
@@ -176,6 +214,7 @@ where
                 }
                 Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => continue,
                 Ok(Message::Text(_)) => {
+                    record_handshake_failure("unexpected_text");
                     send_disconnected(
                         &incoming_tx,
                         &disconnected_tx,
@@ -184,6 +223,7 @@ where
                     return;
                 }
                 Err(error) => {
+                    record_handshake_failure(websocket_read_error_reason(&error));
                     send_disconnected(
                         &incoming_tx,
                         &disconnected_tx,
@@ -197,6 +237,7 @@ where
             let frame = match decode_relay_message_frame(message.as_ref()) {
                 Ok(frame) => frame,
                 Err(error) => {
+                    record_handshake_failure("invalid_frame");
                     send_disconnected(
                         &incoming_tx,
                         &disconnected_tx,
@@ -214,6 +255,7 @@ where
                     let response = match frame.into_handshake_payload() {
                         Ok(response) => response,
                         Err(error) => {
+                            record_handshake_failure("invalid_response");
                             send_disconnected(
                                 &incoming_tx,
                                 &disconnected_tx,
@@ -225,16 +267,34 @@ where
                     match initiator_handshake.finish(&response) {
                         Ok(transport) => {
                             info!(
+                                target: "codex_otel.trace_safe",
                                 noise_event = "handshake",
                                 noise_outcome = "ok",
+                                noise_side = "harness",
+                                elapsed_ms = handshake_started.elapsed().as_millis() as u64,
+                                environment_id,
+                                executor_registration_id,
+                                stream_id,
                                 "Noise harness handshake completed"
                             );
                             if let Some(handshake_ready_tx) = handshake_ready_tx.take() {
-                                let _ = handshake_ready_tx.send(());
+                                let _ = handshake_ready_tx.send(Ok(()));
                             }
                             break transport;
                         }
+                        Err(NoiseChannelError::RegistryAuthenticationRejected) => {
+                            record_handshake_failure("registry_authentication_rejected");
+                            if let Some(handshake_ready_tx) = handshake_ready_tx.take() {
+                                let _ = handshake_ready_tx.send(Err(ExecServerError::EnvironmentRegistryAuth(
+                                    "executor credentials rejected".to_string(),
+                                )));
+                            }
+                            send_disconnected(&incoming_tx, &disconnected_tx,
+                                "environment registry rejected executor credentials".to_string());
+                            return;
+                        }
                         Err(error) => {
+                            record_handshake_failure("handshake_finish");
                             send_disconnected(
                                 &incoming_tx,
                                 &disconnected_tx,
@@ -245,6 +305,7 @@ where
                     }
                 }
                 Ok(RelayFrameBodyKind::Reset) => {
+                    record_handshake_failure("relay_reset");
                     send_disconnected(
                         &incoming_tx,
                         &disconnected_tx,
@@ -258,6 +319,7 @@ where
                     | RelayFrameBodyKind::Heartbeat,
                 ) => {}
                 Ok(RelayFrameBodyKind::Data) | Err(_) => {
+                    record_handshake_failure("unexpected_frame");
                     send_disconnected(
                         &incoming_tx,
                         &disconnected_tx,
@@ -274,7 +336,7 @@ where
         let mut websocket = websocket.peekable();
         let mut next_outbound_seq = 0u32;
         let mut inbound_ciphertexts = OrderedCiphertextFrames::default();
-        let mut inbound_decoder = JsonRpcMessageDecoder::default();
+        let mut inbound_decoder = JsonRpcMessageDecoder::client();
         let mut keepalive = tokio::time::interval_at(
             tokio::time::Instant::now() + WEBSOCKET_KEEPALIVE_INTERVAL,
             WEBSOCKET_KEEPALIVE_INTERVAL,
@@ -289,12 +351,26 @@ where
         let mut pending_outbound = None;
         let mut force_incoming = false;
         let mut frames_drained_after_pong_deadline = 0usize;
-        'relay: loop {
+        let connected_at = Instant::now();
+        let mut last_read_at = connected_at;
+        let mut last_write_at = connected_at;
+        let mut write_started_at = None;
+        let mut write_kind = "none";
+        let mut records_written = 0_u64;
+        let mut frames_read = 0_u64;
+        let mut read_reason = "none";
+        let mut messages_dequeued = 0_u64;
+        let mut messages_written = 0_u64;
+        let mut pending_request: Option<(tracing::Span, Instant)> = None;
+        let mut heartbeat = diagnostics::HeartbeatDiagnostics::default();
+        let exit_reason = 'relay: loop {
             // Consume a due tick before the always-ready record arm below can win
             // another select iteration and postpone the keepalive.
             if pong_watchdog.deadline().is_none()
                 && keepalive.tick().now_or_never().is_some()
             {
+                write_started_at = Some(Instant::now());
+                write_kind = "keepalive";
                 if let Err(error) = send_keepalive_ping(
                     &mut websocket,
                     &mut pong_watchdog,
@@ -303,8 +379,11 @@ where
                 .await
                 {
                     warn!("failed to write Noise relay keepalive ping: {error}");
-                    break;
+                    break error.exit_reason();
                 }
+                last_write_at = Instant::now();
+                write_started_at = None;
+                heartbeat.record(diagnostics::HeartbeatProgress::PingWritten, &stream_id);
                 frames_drained_after_pong_deadline = 0;
                 continue;
             }
@@ -324,16 +403,10 @@ where
                 {
                     force_incoming = true;
                 } else {
-                    warn!(
-                        noise_reason = WEBSOCKET_PONG_TIMEOUT_REASON,
-                        "Noise harness rendezvous websocket disconnected"
-                    );
-                    send_disconnected(
-                        &incoming_tx,
-                        &disconnected_tx,
-                        WEBSOCKET_PONG_TIMEOUT_REASON.to_string(),
-                    );
-                    return;
+                    let _ = incoming_tx.try_send(JsonRpcConnectionEvent::Disconnected {
+                        reason: Some(WEBSOCKET_PONG_TIMEOUT_REASON.to_string()),
+                    });
+                    break TransportExitReason::PongTimeout;
                 }
             }
 
@@ -353,13 +426,36 @@ where
             tokio::select! {
                 maybe_message = outgoing_rx.recv(), if pending_outbound.is_none() && !force_incoming && !pong_deadline_expired => {
                     let Some(message) = maybe_message else {
-                        break;
+                        break TransportExitReason::OutgoingClosed;
                     };
+                    messages_dequeued += 1;
+                    if let codex_exec_server_protocol::JSONRPCMessage::Request(request) = &message {
+                        // Link transport progress to the existing RPC trace without copying
+                        // its method, ID, payload or unvalidated trace carrier into fields.
+                        let span = tracing::info_span!("codex.exec_server.noise_request_write", stream_id);
+                        if let Some(trace) = &request.trace {
+                            codex_otel::set_parent_from_w3c_trace_context(&span, trace);
+                        }
+                        // Live JSON correlation reads OtelData before this span closes.
+                        // Setting a remote parent alone leaves its trace ID lazy.
+                        let _ = codex_otel::span_w3c_trace_context(&span);
+                        tracing::event!(
+                            name: "codex.exec_server.request_dequeued",
+                            target: "codex_otel.trace_safe",
+                            parent: &span,
+                            tracing::Level::INFO,
+                            event.name = "codex.exec_server.request_dequeued",
+                            stream_id,
+                            message_sequence = messages_dequeued,
+                            outgoing_queue_depth = outgoing_rx.len(),
+                        );
+                        pending_request = Some((span, Instant::now()));
+                    }
                     let framed = match frame_jsonrpc_message(&message) {
                         Ok(framed) => framed,
                         Err(error) => {
                             warn!("failed to frame JSON-RPC payload for Noise relay: {error}");
-                            break;
+                            break TransportExitReason::Framing;
                         }
                     };
                     let request_trace = match message {
@@ -375,7 +471,7 @@ where
                         Ok(seq) => seq,
                         Err(error) => {
                             warn!("Noise relay sequence exhausted: {error}");
-                            break 'relay;
+                            break 'relay TransportExitReason::SequenceExhausted;
                         }
                     };
                     let (ciphertext, next_offset, message_complete, request_trace) = {
@@ -387,7 +483,7 @@ where
                             Ok(ciphertext) => ciphertext,
                             Err(error) => {
                                 warn!("failed to encrypt JSON-RPC payload for Noise relay: {error}");
-                                break 'relay;
+                                break 'relay TransportExitReason::Encryption;
                             }
                         };
                         (
@@ -403,6 +499,8 @@ where
                     // combined sink and stream. A single bounded record can therefore hit the
                     // deadline and disconnect with that Pong queued. Treat that as write
                     // backpressure; this loop yields only between records.
+                    write_started_at = Some(Instant::now());
+                    write_kind = "data";
                     if let Err(error) = send_websocket_message(
                         &mut websocket,
                         Message::Binary(encode_relay_message_frame(&frame).into()),
@@ -411,9 +509,25 @@ where
                     .await
                     {
                         warn!("failed to write Noise relay websocket: {error}");
-                        break 'relay;
+                        break 'relay error.exit_reason();
                     }
+                    last_write_at = Instant::now();
+                    write_started_at = None;
+                    records_written += 1;
                     if message_complete {
+                        messages_written += 1;
+                        if let Some((span, started_at)) = pending_request.take() {
+                            tracing::event!(
+                                name: "codex.exec_server.request_written",
+                                target: "codex_otel.trace_safe",
+                                parent: &span,
+                                tracing::Level::INFO,
+                                event.name = "codex.exec_server.request_written",
+                                stream_id,
+                                message_sequence = messages_dequeued,
+                                write_elapsed_ms = started_at.elapsed().as_millis() as u64,
+                            );
+                        }
                         pending_outbound = None;
                     } else if let Some((_framed, offset, _request_trace)) = pending_outbound.as_mut() {
                         *offset = next_offset;
@@ -423,6 +537,8 @@ where
                     continue;
                 }
                 _ = keepalive.tick(), if pong_watchdog.deadline().is_none() => {
+                    write_started_at = Some(Instant::now());
+                    write_kind = "keepalive";
                     if let Err(error) = send_keepalive_ping(
                         &mut websocket,
                         &mut pong_watchdog,
@@ -431,15 +547,22 @@ where
                     .await
                     {
                         warn!("failed to write Noise relay keepalive ping: {error}");
-                        break;
+                        break error.exit_reason();
                     }
+                    last_write_at = Instant::now();
+                    write_started_at = None;
+                    heartbeat.record(diagnostics::HeartbeatProgress::PingWritten, &stream_id);
                     frames_drained_after_pong_deadline = 0;
                 }
                 incoming_message = websocket.next() => {
                     force_incoming = false;
                     let Some(incoming_message) = incoming_message else {
-                        break;
+                        break TransportExitReason::WebsocketEnded;
                     };
+                    if incoming_message.is_ok() {
+                        last_read_at = Instant::now();
+                        frames_read += 1;
+                    }
                     // Count each completed read after expiry. If only the deadline arm
                     // advanced this counter, reads won by a simultaneously ready incoming
                     // arm would not count toward the 32-frame cap.
@@ -455,7 +578,7 @@ where
                                 Ok(frame) => frame,
                                 Err(error) => {
                                     send_malformed(&incoming_tx, error.to_string());
-                                    break;
+                                    break TransportExitReason::InvalidFrame;
                                 }
                             };
                             if frame.stream_id != stream_id {
@@ -467,7 +590,7 @@ where
                                         Ok(data) => data,
                                         Err(error) => {
                                             send_malformed(&incoming_tx, error.to_string());
-                                            break;
+                                            break TransportExitReason::InvalidFrame;
                                         }
                                     };
                                     if let Err(error) = receive_data(
@@ -481,10 +604,10 @@ where
                                     .await
                                     {
                                         if matches!(error, ExecServerError::Closed) {
-                                            break;
+                                            break TransportExitReason::ApplicationDelivery;
                                         }
                                         send_malformed(&incoming_tx, error.to_string());
-                                        break;
+                                        break TransportExitReason::InvalidData;
                                     }
                                 }
                                 Ok(RelayFrameBodyKind::Reset) => {
@@ -495,7 +618,7 @@ where
                                             ),
                                         },
                                     );
-                                    break;
+                                    break TransportExitReason::RelayReset;
                                 }
                                 Ok(
                                     RelayFrameBodyKind::Ack
@@ -507,12 +630,13 @@ where
                                         &incoming_tx,
                                         "Noise relay received invalid post-handshake frame".to_string(),
                                     );
-                                    break;
+                                    break TransportExitReason::InvalidFrame;
                                 }
                             }
                         }
-                        Ok(Message::Close(_)) => break,
+                        Ok(Message::Close(_)) => break TransportExitReason::WebsocketClose,
                         Ok(Message::Pong(_)) => {
+                            heartbeat.record(diagnostics::HeartbeatProgress::PongReceived, &stream_id);
                             pong_watchdog.received_pong();
                             frames_drained_after_pong_deadline = 0;
                         }
@@ -522,16 +646,46 @@ where
                                 &incoming_tx,
                                 "Noise relay transport expects binary protobuf frames".to_string(),
                             );
-                            break;
+                            break TransportExitReason::UnexpectedText;
                         }
                         Err(error) => {
                             debug!("Noise relay websocket read failed: {error}");
-                            break;
+                            read_reason = websocket_read_error_reason(&error);
+                            break TransportExitReason::WebsocketRead;
                         }
                     }
                 }
             }
-        }
+        };
+        // Fixed reasons and local counters only. Raw errors, frames and peer-provided
+        // close/reset text must remain outside the trace-safe target.
+        tracing::event!(
+            name: "codex.exec_server.noise_transport_closed",
+            target: "codex_otel.trace_safe",
+            tracing::Level::INFO,
+            event.name = "codex.exec_server.noise_transport_closed",
+            noise_side = "harness",
+            noise_reason = exit_reason.as_str(),
+            read_reason,
+            stream_id,
+            messages_dequeued,
+            messages_written,
+            pings_written = heartbeat.pings_written,
+            pongs_received = heartbeat.pongs_received,
+            connection_age_ms = connected_at.elapsed().as_millis() as u64,
+            last_read_age_ms = last_read_at.elapsed().as_millis() as u64,
+            last_write_age_ms = last_write_at.elapsed().as_millis() as u64,
+            write_pending = write_started_at.is_some(),
+            write_kind = if write_started_at.is_some() { write_kind } else { "none" },
+            write_wait_ms = write_started_at.map(|at| at.elapsed().as_millis() as u64).unwrap_or(0),
+            pong_pending = pong_watchdog.deadline().is_some(),
+            pong_deadline_overdue_ms = pong_watchdog.deadline()
+                .map(|at| Instant::now().saturating_duration_since(at).as_millis() as u64).unwrap_or(0),
+            frames_read,
+            records_written,
+            outgoing_queue_depth = outgoing_rx.len(),
+            incoming_queue_depth = incoming_tx.max_capacity() - incoming_tx.capacity(),
+        );
         let _ = disconnected_tx.send(true);
     }
     .instrument(stream_span));
@@ -545,6 +699,28 @@ where
             transport: JsonRpcTransport::Plain,
         },
         handshake_ready: handshake_ready_rx,
+        stream_id: connection_stream_id,
+        handshake_started,
+    }
+}
+
+// Classify locally typed errors only; their text can contain untrusted wire data.
+fn websocket_read_error_reason(error: &WebSocketError) -> &'static str {
+    match error {
+        WebSocketError::Io(error) => match error.kind() {
+            std::io::ErrorKind::ConnectionReset => "websocket_read_connection_reset",
+            std::io::ErrorKind::ConnectionAborted => "websocket_read_connection_aborted",
+            std::io::ErrorKind::UnexpectedEof => "websocket_read_unexpected_eof",
+            std::io::ErrorKind::TimedOut => "websocket_read_timed_out",
+            _ => "websocket_read_io_other",
+        },
+        WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
+            "websocket_read_reset_without_close"
+        }
+        WebSocketError::Protocol(_) => "websocket_read_protocol",
+        WebSocketError::ConnectionClosed | WebSocketError::AlreadyClosed => "websocket_read_closed",
+        WebSocketError::Tls(_) => "websocket_read_tls",
+        _ => "websocket_read_other",
     }
 }
 
@@ -552,15 +728,15 @@ async fn send_websocket_message<T, E>(
     websocket: &mut T,
     message: Message,
     deadline: tokio::time::Instant,
-) -> Result<(), String>
+) -> Result<(), WebsocketWriteError>
 where
     T: Sink<Message, Error = E> + Unpin,
     E: std::fmt::Display,
 {
     match tokio::time::timeout_at(deadline, websocket.send(message)).await {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(error.to_string()),
-        Err(_) => Err("websocket write timed out".to_string()),
+        Ok(Err(error)) => Err(WebsocketWriteError::Transport(error.to_string())),
+        Err(_) => Err(WebsocketWriteError::Timeout),
     }
 }
 
@@ -568,7 +744,7 @@ async fn send_keepalive_ping<T, E>(
     websocket: &mut T,
     pong_watchdog: &mut WebSocketPongWatchdog,
     pong_deadline: std::pin::Pin<&mut tokio::time::Sleep>,
-) -> Result<(), String>
+) -> Result<(), WebsocketWriteError>
 where
     T: Sink<Message, Error = E> + Unpin,
     E: std::fmt::Display,
@@ -594,7 +770,7 @@ where
 async fn receive_data(
     inbound_ciphertexts: &mut OrderedCiphertextFrames,
     transport: &mut NoiseTransport,
-    decoder: &mut JsonRpcMessageDecoder,
+    decoder: &mut ClientJsonRpcMessageDecoder,
     data: RelayData,
     delivery_deadline: tokio::time::Instant,
     incoming_tx: &mpsc::Sender<JsonRpcConnectionEvent>,
@@ -626,13 +802,21 @@ async fn send_incoming_event(
     event: JsonRpcConnectionEvent,
     deadline: tokio::time::Instant,
 ) -> Result<(), ExecServerError> {
+    let delivery_started = Instant::now();
     match tokio::time::timeout_at(deadline, incoming_tx.send(event)).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(_)) => Err(ExecServerError::Closed),
         Err(_) => {
-            warn!(
+            tracing::event!(
+                name: "codex.exec_server.noise_application_backpressure",
+                target: "codex_otel.trace_safe",
+                tracing::Level::WARN,
+                event.name = "codex.exec_server.noise_application_backpressure",
+                noise_side = "harness",
                 noise_reason = "application_backpressure",
-                "Noise harness application event delivery timed out"
+                delivery_wait_ms = delivery_started.elapsed().as_millis() as u64,
+                incoming_queue_depth = incoming_tx.max_capacity() - incoming_tx.capacity(),
+                incoming_queue_capacity = incoming_tx.max_capacity(),
             );
             Err(ExecServerError::Closed)
         }

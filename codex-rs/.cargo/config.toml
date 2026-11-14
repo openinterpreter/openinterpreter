@@ -1,3 +1,16 @@
+[env]
+# Roughly one arena per four CPUs reduces idle RSS after Linux musl conversations unload.
+JEMALLOC_SYS_WITH_MALLOC_CONF = "narenas_ratio:0.25"
+
+# curl-sys enables its NTLM sources but does not set the flag required by libcurl 8.21.
+CFLAGS_aarch64_pc_windows_gnullvm = "-DCURL_ENABLE_NTLM"
+CFLAGS_aarch64_pc_windows_msvc = "-DCURL_ENABLE_NTLM"
+CFLAGS_x86_64_pc_windows_gnullvm = "-DCURL_ENABLE_NTLM"
+CFLAGS_x86_64_pc_windows_msvc = "-DCURL_ENABLE_NTLM"
+
+# Debug-build TUI app tests recurse deeply; raise spawned-thread stack.
+RUST_MIN_STACK = "33554432"
+
 [target.'cfg(all(windows, target_env = "msvc"))']
 rustflags = ["-C", "link-arg=/STACK:8388608", "-C", "target-feature=+crt-static"]
 
@@ -9,9 +22,3 @@ rustflags = ["-C", "link-arg=/STACK:8388608", "-C", "link-arg=/arm64hazardfree"]
 
 [target.'cfg(all(windows, target_env = "gnu"))']
 rustflags = ["-C", "link-arg=-Wl,--stack,8388608"]
-
-# Windows builds raise the linker stack above for deep TUI widget recursion.
-# Debug-build TUI app tests recurse just as deeply on other platforms; raise
-# the spawned-thread stack so test threads do not overflow the 2 MiB default.
-[env]
-RUST_MIN_STACK = "33554432"

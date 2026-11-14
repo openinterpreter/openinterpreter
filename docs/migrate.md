@@ -12,16 +12,16 @@ place whenever a practical cross-tool standard exists.
 
 ## What Usually Migrates
 
-| Source item | Open Interpreter destination |
-| ----------- | ---------------------------- |
-| Instructions | `AGENTS.md` |
-| Config | `~/.openinterpreter/config.toml` or `.openinterpreter/config.toml` |
-| Skills | `.agents/skills/` or `~/.agents/skills/` |
-| MCP config | `[mcp_servers]` |
-| Hooks | `hooks.json` or inline `[hooks]` |
-| Slash-command workflows | Skills or project instructions |
-| Subagents | `[agents]` config |
-| Recent sessions | Local session history where supported |
+| Source item             | Open Interpreter destination                                       |
+| ----------------------- | ------------------------------------------------------------------ |
+| Instructions            | `AGENTS.md`                                                        |
+| Config                  | `~/.openinterpreter/config.toml` or `.openinterpreter/config.toml` |
+| Skills                  | `.agents/skills/` or `~/.agents/skills/`                           |
+| MCP config              | `[mcp_servers]`                                                    |
+| Hooks                   | `hooks.json` or inline `[hooks]`                                   |
+| Slash-command workflows | Skills or project instructions                                     |
+| Subagents               | `[agents]` config                                                  |
+| Recent sessions         | Local session history where supported                              |
 
 Skills already stored under `.agents/skills/` or `~/.agents/skills/` do not
 need to be copied. Open Interpreter reads those shared locations directly.

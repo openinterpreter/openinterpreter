@@ -24,6 +24,10 @@ use super::EnableAlternateScroll;
 use super::KeyboardRestore;
 use super::keyboard_modes;
 
+#[cfg(all(test, windows))]
+#[path = "alternate_screen_windows_tests.rs"]
+mod windows_tests;
+
 // Panic and exit cleanup cannot borrow Tui. Track the actual screen independently of its owner.
 pub(super) static ALTERNATE_SCREEN: AlternateScreen = AlternateScreen {
     active: AtomicBool::new(/*v*/ false),

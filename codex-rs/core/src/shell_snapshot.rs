@@ -7,6 +7,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use crate::StateDbHandle;
+use crate::exec_env::CODEX_TOOL_CALL_ID_ENV_VAR;
 use crate::rollout::list::find_thread_path_by_id_str;
 use crate::shell::Shell;
 use crate::shell::ShellType;
@@ -15,11 +16,13 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use codex_exec_server::Environment;
+use codex_network_proxy::CHILD_ONLY_CA_ENV_KEYS;
 use codex_network_proxy::CREDENTIAL_BROKER_ACTIVE_ENV_KEY;
 use codex_network_proxy::CredentialBrokerContext;
 use codex_network_proxy::NetworkProxy;
 use codex_network_proxy::brokered_credential_marker_env_keys;
 use codex_network_proxy::brokered_credential_value_env_keys;
+use codex_network_proxy::is_managed_mitm_ca_trust_bundle_path;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
@@ -205,7 +208,7 @@ impl ShellSnapshot {
                     SnapshotCredentialBrokerState::Ready(network_proxy) if sandbox.is_some() => {
                         Some(SnapshotCredentialBroker {
                             network_proxy,
-                            shell_environment_policy,
+                            shell_environment_policy: shell_environment_policy.clone(),
                             allow_login_shell,
                         })
                     }
@@ -221,6 +224,7 @@ impl ShellSnapshot {
                 &config.codex_home,
                 config.session_id,
                 &cwd,
+                &shell_environment_policy,
                 &shell,
                 config.state_db.clone(),
                 credential_broker,
@@ -242,10 +246,12 @@ impl ShellSnapshot {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn try_create(
         codex_home: &AbsolutePathBuf,
         session_id: ThreadId,
         session_cwd: &AbsolutePathBuf,
+        shell_environment_policy: &ShellEnvironmentPolicy,
         shell: &Shell,
         state_db: Option<StateDbHandle>,
         credential_broker: Option<SnapshotCredentialBroker>,
@@ -672,6 +678,15 @@ async fn capture_snapshot(
         .network_proxy
         .apply_to_env_for_snapshot(&mut env);
     let mut snapshot_allowed_env = env.clone();
+    // The launcher supplies fresh CA defaults on replay. Retain overrides from shell startup.
+    for key in CHILD_ONLY_CA_ENV_KEYS {
+        if original_env
+            .get(key)
+            .is_some_and(|value| is_managed_mitm_ca_trust_bundle_path(value))
+        {
+            snapshot_allowed_env.remove(key);
+        }
+    }
     // The live broker regenerates this marker; captured dummies can belong to another scope.
     snapshot_allowed_env.remove("CODEX_NETWORK_PROXY_BROKERED_CREDENTIALS");
     for key in &provider_context_keys {
@@ -1053,20 +1068,41 @@ async fn run_script_with_timeout(
     handler.args(&args[1..]);
     handler.stdin(Stdio::null());
     handler.current_dir(cwd);
+    codex_protocol::shell_environment::scrub_non_inheritable_env_vars(handler.as_std_mut());
+    #[cfg(unix)]
+    {
+        // The shared launcher needs the complete child environment.
+        handler.env_clear();
+        handler.envs(std::env::vars_os());
+    }
     if let Some(env) = prepared_env {
         handler.env_clear();
         handler.envs(env);
     }
+    handler.env_remove(CODEX_TOOL_CALL_ID_ENV_VAR);
     codex_protocol::shell_environment::scrub_non_inheritable_env_vars(handler.as_std_mut());
     #[cfg(unix)]
-    unsafe {
-        handler.pre_exec(|| {
-            codex_utils_pty::process_group::detach_from_tty()?;
-            Ok(())
-        });
-    }
-    handler.kill_on_drop(true);
-    let output = timeout(snapshot_timeout, handler.output())
+    let output = {
+        let settings = handler.as_std();
+        // Preserve original inputs: std replaces strings containing NUL bytes.
+        let mut command = codex_utils_pty::Command::new(&args[0]);
+        command
+            .args(&args[1..])
+            .envs(
+                settings
+                    .get_envs()
+                    .filter_map(|(key, value)| value.map(|value| (key, value))),
+            )
+            .current_dir(cwd)
+            .stdin(codex_utils_pty::ChildStdin::File(
+                std::fs::File::open("/dev/null")?.into(),
+            ))
+            .process_mode(codex_utils_pty::ProcessMode::NewSession);
+        async move { command.spawn()?.wait_with_output().await }
+    };
+    #[cfg(not(unix))]
+    let output = handler.kill_on_drop(true).output();
+    let output = timeout(snapshot_timeout, output)
         .await
         .map_err(|_| anyhow!("Snapshot command timed out for {shell_name}"))?
         .with_context(|| format!("Failed to execute {shell_name}"))?;

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
+use crate::terminal_hyperlinks::HyperlinkLine;
 use codex_protocol::ThreadId;
-use ratatui::text::Line;
 
 use super::status_line_from_segments;
 use super::status_line_setup::StatusLineItem;
@@ -34,20 +34,21 @@ pub(crate) enum StatusSurfacePreviewItem {
     EstimatedThreadCost,
     SessionId,
     FastMode,
+    Daybreak,
     RawOutput,
     WorkspaceHeadline,
     Model,
     ModelWithReasoning,
     Reasoning,
+    Profile,
+    Provider,
     TaskProgress,
 }
 
 impl StatusSurfacePreviewItem {
     fn placeholder(self) -> &'static str {
         match self {
-            StatusSurfacePreviewItem::AppName => {
-                codex_product_info::Product::current().command_name()
-            }
+            StatusSurfacePreviewItem::AppName => "codex",
             StatusSurfacePreviewItem::ProjectName => "my-project",
             StatusSurfacePreviewItem::ProjectRoot => "my-project",
             StatusSurfacePreviewItem::CurrentDir => "~/my-project/subdir",
@@ -72,12 +73,15 @@ impl StatusSurfacePreviewItem {
             StatusSurfacePreviewItem::ThreadCredits => "5.2 credits",
             StatusSurfacePreviewItem::EstimatedThreadCost => "~$1.82",
             StatusSurfacePreviewItem::SessionId => "550e8400-e29b-41d4",
-            StatusSurfacePreviewItem::FastMode => "Fast on",
+            StatusSurfacePreviewItem::FastMode => "Fast",
+            StatusSurfacePreviewItem::Daybreak => "Daybreak off",
             StatusSurfacePreviewItem::RawOutput => "raw output",
             StatusSurfacePreviewItem::WorkspaceHeadline => "Workspace headline",
             StatusSurfacePreviewItem::Model => "gpt-5.2-codex",
             StatusSurfacePreviewItem::ModelWithReasoning => "gpt-5.2-codex medium",
             StatusSurfacePreviewItem::Reasoning => "medium",
+            StatusSurfacePreviewItem::Profile => "profile: <name>",
+            StatusSurfacePreviewItem::Provider => "provider: <id>",
             StatusSurfacePreviewItem::TaskProgress => "Tasks 0/0",
         }
     }
@@ -110,11 +114,14 @@ impl StatusSurfacePreviewItem {
             Self::EstimatedThreadCost,
             Self::SessionId,
             Self::FastMode,
+            Self::Daybreak,
             Self::RawOutput,
             Self::WorkspaceHeadline,
             Self::Model,
             Self::ModelWithReasoning,
             Self::Reasoning,
+            Self::Profile,
+            Self::Provider,
             Self::TaskProgress,
         ]
         .into_iter()
@@ -130,6 +137,7 @@ struct PreviewValue {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StatusSurfacePreviewData {
     pub(crate) thread_id: Option<ThreadId>,
+    pub(crate) pull_request_url: Option<String>,
     values: BTreeMap<StatusSurfacePreviewItem, PreviewValue>,
 }
 
@@ -137,6 +145,7 @@ impl Default for StatusSurfacePreviewData {
     fn default() -> Self {
         let mut data = Self {
             thread_id: None,
+            pull_request_url: None,
             values: BTreeMap::new(),
         };
         for item in StatusSurfacePreviewItem::iter() {
@@ -239,7 +248,7 @@ impl StatusSurfacePreviewData {
         &self,
         items: I,
         use_theme_colors: bool,
-    ) -> Option<Line<'static>>
+    ) -> Option<HyperlinkLine>
     where
         I: IntoIterator<Item = StatusLineItem>,
     {
@@ -247,7 +256,13 @@ impl StatusSurfacePreviewData {
             self.value_for(item.preview_item())
                 .map(|value| (item, value.to_string()))
         });
-        status_line_from_segments(segments, use_theme_colors, self.thread_id)
+        status_line_from_segments(
+            segments,
+            use_theme_colors,
+            self.thread_id,
+            self.live_value_for(StatusSurfacePreviewItem::PullRequestNumber)
+                .and(self.pull_request_url.as_deref()),
+        )
     }
 }
 

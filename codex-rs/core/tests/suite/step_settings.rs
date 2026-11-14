@@ -778,6 +778,7 @@ async fn settings_updates_preserve_turn_identity_and_target(target: SettingsTarg
                         service_tier: Some(Some(ServiceTier::Fast.request_value().to_string())),
                         ..Default::default()
                     },
+                    reply: None,
                 })
                 .await?;
         }
@@ -1942,6 +1943,7 @@ async fn sparse_updates_preserve_divergent_active_and_future_models() -> Result<
     .await;
     let test = step_settings_test().build_with_auto_env(&server).await?;
     let request = start_paused_turn(&test.codex).await?;
+    assert_eq!(test.codex.current_turn_model("other-turn").await, None);
 
     core_test_support::submit_thread_settings(
         &test.codex,
@@ -1976,6 +1978,7 @@ async fn sparse_updates_preserve_divergent_active_and_future_models() -> Result<
                 service_tier: Some(Some(ServiceTier::Fast.request_value().to_string())),
                 ..Default::default()
             },
+            reply: None,
         })
         .await?;
     apply_turn_settings(
@@ -2006,6 +2009,7 @@ async fn sparse_updates_preserve_divergent_active_and_future_models() -> Result<
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
+    assert_eq!(test.codex.current_turn_model(&request.turn_id).await, None);
     test.submit_text_turn("start the next turn").await?;
 
     let requests = response_mock.requests();
@@ -2276,6 +2280,8 @@ async fn tool_messages_follow_mid_turn_model_changes() -> Result<()> {
                 .expect("controlled model catalog")
                 .models
             {
+                model.tool_mode = Some(ToolMode::CodeMode);
+                model.use_responses_lite = false;
                 model
                     .experimental_supported_tools
                     .push("send_user_message_async".to_string());
@@ -2302,6 +2308,28 @@ async fn tool_messages_follow_mid_turn_model_changes() -> Result<()> {
                         interrupt_agent: tool_message("interrupt_agent"),
                         list_agents: tool_message("list_agents"),
                     }),
+                    multi_agent: Some(MultiAgentToolMessages {
+                        spawn_agent: tool_message("spawn_agent"),
+                        send_message: tool_message("send_message"),
+                        followup_task: tool_message("followup_task"),
+                        wait_agent: tool_message("wait_agent"),
+                        interrupt_agent: tool_message("interrupt_agent"),
+                        list_agents: tool_message("list_agents"),
+                        post: tool_message("post"),
+                        ..Default::default()
+                    }),
+                    code_mode: Some(CodeModeToolMessages {
+                        exec: Some(ToolMessage {
+                            description: Some(format!("Exec description for {}.", model.slug)),
+                            ..Default::default()
+                        }),
+                        wait: Some(ToolMessage {
+                            description: Some(format!("Wait description for {}.", model.slug)),
+                            parameters: Some(wait_parameters(&model.slug).to_string()),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
                 });
             }
         })

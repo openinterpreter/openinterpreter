@@ -1,13 +1,17 @@
 use super::PreviousSectionState;
+use super::SectionTransition;
 use super::WorldStateHash;
 use super::WorldStateSection;
+use super::WorldStateUpdate;
 use crate::context::ContextualUserFragment;
 use codex_prompts::ResolvedCollaborationModeMessages;
 use codex_prompts::ResolvedModelMessages;
 use codex_prompts::without_update_plan_instructions;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 use codex_protocol::protocol::COLLABORATION_MODE_CLOSE_TAG;
 use codex_protocol::protocol::COLLABORATION_MODE_OPEN_TAG;
 use serde::Deserialize;
@@ -94,10 +98,6 @@ impl WorldStateSection for CollaborationModeState {
     const ID: &'static str = "collaboration_mode";
     type Snapshot = CollaborationModeSnapshot;
 
-    fn snapshot(&self) -> Self::Snapshot {
-        self.snapshot.clone()
-    }
-
     fn matches_legacy_fragment(role: &str, text: &str) -> bool {
         role == "developer" && CollaborationModeInstructions::matches_text(text)
     }
@@ -113,7 +113,8 @@ impl WorldStateSection for CollaborationModeState {
     fn render_diff(
         &self,
         previous: PreviousSectionState<'_, Self::Snapshot>,
-    ) -> Option<Box<dyn ContextualUserFragment>> {
+    ) -> SectionTransition<Self::Snapshot> {
+        let current = self.snapshot.clone();
         let unchanged = match previous {
             PreviousSectionState::Absent => self.instructions.is_none(),
             PreviousSectionState::Unknown => false,
@@ -136,12 +137,15 @@ impl WorldStateSection for CollaborationModeState {
             }
         };
         if unchanged {
-            return None;
+            return (Some(current), Vec::new());
         }
 
-        Some(Box::new(CollaborationModeInstructions {
-            instructions: self.instructions.clone().unwrap_or_default(),
-        }))
+        (
+            Some(current),
+            vec![WorldStateUpdate::fragment(CollaborationModeInstructions {
+                instructions: self.instructions.clone().unwrap_or_default(),
+            })],
+        )
     }
 }
 
@@ -167,8 +171,8 @@ impl ContextualUserFragment for CollaborationModeInstructions {
         (COLLABORATION_MODE_OPEN_TAG, COLLABORATION_MODE_CLOSE_TAG)
     }
 
-    fn body(&self) -> String {
-        self.instructions.clone()
+    fn body(&self) -> ContentItem {
+        input_text(self.instructions.clone())
     }
 }
 

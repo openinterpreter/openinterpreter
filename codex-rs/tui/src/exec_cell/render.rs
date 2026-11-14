@@ -6,6 +6,7 @@ use super::model::CommandOutput;
 use super::model::ExecCall;
 use super::model::ExecCell;
 use crate::exec_command::strip_bash_lc_and_escape;
+use crate::history_cell::ActivityDisclosure;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::HistoryRenderMode;
 use crate::history_cell::plain_lines;
@@ -219,17 +220,22 @@ impl HistoryCell for ExecCell {
     }
 
     fn has_hidden_activity_details(&self, width: u16) -> bool {
+        self.activity_disclosure(width).is_some()
+    }
+
+    fn activity_disclosure(&self, width: u16) -> Option<ActivityDisclosure> {
         if self.is_exploring_cell() {
-            return true;
+            return Some(ActivityDisclosure::Generic);
         }
         if self.group.calls.iter().any(ExecCall::is_user_shell_command) {
             // User-shell previews already retain wrapped commands and up to fifty output rows.
             // Reuse its actual truncation decision instead of comparing differently styled text.
             return self
                 .command_display_lines_with_hidden_details(width)
-                .hidden_details;
+                .hidden_details
+                .then_some(ActivityDisclosure::Generic);
         }
-        self.command_has_hidden_details(width)
+        self.command_disclosure(width)
     }
 
     fn compact_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
@@ -945,7 +951,7 @@ mod tests {
             .split_whitespace()
             .join(" ");
         assert!(
-            normalized.contains(TRANSCRIPT_HINT),
+            normalized.contains(&transcript_hint()),
             "expected truncated output to advertise transcript shortcut, got {normalized}"
         );
     }

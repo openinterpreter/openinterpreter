@@ -1,3 +1,7 @@
+use codex_http_client::HttpClientFactory;
+use codex_http_client::OutboundProxyPolicy;
+use codex_model_provider::create_model_provider;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageDetail;
@@ -7,8 +11,12 @@ use codex_tools::ToolOutput;
 use codex_tools::ToolPayload;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::sync::Arc;
 
 use super::HistoryNotesToolOutput;
+use super::history_notes_tools;
+use crate::backend::HttpBackend;
+use crate::backend::HttpContext;
 
 #[test]
 fn preserves_encrypted_history_output() {
@@ -152,4 +160,53 @@ fn rejects_malformed_attachments_instead_of_silently_dropping_them() {
         };
         assert_eq!(message, "History backend returned invalid image content.");
     }
+}
+
+#[test]
+fn sparse_catalog_messages_preserve_defaults_and_explicit_empty_descriptions() {
+    let spec = super::tool_spec::<crate::requests::NotesReadFile, serde_json::Value>;
+    let mut expected = spec(/*namespace_description*/ None, /*message*/ None);
+    let codex_tools::ToolSpec::Namespace(namespace) = &mut expected else {
+        panic!("expected namespace");
+    };
+    namespace.description.clear();
+    let codex_tools::ResponsesApiNamespaceTool::Function(tool) = &mut namespace.tools[0] else {
+        panic!("expected function");
+    };
+    tool.description.clear();
+    let messages = codex_protocol::openai_models::NotesToolMessages {
+        namespace_description: Some(String::new()),
+        read_file: Some(codex_protocol::openai_models::ToolMessage {
+            description: Some(String::new()),
+            parameters: Some(String::new()),
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        spec(
+            messages.namespace_description.as_deref(),
+            messages.read_file.as_ref()
+        ),
+        expected
+    );
+}
+
+#[test]
+fn bundled_tool_contracts() {
+    let backend = HttpBackend::new(
+        create_model_provider(
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            /*auth_manager*/ None,
+        ),
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        Arc::new(HttpContext {
+            session_id: "session-123".to_owned(),
+            current_agent_name: "/root".to_owned(),
+        }),
+    );
+    let specs: Vec<_> = history_notes_tools(backend, /*history*/ None, /*notes*/ None)
+        .iter()
+        .map(|tool| tool.spec())
+        .collect();
+    insta::assert_snapshot!(serde_json::to_string_pretty(&specs).unwrap());
 }

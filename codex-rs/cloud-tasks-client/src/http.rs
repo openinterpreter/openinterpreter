@@ -37,14 +37,22 @@ impl HttpClient {
         Self { base_url, backend }
     }
 
+    pub fn from_backend(base_url: String, backend: backend::Client) -> Self {
+        Self { base_url, backend }
+    }
+
     pub fn with_user_agent(mut self, ua: impl Into<String>) -> Self {
         self.backend = self.backend.clone().with_user_agent(ua);
         self
     }
 
-    pub fn with_auth_provider(mut self, auth: SharedAuthProvider) -> Self {
-        self.backend = self.backend.clone().with_auth_provider(auth);
-        self
+    pub fn with_auth_provider(mut self, auth: SharedAuthProvider) -> Result<Self> {
+        self.backend = self
+            .backend
+            .clone()
+            .with_auth_provider(auth)
+            .map_err(|error| CloudTaskError::Msg(error.to_string()))?;
+        Ok(self)
     }
 
     pub fn with_chatgpt_account_id(mut self, account_id: impl Into<String>) -> Self {

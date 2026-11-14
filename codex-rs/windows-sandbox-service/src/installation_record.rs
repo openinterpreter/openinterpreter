@@ -75,3 +75,46 @@ pub(crate) fn save(mut record: InstallationRecord) -> Result<InstallationRecord>
     save_runtime(&record)?;
     Ok(record)
 }
+
+/// Resolve a saved junction only while its target and all managed identities are pinned.
+pub(crate) fn resolve_restored_home(
+    saved: &Path,
+    runtime: Option<&RuntimeRegistration>,
+    pins: &mut Vec<crate::ipc::OwnedHandle>,
+) -> Result<Option<PathBuf>> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem as fs;
+
+    let Ok(home) = saved.canonicalize() else {
+        return Ok(None);
+    };
+    if home == saved || runtime.is_some_and(|runtime| runtime.retiring.is_some()) {
+        return Ok(None);
+    }
+    crate::ipc::pin_existing_ancestors(&home, pins)?;
+    pins.push(crate::ipc::pin_directory(
+        &home,
+        fs::FILE_ADD_FILE | fs::FILE_ADD_SUBDIRECTORY | fs::WRITE_DAC,
+        codex_windows_sandbox::DirectoryOpenDisposition::OpenExisting,
+    )?);
+    if let Some(runtime) = runtime.filter(|runtime| !runtime.accounts.is_empty()) {
+        crate::ipc::pin_existing_ancestors(
+            &codex_windows_sandbox::sandbox_secrets_dir(&home),
+            pins,
+        )?;
+        for entry in &runtime.accounts {
+            let token =
+                codex_windows_sandbox::logon_existing_sandbox_account(&home, entry.account)?;
+            crate::registered_runtime::validate_target(
+                token.as_raw_handle() as _,
+                entry.account,
+                Some(&entry.user_sid),
+            )?;
+        }
+    }
+    Ok(Some(home))
+}
+
+#[cfg(test)]
+#[path = "installation_record_tests.rs"]
+mod tests;

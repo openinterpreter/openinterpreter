@@ -1,3 +1,6 @@
+use core_test_support::test_codex::local_requests;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -7,7 +10,12 @@ use codex_core::config::Config;
 use codex_core::config::Constrained;
 use codex_extension_api::ExtensionRegistry;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_items::ExtensionItem;
+use codex_extension_items::image_generation::GeneratedImageRef;
 use codex_features::Feature;
+use codex_history::RolloutItem;
+use codex_http_client::DestinationPolicy;
+use codex_http_client::NetworkPolicyController;
 use codex_image_generation_extension::install as install_image_generation_extension;
 use codex_login::CodexAuth;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -16,7 +24,10 @@ use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::models::FileSystemPermissions;
+use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
@@ -27,6 +38,7 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
@@ -37,10 +49,10 @@ use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_sandbox;
 use core_test_support::skip_if_target_windows;
-use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use test_case::test_case;
@@ -48,6 +60,8 @@ use wiremock::Mock;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
+
+use super::image_rollout::RecordingFileAttachmentStore;
 
 const TINY_PNG_BYTES: &[u8] = &[
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
@@ -68,10 +82,157 @@ fn image_generation_extensions(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn extension_tool_receives_turn_environment_sandbox() -> Result<()> {
+async fn generated_image_ui_item_is_file_backed_in_rollout() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/images/generations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "created": 1,
+            "data": [{"b64_json": TINY_PNG_BASE64}],
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
+    let extensions = image_generation_extensions(&auth, |_config| None);
+    let image_store = Arc::new(RecordingFileAttachmentStore::default());
+    let image_call_id = "image-generate-file-backed";
+    responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                responses::ev_response_created("resp-1"),
+                responses::ev_function_call_with_namespace(
+                    image_call_id,
+                    "image_gen",
+                    "imagegen",
+                    &json!({"prompt": "paint a blue whale"}).to_string(),
+                ),
+                responses::ev_completed("resp-1"),
+            ]),
+            responses::sse(vec![
+                responses::ev_response_created("resp-2"),
+                responses::ev_assistant_message("msg-1", "done"),
+                responses::ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+    let test = test_codex()
+        .with_auth(auth)
+        .with_extensions(extensions)
+        .with_image_store(image_store.clone())
+        .with_history_mode(ThreadHistoryMode::Paginated)
+        .with_model_info_override("gpt-5.4", |model_info| {
+            model_info.use_responses_lite = true;
+            model_info.input_modalities = vec![InputModality::Text, InputModality::Image];
+        })
+        .build(&server)
+        .await?;
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "generate an image".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let live_image =
+        wait_for_event_match(&test.codex, |event| match event {
+            EventMsg::ItemCompleted(event) => match &event.item {
+                codex_protocol::items::TurnItem::Extension(ExtensionItem::ImageGeneration(
+                    image,
+                )) if image.id == image_call_id => Some(image.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .await;
+    assert_eq!(
+        live_image.image,
+        GeneratedImageRef::File {
+            file_id: "file_uploaded_image".to_string(),
+        }
+    );
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    test.codex.flush_rollout().await?;
+
+    {
+        let uploads = image_store.uploads.lock().expect("uploads lock");
+        let [item_upload, model_upload] = uploads.as_slice() else {
+            panic!("expected separate item and model uploads");
+        };
+        assert_eq!(
+            item_upload.thread_id,
+            test.session_configured.thread_id.to_string()
+        );
+        assert!(!item_upload.ephemeral);
+        assert_eq!(
+            item_upload.tags,
+            HashMap::from([("usage".to_string(), "image_gen".to_string())])
+        );
+        assert_eq!(item_upload.data, TINY_PNG_BYTES);
+        assert_eq!(model_upload.tags, HashMap::new());
+    }
+
+    let rollout_path = test.codex.rollout_path().context("rollout path")?;
+    let rollout = std::fs::read_to_string(rollout_path)?
+        .lines()
+        .filter_map(|line| codex_rollout::parse_rollout_line(line).ok())
+        .map(|line| line.item)
+        .collect::<Vec<_>>();
+    let image =
+        rollout.iter().find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => match &event.item {
+                codex_protocol::items::TurnItem::Extension(ExtensionItem::ImageGeneration(
+                    image,
+                )) if image.id == image_call_id => Some(image),
+                _ => None,
+            },
+            _ => None,
+        });
+    let image = image.context("persisted image-generation item")?;
+    assert_eq!(image, &live_image);
+
+    let output_image = rollout.iter().find_map(|item| match item {
+        RolloutItem::ResponseItem(envelope) => match &envelope.item {
+            ResponseItem::FunctionCallOutput {
+                call_id: Some(call_id),
+                output,
+                ..
+            } if call_id == image_call_id => output.content_items().and_then(|items| {
+                items.iter().find_map(|item| match item {
+                    FunctionCallOutputContentItem::InputImage { image, .. } => Some(image),
+                    _ => None,
+                })
+            }),
+            _ => None,
+        },
+        _ => None,
+    });
+    assert_eq!(
+        output_image,
+        Some(&ImageReference::File {
+            file_id: "file_uploaded_image".to_string(),
+        })
+    );
+
+    Ok(())
+}
+
+#[test_case(false; "file_access")]
+#[test_case(true; "application_network")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn extension_tool_respects_restrictions(deny_network: bool) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let responses_url = format!("{}/v1/responses", server.uri()).parse()?;
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let extensions = image_generation_extensions(&auth, |config| Some(config.codex_home.clone()));
     let mut builder = test_codex()
@@ -81,12 +242,21 @@ async fn extension_tool_receives_turn_environment_sandbox() -> Result<()> {
             model_info.use_responses_lite = true;
             model_info.input_modalities = vec![InputModality::Text, InputModality::Image];
         })
-        .with_config(|config| {
+        .with_config(move |config| {
             assert!(config.web_search_mode.set(WebSearchMode::Live).is_ok());
+            if deny_network {
+                let controller = NetworkPolicyController::default();
+                let policy = controller
+                    .policy()
+                    .restrict_to_endpoints(BTreeSet::from([responses_url]));
+                assert!(controller.publish(policy.revision(), DestinationPolicy::Unrestricted));
+                config.application_network_policy = policy;
+                config.respect_system_proxy = false;
+            }
         });
     let test = builder.build(&server).await?;
     let denied_path = test.config.cwd.join("denied.png");
-    std::fs::write(&denied_path, b"not readable")?;
+    std::fs::write(&denied_path, TINY_PNG_BYTES)?;
 
     let call_id = "image-edit-denied";
     let response_mock = responses::mount_sse_sequence(
@@ -116,15 +286,17 @@ async fn extension_tool_receives_turn_environment_sandbox() -> Result<()> {
     .await;
 
     let mut file_system_sandbox_policy = FileSystemSandboxPolicy::default();
-    file_system_sandbox_policy
-        .entries
-        .push(FileSystemSandboxEntry {
-            path: FileSystemPath::Path {
-                path: denied_path.clone().into(),
-            },
-            access: FileSystemAccessMode::Deny,
-            missing_path_behavior: None,
-        });
+    if !deny_network {
+        file_system_sandbox_policy
+            .entries
+            .push(FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: denied_path.clone().into(),
+                },
+                access: FileSystemAccessMode::Deny,
+                missing_path_behavior: None,
+            });
+    }
     let permission_profile = PermissionProfile::from_runtime_permissions(
         &file_system_sandbox_policy,
         NetworkSandboxPolicy::Restricted,
@@ -140,13 +312,29 @@ async fn extension_tool_receives_turn_environment_sandbox() -> Result<()> {
         .function_call_output_content_and_success(call_id)
         .and_then(|(content, _)| content)
         .context("extension error text should be present")?;
-    assert!(
-        output.starts_with(&format!(
-            "unable to read referenced image at `{}`:",
-            denied_path.display()
-        )),
-        "unexpected extension error: {output}"
-    );
+    if deny_network {
+        assert!(
+            output.contains("destination denied by application network policy"),
+            "{output}"
+        );
+        let requests = server
+            .received_requests()
+            .await
+            .context("image request history should be recorded")?;
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.url.path().starts_with("/v1/images/"))
+        );
+    } else {
+        assert!(
+            output.starts_with(&format!(
+                "unable to read referenced image at `{}`:",
+                denied_path.display()
+            )),
+            "unexpected extension error: {output}"
+        );
+    }
 
     Ok(())
 }
@@ -261,7 +449,7 @@ async fn extension_tool_uses_granted_turn_permissions_without_host_local_persist
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(test.config.cwd.clone())),
+                environments: Some(local_requests(test.config.cwd.clone())),
                 approval_policy: Some(AskForApproval::OnRequest),
                 approvals_reviewer: Some(ApprovalsReviewer::User),
                 sandbox_policy: Some(sandbox_policy),
@@ -484,7 +672,7 @@ async fn extension_tool_rebinds_granted_permissions_on_each_turn(
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(test.config.cwd.clone())),
+                environments: Some(local_requests(test.config.cwd.clone())),
                 approval_policy: Some(AskForApproval::OnRequest),
                 approvals_reviewer: Some(ApprovalsReviewer::User),
                 sandbox_policy: Some(sandbox_policy),

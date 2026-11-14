@@ -14,6 +14,8 @@ const MODEL_PROVIDER_SELECTION_VIEW_ID: &str = "model-provider-selection";
 const HARNESS_SELECTION_VIEW_ID: &str = "harness-selection";
 pub(super) const MODEL_SELECTION_VIEW_ID: &str = "model-selection";
 pub(super) const ALL_MODELS_SELECTION_VIEW_ID: &str = "all-models-selection";
+pub(super) const MODEL_LOADING_VIEW_ID: &str = "model-loading";
+pub(super) const MODEL_OPTIONS_VIEW_ID: &str = "model-options";
 
 impl ChatWidget {
     /// Open a popup to choose a quick auto model. Selecting "All models"
@@ -242,10 +244,11 @@ impl ChatWidget {
                             .any(|option| Self::is_advanced_reasoning_effort(&option.effort));
                 let actions: Vec<SelectionAction> = if requires_advanced_selection {
                     let preset_for_action = preset.clone();
+                    let scoped = self.scope_model_picker_event();
                     vec![Box::new(move |tx| {
-                        tx.send(AppEvent::OpenReasoningPopup {
+                        tx.send(scoped(AppEvent::OpenReasoningPopup {
                             model: preset_for_action.clone(),
-                        });
+                        }));
                     })]
                 } else {
                     let should_prompt_plan_mode_scope = self
@@ -376,11 +379,12 @@ impl ChatWidget {
             .filter(|effort| !Self::is_advanced_reasoning_effort(effort));
             let single_supported_effort = direct_effort.is_some();
             let preset_for_action = preset.clone();
+            let scoped = self.scope_model_picker_event();
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 let preset_for_event = preset_for_action.clone();
-                tx.send(AppEvent::OpenReasoningPopup {
+                tx.send(scoped(AppEvent::OpenReasoningPopup {
                     model: preset_for_event,
-                });
+                }));
             })];
             items.push(SelectionItem {
                 name: preset.display_name.clone(),
@@ -420,42 +424,45 @@ impl ChatWidget {
             .and_then(|effort| self.ultra_reasoning_concurrency_warning(effort));
         let thread_id = self.thread_id();
         let sparkle_thread = self.sparkle_thread_for_picker_action(&model_for_action);
+        let scoped = self.scope_model_picker_event();
         vec![Box::new(move |tx| {
             if model_for_action == LUNA_RESERVE_MODEL {
                 // Reserve is temporary: update the active task without persisting a model default.
                 if let Some(thread_id) = thread_id {
-                    tx.send(AppEvent::UpdateLunaReserveReasoning {
+                    tx.send(scoped(AppEvent::UpdateLunaReserveReasoning {
                         thread_id,
                         effort: effort_for_action.clone(),
-                    });
+                    }));
                 }
             } else if effort_for_action == Some(ReasoningEffortConfig::Ultra) {
-                tx.send(
+                tx.send(scoped(
                     AstraModelPickerAction::ApplyAdvancedReasoning {
                         effort: ReasoningEffortConfig::Ultra,
                     }
                     .into_picker_event(sparkle_thread, model_for_action.clone()),
-                );
+                ));
             } else if should_prompt_plan_mode_scope {
-                tx.send(AppEvent::OpenPlanReasoningScopePrompt {
+                tx.send(scoped(AppEvent::OpenPlanReasoningScopePrompt {
                     model: model_for_action.clone(),
                     effort: effort_for_action.clone(),
-                });
+                }));
             } else {
-                tx.send(
+                tx.send(scoped(
                     AstraModelPickerAction::UpdateModel
                         .into_picker_event(sparkle_thread, model_for_action.clone()),
-                );
-                tx.send(AppEvent::UpdateReasoningEffort(effort_for_action.clone()));
-                tx.send(AppEvent::PersistModelSelection {
+                ));
+                tx.send(scoped(AppEvent::UpdateReasoningEffort(
+                    effort_for_action.clone(),
+                )));
+                tx.send(scoped(AppEvent::PersistModelSelection {
                     model: model_for_action.clone(),
                     effort: effort_for_action.clone(),
-                });
+                }));
             }
             if let Some(warning) = warning.clone() {
-                tx.send(AppEvent::InsertHistoryCell(Box::new(
+                tx.send(scoped(AppEvent::InsertHistoryCell(Box::new(
                     history_cell::new_warning_event(warning),
-                )));
+                ))));
             }
         })]
     }
@@ -496,7 +503,7 @@ impl ChatWidget {
             }
             None => "the selected reasoning".to_string(),
         };
-        let plan_only_description = format!("Always use {reasoning_phrase} in Plan mode.");
+        let plan_only_description = format!("Always use {reasoning_phrase} in Plan mode");
         let plan_reasoning_source = if let Some(plan_override) =
             self.config.plan_mode_reasoning_effort.as_ref()
         {
@@ -521,7 +528,7 @@ impl ChatWidget {
             "built-in Plan default".to_string()
         };
         let all_modes_description = format!(
-            "Set the global default reasoning level and the Plan mode override. This replaces the current {plan_reasoning_source}."
+            "Set the global default reasoning level and Plan mode override, replacing the current {plan_reasoning_source}"
         );
         let subtitle = format!("Choose where to apply {reasoning_phrase}.");
         let warning = effort
@@ -529,44 +536,55 @@ impl ChatWidget {
             .and_then(|effort| self.ultra_reasoning_concurrency_warning(effort));
         let sparkle_thread = self.sparkle_thread_for_picker_action(&model);
 
+        let scoped = self.scope_model_picker_event();
         let plan_only_actions: Vec<SelectionAction> = vec![Box::new({
             let model = model.clone();
             let effort = effort.clone();
             let warning = warning.clone();
             move |tx| {
-                tx.send(
+                tx.send(scoped(
                     AstraModelPickerAction::UpdateModel
                         .into_picker_event(sparkle_thread, model.clone()),
-                );
-                tx.send(AppEvent::UpdatePlanModeReasoningEffort(effort.clone()));
-                tx.send(AppEvent::PersistPlanModeReasoningEffort(effort.clone()));
+                ));
+                tx.send(scoped(AppEvent::UpdatePlanModeReasoningEffort(
+                    effort.clone(),
+                )));
+                tx.send(scoped(AppEvent::PersistPlanModeReasoningEffort(
+                    effort.clone(),
+                )));
                 if let Some(warning) = warning.clone() {
-                    tx.send(AppEvent::InsertHistoryCell(Box::new(
+                    tx.send(scoped(AppEvent::InsertHistoryCell(Box::new(
                         history_cell::new_warning_event(warning),
-                    )));
+                    ))));
                 }
             }
         })];
+        let scoped = self.scope_model_picker_event();
         let all_modes_actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-            tx.send(
+            tx.send(scoped(
                 AstraModelPickerAction::UpdateModel
                     .into_picker_event(sparkle_thread, model.clone()),
-            );
-            tx.send(AppEvent::UpdateReasoningEffort(effort.clone()));
-            tx.send(AppEvent::UpdatePlanModeReasoningEffort(effort.clone()));
-            tx.send(AppEvent::PersistPlanModeReasoningEffort(effort.clone()));
-            tx.send(AppEvent::PersistModelSelection {
+            ));
+            tx.send(scoped(AppEvent::UpdateReasoningEffort(effort.clone())));
+            tx.send(scoped(AppEvent::UpdatePlanModeReasoningEffort(
+                effort.clone(),
+            )));
+            tx.send(scoped(AppEvent::PersistPlanModeReasoningEffort(
+                effort.clone(),
+            )));
+            tx.send(scoped(AppEvent::PersistModelSelection {
                 model: model.clone(),
                 effort: effort.clone(),
-            });
+            }));
             if let Some(warning) = warning.clone() {
-                tx.send(AppEvent::InsertHistoryCell(Box::new(
+                tx.send(scoped(AppEvent::InsertHistoryCell(Box::new(
                     history_cell::new_warning_event(warning),
-                )));
+                ))));
             }
         })];
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
+            view_id: Some(MODEL_OPTIONS_VIEW_ID),
             title: Some(PLAN_MODE_REASONING_SCOPE_TITLE.to_string()),
             subtitle: Some(subtitle),
             items: vec![
@@ -617,7 +635,7 @@ impl ChatWidget {
         };
         let warning_text = warn_effort.as_ref().map(|effort| {
             let effort_label = Self::reasoning_effort_label(effort);
-            format!("⚠ {effort_label} reasoning effort can quickly consume Plus plan rate limits.")
+            format!("⚠ {effort_label} reasoning effort can quickly consume Plus plan rate limits")
         });
         let warn_for_model = preset.model.starts_with("gpt-5.1-codex")
             || preset.model.starts_with("gpt-5.1-codex-max")
@@ -640,11 +658,12 @@ impl ChatWidget {
             if self
                 .should_prompt_plan_mode_reasoning_scope(&selected_model, selected_effort.clone())
             {
+                let scoped = self.scope_model_picker_event();
                 self.app_event_tx
-                    .send(AppEvent::OpenPlanReasoningScopePrompt {
+                    .send(scoped(AppEvent::OpenPlanReasoningScopePrompt {
                         model: selected_model,
                         effort: selected_effort,
-                    });
+                    }));
             } else {
                 self.apply_model_and_effort(selected_model, selected_effort);
             }
@@ -736,10 +755,11 @@ impl ChatWidget {
                 "consume"
             };
             let preset_for_action = preset;
+            let scoped = self.scope_model_picker_event();
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-                tx.send(AppEvent::OpenAdvancedReasoningPopup {
+                tx.send(scoped(AppEvent::OpenAdvancedReasoningPopup {
                     model: preset_for_action.clone(),
-                });
+                }));
             })];
             items.push(SelectionItem {
                 name: "More reasoning…".to_string(),
@@ -760,6 +780,7 @@ impl ChatWidget {
         .wrap(Wrap { trim: false });
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
+            view_id: Some(MODEL_OPTIONS_VIEW_ID),
             header: Box::new(header),
             items,
             initial_selected_idx,
@@ -827,6 +848,7 @@ impl ChatWidget {
         ])
         .wrap(Wrap { trim: false });
         self.bottom_pane.show_selection_view(SelectionViewParams {
+            view_id: Some(MODEL_OPTIONS_VIEW_ID),
             header: Box::new(header),
             items,
             ..SelectionViewParams::picker()

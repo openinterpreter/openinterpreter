@@ -1,4 +1,5 @@
 pub use codex_api::ResponseEvent;
+use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
@@ -16,16 +17,18 @@ use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-/// API request payload for a single model turn
-#[derive(Debug, Clone)]
+/// Core inputs to provider request formatting for a single model turn.
+/// The rollout trace serializes this shape before transport-specific rewrites.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Prompt {
     /// Conversation context input items.
+    #[serde(serialize_with = "codex_rollout_trace::serialize_trace_items")]
     pub input: Vec<ResponseItem>,
 
-    /// Tools available to the model, including additional tools sourced from
-    /// external MCP servers.
+    /// Tool definitions to inject into this request, empty when supplied by history.
     pub(crate) tools: Arc<[ToolSpec]>,
 
     /// Whether parallel tool calls are permitted for this prompt.
@@ -41,6 +44,8 @@ pub struct Prompt {
     /// Whether the Responses API should strictly validate `output_schema`.
     pub output_schema_strict: bool,
 
+    pub(crate) prompt_cache_ttl: Option<crate::PromptCacheTtl>,
+
     pub(crate) cyber_access_program: Option<codex_protocol::turn_input::CyberAccessProgram>,
 }
 
@@ -54,6 +59,7 @@ impl Default for Prompt {
             base_instructions: BaseInstructions::default(),
             output_schema: None,
             output_schema_strict: true,
+            prompt_cache_ttl: None,
             cyber_access_program: None,
         }
     }
@@ -124,10 +130,38 @@ fn normalize_image_detail(detail: &mut Option<ImageDetail>, model_info: &ModelIn
 }
 
 pub struct ResponseStream {
+    pub(crate) routing_affinity: Option<codex_http_client::ChatGptRoutingAffinity>,
     pub(crate) rx_event: mpsc::Receiver<Result<ResponseEvent>>,
+    pub(crate) interrupt: Option<oneshot::Sender<codex_api::ResponseInterrupt>>,
     /// Signals the mapper task that the consumer stopped polling before the
     /// provider stream reached its own terminal event.
     pub(crate) consumer_dropped: CancellationToken,
+}
+
+impl ResponseStream {
+    /// A cancelled turn discards any queued event, including an incomplete response's usage.
+    pub(crate) fn accept_for_turn(
+        event: Option<Result<ResponseEvent>>,
+        cancellation: &CancellationToken,
+    ) -> Option<Result<ResponseEvent>> {
+        if cancellation.is_cancelled() {
+            Some(Err(CodexErr::TurnAborted))
+        } else {
+            event
+        }
+    }
+
+    pub(crate) async fn next_for_turn(
+        &mut self,
+        cancellation: &CancellationToken,
+    ) -> Option<Result<ResponseEvent>> {
+        let event = tokio::select! {
+            biased;
+            event = self.rx_event.recv() => event,
+            () = cancellation.cancelled() => return Some(Err(CodexErr::TurnAborted)),
+        };
+        Self::accept_for_turn(event, cancellation)
+    }
 }
 
 impl Stream for ResponseStream {

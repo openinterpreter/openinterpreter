@@ -104,18 +104,13 @@ fn spawn_runtime_payload_targets_delivered_child_message() -> anyhow::Result<()>
         "019d0000-0000-7000-8000-000000000002",
         "turn-child-1",
     )?;
-    let delivered = inter_agent_message(
-        "/root",
-        "/root/repo_file_counter",
-        "count",
-        /*trigger_turn*/ true,
-    );
+    let delivered = inter_agent_message("/root", "/root/repo_file_counter", "count");
     append_inference_request(
         &writer,
         "019d0000-0000-7000-8000-000000000002",
         "turn-child-1",
         "inference-child-1",
-        vec![message("assistant", &delivered)],
+        vec![delivered],
     )?;
 
     let replayed = replay_bundle(temp.path())?;
@@ -246,27 +241,68 @@ fn sub_agent_started_activity_creates_spawn_edge() -> anyhow::Result<()> {
     )?;
     start_thread(&writer, child_thread_id, "/root/reviewer")?;
     start_turn_for_thread(&writer, child_thread_id, "turn-child-1")?;
+    let mut delivery = json!({
+        "type": "agent_message",
+        "id": "amsg-delivery",
+        "author": "/root",
+        "recipient": "/root/reviewer",
+        "content": [
+            {
+                "type": "input_text",
+                "text": "Message Type: NEW_TASK\nTask name: /root/reviewer\nSender: /root\nPayload:\n"
+            },
+            {"type": "encrypted_content", "encrypted_content": "review this"}
+        ]
+    });
+    let receipt = RawTraceEventPayload::HistoryItemAccepted {
+        item_id: "amsg-delivery".into(),
+        agent_message_payload: Some(
+            writer.write_json_payload(RawPayloadKind::ProtocolEvent, &delivery)?,
+        ),
+    };
+    let context = trace_context_for_thread(child_thread_id, "turn-child-1");
+    writer.append_with_context(context.clone(), receipt.clone())?;
+
+    // Interrupt or reset here: the receipt already has its delivery edge without any child request.
+    let received = replay_bundle(temp.path())?;
+    let edge_id = format!("edge:spawn:019d0000-0000-7000-8000-000000000001:{child_thread_id}");
+    let receipt_id = target_conversation_item_id(&received.interaction_edges[&edge_id].target);
+    let delivered_item_ids = std::slice::from_ref(receipt_id);
+    assert_eq!(
+        received.threads[child_thread_id].conversation_item_ids,
+        delivered_item_ids
+    );
+    assert!(
+        received.conversation_items[receipt_id]
+            .accepted_seq
+            .is_some()
+    );
+    assert!(received.inference_calls.is_empty());
+
+    // The request trims the encrypted part. A repeated receipt must retain the model's view.
+    delivery["content"] = json!([delivery["content"][0]]);
     append_inference_request(
         &writer,
         child_thread_id,
         "turn-child-1",
         "inference-child-1",
-        vec![json!({
-            "type": "agent_message",
-            "author": "/root",
-            "recipient": "/root/reviewer",
-            "content": [
-                {
-                    "type": "input_text",
-                    "text": "Message Type: NEW_TASK\nTask name: /root/reviewer\nSender: /root\nPayload:\n"
-                },
-                {"type": "encrypted_content", "encrypted_content": "review this"}
-            ]
-        })],
+        vec![delivery],
     )?;
+    writer.append_with_context(context, receipt)?;
 
     let replayed = replay_bundle(temp.path())?;
-    let edge_id = format!("edge:spawn:019d0000-0000-7000-8000-000000000001:{child_thread_id}");
+    assert_eq!(
+        replayed.inference_calls["inference-child-1"].request_item_ids,
+        delivered_item_ids
+    );
+    assert_eq!(
+        replayed.threads[child_thread_id].conversation_item_ids,
+        delivered_item_ids
+    );
+    assert_eq!(
+        replayed.conversation_items[receipt_id].body.parts,
+        received.conversation_items[receipt_id].body.parts[..1]
+    );
     let edge = &replayed.interaction_edges[&edge_id];
     assert_eq!(edge.kind, InteractionEdgeKind::SpawnAgent);
     let target_item_id = target_conversation_item_id(&edge.target);
@@ -329,6 +365,7 @@ fn send_message_runtime_payload_targets_delivered_child_message() -> anyhow::Res
     writer.append_with_context(
         trace_context_for_agent("turn-1"),
         RawTraceEventPayload::ToolCallRuntimeStarted {
+            kind: ToolCallKind::SendMessage,
             tool_call_id: "call-send".to_string(),
             runtime_payload: begin_payload,
         },
@@ -361,14 +398,13 @@ fn send_message_runtime_payload_targets_delivered_child_message() -> anyhow::Res
         "019d0000-0000-7000-8000-000000000002",
         "turn-child-1",
     )?;
-    let delivered =
-        inter_agent_message("/root", "/root/child", "hello", /*trigger_turn*/ false);
+    let delivered = inter_agent_message("/root", "/root/child", "hello");
     append_inference_request(
         &writer,
         "019d0000-0000-7000-8000-000000000002",
         "turn-child-1",
         "inference-child-1",
-        vec![message("assistant", &delivered)],
+        vec![delivered],
     )?;
 
     let replayed = replay_bundle(temp.path())?;
@@ -443,18 +479,13 @@ fn send_message_activity_targets_delivered_child_message() -> anyhow::Result<()>
     )?;
     start_thread(&writer, child_thread_id, "/root/child")?;
     start_turn_for_thread(&writer, child_thread_id, "turn-child-1")?;
-    let delivered = inter_agent_message(
-        "/root",
-        "/root/child",
-        "hello again",
-        /*trigger_turn*/ false,
-    );
+    let delivered = inter_agent_message("/root", "/root/child", "hello again");
     append_inference_request(
         &writer,
         child_thread_id,
         "turn-child-1",
         "inference-child-1",
-        vec![message("assistant", &delivered)],
+        vec![delivered],
     )?;
 
     let replayed = replay_bundle(temp.path())?;
@@ -529,18 +560,13 @@ fn followup_activity_targets_delivered_child_message() -> anyhow::Result<()> {
     )?;
     start_thread(&writer, child_thread_id, "/root/child")?;
     start_turn_for_thread(&writer, child_thread_id, "turn-child-1")?;
-    let delivered = inter_agent_message(
-        "/root",
-        "/root/child",
-        "continue",
-        /*trigger_turn*/ true,
-    );
+    let delivered = inter_agent_message("/root", "/root/child", "continue");
     append_inference_request(
         &writer,
         child_thread_id,
         "turn-child-1",
         "inference-child-1",
-        vec![message("assistant", &delivered)],
+        vec![delivered],
     )?;
 
     let replayed = replay_bundle(temp.path())?;
@@ -610,6 +636,7 @@ fn close_agent_runtime_payload_targets_thread() -> anyhow::Result<()> {
     writer.append_with_context(
         trace_context_for_agent("turn-1"),
         RawTraceEventPayload::ToolCallRuntimeStarted {
+            kind: ToolCallKind::CloseAgent,
             tool_call_id: "call-close".to_string(),
             runtime_payload: begin_payload.clone(),
         },
@@ -731,18 +758,13 @@ fn agent_result_edge_links_child_result_to_parent_notification() -> anyhow::Resu
     )?;
 
     start_agent_turn(&writer, "turn-root-1")?;
-    let delivered = inter_agent_message(
-        "/root/child",
-        "/root",
-        notification,
-        /*trigger_turn*/ false,
-    );
+    let delivered = inter_agent_message("/root/child", "/root", notification);
     append_inference_request(
         &writer,
         "019d0000-0000-7000-8000-000000000001",
         "turn-root-1",
         "inference-root-1",
-        vec![message("assistant", &delivered)],
+        vec![delivered],
     )?;
 
     let replayed = replay_bundle(temp.path())?;
@@ -829,18 +851,13 @@ fn agent_result_edge_falls_back_to_child_thread_without_result_message() -> anyh
     // mailbox item. The target should remain that precise parent-side
     // ConversationItem even though the source falls back to the child thread.
     start_agent_turn(&writer, "turn-root-1")?;
-    let delivered = inter_agent_message(
-        "/root/child",
-        "/root",
-        notification,
-        /*trigger_turn*/ false,
-    );
+    let delivered = inter_agent_message("/root/child", "/root", notification);
     append_inference_request(
         &writer,
         "019d0000-0000-7000-8000-000000000001",
         "turn-root-1",
         "inference-root-1",
-        vec![message("assistant", &delivered)],
+        vec![delivered],
     )?;
 
     let replayed = replay_bundle(temp.path())?;
@@ -918,6 +935,7 @@ fn append_spawn_agent_tool_lifecycle(
     writer.append_with_context(
         trace_context_for_agent(turn_id),
         RawTraceEventPayload::ToolCallRuntimeStarted {
+            kind: ToolCallKind::SpawnAgent,
             tool_call_id: "call-spawn".to_string(),
             runtime_payload: begin.clone(),
         },
@@ -965,15 +983,13 @@ fn append_spawn_agent_tool_lifecycle(
     })
 }
 
-fn inter_agent_message(author: &str, recipient: &str, content: &str, trigger_turn: bool) -> String {
+fn inter_agent_message(author: &str, recipient: &str, content: &str) -> serde_json::Value {
     json!({
+        "type": "agent_message",
         "author": author,
         "recipient": recipient,
-        "other_recipients": [],
-        "content": content,
-        "trigger_turn": trigger_turn,
+        "content": [{"type": "input_text", "text": content}]
     })
-    .to_string()
 }
 
 fn target_conversation_item_id(anchor: &TraceAnchor) -> &String {

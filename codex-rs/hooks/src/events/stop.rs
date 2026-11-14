@@ -8,7 +8,6 @@ use codex_protocol::protocol::HookOutputEntry;
 use codex_protocol::protocol::HookOutputEntryKind;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
-use codex_protocol::protocol::HookSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Map;
 use serde_json::Value;
@@ -70,24 +69,7 @@ impl StopHookTarget {
             .into_iter()
             .filter(|handler| {
                 !matches!(self, Self::MemoryConsolidation)
-                    || matches!(
-                        handler.source_path,
-                        HandlerSourcePath::ExecutorScoped { .. }
-                    )
-                    || match handler.source {
-                        HookSource::User
-                        | HookSource::Project
-                        | HookSource::SessionFlags
-                        | HookSource::Plugin => false,
-                        HookSource::System
-                        | HookSource::Mdm
-                        | HookSource::CloudRequirements
-                        | HookSource::CloudManagedConfig
-                        | HookSource::LegacyManagedConfigFile
-                        | HookSource::LegacyManagedConfigMdm
-                        // Required hooks can have unknown attribution; retain them fail-closed.
-                        | HookSource::Unknown => true,
-                    }
+                    || handler.runs_for_memory_consolidation()
             })
             .collect()
     }
@@ -120,7 +102,12 @@ pub(crate) fn preview(
         .target
         .select_handlers(handlers)
         .into_iter()
-        .filter(|handler| matches!(handler.source_path, HandlerSourcePath::Local(_)))
+        .filter(|handler| {
+            !matches!(
+                handler.source_path,
+                HandlerSourcePath::ExecutorScoped { .. }
+            )
+        })
         .map(|handler| dispatcher::running_summary(&handler))
         .collect()
 }
@@ -147,7 +134,7 @@ pub(crate) async fn run(engine: &ClaudeHooksEngine, request: StopRequest) -> Sto
                 HandlerSourcePath::ExecutorScoped { .. }
             )
     });
-    let input_json = match request.target {
+    let input = match request.target {
         StopHookTarget::Stop | StopHookTarget::MemoryConsolidation => {
             let input = StopCommandInput {
                 session_id: request.session_id.to_string(),
@@ -162,8 +149,8 @@ pub(crate) async fn run(engine: &ClaudeHooksEngine, request: StopRequest) -> Sto
                     request.last_assistant_message.clone(),
                 ),
             };
-            match serde_json::to_string(&input) {
-                Ok(input_json) => input_json,
+            match serde_json::to_value(input) {
+                Ok(input) => input,
                 Err(error) => {
                     return serialization_failure_outcome(
                         common::serialization_failure_hook_events(
@@ -196,8 +183,8 @@ pub(crate) async fn run(engine: &ClaudeHooksEngine, request: StopRequest) -> Sto
                     request.last_assistant_message.clone(),
                 ),
             };
-            match serde_json::to_string(&input) {
-                Ok(input_json) => input_json,
+            match serde_json::to_value(input) {
+                Ok(input) => input,
                 Err(error) => {
                     return serialization_failure_outcome(
                         common::serialization_failure_hook_events(
@@ -214,7 +201,7 @@ pub(crate) async fn run(engine: &ClaudeHooksEngine, request: StopRequest) -> Sto
     let results = dispatcher::execute_handlers_with_metadata(
         engine,
         matched,
-        input_json.clone(),
+        &input,
         request.cwd.as_path(),
         Some(request.turn_id.clone()),
         request.request_metadata.as_ref(),
@@ -226,7 +213,7 @@ pub(crate) async fn run(engine: &ClaudeHooksEngine, request: StopRequest) -> Sto
         dispatcher::execute_handlers_with_metadata(
             engine,
             executor_cleanup,
-            input_json,
+            &input,
             request.cwd.as_path(),
             Some(request.turn_id),
             request.request_metadata.as_ref(),
@@ -390,10 +377,11 @@ fn parse_completed(
     };
     let continuation_fragments = continuation_prompt
         .map(|prompt| {
-            vec![HookPromptFragment::from_single_hook(
-                prompt,
-                completed.run.id.clone(),
-            )]
+            vec![HookPromptFragment {
+                text: prompt,
+                hook_run_id: completed.run.id.clone(),
+                metadata: run_result.context_metadata,
+            }]
         })
         .unwrap_or_default();
 
@@ -497,6 +485,7 @@ mod tests {
                 continuation_fragments: vec![HookPromptFragment {
                     text: "retry with tests".to_string(),
                     hook_run_id: parsed.completed.run.id.clone(),
+                    metadata: codex_protocol::models::ContentItemMetadata::harness(),
                 }],
             }
         );
@@ -574,6 +563,7 @@ mod tests {
                 continuation_fragments: vec![HookPromptFragment {
                     text: "retry with tests".to_string(),
                     hook_run_id: parsed.completed.run.id.clone(),
+                    metadata: codex_protocol::models::ContentItemMetadata::harness(),
                 }],
             }
         );
@@ -693,6 +683,7 @@ mod tests {
     fn handler_with_async(r#async: bool) -> ConfiguredHandler {
         ConfiguredHandler {
             builtin: false,
+            plugin_trust: None,
             event_name: HookEventName::Stop,
             matcher: None,
             timeout_sec: 600,
@@ -711,6 +702,7 @@ mod tests {
 
     fn run_result(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HandlerRunResult {
         HandlerRunResult {
+            context_metadata: codex_protocol::models::ContentItemMetadata::harness(),
             started_at: 1,
             completed_at: 2,
             duration_ms: 1,

@@ -1,7 +1,15 @@
 mod common;
+#[cfg(unix)]
+#[path = "exec_process/shell_snapshot.rs"]
+mod shell_snapshot;
+#[cfg(unix)]
+#[path = "common/tls_proxy.rs"]
+mod tls_proxy;
 #[path = "exec_process/windows_sandbox.rs"]
 mod windows_sandbox;
 
+#[cfg(unix)]
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -13,6 +21,7 @@ use codex_exec_server::Environment;
 use codex_exec_server::ExecBackend;
 #[cfg(unix)]
 use codex_exec_server::ExecEnvPolicy;
+use codex_exec_server::ExecMetadata;
 use codex_exec_server::ExecOutputStream;
 use codex_exec_server::ExecParams;
 use codex_exec_server::ExecProcess;
@@ -52,7 +61,6 @@ use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSpecialPath;
 #[cfg(unix)]
 use codex_protocol::permissions::NetworkSandboxPolicy;
-use codex_protocol::protocol::SandboxPolicy;
 use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
@@ -210,8 +218,10 @@ async fn shell_snapshot_v2_filters_profile_exports_and_stays_in_memory(
     shell_name: &str,
 ) -> Result<()> {
     if use_sandbox
-        && let Some(warning) =
-            codex_sandboxing::system_bwrap_warning(&PermissionProfile::read_only())
+        && let Some(warning) = codex_sandboxing::system_bwrap_warning(
+            &PermissionProfile::read_only(),
+            &std::env::current_dir()?,
+        )
     {
         eprintln!("skipping sandbox test: {warning}");
         return Ok(());
@@ -242,7 +252,7 @@ async fn shell_snapshot_v2_filters_profile_exports_and_stays_in_memory(
     let padding = if !use_remote && !tty && shell_name == "bash" {
         format!(
             "snapshot_padding() {{ printf '%s' '{}'; }}\n",
-            "🦀".repeat(20_000)
+            "🦀".repeat(200_000)
         )
     } else {
         String::new()
@@ -250,7 +260,7 @@ async fn shell_snapshot_v2_filters_profile_exports_and_stays_in_memory(
     let shadowed_builtins = if posix_shell {
         ""
     } else {
-        "unset() { exit 41; }\nbuiltin() { :; }\n"
+        "unset() { exit 41; }\nbuiltin() { exit 41; }\nexec() { exit 41; }\n"
     };
     std::fs::write(
         &profile_path,
@@ -372,61 +382,453 @@ async fn shell_snapshot_v2_filters_profile_exports_and_stays_in_memory(
 }
 
 #[cfg(unix)]
+#[test_case(false, false, false; "local_pipe")]
+#[test_case(false, true, false; "local_tty")]
+#[test_case(true, false, false; "remote_pipe")]
+#[test_case(true, true, false; "remote_tty")]
+#[test_case(true, false, true; "remote_sandbox")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial(remote_exec_server)]
-async fn shell_snapshot_v2_remote_managed_proxy_uses_prepared_execution_context() -> Result<()> {
-    let context = create_process_context(/*use_remote*/ true).await?;
+async fn exec_metadata_overrides_policy_and_cached_snapshot(
+    use_remote: bool,
+    tty: bool,
+    use_sandbox: bool,
+) -> Result<()> {
+    if use_sandbox
+        && let Some(warning) = codex_sandboxing::system_bwrap_warning(
+            &PermissionProfile::workspace_write(),
+            &std::env::current_dir()?,
+        )
+    {
+        eprintln!("skipping sandbox test: {warning}");
+        return Ok(());
+    }
+    let context = create_process_context(use_remote).await?;
     let home = TempDir::new()?;
     let cwd = PathUri::from_host_native_path(home.path())?;
     std::fs::write(
         home.path().join(".bashrc"),
-        "printf '%s\\n' \"$HTTP_PROXY\" >> \"$HOME/captures\"\ntest \"$CODEX_NETWORK_PROXY_ACTIVE\" = 1 || exit 41\nexport PROFILE_ALLOWED=profile\nprofile_helper() { printf helper; }\n",
+        "printf '%s|%s\n' \"${CODEX_THREAD_ID-unset}\" \"${CODEX_TOOL_CALL_ID-unset}\" >> \"$HOME/capture-env\"\nexport CODEX_THREAD_ID=snapshot-thread\nexport CODEX_TOOL_CALL_ID=snapshot-call\n",
     )?;
     let policy = ExecEnvPolicy {
-        inherit: ShellEnvironmentPolicyInherit::All,
-        ignore_default_excludes: false,
+        inherit: ShellEnvironmentPolicyInherit::None,
+        ignore_default_excludes: true,
         exclude: Vec::new(),
-        r#set: HashMap::from([(
-            "HOME".to_string(),
-            home.path().to_string_lossy().into_owned(),
-        )]),
-        include_only: vec![
-            "HOME".to_string(),
-            "PATH".to_string(),
-            "PROFILE_*".to_string(),
-        ],
+        r#set: HashMap::from([
+            ("HOME".into(), home.path().to_string_lossy().into_owned()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("CODEX_THREAD_ID".into(), "policy-thread".into()),
+            ("CODEX_TOOL_CALL_ID".into(), "policy-call".into()),
+        ]),
+        include_only: Vec::new(),
     };
-    let proxy_config = RemoteNetworkProxyConfig::from_effective_config(&NetworkProxyConfig {
-        enabled: true,
-        ..NetworkProxyConfig::default()
-    })?;
-    let mut proxy_addresses = Vec::new();
+    let thread_id = codex_protocol::ThreadId::from_string("019d25f0-6728-7ce2-908f-c3c187323e5b")?;
+    let later_thread_id =
+        codex_protocol::ThreadId::from_string("019d25f0-6728-7ce2-908f-c3c187323e5c")?;
 
-    for attempt in 0..2 {
+    for (attempt, call_id, expected) in [
+        (0, Some(""), ""),
+        (1, Some("call-λ-'\";$()"), "call-λ-'\";$()"),
+        (2, None, "unset"),
+        (3, Some("exec-invalid\0call"), "unset"),
+    ] {
+        let execution_thread_id = if attempt == 1 {
+            later_thread_id
+        } else {
+            thread_id
+        };
         let started = context
             .backend
             .start(ExecParams {
-                metadata: Default::default(),
-                process_id: ProcessId::from(format!("managed-snapshot-{attempt}")),
+                metadata: Some(ExecMetadata {
+                    thread_id: Some(execution_thread_id),
+                    tool_call_id: call_id.map(str::to_string),
+                }),
+                process_id: ProcessId::from(format!("metadata-snapshot-{attempt}")),
                 argv: vec![
-                    "/bin/bash".to_string(),
-                    "-lc".to_string(),
-                    "profile_helper; printf '|%s|%s|%s' \"$PROFILE_ALLOWED\" \"$CODEX_NETWORK_PROXY_ACTIVE\" \"$HTTP_PROXY\"".to_string(),
+                    "/bin/bash".into(),
+                    "-lc".into(),
+                    "printf '%s|%s' \"$CODEX_THREAD_ID\" \"${CODEX_TOOL_CALL_ID-unset}\""
+                        .to_string(),
                 ],
                 cwd: cwd.clone(),
                 env_policy: Some(policy.clone()),
                 shell_snapshot: Some(ShellSnapshotRequest {
-                    scope_id: "managed-attachment".to_string(),
+                    scope_id: "metadata-attachment".into(),
                     shell: ShellInfo {
-                        name: "bash".to_string(),
-                        path: "/bin/bash".to_string(),
+                        name: "bash".into(),
+                        path: "/bin/bash".into(),
                     },
                 }),
-                env: HashMap::new(),
+                env: HashMap::from([
+                    ("CODEX_THREAD_ID".into(), "overlay-thread".into()),
+                    ("CODEX_TOOL_CALL_ID".into(), "overlay-call".into()),
+                ]),
+                tty,
+                pipe_stdin: false,
+                arg0: None,
+                sandbox: use_sandbox.then(|| {
+                    FileSystemSandboxContext::from_permission_profile(
+                        PermissionProfile::workspace_write(),
+                        cwd.clone(),
+                    )
+                }),
+                enforce_managed_network: false,
+                managed_network: None,
+                network_proxy: None,
+            })
+            .await?;
+        let (stdout, stderr, status, closed) =
+            collect_process_output_from_events(started.process).await?;
+        assert_eq!(
+            (stdout, stderr, status, closed),
+            (
+                format!("{execution_thread_id}|{expected}"),
+                String::new(),
+                Some(0),
+                true,
+            )
+        );
+    }
+
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("capture-env"))?,
+        "019d25f0-6728-7ce2-908f-c3c187323e5b|unset\n"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum CredentialStartup {
+    Inherited,
+    Profile,
+    UnsupportedProfile,
+    OrdinaryLogin,
+}
+
+#[cfg(unix)]
+#[test_case(false, "bash", &["-lc", "-lc"], CredentialStartup::Inherited; "unmasked")]
+#[cfg_attr(any(target_os = "linux", target_os = "macos"), test_case(true, "bash", &["-c", "-c", "-lc"], CredentialStartup::Inherited; "masked_bash"))]
+#[cfg_attr(any(target_os = "linux", target_os = "macos"), test_case(true, "bash", &["-lc", "-lc"], CredentialStartup::Inherited; "bash_profile_fallback"))]
+#[cfg_attr(any(target_os = "linux", target_os = "macos"), test_case(true, "zsh", &["-lc", "-lc"], CredentialStartup::OrdinaryLogin; "zsh_profile_gateway_fallback"))]
+#[cfg_attr(any(target_os = "linux", target_os = "macos"), test_case(true, "zsh", &["-lc", "-lc"], CredentialStartup::Inherited; "masked_zsh_inherited_credentials"))]
+#[cfg_attr(any(target_os = "linux", target_os = "macos"), test_case(true, "zsh", &["-lc", "-lc"], CredentialStartup::Profile; "masked_zsh_profile_credentials"))]
+#[cfg_attr(any(target_os = "linux", target_os = "macos"), test_case(true, "zsh", &["-lc", "-lc"], CredentialStartup::UnsupportedProfile; "zsh_unsupported_profile_fallback"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(remote_exec_server)]
+async fn shell_snapshot_v2_remote_managed_proxy_uses_prepared_execution_context(
+    credential_masking: bool,
+    shell_name: &str,
+    shell_args: &[&str],
+    credential_startup: CredentialStartup,
+) -> Result<()> {
+    const API_KEY: &str = "sk-proj-executor-only-0000000000000000000000000000000000";
+    const PROFILE_GH_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const REQUEST_GH_TOKEN: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const VENDOR_TOKEN: &str = "vendor_abcdefgh";
+    const CUSTOM_HOST: &str = "chatgpt.com";
+    let configured_provider = shell_name == "bash" && shell_args.first() == Some(&"-c");
+    let shell_path = format!("/bin/{shell_name}");
+    if shell_name == "zsh" && !std::path::Path::new(&shell_path).exists() {
+        eprintln!("skipping zsh test: {shell_path} is unavailable");
+        return Ok(());
+    }
+    let unset_destinations =
+        shell_name == "zsh" && matches!(credential_startup, CredentialStartup::Inherited);
+    let api_host = if shell_name == "zsh" && !unset_destinations {
+        CUSTOM_HOST
+    } else {
+        "api.openai.com"
+    };
+    let home = TempDir::new()?;
+    if credential_masking
+        && let Some(warning) = codex_sandboxing::system_bwrap_warning(
+            &PermissionProfile::workspace_write(),
+            home.path(),
+        )
+    {
+        eprintln!("skipping sandbox test: {warning}");
+        return Ok(());
+    }
+    let upstream = credential_masking
+        .then(|| {
+            tls_proxy::TlsInterceptingProxy::start(
+                shell_args.len() * if unset_destinations { 2 } else { 1 },
+            )
+        })
+        .transpose()?;
+    let mut executor_env = vec![("OPENAI_API_KEY", API_KEY.to_string())];
+    if configured_provider {
+        executor_env.extend([
+            ("VENDOR_TOKEN", VENDOR_TOKEN.to_string()),
+            ("VENDOR_BASE_URL", "https://api.openai.com/v1".to_string()),
+        ]);
+    }
+    if let Some(upstream) = &upstream {
+        let ca_path = home.path().join("upstream-ca.pem");
+        std::fs::write(&ca_path, &upstream.ca_cert_pem)?;
+        let inherited_api_host = if unset_destinations {
+            CUSTOM_HOST
+        } else {
+            "api.openai.com"
+        };
+        executor_env.extend([
+            ("AUTH_ALIAS", format!("Bearer {API_KEY}")),
+            (
+                "OPENAI_BASE_URL",
+                format!("https://{inherited_api_host}/v1"),
+            ),
+            (
+                "GH_HOST",
+                if unset_destinations { CUSTOM_HOST } else { "" }.to_string(),
+            ),
+            (
+                "GH_ENTERPRISE_TOKEN",
+                "executor-unbound-enterprise-token".to_string(),
+            ),
+            (
+                "CODEX_CA_CERTIFICATE",
+                ca_path.to_string_lossy().into_owned(),
+            ),
+            ("CURL_CA_BUNDLE", ca_path.to_string_lossy().into_owned()),
+            ("HTTPS_PROXY", upstream.url.clone()),
+            ("https_proxy", upstream.url.clone()),
+            ("ALL_PROXY", upstream.url.clone()),
+            ("all_proxy", upstream.url.clone()),
+            ("NO_PROXY", String::new()),
+            ("no_proxy", String::new()),
+        ]);
+    }
+    if matches!(credential_startup, CredentialStartup::Profile) {
+        executor_env.extend([("GH_TOKEN", String::new()), ("GH_ALIAS", String::new())]);
+        for (key, value) in &mut executor_env {
+            if matches!(*key, "OPENAI_API_KEY" | "AUTH_ALIAS") {
+                value.clear();
+            }
+        }
+    }
+    let mut server = common::exec_server::exec_server_with_env(executor_env, &[]).await?;
+    let environment = Environment::create_for_tests(Some(server.websocket_url().to_string()))?;
+    let backend = environment.get_exec_backend();
+    let cwd = PathUri::from_host_native_path(home.path())?;
+    let profile_bin = home.path().join("profile-bin");
+    std::fs::create_dir(&profile_bin)?;
+    codex_utils_cargo_bin::write_executable(
+        &profile_bin.join("profile_command"),
+        "#!/bin/sh\nprintf helper\n",
+    )?;
+    let shell_path = if shell_name == "zsh" {
+        // Observe the launcher's proxy before replay and simulate a global zshenv export.
+        let path = home.path().join("zsh");
+        codex_utils_cargo_bin::write_executable(
+            &path,
+            "#!/bin/sh\nexport GITHUB_TOKEN=global-test-token\nexport TEST_LIVE_HTTP_PROXY=\"$HTTP_PROXY\"\nexec /bin/zsh \"$@\"\n",
+        )?;
+        path.to_string_lossy().into_owned()
+    } else {
+        shell_path
+    };
+    let profile = "printf '%s\\n' \"$HTTP_PROXY\" >> \"$HOME/captures\"\ntest \"$CODEX_NETWORK_PROXY_ACTIVE\" = 1 || exit 41\nexport PROFILE_ALLOWED=profile\nprofile_helper() { profile_command; }\n";
+    std::fs::write(home.path().join(".bashrc"), profile)?;
+    std::fs::write(
+        home.path().join(".bash_profile"),
+        "export PATH=\"$HOME/profile-bin:$PATH\"\n",
+    )?;
+    let profile_credentials = match credential_startup {
+        CredentialStartup::Inherited | CredentialStartup::OrdinaryLogin => String::new(),
+        CredentialStartup::Profile => format!(
+            "export OPENAI_API_KEY={API_KEY}\nexport AUTH_ALIAS=\"Bearer $OPENAI_API_KEY\"\nexport GH_TOKEN={PROFILE_GH_TOKEN}\nexport GH_ALIAS=\"Bearer $GH_TOKEN\"\nfor index in {{1..256}}; do export \"AUTH_SIZE_$index=Bearer $OPENAI_API_KEY\"; done\nunset index\n"
+        ),
+        CredentialStartup::UnsupportedProfile => {
+            format!("credential_literal() {{ printf '%s' '{API_KEY}'; }}\n")
+        }
+    };
+    let profile_destinations = if unset_destinations {
+        "unset OPENAI_BASE_URL GH_HOST\n".to_string()
+    } else {
+        format!("export OPENAI_BASE_URL=https://{api_host}/v1\n")
+    };
+    std::fs::write(
+        home.path().join(".zshenv"),
+        format!(
+            "unset GITHUB_TOKEN\nexport PATH=\"$HOME/profile-bin:$PATH\"\n{profile_destinations}typeset -ux FOO=profile\nexport PROFILE_OVERRIDE=profile\nprofile_local=local\ncd \"$HOME/profile-bin\"\numask 027\n{profile_credentials}test \"$OPENAI_API_KEY\" = '{API_KEY}' || exit 48\n{profile}"
+        ),
+    )?;
+    std::fs::write(home.path().join(".zshrc"), ": > \"$HOME/zshrc-loaded\"\n")?;
+    let mut policy = ExecEnvPolicy {
+        inherit: ShellEnvironmentPolicyInherit::All,
+        ignore_default_excludes: true,
+        exclude: Vec::new(),
+        r#set: HashMap::from([
+            (
+                "HOME".to_string(),
+                home.path().to_string_lossy().into_owned(),
+            ),
+            ("DEBUG_FLAG".to_string(), "debug".to_string()),
+            ("PROFILE_OVERRIDE".to_string(), "policy".to_string()),
+        ]),
+        include_only: vec![
+            "HOME".to_string(),
+            "PATH".to_string(),
+            "PROFILE_*".to_string(),
+            "OPENAI_API_KEY".to_string(),
+        ],
+    };
+    if credential_masking {
+        policy.include_only.extend(
+            [
+                "OPENAI_BASE_URL",
+                "AUTH_ALIAS",
+                "GITHUB_TOKEN",
+                "GH_HOST",
+                "GH_ENTERPRISE_TOKEN",
+                "CURL_CA_BUNDLE",
+            ]
+            .map(str::to_string),
+        );
+    }
+    if matches!(credential_startup, CredentialStartup::Profile) {
+        policy
+            .include_only
+            .extend(["GH_TOKEN", "GH_ALIAS", "AUTH_SIZE_*"].map(str::to_string));
+    }
+    if configured_provider {
+        policy
+            .include_only
+            .extend(["VENDOR_TOKEN", "VENDOR_BASE_URL"].map(str::to_string));
+    }
+    let mut proxy_settings = NetworkProxyConfig {
+        enabled: true,
+        ..NetworkProxyConfig::default()
+    };
+    let mut allowed_domains = vec![api_host.to_string()];
+    if unset_destinations {
+        allowed_domains.push(CUSTOM_HOST.to_string());
+    }
+    proxy_settings.set_allowed_domains(allowed_domains);
+    let mut proxy_config = RemoteNetworkProxyConfig::from_effective_config(&proxy_settings)?;
+    let mut providers = BTreeMap::new();
+    if configured_provider {
+        providers.insert(
+            "vendor".to_string(),
+            codex_network_proxy::CredentialProviderConfig {
+                env: vec!["VENDOR_TOKEN".to_string()],
+                patterns: vec!["vendor_[a-z]{8}".to_string()],
+                url_prefix_from_env: Some("VENDOR_BASE_URL".to_string()),
+                auth: vec![codex_network_proxy::CredentialAuthMethod::Header],
+                header: Some("X-Vendor-Token".to_string()),
+                ..Default::default()
+            },
+        );
+    }
+    if credential_masking {
+        proxy_config.enable_credential_masking(providers);
+    }
+    let mut saved_api_key = None;
+
+    for (attempt, &shell_args) in shell_args.iter().enumerate() {
+        let use_snapshot =
+            shell_args == "-lc" && !matches!(credential_startup, CredentialStartup::OrdinaryLogin);
+        let expect_snapshot_fallback =
+            matches!(credential_startup, CredentialStartup::UnsupportedProfile)
+                || matches!(credential_startup, CredentialStartup::Profile) && attempt == 1;
+        let expect_masking = credential_masking
+            && (shell_name == "bash" && !use_snapshot
+                || shell_name == "zsh" && use_snapshot && !expect_snapshot_fallback);
+        let expect_profile = use_snapshot || shell_name == "zsh";
+        let request_foo = if attempt == 0 { "request" } else { "" };
+        let mut env = HashMap::from([("FOO".to_string(), request_foo.to_string())]);
+        if shell_name == "zsh" && expect_masking {
+            env.insert("HTTP_PROXY".to_string(), "http://127.0.0.1:1".to_string());
+        }
+        if matches!(credential_startup, CredentialStartup::Profile) {
+            let (key, value) = if attempt == 0 {
+                ("GH_TOKEN", REQUEST_GH_TOKEN)
+            } else {
+                ("OPENAI_API_KEY", "")
+            };
+            env.insert(key.to_string(), value.to_string());
+        }
+        let command = if expect_profile {
+            "profile_helper; printf '|%s|%s|%s' \"$PROFILE_ALLOWED\" \"$CODEX_NETWORK_PROXY_ACTIVE\" \"$HTTP_PROXY\""
+        } else {
+            "printf 'masked|%s|%s' \"$CODEX_NETWORK_PROXY_ACTIVE\" \"$HTTP_PROXY\""
+        };
+        let command = if shell_name == "zsh" && expect_masking {
+            format!(
+                "test \"$HTTP_PROXY\" = \"$TEST_LIVE_HTTP_PROXY\" && test \"$HTTPS_PROXY\" = \"$TEST_LIVE_HTTP_PROXY\" || exit 51; test \"${{DEBUG_FLAG+x}}\" = '' && test \"${{GITHUB_TOKEN+x}}\" = '' && test \"$PROFILE_OVERRIDE\" = policy && test \"${{FOO-unset}}\" = '{request_foo}' && test -e \"$HOME/zshrc-loaded\" || exit 47; {command}"
+            )
+        } else if matches!(credential_startup, CredentialStartup::OrdinaryLogin) {
+            format!(
+                "test \"$profile_local\" = local && test \"$PWD\" = \"$HOME/profile-bin\" && test \"$(umask -S)\" = 'u=rwx,g=rx,o=' && test ! -e \"$HOME/zshrc-loaded\" || exit 49; {command}"
+            )
+        } else {
+            command.to_string()
+        };
+        let command = if matches!(credential_startup, CredentialStartup::Profile) && attempt == 0 {
+            format!(
+                "test -n \"$GH_TOKEN\" && test \"$GH_ALIAS\" = \"Bearer $GH_TOKEN\" && test \"$AUTH_SIZE_1\" = \"Bearer $OPENAI_API_KEY\" && test \"$AUTH_SIZE_256\" = \"Bearer $OPENAI_API_KEY\" || exit 50; case \"$GH_TOKEN|$GH_ALIAS\" in *'{PROFILE_GH_TOKEN}'*|*'{REQUEST_GH_TOKEN}'*) exit 50 ;; esac; {command}"
+            )
+        } else {
+            command
+        };
+        let command = if credential_masking {
+            let vendor_header = if configured_provider {
+                "--header \"X-Vendor-Token: $(<\"$HOME/vendor-token\")\""
+            } else {
+                ""
+            };
+            format!(
+                "{command}; test \"$GH_ENTERPRISE_TOKEN\" = executor-unbound-enterprise-token || exit 45; test \"$AUTH_ALIAS\" = \"Bearer $OPENAI_API_KEY\" || exit 42; printf '|%s' \"$OPENAI_API_KEY\"; curl --silent --show-error --fail --max-time 5 --noproxy '' --config \"$HOME/curl.conf\" {vendor_header} \"${{OPENAI_BASE_URL:-https://api.openai.com/v1}}/models\" >/dev/null"
+            )
+        } else {
+            format!("{command}; test \"$OPENAI_API_KEY\" = '{API_KEY}' || exit 46")
+        };
+        let command = if unset_destinations {
+            format!(
+                "test \"${{OPENAI_BASE_URL+x}}\" = '' && test \"${{GH_HOST+x}}\" = '' || exit 52; {command} && curl --silent --show-error --fail --max-time 5 --noproxy '' --config \"$HOME/curl.conf\" https://{CUSTOM_HOST}/v1/models >/dev/null"
+            )
+        } else {
+            command
+        };
+        let command = if credential_masking && attempt == 0 {
+            format!(
+                "printf 'header = \"Authorization: %s\"\\n' \"$AUTH_ALIAS\" > \"$HOME/curl.conf\" || exit 44; {command}"
+            )
+        } else {
+            command
+        };
+        let command = if configured_provider && attempt == 0 {
+            format!("printf '%s' \"$VENDOR_TOKEN\" > \"$HOME/vendor-token\"; {command}")
+        } else {
+            command
+        };
+        let started = timeout(
+            Duration::from_secs(30),
+            backend.start(ExecParams {
+                metadata: Default::default(),
+                process_id: ProcessId::from(format!("managed-snapshot-{attempt}")),
+                argv: vec![shell_path.clone(), shell_args.to_string(), command],
+                cwd: cwd.clone(),
+                env_policy: Some(policy.clone()),
+                shell_snapshot: use_snapshot.then(|| ShellSnapshotRequest {
+                    scope_id: "managed-attachment".to_string(),
+                    shell: ShellInfo {
+                        name: shell_name.to_string(),
+                        path: shell_path.clone(),
+                    },
+                }),
+                env,
                 tty: false,
                 pipe_stdin: false,
                 arg0: None,
-                sandbox: None,
+                sandbox: credential_masking.then(|| {
+                    FileSystemSandboxContext::from_permission_profile(
+                        PermissionProfile::workspace_write(),
+                        cwd.clone(),
+                    )
+                }),
                 enforce_managed_network: true,
                 managed_network: None,
                 network_proxy: Some(
@@ -435,34 +837,139 @@ async fn shell_snapshot_v2_remote_managed_proxy_uses_prepared_execution_context(
                         format!("managed-snapshot-{attempt}"),
                     ),
                 ),
-            })
-            .await?;
+            }),
+        )
+        .await??;
         let (stdout, stderr, status, closed) =
             collect_process_output_from_events(started.process).await?;
-        let proxy_address = stdout
-            .strip_prefix("helper|profile|1|")
-            .context("snapshot should restore profile functions and live proxy state")?;
+        let expected_stderr = if expect_snapshot_fallback {
+            "Credential masking is unavailable for this shell snapshot; running with unmasked credentials.\n"
+        } else {
+            ""
+        };
+        assert_eq!(
+            (stderr.as_str(), status, closed),
+            (expected_stderr, Some(0), true)
+        );
+        let prefix = if expect_profile {
+            "helper|profile|1|"
+        } else {
+            "masked|1|"
+        };
+        let proxy_state = stdout
+            .strip_prefix(prefix)
+            .context("command should preserve live proxy state")?;
+        let proxy_address = if let Some(upstream) = &upstream {
+            let (proxy_address, child_api_key) = proxy_state
+                .split_once('|')
+                .context("command should expose the child API key")?;
+            if expect_masking {
+                assert!(child_api_key.starts_with("sk-proj-masked"));
+                assert_ne!(child_api_key, API_KEY);
+                assert!(!stdout.contains(API_KEY));
+            } else {
+                assert_eq!(child_api_key, API_KEY);
+            }
+            let saved_api_key = saved_api_key.get_or_insert_with(|| child_api_key.to_string());
+            assert_eq!(
+                std::fs::read_to_string(home.path().join("curl.conf"))?,
+                format!("header = \"Authorization: Bearer {saved_api_key}\"\n")
+            );
+            let request = upstream.next_request()?;
+            if configured_provider {
+                let placeholder = std::fs::read_to_string(home.path().join("vendor-token"))?;
+                assert!(placeholder.starts_with("vendor_"));
+                assert_eq!(placeholder.len(), VENDOR_TOKEN.len());
+                assert_ne!(placeholder, VENDOR_TOKEN);
+                assert_eq!(
+                    request.headers.get("x-vendor-token"),
+                    Some(&vec![VENDOR_TOKEN.to_string()])
+                );
+            }
+            assert_eq!(
+                (
+                    request.connect_authority.as_str(),
+                    request.request_line.as_str(),
+                    request.headers.get("authorization"),
+                ),
+                (
+                    format!("{api_host}:443").as_str(),
+                    "GET /v1/models HTTP/1.1",
+                    Some(&vec![format!("Bearer {API_KEY}")]),
+                )
+            );
+            if unset_destinations {
+                let request = upstream.next_request()?;
+                assert_eq!(
+                    (
+                        request.connect_authority.as_str(),
+                        request.request_line.as_str(),
+                        request.headers.get("authorization"),
+                    ),
+                    (
+                        format!("{CUSTOM_HOST}:443").as_str(),
+                        "GET /v1/models HTTP/1.1",
+                        Some(&vec![format!("Bearer {saved_api_key}")]),
+                    )
+                );
+            }
+            proxy_address
+        } else {
+            proxy_state
+        };
         assert!(proxy_address.starts_with("http://127.0.0.1:"));
-        assert_eq!((stderr, status, closed), (String::new(), Some(0), true));
-        proxy_addresses.push(proxy_address.to_string());
     }
 
-    assert_eq!(
-        std::fs::read_to_string(home.path().join("captures"))?,
-        format!("{}\n", proxy_addresses[0])
-    );
+    let expected_capture_count =
+        if matches!(credential_startup, CredentialStartup::UnsupportedProfile) {
+            Some(shell_args.len() * 2)
+        } else if matches!(credential_startup, CredentialStartup::Profile) {
+            Some(shell_args.len() + 1)
+        } else if shell_name == "zsh" {
+            Some(shell_args.len())
+        } else {
+            shell_args.iter().position(|flag| *flag == "-lc").map(|_| 1)
+        };
+    if let Some(expected_capture_count) = expected_capture_count {
+        // Capture and replay can have different proxy ports in separate Linux namespaces.
+        let captures = std::fs::read_to_string(home.path().join("captures"))?;
+        assert_eq!(captures.lines().count(), expected_capture_count);
+        assert!(
+            captures
+                .lines()
+                .all(|address| address.starts_with("http://127.0.0.1:"))
+        );
+    } else {
+        assert!(!home.path().join("captures").exists());
+    }
+    if let Some(upstream) = upstream {
+        upstream.finish()?;
+    }
+    server.shutdown().await?;
     Ok(())
 }
 
 #[cfg(unix)]
-#[test_case(false, false, "bash", 1; "local_pipe_recovery")]
-#[test_case(false, true, "bash", 1; "local_tty_recovery")]
-#[test_case(true, false, "bash", 1; "remote_pipe_recovery")]
-#[test_case(true, true, "bash", 1; "remote_tty_recovery")]
-#[test_case(false, false, "bash", 3; "local_retry_budget_exhausted")]
-#[test_case(true, false, "bash", 3; "remote_retry_budget_exhausted")]
-#[cfg_attr(target_os = "macos", test_case(false, false, "zsh", 1; "local_zsh_recovery"))]
-#[cfg_attr(target_os = "macos", test_case(true, false, "zsh", 1; "remote_zsh_recovery"))]
+#[derive(Clone, Copy)]
+enum CaptureFailure {
+    Exit(i32),
+    Cancel,
+    Timeout,
+}
+
+#[cfg(unix)]
+#[test_case(false, false, "bash", 1, CaptureFailure::Exit(7); "local_pipe_recovery")]
+#[test_case(false, true, "bash", 1, CaptureFailure::Exit(7); "local_tty_recovery")]
+#[test_case(true, false, "bash", 1, CaptureFailure::Exit(7); "remote_pipe_recovery")]
+#[test_case(true, true, "bash", 1, CaptureFailure::Exit(7); "remote_tty_recovery")]
+#[test_case(false, false, "bash", 3, CaptureFailure::Exit(7); "local_retry_budget_exhausted")]
+#[test_case(true, false, "bash", 3, CaptureFailure::Exit(7); "remote_retry_budget_exhausted")]
+#[test_case(false, false, "bash", 1, CaptureFailure::Exit(0); "local_invalid_output_recovery")]
+#[cfg_attr(target_os = "macos", test_case(false, false, "zsh", 1, CaptureFailure::Exit(0); "local_zsh_invalid_output_recovery"))]
+#[cfg_attr(target_os = "macos", test_case(false, false, "zsh", 1, CaptureFailure::Exit(7); "local_zsh_recovery"))]
+#[cfg_attr(target_os = "macos", test_case(true, false, "zsh", 1, CaptureFailure::Exit(7); "remote_zsh_recovery"))]
+#[test_case(false, false, "bash", 1, CaptureFailure::Cancel; "cancel_capture")]
+#[test_case(false, false, "bash", 1, CaptureFailure::Timeout; "timeout_capture")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial(remote_exec_server)]
 async fn shell_snapshot_v2_capture_failure_falls_back_and_retries(
@@ -470,10 +977,13 @@ async fn shell_snapshot_v2_capture_failure_falls_back_and_retries(
     tty: bool,
     shell_name: &str,
     failures_before_repair: usize,
+    failure: CaptureFailure,
 ) -> Result<()> {
     if use_remote
-        && let Some(warning) =
-            codex_sandboxing::system_bwrap_warning(&PermissionProfile::workspace_write())
+        && let Some(warning) = codex_sandboxing::system_bwrap_warning(
+            &PermissionProfile::workspace_write(),
+            &std::env::current_dir()?,
+        )
     {
         eprintln!("skipping sandbox test: {warning}");
         return Ok(());
@@ -486,9 +996,21 @@ async fn shell_snapshot_v2_capture_failure_falls_back_and_retries(
         "zsh" => ("/bin/zsh", ".zshrc"),
         name => anyhow::bail!("unsupported test shell {name}"),
     };
+    let child_pids = home.path().join("startup-pids");
+    let _cleanup = shell_snapshot::StartupProcesses(child_pids.clone());
+    // Sandboxed remote PIDs may be namespace-local; check descendants on the native path.
+    let startup_child = if use_remote {
+        ""
+    } else {
+        "/bin/sleep 30 >/dev/null 2>&1 &\nprintf '%s\\n' \"$!\" >> \"$HOME/startup-pids\"\n"
+    };
+    let finish = match failure {
+        CaptureFailure::Exit(code) => format!("exit {code}"),
+        CaptureFailure::Cancel | CaptureFailure::Timeout => "wait".to_string(),
+    };
     std::fs::write(
         home.path().join(profile_name),
-        "printf x >> \"$HOME/captures\"\nexit 7\n",
+        format!("printf x >> \"$HOME/captures\"\n{startup_child}{finish}\n"),
     )?;
     let policy = ExecEnvPolicy {
         inherit: ShellEnvironmentPolicyInherit::All,
@@ -534,12 +1056,47 @@ async fn shell_snapshot_v2_capture_failure_falls_back_and_retries(
 
     for attempt in 0..failures_before_repair {
         params.process_id = ProcessId::from(format!("snapshot-fallback-{attempt}"));
-        let fallback = context.backend.start(params.clone()).await?;
-        let fallback_output = collect_process_output_from_events(fallback.process).await?;
-        assert_eq!(
-            fallback_output,
-            ("original".to_string(), String::new(), Some(0), true)
-        );
+        let mut start = context.backend.start(params.clone());
+        if matches!(failure, CaptureFailure::Cancel) {
+            tokio::select! {
+                result = &mut start => anyhow::bail!("capture finished before cancellation: {}", result.is_ok()),
+                _ = async {
+                    while std::fs::read_to_string(&child_pids).unwrap_or_default().trim().is_empty() {
+                        sleep(Duration::from_millis(20)).await;
+                    }
+                } => {}
+            }
+            drop(start);
+        } else {
+            let fallback = start.await?;
+            assert_eq!(
+                collect_process_output_from_events(fallback.process).await?,
+                ("original".to_string(), String::new(), Some(0), true)
+            );
+        }
+        if !use_remote {
+            let pids = std::fs::read_to_string(&child_pids)?;
+            let pid = pids
+                .split_whitespace()
+                .last()
+                .context("startup child PID")?;
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    let output = std::process::Command::new("/bin/ps")
+                        .args(["-o", "stat=", "-p", pid])
+                        .output()?;
+                    let state = String::from_utf8(output.stdout)?;
+                    if state.trim().is_empty() || state.trim().starts_with('Z') {
+                        // Forget the completed child before retries can reuse its PID.
+                        std::fs::remove_file(&child_pids)?;
+                        return Ok::<_, anyhow::Error>(());
+                    }
+                    sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .context("failed capture left its startup child running")??;
+        }
         // A real remote executor has its own clock; the unit test uses a
         // paused clock to check requests made during the one-second backoff.
         sleep(Duration::from_millis(1100)).await;
@@ -576,7 +1133,10 @@ async fn shell_snapshot_v2_capture_failure_falls_back_and_retries(
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_sandboxed_process_preserves_custom_arg0() -> Result<()> {
-    if let Some(warning) = codex_sandboxing::system_bwrap_warning(&PermissionProfile::read_only()) {
+    if let Some(warning) = codex_sandboxing::system_bwrap_warning(
+        &PermissionProfile::read_only(),
+        &std::env::current_dir()?,
+    ) {
         eprintln!("skipping bwrap test: {warning}");
         return Ok(());
     }
@@ -648,16 +1208,43 @@ async fn remote_sandboxed_process_preserves_custom_arg0() -> Result<()> {
 
 async fn assert_exec_process_starts_and_exits(use_remote: bool) -> Result<()> {
     let context = create_process_context(use_remote).await?;
+    let thread_id = codex_protocol::ThreadId::from_string("019d25f0-6728-7ce2-908f-c3c187323e5b")?;
+    let call_id = "call-λ-'\";$()";
+    #[cfg(unix)]
+    let argv = vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "printf '%s|%s|%s' \"$CODEX_THREAD_ID\" \"$CODEX_TOOL_CALL_ID\" \"$CUSTOM_ENV_VAR\""
+            .to_string(),
+    ];
+    #[cfg(windows)]
+    let argv = vec![
+        "powershell.exe".into(),
+        "-NoProfile".into(),
+        "-Command".into(),
+        "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); [Console]::Write($env:CODEX_THREAD_ID + '|' + $env:CODEX_TOOL_CALL_ID + '|' + $env:CUSTOM_ENV_VAR)".into(),
+    ];
+    let mut env = std::env::vars().collect::<HashMap<_, _>>();
+    env.extend([
+        ("CODEX_THREAD_ID".into(), "stale-thread".into()),
+        ("Codex_Thread_Id".into(), "mixed-case-thread".into()),
+        ("CODEX_TOOL_CALL_ID".into(), "stale-call".into()),
+        ("Codex_Tool_Call_Id".into(), "mixed-case-call".into()),
+        ("CUSTOM_ENV_VAR".into(), "caller-owned".into()),
+    ]);
     let session = context
         .backend
         .start(ExecParams {
-            metadata: Default::default(),
+            metadata: Some(ExecMetadata {
+                thread_id: Some(thread_id),
+                tool_call_id: Some(call_id.to_string()),
+            }),
             process_id: ProcessId::from("proc-1"),
-            argv: vec!["true".to_string()],
+            argv,
             cwd: PathUri::from_host_native_path(std::env::current_dir()?)?,
             shell_snapshot: None,
             env_policy: /*env_policy*/ None,
-            env: Default::default(),
+            env,
             tty: false,
             pipe_stdin: false,
             arg0: None,
@@ -669,6 +1256,17 @@ async fn assert_exec_process_starts_and_exits(use_remote: bool) -> Result<()> {
         .await?;
     assert_eq!(session.process.process_id().as_str(), "proc-1");
     let wake_rx = session.process.subscribe_wake();
+    let (stdout, stderr, status, closed) =
+        collect_process_output_from_events(Arc::clone(&session.process)).await?;
+    assert_eq!(
+        (stdout, stderr, status, closed),
+        (
+            format!("{thread_id}|{call_id}|caller-owned"),
+            String::new(),
+            Some(0),
+            true,
+        )
+    );
     let (_, exit_code, closed) =
         collect_process_output_from_reads(session.process, wake_rx).await?;
 
@@ -677,18 +1275,35 @@ async fn assert_exec_process_starts_and_exits(use_remote: bool) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_process_keeps_sandbox_helper_visible_with_restricted_reads() -> Result<()> {
-    if let Some(warning) = codex_sandboxing::system_bwrap_warning(&PermissionProfile::read_only()) {
+async fn remote_process_can_read_its_helper_and_generated_ca_with_restricted_reads() -> Result<()> {
+    if let Some(warning) = codex_sandboxing::system_bwrap_warning(
+        &PermissionProfile::read_only(),
+        &std::env::current_dir()?,
+    ) {
         eprintln!("skipping bwrap test: {warning}");
         return Ok(());
     }
 
-    let context = create_process_context(/*use_remote*/ true).await?;
+    let server = exec_server().await?;
+    let environment = Environment::create_for_tests(Some(server.websocket_url().to_string()))?;
+    let proxy_dir = server.codex_home().canonicalize()?.join("proxy");
+    std::fs::create_dir_all(&proxy_dir)?;
+    // The bundle name contains the SHA-256 of its contents.
+    let bundle = proxy_dir
+        .join("ca-bundle-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad.pem");
+    std::fs::write(&bundle, b"abc")?;
+    let untrusted = proxy_dir.join("untrusted.pem");
+    std::fs::write(&untrusted, b"untrusted")?;
     let workspace = TempDir::new()?;
     let file = workspace.path().join("allowed.txt");
     std::fs::write(&file, b"allowed")?;
+    // Capture Bash startup with the controller's default in the environment, then replay the override.
+    std::fs::write(
+        workspace.path().join(".bashrc"),
+        "export DENO_CERT=profile.pem\n",
+    )?;
     let cwd = PathUri::from_host_native_path(workspace.path())?;
     let policy = FileSystemSandboxPolicy::restricted(vec![
         FileSystemSandboxEntry {
@@ -711,22 +1326,35 @@ async fn remote_process_keeps_sandbox_helper_visible_with_restricted_reads() -> 
         cwd.clone(),
     );
 
-    let session = context
-        .backend
+    let session = environment
+        .get_exec_backend()
         .start(ExecParams {
             metadata: Default::default(),
             process_id: ProcessId::from("proc-restricted-helper"),
-            argv: vec!["/bin/cat".to_string(), file.to_string_lossy().into_owned()],
+            argv: vec![
+                "/bin/bash".to_owned(), "-lc".to_owned(),
+                r#"test "$DENO_CERT" = profile.pem && cat "$1" "$CURL_CA_BUNDLE" && ! cat "$SSL_CERT_FILE" 2>/dev/null"#.to_owned(),
+                "bash".to_owned(), file.to_string_lossy().into_owned(),
+            ],
             cwd,
-            shell_snapshot: None,
+            shell_snapshot: Some(ShellSnapshotRequest {
+                scope_id: "restricted-ca".to_string(),
+                shell: ShellInfo { name: "bash".to_string(), path: "/bin/bash".to_string() },
+            }),
             env_policy: /*env_policy*/ None,
-            env: HashMap::from([("PATH".to_string(), std::env::var("PATH")?)]),
+            env: HashMap::from([
+                ("PATH".to_owned(), std::env::var("PATH")?),
+                ("HOME".to_owned(), workspace.path().display().to_string()),
+                ("DENO_CERT".to_owned(), bundle.to_string_lossy().into_owned()),
+                ("CURL_CA_BUNDLE".to_owned(), bundle.to_string_lossy().into_owned()),
+                ("SSL_CERT_FILE".to_owned(), untrusted.to_string_lossy().into_owned()),
+            ]),
             tty: false,
             pipe_stdin: false,
             arg0: None,
             sandbox: Some(sandbox),
             enforce_managed_network: false,
-            managed_network: None,
+            managed_network: Some(codex_network_proxy::ManagedNetworkSandboxContext::default()),
             network_proxy: None,
         })
         .await?;
@@ -734,7 +1362,7 @@ async fn remote_process_keeps_sandbox_helper_visible_with_restricted_reads() -> 
 
     assert_eq!(
         output,
-        ("allowed".to_string(), String::new(), Some(0), true)
+        ("allowedabc".to_string(), String::new(), Some(0), true)
     );
     Ok(())
 }
@@ -742,7 +1370,10 @@ async fn remote_process_keeps_sandbox_helper_visible_with_restricted_reads() -> 
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_tty_process_uses_configured_sandbox_helper_with_hostile_path() -> Result<()> {
-    if let Some(warning) = codex_sandboxing::system_bwrap_warning(&PermissionProfile::read_only()) {
+    if let Some(warning) = codex_sandboxing::system_bwrap_warning(
+        &PermissionProfile::read_only(),
+        &std::env::current_dir()?,
+    ) {
         eprintln!("skipping bwrap test: {warning}");
         return Ok(());
     }
@@ -752,10 +1383,7 @@ async fn remote_tty_process_uses_configured_sandbox_helper_with_hostile_path() -
     let file = workspace.path().join("allowed.txt");
     std::fs::write(&file, b"allowed")?;
     let hostile_helper = workspace.path().join("codex-linux-sandbox");
-    std::fs::write(&hostile_helper, b"#!/bin/sh\nprintf hostile")?;
-    let mut permissions = std::fs::metadata(&hostile_helper)?.permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&hostile_helper, permissions)?;
+    codex_utils_cargo_bin::write_executable(&hostile_helper, "#!/bin/sh\nprintf hostile")?;
     let path = std::env::var_os("PATH").context("PATH is not set")?;
     let hostile_path = std::env::join_paths(
         std::iter::once(workspace.path().to_path_buf()).chain(std::env::split_paths(&path)),
@@ -816,7 +1444,10 @@ async fn remote_tty_process_uses_configured_sandbox_helper_with_hostile_path() -
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_process_preserves_empty_workspace_roots() -> Result<()> {
-    if let Some(warning) = codex_sandboxing::system_bwrap_warning(&PermissionProfile::read_only()) {
+    if let Some(warning) = codex_sandboxing::system_bwrap_warning(
+        &PermissionProfile::read_only(),
+        &std::env::current_dir()?,
+    ) {
         eprintln!("skipping bwrap test: {warning}");
         return Ok(());
     }
@@ -1302,10 +1933,10 @@ async fn assert_remote_windows_sandbox_process_write(
     let workspace = TempDir::new()?;
     let blocked_file = workspace.path().join("blocked.txt");
     let cwd = PathUri::from_host_native_path(workspace.path())?;
-    let mut sandbox = FileSystemSandboxContext::from_legacy_sandbox_policy(
-        SandboxPolicy::new_read_only_policy(),
+    let mut sandbox = FileSystemSandboxContext::from_permission_profile(
+        codex_protocol::models::PermissionProfile::read_only(),
         cwd.clone(),
-    )?;
+    );
     match expected_sandbox_type {
         codex_sandboxing::SandboxType::WindowsRestrictedToken => {
             sandbox.windows_sandbox_selection = WindowsSandboxSelection::RestrictedToken;
@@ -1703,7 +2334,6 @@ async fn remote_exec_process_recovers_after_transport_disconnect() -> Result<()>
 
 #[test_case(false ; "local")]
 #[test_case(true ; "remote")]
-#[cfg_attr(not(unix), ignore = "Unix-only exec-server process test")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 // Serialize tests that launch a real exec-server process through the full CLI.
 #[serial_test::serial(remote_exec_server)]

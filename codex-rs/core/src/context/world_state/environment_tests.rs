@@ -1,10 +1,12 @@
 use super::super::PreviousSectionState;
 use super::super::test_support::render_section_cases;
 use super::*;
+use crate::context::world_state::test_support::FragmentSectionTestExt as _;
 use anyhow::Result;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol_test_support::ContentItemTestExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
@@ -108,6 +110,8 @@ fn snapshots() -> Result<()> {
                 error: None,
                 shell: None,
                 is_primary: false,
+                filesystem: None,
+                network_access: None,
             },
         )]
         .into_iter()
@@ -173,11 +177,16 @@ fn changing_primary_environment_updates_model_context_and_persisted_state() -> R
         .collect(),
         ..Default::default()
     };
-    let previous = before.snapshot();
+    let previous = before
+        .render_fragment_diff(PreviousSectionState::Absent)
+        .0
+        .unwrap();
     let rendered = after
-        .render_diff(PreviousSectionState::Known(&previous))
+        .render_fragment_diff(PreviousSectionState::Known(&previous))
+        .1
         .expect("primary change should update the model")
-        .render();
+        .render()
+        .expect_text();
 
     assert_eq!(
         rendered,
@@ -194,8 +203,9 @@ fn changing_primary_environment_updates_model_context_and_persisted_state() -> R
     current_world_state.add_section(after);
     assert_eq!(
         current_world_state
-            .snapshot()
-            .merge_patch_from(&previous_world_state.snapshot())
+            .render_full()
+            .0
+            .merge_patch_from(&previous_world_state.render_full().0)
             .map(serde_json::Value::Object),
         Some(json!({
             "environments": {
@@ -230,11 +240,17 @@ fn legacy_single_environment_snapshot_does_not_change() -> Result<()> {
 
     assert!(
         environment
-            .render_diff(PreviousSectionState::Known(&legacy_snapshot))
+            .render_fragment_diff(PreviousSectionState::Known(&legacy_snapshot))
+            .1
             .is_none()
     );
     assert_eq!(
-        serde_json::to_value(environment.snapshot())?["environments"]["local"],
+        serde_json::to_value(
+            environment
+                .render_fragment_diff(PreviousSectionState::Absent)
+                .0
+                .unwrap()
+        )?["environments"]["local"],
         json!({
             "cwd": PathUri::parse("file:///repo")?.inferred_native_path_string(),
             "status": "available",
@@ -280,9 +296,16 @@ fn crossing_single_environment_boundary_restates_current_environments() -> Resul
         };
 
         let expanded = multiple
-            .render_diff(PreviousSectionState::Known(&single.snapshot()))
+            .render_fragment_diff(PreviousSectionState::Known(
+                &single
+                    .render_fragment_diff(PreviousSectionState::Absent)
+                    .0
+                    .unwrap(),
+            ))
+            .1
             .expect("adding an environment should update the model")
-            .render();
+            .render()
+            .expect_text();
         assert_eq!(
             expanded,
             format!(
@@ -291,9 +314,16 @@ fn crossing_single_environment_boundary_restates_current_environments() -> Resul
         );
 
         let reduced = single
-            .render_diff(PreviousSectionState::Known(&multiple.snapshot()))
+            .render_fragment_diff(PreviousSectionState::Known(
+                &multiple
+                    .render_fragment_diff(PreviousSectionState::Absent)
+                    .0
+                    .unwrap(),
+            ))
+            .1
             .expect("removing an environment should update the model")
-            .render();
+            .render()
+            .expect_text();
         assert_eq!(
             reduced,
             format!(
@@ -312,6 +342,8 @@ fn available(cwd: &str, shell: &str) -> Result<EnvironmentState> {
         error: None,
         shell: Some(shell.to_string()),
         is_primary: false,
+        filesystem: None,
+        network_access: None,
     })
 }
 
@@ -329,6 +361,8 @@ fn starting(cwd: &str) -> Result<EnvironmentState> {
         error: None,
         shell: None,
         is_primary: false,
+        filesystem: None,
+        network_access: None,
     })
 }
 
@@ -343,6 +377,8 @@ fn failure_context_is_escaped_incremental_and_cleared_on_recovery() -> Result<()
                 error: Some("Repository <empty> & unavailable".to_string()),
                 shell: None,
                 is_primary: false,
+                filesystem: None,
+                network_access: None,
             },
         )]
         .into_iter()
@@ -398,7 +434,7 @@ fn failure_context_limits_total_detail_bytes_at_utf8_boundaries() {
             })
             .collect(),
     };
-    let states = environment_states(&snapshot);
+    let states = environment_states(&snapshot, /*per_environment*/ false);
     let details: Vec<_> = states
         .values()
         .map(|state| state.error.as_deref())

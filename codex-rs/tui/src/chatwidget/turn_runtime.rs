@@ -10,9 +10,20 @@ const LEGACY_SAFETY_ACCESS_BLOCK_PREFIX: &str =
 const BIO_POLICY_SAFETY_ACCESS_BLOCK_PREFIX: &str =
     "This content was flagged for possible biological risk.";
 
+pub(super) fn is_bio_policy_error(message: &str) -> bool {
+    is_safety_access_block_message(message)
+        || serde_json::from_str::<serde_json::Value>(message).is_ok_and(|response| {
+            response["error"]["code"].as_str() == Some("bio_policy")
+                || response["error"]["message"]
+                    .as_str()
+                    .is_some_and(is_safety_access_block_message)
+        })
+}
+
 fn is_safety_access_block_message(message: &str) -> bool {
     message.starts_with(LEGACY_SAFETY_ACCESS_BLOCK_PREFIX)
         || message.starts_with(BIO_POLICY_SAFETY_ACCESS_BLOCK_PREFIX)
+        || message.starts_with("This request has been flagged for possible biological risk.")
 }
 
 impl ChatWidget {
@@ -32,7 +43,7 @@ impl ChatWidget {
     /// both the agent turn lifecycle and MCP startup lifecycle.
     pub(super) fn update_task_running_state(&mut self) {
         self.bottom_pane.set_task_running(
-            self.turn_lifecycle.agent_turn_running
+            self.turn_lifecycle.is_running_or_admitted()
                 || self.review.is_review_mode
                 || self.mcp_startup_status.is_some(),
         );
@@ -113,6 +124,16 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    pub(super) fn on_replayed_task_started(&mut self, started_at: Option<i64>) {
+        self.on_task_started();
+        if let Some(started_at) = started_at {
+            let elapsed_secs = chrono::Utc::now().timestamp().saturating_sub(started_at);
+            self.bottom_pane.reset_status_timer(Duration::from_secs(
+                elapsed_secs.try_into().unwrap_or_default(),
+            ));
+        }
+    }
+
     pub(super) fn on_task_complete(
         &mut self,
         last_agent_message: Option<String>,
@@ -176,6 +197,11 @@ impl ChatWidget {
         self.clear_active_hook_cell();
         self.clear_guardian_review_status();
         self.turn_lifecycle.finish();
+        self.status_state.program_status_after_turn = if from_replay {
+            crate::terminal_program_status::ProgramStatus::Idle
+        } else {
+            crate::terminal_program_status::ProgramStatus::Done
+        };
         self.clear_safety_buffering();
         self.update_task_running_state();
         self.running_commands.clear();
@@ -293,6 +319,12 @@ impl ChatWidget {
         None
     }
 
+    pub(crate) fn has_unsent_input(&self) -> bool {
+        !self.composer_is_empty()
+            || self.pending_image_submission.is_some()
+            || self.has_queued_follow_up_messages()
+    }
+
     pub(crate) fn has_queued_follow_up_messages(&self) -> bool {
         self.input_queue.has_queued_follow_up_messages()
     }
@@ -323,6 +355,7 @@ impl ChatWidget {
         self.reasoning_header = None;
         self.clear_context_compaction();
         self.clear_safety_buffering();
+        self.safety_recourse = None;
         // Drop preview-only stream tail content on any termination path before
         // failed-cell finalization, so transient tail cells are never persisted.
         self.clear_active_stream_tail();
@@ -336,6 +369,12 @@ impl ChatWidget {
         self.input_queue.user_turn_pending_start = false;
         self.clear_guardian_review_status();
         self.turn_lifecycle.finish();
+        self.status_state.program_status_after_turn = if self.thread_usage.replaying_turn_completion
+        {
+            crate::terminal_program_status::ProgramStatus::Idle
+        } else {
+            crate::terminal_program_status::ProgramStatus::Error
+        };
         self.update_task_running_state();
         self.running_commands.clear();
         self.suppressed_exec_calls.clear();
@@ -393,19 +432,51 @@ impl ChatWidget {
         true
     }
 
+    pub(super) fn cyber_policy_notice(&self) -> crate::daybreak::Notice {
+        let can_enable_daybreak =
+            self.daybreak_account_eligible() && !self.side_conversation_active();
+        crate::daybreak::notice_for_setting(
+            &self.model_catalog.models,
+            self.current_model(),
+            self.daybreak_enabled && can_enable_daybreak,
+            can_enable_daybreak,
+        )
+    }
+
     pub(super) fn on_cyber_policy_error(&mut self) {
+        let notice = self.cyber_policy_notice();
         self.input_queue.submit_pending_steers_after_interrupt = false;
         self.finalize_turn();
-        let notice = if self.config.model_provider_id == "openai" {
-            self.cyber_policy_notice
-                .get()
-                .copied()
-                .unwrap_or_default()
-                .for_model(self.current_model())
-        } else {
-            crate::daybreak::Notice::Limited
-        };
         self.add_to_history(history_cell::new_cyber_policy_error_event(notice));
+        if notice == crate::daybreak::Notice::Disabled
+            && !self.thread_usage.replaying_turn_completion
+            && !self.blocks_direct_input
+            && let Some(thread_id) = self.thread_id
+        {
+            self.bottom_pane.show_selection_view(SelectionViewParams {
+                title: Some("Turn on Daybreak for your next request?".into()),
+                items: vec![
+                    SelectionItem {
+                        name: "Enable Daybreak".into(),
+                        actions: vec![Box::new(move |tx| {
+                            tx.send(AppEvent::PersistDaybreakSelection {
+                                thread_id,
+                                enabled: true,
+                            })
+                        })],
+                        dismiss_on_select: true,
+                        ..Default::default()
+                    },
+                    SelectionItem {
+                        name: "Not now".into(),
+                        dismiss_on_select: true,
+                        ..Default::default()
+                    },
+                ],
+                ..SelectionViewParams::picker()
+            });
+            self.defer_input_until_settings_applied();
+        }
         self.request_redraw();
 
         // After an error ends the turn, try sending the next queued input.
@@ -478,25 +549,25 @@ impl ChatWidget {
         message: String,
         codex_error_info: Option<AppServerCodexErrorInfo>,
     ) {
-        if codex_error_info == Some(AppServerCodexErrorInfo::MisalignmentPolicyViolation) {
-            self.on_misalignment_policy_violation();
-        } else if codex_error_info
+        if codex_error_info
             .as_ref()
             .is_some_and(|info| self.handle_app_server_steer_rejected_error(info))
         {
+            return;
+        }
+        let question_drafts = if self.thread_usage.replaying_turn_completion {
+            None
+        } else {
+            self.take_question_drafts()
+        };
+        if codex_error_info == Some(AppServerCodexErrorInfo::MisalignmentPolicyViolation) {
+            self.on_misalignment_policy_violation();
         } else if codex_error_info
             .as_ref()
             .is_some_and(is_app_server_cyber_policy_error)
         {
             self.on_cyber_policy_error();
-        } else if is_safety_access_block_message(&message)
-            || serde_json::from_str::<serde_json::Value>(&message).is_ok_and(|response| {
-                response["error"]["code"].as_str() == Some("bio_policy")
-                    || response["error"]["message"]
-                        .as_str()
-                        .is_some_and(is_safety_access_block_message)
-            })
-        {
+        } else if is_bio_policy_error(&message) {
             self.input_queue.submit_pending_steers_after_interrupt = false;
             self.finalize_turn();
             self.add_to_history(history_cell::new_safety_access_block_event());
@@ -514,6 +585,13 @@ impl ChatWidget {
             }
         } else {
             self.on_error(message);
+        }
+        if let Some(drafts) = question_drafts
+            && !self.has_misalignment_policy_violation()
+        {
+            self.bottom_pane.append_question_drafts(&drafts);
+            self.refresh_pending_input_preview();
+            self.request_redraw();
         }
     }
 
@@ -549,13 +627,5 @@ impl ChatWidget {
         self.transcript.last_plan_progress = (total > 0).then_some((completed, total));
         self.refresh_status_surfaces();
         self.add_to_history(history_cell::new_plan_update(update));
-    }
-
-    pub(super) fn interrupted_turn_message(&self, reason: TurnAbortReason) -> String {
-        if reason == TurnAbortReason::BudgetLimited {
-            return "Goal budget reached - the turn was stopped.".to_string();
-        }
-
-        "Conversation interrupted - tell the model what to do differently. Something went wrong? Hit `/feedback` to report the issue.".to_string()
     }
 }

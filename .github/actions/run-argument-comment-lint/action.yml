@@ -3,19 +3,36 @@ description: Run argument-comment-lint on codex-rs via Bazel.
 
 inputs:
   target:
-    description: Runner target passed to setup-bazel-ci.
+    description: Runner target passed to prepare-bazel-ci.
     required: true
-  buildbuddy-api-key:
-    description: BuildBuddy API key used by Bazel CI.
-    required: false
-    default: ""
 
 runs:
   using: composite
   steps:
-    - uses: ./.github/actions/setup-bazel-ci
+    - uses: ./.github/actions/prepare-bazel-ci
       with:
         target: ${{ inputs.target }}
+        cache-scope: bazel-argument-comment-lint
+
+    - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      if: ${{ runner.os == 'Windows' }}
+      with:
+        python-version: "3.12"
+        architecture: x64
+
+    - name: Prepare native Windows audio dependencies
+      if: ${{ runner.os == 'Windows' }}
+      uses: ./.github/actions/setup-bazel-windows
+      with:
+        target: x86_64-pc-windows-msvc
+
+    - name: Verify native Windows audio dependencies
+      if: ${{ runner.os == 'Windows' }}
+      shell: bash
+      run: |
+        : "${VOICE_WINDOWS_BAZEL_REPOSITORY:?Windows voice tools are required}"
+        : "${VOICE_WINDOWS_SYSTEM_ROOT:?Windows SystemRoot is required}"
+        : "${VOICE_WINDOWS_HOST_ARCH:?Windows host architecture is required}"
 
     - name: Install Linux sandbox build dependencies
       if: ${{ runner.os == 'Linux' }}
@@ -24,10 +41,17 @@ runs:
         sudo DEBIAN_FRONTEND=noninteractive apt-get update
         sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
 
+    - name: Resolve app-server/exec-server compatibility releases
+      if: ${{ runner.os == 'Linux' }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: bash
+      run: |
+        releases="$(python3 .github/scripts/resolve_exec_server_releases.py)"
+        echo "CODEX_COMPAT_RELEASES=$releases" >> "$GITHUB_ENV"
+
     - name: Run argument comment lint on codex-rs via Bazel
       if: ${{ runner.os != 'Windows' }}
-      env:
-        BUILDBUDDY_API_KEY: ${{ inputs.buildbuddy-api-key }}
       shell: bash
       run: |
         bazel_targets="$(./tools/argument-comment-lint/list-bazel-targets.sh)"
@@ -42,8 +66,6 @@ runs:
 
     - name: Run argument comment lint on codex-rs via Bazel
       if: ${{ runner.os == 'Windows' }}
-      env:
-        BUILDBUDDY_API_KEY: ${{ inputs.buildbuddy-api-key }}
       shell: bash
       run: |
         ./.github/scripts/run-argument-comment-lint-bazel.sh \

@@ -5,17 +5,21 @@ use super::AppServerStartedThread;
 use super::HistoryHydrationScope;
 use super::ResumeModelSettings;
 use super::ThreadHistorySupport;
+use super::ThreadParamsMode;
+use super::ThreadSettingsOwner;
 use super::bootstrap_request_error;
 use super::is_history_pagination_unsupported;
 use super::started_thread_from_resume_response;
 use super::thread_resume_params_from_config;
 use super::thread_session_state_from_thread_response;
 use crate::legacy_core::config::Config;
+use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadHistoryMode;
+use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadTurnsListParams;
 use codex_app_server_protocol::ThreadTurnsListResponse;
@@ -75,9 +79,9 @@ impl AppServerSession {
                 "Showing up to 100 recent prompts and final replies. Intermediate messages and tool activity are unavailable.",
             );
         }
-        let session = thread_session_state_from_thread_response(
+        let mut session = thread_session_state_from_thread_response(
             &thread.id,
-            crate::windows_sandbox::host_from_environments(thread.environments.as_deref()),
+            thread.environments.as_deref(),
             thread.forked_from_id.clone(),
             thread.name.clone(),
             thread.path.clone(),
@@ -92,11 +96,11 @@ impl AppServerSession {
             config.workspace_roots.clone(),
             Vec::new(),
             thread.reasoning_effort,
-            config.personality,
             local_settings,
         )
         .await
         .map_err(color_eyre::eyre::Report::msg)?;
+        session.read_only_history = true;
         Ok((
             AppServerStartedThread {
                 session,
@@ -109,8 +113,8 @@ impl AppServerSession {
     }
 
     pub(crate) fn with_local_codex_home(mut self, codex_home: &AbsolutePathBuf) -> Self {
-        self.task_tool_capabilities_dir = (!self.uses_embedded_app_server())
-            .then(|| codex_home.join("tui-thread-reference-capabilities"));
+        self.task_tool_capabilities_dir =
+            Some(codex_home.join("tui-thread-reference-capabilities"));
         self
     }
 
@@ -138,9 +142,95 @@ impl AppServerSession {
         thread_id: ThreadId,
         model_settings: ResumeModelSettings,
     ) -> Result<AppServerStartedThread> {
+        Box::pin(self.resume_thread_with_permission_overrides(
+            local_settings,
+            config,
+            thread_id,
+            model_settings,
+            crate::resume_permissions::ResumePermissions::default(),
+        ))
+        .await
+    }
+
+    /// Prepare a saved Cloud task without displacing the displayed attachment on failure.
+    pub(crate) async fn resume_thread_for_navigation(
+        &mut self,
+        local_settings: &crate::local_settings::LocalSettings,
+        config: Config,
+        thread_id: ThreadId,
+        model_settings: ResumeModelSettings,
+        permission_overrides: crate::resume_permissions::ResumePermissions,
+    ) -> Result<AppServerStartedThread> {
+        let (ThreadParamsMode::Cloud, AppServerRequestHandle::Cloud(handle)) =
+            (self.thread_params_mode(), self.request_handle())
+        else {
+            return Box::pin(self.resume_thread_with_permission_overrides(
+                local_settings,
+                config,
+                thread_id,
+                model_settings,
+                permission_overrides,
+            ))
+            .await;
+        };
+        let (mut response, scoped) = handle
+            .prepare_thread_resume(
+                self.next_request_id(),
+                ThreadResumeParams {
+                    thread_id: thread_id.to_string(),
+                    exclude_turns: true,
+                    ..ThreadResumeParams::default()
+                },
+            )
+            .await
+            .map_err(|err| {
+                bootstrap_request_error("thread/resume failed during TUI bootstrap", err)
+            })?;
+        let mut history = self.request_view();
+        history.request_handle = AppServerRequestHandle::Cloud(scoped.clone());
+        history
+            .hydrate_initial_thread_history(
+                &mut response.thread,
+                response.turns_backwards_cursor.clone(),
+                response.items_backwards_cursor.clone(),
+                Some(&config),
+                Some(local_settings),
+                HistoryHydrationScope::Initial,
+            )
+            .await?;
+        let mut started =
+            started_thread_from_resume_response(response, local_settings, ThreadParamsMode::Cloud)
+                .await?;
+        scoped.commit_prepared_resume().await.map_err(|err| {
+            bootstrap_request_error("thread/resume failed during TUI bootstrap", err)
+        })?;
+        self.unread_revisions.remove(&thread_id);
+        self.history_pagination.extend(history.history_pagination);
+        if self.task_tools_available(thread_id) {
+            self.remember_task_tool_thread(thread_id);
+            started.task_tools_available = true;
+        }
+        Ok(started)
+    }
+
+    pub(crate) async fn resume_thread_with_permission_overrides(
+        &mut self,
+        local_settings: &crate::local_settings::LocalSettings,
+        config: Config,
+        thread_id: ThreadId,
+        model_settings: ResumeModelSettings,
+        permission_overrides: crate::resume_permissions::ResumePermissions,
+    ) -> Result<AppServerStartedThread> {
+        if self.thread_params_mode().settings_owner() == ThreadSettingsOwner::Client {
+            self.thread_tool_transport()
+                .check_namespace(&self.request_handle, &config.cwd)
+                .await?;
+        }
         let session_config = if matches!(
             model_settings,
-            ResumeModelSettings::RestoreFromThread | ResumeModelSettings::PreserveExistingThread
+            ResumeModelSettings::RestoreFromThread
+                | ResumeModelSettings::PreserveExistingThread
+                | ResumeModelSettings::PreserveSideConversation
         ) {
             config.clone()
         } else {
@@ -152,40 +242,48 @@ impl AppServerSession {
             self.thread_params_mode(),
             self.remote_cwd_override.as_deref(),
             model_settings,
+            permission_overrides,
         );
-        self.thread_tool_transport()
-            .configure_mcp(&mut params.config);
-        let mut rollout_maintenance_guard = None;
-        params.exclude_turns = if self.history_support == ThreadHistorySupport::Paginated {
-            let known_legacy_history = self
+        if self.thread_params_mode().settings_owner() == ThreadSettingsOwner::Client
+            && model_settings == ResumeModelSettings::OverrideFromCurrentConfig
+        {
+            params.model_provider = self.explicit_model_provider(&config);
+        }
+        if self.thread_params_mode().settings_owner() == ThreadSettingsOwner::Client {
+            self.thread_tool_transport()
+                .configure_mcp(&mut params.config);
+        }
+        let paginated = self.history_support == ThreadHistorySupport::Paginated;
+        let cached_legacy = paginated
+            && self
                 .history_pagination
                 .get(&thread_id)
-                .is_some_and(|state| state.history_mode == ThreadHistoryMode::Legacy)
-                && (!self.uses_embedded_app_server()
-                    || ({
-                        // The guard prevents migration through the full resume,
-                        // regardless of the server's migration feature settings.
-                        rollout_maintenance_guard =
-                            codex_rollout::try_acquire_rollout_maintenance_lock(
-                                config.codex_home.as_path(),
-                            )
-                            .ok()
-                            .flatten();
-                        rollout_maintenance_guard.is_some()
-                    } && self
-                        .thread_read(thread_id, /*include_turns*/ false)
-                        .await
-                        .is_ok_and(|thread| thread.history_mode == ThreadHistoryMode::Legacy)));
-            !known_legacy_history
+                .is_some_and(|state| state.history_mode == ThreadHistoryMode::Legacy);
+        // Hold the maintenance lock through a full legacy resume to prevent migration.
+        let mut rollout_maintenance_guard = if cached_legacy && self.uses_embedded_app_server() {
+            codex_rollout::try_acquire_rollout_maintenance_lock(config.codex_home.as_path())
+                .ok()
+                .flatten()
         } else {
-            false
+            None
         };
+        // Capture the receipt before the resume-time history boundary. Later results are delivered live.
+        self.unread_revisions.remove(&thread_id);
+        let metadata = Box::pin(self.thread_read(thread_id, /*include_turns*/ false))
+            .await
+            .ok();
+        let known_legacy = cached_legacy
+            && (!self.uses_embedded_app_server()
+                || (rollout_maintenance_guard.is_some()
+                    && metadata
+                        .is_some_and(|thread| thread.history_mode == ThreadHistoryMode::Legacy)));
+        params.exclude_turns = paginated && !known_legacy;
         if params.exclude_turns {
             rollout_maintenance_guard = None;
         }
         let request_id = self.next_request_id();
         let resume_response = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::ThreadResume {
                 request_id,
                 params: params.clone(),
@@ -200,7 +298,7 @@ impl AppServerSession {
                 self.history_support = ThreadHistorySupport::LegacyOnly;
                 params.exclude_turns = false;
                 let request_id = self.next_request_id();
-                self.client
+                self.request_handle
                     .request_typed(ClientRequest::ThreadResume { request_id, params })
                     .await
                     .map_err(|err| {
@@ -214,6 +312,9 @@ impl AppServerSession {
                 ));
             }
         };
+        if let Some(subscribed) = &mut self.attachment_subscribed {
+            *subscribed = true;
+        }
         self.hydrate_initial_thread_history(
             &mut response.thread,
             response.turns_backwards_cursor.clone(),
@@ -229,7 +330,6 @@ impl AppServerSession {
         let mut started = started_thread_from_resume_response(
             response,
             local_settings,
-            &config,
             self.thread_params_mode(),
         )
         .await?;

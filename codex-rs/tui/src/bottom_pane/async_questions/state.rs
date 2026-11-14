@@ -2,8 +2,13 @@
 //! Message IDs survive removal so replay cannot reopen an answered or skipped question.
 
 use super::*;
+use crate::history_cell::sanitize_user_text;
 use codex_context_fragments::AnsweredQuestion;
 use codex_context_fragments::ContextualUserFragment;
+use codex_utils_string::take_bytes_at_char_boundary;
+
+// Match the model-authored title budget used by AnsweredQuestion.
+const MAX_RECOVERED_QUESTION_TITLE_BYTES: usize = 512;
 
 impl AsyncQuestions {
     pub(crate) fn append(&mut self, message_id: &str, questions: &[AsyncUserInputQuestion]) {
@@ -132,8 +137,10 @@ impl AsyncQuestions {
         if text.is_empty() {
             return;
         }
-        let reply =
-            AnsweredQuestion::new(&answer.question_id, &answer.question.title, text).render();
+        let reply = AnsweredQuestion::new(&answer.question_id, &answer.question.title, text)
+            .render()
+            .into_text()
+            .unwrap_or_default();
         if reply.chars().count() > codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS {
             self.composer.show_footer_flash(
                 "Answer too long; shorten it before sending".into(),
@@ -144,7 +151,8 @@ impl AsyncQuestions {
         }
     }
 
-    pub(crate) fn resolve_answers(&mut self, question_ids: &[String]) {
+    /// Return whether resolving these answers changed the expanded question's input target.
+    pub(crate) fn resolve_answers(&mut self, question_ids: &[String]) -> bool {
         // History can arrive before live questions or before restoring local drafts.
         self.state.answered_ids.extend(question_ids.iter().cloned());
         // Older desktop replies identify the whole source message instead of one question.
@@ -153,9 +161,10 @@ impl AsyncQuestions {
                 || question_ids.contains(&question.message_id)
         };
         if !self.state.pending.iter().any(answered) {
-            return;
+            return false;
         }
         let current_answered = self.current_answer().is_some_and(answered);
+        let displayed_answer_changed = self.expanded && current_answered;
         if current_answered {
             self.composer.flush_pending_input();
         }
@@ -178,6 +187,7 @@ impl AsyncQuestions {
             self.restore_current_draft();
             self.composer.reset_vim_mode();
         }
+        displayed_answer_changed
     }
 
     pub(crate) fn accept_answer(&mut self) {

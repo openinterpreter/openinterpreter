@@ -653,6 +653,8 @@ async fn snapshot_discovers_and_redacts_shell_initialized_credentials() -> Resul
     std::fs::write(
         &startup,
         "unset GITHUB_ENTERPRISE_TOKEN UNSET_AUTH_HEADER\n\
+         export DENO_CERT=profile.pem\n\
+         export CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE=\"$SSL_CERT_FILE\"\n\
          export GH_TOKEN='ghp_shell_only_secret'\n\
          export AUTH_HEADER=\"Bearer $GH_TOKEN\"\n\
          declare -rx GITHUB_TOKEN='ghp_readonly_secret'\n\
@@ -772,6 +774,8 @@ async fn snapshot_discovers_and_redacts_shell_initialized_credentials() -> Resul
     }
     assert!(!snapshot.contains("attacker.example"));
     assert!(!snapshot.contains("CODEX_NETWORK_PROXY_BROKERED_CREDENTIALS"));
+    assert!(snapshot.contains(r#"DENO_CERT="profile.pem""#));
+    assert!(!snapshot.contains("CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE="));
     assert!(snapshot.contains("api.snapshot.example"));
     assert!(!snapshot.contains("attacker.vendor.example"));
     assert!(snapshot.contains("IDENTITY_SEEN=\"missing\""));
@@ -1588,6 +1592,7 @@ async fn try_create_creates_and_deletes_snapshot_file() -> Result<()> {
         &dir.path().abs(),
         ThreadId::new(),
         &dir.path().abs(),
+        &ShellEnvironmentPolicy::default(),
         &shell,
         /*state_db*/ None,
         /*credential_broker*/ None,
@@ -1619,6 +1624,7 @@ async fn try_create_uses_distinct_generation_paths() -> Result<()> {
         &dir.path().abs(),
         session_id,
         &dir.path().abs(),
+        &ShellEnvironmentPolicy::default(),
         &shell,
         /*state_db*/ None,
         /*credential_broker*/ None,
@@ -1630,6 +1636,7 @@ async fn try_create_uses_distinct_generation_paths() -> Result<()> {
         &dir.path().abs(),
         session_id,
         &dir.path().abs(),
+        &ShellEnvironmentPolicy::default(),
         &shell,
         /*state_db*/ None,
         /*credential_broker*/ None,
@@ -1905,5 +1912,34 @@ fn set_file_mtime(path: &Path, age: Duration) -> Result<()> {
     if result != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn snapshot_rejects_nul_script_before_execution() -> Result<()> {
+    let root = tempdir()?;
+    let shell = Shell {
+        shell_type: ShellType::Sh,
+        shell_path: PathBuf::from("/bin/sh"),
+    };
+    let error = run_script_with_timeout(
+        &shell,
+        "printf ran > ran\0",
+        Duration::from_secs(5),
+        SnapshotShellMode::NonLogin,
+        &root.path().abs(),
+        /*credential_broker*/ None,
+        /*sandbox*/ None,
+    )
+    .await
+    .expect_err("invalid snapshot script must fail to spawn");
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::InvalidInput)
+    );
+    assert!(!root.path().join("ran").exists());
     Ok(())
 }

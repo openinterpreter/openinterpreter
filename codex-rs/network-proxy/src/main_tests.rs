@@ -1,6 +1,15 @@
-use super::parse_standalone_config;
+use super::Args;
+use super::StaticNetworkProxyConfig;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+
+fn parse_standalone_config(bytes: &[u8]) -> anyhow::Result<StaticNetworkProxyConfig> {
+    Args {
+        config: Default::default(),
+        strict: false,
+    }
+    .parse_config(bytes)
+}
 
 #[test]
 fn enables_mitm_for_limited_mode_and_hooks() {

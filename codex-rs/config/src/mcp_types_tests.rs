@@ -5,6 +5,39 @@ use std::collections::HashMap;
 use std::path::Path;
 
 #[test]
+fn requirements_disable_keeps_explicit_and_enterprise_auth_rejections() {
+    let source = RequirementSource::EnterpriseManaged {
+        id: "policy".into(),
+        name: "Cloud policy".into(),
+    };
+    let mut server: McpServerConfig =
+        toml::from_str("url = 'https://example.com/mcp'").expect("valid MCP server");
+    assert!(
+        serde_json::to_value(&server)
+            .expect("serialize")
+            .get("auth")
+            .is_none()
+    );
+
+    server.enabled = false;
+    server.disable_by_requirements(source.clone());
+    assert_eq!(
+        server.disabled_reason,
+        Some(McpServerDisabledReason::ExplicitAndRequirements {
+            source: source.clone()
+        })
+    );
+
+    server.disabled_reason = Some(McpServerDisabledReason::EmaRegistration);
+    server.disable_by_requirements(source);
+    assert!(!server.enabled);
+    assert_eq!(
+        server.disabled_reason,
+        Some(McpServerDisabledReason::EmaRegistration)
+    );
+}
+
+#[test]
 fn app_tool_approval_restrictions_never_weaken_either_policy() {
     use AppToolApproval::Approve;
     use AppToolApproval::Auto;
@@ -382,6 +415,84 @@ fn deserialize_streamable_http_server_config_with_oauth_client_id() {
 }
 
 #[test]
+fn oauth_client_secret_round_trips_without_debug_disclosure() {
+    let cfg: McpServerConfig = toml::from_str(
+        r#"
+            url = "https://example.com/mcp"
+
+            [oauth]
+            client_id = "confidential-client"
+            client_secret = "test-client-secret"
+        "#,
+    )
+    .expect("should deserialize an OAuth client secret");
+    assert_eq!(
+        cfg.oauth,
+        Some(McpServerOAuthConfig {
+            client_id: Some("confidential-client".to_string()),
+            client_secret: Some("test-client-secret".into()),
+            ..Default::default()
+        })
+    );
+    assert_eq!(cfg.oauth_client_secret(), Some("test-client-secret"));
+
+    let serialized = serde_json::to_value(&cfg).expect("serialize server as JSON");
+    assert_eq!(
+        serialized["oauth"],
+        serde_json::json!({
+            "client_id": "confidential-client",
+            "client_secret": "test-client-secret"
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<McpServerConfig>(serialized).expect("deserialize JSON"),
+        cfg
+    );
+    assert_eq!(
+        toml::from_str::<McpServerConfig>(&toml::to_string(&cfg).expect("serialize TOML"))
+            .expect("deserialize TOML"),
+        cfg
+    );
+
+    let debug = format!("{cfg:?}");
+    assert!(!debug.contains("test-client-secret"));
+    assert!(debug.contains("client_secret: Some(<redacted>)"));
+}
+
+#[test]
+fn oauth_client_secret_requires_nonempty_secret_and_client_id() {
+    for (oauth, expected) in [
+        (
+            serde_json::json!({"client_id": "client", "client_secret": ""}),
+            "oauth.client_secret must not be empty",
+        ),
+        (
+            serde_json::json!({"client_id": "client", "client_secret": " \t"}),
+            "oauth.client_secret must not be empty",
+        ),
+        (
+            serde_json::json!({"client_secret": "test-client-secret"}),
+            "oauth.client_secret requires oauth.client_id",
+        ),
+        (
+            serde_json::json!({"client_id": "", "client_secret": "test-client-secret"}),
+            "oauth.client_secret requires oauth.client_id",
+        ),
+        (
+            serde_json::json!({"client_id": " \t", "client_secret": "test-client-secret"}),
+            "oauth.client_secret requires oauth.client_id",
+        ),
+    ] {
+        let err = serde_json::from_value::<McpServerConfig>(serde_json::json!({
+            "url": "https://example.com/mcp",
+            "oauth": oauth
+        }))
+        .expect_err("should reject invalid OAuth client credentials");
+        assert_eq!(err.to_string(), expected);
+    }
+}
+
+#[test]
 fn oauth_callback_port_prefers_server_port_over_global_port() {
     let cfg: McpServerConfig = toml::from_str(
         r#"
@@ -461,7 +572,7 @@ fn serialize_round_trips_server_config_with_omitted_tool_exposure_surfaces() {
         let config = format!("command = \"echo\"\nomit_tools_from = [{serialized_surfaces}]\n");
         let cfg: McpServerConfig =
             toml::from_str(&config).expect("should deserialize omitted MCP exposure surfaces");
-        assert_eq!(cfg.omit_tools_from, Some(omitted_surfaces.clone()));
+        assert_eq!(cfg.omit_tools_from, Some(omitted_surfaces));
 
         let serialized = toml::to_string(&cfg).expect("should serialize MCP config");
         assert!(serialized.contains(&format!("omit_tools_from = [{serialized_surfaces}]")));
@@ -562,7 +673,9 @@ fn deserialize_ignores_unknown_server_fields() {
             environment_id: crate::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             enabled: true,
             required: false,
+            startup_readiness: Default::default(),
             supports_parallel_tool_calls: false,
+            tool_input_schema_max_bytes: None,
             omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: None,

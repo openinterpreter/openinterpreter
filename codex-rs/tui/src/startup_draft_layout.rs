@@ -1,38 +1,42 @@
 //! First-frame owned layout: the banner stays at the top and the normal composer at the bottom.
 //! Measurement, paint, and cursor placement use the same bottom rectangle, including both footers.
+//! Only a new conversation paints decoration in the unused area, so it cannot enter scrollback.
 
 use crossterm::cursor::SetCursorStyle;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::style::Stylize;
+use ratatui::widgets::Widget;
+use std::cell::Cell;
+use std::time::Duration;
 
+use super::StartupDraftPump;
 use super::StartupDraftSessionAction;
-use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::CommandPopupPlacement;
 use crate::bottom_pane::ComposerRenderOptions;
 use crate::render::renderable::Renderable;
 use crate::render::renderable::RenderableItem;
+use crate::terminal_hyperlinks::HyperlinkParagraph;
 
 pub(super) struct OwnedStartupLayout<'a> {
-    header: &'a dyn Renderable,
+    pump: &'a StartupDraftPump,
     bottom: RenderableItem<'a>,
-    session_action: StartupDraftSessionAction,
+    pub(super) next_frame: Cell<Option<Duration>>,
 }
 
 impl<'a> OwnedStartupLayout<'a> {
-    pub(super) fn new(
-        header: &'a dyn Renderable,
-        bottom_pane: &'a BottomPane,
-        session_action: StartupDraftSessionAction,
-    ) -> Self {
+    pub(super) fn new(pump: &'a StartupDraftPump) -> Self {
         Self {
-            header,
-            bottom: bottom_pane.as_renderable_with_options(ComposerRenderOptions {
-                separate_status_line: true,
-                command_popup_placement: CommandPopupPlacement::Overlay,
-                ..ComposerRenderOptions::default()
-            }),
-            session_action,
+            pump,
+            next_frame: Cell::new(/*value*/ None),
+            bottom: pump
+                .bottom_pane
+                .as_renderable_with_options(ComposerRenderOptions {
+                    separate_status_line: true,
+                    command_popup_placement: CommandPopupPlacement::Overlay,
+                    ..ComposerRenderOptions::default()
+                }),
         }
     }
 
@@ -49,16 +53,34 @@ impl<'a> OwnedStartupLayout<'a> {
 impl Renderable for OwnedStartupLayout<'_> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let bottom = self.bottom_area(area);
+        let lines = self.pump.header.display_hyperlink_lines(area.width);
+        let paragraph = HyperlinkParagraph::new(&lines, Style::default());
         let header = Rect {
-            height: self
-                .header
-                .desired_height(area.width)
+            height: u16::try_from(paragraph.line_count(area.width))
+                .unwrap_or(u16::MAX)
                 .min(bottom.y.saturating_sub(area.y)),
             ..area
         };
-        self.header.render(header, buf);
-        let message = match self.session_action {
-            StartupDraftSessionAction::New | StartupDraftSessionAction::NewFromCommandCenter => {
+        paragraph.render(header, buf);
+        let message = match self.pump.session_action {
+            StartupDraftSessionAction::New
+            | StartupDraftSessionAction::NewWhileRunning
+            | StartupDraftSessionAction::NewFromCommandCenter => {
+                let composer = (!self.pump.submission_pending)
+                    .then(|| self.pump.bottom_pane.empty_state_composer())
+                    .flatten();
+                self.next_frame
+                    .set(self.pump.blossom.borrow_mut().render_first_screen(
+                        area,
+                        Rect {
+                            y: header.bottom(),
+                            height: bottom.y.saturating_sub(header.bottom()),
+                            ..area
+                        },
+                        buf,
+                        composer,
+                        self.pump.motion,
+                    ));
                 None
             }
             StartupDraftSessionAction::Resume => Some("  Resuming session…"),
@@ -80,8 +102,9 @@ impl Renderable for OwnedStartupLayout<'_> {
     }
 
     fn desired_height(&self, width: u16) -> u16 {
-        self.header
-            .desired_height(width)
+        let lines = self.pump.header.display_hyperlink_lines(width);
+        u16::try_from(HyperlinkParagraph::new(&lines, Style::default()).line_count(width))
+            .unwrap_or(u16::MAX)
             .saturating_add(self.bottom.desired_height(width))
     }
 

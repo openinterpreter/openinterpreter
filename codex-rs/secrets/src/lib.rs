@@ -18,6 +18,7 @@ mod sanitizer;
 
 pub use local::LocalSecretsBackend;
 pub use local::LocalSecretsNamespace;
+pub use local::LocalSecretsSnapshot;
 pub use sanitizer::redact_secrets;
 
 const KEYRING_SERVICE: &str = "codex";
@@ -210,8 +211,10 @@ pub(crate) fn keyring_service() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local::SECRETS_CACHE_TEST_LOCK;
     use codex_keyring_store::tests::MockKeyringStore;
     use pretty_assertions::assert_eq;
+    use std::sync::PoisonError;
 
     #[test]
     fn environment_id_fallback_has_cwd_prefix() {
@@ -233,6 +236,9 @@ mod tests {
 
     #[test]
     fn manager_round_trips_local_backend() -> Result<()> {
+        let _cache_lock = SECRETS_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let codex_home = tempfile::tempdir().expect("tempdir");
         let keyring = Arc::new(MockKeyringStore::default());
         let manager = SecretsManager::new_with_keyring_store(

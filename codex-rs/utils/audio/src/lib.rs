@@ -2,6 +2,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::MAX_PROMPT_AUDIO_INPUT_BYTES;
@@ -11,7 +12,9 @@ use codex_utils_cache::sha1_digest;
 use codex_utils_string::approx_token_count;
 use std::io::Cursor;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::OnceLock;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::formats::TrackType;
 use symphonia::core::formats::probe::Hint;
@@ -28,9 +31,9 @@ const UNSUPPORTED_AUDIO_FORMAT_PLACEHOLDER: &str =
 
 const MAX_PROMPT_AUDIO_BASE64_BYTES: usize = MAX_PROMPT_AUDIO_INPUT_BYTES.div_ceil(3) * 4;
 const AUDIO_TOKEN_ESTIMATE_CACHE_SIZE: usize = 32;
-const AUDIO_TOKENS_PER_SECOND: f64 = 10.0;
+const AUDIO_TOKENS_PER_SECOND: u32 = 10;
 
-static AUDIO_TOKEN_ESTIMATE_CACHE: LazyLock<BlockingLruCache<[u8; 20], usize>> =
+static AUDIO_TOKEN_ESTIMATE_CACHE: LazyLock<BlockingLruCache<[u8; 20], Arc<OnceLock<usize>>>> =
     LazyLock::new(|| {
         BlockingLruCache::new(
             NonZeroUsize::new(AUDIO_TOKEN_ESTIMATE_CACHE_SIZE).unwrap_or(NonZeroUsize::MIN),
@@ -38,7 +41,7 @@ static AUDIO_TOKEN_ESTIMATE_CACHE: LazyLock<BlockingLruCache<[u8; 20], usize>> =
     });
 
 #[derive(Debug, thiserror::Error)]
-enum AudioPreparationError {
+pub enum AudioPreparationError {
     #[error("invalid audio data URL: {reason}")]
     InvalidDataUrl { reason: &'static str },
     #[error("unsupported audio format")]
@@ -48,7 +51,7 @@ enum AudioPreparationError {
 }
 
 impl AudioPreparationError {
-    fn placeholder(&self) -> &'static str {
+    pub fn placeholder(&self) -> &'static str {
         match self {
             AudioPreparationError::InvalidDataUrl { .. } => AUDIO_PROCESSING_ERROR_PLACEHOLDER,
             AudioPreparationError::UnsupportedFormat => UNSUPPORTED_AUDIO_FORMAT_PLACEHOLDER,
@@ -89,7 +92,9 @@ pub fn prepare_response_items(items: &mut [ResponseItem]) {
 
 fn prepare_message_content(items: &mut [ContentItem]) {
     for item in items {
-        if let ContentItem::InputAudio { audio_url } = item
+        if let ContentItem::InputAudio {
+            audio: AudioReference::Inline { audio_url },
+        } = item
             && let Err(error) = prepare_audio(audio_url)
         {
             warn!(%error, "failed to prepare message audio");
@@ -102,7 +107,9 @@ fn prepare_message_content(items: &mut [ContentItem]) {
 
 fn prepare_tool_output_content(items: &mut [FunctionCallOutputContentItem]) {
     for item in items {
-        if let FunctionCallOutputContentItem::InputAudio { audio_url } = item
+        if let FunctionCallOutputContentItem::InputAudio {
+            audio: AudioReference::Inline { audio_url },
+        } = item
             && let Err(error) = prepare_audio(audio_url)
         {
             warn!(%error, "failed to prepare tool output audio");
@@ -142,38 +149,68 @@ fn canonical_audio_mime(mime: &str) -> Option<&'static str> {
     }
 }
 
-/// Estimates audio tokens from decoded duration, falling back to the data URL size.
-pub fn estimate_audio_token_count(audio_url: &str) -> usize {
-    let key = sha1_digest(audio_url.as_bytes());
-    AUDIO_TOKEN_ESTIMATE_CACHE.get_or_insert_with(key, || {
-        let Some(duration_seconds) = audio_duration_seconds(audio_url) else {
-            return approx_token_count(audio_url);
-        };
-        let token_count = (duration_seconds * AUDIO_TOKENS_PER_SECOND).ceil();
-        if token_count >= usize::MAX as f64 {
-            usize::MAX
-        } else {
-            token_count as usize
-        }
-    })
+/// Budget one file reference at the inline audio rate. Missing or unusable metadata
+/// reserves the full 20 minutes accepted by Responses. Admission belongs to Responses.
+pub fn estimate_file_audio_tokens(duration: Option<std::time::Duration>) -> usize {
+    const MAX_DURATION: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+    let duration = duration
+        .filter(|value| !value.is_zero())
+        .unwrap_or(MAX_DURATION)
+        .min(MAX_DURATION);
+    let tokens =
+        (duration.as_nanos() * u128::from(AUDIO_TOKENS_PER_SECOND)).div_ceil(1_000_000_000);
+    usize::try_from(tokens).unwrap_or(usize::MAX)
 }
 
-fn audio_duration_seconds(audio_url: &str) -> Option<f64> {
-    let (metadata, payload) = audio_url.split_once(',')?;
-    let metadata = metadata.get("data:".len()..)?;
-    let mut metadata_parts = metadata.split(';');
-    let canonical_mime = canonical_audio_mime(metadata_parts.next()?)?;
-    if !metadata_parts.any(|part| part.eq_ignore_ascii_case("base64")) {
-        return None;
-    }
+/// Estimate tool audio on Core's multi-threaded runtime.
+pub fn estimate_tool_audio_tokens(audio: &AudioReference) -> usize {
+    estimate_tool_audio_tokens_with(audio, estimate_audio_token_count)
+}
 
-    let bytes = match BASE64_STANDARD.decode(payload) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            tracing::trace!(%error, "failed to decode audio payload for token estimation");
-            return None;
-        }
+/// Code Mode can render on a single thread, where blocking cache access is unavailable.
+pub fn estimate_tool_audio_tokens_without_cache(audio: &AudioReference) -> usize {
+    estimate_tool_audio_tokens_with(audio, estimate_audio_token_count_without_cache)
+}
+
+fn estimate_tool_audio_tokens_with(
+    audio: &AudioReference,
+    inline_cost: impl FnOnce(&str) -> usize,
+) -> usize {
+    match audio {
+        AudioReference::Inline { audio_url } => inline_cost(audio_url),
+        AudioReference::File { .. } => estimate_file_audio_tokens(/*duration*/ None),
+    }
+}
+
+/// Estimates audio tokens from decoded duration, falling back to the data URL size.
+fn estimate_audio_token_count(audio_url: &str) -> usize {
+    let key = sha1_digest(audio_url.as_bytes());
+    AUDIO_TOKEN_ESTIMATE_CACHE
+        .get_or_init(key, || estimate_audio_token_count_without_cache(audio_url))
+}
+
+/// The same duration-based estimate without accessing the Tokio-dependent cache.
+/// Suitable for bounded output rendered on a current-thread runtime.
+fn estimate_audio_token_count_without_cache(audio_url: &str) -> usize {
+    let Ok((mime, bytes)) = decode_audio(audio_url) else {
+        return approx_token_count(audio_url);
     };
+    decoded_audio_token_count(mime, bytes, audio_url)
+}
+
+fn decoded_audio_token_count(mime: &str, bytes: Vec<u8>, audio_url: &str) -> usize {
+    let Some(duration_seconds) = audio_duration_seconds(mime, bytes) else {
+        return approx_token_count(audio_url);
+    };
+    let token_count = (duration_seconds * f64::from(AUDIO_TOKENS_PER_SECOND)).ceil();
+    if token_count >= usize::MAX as f64 {
+        usize::MAX
+    } else {
+        token_count as usize
+    }
+}
+
+fn audio_duration_seconds(canonical_mime: &str, bytes: Vec<u8>) -> Option<f64> {
     let media_source = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
     let mut hint = Hint::new();
     hint.mime_type(canonical_mime);
@@ -202,7 +239,44 @@ fn audio_duration_seconds(audio_url: &str) -> Option<f64> {
     duration_seconds.is_finite().then_some(duration_seconds)
 }
 
+/// Validate the data URL and measure its decoded duration in the same pass.
+pub fn prepare_and_measure_inline_audio(
+    audio_url: &mut String,
+) -> Result<usize, AudioPreparationError> {
+    let (mime, bytes) = decode_audio(audio_url)?;
+    normalize_validated_header(audio_url, mime);
+    Ok(decoded_audio_token_count(mime, bytes, audio_url))
+}
+
 fn prepare_audio(audio_url: &mut String) -> Result<(), AudioPreparationError> {
+    let (mime, _) = decode_audio(audio_url)?;
+    normalize_validated_header(audio_url, mime);
+    Ok(())
+}
+
+// The standard base64 decoder has already validated the payload, including padding.
+fn normalize_validated_header(url: &mut String, mime: &str) {
+    let canonical = format!("data:{mime};base64");
+    if let Some((header, _)) = url.split_once(',')
+        && header != canonical
+    {
+        url.replace_range(..header.len(), &canonical);
+    }
+}
+
+/// Canonical inline representation for a validated payload.
+pub fn audio_data_url(mime: &str, data: &[u8]) -> String {
+    let mut url =
+        String::with_capacity("data:;base64,".len() + mime.len() + data.len().div_ceil(3) * 4);
+    url.push_str("data:");
+    url.push_str(mime);
+    url.push_str(";base64,");
+    BASE64_STANDARD.encode_string(data, &mut url);
+    url
+}
+
+/// Parses a size-bounded audio data URL. A file-writing host also verifies its media container.
+pub fn decode_audio(audio_url: &str) -> Result<(&'static str, Vec<u8>), AudioPreparationError> {
     if !is_data_url(audio_url) {
         return Err(AudioPreparationError::InvalidDataUrl {
             reason: "audio input must be a data URL",
@@ -255,9 +329,7 @@ fn prepare_audio(audio_url: &mut String) -> Result<(), AudioPreparationError> {
         return Err(AudioPreparationError::AudioTooLarge { size: bytes.len() });
     }
 
-    let encoded = BASE64_STANDARD.encode(bytes);
-    *audio_url = format!("data:{canonical_mime};base64,{encoded}");
-    Ok(())
+    Ok((canonical_mime, bytes))
 }
 
 #[cfg(test)]

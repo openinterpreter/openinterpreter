@@ -1,15 +1,13 @@
-/*
-Module: orchestrator
-
-Central place for approvals + sandbox selection + retry semantics. Drives a
-simple sequence for any ToolRuntime: approval → select sandbox → attempt →
-retry with an escalated sandbox strategy on denial (no re‑approval thanks to
-caching).
-*/
+//! Coordinates tool approval, sandbox selection, and retries after sandbox denial.
+//! Guardian approval applies to the reviewed authority; escalating a sandboxed
+//! attempt requires a fresh review of the retry.
 use crate::config::NetworkProxySpec;
 use crate::guardian::GuardianReviewContext;
 use crate::network_policy_decision::network_approval_context_from_payload;
+use crate::sandboxing::SandboxPermissions;
+use crate::tools::approvals::ApprovalAction;
 use crate::tools::approvals::ApprovalContext;
+use crate::tools::approvals::ApprovalResolutionSource;
 use crate::tools::flat_tool_name;
 use crate::tools::network_approval::ActiveNetworkApproval;
 use crate::tools::network_approval::DeferredNetworkApproval;
@@ -23,12 +21,16 @@ use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::default_exec_approval_requirement;
+use crate::tools::sandboxing::ensure_native_sandbox;
 use crate::tools::sandboxing::sandbox_override_for_first_attempt;
 use crate::tools::sandboxing::unsandboxed_execution_allowed;
 use codex_otel::ToolDecisionSource;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::SandboxErr;
 use codex_protocol::exec_output::ExecToolCallOutput;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::PROTECTED_METADATA_PATH_NAMES;
+use codex_protocol::permissions::file_system_root;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewDecision;
 use codex_sandboxing::SandboxManager;
@@ -80,6 +82,7 @@ impl ToolOrchestrator {
             tool_name: tool_ctx.tool_name.clone(),
         };
         let attempt_with_network_approval = SandboxAttempt {
+            sandbox_override: attempt.sandbox_override,
             sandbox: attempt.sandbox,
             sandbox_requested: attempt.sandbox_requested,
             permissions: attempt.permissions,
@@ -133,20 +136,16 @@ impl ToolOrchestrator {
         let otel = turn_ctx.session_telemetry.clone();
         let otel_tn = flat_tool_name(&tool_ctx.tool_name).into_owned();
         let otel_ci = &tool_ctx.call_id;
-        let strict_auto_review = tool_ctx
-            .session
-            .active_turn_context_and_strict_auto_review()
-            .await
-            .is_some_and(|(_, _, strict_auto_review)| strict_auto_review);
+        let strict_auto_review = turn_ctx.strict_auto_review_enabled();
         // 1) Approval
-        let mut already_approved = false;
+        let mut initial_approval_source = None;
 
         let environment = tool.turn_environment(req);
         let sandbox_manager = SandboxManager::new();
         #[cfg(target_os = "macos")]
         let sandbox_manager = sandbox_manager.with_allowed_symlinked_codex_home(
             environment
-                .environment
+                .environment()
                 .local_runtime_paths()
                 .and_then(|paths| paths.allowed_symlinked_codex_home.clone()),
         );
@@ -165,6 +164,10 @@ impl ToolOrchestrator {
         let requirement = tool.exec_approval_requirement(req).unwrap_or_else(|| {
             default_exec_approval_requirement(approval_policy, &file_system_sandbox_policy)
         });
+        let human_once = matches!(
+            requirement,
+            ExecApprovalRequirement::NeedsHumanApproval { .. }
+        );
         match &requirement {
             ExecApprovalRequirement::Skip { .. } => {
                 if strict_auto_review {
@@ -174,6 +177,7 @@ impl ToolOrchestrator {
                             ToolError::Rejected(format!("could not prepare approval action: {err}"))
                         })?;
                     let approval_ctx = ApprovalContext {
+                        exec_requirement: Some(requirement.clone()),
                         review_context: GuardianReviewContext::from(&tool_ctx.step_context),
                         cancellation_token: Some(tool_ctx.cancellation_token.clone()),
                         call_id: tool_ctx.call_id.clone(),
@@ -183,11 +187,12 @@ impl ToolOrchestrator {
                         retry_reason: None,
                         network_approval_context: None,
                     };
-                    tool_ctx
+                    let approval = tool_ctx
                         .session
                         .request_approval(action, approval_ctx)
-                        .await?;
-                    already_approved = true;
+                        .await;
+                    approval.result?;
+                    initial_approval_source = approval.source;
                 } else {
                     otel.tool_decision(
                         &tool_ctx.tool_name,
@@ -200,13 +205,15 @@ impl ToolOrchestrator {
             ExecApprovalRequirement::Forbidden { reason } => {
                 return Err(ToolError::Rejected(reason.clone()));
             }
-            ExecApprovalRequirement::NeedsApproval { reason, .. } => {
+            ExecApprovalRequirement::NeedsApproval { reason, .. }
+            | ExecApprovalRequirement::NeedsHumanApproval { reason } => {
                 let action = tool
                     .approval_action(req, &tool_ctx.call_id)
                     .map_err(|err| {
                         ToolError::Rejected(format!("could not prepare approval action: {err}"))
                     })?;
                 let approval_ctx = ApprovalContext {
+                    exec_requirement: Some(requirement.clone()),
                     review_context: GuardianReviewContext::from(&tool_ctx.step_context),
                     cancellation_token: Some(tool_ctx.cancellation_token.clone()),
                     call_id: tool_ctx.call_id.clone(),
@@ -216,28 +223,86 @@ impl ToolOrchestrator {
                     retry_reason: None,
                     network_approval_context: None,
                 };
-                tool_ctx
+                let approval = tool_ctx
                     .session
                     .request_approval(action, approval_ctx)
-                    .await?;
-                already_approved = true;
+                    .await;
+                approval.result?;
+                initial_approval_source = approval.source;
             }
         }
 
         // 2) First attempt under the selected sandbox.
         let unsandboxed_allowed = unsandboxed_execution_allowed(&file_system_sandbox_policy);
-        let sandbox_override = if unsandboxed_allowed {
-            sandbox_override_for_first_attempt(
-                tool.sandbox_permissions(req),
-                &requirement,
-                &file_system_sandbox_policy,
-            )
+        let sandbox_override = sandbox_override_for_first_attempt(
+            tool.sandbox_permissions(req),
+            &requirement,
+            &file_system_sandbox_policy,
+            /*already_approved*/ initial_approval_source.is_some(),
+        );
+        let (escalated_profile, writable_root_metadata) = if sandbox_override
+            == SandboxOverride::EscalatedSandboxWithRestrictions
+        {
+            let context = environment.sandbox_context(/*additional_permissions*/ None);
+            let policy_context = context.policy_context();
+            let baseline = permission_profile.file_system_sandbox_policy();
+            let file_system = baseline.for_approved_command(&policy_context);
+            let writable_root_metadata = file_system_root(&policy_context).is_some_and(|root| {
+                file_system.can_write_path(&root, &policy_context)
+                    && PROTECTED_METADATA_PATH_NAMES.iter().any(|name| {
+                        root.join_descendant(name)
+                            .is_ok_and(|path| file_system.can_write_path(&path, &policy_context))
+                    })
+            });
+            let escalated_profile = (file_system != baseline
+                && file_system
+                    != baseline.materialize_project_roots_with_path_uris(workspace_roots))
+            .then(|| {
+                PermissionProfile::from_runtime_permissions_with_enforcement(
+                    permission_profile.enforcement(),
+                    &file_system,
+                    permission_profile.network_sandbox_policy(),
+                )
+            });
+            (escalated_profile, writable_root_metadata)
         } else {
-            SandboxOverride::NoOverride
+            (None, false)
         };
+        if (escalated_profile.is_some() || writable_root_metadata)
+            && environment.environment().is_remote()
+        {
+            let info = environment.environment().info().await.map_err(|err| {
+                ToolError::Rejected(format!(
+                    "could not verify exec-server support for escalation with denied reads: {err}"
+                ))
+            })?;
+            if !matches!(info.platform_os.as_deref(), Some("windows" | "macos"))
+                && !info
+                    .capabilities
+                    .linux_approved_root_write_preserves_restrictions
+            {
+                return Err(ToolError::Rejected(
+                    "this exec-server cannot safely escalate with denied reads; upgrade the exec-server and retry"
+                        .to_string(),
+                ));
+            }
+        }
+        let escalated_local_profile = escalated_profile
+            .as_ref()
+            .filter(|_| !executor_managed_process_sandbox)
+            .map(|profile| {
+                profile
+                    .clone()
+                    .materialize_project_roots_with_path_uris(workspace_roots)
+            });
+        let initial_permissions = escalated_local_profile
+            .as_ref()
+            .or(escalated_profile.as_ref())
+            .unwrap_or(&permissions);
         let network_approval_spec = tool.network_approval_spec(req, tool_ctx);
-        // Offline owner attachments stay offline unless approved command permissions grant
-        // networking. Existing enabled controller proxies remain independently authoritative.
+        // An explicit owner proxy requirement permits filtered egress, like an enabled
+        // controller proxy. Traffic-only owner policies stay offline unless command
+        // permissions grant networking.
         // Preserve this baseline even when escalation skips the execution proxy, so retained
         // terminals still record that their launch bypassed network restrictions.
         let managed_network_active = if owner_network_policy {
@@ -247,6 +312,10 @@ impl ToolOrchestrator {
                 .network
                 .as_ref()
                 .is_some_and(NetworkProxySpec::enabled)
+                || sandbox_config
+                    .network_policy
+                    .as_ref()
+                    .is_some_and(|policy| policy.requires_proxy)
                 || (network_approval_spec.is_some()
                     || tool
                         .sandbox_permissions(req)
@@ -264,11 +333,13 @@ impl ToolOrchestrator {
         let sandbox_preference = tool.sandbox_preference();
         let sandbox_requested = match sandbox_override {
             SandboxOverride::BypassSandboxFirstAttempt => false,
-            SandboxOverride::NoOverride => sandbox_manager.should_sandbox(
-                &permissions,
-                sandbox_preference,
-                managed_network_active,
-            ),
+            SandboxOverride::NoOverride | SandboxOverride::EscalatedSandboxWithRestrictions => {
+                sandbox_manager.should_sandbox(
+                    initial_permissions,
+                    sandbox_preference,
+                    managed_network_active,
+                )
+            }
         };
         let windows_sandbox_type = codex_protocol::sandbox::effective_windows_sandbox_type(
             sandbox_config.windows_sandbox_type,
@@ -276,7 +347,7 @@ impl ToolOrchestrator {
         );
         let initial_sandbox = if sandbox_requested && !executor_managed_process_sandbox {
             sandbox_manager.select_initial(
-                &permissions,
+                initial_permissions,
                 sandbox_preference,
                 windows_sandbox_type,
                 managed_network_active,
@@ -284,6 +355,9 @@ impl ToolOrchestrator {
         } else {
             SandboxType::None
         };
+        if !executor_managed_process_sandbox {
+            ensure_native_sandbox(sandbox_override, initial_sandbox)?;
+        }
 
         let sandbox_policy_cwd = tool
             .sandbox_cwd(req)
@@ -295,10 +369,11 @@ impl ToolOrchestrator {
             turn_ctx.config.codex_linux_sandbox_exe.as_ref()
         };
         let initial_attempt = SandboxAttempt {
+            sandbox_override,
             sandbox: initial_sandbox,
             sandbox_requested,
-            permissions: &permissions,
-            exec_server_permissions: permission_profile,
+            permissions: initial_permissions,
+            exec_server_permissions: escalated_profile.as_ref().unwrap_or(permission_profile),
             enforce_managed_network: managed_network_active,
             manager: &sandbox_manager,
             sandbox_cwd: &sandbox_policy_cwd,
@@ -413,23 +488,45 @@ impl ToolOrchestrator {
                         build_denial_reason_from_output(output.as_ref())
                     };
 
-                // Strict auto-review approval covers the sandboxed attempt only;
-                // retrying without the sandbox requires a fresh guardian review.
-                let bypass_retry_approval = !strict_auto_review
-                    && tool.should_bypass_approval(approval_policy, already_approved)
+                // Human and policy approvals keep their existing retry scope. A
+                // Guardian verdict only covers the authority of the reviewed action.
+                let retry_preapproved = !human_once
+                    && matches!(
+                        initial_approval_source,
+                        Some(ApprovalResolutionSource::User | ApprovalResolutionSource::Hook)
+                    );
+                let bypass_retry_approval = !human_once
+                    && !strict_auto_review
+                    && tool.should_bypass_approval(approval_policy, retry_preapproved)
                     && network_approval_context.is_none();
                 if !bypass_retry_approval {
                     let approval_reason = match &requirement {
-                        ExecApprovalRequirement::NeedsApproval { reason, .. } => reason.clone(),
+                        ExecApprovalRequirement::NeedsApproval { reason, .. }
+                        | ExecApprovalRequirement::NeedsHumanApproval { reason } => reason.clone(),
                         ExecApprovalRequirement::Skip { .. }
                         | ExecApprovalRequirement::Forbidden { .. } => None,
                     };
-                    let action = tool
-                        .approval_action(req, &tool_ctx.call_id)
-                        .map_err(|err| {
-                            ToolError::Rejected(format!("could not prepare approval action: {err}"))
-                        })?;
+                    let mut action =
+                        tool.approval_action(req, &tool_ctx.call_id)
+                            .map_err(|err| {
+                                ToolError::Rejected(format!(
+                                    "could not prepare approval action: {err}"
+                                ))
+                            })?;
+                    if unsandboxed_allowed
+                        && let ApprovalAction::ExecCommand {
+                            sandbox_permissions,
+                            additional_permissions,
+                            ..
+                        } = &mut action
+                    {
+                        // Review and cache the authority of the actual retry, not
+                        // the narrower permissions requested for the first attempt.
+                        *sandbox_permissions = SandboxPermissions::RequireEscalated;
+                        *additional_permissions = None;
+                    }
                     let approval_ctx = ApprovalContext {
+                        exec_requirement: Some(requirement.clone()),
                         review_context: GuardianReviewContext::from(&tool_ctx.step_context),
                         cancellation_token: Some(tool_ctx.cancellation_token.clone()),
                         call_id: tool_ctx.call_id.clone(),
@@ -440,22 +537,32 @@ impl ToolOrchestrator {
                         network_approval_context: network_approval_context.clone(),
                     };
 
+                    if human_once && network_approval_context.is_some() {
+                        let mut network_ctx = approval_ctx.clone();
+                        network_ctx.exec_requirement = None;
+                        tool_ctx
+                            .session
+                            .request_approval(action.clone(), network_ctx)
+                            .await
+                            .result?;
+                    }
                     tool_ctx
                         .session
                         .request_approval(action, approval_ctx)
-                        .await?;
+                        .await
+                        .result?;
                 }
 
                 let retry_sandbox_requested = !unsandboxed_allowed
                     && sandbox_manager.should_sandbox(
-                        &permissions,
+                        initial_permissions,
                         sandbox_preference,
                         managed_network_active,
                     );
                 let retry_sandbox = if retry_sandbox_requested && !executor_managed_process_sandbox
                 {
                     sandbox_manager.select_initial(
-                        &permissions,
+                        initial_permissions,
                         sandbox_preference,
                         windows_sandbox_type,
                         managed_network_active,
@@ -469,10 +576,13 @@ impl ToolOrchestrator {
                     codex_sandbox_exe
                 };
                 let retry_attempt = SandboxAttempt {
+                    sandbox_override,
                     sandbox: retry_sandbox,
                     sandbox_requested: retry_sandbox_requested,
-                    permissions: &permissions,
-                    exec_server_permissions: permission_profile,
+                    permissions: initial_permissions,
+                    exec_server_permissions: escalated_profile
+                        .as_ref()
+                        .unwrap_or(permission_profile),
                     enforce_managed_network: managed_network_active,
                     manager: &sandbox_manager,
                     sandbox_cwd: &sandbox_policy_cwd,

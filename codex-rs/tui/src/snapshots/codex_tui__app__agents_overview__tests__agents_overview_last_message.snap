@@ -22,6 +22,12 @@ expression: "render_bottom_popup(&app.chat_widget,\n96).replace(&format!(\"{proj
                                                       │ /tmp/project
                                                       │ Model: Unknown
                                                       │
+                                                      │ Last message
+                                                      │ Found the regression in the parser.
+                                                      │ Found the regression in the parser.
+                                                      │ Found the regression in the parser.
+                                                      │ …
+                                                      │
                                                       │ Prompt
                                                       │ Investigate parser
                                                       │ …

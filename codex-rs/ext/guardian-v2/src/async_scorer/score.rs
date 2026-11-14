@@ -1,6 +1,7 @@
 //! Owns cached-score publication, observation coverage, and reuse snapshots.
 //! The cached score, authorization, and coverage are published under one lock;
 //! failures never replace a newer sample.
+//! Pending classifications expire only when no active action can reuse their score.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -18,12 +19,47 @@ use super::wrapper_lag::WrapperLag;
 #[derive(Default)]
 pub(super) struct GuardianV2ScoreProgress {
     state: Mutex<ScoreState>,
+    pub(super) updates: tokio::sync::watch::Sender<()>,
+    observations: tokio::sync::watch::Sender<()>,
     pub(super) metrics: Option<Arc<dyn ExtensionMetrics>>,
+}
+
+#[derive(Clone)]
+pub(super) struct PendingScore {
+    pub(super) progress: Arc<GuardianV2ScoreProgress>,
+    pub(super) index: usize,
+    pub(super) max_lag: usize,
+}
+
+impl PendingScore {
+    pub(super) fn is_expired(&self) -> bool {
+        let state = self
+            .progress
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .latest_tool_call
+            .saturating_sub(self.index)
+            .saturating_sub(state.wrapper_lag.pending_discount(self.index))
+            > self.max_lag
+    }
+
+    pub(super) async fn expired(&self) {
+        // Subscribe before checking so admission cannot race past the expiry check.
+        let mut observations = self.progress.observations.subscribe();
+        while !self.is_expired() {
+            if observations.changed().await.is_err() {
+                return;
+            }
+        }
+    }
 }
 
 #[derive(Default)]
 struct ScoreState {
     score: Option<SecurityRiskScore>,
+    score_index: usize,
     wrapper_lag: WrapperLag,
     latest_tool_call: usize,
     js_executions: usize,
@@ -37,6 +73,8 @@ struct ScoreState {
 #[derive(Debug, PartialEq)]
 pub(super) struct CachedScore {
     pub(super) lag: usize,
+    pub(super) sampled_at: Option<SystemTime>,
+    pub(super) score_at_or_before_action: bool,
     pub(super) has_unscored_failure: bool,
     pub(super) js_executions: usize,
     pub(super) oversized: bool,
@@ -60,6 +98,7 @@ impl GuardianV2ScoreProgress {
         state.latest_tool_call = state.latest_tool_call.saturating_add(/*rhs*/ 1);
         let index = state.latest_tool_call;
         state.wrapper_lag.record(input, index);
+        self.observations.send_replace(());
         index
     }
 
@@ -91,11 +130,13 @@ impl GuardianV2ScoreProgress {
 
     pub(super) fn finish(&self, call_id: &str) {
         // Overflow belongs to each active call even after a newer score succeeds.
-        self.state
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .oversized_tool_calls
-            .remove(call_id);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.oversized_tool_calls.remove(call_id);
+        state.wrapper_lag.finish(call_id);
+        self.observations.send_replace(());
     }
 
     pub(super) fn publish(
@@ -114,8 +155,10 @@ impl GuardianV2ScoreProgress {
             .is_none_or(|previous| previous.sampled_at < score.sampled_at);
         if accepted {
             state.score = Some(score);
+            state.score_index = index;
             state.authorization = Some(authorization);
             state.latest_scored_tool_call = state.latest_scored_tool_call.max(index);
+            self.updates.send_replace(());
         }
         accepted
     }
@@ -154,6 +197,16 @@ impl GuardianV2ScoreProgress {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         CachedScore {
+            sampled_at: state
+                .score
+                .as_ref()
+                .and_then(|score| score.sampled_at)
+                .map(SystemTime::from),
+            // Use the accepted score's source, not the coverage high-water mark.
+            score_at_or_before_action: state
+                .wrapper_lag
+                .get(call_id)
+                .is_some_and(|start| state.score_index <= start.index),
             lag: state
                 .latest_tool_call
                 .saturating_sub(state.latest_scored_tool_call)

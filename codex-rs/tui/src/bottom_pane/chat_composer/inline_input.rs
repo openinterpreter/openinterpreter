@@ -1,5 +1,10 @@
 //! Embed the composer in question rows, resetting history navigation when drafts change.
+//! Recovered appends cancel pending Vim commands before moving the cursor and stay out of dot repeat.
+//! Normal-mode recovery is one undoable edit; active insert/replace sessions keep their grouping.
+//! Paste payloads stay intact and sparkle stays dismissed.
+//! Command prefixes become escaped, editable prompt text before answers are appended.
 
+use super::super::textarea::VimPersistentState;
 use super::*;
 
 impl ComposerDraft {
@@ -14,6 +19,52 @@ impl ComposerDraft {
 }
 
 impl ChatComposer {
+    pub(in crate::bottom_pane) fn append_recovered_drafts(&mut self, drafts: &str) {
+        self.flush_pending_input();
+        self.dismiss_sparkle();
+        if self.draft.textarea.is_vim_operator_pending() {
+            self.draft.textarea.enter_vim_normal_mode();
+        }
+        self.finish_vim_edit();
+        let mut vim_state = VimPersistentState::default();
+        self.draft
+            .textarea
+            .swap_vim_persistent_state(&mut vim_state);
+        let started_vim_edit = self.begin_direct_vim_edit();
+        // Recovered answers turn the draft into a prompt, so escape any command prefix
+        // before appending them. Shell mode stores its `!` outside the textarea.
+        let text = self.draft.textarea.text();
+        let slash_command_draft = self.slash_input().should_parse_on_dequeue(text)
+            && parse_slash_name(text.trim_start()).is_none_or(|(name, _, _)| !name.contains('/'));
+        if self.draft.is_bash_mode {
+            self.draft.is_bash_mode = false;
+            self.draft.textarea.insert_str_at(/*pos*/ 0, "\\!");
+        } else if self.is_bang_shell_command() || slash_command_draft {
+            let prefix_len =
+                self.draft.textarea.text().len() - self.draft.textarea.text().trim_start().len();
+            self.draft.textarea.insert_str_at(prefix_len, "\\");
+        }
+        self.move_cursor_to_end();
+        if !self.current_text().is_empty() {
+            self.insert_str("\n\n");
+        }
+        let char_count = drafts.chars().count();
+        if char_count > LARGE_PASTE_CHAR_THRESHOLD {
+            let placeholder = self.next_large_paste_placeholder(char_count);
+            self.draft.textarea.insert_element(&placeholder);
+            self.draft.pending_pastes.push((placeholder, drafts.into()));
+            self.sync_popups();
+        } else {
+            self.insert_str(drafts);
+        }
+        self.draft
+            .textarea
+            .swap_vim_persistent_state(&mut vim_state);
+        if started_vim_edit {
+            self.finish_vim_edit();
+        }
+    }
+
     pub(in crate::bottom_pane) fn restore_inline_draft(&mut self, draft: ComposerDraft) {
         self.history.reset_navigation();
         self.restore_draft(draft);
@@ -68,6 +119,13 @@ impl ChatComposer {
 
     /// Integrate already-classified buffered typing before another answer takes over this editor.
     pub(crate) fn flush_pending_input(&mut self) {
+        self.flush_pending_input_with_shell_prefix(ShellPrefixHandling::Interpret);
+    }
+
+    pub(in crate::bottom_pane) fn flush_pending_input_with_shell_prefix(
+        &mut self,
+        shell_prefix: ShellPrefixHandling,
+    ) {
         if let Some(text) = self.draft.paste_burst.flush_before_modified_input() {
             self.apply_paste(text);
         }

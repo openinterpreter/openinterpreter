@@ -35,11 +35,14 @@ features = [
     "ApplicationModel",
     "Foundation_Collections",
     "Management_Deployment",
+    "Storage",
+    "Win32_Security",
+    "Win32_System_EventLog",
     "Win32_System_WinRT",
 ]
 
 [target.'cfg(windows)'.dependencies.windows-sys]
-version = "0.52"
+workspace = true
 features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_NetManagement",

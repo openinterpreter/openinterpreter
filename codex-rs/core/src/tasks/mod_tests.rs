@@ -12,6 +12,9 @@ use crate::state::TaskKind;
 use codex_otel::MetricsClient;
 use codex_otel::MetricsConfig;
 use codex_otel::SessionTelemetry;
+use codex_otel::TURN_CRITICAL_PATH_CAPTURE_METRIC;
+use codex_otel::TURN_CRITICAL_PATH_COMPONENT_METRIC;
+use codex_otel::TURN_CRITICAL_PATH_DURATION_METRIC;
 use codex_otel::TURN_MEMORY_METRIC;
 use codex_otel::TURN_NETWORK_PROXY_METRIC;
 use codex_otel::TURN_TOKEN_USAGE_METRIC;
@@ -478,4 +481,215 @@ fn emit_compact_metric_records_auto_local() {
             ("type".to_string(), "local".to_string()),
         ])
     );
+}
+
+struct UncooperativeTimedTask {
+    entered: Arc<tokio::sync::Notify>,
+}
+
+impl SessionTask for UncooperativeTimedTask {
+    fn kind(&self) -> TaskKind {
+        TaskKind::Regular
+    }
+    fn span_name(&self) -> &'static str {
+        "session_task.uncooperative_timing"
+    }
+    async fn run(
+        self: Arc<Self>,
+        _session: Arc<Session>,
+        context: Arc<TurnContext>,
+        _input: Vec<TurnInput>,
+        _cancellation_token: CancellationToken,
+    ) -> SessionTaskResult {
+        let timing = &context.turn_timing_state;
+        timing.enable_critical_path();
+        let batch = codex_direct_tool_timing::ToolBatchTiming::default();
+        let now = std::time::Instant::now();
+        let _blocking;
+        let _work = timing.direct_tool_timings.start_turn_direct_call(
+            "uncooperative",
+            &context.sub_id,
+            batch.clone(),
+            now,
+            timing.snapshot_path(now),
+        );
+        _blocking = timing.begin_tool_blocking(Some(batch));
+        let _review = _work.start_review();
+        self.entered.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn hard_abort_drops_timing_guards_before_profile_completion() {
+    let (session, context, _receiver) = make_session_and_context_with_rx().await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    session
+        .spawn_task(
+            Arc::clone(&context),
+            Vec::new(),
+            UncooperativeTimedTask {
+                entered: Arc::clone(&entered),
+            },
+        )
+        .await;
+    entered.notified().await;
+    session
+        .abort_all_tasks(codex_protocol::protocol::TurnAbortReason::Interrupted)
+        .await;
+    // The task's review and tool guards are gone before abort completion.
+    assert!(
+        context
+            .turn_timing_state
+            .direct_tool_timings
+            .owner_for_turn("uncooperative", &context.sub_id)
+            .is_none()
+    );
+    assert_eq!(
+        context
+            .turn_timing_state
+            .snapshot_path(std::time::Instant::now()),
+        None
+    );
+}
+
+#[tokio::test]
+async fn turn_critical_path_metrics_count_each_capture_once() {
+    use codex_analytics::TurnCriticalPath;
+    use codex_analytics::TurnCriticalPathDurations;
+
+    let (session, mut context, _rx) = make_session_and_context_with_rx().await;
+    let context = Arc::get_mut(&mut context).unwrap();
+    context.session_telemetry = test_session_telemetry();
+    let complete = TurnCriticalPath::Complete(TurnCriticalPathDurations {
+        duration_ms: 60,
+        inference_ms: 31,
+        sampling_ms: 31,
+        compaction_ms: 0,
+        auto_review_ms: 2,
+        auto_review_overhead_ms: None,
+        tools_ms: 10,
+        user_wait_ms: 0,
+        overhead_ms: 14,
+        unknown_ms: 3,
+    });
+    let _interest_cache_guard =
+        tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    for (sku, path) in [
+        (Some("codex"), complete),
+        (Some("codex"), TurnCriticalPath::Disabled),
+        (None, TurnCriticalPath::Incomplete),
+        (Some("unrecognized-sku"), TurnCriticalPath::Incomplete),
+    ] {
+        Arc::make_mut(&mut context.config).apps_mcp_product_sku = sku.map(str::to_owned);
+        context.turn_timing_state = Arc::default();
+        let (_, _, mut profile) = context
+            .turn_timing_state
+            .complete_profile_and_duration_ms()
+            .await;
+        profile.critical_path = path;
+        let buffer: &std::sync::Mutex<Vec<u8>> =
+            Box::leak(Box::new(std::sync::Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(tracing_test::internal::MockWriter::new(buffer))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..2 {
+                crate::turn_timing::record_terminal_turn_profile(
+                    session.thread_id,
+                    context,
+                    &profile,
+                );
+            }
+        });
+        let trace = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        match &profile.critical_path {
+            TurnCriticalPath::Complete(_) => {
+                assert!(trace.contains("critical_path_status=\"complete\""));
+                assert!(trace.contains("critical_path_inference_ms=31"));
+                assert!(trace.contains("critical_path_user_wait_ms=0"));
+            }
+            TurnCriticalPath::Disabled | TurnCriticalPath::Incomplete => {
+                assert!(!trace.contains("critical_path_duration_ms="));
+                let status = if matches!(profile.critical_path, TurnCriticalPath::Disabled) {
+                    "disabled"
+                } else {
+                    "incomplete"
+                };
+                assert!(trace.contains(&format!("critical_path_status=\"{status}\"")));
+            }
+        }
+    }
+
+    let snapshot = context.session_telemetry.snapshot_metrics().unwrap();
+    let AggregatedMetrics::U64(MetricData::Sum(captures)) =
+        find_metric(&snapshot, TURN_CRITICAL_PATH_CAPTURE_METRIC).data()
+    else {
+        panic!("expected capture counter");
+    };
+    let counts = captures
+        .data_points()
+        .map(|point| {
+            let tags = attributes_to_map(point.attributes());
+            (
+                (tags["product_sku"].clone(), tags["capture_status"].clone()),
+                point.value(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        counts,
+        BTreeMap::from([
+            (("codex".into(), "complete".into()), 1),
+            (("unknown".into(), "incomplete".into()), 1),
+            (("other".into(), "incomplete".into()), 1),
+        ])
+    );
+
+    for (name, expected) in [
+        (
+            TURN_CRITICAL_PATH_DURATION_METRIC,
+            BTreeMap::from([("total", 60.0)]),
+        ),
+        (
+            TURN_CRITICAL_PATH_COMPONENT_METRIC,
+            BTreeMap::from([
+                ("inference", 31.0),
+                ("auto_review", 2.0),
+                ("tools", 10.0),
+                ("user_wait", 0.0),
+                ("overhead", 14.0),
+                ("unknown", 3.0),
+            ]),
+        ),
+    ] {
+        let AggregatedMetrics::F64(MetricData::Histogram(histogram)) =
+            find_metric(&snapshot, name).data()
+        else {
+            panic!("expected duration histogram");
+        };
+        assert_eq!(histogram.data_points().count(), expected.len());
+        for point in histogram.data_points() {
+            let tags = attributes_to_map(point.attributes());
+            assert_eq!(tags["product_sku"], "codex");
+            assert_eq!(
+                point
+                    .bounds()
+                    .filter(|bound| *bound > 120_000.0)
+                    .collect::<Vec<_>>(),
+                vec![
+                    180_000.0,
+                    300_000.0,
+                    600_000.0,
+                    900_000.0,
+                    1_800_000.0,
+                    3_600_000.0,
+                    7_200_000.0
+                ]
+            );
+            let component = tags.get("component").map_or("total", String::as_str);
+            assert_eq!((point.count(), point.sum()), (1, expected[component]));
+        }
+    }
 }

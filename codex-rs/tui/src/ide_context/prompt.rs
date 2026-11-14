@@ -205,6 +205,9 @@ mod tests {
     use super::super::Position;
     use super::super::Range;
     use super::*;
+    use codex_app_server_protocol::ByteRange;
+    use codex_app_server_protocol::TextElement;
+    use codex_protocol_test_support::ContentItemTestExt;
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
 
@@ -361,17 +364,6 @@ mod tests {
                     )],
                 },
             ]
-        );
-    }
-
-    #[test]
-    fn extract_prompt_request_returns_text_after_last_delimiter() {
-        let message =
-            "# Context\n## My request for Codex:\nFirst\n## My request for Codex:\n  Second\n";
-
-        assert_eq!(
-            extract_prompt_request_with_offset(message),
-            ("Second", message.find("Second").expect("request offset"))
         );
     }
 

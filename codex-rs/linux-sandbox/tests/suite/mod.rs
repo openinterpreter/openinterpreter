@@ -1,4 +1,5 @@
 // Aggregates all former standalone integration tests as modules.
 mod bundled_bwrap;
-mod landlock;
+mod bwrap_path;
 mod managed_proxy;
+mod sandbox;

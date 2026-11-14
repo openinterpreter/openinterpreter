@@ -8,8 +8,8 @@ use serde::Deserialize;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AsyncQuestionReply {
     pub(crate) question_item_id: String,
-    question: String,
-    answer: String,
+    pub(crate) question: String,
+    pub(crate) answer: String,
 }
 
 pub(crate) fn parse(text: &str) -> Option<Vec<AsyncQuestionReply>> {

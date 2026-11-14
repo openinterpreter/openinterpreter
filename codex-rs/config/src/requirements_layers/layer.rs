@@ -1,6 +1,7 @@
 use crate::ConfigPathContext;
 use crate::ConfigRequirementsToml;
 use crate::ManagedHooksRequirementsToml;
+use crate::OtelRequirementsToml;
 use crate::RequirementSource;
 use crate::RequirementsExecPolicyToml;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -143,6 +144,18 @@ impl ComposableRequirementsLayer {
         {
             table.insert("features".to_string(), features);
         }
+        if let Some(legacy) = &requirements.network
+            && let Some(nested) = requirements
+                .permissions
+                .as_ref()
+                .and_then(|p| p.network.as_deref())
+            && !legacy.describes_same_policy(nested)
+        {
+            return Err(RequirementsCompositionError::Parse {
+                layer_source: source,
+                message: "legacy and permissions.network requirements must describe the same network policy".into(),
+            });
+        }
 
         // Hostname lookup is configuration-driven and may block on DNS, so only
         // resolve it when this layer contains hostname-based sandbox selectors.
@@ -163,6 +176,7 @@ impl ComposableRequirementsLayer {
                 hooks: requirements.hooks,
                 permissions: requirements.permissions,
                 auto_review: requirements.auto_review,
+                otel: requirements.otel,
             },
         })
     }
@@ -174,6 +188,7 @@ pub(super) struct DomainMergedRequirementsFields {
     pub(super) hooks: Option<ManagedHooksRequirementsToml>,
     pub(super) permissions: Option<crate::config_requirements::PermissionsRequirementsToml>,
     pub(super) auto_review: Option<crate::config_requirements::AutoReviewRequirementsToml>,
+    pub(super) otel: Option<Box<OtelRequirementsToml>>,
 }
 
 fn parse_layer_toml(
@@ -270,6 +285,7 @@ fn toml_value_from_serializable<T: serde::Serialize>(
 fn strip_special_fields(layer_toml: &mut TomlValue) {
     remove_top_level_field(layer_toml, "rules");
     remove_top_level_field(layer_toml, "hooks");
+    remove_top_level_field(layer_toml, "otel");
     remove_nested_field_and_prune_empty(layer_toml, &["permissions", "filesystem", "deny_read"]);
     remove_nested_field_and_prune_empty(layer_toml, &["auto_review", "required_on_models"]);
 }
@@ -282,11 +298,14 @@ pub(crate) fn strip_cloud_auth_requirements(source: &RequirementSource, value: &
     }
 }
 
-fn remove_top_level_field(value: &mut TomlValue, key: &str) -> Option<TomlValue> {
+pub(super) fn remove_top_level_field(value: &mut TomlValue, key: &str) -> Option<TomlValue> {
     value.as_table_mut()?.remove(key)
 }
 
-fn remove_nested_field_and_prune_empty(value: &mut TomlValue, path: &[&str]) -> Option<TomlValue> {
+pub(super) fn remove_nested_field_and_prune_empty(
+    value: &mut TomlValue,
+    path: &[&str],
+) -> Option<TomlValue> {
     let (key, remaining) = path.split_first()?;
     let table = value.as_table_mut()?;
     if remaining.is_empty() {

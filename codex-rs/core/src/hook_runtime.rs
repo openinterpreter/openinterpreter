@@ -1,3 +1,8 @@
+mod executor;
+pub(crate) mod sampling;
+
+pub(crate) use executor::prepare_executor_hook_sources;
+
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -5,9 +10,6 @@ use std::time::Duration;
 use codex_analytics::CompactionTrigger;
 use codex_analytics::HookRunFact;
 use codex_analytics::build_track_events_context;
-use codex_connectors::AppToolPolicyEvaluator;
-use codex_connectors::AppToolPolicyInput;
-use codex_core_plugins::executor_plugin_hook_sources;
 use codex_hooks::InterruptRequest;
 use codex_hooks::PermissionRequestDecision;
 use codex_hooks::PermissionRequestOutcome;
@@ -25,13 +27,12 @@ use codex_hooks::UserPromptSubmitOutcome;
 use codex_hooks::UserPromptSubmitRequest;
 use codex_hooks::hook_execution_mode_label;
 use codex_hooks::hook_handler_type_label;
-use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_otel::HOOK_RUN_DURATION_METRIC;
 use codex_otel::HOOK_RUN_METRIC;
-use codex_plugin::ExecutorPluginHookSource;
 use codex_protocol::items::FunctionCallOutputItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::AskForApproval;
@@ -53,6 +54,7 @@ use codex_protocol::protocol::WarningEvent;
 use codex_rollout::state_db;
 use codex_thread_store::PersistContext;
 use codex_thread_store::ReadThreadParams;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Map;
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -60,20 +62,25 @@ use tracing::instrument;
 
 use crate::context::ContextualUserFragment;
 use crate::context::HookAdditionalContext;
-use crate::event_mapping::parse_turn_item;
+use crate::environment_selection::TurnEnvironmentSnapshot;
+use crate::event_mapping::is_contextual_user_message_content;
+use crate::event_mapping::user_input_parts;
 use crate::guardian::GuardianReviewContext;
+use crate::hook_environment_executor::with_environment_hooks;
+use crate::hook_environment_executor::with_tool_environment_hooks;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::state::TurnState;
 use crate::tools::hook_names::HookToolName;
+use crate::tools::registry::PostToolUsePayload;
 use crate::tools::sandboxing::PermissionRequestPayload;
 use crate::turn_metadata::ExecutionMetadata;
 
 pub(crate) struct HookRuntimeOutcome {
     pub should_stop: bool,
-    pub additional_contexts: Vec<String>,
+    pub additional_contexts: Vec<codex_hooks::HookContext>,
 }
 
 pub(crate) enum PreToolUseHookResult {
@@ -159,7 +166,11 @@ pub(crate) async fn run_pending_session_start_hooks(
             permission_mode: hook_permission_mode(turn_context.approval_policy()),
             target,
         };
-        let hooks = sess.hooks();
+        let hooks = with_environment_hooks(
+            sess,
+            turn_context,
+            &turn_context.initial_environments.refresh_readiness(),
+        );
         let preview_runs = hooks.preview_session_start(&request);
         if run_context_injecting_hook(
             sess,
@@ -189,14 +200,16 @@ pub(crate) async fn run_pre_tool_use_hooks(
     tool_use_id: String,
     tool_name: &HookToolName,
     tool_input: &Value,
+    tool_cwd: Option<codex_utils_path_uri::PathUri>,
+    target_environments: &[&str],
 ) -> PreToolUseHookResult {
     let turn_context = &step_context.turn;
     let request = PreToolUseRequest {
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
         subagent: thread_spawn_subagent_hook_context(sess, turn_context),
-        #[allow(deprecated)]
-        cwd: turn_context.cwd.clone(),
+        cwd: tool_hook_cwd(&step_context.environments, turn_context),
+        tool_cwd,
         transcript_path: sess.hook_transcript_path().await,
         model: step_context.settings.model_info.slug.clone(),
         permission_mode: hook_permission_mode(step_context.settings.approval_policy()),
@@ -205,7 +218,12 @@ pub(crate) async fn run_pre_tool_use_hooks(
         tool_use_id,
         tool_input: tool_input.clone(),
     };
-    let hooks = sess.hooks();
+    let hooks = with_tool_environment_hooks(
+        sess,
+        turn_context,
+        &step_context.environments,
+        target_environments,
+    );
     let preview_runs = hooks.preview_pre_tool_use(&request);
     emit_hook_started_events(sess, turn_context, preview_runs).await;
 
@@ -243,6 +261,14 @@ pub(crate) async fn run_pre_tool_use_hooks(
     }
 }
 
+#[allow(deprecated)]
+fn tool_hook_cwd(environments: &TurnEnvironmentSnapshot, turn: &TurnContext) -> AbsolutePathBuf {
+    // Hooks run on the host, so a remote workspace cannot replace the local fallback.
+    environments
+        .local_environment_cwd()
+        .unwrap_or_else(|| turn.cwd.clone())
+}
+
 // PermissionRequest hooks share the same preview/start/completed event flow as
 // other hook types, but they return an optional decision instead of mutating
 // tool input or post-run state.
@@ -251,14 +277,15 @@ pub(crate) async fn run_permission_request_hooks(
     review_context: &GuardianReviewContext,
     run_id_suffix: &str,
     payload: PermissionRequestPayload,
+    target_environment: &str,
 ) -> Option<PermissionRequestDecision> {
     let turn_context = review_context.turn();
     let request = PermissionRequestRequest {
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
         subagent: thread_spawn_subagent_hook_context(sess, turn_context),
-        #[allow(deprecated)]
-        cwd: turn_context.cwd.to_path_buf(),
+        cwd: tool_hook_cwd(review_context.environments(), turn_context).to_path_buf(),
+        tool_cwd: payload.tool_cwd,
         transcript_path: sess.hook_transcript_path().await,
         model: review_context.model_info.slug.clone(),
         permission_mode: hook_permission_mode(review_context.approval_policy),
@@ -267,7 +294,12 @@ pub(crate) async fn run_permission_request_hooks(
         run_id_suffix: run_id_suffix.to_string(),
         tool_input: payload.tool_input,
     };
-    let hooks = sess.hooks();
+    let hooks = with_tool_environment_hooks(
+        sess,
+        turn_context,
+        review_context.environments(),
+        &[target_environment],
+    );
     let preview_runs = hooks.preview_permission_request(&request);
     emit_hook_started_events(sess, turn_context, preview_runs).await;
 
@@ -282,84 +314,43 @@ pub(crate) async fn run_permission_request_hooks(
 
 /// Runs matching `PostToolUse` hooks after a tool has produced a successful output.
 ///
-/// The `tool_name`, matcher aliases, `tool_input`, and `tool_response` values are
-/// already adapted by the tool handler into the stable hook contract. Passing
+/// The payload is already adapted by the tool handler into the stable hook contract. Passing
 /// raw internal tool data here would leak implementation details into user hook
 /// matchers and hook logs.
 pub(crate) async fn run_post_tool_use_hooks(
     sess: &Arc<Session>,
     step_context: &StepContext,
-    tool_use_id: String,
-    tool_name: String,
-    matcher_aliases: Vec<String>,
-    tool_input: Value,
-    tool_response: Value,
+    payload: PostToolUsePayload,
+    target_environments: &[&str],
 ) -> PostToolUseOutcome {
     let turn_context = &step_context.turn;
     let request = PostToolUseRequest {
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
         subagent: thread_spawn_subagent_hook_context(sess, turn_context),
-        #[allow(deprecated)]
-        cwd: turn_context.cwd.clone(),
+        cwd: tool_hook_cwd(&step_context.environments, turn_context),
+        tool_cwd: payload.tool_cwd,
         transcript_path: sess.hook_transcript_path().await,
         model: step_context.settings.model_info.slug.clone(),
         permission_mode: hook_permission_mode(step_context.settings.approval_policy()),
-        tool_name,
-        matcher_aliases,
-        tool_use_id,
-        tool_input,
-        tool_response,
+        tool_name: payload.tool_name.name().to_string(),
+        matcher_aliases: payload.tool_name.matcher_aliases().to_vec(),
+        tool_use_id: payload.tool_use_id,
+        tool_input: payload.tool_input,
+        tool_response: payload.tool_response,
     };
-    let hooks = sess.hooks();
+    let hooks = with_tool_environment_hooks(
+        sess,
+        turn_context,
+        &step_context.environments,
+        target_environments,
+    );
     let preview_runs = hooks.preview_post_tool_use(&request);
     emit_hook_started_events(sess, turn_context, preview_runs).await;
 
     let outcome = hooks.run_post_tool_use(request).await;
     emit_hook_completed_events(sess, turn_context, outcome.hook_events.clone()).await;
     outcome
-}
-
-fn executor_hook_sources_for_step(step_context: &StepContext) -> Vec<ExecutorPluginHookSource> {
-    step_context
-        .executor_capability_discovery
-        .as_deref()
-        .map(|snapshot| {
-            let app_tool_policy =
-                AppToolPolicyEvaluator::new(&step_context.mcp.config().config_layer_stack);
-            executor_plugin_hook_sources(snapshot, |server, tool| {
-                step_context
-                    .mcp
-                    .tool_info(server, tool)
-                    .filter(|tool_info| {
-                        if server != CODEX_APPS_MCP_SERVER_NAME {
-                            return true;
-                        }
-                        let annotations = tool_info.tool.annotations.as_ref();
-                        app_tool_policy
-                            .policy(AppToolPolicyInput {
-                                connector_id: tool_info.connector_id.as_deref(),
-                                link_id: None,
-                                tool_name: &tool_info.tool.name,
-                                tool_title: tool_info.tool.title.as_deref(),
-                                destructive_hint: annotations
-                                    .and_then(|annotations| annotations.destructive_hint),
-                                open_world_hint: annotations
-                                    .and_then(|annotations| annotations.open_world_hint),
-                            })
-                            .enabled
-                    })
-            })
-            .into_iter()
-            .filter(|source| {
-                !step_context
-                    .turn
-                    .disabled_plugin_ids
-                    .contains(&source.plugin_id.as_key())
-            })
-            .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn build_request_metadata(
@@ -451,8 +442,9 @@ pub(crate) async fn run_turn_stop_hooks(
         last_assistant_message,
         target,
     };
-    let executor_hook_sources = executor_hook_sources_for_step(step_context);
-    let hooks = sess.hooks().with_executor_hooks(executor_hook_sources);
+    let executor_hook_sources = step_context.executor_hook_sources.clone();
+    let hooks = with_environment_hooks(sess, turn_context, &step_context.environments)
+        .with_executor_hooks(executor_hook_sources);
     emit_hook_started_events(sess, turn_context, hooks.preview_stop(&request)).await;
 
     let mut outcome = hooks.run_stop(request).await;
@@ -462,13 +454,26 @@ pub(crate) async fn run_turn_stop_hooks(
 
 #[instrument(level = "trace", skip_all)]
 pub(crate) async fn run_session_end_hooks(sess: &Arc<Session>) {
-    let hooks = sess.hooks();
-    let preview_runs = hooks.preview_session_end();
-    if preview_runs.is_empty() {
+    // Building a turn can read plugins and skills from a remote executor. Check
+    // the captured hook declarations before spending any of the shutdown deadline.
+    let environments = sess.services.turn_environments.snapshot_now();
+    let has_environment_end_hooks = environments.turn_environments().any(|environment| {
+        !environment
+            .config()
+            .environment_hooks
+            .session_end
+            .is_empty()
+    });
+    if !has_environment_end_hooks && sess.hooks().preview_session_end().is_empty() {
         return;
     }
 
     let turn_context = sess.new_default_turn().await;
+    let hooks = with_environment_hooks(sess, &turn_context, &environments);
+    let preview_runs = hooks.preview_session_end();
+    if preview_runs.is_empty() {
+        return;
+    }
 
     // SessionEnd is root-only; ThreadSpawn uses SubagentStart/SubagentStop and other subagents
     // are internal implementation details.
@@ -505,10 +510,16 @@ pub(crate) async fn run_turn_interrupt_hooks(
     let last_known_step_context = turn_state.lock().await.last_known_step_context.clone();
     let executor_hook_sources = last_known_step_context
         .as_deref()
-        .map(executor_hook_sources_for_step)
+        .map(|step| step.executor_hook_sources.clone())
         .unwrap_or_default();
     let has_executor_hooks = !executor_hook_sources.is_empty();
-    let hooks = sess.hooks().with_executor_hooks(executor_hook_sources);
+    let hooks = last_known_step_context
+        .as_deref()
+        .map_or_else(
+            || (*sess.hooks()).clone(),
+            |step| with_environment_hooks(sess, &step.turn, &step.environments),
+        )
+        .with_executor_hooks(executor_hook_sources);
     let preview_runs = hooks.preview_interrupt();
     if preview_runs.is_empty() && !has_executor_hooks {
         return;
@@ -549,10 +560,15 @@ pub(crate) async fn run_pre_compact_hooks(
         model: turn_context.model_info().slug.clone(),
         trigger: compaction_trigger_label(trigger).to_string(),
     };
-    let preview_runs = sess.hooks().preview_pre_compact(&request);
+    let hooks = with_environment_hooks(
+        sess,
+        turn_context,
+        &turn_context.initial_environments.refresh_readiness(),
+    );
+    let preview_runs = hooks.preview_pre_compact(&request);
     emit_hook_started_events(sess, turn_context, preview_runs).await;
 
-    let outcome = sess.hooks().run_pre_compact(request).await;
+    let outcome = hooks.run_pre_compact(request).await;
     emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
     if outcome.should_stop {
         PreCompactHookOutcome::Stopped
@@ -586,10 +602,15 @@ pub(crate) async fn run_post_compact_hooks(
         model: turn_context.model_info().slug.clone(),
         trigger: compaction_trigger_label(trigger).to_string(),
     };
-    let preview_runs = sess.hooks().preview_post_compact(&request);
+    let hooks = with_environment_hooks(
+        sess,
+        turn_context,
+        &turn_context.initial_environments.refresh_readiness(),
+    );
+    let preview_runs = hooks.preview_post_compact(&request);
     emit_hook_started_events(sess, turn_context, preview_runs).await;
 
-    let outcome = sess.hooks().run_post_compact(request).await;
+    let outcome = hooks.run_post_compact(request).await;
     emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
     if outcome.should_stop {
         PostCompactHookOutcome::Stopped
@@ -598,21 +619,38 @@ pub(crate) async fn run_post_compact_hooks(
     }
 }
 
+pub(crate) fn legacy_notify_input_messages(input: &[ResponseItem]) -> Vec<String> {
+    input
+        .iter()
+        .filter_map(|item| {
+            let ResponseItem::Message { role, content, .. } = item else {
+                return None;
+            };
+            if role != "user" || is_contextual_user_message_content(content) {
+                return None;
+            }
+            Some(
+                user_input_parts(content)
+                    .filter_map(|(_, part)| match part {
+                        ContentItem::InputText { text } => Some(text.as_str()),
+                        ContentItem::InputImage { .. }
+                        | ContentItem::InputAudio { .. }
+                        | ContentItem::OutputText { .. } => None,
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
 #[instrument(level = "trace", skip_all)]
 pub(crate) async fn run_legacy_after_agent_hook(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
-    input: &[ResponseItem],
+    input_messages: Vec<String>,
     last_assistant_message: Option<String>,
 ) -> bool {
     let mut abort_message = None;
-    let input_messages = input
-        .iter()
-        .filter_map(|item| match parse_turn_item(item) {
-            Some(TurnItem::UserMessage(user_message)) => Some(user_message.message()),
-            _ => None,
-        })
-        .collect();
     let hooks = sess.hooks();
     for hook_outcome in hooks
         .dispatch(codex_hooks::HookPayload {
@@ -662,6 +700,7 @@ pub(crate) async fn run_legacy_after_agent_hook(
         misalignment: None,
         message,
         codex_error_info: Some(CodexErrorInfo::Other),
+        rejected_audio_file_ids: Vec::new(),
     });
     sess.send_event(turn_context, event).await;
     true
@@ -685,7 +724,11 @@ pub(crate) async fn inspect_pending_input(
                 permission_mode: hook_permission_mode(turn_context.approval_policy()),
                 prompt: UserMessageItem::new(content).message(),
             };
-            let hooks = sess.hooks();
+            let hooks = with_environment_hooks(
+                sess,
+                turn_context,
+                &turn_context.initial_environments.refresh_readiness(),
+            );
             let preview_runs = hooks.preview_user_prompt_submit(&request);
             run_context_injecting_hook(
                 sess,
@@ -711,21 +754,23 @@ pub(crate) async fn record_pending_input(
     turn_context: &Arc<TurnContext>,
     model_info: &ModelInfo,
     pending_input: TurnInput,
-    additional_contexts: Vec<String>,
+    additional_contexts: Vec<codex_hooks::HookContext>,
     persist_context: PersistContext,
 ) {
     match pending_input {
         TurnInput::UserInput {
             content,
             client_id,
-            acceptance_order,
+            metadata,
         } => {
+            // Prompt telemetry can contain full text. Emit it only for prompts selected for recording.
+            turn_context.session_telemetry.user_prompt(&content);
             sess.record_user_prompt_and_emit_turn_item(
                 turn_context.as_ref(),
                 model_info,
                 content.as_slice(),
                 client_id,
-                acceptance_order,
+                metadata,
                 persist_context,
             )
             .await;
@@ -759,6 +804,7 @@ pub(crate) async fn record_pending_input(
         TurnInput::InterAgentCommunication(communication) => {
             sess.record_inter_agent_communication(turn_context, model_info, communication)
                 .await;
+            sess.ensure_rollout_materialized(persist_context).await;
         }
     }
     record_additional_contexts(sess, turn_context, additional_contexts).await;
@@ -782,7 +828,10 @@ pub(crate) async fn drain_async_hook_results(
             .entries
             .iter()
             .filter(|entry| entry.kind == HookOutputEntryKind::Context)
-            .map(|entry| entry.text.clone())
+            .map(|entry| codex_hooks::HookContext {
+                text: entry.text.clone(),
+                metadata: codex_protocol::models::ContentItemMetadata::command_hook(),
+            })
             .collect::<Vec<_>>();
 
         if before_user_prompt {
@@ -841,7 +890,7 @@ impl HookRuntimeOutcome {
 pub(crate) async fn record_additional_contexts(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
-    additional_contexts: Vec<String>,
+    additional_contexts: Vec<codex_hooks::HookContext>,
 ) {
     let developer_messages = additional_context_messages(additional_contexts);
     if developer_messages.is_empty() {
@@ -856,7 +905,9 @@ pub(crate) async fn record_additional_contexts(
     .await;
 }
 
-fn additional_context_messages(additional_contexts: Vec<String>) -> Vec<ResponseItem> {
+fn additional_context_messages(
+    additional_contexts: Vec<codex_hooks::HookContext>,
+) -> Vec<ResponseItem> {
     additional_contexts
         .into_iter()
         .map(HookAdditionalContext::new)
@@ -962,6 +1013,7 @@ fn hook_run_analytics_payload(
                 .clone()
                 .unwrap_or_else(|| turn_context.sub_id.clone()),
             turn_context.originator.clone(),
+            /*turn_metadata*/ None,
         ),
         HookRunFact {
             event_name: completed.run.event_name,
@@ -980,6 +1032,8 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str); 
         HookEventName::PostToolUse => "PostToolUse",
         HookEventName::PreCompact => "PreCompact",
         HookEventName::PostCompact => "PostCompact",
+        HookEventName::PreModelRequest => "PreModelRequest",
+        HookEventName::PostModelRequest => "PostModelRequest",
         HookEventName::SessionStart => "SessionStart",
         HookEventName::SessionEnd => "SessionEnd",
         HookEventName::UserPromptSubmit => "UserPromptSubmit",
@@ -1058,6 +1112,36 @@ fn compaction_trigger_label(value: CompactionTrigger) -> &'static str {
     }
 }
 
+pub(crate) fn hooks_for_model_request(
+    session: &Arc<Session>,
+    step: &StepContext,
+) -> Arc<codex_hooks::Hooks> {
+    match step.turn.session_source {
+        SessionSource::Internal(InternalSessionSource::MemoryConsolidation)
+        | SessionSource::SubAgent(SubAgentSource::MemoryConsolidation) => Arc::new(
+            session
+                .hooks()
+                .for_memory_consolidation(step.executor_hook_sources.clone()),
+        ),
+        _ => Arc::new(with_environment_hooks(
+            session,
+            &step.turn,
+            &step.environments,
+        )),
+    }
+}
+
+async fn run_model_request_hooks(
+    session: &Arc<Session>,
+    step: &StepContext,
+    hooks: &codex_hooks::Hooks,
+    request: codex_hooks::ModelRequestHookInput,
+) {
+    emit_hook_started_events(session, &step.turn, hooks.preview_model_request(&request)).await;
+    let events = hooks.run_model_request(request, |_| {}).await;
+    emit_hook_completed_events(session, &step.turn, events).await;
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1095,8 +1179,8 @@ mod tests {
     #[test]
     fn additional_context_messages_stay_separate_and_ordered() {
         let messages = additional_context_messages(vec![
-            "first tide note".to_string(),
-            "second tide note".to_string(),
+            codex_hooks::HookContext::harness("first tide note".to_string()),
+            codex_hooks::HookContext::harness("second tide note".to_string()),
         ]);
 
         assert_eq!(messages.len(), 2);
@@ -1330,7 +1414,7 @@ mod tests {
             execution_mode: HookExecutionMode::Sync,
             builtin: false,
             scope: HookScope::Turn,
-            source_path: test_path_buf("/tmp/hooks.json").abs(),
+            source_path: test_path_buf("/tmp/hooks.json").abs().into(),
             source,
             display_order: 0,
             status,

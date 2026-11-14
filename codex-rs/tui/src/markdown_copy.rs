@@ -1,0 +1,695 @@
+//! Semantic copy annotations in rendered-byte coordinates, independent of terminal styling.
+//!
+//! Wrapping and selection snapshots share each logical line's annotations. Only copying
+//! serializes Markdown; literal-only selections keep their original text and clipboard format.
+//! Rich selections preserve selected words and semantic formatting with balanced markup,
+//! rather than reproducing the complete response's source spelling (available through `/copy`).
+
+use std::ops::Range;
+use std::ops::RangeInclusive;
+use std::sync::Arc;
+
+use pulldown_cmark::Event;
+use pulldown_cmark::Tag;
+
+use crate::clipboard_copy::CopyFormat;
+use crate::terminal_hyperlinks::LogicalLineSource;
+
+pub(crate) mod table;
+
+/// A transformed fenced block and its coordinates in the renderer input.
+#[derive(Clone)]
+pub(crate) struct SourceBlock {
+    pub(crate) range: Range<usize>,
+    pub(crate) content: Arc<str>,
+}
+
+pub(crate) fn quote_content(source: &str) -> String {
+    source
+        .split_inclusive('\n')
+        .map(|line| {
+            line.trim_start_matches(' ')
+                .strip_prefix('>')
+                .map_or(line, |line| line.strip_prefix(' ').unwrap_or(line))
+        })
+        .collect()
+}
+
+// Bound retained inline stacks and container prefixes independently of parser nesting.
+pub(crate) const MAX_COPY_DEPTH: usize = 64;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SelectionOutput {
+    Markdown,
+    PlainText,
+}
+
+impl SelectionOutput {
+    fn render(self, plain: &str, markdown: impl FnOnce() -> String) -> String {
+        match self {
+            Self::Markdown => markdown(),
+            Self::PlainText => plain.to_owned(),
+        }
+    }
+
+    fn push_prose(self, out: &mut String, plain: &str, markdown: impl FnOnce() -> String) {
+        match self {
+            Self::Markdown => push_prose_fragment(out, &markdown()),
+            Self::PlainText => out.push_str(plain),
+        }
+    }
+}
+
+// A fixed, deduplicated style order gives each nested wrapper a distinct delimiter family.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Inline {
+    // Keep one link around its formatted label instead of repeating its destination per style.
+    Link(Arc<str>),
+    Delimiter(&'static str),
+    Code,
+    /// Copy a generated file target literally without changing mixed-selection Markdown.
+    Literal,
+    /// Balance parser events for links whose visible text has no copied wrapper.
+    Ignored,
+}
+
+impl Inline {
+    pub(crate) fn from_event(event: &Event<'_>) -> Option<Self> {
+        match event {
+            Event::Start(Tag::Emphasis) => Some(Self::Delimiter("_")),
+            Event::Start(Tag::Strong) => Some(Self::Delimiter("**")),
+            Event::Start(Tag::Strikethrough) => Some(Self::Delimiter("~~")),
+            Event::Start(Tag::Link { dest_url, .. }) => Some(
+                if crate::terminal_hyperlinks::web_destination(dest_url).is_some()
+                    && !dest_url.starts_with(crate::inline_visualization::LINK_PLACEHOLDER_PREFIX)
+                {
+                    Self::Link(dest_url.as_ref().into())
+                } else {
+                    Self::Ignored
+                },
+            ),
+            Event::Code(_) => Some(Self::Code),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CopyLine {
+    pub(crate) prefix: String,
+    pub(crate) continuation: String,
+    /// Restore the containing item when a multiline selection starts in its later paragraph.
+    pub(crate) item_prefix: String,
+    pub(crate) code: bool,
+    /// Source shared by rows when rendering replaces code with a diagram or table.
+    pub(crate) code_source: Option<Arc<str>>,
+    /// Outer quote source, retained even when it contains only code.
+    pub(crate) quote_source: Option<Arc<str>>,
+    pub(crate) table: Option<table::TableLine>,
+    table_cell: bool,
+    pub(crate) rule: bool,
+    pub(crate) heading: usize,
+    pub(crate) hard_break: bool,
+    /// A visual separator inserted between sibling list items, never source content.
+    pub(crate) omit: bool,
+    runs: Vec<(Range<usize>, Vec<Inline>)>,
+    literal_ranges: Vec<Range<usize>>,
+}
+
+/// Keep literal prompt spacing when parsing only changed whitespace, and retain the source
+/// when Markdown renders nothing (for example, a reference definition on its own).
+pub(crate) fn has_visible_markup(
+    lines: &[crate::terminal_hyperlinks::HyperlinkLine],
+    source: &str,
+) -> bool {
+    let mut displayed = lines
+        .iter()
+        .flat_map(|line| &line.line.spans)
+        .flat_map(|span| span.content.chars())
+        .filter(|ch| !ch.is_whitespace())
+        .peekable();
+    displayed.peek().is_some()
+        && (displayed.ne(source.chars().filter(|ch| !ch.is_whitespace()))
+            || lines.iter().any(|line| {
+                line.source
+                    .as_ref()
+                    .and_then(|source| source.copy.as_deref())
+                    .is_some_and(|copy| {
+                        !copy.prefix.is_empty()
+                            || copy.code
+                            || copy.code_source.is_some()
+                            || copy.quote_source.is_some()
+                            || copy.table.is_some()
+                            || copy.rule
+                            || copy.heading != 0
+                            || copy.hard_break
+                            || copy.runs.iter().any(|(_, inline)| !inline.is_empty())
+                    })
+            }))
+}
+
+impl CopyLine {
+    pub(crate) fn push(&mut self, length: usize, inline: &[Inline]) {
+        if length == 0 {
+            return;
+        }
+        let inline = &inline[..inline.len().min(MAX_COPY_DEPTH)];
+        let literal = inline
+            .iter()
+            .any(|mark| matches!(mark, Inline::Code | Inline::Literal));
+        let mut inline = inline
+            .iter()
+            .filter(|mark| !matches!(mark, Inline::Ignored | Inline::Literal))
+            .cloned()
+            .collect::<Vec<_>>();
+        inline.sort();
+        inline.dedup();
+        let start = self
+            .runs
+            .last()
+            .map_or(/*default*/ 0, |(range, _)| range.end);
+        // Keep literal spans separate so they never split context-sensitive prose escaping.
+        if literal {
+            if let Some(range) = self.literal_ranges.last_mut()
+                && range.end == start
+            {
+                range.end += length;
+            } else {
+                self.literal_ranges.push(start..start + length);
+            }
+        }
+        if let Some((range, previous)) = self.runs.last_mut()
+            && previous == &inline
+        {
+            range.end += length;
+        } else {
+            self.runs.push((start..start + length, inline));
+        }
+    }
+
+    fn is_literal(&self, range: &Range<usize>) -> bool {
+        !range.is_empty()
+            && self
+                .literal_ranges
+                .iter()
+                .any(|literal| literal.start <= range.start && range.end <= literal.end)
+    }
+
+    fn render(&self, text: &str, range: Range<usize>, depth: usize) -> String {
+        if self.rule && range == (0..text.len()) {
+            return "***".to_owned();
+        }
+        let mut out = String::new();
+        let first = self.runs.partition_point(|(run, _)| run.end <= range.start);
+        let mut runs = self.runs[first..]
+            .iter()
+            .take_while(|(run, _)| run.start < range.end)
+            .peekable();
+        while let Some((run, inline)) = runs.next() {
+            let start = run.start.max(range.start);
+            let mut end = run.end.min(range.end);
+            if start >= end {
+                continue;
+            }
+            let mark = inline.get(depth);
+            while let Some((next, inline)) = runs.peek()
+                && next.start == end
+                && inline.get(depth) == mark
+                && end < range.end
+            {
+                end = next.end.min(range.end);
+                runs.next();
+            }
+            match mark {
+                Some(Inline::Code) => {
+                    let content = &text[start..end];
+                    let content = if self.table_cell {
+                        content.replace('|', "\\|")
+                    } else {
+                        content.to_owned()
+                    };
+                    let fence = fence(&content, /*minimum*/ 1);
+                    let padding =
+                        if content.starts_with(['`', ' ']) || content.ends_with(['`', ' ']) {
+                            if content.chars().all(|ch| ch == ' ') {
+                                ""
+                            } else {
+                                " "
+                            }
+                        } else {
+                            ""
+                        };
+                    append_inline(
+                        &mut out,
+                        &format!("{fence}{padding}{content}{padding}{fence}"),
+                    );
+                }
+                Some(mark) => {
+                    let body = self.render(text, start..end, depth + 1);
+                    let trimmed = body.trim();
+                    if trimmed.is_empty() {
+                        out.push_str(&body);
+                        continue;
+                    }
+                    out.push_str(&body[..body.len() - body.trim_start().len()]);
+                    match mark {
+                        Inline::Delimiter(delimiter) => {
+                            append_inline(&mut out, &format!("{delimiter}{trimmed}{delimiter}"))
+                        }
+                        Inline::Link(destination) => {
+                            let destination = destination
+                                .replace('\\', "\\\\")
+                                .replace('&', "&amp;")
+                                .replace('<', "%3C")
+                                .replace('>', "%3E")
+                                .replace('|', "%7C")
+                                .replace('\n', "%0A")
+                                .replace('\r', "%0D");
+                            append_inline(&mut out, &format!("[{trimmed}](<{destination}>)"));
+                        }
+                        Inline::Code | Inline::Literal | Inline::Ignored => unreachable!(),
+                    }
+                    out.push_str(&body[body.trim_end().len()..]);
+                }
+                None => {
+                    let heading_end = self.heading.min(end).max(start);
+                    out.push_str(&text[start..heading_end]);
+                    append_inline(&mut out, &escape(&text[heading_end..end]));
+                }
+            }
+        }
+        out
+    }
+}
+
+// Entity decoding and omitted link wrappers can turn a delimiter's punctuation neighbor into
+// a word character. Protect that boundary without changing the selected text or adding spacing.
+fn append_inline(out: &mut String, text: &str) {
+    let word = |ch: char| !ch.is_whitespace() && !ch.is_ascii_punctuation();
+    let left = text.starts_with('_')
+        || text.starts_with(['*', '~'])
+            && text
+                .chars()
+                .next()
+                .and_then(|delimiter| text.trim_start_matches(delimiter).chars().next())
+                .is_some_and(|ch| !ch.is_alphanumeric());
+    if left && let Some(ch) = out.chars().last().filter(|ch| word(*ch)) {
+        out.pop();
+        out.push_str(&format!("&#{};", u32::from(ch)));
+    }
+    let right = out.ends_with('_')
+        || out.ends_with(['*', '~'])
+            && out
+                .chars()
+                .next_back()
+                .and_then(|delimiter| out.trim_end_matches(delimiter).chars().next_back())
+                .is_some_and(|ch| !ch.is_alphanumeric());
+    if right && let Some(ch) = text.chars().next().filter(|ch| word(*ch)) {
+        out.push_str(&format!("&#{};", u32::from(ch)));
+        out.push_str(&text[ch.len_utf8()..]);
+    } else {
+        out.push_str(text);
+    }
+}
+
+pub(crate) struct SelectedLine {
+    source: LogicalLineSource,
+    range: Range<usize>,
+    separator: String,
+}
+
+impl SelectedLine {
+    pub(crate) fn append(
+        lines: &mut Vec<Self>,
+        source: LogicalLineSource,
+        range: Range<usize>,
+        separator: &str,
+    ) {
+        if let Some((label_end, body)) = source.labelled_body.as_deref() {
+            let body_start = source.text.len() - body.text.len();
+            let mut separator = separator;
+            if range.start < *label_end {
+                let mut label = LogicalLineSource::new(source.text[..*label_end].to_owned());
+                label.copy_as_prose = true;
+                Self::append(
+                    lines,
+                    label,
+                    range.start..range.end.min(*label_end),
+                    separator,
+                );
+                separator = "";
+            }
+            if range.end > body_start {
+                let body_range = range.start.saturating_sub(body_start)..range.end - body_start;
+                Self::append(lines, body.clone(), body_range, separator);
+            }
+            return;
+        }
+        // Streaming can split the same logical line across history cells.
+        if let Some(previous) = lines.last_mut()
+            && Arc::ptr_eq(&previous.source.text, &source.text)
+            && previous.range.end <= range.start
+        {
+            previous.range.end = range.end;
+        } else {
+            let separator = if separator.starts_with('\n')
+                && lines.last().is_some_and(|previous| {
+                    previous.range.end == previous.source.text.len()
+                        && (previous.source.copy_as_prose
+                            || previous
+                                .source
+                                .copy
+                                .as_ref()
+                                .is_some_and(|copy| copy.hard_break))
+                }) {
+                format!("  {separator}")
+            } else {
+                separator.to_string()
+            };
+            lines.push(Self {
+                source,
+                range,
+                separator,
+            });
+        }
+    }
+
+    fn separator(&self, output: SelectionOutput) -> &str {
+        if output == SelectionOutput::PlainText && self.separator.starts_with("  \n") {
+            &self.separator[2..]
+        } else {
+            &self.separator
+        }
+    }
+}
+
+pub(crate) fn selection(
+    lines: &[SelectedLine],
+    plain: &str,
+    rectangle_rows: Option<&RangeInclusive<usize>>,
+) -> (String, CopyFormat) {
+    render_selection(lines, plain, rectangle_rows, SelectionOutput::Markdown)
+}
+
+pub(crate) fn literal_selection(
+    lines: &[SelectedLine],
+    plain: &str,
+    rectangle_rows: Option<&RangeInclusive<usize>>,
+) -> String {
+    render_selection(lines, plain, rectangle_rows, SelectionOutput::PlainText).0
+}
+
+fn render_selection(
+    lines: &[SelectedLine],
+    plain: &str,
+    rectangle_rows: Option<&RangeInclusive<usize>>,
+    output: SelectionOutput,
+) -> (String, CopyFormat) {
+    // Soft wraps and streamed fragments of the same logical line are already coalesced.
+    if rectangle_rows.is_none()
+        && let [line] = lines
+        && line
+            .source
+            .copy
+            .as_ref()
+            .is_some_and(|copy| copy.is_literal(&line.range))
+    {
+        return (plain.to_owned(), CopyFormat::PlainText);
+    }
+    // Quote-only selections omit quote markers. Tables and task lists still need their
+    // semantic metadata to reconstruct cell fragments and preserve checkbox state.
+    let mut content = lines
+        .iter()
+        .filter(|line| {
+            !line.range.is_empty() && !line.source.copy.as_ref().is_some_and(|copy| copy.omit)
+        })
+        .peekable();
+    let quote_only = content.peek().is_some()
+        && content.all(|line| {
+            line.source
+                .copy
+                .as_ref()
+                .is_some_and(|copy| copy.prefix.contains("> "))
+        });
+    let unquoted;
+    let lines = if quote_only {
+        if !lines.iter().any(|line| {
+            (!line.range.is_empty() || line.source.text.is_empty())
+                && line.source.copy.as_ref().is_some_and(|copy| {
+                    !copy.omit
+                        && (copy.table.is_some()
+                            || copy.item_prefix.contains("[x] ")
+                            || copy.item_prefix.contains("[ ] "))
+                })
+        }) {
+            return (plain.to_owned(), CopyFormat::PlainText);
+        }
+        unquoted = lines
+            .iter()
+            .map(|line| {
+                let mut source = line.source.clone();
+                if let Some(copy) = source.copy.as_mut() {
+                    let copy = Arc::make_mut(copy);
+                    copy.prefix = copy.prefix.replace("> ", "");
+                    copy.continuation = copy.continuation.replace("> ", "");
+                    copy.item_prefix = copy.item_prefix.replace("> ", "");
+                }
+                SelectedLine {
+                    source,
+                    range: line.range.clone(),
+                    separator: line.separator.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+        &unquoted
+    } else {
+        lines
+    };
+    let rich = lines.iter().enumerate().any(|(index, line)| {
+        (!line.range.is_empty() || index == 0 && rectangle_rows.is_some())
+            && line
+                .source
+                .copy
+                .as_ref()
+                .is_some_and(|copy| !copy.code && !copy.omit)
+    });
+    if !rich {
+        return (plain.to_owned(), CopyFormat::PlainText);
+    }
+    let mut out = String::new();
+    let mut lines = lines
+        .iter()
+        .filter(|line| !line.source.copy.as_ref().is_some_and(|copy| copy.omit))
+        .peekable();
+    let mut first = true;
+    let mut indentation: Option<usize> = None;
+    while let Some(line) = lines.next() {
+        if !first {
+            out.push_str(line.separator(output));
+        }
+        let prefix = line.source.copy.as_ref().map_or("", |copy| {
+            if indentation.is_none() && !line.range.is_empty() && lines.peek().is_some() {
+                &copy.item_prefix
+            } else {
+                &copy.prefix
+            }
+        });
+        if !line.range.is_empty() {
+            let spaces = prefix
+                .split("> ")
+                .map(|part| part.len() - part.trim_start_matches(' ').len())
+                .sum();
+            indentation = Some(indentation.map_or(spaces, |previous| previous.min(spaces)));
+        }
+        let prefix = dedent(prefix, indentation.unwrap_or(/*default*/ 0));
+        // A rectangle is scoped to the table at the start of the selection.
+        let rectangle = rectangle_rows.filter(|_| first);
+        if line.range.is_empty() && rectangle.is_none() {
+            if line.source.text.is_empty() {
+                out.push_str(prefix.trim_end());
+            }
+            first = false;
+            continue;
+        }
+        if let Some(table) = line
+            .source
+            .copy
+            .as_ref()
+            .and_then(|copy| copy.table.as_ref())
+        {
+            let mut selected = vec![line];
+            while let Some(next) = lines.peek()
+                && next
+                    .source
+                    .copy
+                    .as_ref()
+                    .and_then(|copy| copy.table.as_ref())
+                    .is_some_and(|next| Arc::ptr_eq(&next.table, &table.table))
+            {
+                selected.extend(lines.next());
+            }
+            let entire_selection = first && lines.peek().is_none();
+            let (mut body, format) =
+                table::render(&selected, table, entire_selection, rectangle, output);
+            if format == CopyFormat::PlainText {
+                body.retain(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'));
+                return (body, format);
+            }
+            let continuation = line
+                .source
+                .copy
+                .as_ref()
+                .map_or("", |copy| copy.continuation.as_str());
+            let continuation = dedent(continuation, indentation.unwrap_or(/*default*/ 0));
+            for (index, row) in body.lines().enumerate() {
+                if index > 0 {
+                    out.push('\n');
+                    out.push_str(&continuation);
+                } else {
+                    out.push_str(&prefix);
+                }
+                out.push_str(row);
+            }
+            if lines
+                .peek()
+                .is_some_and(|next| next.separator == "\n" && !next.range.is_empty())
+            {
+                out.push('\n');
+                out.push_str(continuation.trim_end());
+            }
+        } else if line.source.copy_as_prose {
+            let text = &line.source.text[line.range.clone()];
+            output.push_prose(&mut out, text, || escape(text));
+        } else if let Some(copy) = &line.source.copy
+            && !copy.code
+        {
+            if line.range.start == 0 || first && lines.peek().is_some() {
+                out.push_str(&prefix);
+            }
+            let text = &line.source.text[line.range.clone()];
+            output.push_prose(&mut out, text, || {
+                copy.render(&line.source.text, line.range.clone(), /*depth*/ 0)
+            });
+        } else {
+            // Preserve whitespace and Markdown-looking tool output within mixed selections.
+            let mut code = line.source.text[line.range.clone()].to_owned();
+            let continuation = line
+                .source
+                .copy
+                .as_ref()
+                .map_or("", |copy| copy.continuation.as_str());
+            while let Some(next) = lines.peek()
+                && !next.source.copy_as_prose
+                && next.source.copy.is_some() == line.source.copy.is_some()
+                && next.source.copy.as_ref().is_none_or(|copy| copy.code)
+                && next
+                    .source
+                    .copy
+                    .as_ref()
+                    .map_or("", |copy| copy.prefix.as_str())
+                    == continuation
+                && next
+                    .source
+                    .copy
+                    .as_ref()
+                    .map_or("", |copy| copy.continuation.as_str())
+                    == continuation
+            {
+                code.push_str(next.separator(output));
+                code.push_str(&next.source.text[next.range.clone()]);
+                lines.next();
+            }
+            if output == SelectionOutput::PlainText {
+                out.push_str(&prefix);
+                out.push_str(&code);
+                first = false;
+                continue;
+            }
+            let fence = fence(&code, /*minimum*/ 3);
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            let continuation = dedent(continuation, indentation.unwrap_or(/*default*/ 0));
+            // A checkbox label must precede the fence on its own line.
+            if prefix.ends_with("[ ] ") || prefix.ends_with("[x] ") {
+                out.push_str(prefix.trim_end());
+                out.push('\n');
+                out.push_str(&continuation);
+            } else {
+                out.push_str(&prefix);
+            }
+            out.push_str(&format!("{fence}\n"));
+            for row in code.split_inclusive('\n') {
+                out.push_str(&continuation);
+                out.push_str(row);
+            }
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&continuation);
+            out.push_str(&fence);
+        }
+        first = false;
+    }
+    out.retain(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'));
+    (out, CopyFormat::Markdown)
+}
+
+// Remove unselected ancestor list padding without discarding blockquote markers.
+fn dedent(prefix: &str, mut spaces: usize) -> String {
+    prefix
+        .split_inclusive("> ")
+        .map(|part| {
+            let remove = spaces.min(part.len() - part.trim_start_matches(' ').len());
+            spaces -= remove;
+            &part[remove..]
+        })
+        .collect()
+}
+
+fn fence(text: &str, minimum: usize) -> String {
+    "`".repeat(
+        text.split(|ch| ch != '`')
+            .map(str::len)
+            .max()
+            .unwrap_or(/*default*/ 0)
+            .saturating_add(/*rhs*/ 1)
+            .max(minimum),
+    )
+}
+
+// Append escaped prose without allowing its leading whitespace to become code indentation.
+fn push_prose_fragment(out: &mut String, text: &str) {
+    let body = text.trim_start_matches([' ', '\t']);
+    for ch in text[..text.len() - body.len()].chars() {
+        out.push_str(if ch == '\t' { "&#9;" } else { "&#32;" });
+    }
+    out.push_str(body);
+}
+
+fn escape(text: &str) -> String {
+    let mut out = String::new();
+    let mut whitespace_prefix = true;
+    let mut numeric_prefix = false;
+    let mut number_has_trailing_space = false;
+    for ch in text.chars() {
+        let block_marker =
+            "=-+".contains(ch) && whitespace_prefix || matches!(ch, '.' | ')') && numeric_prefix;
+        if "\\`*_[]<>~#|&!".contains(ch) || block_marker {
+            out.push('\\');
+        }
+        out.push(ch);
+        if ch.is_whitespace() {
+            number_has_trailing_space |= numeric_prefix;
+        } else {
+            numeric_prefix = ch.is_ascii_digit()
+                && (whitespace_prefix || numeric_prefix && !number_has_trailing_space);
+            whitespace_prefix = false;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+#[path = "markdown_copy_tests.rs"]
+mod tests;

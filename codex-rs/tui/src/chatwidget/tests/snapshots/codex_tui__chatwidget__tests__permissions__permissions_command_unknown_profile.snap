@@ -1,0 +1,5 @@
+---
+source: tui/src/chatwidget/tests/permissions.rs
+expression: lines_to_single_string(&cell.display_lines(80))
+---
+■ Unknown permission profile `unknown-profile`. Run `/permissions` to see available profiles.

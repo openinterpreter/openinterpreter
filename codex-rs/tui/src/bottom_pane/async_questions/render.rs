@@ -12,6 +12,7 @@ use crate::bottom_pane::selection_popup_common::menu_surface_inset;
 use crate::bottom_pane::selection_popup_common::menu_surface_padding_height;
 use crate::bottom_pane::selection_popup_common::render_menu_surface;
 use crate::render::renderable::Renderable;
+use crate::terminal_hyperlinks::HyperlinkParagraph;
 
 use super::AsyncQuestions;
 use super::TIP_SEPARATOR;
@@ -59,6 +60,7 @@ impl Renderable for AsyncQuestions {
         if self.other_selected() {
             self.render_inline_options(sections.options_area, buf);
         } else if self.has_options() && sections.options_area.height > 0 {
+            let option_rows = self.option_rows(sections.options_area.width);
             let mut options_state = self.state.pending[self.state.current_idx].options_state;
             let selected = options_state.selected_idx.unwrap_or(0);
             let heights: Vec<_> = option_rows
@@ -129,10 +131,7 @@ impl Renderable for AsyncQuestions {
                 buf,
             );
         }
-        let option_tip = (self.has_options()
-            && sections.options_area.height > 0
-            && self.options_required_height(content_area.width) > sections.options_area.height)
-            .then(|| self.option_tip());
+        let option_tip = sections.show_option_tip.then(|| self.option_tip());
         let lines = self
             .footer_lines(footer_area.width, option_tip)
             .into_iter()
@@ -209,7 +208,7 @@ impl AsyncQuestions {
             None
         };
         if let Some(label) = next
-            && let Some(key) = self.next_hint
+            && let Some(key) = chat_hint("edit_queued_message")
         {
             tips.push(crate::footer_hint::shortcut(&key.display_label(), label));
         }

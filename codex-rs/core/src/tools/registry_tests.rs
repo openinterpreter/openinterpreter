@@ -122,6 +122,20 @@ impl LifecycleTestHandler {
 
 impl CoreToolRuntime for LifecycleTestHandler {}
 
+impl codex_extension_api::ApprovalReviewContributor for LifecycleTestHandler {
+    fn decide<'a>(
+        &'a self,
+        _input: &'a codex_extension_api::ApprovalDecisionInput<'_>,
+    ) -> codex_extension_api::ExtensionFuture<'a, Option<codex_extension_api::ApprovalDecision>>
+    {
+        Box::pin(async {
+            Some(codex_extension_api::ApprovalDecision::Reviewed(
+                codex_protocol::protocol::ReviewDecision::denied("review denied"),
+            ))
+        })
+    }
+}
+
 fn test_spec(tool_name: &codex_tools::ToolName) -> codex_tools::ToolSpec {
     codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
         name: tool_name.name.clone(),
@@ -470,6 +484,7 @@ async fn function_tools_expose_default_hook_payloads_and_rewrites() -> anyhow::R
     assert_eq!(
         handler.post_tool_use_payload(&invocation, &output),
         Some(PostToolUsePayload {
+            tool_cwd: None,
             tool_name: HookToolName::new("functions.echo"),
             tool_use_id: "call-1".to_string(),
             tool_input: serde_json::json!({ "message": "hello" }),
@@ -563,7 +578,9 @@ async fn code_mode_wait_does_not_expose_default_hook_payloads() {
     let (session, turn) = crate::session::tests::make_session_and_context().await;
     let output = crate::tools::context::FunctionToolOutput::from_text("ok".to_string(), Some(true));
 
-    let wait = crate::tools::handlers::CodeModeWaitHandler;
+    let wait = crate::tools::handlers::CodeModeWaitHandler::new(
+        /*description_override*/ None, /*parameters_override*/ None,
+    );
     let wait_invocation = test_invocation(
         Arc::new(session),
         Arc::new(turn),
@@ -623,7 +640,7 @@ fn post_tool_use_feedback_output_preserves_fallback_token_limit_override(
     };
 
     assert_eq!(
-        result.into_response(),
+        result.into_response(/*file_backed_tool_audio*/ false),
         ResponseItemEnvelope {
             item: ResponseItem::from(ResponseInputItem::FunctionCallOutput {
                 call_id: "call-1".to_string(),
@@ -635,6 +652,45 @@ fn post_tool_use_feedback_output_preserves_fallback_token_limit_override(
             }),
         }
     );
+}
+
+#[test_case::test_case(true; "file-backed audio enabled")]
+#[test_case::test_case(false; "file-backed audio disabled")]
+fn mcp_audio_producer_limit_is_transient_until_history_admission(file_backed_tool_audio: bool) {
+    let result = AnyToolResult {
+        call_id: "clip".into(),
+        payload: ToolPayload::Function {
+            arguments: "{}".into(),
+        },
+        result: Box::new(crate::tools::context::McpToolOutput {
+            result: codex_protocol::mcp::CallToolResult {
+                content: vec![serde_json::json!({
+                    "type": "audio",
+                    "mimeType": "audio/wav",
+                    "data": "UklGRiYAAABXQVZFZm10IBAAAAABAAEAwF0AAIC7AAACABAAZGF0YQIAAAAAAA==",
+                })],
+                structured_content: None,
+                is_error: None,
+                meta: None,
+            },
+            tool_input: serde_json::json!({}),
+            result_metadata_capture_allowed: false,
+            wall_time: Duration::ZERO,
+            original_image_detail_supported: false,
+            truncation_policy: TruncationPolicy::Tokens(100),
+        }),
+        post_tool_use_payload: None,
+    };
+
+    let metadata = result
+        .into_response(file_backed_tool_audio)
+        .metadata
+        .unwrap();
+    assert_eq!(metadata.producer_bounded_tool_audio, file_backed_tool_audio);
+    assert!(!metadata.tool_audio_budget_applied);
+    let serialized = serde_json::to_value(&metadata).unwrap();
+    assert!(serialized.get("producer_bounded_tool_audio").is_none());
+    assert!(serialized.get("tool_audio_budget_applied").is_none());
 }
 
 #[test]
@@ -657,7 +713,7 @@ fn post_tool_use_feedback_output_keeps_code_mode_result_typed() {
     };
 
     assert_eq!(
-        result.into_response(),
+        result.into_response(/*file_backed_tool_audio*/ false),
         ResponseItemEnvelope::new(
             ResponseInputItem::FunctionCallOutput {
                 call_id: "call-1".to_string(),
@@ -739,7 +795,6 @@ async fn dispatch_uses_canonical_tool_names_for_lifecycle_contributors() -> anyh
     builder.tool_lifecycle_contributor(Arc::new(ToolLifecycleRecorder {
         records: Arc::clone(&records),
     }));
-    session.services.extensions = Arc::new(builder.build());
 
     let ok_tool = codex_tools::ToolName::plain("ok_tool");
     let failing_tool = codex_tools::ToolName::namespaced("extensions", "failing_tool");
@@ -751,7 +806,19 @@ async fn dispatch_uses_canonical_tool_names_for_lifecycle_contributors() -> anyh
         tool_name: failing_tool.clone(),
         result: LifecycleTestResult::Err,
     }) as Arc<dyn CoreToolRuntime>;
-    let registry = ToolRegistry::from_tools([ok_handler, failing_handler]);
+    let reviewed_tool = codex_tools::ToolName::namespaced("extensions", "reviewed_tool");
+    let reviewed_handler = Arc::new(LifecycleTestHandler {
+        tool_name: reviewed_tool.clone(),
+        result: LifecycleTestResult::Err,
+    });
+    builder.approval_review_contributor(reviewed_handler.clone());
+    session.services.extensions = Arc::new(builder.build());
+    let mut registry = ToolRegistry::from_tools([ok_handler, failing_handler]);
+    registry.register_trusted_with_native_review(
+        reviewed_handler,
+        super::ToolExposure::Direct,
+        super::NativeReview::Required,
+    );
     let session = Arc::new(session);
     let turn = Arc::new(turn);
 
@@ -782,6 +849,16 @@ async fn dispatch_uses_canonical_tool_names_for_lifecycle_contributors() -> anyh
         Err(err) => err,
     };
     assert_eq!(err.to_string(), "handler failed");
+    let denied = registry
+        .dispatch_any_with_state(
+            test_invocation(session, turn, "reviewed-call", reviewed_tool.clone()),
+            /*call_state*/ None,
+        )
+        .await;
+    assert_eq!(
+        denied.err().expect("review must deny").to_string(),
+        "review denied"
+    );
 
     let expected = vec![
         RecordedToolLifecycle::Start {
@@ -804,6 +881,13 @@ async fn dispatch_uses_canonical_tool_names_for_lifecycle_contributors() -> anyh
             tool_name: failing_tool,
             outcome: codex_extension_api::ToolCallOutcome::Failed {
                 handler_executed: true,
+            },
+        },
+        RecordedToolLifecycle::Finish {
+            call_id: "reviewed-call".to_string(),
+            tool_name: reviewed_tool,
+            outcome: codex_extension_api::ToolCallOutcome::Failed {
+                handler_executed: false,
             },
         },
     ];
@@ -835,6 +919,8 @@ fn test_invocation(
         call_id: call_id.to_string(),
         tool_name,
         source: crate::tools::context::ToolCallSource::Direct,
+        native_call: None,
+        environments: Default::default(),
         payload: ToolPayload::Function {
             arguments: "{}".to_string(),
         },

@@ -1,11 +1,13 @@
-//! Low-cardinality metrics for Guardian V2 classification, connections, and approval decisions.
+//! Structured failure diagnostics and low-cardinality metrics for Guardian V2 scoring and decisions.
 
 use std::time::Duration;
 
 use codex_api::ApiError;
 use codex_api::TransportError;
+use codex_core::context::GuardianContextMode;
 use codex_extension_api::ExtensionMetrics;
 
+use super::decisions::DecisionsError;
 use super::sampler::LunaSamplerError;
 
 pub(super) const CLASSIFICATION_METRIC: &str = "codex.guardian_v2.classification";
@@ -24,8 +26,8 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
         LunaSamplerError::MissingOutput => "missing_output",
         LunaSamplerError::OutputTooLarge => "output_too_large",
         LunaSamplerError::Superseded => "superseded",
-        LunaSamplerError::IncompatibleCompaction => "incompatible_compaction",
         LunaSamplerError::InputTooLarge => "input_too_large",
+        LunaSamplerError::QueueFull => "queue_full",
         LunaSamplerError::Api(error) => match error {
             ApiError::Transport(TransportError::Http { status, .. })
             | ApiError::Api { status, .. } => match status.as_u16() {
@@ -42,31 +44,55 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
             ApiError::Transport(TransportError::RetryLimit) => "retry_limit",
             ApiError::Transport(TransportError::Build(_)) => "request_build_error",
             ApiError::Transport(TransportError::ResponseTooLarge { .. }) => "response_too_large",
-            ApiError::Stream(_) => "stream_error",
+            ApiError::Transport(TransportError::Policy(_)) => "network_policy_denied",
+            ApiError::Stream(_) | ApiError::ContentFilter => "stream_error",
+            ApiError::WebsocketMessageTooLarge => "websocket_message_too_large",
+            ApiError::ResponseIncomplete(_) => "incomplete_response",
             ApiError::ContextWindowExceeded => "context_window_exceeded",
             ApiError::QuotaExceeded => "quota_exceeded",
             ApiError::UsageNotIncluded => "usage_not_included",
+            ApiError::SessionBudgetExceeded => "session_budget_exceeded",
             ApiError::Retryable { .. } => "retryable_api_error",
             ApiError::RateLimitExceeded { .. } | ApiError::RateLimit(_) => "rate_limit",
-            ApiError::InvalidRequest { .. } => "invalid_request",
+            ApiError::ModelNotFound { .. } => "model_not_found",
+            ApiError::InvalidRequest { .. }
+            | ApiError::InvalidAudioInput { .. }
+            | ApiError::InvalidPrompt { .. } => "invalid_request",
+            ApiError::AccessProgramNotEnabled { .. } => "access_program_not_enabled",
+            ApiError::ContentPolicyViolation { .. } => "content_policy_violation",
             ApiError::CyberPolicy { .. }
             | ApiError::BioPolicy { .. }
+            | ApiError::InferenceHookDenied { .. }
             | ApiError::MisalignmentPolicyViolation { .. } => "policy_error",
-            ApiError::ServerOverloaded => "server_overloaded",
+            ApiError::ServerOverloaded { .. } => "server_overloaded",
+            ApiError::PolicyCapacityUnavailable { .. } => "policy_capacity_unavailable",
+            ApiError::FlexUnavailable => "flex_unavailable",
         },
     }
 }
 
 pub(super) fn record_classification(
     metrics: Option<&dyn ExtensionMetrics>,
+    context_mode: GuardianContextMode,
     duration: Duration,
     outcome: &str,
     failure_reason: Option<&str>,
 ) {
+    if outcome == "failure" {
+        tracing::warn!(
+            failure_reason,
+            context_mode = context_mode.as_str(),
+            duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+            "Guardian V2 background scoring failed"
+        );
+    }
     let Some(metrics) = metrics else {
         return;
     };
-    let mut tags = vec![("outcome", outcome)];
+    let mut tags = vec![
+        ("outcome", outcome),
+        ("context_mode", context_mode.as_str()),
+    ];
     if let Some(reason) = failure_reason {
         tags.push(("failure_reason", reason));
     }
@@ -102,4 +128,172 @@ pub(super) fn record_fast_decision(
         /*inc*/ 1,
         &[("decision", decision), ("reason", reason)],
     );
+}
+
+pub(super) fn record_section_costs(
+    metrics: Option<&dyn ExtensionMetrics>,
+    costs: impl IntoIterator<Item = (&'static str, codex_guardian_context::SectionCost)>,
+) {
+    let Some(metrics) = metrics else {
+        return;
+    };
+    for (section, cost) in costs {
+        for (measurement, value) in cost.measurements() {
+            metrics.histogram_with_boundaries(
+                codex_guardian_context::SECTION_COST_METRIC,
+                i64::try_from(value).unwrap_or(i64::MAX),
+                codex_guardian_context::SECTION_COST_BOUNDARIES,
+                &[
+                    ("target", "async"),
+                    ("section", section),
+                    ("measurement", measurement),
+                ],
+            );
+        }
+    }
+}
+
+pub(super) fn record_request_tokens(
+    metrics: Option<&dyn ExtensionMetrics>,
+    existing: usize,
+    total: usize,
+) {
+    let Some(metrics) = metrics else {
+        return;
+    };
+    for (component, tokens) in [
+        ("existing_context", existing),
+        ("new_input", total.saturating_sub(existing)),
+        ("total", total),
+    ] {
+        let mut tags = vec![("target", "async"), ("component", component)];
+        // Histogram Count grouped by token_bucket counts only admitted complete inputs.
+        if component == "total" {
+            tags.push((
+                "token_bucket",
+                codex_guardian_context::request_token_bucket(total),
+            ));
+        }
+        metrics.histogram_with_boundaries(
+            codex_guardian_context::REQUEST_TOKENS_METRIC,
+            i64::try_from(tokens).unwrap_or(i64::MAX),
+            codex_guardian_context::REQUEST_TOKENS_BOUNDARIES,
+            &tags,
+        );
+    }
+}
+
+pub(super) fn record_decisions_comparison_outcome(
+    metrics: Option<&dyn ExtensionMetrics>,
+    outcome: &str,
+    reason: &str,
+) {
+    if let Some(metrics) = metrics {
+        metrics.counter(
+            "codex.guardian_v2.decisions_comparison",
+            /*inc*/ 1,
+            &[("outcome", outcome), ("reason", reason)],
+        );
+    }
+}
+
+// Keep all backend diagnostics bounded and free of raw transport data.
+pub(super) fn decisions_failure_reason(error: DecisionsError) -> &'static str {
+    match error {
+        DecisionsError::Credentials => "credentials_unavailable",
+        DecisionsError::ClientSetup => "request_build_error",
+        DecisionsError::UnexpectedRequestSetup => "unexpected_request_setup",
+        DecisionsError::UnsupportedInputItem => "unsupported_input_item",
+        DecisionsError::UnsupportedImage => "image",
+        DecisionsError::UnsupportedAudio => "audio",
+        DecisionsError::InputTooLarge => "input_too_large",
+        DecisionsError::Timeout => "transport_timeout",
+        // The adapter erases transport details; do not claim a specific network failure.
+        DecisionsError::Transport => "decisions_transport",
+        DecisionsError::Http(status) => match status {
+            401 => "http_401",
+            403 => "http_403",
+            429 => "http_429",
+            400..=499 => "http_4xx",
+            500..=599 => "http_5xx",
+            _ => "http_other",
+        },
+        DecisionsError::ResponseTooLarge => "response_too_large",
+        DecisionsError::InvalidResponse => "invalid_output",
+    }
+}
+
+// Called after the authoritative baseline has been published.
+pub(super) fn record_decisions_comparison(
+    completed: Result<(Result<&'static str, DecisionsError>, Duration), tokio::task::JoinError>,
+    responses_sample: Option<(&str, Duration)>,
+    metrics: Option<&dyn ExtensionMetrics>,
+) {
+    let decisions_sample = match completed {
+        Ok((result, duration)) => {
+            let outcome = match &result {
+                Ok(_) => "success",
+                Err(
+                    DecisionsError::UnsupportedInputItem
+                    | DecisionsError::UnsupportedImage
+                    | DecisionsError::UnsupportedAudio
+                    | DecisionsError::InputTooLarge,
+                ) => "skipped",
+                Err(_) => "failure",
+            };
+            record_decisions_comparison_outcome(
+                metrics,
+                outcome,
+                result
+                    .as_ref()
+                    .err()
+                    .map_or("none", |error| decisions_failure_reason(*error)),
+            );
+            result.ok().map(|risk| (risk, duration))
+        }
+        Err(error) => {
+            let (outcome, reason) = if error.is_cancelled() {
+                ("skipped", "superseded")
+            } else {
+                ("failure", "task_error")
+            };
+            record_decisions_comparison_outcome(metrics, outcome, reason);
+            None
+        }
+    };
+    if let Some(metrics) = metrics {
+        if let (Some((_, responses_duration)), Some((_, decisions_duration))) =
+            (responses_sample, decisions_sample)
+        {
+            // Compare latency only for the same successfully classified requests.
+            for (backend, duration) in [
+                ("responses", responses_duration),
+                ("decisions", decisions_duration),
+            ] {
+                metrics.histogram(
+                    "codex.guardian_v2.decisions_comparison.duration_ms",
+                    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
+                    &[("backend", backend), ("outcome", "success")],
+                );
+            }
+        }
+        let responses_risk = responses_sample.map(|(risk, _)| risk);
+        let decisions_risk = decisions_sample.map(|(risk, _)| risk);
+        let comparison = match (responses_risk, decisions_risk) {
+            (Some(responses_risk), Some(decisions_risk)) if responses_risk == decisions_risk => {
+                "agree"
+            }
+            (Some(_), Some(_)) => "disagree",
+            _ => "unavailable",
+        };
+        metrics.counter(
+            "codex.guardian_v2.decisions_comparison.comparison",
+            /*inc*/ 1,
+            &[
+                ("comparison", comparison),
+                ("responses", responses_risk.unwrap_or("unavailable")),
+                ("decisions", decisions_risk.unwrap_or("unavailable")),
+            ],
+        );
+    }
 }

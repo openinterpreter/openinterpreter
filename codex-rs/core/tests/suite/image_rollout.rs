@@ -43,7 +43,7 @@ use core_test_support::responses::strip_metadata;
 use core_test_support::responses::strip_response_item_id;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
-use core_test_support::test_codex::local_selections;
+use core_test_support::test_codex::local_requests;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
@@ -53,6 +53,7 @@ use image::ImageBuffer;
 use image::Rgba;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -188,7 +189,7 @@ async fn copy_paste_local_image_persists_rollout_request_shape() -> anyhow::Resu
                 },
             ])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(cwd.abs())),
+                environments: Some(local_requests(cwd.abs())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -216,6 +217,8 @@ async fn copy_paste_local_image_persists_rollout_request_shape() -> anyhow::Resu
 
     let image_url = extract_image_url(&actual).expect("expected image url in rollout");
     let expected = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![
@@ -286,7 +289,7 @@ async fn drag_drop_image_persists_rollout_request_shape() -> anyhow::Result<()> 
                 },
             ])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(cwd.abs())),
+                environments: Some(local_requests(cwd.abs())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -314,6 +317,8 @@ async fn drag_drop_image_persists_rollout_request_shape() -> anyhow::Result<()> 
 
     let image_url = extract_image_url(&actual).expect("expected image url in rollout");
     let expected = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![
@@ -597,8 +602,8 @@ async fn resumed_history_only_emits_resize_notices_for_new_images() -> anyhow::R
 
     let image_path = initial.cwd.path().join("large-image.png");
     ImageBuffer::from_pixel(
-        /*width*/ 2304,
-        /*height*/ 864,
+        /*width*/ 6400,
+        /*height*/ 256,
         Rgba([12u8, 34, 56, 255]),
     )
     .save(&image_path)?;
@@ -735,7 +740,7 @@ async fn resumed_history_only_emits_resize_notices_for_new_images() -> anyhow::R
 
     let expected_notice = concat!(
         "<image_resize_notice>\n",
-        "Image 1 of 1 in the preceding user message was resized from 2304x864 to 2048x768 pixels.\n",
+        "Image 1 of 1 in the preceding user message was resized from 6400x256 to 6000x240 pixels.\n",
         "</image_resize_notice>"
     );
     let resize_notices = request
@@ -829,11 +834,11 @@ async fn resumed_history_only_emits_resize_notices_for_new_images() -> anyhow::R
             else {
                 return None;
             };
-            matches!(envelope.item, ResponseItem::Message { role, .. } if role == "developer")
-                .then(|| envelope.metadata.map(|metadata| metadata.client_authored))
+            matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "developer")
+                .then(|| envelope.is_always_retained())
         })
         .collect::<Vec<_>>();
-    assert_eq!(persisted_developer_metadata, vec![None, Some(true)]);
+    assert_eq!(persisted_developer_metadata, vec![false, true]);
 
     Ok(())
 }

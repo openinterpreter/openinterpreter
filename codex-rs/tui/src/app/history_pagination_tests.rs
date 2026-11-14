@@ -4,6 +4,7 @@ use super::*;
 use crate::app::test_support::make_test_app;
 use crate::history_cell::ComputerActivityCell;
 use crate::history_cell::FinalMessageSeparator;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::UserInput;
 use pretty_assertions::assert_eq;
@@ -11,13 +12,15 @@ use pretty_assertions::assert_eq;
 fn turn(id: &str, status: TurnStatus, item_ids: &[&str]) -> Turn {
     Turn {
         id: id.to_string(),
+        root_turn_id: None,
         items: item_ids
             .iter()
-            .map(|id| ThreadItem::UserMessage {
+            .map(|id| ThreadItemPayload::UserMessage {
                 id: id.to_string(),
                 client_id: None,
                 content: Vec::new(),
             })
+            .map(codex_app_server_protocol::ThreadItem::untimed)
             .collect(),
         items_view: TurnItemsView::Full,
         status,
@@ -97,12 +100,12 @@ async fn hidden_last_item_keeps_turn_groups_and_completion_boundaries() {
         let expected_completions = usize::from(status == TurnStatus::Completed);
         let mut first = turn("first", status, &[]);
         first.items = vec![
-            ThreadItem::EnteredReviewMode {
+            ThreadItemPayload::EnteredReviewMode {
                 id: "enter-review".to_string(),
                 review: "current changes".to_string(),
             },
             computer("older-call"),
-            ThreadItem::UserMessage {
+            ThreadItemPayload::UserMessage {
                 id: "hidden".to_string(),
                 client_id: None,
                 content: vec![UserInput::Text {
@@ -110,11 +113,16 @@ async fn hidden_last_item_keeps_turn_groups_and_completion_boundaries() {
                     text_elements: Vec::new(),
                 }],
             },
-        ];
+        ]
+        .into_iter()
+        .map(codex_app_server_protocol::ThreadItem::untimed)
+        .collect();
         first.completed_at = Some(1_700_000_000);
         first.duration_ms = Some(125_000);
         let mut second = turn("second", TurnStatus::InProgress, &[]);
-        second.items = vec![computer("newer-call")];
+        second.items = vec![codex_app_server_protocol::ThreadItem::untimed(computer(
+            "newer-call",
+        ))];
         let turns = vec![first, second];
         let hidden = hidden_review_item_ids(&turns);
         assert_eq!(hidden, HashSet::from(["hidden"]));
@@ -220,7 +228,7 @@ async fn browsing_waits_for_a_prompt_outside_the_initial_history_window() -> Res
         &["older prompt", "latest prompt"],
     );
     for item in &mut review_turn.items {
-        if let ThreadItem::UserMessage { id, content, .. } = item {
+        if let ThreadItemPayload::UserMessage { id, content, .. } = &mut item.payload {
             *content = vec![UserInput::Text {
                 text: id.clone(),
                 text_elements: Vec::new(),
@@ -229,14 +237,14 @@ async fn browsing_waits_for_a_prompt_outside_the_initial_history_window() -> Res
     }
     review_turn.items.insert(
         /*index*/ 0,
-        ThreadItem::EnteredReviewMode {
+        ThreadItemPayload::EnteredReviewMode {
             id: "enter".to_string(),
             review: "review".to_string(),
         },
     );
     review_turn.items.insert(
         /*index*/ 2,
-        ThreadItem::ExitedReviewMode {
+        ThreadItemPayload::ExitedReviewMode {
             id: "exit".to_string(),
             review: "review".to_string(),
         },

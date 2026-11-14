@@ -36,7 +36,7 @@ impl ChatWidget {
         let docs_url = product.windows_sandbox_docs_url();
         let mut header = ColumnRenderable::new();
         header.push(*Box::new(
-            Paragraph::new(if allow_unelevated {
+            crate::terminal_hyperlinks::HyperlinkText::new(if allow_unelevated {
                 vec![
                     line![format!("Set up the {product_name} agent sandbox to protect your files and control network access. Learn more <{docs_url}>")],
                 ]
@@ -45,8 +45,7 @@ impl ChatWidget {
                     line![format!("Your organization requires the default {product_name} agent sandbox to continue. Set it up to protect your files and control network access.")],
                     line![format!("Learn more <{docs_url}>")],
                 ]
-            })
-            .wrap(Wrap { trim: false }),
+            }),
         ));
 
         let accept_otel = self.session_telemetry.clone();
@@ -174,7 +173,7 @@ impl ChatWidget {
         lines.push(line![format!("Learn more <{docs_url}>")]);
 
         let mut header = ColumnRenderable::new();
-        header.push(*Box::new(Paragraph::new(lines).wrap(Wrap { trim: false })));
+        header.push(crate::terminal_hyperlinks::HyperlinkText::new(lines));
 
         let elevated_preset = preset.clone();
         let legacy_preset = preset;
@@ -276,16 +275,21 @@ impl ChatWidget {
     ) {
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", test))]
     pub(crate) fn maybe_prompt_windows_sandbox_enable(&mut self, show_now: bool) {
         let setup_is_required = !self.windows_sandbox_config.is_enabled()
             || self.elevated_windows_sandbox_setup_required();
         if show_now
             && setup_is_required
-            && let Some(preset) = builtin_approval_presets()
+            && let Some(mut preset) = builtin_approval_presets()
                 .into_iter()
                 .find(|preset| preset.id == "auto")
         {
+            if self.config.active_project.trust_level.is_none()
+                && self.config.config_layer_stack.is_projectless()
+            {
+                preset.approval = self.config.permissions.approval_policy.value();
+            }
             self.open_windows_sandbox_enable_prompt(preset, /*profile_selection*/ None);
         }
     }

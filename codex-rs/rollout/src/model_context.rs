@@ -1,10 +1,16 @@
+//! Collects persisted rollout items needed to reconstruct the most recent context window.
+//!
+//! Storage readers feed items newest-to-oldest. The scan stops at the newest compaction that has
+//! both replacement history and a window number and a compatible completed turn context with a
+//! durable user or full-world-state baseline. Missing fields and rollback require full replay.
+//! Items are returned in chronological order; callers prepend canonical head metadata.
+
 use crate::ResponseItemEnvelope;
 use crate::RolloutItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
-use codex_protocol::protocol::SessionMetaLine;
 
 /// Whether a reverse model-context scan needs more rollout items.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15,37 +21,12 @@ pub enum ModelContextScanProgress {
     Complete,
 }
 
-/// Accumulates newest-to-oldest rollout items until they are sufficient to reconstruct the latest
-/// model context.
+/// Finds a bounded suffix for reconstructing the most recent context window.
 ///
-/// Storage implementations own how they fetch older items. Local JSONL readers and future
-/// reverse-paged cloud readers can both feed their items through this scan to share the cutoff
-/// rules and chronological replay assembly.
-///
-/// The scan stops once it has both:
-///
-/// - `saw_compaction`: a `CompactedItem` with `replacement_history` and `window_number`;
-/// - `saw_completed_turn_context`: a completed turn with a compatible `TurnContextItem` and a
-///   durable context baseline.
-///
-/// If the scan reaches the beginning before finding a bounded cutoff, it has already collected
-/// the complete replay and so we can return that directly.
-///
-/// A turn establishes a context baseline with a user-turn boundary (a paginated
-/// `ItemCompleted(UserMessage)` marker, agent message, or inter-agent message), or a full
-/// `WorldState` snapshot newer than that turn's latest compaction. The snapshot also lets turns
-/// with empty input supply resume metadata, matching rollout reconstruction. Without either,
-/// the scan continues to older turns. A raw `role=user` response item is not sufficient because
-/// contextual user fragments use that role but do not count as turn boundaries during reconstruction.
-/// The compaction restores model-visible items; the turn context restores previous settings
-/// (`model`, `comp_hash`, and `realtime_active`) and the reference baseline.
-///
-/// These paginated shapes disable the bounded cutoff:
-///
-/// - compaction without `replacement_history` or `window_number`;
-/// - rollback markers;
-///
-/// When one appears, the scanner continues to the beginning and returns the complete replay.
+/// A compaction with replacement history and a window number is a conversation-history boundary
+/// only after a compatible completed turn establishes its context baseline. A retained full world
+/// state after that turn's compaction can serve as its baseline even for an empty-input wake.
+/// Legacy rollback or an incomplete compaction require the entire rollout for reconstruction.
 #[derive(Debug, Default)]
 pub struct ModelContextScan {
     items_newest_first: Vec<RolloutItem>,
@@ -63,19 +44,12 @@ impl ModelContextScan {
         progress
     }
 
-    /// Returns the collected items in chronological order with canonical head metadata.
+    /// Returns the collected items in chronological order.
     ///
     /// Call this after the reader reaches the beginning of its source or after [`Self::push`]
     /// returns [`ModelContextScanProgress::Complete`].
-    pub fn finish(mut self, session_meta: SessionMetaLine) -> Vec<RolloutItem> {
+    pub fn finish(mut self) -> Vec<RolloutItem> {
         self.items_newest_first.reverse();
-        if self.has_bounded_cutoff() {
-            // A bounded scan stops before reaching the head. Prepend the separately loaded head
-            // SessionMeta, which remains canonical when copied fork history contains later
-            // metadata.
-            self.items_newest_first
-                .insert(0, RolloutItem::SessionMeta(session_meta));
-        }
         self.items_newest_first
     }
 
@@ -157,6 +131,7 @@ impl ModelContextScan {
                     state.full && !self.active_segment.saw_compaction;
             }
             RolloutItem::EventMsg(_)
+            | RolloutItem::DynamicToolsUpdated { .. }
             | RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::RealtimeItem(_)
@@ -207,5 +182,27 @@ fn response_item_counts_as_user_turn(response_item: &ResponseItemEnvelope) -> bo
             role == "assistant" && InterAgentCommunication::is_message_content(content)
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::ThreadId;
+
+    #[test]
+    fn dynamic_tool_catalog_is_retained_without_creating_a_context_boundary() {
+        let mut scan = ModelContextScan::default();
+        assert_eq!(
+            scan.push(RolloutItem::DynamicToolsUpdated {
+                thread_id: ThreadId::new(),
+                tools: vec![],
+            }),
+            ModelContextScanProgress::Continue
+        );
+        assert!(matches!(
+            scan.finish().as_slice(),
+            [RolloutItem::DynamicToolsUpdated { tools, .. }] if tools.is_empty()
+        ));
     }
 }

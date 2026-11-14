@@ -32,3 +32,6 @@ fn rejects_non_loopback_websocket_destinations() {
         ));
     }
 }
+
+#[path = "network_policy_tests.rs"]
+mod network_policy_tests;

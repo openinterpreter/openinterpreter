@@ -2,7 +2,7 @@
 //!
 //! This gives direct-spawn callers an argv-shaped Windows sandbox launcher,
 //! analogous to the macOS seatbelt and Linux sandbox wrapper paths. The wrapper
-//! parses sandbox metadata from argv, launches the requested inner command in a
+//! parses sandbox metadata from argv or a launch environment, launches the inner command in a
 //! Windows sandbox session, and forwards stdio to that inner command.
 
 use std::collections::HashMap;
@@ -53,7 +53,7 @@ pub fn create_windows_sandbox_command_args_for_permission_profile(
     command: Vec<String>,
     command_cwd: &AbsolutePathBuf,
     workspace_roots: &[AbsolutePathBuf],
-    env_map: &HashMap<String, String>,
+    env_map: &mut HashMap<String, String>,
     permission_profile: &PermissionProfile,
     windows_sandbox_level: WindowsSandboxLevel,
     proxy_enforced: bool,
@@ -275,6 +275,12 @@ pub fn run_windows_sandbox_wrapper_main() -> ! {
 }
 
 async fn run_windows_sandbox_wrapper_args(args: Vec<String>) -> Result<i32> {
+    let args = if args == [crate::launch_environment::ARG] {
+        serde_json::from_str(&crate::environment_transport::decode(std::env::vars_os())?)
+            .context("failed to parse Windows sandbox launch arguments")?
+    } else {
+        args
+    };
     let request = parse_windows_sandbox_wrapper_args(args)?;
     run_windows_sandbox_wrapper_request(request).await
 }

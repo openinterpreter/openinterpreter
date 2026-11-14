@@ -29,12 +29,12 @@ pub(crate) use codex_app_server_transport::TransportEvent;
 pub(crate) use codex_app_server_transport::acquire_app_server_startup_lock;
 pub use codex_app_server_transport::app_server_control_socket_path;
 pub(crate) use codex_app_server_transport::app_server_startup_lock_path;
-pub use codex_app_server_transport::auth;
 pub(crate) use codex_app_server_transport::start_control_socket_acceptor;
 pub(crate) use codex_app_server_transport::start_remote_control;
 pub(crate) use codex_app_server_transport::start_stdio_connection;
 pub(crate) use codex_app_server_transport::start_websocket_acceptor;
 pub use codex_app_server_transport::take_remote_control_disabled_env;
+pub use codex_app_server_transport::verified_local_daemon_socket;
 
 pub(crate) struct ConnectionState {
     pub(crate) origin: ConnectionOrigin,
@@ -230,11 +230,12 @@ pub(crate) async fn route_outgoing_envelope(
                 })
                 .collect();
 
-            for connection_id in target_connections {
+            let messages = std::iter::repeat_n(message, target_connections.len());
+            for (connection_id, message) in target_connections.into_iter().zip(messages) {
                 let _ = send_message_to_connection(
                     connections,
                     connection_id,
-                    message.clone(),
+                    message,
                     /*write_complete_tx*/ None,
                 )
                 .await;

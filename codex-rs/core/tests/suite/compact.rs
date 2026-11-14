@@ -19,10 +19,15 @@ use codex_protocol::config_types::Settings;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelServiceTier;
 use codex_protocol::openai_models::ModelsResponse;
+use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::AdditionalContextEntry;
+use codex_protocol::protocol::AdditionalContextKind;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookRunStatus;
@@ -30,7 +35,8 @@ use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
-use codex_protocol::protocol::WarningEvent;
+use codex_protocol::request_user_input::RequestUserInputAnswer;
+use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
@@ -43,12 +49,13 @@ use core_test_support::responses::ev_reasoning_item;
 use core_test_support::responses::mount_models_once;
 use core_test_support::responses::strip_response_item_ids_from_json;
 use core_test_support::skip_if_no_network;
-use core_test_support::test_codex::local_selections;
+use core_test_support::test_codex::local_requests;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::test_path_buf;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_match;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use core_test_support::responses::ev_assistant_message;
@@ -97,8 +104,6 @@ const NEW_GLOBAL_INSTRUCTIONS: &str = "new global instructions";
 const OLD_GLOBAL_INSTRUCTIONS: &str = "old global instructions";
 const REMOTE_V2_SUMMARY: &str = "global-instructions-remote-v2-summary";
 
-pub(super) const COMPACT_WARNING_MESSAGE: &str = "Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.";
-
 fn ev_exec_command_call(call_id: &str, command: &str) -> serde_json::Value {
     ev_function_call(
         call_id,
@@ -129,7 +134,7 @@ fn disabled_permission_user_turn(
         text_elements: Vec::new(),
     }])
     .with_thread_settings(ThreadSettingsOverrides {
-        environments: Some(local_selections(cwd.abs())),
+        environments: Some(local_requests(cwd.abs())),
         approval_policy: Some(AskForApproval::Never),
         sandbox_policy: Some(sandbox_policy),
         permission_profile,
@@ -526,6 +531,8 @@ async fn summarize_context_three_requests_and_instructions(
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
     const CUSTOM_INSTRUCTIONS: &str = "## Plan tool\nNever deploy without explicit approval.\n";
+    const ORIGINAL_FIRST_PART: &str =
+        "Example from our runbook:\n```sh\ndeploy --environment production";
 
     // Set up a mock server that we can inspect after the run.
     let server = start_mock_server().await;
@@ -569,11 +576,15 @@ async fn summarize_context_three_requests_and_instructions(
     codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![
             UserInput::Text {
-                text: "hello world".into(),
+                text: ORIGINAL_FIRST_PART.into(),
                 text_elements: Vec::new(),
             },
             UserInput::Text {
-                text: " second fragment".into(),
+                text: String::new(),
+                text_elements: Vec::new(),
+            },
+            UserInput::Text {
+                text: "```\nDo not deploy to production. Only inspect the configuration.".into(),
                 text_elements: Vec::new(),
             },
         ]))
@@ -582,11 +593,6 @@ async fn summarize_context_three_requests_and_instructions(
 
     // 2) Summarize – second hit should include the summarization prompt.
     codex.submit(Op::Compact).await?;
-    let warning_event = wait_for_event(&codex, |ev| matches!(ev, EventMsg::Warning(_))).await;
-    let EventMsg::Warning(WarningEvent { message }) = warning_event else {
-        panic!("expected warning event after compact");
-    };
-    assert_eq!(message, COMPACT_WARNING_MESSAGE);
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     // 3) Next user input – third hit; history should include only the summary.
@@ -603,6 +609,11 @@ async fn summarize_context_three_requests_and_instructions(
     assert_eq!(requests.len(), 3, "expected exactly three requests");
     let body2 = requests[1].body_json();
     let body3 = requests[2].body_json();
+    let original_user_message = requests[0]
+        .input()
+        .into_iter()
+        .find(|item| item["role"] == "user" && item["content"][0]["text"] == ORIGINAL_FIRST_PART)
+        .expect("original multipart user message");
 
     // Manual compact should keep the baseline developer instructions.
     let instr1 = requests[0].instructions_text();
@@ -678,9 +689,7 @@ async fn summarize_context_three_requests_and_instructions(
         "third request should include the new user message"
     );
     assert!(
-        messages
-            .iter()
-            .any(|(r, t)| r == "user" && t == "hello world second fragment"),
+        input3.contains(&original_user_message),
         "third request should include the original user message"
     );
     assert!(
@@ -704,7 +713,7 @@ async fn summarize_context_three_requests_and_instructions(
         .expect("local compaction should persist replacement history");
     let compacted_user_message = replacement_history
         .iter()
-        .find(|item| item["content"][0]["text"] == "hello world second fragment")
+        .find(|item| item["content"][0]["text"] == ORIGINAL_FIRST_PART)
         .expect("persisted replacement history should contain the compacted user message");
     assert_eq!(
         json!({
@@ -717,15 +726,15 @@ async fn summarize_context_three_requests_and_instructions(
         json!({
             "type": "message",
             "role": "user",
-            "content": [{"type": "input_text", "text": "hello world second fragment"}],
-            "content_item_kinds": ["user.text"],
+            "content": original_user_message["content"],
+            "content_item_kinds": ["user.text", "user.text", "user.text"],
         }),
     );
 
     // Verify rollout contains user-turn TurnContext entries and a Compacted entry.
     println!("rollout path: {}", rollout_path.display());
     let text = std::fs::read_to_string(&rollout_path).expect("failed to read rollout file");
-    let mut regular_turn_context_count = 0usize;
+    let mut turn_context_count = 0usize;
     let mut saw_compacted_summary = false;
     for line in text.lines() {
         let trimmed = line.trim();
@@ -737,7 +746,7 @@ async fn summarize_context_three_requests_and_instructions(
         };
         match entry.item {
             RolloutItem::TurnContext(_) => {
-                regular_turn_context_count += 1;
+                turn_context_count += 1;
             }
             RolloutItem::Compacted(ci) if ci.message == expected_summary_message => {
                 let summary_item = ci
@@ -770,8 +779,8 @@ async fn summarize_context_three_requests_and_instructions(
     }
 
     assert_eq!(
-        regular_turn_context_count, 2,
-        "rollout should contain one TurnContext entry per real user turn"
+        turn_context_count, 3,
+        "rollout should contain two user-turn contexts and the compaction baseline"
     );
     assert!(
         saw_compacted_summary,
@@ -827,7 +836,6 @@ async fn manual_pre_compact_block_decision_does_not_block_compaction() {
     })
     .await;
     assert_eq!(completed.run.status, HookRunStatus::Failed);
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::Warning(_))).await;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     let requests = request_log.requests();
@@ -883,7 +891,6 @@ async fn compact_hooks_respect_matchers_and_post_runs_after_compaction() {
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     codex.submit(Op::Compact).await.expect("trigger compact");
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::Warning(_))).await;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     assert_eq!(request_log.requests().len(), 2);
@@ -947,11 +954,6 @@ async fn manual_compact_uses_custom_prompt() {
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     codex.submit(Op::Compact).await.expect("trigger compact");
-    let warning_event = wait_for_event(&codex, |ev| matches!(ev, EventMsg::Warning(_))).await;
-    let EventMsg::Warning(WarningEvent { message }) = warning_event else {
-        panic!("expected warning event after compact");
-    };
-    assert_eq!(message, COMPACT_WARNING_MESSAGE);
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     let requests = request_log.requests();
@@ -995,6 +997,139 @@ async fn manual_compact_uses_custom_prompt() {
             "summarization prompt should not appear if compaction omits a prompt"
         );
     }
+}
+
+#[test_case::test_case(false; "local_messages")]
+#[test_case::test_case(true; "remote_tool_outputs")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn additional_context_survives_compaction(remote: bool) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let (provider, summary) = if remote {
+        (
+            openai_model_provider(&server),
+            remote_v2_compaction_response(),
+        )
+    } else {
+        (
+            local_compaction_provider(&server),
+            sse(vec![
+                ev_assistant_message("summary", "Compacted."),
+                ev_completed("compact"),
+            ]),
+        )
+    };
+    let requests = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![ev_completed("first")]),
+            sse(vec![ev_completed("second")]),
+            summary,
+            sse(vec![ev_completed("follow-up")]),
+        ],
+    )
+    .await;
+    let test = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(move |config| {
+            config.model_provider = provider;
+            set_test_compact_prompt(config);
+            config
+                .features
+                .set_enabled(Feature::UntrustedAsToolOutput, remote)
+                .expect("set context tool-output format");
+            config
+                .features
+                .enable(Feature::RetainClientDeveloperMessages)
+                .expect("retain client developer messages");
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    let untrusted = |value: &str| {
+        AdditionalContextEntry::new(value.to_owned(), AdditionalContextKind::Untrusted)
+    };
+    let mut context = BTreeMap::from([
+        ("page".to_owned(), untrusted("old selection")),
+        ("removed".to_owned(), untrusted("closed tab")),
+        (
+            "app".to_owned(),
+            AdditionalContextEntry::new("editor".to_owned(), AdditionalContextKind::Application),
+        ),
+    ]);
+    let submit = async |prompt: &str, context| -> Result<()> {
+        test.codex
+            .start_or_steer_turn(
+                TurnInputRequest::user_input(vec![UserInput::Text {
+                    text: prompt.to_owned(),
+                    text_elements: Vec::new(),
+                }])
+                .with_additional_context(context),
+            )
+            .await?;
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await;
+        Ok(())
+    };
+    submit("first", context.clone()).await?;
+    context.remove("removed");
+    context.insert("page".to_owned(), untrusted("current selection"));
+    submit("second", context.clone()).await?;
+
+    test.codex.submit(Op::Compact).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    submit("follow-up", context).await?;
+
+    let requests = requests.requests();
+    assert_eq!(requests.len(), 4);
+    let follow_up = &requests[3];
+    assert!(!follow_up.body_contains_text("closed tab"));
+    assert!(!follow_up.body_contains_text("old selection"));
+    let app_messages = follow_up
+        .message_input_texts("developer")
+        .into_iter()
+        .filter(|text| text == "<app>editor</app>")
+        .collect::<Vec<_>>();
+    assert_eq!(app_messages, ["<app>editor</app>"]);
+    // The context belongs to the compacted window, before the preserved second prompt.
+    let input = follow_up.input();
+    let second_prompt = input
+        .iter()
+        .position(|item| item["content"][0]["text"] == "second")
+        .expect("preserved second prompt");
+    assert!(
+        input[..second_prompt]
+            .iter()
+            .any(|item| item["output"] == "current selection"
+                || item["content"][0]["text"]
+                    == "<external_page>current selection</external_page>")
+    );
+    if remote {
+        let page_outputs = follow_up
+            .inputs_of_type("function_call_output")
+            .into_iter()
+            .filter(|item| item["namespace"] == "agent" && item["name"] == "page")
+            .map(|item| item["output"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(page_outputs, [json!("current selection")]);
+    } else {
+        let page_messages = follow_up
+            .message_input_texts("user")
+            .into_iter()
+            .filter(|text| text.starts_with("<external_page>"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            page_messages,
+            ["<external_page>current selection</external_page>"]
+        );
+    }
+    Ok(())
 }
 
 #[test_case::test_case(false; "success")]
@@ -1142,6 +1277,146 @@ async fn reasoning_effort_override_remote_v2_compaction_resets_pinned_effort(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreground_compaction_only_installs_and_bills_after_its_post_hook() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let responses = ["seed", "interrupted", "accepted"].map(|id| {
+        sse(vec![
+            ev_assistant_message(id, id),
+            ev_completed_with_tokens(id, /*total_tokens*/ 42),
+        ])
+    });
+    let model = mount_sse_sequence(&server, responses.to_vec()).await;
+    let hook_server = start_mock_server().await;
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let held = Arc::new(tokio::sync::Notify::new());
+    let (release, gate) = std::sync::mpsc::channel();
+    let gate = std::sync::Mutex::new(gate);
+    core_test_support::hooks::mount_hook_mcp(&hook_server, "observer", &["pre", "post"], {
+        let calls = Arc::clone(&calls);
+        let held = Arc::clone(&held);
+        move |params| {
+            let input = &params["arguments"];
+            if input["kind"] == "foreground_compaction" {
+                calls
+                    .lock()
+                    .unwrap()
+                    .push((params["name"].clone(), input["response_id"].clone()));
+                if input["response_id"] == "interrupted" {
+                    held.notify_one();
+                    // Dropping the sender also releases the mock if an assertion fails.
+                    let _ = gate.lock().unwrap().recv();
+                }
+            }
+            json!({"content":[]})
+        }
+    })
+    .await;
+    let url = format!("{}/repl", hook_server.uri());
+    let provider = non_openai_model_provider(&server);
+    let accounting = Arc::new(super::rollout_budget::HostAccounting::default());
+    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
+    extensions.thread_lifecycle_contributor(accounting.clone());
+    let test = test_codex()
+        .with_pre_build_hook(move |home| {
+            let hook = |tool, input| {
+                json!([{ "hooks": [{
+                    "type": "mcp_tool",
+                    "server": "observer",
+                    "tool": tool,
+                    "input": input
+                }] }])
+            };
+            let config = json!({
+                "hooks": {
+                    "PreModelRequest": hook("pre", json!({ "kind": "${kind}" })),
+                    "PostModelRequest": hook("post", json!({
+                        "kind": "${kind}",
+                        "response_id": "${response_id}"
+                    }))
+                },
+                "mcp_servers": { "observer": {
+                    "url": url,
+                    "environment_id": super::rmcp_client::remote_aware_environment_id()
+                } }
+            });
+            fs::write(home.join("config.toml"), toml::to_string(&config).unwrap()).unwrap();
+        })
+        .with_config(move |config| {
+            config.model_provider = provider;
+            set_test_compact_prompt(config);
+            trust_discovered_hooks(config);
+        })
+        .with_extensions(Arc::new(extensions.build()))
+        .build_with_auto_env(&server)
+        .await?;
+    test.submit_turn("seed history").await?;
+    let charged_turns = || {
+        accounting
+            .reports
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.turn_id.clone())
+            .collect::<Vec<_>>()
+    };
+    let seed_charges = charged_turns();
+    assert_eq!(seed_charges.len(), 1);
+
+    test.codex.submit(Op::Compact).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(15), held.notified()).await?;
+    test.codex.flush_rollout().await?;
+    let history = test.codex.load_history(/*include_archived*/ false).await?;
+    assert!(
+        !history
+            .items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::Compacted(_)))
+    );
+    assert_eq!(charged_turns(), seed_charges);
+    test.codex.submit(Op::Interrupt).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnAborted(_))
+    })
+    .await;
+    release.send(())?;
+
+    let accepted_turn = test.codex.submit(Op::Compact).await?;
+    wait_for_event(
+        &test.codex,
+        |event| matches!(event, EventMsg::TurnComplete(done) if done.turn_id == accepted_turn),
+    )
+    .await;
+    test.codex.flush_rollout().await?;
+    let history = test.codex.load_history(/*include_archived*/ false).await?;
+    let checkpoints: Vec<_> = history
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::Compacted(checkpoint) => {
+                Some(checkpoint.compaction_response_id.as_deref())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(checkpoints, [Some("accepted")]);
+    let mut expected_charges = seed_charges;
+    expected_charges.push(accepted_turn);
+    assert_eq!(charged_turns(), expected_charges);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            (json!("pre"), Value::Null),
+            (json!("post"), json!("interrupted")),
+            (json!("pre"), Value::Null),
+            (json!("post"), json!("accepted")),
+        ]
+    );
+    assert_eq!(model.requests().len(), 3);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_compact_records_durable_and_local_token_usage() {
     skip_if_no_network!();
 
@@ -1154,19 +1429,34 @@ async fn manual_compact_records_durable_and_local_token_usage() {
         ev_assistant_message("m1", SUMMARY_TEXT),
         ev_completed_with_tokens("r1", /*total_tokens*/ 0),
     ]);
-    mount_sse_once(&server, sse_compact).await;
+    mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_assistant_message("initial", FIRST_REPLY),
+                ev_completed_with_tokens("initial", /*total_tokens*/ 1_000),
+            ]),
+            sse_compact,
+        ],
+    )
+    .await;
 
     let model_provider = non_openai_model_provider(&server);
     let mut builder = test_codex().with_config(move |config| {
         config.model_provider = model_provider;
         set_test_compact_prompt(config);
     });
-    let test = builder.build(&server).await.unwrap();
+    let test = builder.build_with_auto_env(&server).await.unwrap();
+    test.submit_turn("hello").await.unwrap();
     let rollout_path = test.codex.rollout_path().expect("rollout path");
     let codex = test.codex;
 
     // Trigger manual compact and collect TokenCount events for the compact turn.
     codex.submit(Op::Compact).await.unwrap();
+    wait_for_event(&codex, |event| {
+        matches!(event, EventMsg::RawResponseCompleted(response) if response.response_id == "r1")
+    })
+    .await;
 
     // First TokenCount: from the compact API call (usage.total_tokens = 0).
     let first = wait_for_event_match(&codex, |ev| match ev {
@@ -1212,9 +1502,9 @@ async fn manual_compact_records_durable_and_local_token_usage() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].response_id, "r1");
-    assert_eq!(records[0].usage.total_tokens, 0);
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[1].response_id, "r1");
+    assert_eq!(records[1].usage.total_tokens, 0);
     let compacted = rollout_items
         .iter()
         .find_map(|item| match item {
@@ -1227,7 +1517,7 @@ async fn manual_compact_records_durable_and_local_token_usage() {
             compacted.compaction_response_id.as_deref(),
             compacted.latest_token_usage_record.as_ref(),
         ),
-        (Some("r1"), records.first().copied())
+        (Some("r1"), records.last().copied())
     );
 }
 
@@ -1241,10 +1531,15 @@ async fn manual_compact_emits_context_compaction_items() {
         ev_assistant_message("m1", FIRST_REPLY),
         ev_completed("r1"),
     ]);
-    let sse2 = sse(vec![
-        ev_assistant_message("m2", SUMMARY_TEXT),
-        ev_completed("r2"),
-    ]);
+    let reasoning = ev_reasoning_item("compact-reasoning", &["Summarizing the conversation"], &[]);
+    let summary = ev_assistant_message("m2", SUMMARY_TEXT);
+    let mut expected_summary = summary["item"].clone();
+    expected_summary["internal_chat_message_metadata_passthrough"] =
+        json!({ "content_item_kinds": ["unknown"] });
+    let mut expected_raw_items = [reasoning["item"].clone(), expected_summary]
+        .map(|item| serde_json::from_value::<ResponseItem>(item).unwrap())
+        .to_vec();
+    let sse2 = sse(vec![reasoning, summary, ev_completed("r2")]);
     mount_sse_sequence(&server, vec![sse1, sse2]).await;
 
     let model_provider = non_openai_model_provider(&server);
@@ -1252,7 +1547,8 @@ async fn manual_compact_emits_context_compaction_items() {
         config.model_provider = model_provider;
         set_test_compact_prompt(config);
     });
-    let codex = builder.build(&server).await.unwrap().codex;
+    let test = builder.build_with_auto_env(&server).await.unwrap();
+    let codex = &test.codex;
 
     codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
@@ -1261,14 +1557,19 @@ async fn manual_compact_emits_context_compaction_items() {
         }]))
         .await
         .unwrap();
-    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    wait_for_event(codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
 
-    codex.submit(Op::Compact).await.unwrap();
+    let compact_turn_id = codex.submit(Op::Compact).await.unwrap();
+    for item in &mut expected_raw_items {
+        item.set_turn_id_if_missing(&compact_turn_id);
+    }
 
     let mut started_item = None;
     let mut completed_item = None;
     let mut legacy_event = false;
     let mut saw_turn_complete = false;
+    let mut raw_items = Vec::new();
+    let mut raw_items_at_response_completion = None;
 
     while !saw_turn_complete || started_item.is_none() || completed_item.is_none() || !legacy_event
     {
@@ -1292,6 +1593,10 @@ async fn manual_compact_emits_context_compaction_items() {
             EventMsg::TurnComplete(_) => {
                 saw_turn_complete = true;
             }
+            EventMsg::RawResponseItem(event) => raw_items.push(event.item),
+            EventMsg::RawResponseCompleted(_) => {
+                raw_items_at_response_completion = Some(raw_items.clone());
+            }
             _ => {}
         }
     }
@@ -1300,6 +1605,35 @@ async fn manual_compact_emits_context_compaction_items() {
     let completed_item = completed_item.expect("context compaction item completed");
     assert_eq!(started_item.id, completed_item.id);
     assert!(legacy_event);
+    // Raw output remains observable before the terminal response notification,
+    // independently of when the summary is installed into conversation history.
+    assert_eq!(
+        raw_items_at_response_completion,
+        Some(expected_raw_items.clone())
+    );
+
+    let rollout =
+        fs::read_to_string(test.codex.rollout_path().expect("rollout path")).expect("read rollout");
+    let persisted_output = rollout
+        .lines()
+        .map(|line| {
+            codex_rollout::parse_rollout_line(line)
+                .expect("rollout item")
+                .item
+        })
+        .filter_map(|item| match item {
+            RolloutItem::ResponseItem(envelope)
+                if envelope
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.compaction_output) =>
+            {
+                Some(envelope.item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(persisted_output, expected_raw_items);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1466,21 +1800,10 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
                     return None;
                 }
 
-                let texts = value
-                    .get("content")
-                    .and_then(|content| content.as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|item| item.get("text").and_then(|text| text.as_str()));
-
-                // Ignore cached prefix messages (project docs + permissions) since they are not
-                // relevant to compaction behavior and can change as bundled prompts evolve.
+                // Ignore instruction prefixes since they are not relevant to the history
+                // being compacted and can change as bundled prompts evolve.
                 let role = value.get("role").and_then(|role| role.as_str());
-                if role == Some("developer")
-                    && texts
-                        .into_iter()
-                        .any(|text| text.contains("`sandbox_mode`"))
-                {
+                if role == Some("developer") {
                     return None;
                 }
                 if role == Some("user") {
@@ -1954,18 +2277,10 @@ async fn auto_compact_runs_after_token_limit_hit() {
         .expect("follow-up request missing");
     assert_eq!(follow_up_index, 3, "follow-up request should be last");
 
-    let body_first = requests[0].body_json();
     let body_auto = requests[auto_compact_index].body_json();
     let body_follow_up = requests[follow_up_index].body_json();
-    let instructions = body_auto
-        .get("instructions")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let baseline_instructions = body_first
-        .get("instructions")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
+    let instructions = requests[auto_compact_index].instructions_text();
+    let baseline_instructions = requests[0].instructions_text();
     assert_eq!(
         instructions, baseline_instructions,
         "auto compact should keep the standard developer instructions",
@@ -2843,8 +3158,12 @@ async fn pre_sampling_compact_falls_back_when_previous_model_is_not_found() {
     );
 }
 
+#[test_case::test_case("openai"; "built in provider")]
+#[test_case::test_case("local"; "cloud agent provider alias")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pre_sampling_compact_falls_back_after_previous_model_invalid_request_on_downshift() {
+async fn pre_sampling_compact_falls_back_after_previous_model_invalid_request_on_downshift(
+    provider_id: &'static str,
+) {
     skip_if_no_network!();
 
     let server = MockServer::start().await;
@@ -2899,11 +3218,15 @@ async fn pre_sampling_compact_falls_back_after_previous_model_invalid_request_on
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_model(retired_model)
         .with_config(move |config| {
+            config.model_provider_id = provider_id.to_owned();
             config.model_provider = model_provider;
             config.tool_registry.turn_metadata_includes_tool_info = true;
             set_test_compact_prompt(config);
         });
-    let test = builder.build(&server).await.expect("build test codex");
+    let test = builder
+        .build_with_auto_env(&server)
+        .await
+        .expect("build test codex");
 
     test.codex
         .start_or_steer_turn(disabled_permission_user_turn(
@@ -3878,22 +4201,25 @@ async fn manual_compact_retries_after_context_window_error() {
         ev_assistant_message("m1", FIRST_REPLY),
         ev_completed("r1"),
     ]);
-    let compact_failed = sse_failed(
-        "resp-fail",
-        "context_length_exceeded",
-        CONTEXT_LIMIT_MESSAGE,
-    );
+    let compact_failed = wiremock::ResponseTemplate::new(/*s*/ 400).set_body_json(json!({
+        "error": {
+            "type": "invalid_request_error",
+            "code": "context_length_exceeded",
+            "message": CONTEXT_LIMIT_MESSAGE,
+            "param": "input",
+        }
+    }));
     let compact_succeeds = sse(vec![
         ev_assistant_message("m2", SUMMARY_TEXT),
         ev_completed("r2"),
     ]);
 
-    let request_log = mount_sse_sequence(
+    let request_log = mount_response_sequence(
         &server,
         vec![
-            user_turn.clone(),
-            compact_failed.clone(),
-            compact_succeeds.clone(),
+            sse_response(user_turn),
+            compact_failed,
+            sse_response(compact_succeeds),
         ],
     )
     .await;
@@ -3917,11 +4243,6 @@ async fn manual_compact_retries_after_context_window_error() {
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     codex.submit(Op::Compact).await.unwrap();
-    let warning_event = wait_for_event(&codex, |ev| matches!(ev, EventMsg::Warning(_))).await;
-    let EventMsg::Warning(WarningEvent { message }) = warning_event else {
-        panic!("expected warning event after compact retry");
-    };
-    assert_eq!(message, COMPACT_WARNING_MESSAGE);
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     let requests = request_log.requests();
@@ -3955,7 +4276,8 @@ async fn manual_compact_retries_after_context_window_error() {
         compact_input.len(),
         retry_input.len()
     );
-    if let (Some(first_before), Some(first_after)) = (compact_input.first(), retry_input.first()) {
+    assert_eq!(compact_input.first(), retry_input.first());
+    if let (Some(first_before), Some(first_after)) = (compact_input.get(1), retry_input.get(1)) {
         assert_ne!(
             first_before, first_after,
             "retry should drop the oldest conversation item"
@@ -4104,6 +4426,16 @@ async fn manual_compact_twice_preserves_latest_user_messages() {
         .unwrap();
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
+    let mail = json!({
+        "type": "agent_message", "id": "agent_pending-result",
+        "author": "/root/worker", "recipient": "/root",
+        "content": [{"type": "input_text", "text": "Message Type: FINAL_ANSWER\nThe worker found a release blocker."}],
+    });
+    codex
+        .inject_response_items(vec![serde_json::from_value(mail.clone()).unwrap()])
+        .await
+        .unwrap();
+
     codex.submit(Op::Compact).await.unwrap();
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
@@ -4129,6 +4461,11 @@ async fn manual_compact_twice_preserves_latest_user_messages() {
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     let requests = responses_mock.requests();
+    assert_eq!(
+        responses::strip_metadata_from_json(json!(requests[2].inputs_of_type("agent_message"))),
+        json!([mail]),
+    );
+    assert!(requests[4].inputs_of_type("agent_message").is_empty());
     assert_eq!(
         requests.len(),
         5,
@@ -4258,15 +4595,10 @@ async fn manual_compact_twice_preserves_latest_user_messages() {
         final_request_last_user_text, final_user_message,
         "final turn request should end with the submitted user message"
     );
-    let history_before_seeded_prefix = final_request_before_last_user
-        .strip_suffix(initial_seeded_user_prefix)
-        .expect("final request should end with the seeded user prefix from the first request");
-    let expected_history = vec![
-        first_user_message.to_string(),
-        second_user_message.to_string(),
-        expected_second_summary,
-    ];
-    assert_eq!(history_before_seeded_prefix, expected_history.as_slice());
+    let mut expected_history = vec![first_user_message.to_string()];
+    expected_history.extend_from_slice(initial_seeded_user_prefix);
+    expected_history.extend([second_user_message.to_string(), expected_second_summary]);
+    assert_eq!(final_request_before_last_user, expected_history.as_slice());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4379,6 +4711,213 @@ async fn auto_compact_allows_multiple_attempts_when_interleaved_with_other_turn_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn paginated_compaction_cold_resume_from_bounded_suffix() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_function_call(
+                    DUMMY_CALL_ID,
+                    "request_user_input",
+                    &json!({"questions": [{
+                        "id": "next", "header": "Next", "question": "Continue?",
+                        "options": [
+                            {"label": "Yes", "description": "Continue."},
+                            {"label": "No", "description": "Stop."}
+                        ]
+                    }]})
+                    .to_string(),
+                ),
+                ev_completed_with_tokens("before-compact", /*total_tokens*/ 96),
+            ]),
+            sse(vec![
+                ev_assistant_message("summary", &auto_summary(AUTO_SUMMARY_TEXT)),
+                ev_completed_with_tokens("compact", /*total_tokens*/ 10),
+            ]),
+            sse(vec![
+                ev_assistant_message("continued", "continued"),
+                ev_completed_with_tokens("continued", /*total_tokens*/ 10),
+            ]),
+            sse(vec![ev_completed_with_tokens(
+                "resumed", /*total_tokens*/ 10,
+            )]),
+        ],
+    )
+    .await;
+    let provider = non_openai_model_provider(&server);
+    let test = test_codex()
+        .with_model_info_override("gpt-5.4", |model| {
+            model.multi_agent_version = Some(codex_protocol::protocol::MultiAgentVersion::V2);
+        })
+        .with_history_mode(codex_protocol::protocol::ThreadHistoryMode::Paginated)
+        .with_config(move |config| {
+            config
+                .features
+                .disable(Feature::MultiAgentV2)
+                .expect("disable override");
+            config.agents_enabled = true;
+            config.model_provider = provider;
+            config.include_environment_context = false;
+            set_test_compact_prompt(config);
+            config.model_context_window = Some(100);
+            config.model_auto_compact_token_limit = Some(90);
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    core_test_support::submit_thread_settings(
+        &test.codex,
+        ThreadSettingsOverrides {
+            collaboration_mode: Some(CollaborationMode {
+                mode: ModeKind::Plan,
+                settings: Settings {
+                    model: test.session_configured.model.clone(),
+                    reasoning_effort: test.config.model_reasoning_effort.clone(),
+                    developer_instructions: Some(
+                        "Preserve the compaction's plan instructions.".into(),
+                    ),
+                },
+            }),
+            ..Default::default()
+        },
+    )
+    .await?;
+    // The resumed turn retains its frozen settings, even after an in-flight update.
+    let expected_settings = test.codex.thread_settings_snapshot().await;
+    let codex_core::TurnInputSubmission::Started { turn_id, .. } = test
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: FUNCTION_CALL_LIMIT_MSG.into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?
+    else {
+        panic!("initial turn did not start");
+    };
+    // Change settings while the turn is blocked, before compaction checkpoints its lineage.
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::RequestUserInput(_))
+    })
+    .await;
+    core_test_support::submit_thread_settings(
+        &test.codex,
+        ThreadSettingsOverrides {
+            effort: Some(Some(ReasoningEffort::High)),
+            ..Default::default()
+        },
+    )
+    .await?;
+    test.codex.checkpoint_thread_settings().await?;
+    test.codex
+        .submit(Op::UserInputAnswer {
+            id: turn_id.clone(),
+            response: RequestUserInputResponse {
+                answers: [(
+                    "next".into(),
+                    RequestUserInputAnswer {
+                        answers: vec!["Yes".into()],
+                    },
+                )]
+                .into(),
+            },
+        })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let path = test.codex.rollout_path().expect("rollout path");
+    test.codex.shutdown_and_wait().await?;
+    test.thread_manager
+        .remove_thread(&test.session_configured.thread_id)
+        .await;
+
+    let context = test
+        .thread_store
+        .load_latest_model_context(codex_thread_store::LoadThreadHistoryParams {
+            thread_id: test.session_configured.thread_id,
+            include_archived: false,
+        })
+        .await?;
+    let [
+        RolloutItem::SessionMeta(meta),
+        RolloutItem::Compacted(compacted),
+        ..,
+    ] = context.items.as_slice()
+    else {
+        panic!("bounded resume should start with session metadata and the compaction");
+    };
+    assert_eq!(meta.meta.multi_agent_version, None);
+    assert!(compacted.resume_metadata.is_some());
+    let replacement_len = compacted
+        .replacement_history
+        .as_ref()
+        .expect("replacement history")
+        .len();
+
+    let auth_manager = codex_core::test_support::auth_manager_from_auth_with_home(
+        CodexAuth::from_api_key("test"),
+        test.config.codex_home.to_path_buf(),
+    );
+    let resumed = test
+        .thread_manager
+        .resume_thread_with_history(
+            test.config.clone(),
+            codex_history::InitialHistory::Resumed(codex_history::ResumedHistory {
+                history_revision: None,
+                conversation_id: context.thread_id,
+                history: Arc::new(context.items),
+                rollout_path: Some(path),
+            }),
+            auth_manager,
+            /*parent_trace*/ None,
+            codex_protocol::mcp::ClientMcpExtensions::default(),
+        )
+        .await?;
+    assert_eq!(
+        resumed.thread.thread_settings_snapshot().await,
+        expected_settings
+    );
+    assert_eq!(
+        resumed.thread.multi_agent_version(),
+        Some(codex_protocol::protocol::MultiAgentVersion::V2)
+    );
+    let submission = resumed
+        .thread
+        .continue_turn_if_idle(
+            TurnInputRequest::new(codex_core::TurnInput::ResponseItem(
+                core_test_support::responses::user_message_item("continue after cold resume"),
+            )),
+            turn_id,
+        )
+        .await?;
+    assert!(matches!(
+        submission,
+        codex_core::TurnInputSubmission::Started { .. }
+    ));
+    wait_for_event(&resumed.thread, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        &requests[3].input()[..replacement_len],
+        &requests[2].input()[..replacement_len]
+    );
+    insta::assert_snapshot!(
+        "compaction_cold_resume_after_completion",
+        format_history_snapshot(
+            "Real paginated mid-turn compaction and cold resume from the bounded suffix.",
+            &requests,
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snapshot_request_shape_mid_turn_continuation_compaction() {
     skip_if_no_network!();
 
@@ -4416,17 +4955,38 @@ async fn snapshot_request_shape_mid_turn_continuation_compaction() {
         config.model_context_window = Some(context_window);
         config.model_auto_compact_token_limit = Some(limit);
     });
-    let codex = builder.build(&server).await.unwrap().codex;
+    let codex = builder.build_with_auto_env(&server).await.unwrap().codex;
+    let continuation = r#"{"review_target":"RB._~:-opaque"}"#;
 
     codex
-        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-            text: FUNCTION_CALL_LIMIT_MSG.into(),
-            text_elements: Vec::new(),
-        }]))
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: FUNCTION_CALL_LIMIT_MSG.into(),
+                text_elements: Vec::new(),
+            }])
+            .with_responses_metadata(Some(std::collections::HashMap::from([(
+                "misalignment_override".to_string(),
+                continuation.to_string(),
+            )]))),
+        )
         .await
         .unwrap();
 
     wait_for_event(&codex, |msg| matches!(msg, EventMsg::TurnComplete(_))).await;
+
+    for (request, expected) in [
+        (first_turn_mock.single_request(), Some(continuation)),
+        (auto_compact_mock.single_request(), None),
+        (post_auto_compact_mock.single_request(), Some(continuation)),
+    ] {
+        let metadata: Value = serde_json::from_str(
+            request.body_json()["client_metadata"]["x-codex-turn-metadata"]
+                .as_str()
+                .expect("turn metadata"),
+        )
+        .expect("valid turn metadata");
+        assert_eq!(metadata["misalignment_override"].as_str(), expected);
+    }
 
     // Assert first request captured expected user message that triggers function call.
     let first_request = first_turn_mock.single_request().input();
@@ -4774,10 +5334,6 @@ async fn auto_compact_accounts_for_encrypted_reasoning(first_response_includes_r
 
     let server = start_mock_server().await;
 
-    let first_user = "COUNT_PRE_LAST_REASONING";
-    let second_user = "TRIGGER_COMPACT_AT_LIMIT";
-    let third_user = "AFTER_REMOTE_COMPACT";
-
     let pre_last_reasoning_content = "a".repeat(2_400);
     let post_last_reasoning_content = "b".repeat(4_000);
 
@@ -4791,6 +5347,11 @@ async fn auto_compact_accounts_for_encrypted_reasoning(first_response_includes_r
     ]);
     let compact_turn = remote_v2_compaction_response();
     let third_turn = sse(vec![
+        ev_assistant_message("m3", THIRD_USER_MSG),
+        ev_completed_with_tokens("r3", /*total_tokens*/ 81),
+    ]);
+    let compact_turn = remote_v2_compaction_response();
+    let fourth_turn = sse(vec![
         ev_assistant_message("m4", FINAL_REPLY),
         ev_completed_with_tokens("r4", /*total_tokens*/ 1),
     ]);
@@ -4822,8 +5383,7 @@ async fn auto_compact_accounts_for_encrypted_reasoning(first_response_includes_r
         })
         .build(&server)
         .await
-        .expect("build codex")
-        .codex;
+        .expect("build codex");
 
     for (idx, user) in [first_user, second_user, third_user]
         .into_iter()
@@ -4850,6 +5410,8 @@ async fn auto_compact_accounts_for_encrypted_reasoning(first_response_includes_r
     }
 
     let requests = request_log.requests();
+    // Responses Lite includes retained reasoning in its usage without a header.
+    // 80 must remain below the limit; 81 must trigger compaction before turn 4.
     assert_eq!(
         requests.len(),
         4,
@@ -4870,6 +5432,10 @@ async fn auto_compact_accounts_for_encrypted_reasoning(first_response_includes_r
     );
 }
 
+#[test_case::test_case("response.incomplete", true, true; "incomplete_with_usage")]
+#[test_case::test_case("response.incomplete", false, true; "incomplete_without_usage")]
+#[test_case::test_case("response.completed", false, true; "completed_without_usage")]
+#[test_case::test_case("response.incomplete", false, false; "non_lite_incomplete_without_usage")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 // TODO(ccunningham): Update once pre-turn compaction includes incoming user input.
 async fn snapshot_request_shape_pre_turn_compaction_including_incoming_user_message() {
@@ -4921,7 +5487,7 @@ async fn snapshot_request_shape_pre_turn_compaction_including_incoming_user_mess
     core_test_support::submit_thread_settings(
         &codex,
         ThreadSettingsOverrides {
-            environments: Some(local_selections(
+            environments: Some(local_requests(
                 test_path_buf(PRETURN_CONTEXT_DIFF_CWD).abs(),
             )),
             ..Default::default()
@@ -5017,7 +5583,7 @@ async fn snapshot_request_shape_pre_turn_compaction_strips_incoming_model_switch
     let model_provider = non_openai_model_provider(&server);
     let test = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_model(previous_model)
+        .with_model_info_override(previous_model, |_| {})
         .with_config(move |config| {
             config.update_plan_enabled = true;
             config.model_provider = model_provider;
@@ -5453,8 +6019,8 @@ async fn remote_v2_compaction_refreshes_instructions_and_preserves_them_on_cold_
     let replacement_history = replacement_history_from_rollout(&rollout_path)?;
     assert_eq!(
         instruction_fragments_in_items(&replacement_history),
-        Vec::<String>::new(),
-        "remote-v2 replacement history currently omits the global-instruction fragment"
+        vec![new_fragment.clone()],
+        "remote-v2 replacement history includes refreshed global instructions"
     );
     assert_eq!(
         test.codex.instruction_sources().await,
@@ -5476,6 +6042,7 @@ async fn remote_v2_compaction_refreshes_instructions_and_preserves_them_on_cold_
     let resumed_cwd = test.config.cwd.clone();
     let mut resume_builder = test_codex()
         .with_home(Arc::clone(&home))
+        .with_model_info_override("gpt-5.5", |model| model.use_responses_lite = true)
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(move |config| config.cwd = resumed_cwd);
     let resumed = resume_builder
@@ -5509,3 +6076,6 @@ async fn remote_v2_compaction_refreshes_instructions_and_preserves_them_on_cold_
 
     Ok(())
 }
+
+#[path = "compact_program_tests.rs"]
+mod program_tests;

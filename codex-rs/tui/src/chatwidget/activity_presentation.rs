@@ -2,6 +2,7 @@
 //! Canonical cells retain all available data; presentation does not modify tool execution.
 
 use super::*;
+use crate::history_cell::ActivityDisclosure;
 use crate::transcript_view::ActivityTranscriptLines;
 
 impl ChatWidget {
@@ -56,7 +57,7 @@ impl ChatWidget {
         Some(ActivityTranscriptLines {
             activity,
             auxiliary,
-            has_hidden_details,
+            disclosure: has_hidden_details.then_some(ActivityDisclosure::Generic),
         })
     }
 }

@@ -4,6 +4,7 @@ use crate::OPENAI_BUNDLED_MARKETPLACE_NAME;
 use crate::PluginInstallRequest;
 use crate::PluginsConfigInput;
 use crate::PluginsManager;
+use crate::remote::InstalledPluginDisplayAssets;
 use crate::remote::REMOTE_GLOBAL_MARKETPLACE_NAME;
 use crate::remote::RemotePluginServiceConfig;
 use crate::remote::fetch_and_cache_global_remote_plugin_catalog;
@@ -640,13 +641,13 @@ async fn omits_not_available_curated_plugins() {
 }
 
 #[tokio::test]
-async fn does_not_reload_marketplace_per_plugin() {
+async fn discovery_warns_once_per_invalid_manifest() {
     let codex_home = tempdir().expect("tempdir should succeed");
     let curated_root = curated_plugins_repo_path(codex_home.path());
     write_openai_curated_marketplace(&curated_root, &["slack", "gmail", "openai-developers"]);
     install_marketplace_plugin(codex_home.path(), curated_root.as_path(), "slack").await;
 
-    let too_long_prompt = "x".repeat(129);
+    let too_long_prompt = "x".repeat(513);
     for plugin_name in ["gmail", "openai-developers"] {
         write_file(
             &curated_root.join(format!("plugins/{plugin_name}/.codex-plugin/plugin.json")),
@@ -697,12 +698,12 @@ async fn does_not_reload_marketplace_per_plugin() {
     let logs = String::from_utf8(buffer.lock().expect("buffer lock").clone())
         .expect("utf8 logs")
         .replace('\\', "/");
-    assert_eq!(logs.matches("ignoring interface.defaultPrompt").count(), 8);
-    assert_eq!(logs.matches("gmail/.codex-plugin/plugin.json").count(), 4);
+    assert_eq!(logs.matches("ignoring interface.defaultPrompt").count(), 2);
+    assert_eq!(logs.matches("gmail/.codex-plugin/plugin.json").count(), 1);
     assert_eq!(
         logs.matches("openai-developers/.codex-plugin/plugin.json")
             .count(),
-        4
+        1
     );
 }
 
@@ -840,6 +841,18 @@ source = "/tmp/{sales_marketplace_name}"
 
 #[tokio::test]
 async fn cached_remote_discovery_requires_installed_cache_and_filters_candidates() {
+    assert_cached_remote_discovery_filters_candidates(InstalledPluginDisplayAssets::Include).await;
+}
+
+/// Tool suggestions need installed IDs even when display enrichment was skipped.
+#[tokio::test]
+async fn cached_remote_discovery_accepts_snapshot_without_display_assets() {
+    assert_cached_remote_discovery_filters_candidates(InstalledPluginDisplayAssets::Skip).await;
+}
+
+async fn assert_cached_remote_discovery_filters_candidates(
+    display_assets: InstalledPluginDisplayAssets,
+) {
     let codex_home = tempdir().expect("tempdir should succeed");
     write_file(
         &codex_home.path().join(CONFIG_TOML_FILE),
@@ -956,6 +969,7 @@ plugins = true
         &RemotePluginServiceConfig::new(
             plugins.chatgpt_base_url.clone(),
             crate::test_support::test_http_client_factory(),
+            /*product_sku*/ None,
         ),
         Some(&auth),
     )
@@ -972,10 +986,19 @@ plugins = true
         Vec::new()
     );
 
-    Mock::given(method("GET"))
+    let installed_request = Mock::given(method("GET"))
         .and(path("/backend-api/ps/plugins/installed"))
         .and(query_param_is_missing("scope"))
-        .and(query_param_is_missing("includeDownloadUrls"))
+        .and(query_param_is_missing("includeDownloadUrls"));
+    let installed_request = match display_assets {
+        InstalledPluginDisplayAssets::Include => {
+            installed_request.and(query_param_is_missing("includeDisplayAssets"))
+        }
+        InstalledPluginDisplayAssets::Skip => {
+            installed_request.and(query_param("includeDisplayAssets", "false"))
+        }
+    };
+    installed_request
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "plugins": [],
             "pagination": {
@@ -986,11 +1009,12 @@ plugins = true
         .mount(&server)
         .await;
     plugins_manager
-        .build_and_cache_remote_installed_plugin_marketplaces(
+        .build_and_cache_remote_installed_plugin_marketplaces_with_display_assets(
             &plugins,
             Some(&auth),
             &[REMOTE_GLOBAL_MARKETPLACE_NAME],
             /*on_effective_plugins_changed*/ None,
+            display_assets,
         )
         .await
         .expect("remote installed plugin cache should write");

@@ -4,9 +4,12 @@
 //! limits, add-credit nudges, and feedback uploads. Results are routed back through `AppEvent` so
 //! the main event loop remains single-threaded.
 
+use super::feedback_upload::deliver_feedback;
 use super::plugin_mentions::fetch_plugin_mentions;
 use super::*;
 use crate::app_event::ConnectorsSnapshot;
+use crate::app_event::FeedbackDestination;
+use crate::app_event::FeedbackReceipt;
 use crate::app_info::app_info_from_api;
 use crate::chatwidget::ThreadUsageOutcome;
 use crate::config_update::format_config_error;
@@ -23,8 +26,10 @@ use codex_app_server_protocol::MarketplaceRemoveParams;
 use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::MarketplaceUpgradeParams;
 use codex_app_server_protocol::MarketplaceUpgradeResponse;
+use codex_app_server_protocol::McpServerOauthLoginParams;
 use codex_app_server_protocol::RequestId;
 
+use crate::hooks_rpc::HooksListTarget;
 use crate::hooks_rpc::fetch_hooks_list;
 use crate::hooks_rpc::write_hook_trust;
 use crate::hooks_rpc::write_hook_trusts;
@@ -38,6 +43,35 @@ const WORKSPACE_HEADLINE_FETCH_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(/*millis*/ 2000);
 
 impl App {
+    pub(super) fn start_mcp_login(
+        &self,
+        app_server: &AppServerSession,
+        request_id: String,
+        name: String,
+        environment_id: Option<String>,
+        thread_id: ThreadId,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = request_handle
+                .request_typed(ClientRequest::McpServerOauthLogin {
+                    request_id: RequestId::String(request_id.clone()),
+                    params: McpServerOauthLoginParams {
+                        environment_id,
+                        name,
+                        thread_id: Some(thread_id.to_string()),
+                        client_registration: None,
+                        scopes: None,
+                        timeout_secs: None,
+                    },
+                })
+                .await
+                .map_err(|error| error.to_string());
+            app_event_tx.send(AppEvent::McpLoginStarted { request_id, result });
+        });
+    }
+
     pub(super) fn fetch_mcp_inventory(
         &mut self,
         app_server: &AppServerSession,
@@ -127,8 +161,14 @@ impl App {
         &mut self,
         app_server: &AppServerSession,
         thread_id: ThreadId,
-        request_id: u64,
+        request_id: Uuid,
     ) {
+        if !self
+            .chat_widget
+            .is_pending_thread_usage(thread_id, request_id)
+        {
+            return;
+        }
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -180,8 +220,11 @@ impl App {
     pub(super) fn refresh_status_line_workspace_headline(
         &mut self,
         app_server: &AppServerSession,
-        request_id: u64,
+        request_id: Uuid,
     ) {
+        if !self.chat_widget.is_pending_workspace_headline(request_id) {
+            return;
+        }
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -224,13 +267,25 @@ impl App {
     /// app-server RPC finishes. User-initiated skills refreshes still use the blocking app command path so
     /// callers that explicitly asked for fresh skill state do not race ahead of their own refresh.
     pub(super) fn refresh_startup_skills(&mut self, app_server: &AppServerSession) {
+        if app_server.thread_params_mode() == crate::ThreadParamsMode::Cloud {
+            self.skill_load_warnings.startup_complete = true;
+            return;
+        }
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         let cwd = self.config.cwd.to_path_buf();
         tokio::spawn(async move {
-            let result = fetch_skills_list(request_handle, cwd.clone())
-                .await
-                .map_err(|err| format!("{err:#}"));
+            let request_id = RequestId::String(format!("startup-skills-list-{}", Uuid::new_v4()));
+            let result = fetch_skills_list(
+                request_handle,
+                request_id,
+                SkillsListParams {
+                    cwds: vec![cwd.clone()],
+                    force_reload: true,
+                },
+            )
+            .await
+            .map_err(|err| format!("{err:#}"));
             app_event_tx.send(AppEvent::SkillsListLoaded { cwd, result });
         });
     }
@@ -295,14 +350,18 @@ impl App {
         });
     }
 
-    pub(super) fn fetch_hooks_list(&mut self, app_server: &AppServerSession, cwd: PathBuf) {
+    pub(super) fn fetch_hooks_list(
+        &mut self,
+        app_server: &AppServerSession,
+        target: HooksListTarget,
+    ) {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
-            let result = fetch_hooks_list(request_handle, cwd.clone())
+            let result = fetch_hooks_list(request_handle, &target)
                 .await
                 .map_err(|err| err.to_string());
-            app_event_tx.send(AppEvent::HooksLoaded { cwd, result });
+            app_event_tx.send(AppEvent::HooksLoaded { target, result });
         });
     }
 
@@ -574,7 +633,7 @@ impl App {
                     });
                 }
                 Err(err) => {
-                    tracing::warn!(error = %err, "plugin/list failed while refreshing plugin mention candidates");
+                    tracing::warn!(error = %err, "plugin/installed failed while refreshing plugin mention candidates");
                 }
             }
         });
@@ -588,32 +647,38 @@ impl App {
         report_passcode: Option<crate::app_event::SecretReportPasscode>,
         turn_id: Option<String>,
         include_logs: bool,
+        destination: FeedbackDestination,
     ) {
+        if destination == FeedbackDestination::LocalZip && app_server.uses_remote_workspace() {
+            self.chat_widget.add_info_message(
+                "Saving a feedback ZIP requires a local app server.".to_string(),
+                /*hint*/ None,
+            );
+            return;
+        }
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         let origin_thread_id = self.chat_widget.thread_id();
         let missing_passcode = report_passcode.is_none();
         let retry_reason = reason.clone();
         let retry_turn_id = turn_id.clone();
-        let rollout_path = if include_logs {
-            self.chat_widget.rollout_path()
-        } else {
-            None
-        };
         let params = build_feedback_upload_params(
             origin_thread_id,
-            rollout_path,
+            self.chat_widget.rollout_path(),
             category,
             reason,
             report_passcode.map(crate::app_event::SecretReportPasscode::into_inner),
             turn_id,
             include_logs,
+            destination,
         );
+        let codex_home = app_server.codex_home_path(&self.config.codex_home);
+        let feedback = self.feedback.clone();
         tokio::spawn(async move {
-            let result = fetch_feedback_upload(request_handle, params)
-                .await
-                .map(|response| response.thread_id)
-                .map_err(|err| err.to_string());
+            let result =
+                deliver_feedback(request_handle, codex_home, params, feedback, destination)
+                    .await
+                    .map_err(|err| format!("{err:#}"));
             if app_server_requests_feedback_passcode(missing_passcode, &result) {
                 app_event_tx.send(AppEvent::FeedbackPasscodeRequired {
                     origin_thread_id,
@@ -635,7 +700,7 @@ impl App {
 
     pub(super) fn handle_feedback_thread_event(&mut self, event: FeedbackThreadEvent) {
         match event.result {
-            Ok(thread_id) => {
+            Ok(FeedbackReceipt::Uploaded { thread_id }) => {
                 self.chat_widget
                     .add_to_history(crate::bottom_pane::feedback_success_cell(
                         event.category,
@@ -644,11 +709,16 @@ impl App {
                         event.feedback_audience,
                     ))
             }
+            Ok(FeedbackReceipt::Saved { path }) => {
+                self.chat_widget
+                    .add_to_history(history_cell::new_info_event(
+                        format!("Feedback ZIP saved to {path}"),
+                        /*hint*/ None,
+                    ))
+            }
             Err(err) => self
                 .chat_widget
-                .add_to_history(history_cell::new_error_event(format!(
-                    "Failed to upload feedback: {err}"
-                ))),
+                .add_to_history(history_cell::new_error_event(err)),
         }
     }
 
@@ -664,6 +734,7 @@ impl App {
 
         let should_send = {
             let mut guard = store.lock().await;
+            guard.replay_may_have_output |= !guard.active;
             guard.push_buffered_event(ThreadBufferedEvent::FeedbackSubmission(event.clone()));
             guard.active
         };
@@ -690,7 +761,7 @@ impl App {
         origin_thread_id: Option<ThreadId>,
         category: FeedbackCategory,
         include_logs: bool,
-        result: Result<String, String>,
+        result: Result<FeedbackReceipt, String>,
     ) {
         let event = FeedbackThreadEvent {
             category,
@@ -776,10 +847,12 @@ pub(super) async fn fetch_all_mcp_server_statuses(
             .request_typed(ClientRequest::McpServerStatusList {
                 request_id,
                 params: ListMcpServerStatusParams {
+                    environment_id: None,
                     cursor: cursor.clone(),
                     limit: Some(100),
                     detail: Some(detail),
                     thread_id: thread_id.clone(),
+                    server_name: None,
                 },
             })
             .await
@@ -896,19 +969,11 @@ pub(super) async fn send_add_credits_nudge_email(
 
 pub(super) async fn fetch_skills_list(
     request_handle: AppServerRequestHandle,
-    cwd: PathBuf,
+    request_id: RequestId,
+    params: SkillsListParams,
 ) -> Result<SkillsListResponse> {
-    let request_id = RequestId::String(format!("startup-skills-list-{}", Uuid::new_v4()));
-    // Use the cloneable request handle so startup can issue this RPC from a background task without
-    // extending a borrow of `AppServerSession` across the first frame render.
     request_handle
-        .request_typed(ClientRequest::SkillsList {
-            request_id,
-            params: SkillsListParams {
-                cwds: vec![cwd],
-                force_reload: true,
-            },
-        })
+        .request_typed(ClientRequest::SkillsList { request_id, params })
         .await
         .wrap_err("skills/list failed in TUI")
 }
@@ -1278,9 +1343,9 @@ pub(super) async fn write_hook_enabled(
         .wrap_err("config/batchWrite failed while updating hook enablement in TUI")
 }
 
-fn app_server_requests_feedback_passcode(
+fn app_server_requests_feedback_passcode<T>(
     missing_passcode: bool,
-    result: &Result<String, String>,
+    result: &Result<T, String>,
 ) -> bool {
     missing_passcode
         && result
@@ -1297,8 +1362,11 @@ pub(super) fn build_feedback_upload_params(
     report_passcode: Option<String>,
     turn_id: Option<String>,
     include_logs: bool,
+    destination: FeedbackDestination,
 ) -> FeedbackUploadParams {
-    let extra_log_files = if include_logs {
+    // The app-server `feedback/save` RPC handler selects persisted transcripts by thread ID.
+    // The TUI can already know a future rollout path before the first turn writes it.
+    let extra_log_files = if include_logs && destination == FeedbackDestination::OpenAi {
         rollout_path.map(|rollout_path| vec![rollout_path])
     } else {
         None
@@ -1313,17 +1381,6 @@ pub(super) fn build_feedback_upload_params(
         extra_log_files,
         tags,
     }
-}
-
-pub(super) async fn fetch_feedback_upload(
-    request_handle: AppServerRequestHandle,
-    params: FeedbackUploadParams,
-) -> Result<FeedbackUploadResponse> {
-    let request_id = RequestId::String(format!("feedback-upload-{}", Uuid::new_v4()));
-    request_handle
-        .request_typed(ClientRequest::FeedbackUpload { request_id, params })
-        .await
-        .wrap_err("feedback/upload failed in TUI")
 }
 
 /// Convert flat `McpServerStatus` responses into the per-server maps used by the
@@ -1401,16 +1458,38 @@ mod tests {
         let server = wiremock::MockServer::start().await;
         let thread_id = ThreadId::new();
         app.config.chatgpt_base_url = server.uri();
+        app.cli_kv_overrides = vec![(
+            "chatgpt_base_url".to_string(),
+            toml::Value::String(server.uri()),
+        )];
         app.config.cli_auth_credentials_store_mode = AuthCredentialsStoreMode::File;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/codex/config/bundle"))
+            .respond_with(wiremock::ResponseTemplate::new(/*s*/ 200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        std::fs::write(
+            app.config.codex_home.join("config.toml"),
+            format!("chatgpt_base_url = {:?}\n", server.uri()),
+        )
+        .expect("persist endpoint for account config reloads");
         write_chatgpt_auth(
             app.config.codex_home.as_path(),
             ChatGptAuthFixture::new("chatgpt-token").account_id("account-123"),
             AuthCredentialsStoreMode::File,
         )
         .expect("write ChatGPT authentication");
-        let app_server = crate::start_embedded_app_server_for_picker(&app.config)
-            .await
-            .expect("start authenticated embedded app server");
+        let app_server = crate::start_app_server_for_picker(
+            crate::backend_id::BackendId::new(),
+            &app.config,
+            &crate::AppServerTarget::Embedded,
+            app.cli_kv_overrides.clone(),
+            app.loader_overrides.clone(),
+            /*state_db*/ None,
+            app.environment_manager.clone(),
+        )
+        .await
+        .expect("start authenticated embedded app server");
         write_chatgpt_auth(
             app.config.codex_home.as_path(),
             ChatGptAuthFixture::new("different-token").account_id("different-account"),
@@ -1437,8 +1516,9 @@ mod tests {
                 serde_json::json!({
                     "threads": [{
                         "thread_id": thread_id.to_string(),
-                        "estimated_usage_credits_micros": 46_000_000,
-                        "estimated_usage_usd_micros": 1_820_000
+                        "estimated_usage_credits_micros": 0,
+                        "estimated_usage_usd_micros": 0,
+                        "native_usage_usd_micros": 750_000
                     }]
                 }),
             ))
@@ -1451,9 +1531,10 @@ mod tests {
                 .await
                 .expect("read thread usage through the authenticated app server"),
             ThreadUsageOutcome::Available(ThreadUsage {
+                native_usage_usd_micros: Some(750_000),
                 thread_id: thread_id.to_string(),
-                estimated_usage_credits_micros: 46_000_000,
-                estimated_usage_usd_micros: Some(1_820_000),
+                estimated_usage_credits_micros: 0,
+                estimated_usage_usd_micros: Some(0),
                 groups: Vec::new(),
             })
         );
@@ -1548,42 +1629,42 @@ mod tests {
             (
                 "Workspace",
                 "chatgpt authentication required for remote plugin catalog",
-                "Sign in to ChatGPT, then try loading this section again.",
+                "Sign in to ChatGPT, then try loading this section again",
             ),
             (
                 "OpenAI Curated",
                 "chatgpt authentication required for remote plugin catalog; api key auth is not supported",
-                "Sign in with ChatGPT auth; API key auth cannot load remote plugin catalogs.",
+                "Sign in with ChatGPT auth; API key auth cannot load remote plugin catalogs",
             ),
             (
                 "Shared with me",
                 "remote plugin catalog request failed with status 404: missing",
-                "Check that you are signed in to the correct workspace and still have access.",
+                "Check that you are signed in to the correct workspace and still have access",
             ),
             (
                 "Shared with me",
                 "workspace access mismatch",
-                "Switch to the matching workspace or ask the sharer for access.",
+                "Switch to the matching workspace or ask the sharer for access",
             ),
             (
                 "Shared with me",
                 "old build fallback",
-                "Update Codex, then try opening the shared plugin again.",
+                "Update Codex, then try opening the shared plugin again",
             ),
             (
                 "Shared with me",
                 "remote service unavailable",
-                "Try again later; local plugin functionality is still available.",
+                "Try again later; local plugin functionality is still available",
             ),
             (
                 "Workspace",
                 "plugin disabled by admin",
-                "Ask a workspace admin to confirm plugin access.",
+                "Ask a workspace admin to confirm plugin access",
             ),
             (
                 "Shared with me",
                 "plugin sharing is not enabled",
-                "Ask a workspace admin to enable Codex plugins or plugin sharing.",
+                "Ask a workspace admin to enable Codex plugins or plugin sharing",
             ),
         ];
 
@@ -1602,7 +1683,8 @@ mod tests {
             PluginRemoteSectionError {
                 section_id: "shared-with-me".to_string(),
                 label: "Shared with me".to_string(),
-                message: "Plugin sharing is disabled for this Codex session. Enable plugin sharing to load shared plugins.".to_string(),
+                message: "Enable plugin sharing for this Codex session to load shared plugins"
+                    .to_string(),
             }
         );
     }
@@ -1611,11 +1693,13 @@ mod tests {
     fn mcp_inventory_maps_prefix_tool_names_by_server() {
         let statuses = vec![
             McpServerStatus {
+                environment_id: None,
                 server_capabilities: None,
                 tools_error: None,
                 name: "docs".to_string(),
                 runtime_status: None,
                 plugin_id: None,
+                http_origin: None,
                 server_info: None,
                 tools: HashMap::from([(
                     "list".to_string(),
@@ -1635,11 +1719,13 @@ mod tests {
                 auth_status: codex_app_server_protocol::McpAuthStatus::Unsupported,
             },
             McpServerStatus {
+                environment_id: None,
                 server_capabilities: None,
                 tools_error: None,
                 name: "disabled".to_string(),
                 runtime_status: None,
                 plugin_id: None,
+                http_origin: None,
                 server_info: None,
                 tools: HashMap::new(),
                 resources: Vec::new(),
@@ -1688,11 +1774,11 @@ mod tests {
     }
 
     #[test]
-    fn build_feedback_upload_params_includes_thread_id_and_rollout_path() {
+    fn build_feedback_params_includes_thread_id_and_rollout_path() {
         let thread_id = ThreadId::new();
         let rollout_path = PathBuf::from("/tmp/rollout.jsonl");
 
-        let params = build_feedback_upload_params(
+        let params = build_feedback_params(
             Some(thread_id),
             Some(rollout_path.clone()),
             FeedbackCategory::SafetyCheck,
@@ -1700,6 +1786,7 @@ mod tests {
             /*report_passcode*/ None,
             Some("turn-123".to_string()),
             /*include_logs*/ true,
+            FeedbackDestination::OpenAi,
         );
 
         assert_eq!(params.classification, "safety_check");
@@ -1718,8 +1805,8 @@ mod tests {
     }
 
     #[test]
-    fn build_feedback_upload_params_omits_rollout_path_without_logs() {
-        let params = build_feedback_upload_params(
+    fn build_feedback_params_omits_rollout_path_without_logs() {
+        let params = build_feedback_params(
             /*origin_thread_id*/ None,
             Some(PathBuf::from("/tmp/rollout.jsonl")),
             FeedbackCategory::GoodResult,
@@ -1727,6 +1814,7 @@ mod tests {
             /*report_passcode*/ None,
             /*turn_id*/ None,
             /*include_logs*/ false,
+            FeedbackDestination::OpenAi,
         );
 
         assert_eq!(params.classification, "good_result");

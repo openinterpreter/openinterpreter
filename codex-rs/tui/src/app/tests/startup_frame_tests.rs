@@ -3,6 +3,7 @@
 use super::*;
 use crate::custom_terminal::test_support::last_rendered_buffer;
 use crate::startup_draft::tests::quiet_startup_test_pump;
+use codex_app_server_protocol::ThreadItemPayload;
 use pretty_assertions::assert_eq;
 
 fn frame_text(tui: &tui::Tui) -> String {
@@ -17,7 +18,8 @@ fn frame_text(tui: &tui::Tui) -> String {
 async fn owned_startup_preserves_loading_until_resume_replay_is_applied() -> Result<()> {
     for items in [
         Vec::new(),
-        vec![ThreadItem::AgentMessage {
+        vec![ThreadItemPayload::AgentMessage {
+            moderation: None,
             id: "answer".into(),
             text: "Retained **answer** after resume.".into(),
             phase: None,

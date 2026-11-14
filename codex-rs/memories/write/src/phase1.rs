@@ -10,7 +10,6 @@ use crate::runtime::MemoryStartupContext;
 use crate::runtime::StageOneRequestContext;
 use codex_config::types::MemoriesConfig;
 use codex_core::Prompt;
-use codex_core::RolloutRecorder;
 use codex_core::config::Config;
 use codex_protocol::MemoryVersion;
 use codex_protocol::ResponseItemId;
@@ -21,6 +20,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
 use codex_rollout::INTERACTIVE_SESSION_SOURCES;
 use codex_rollout::RolloutItem;
+use codex_rollout::RolloutRecorder;
 use codex_secrets::redact_secrets;
 use futures::StreamExt;
 use std::path::Path;
@@ -291,10 +291,12 @@ mod job {
         let mut prompt = Prompt::default();
         prompt.input = match config.memories.version {
             MemoryVersion::V1 => vec![ResponseItem::Message {
-                id: Some(ResponseItemId::new("msg")),
+                id: Some(ResponseItemId::with_suffix("msg", "memory")),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText { text: input_text }],
                 phase: None,
+                encrypted_content: None,
+                status: None,
                 internal_chat_message_metadata_passthrough: None,
             }],
             MemoryVersion::V2 => crate::rollout_input::extraction_messages(&input_text),
@@ -311,7 +313,7 @@ mod job {
         prompt.output_schema_strict = true;
 
         let (result, token_usage) = context
-            .stream_stage_one_prompt(config, &prompt, stage_one_context)
+            .stream_stage_one_prompt(config, prompt, stage_one_context)
             .await?;
 
         let output = StageOneOutput::parse(&result, config.memories.version)?;
@@ -404,7 +406,8 @@ mod job {
                 RolloutItem::InterAgentCommunication(communication) => {
                     Some(communication.to_model_input_item())
                 }
-                RolloutItem::SessionMeta(_)
+                RolloutItem::DynamicToolsUpdated { .. }
+                | RolloutItem::SessionMeta(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::Compacted(_)
                 | RolloutItem::TurnContext(_)
@@ -581,6 +584,8 @@ mod tests {
     #[test]
     fn serializes_memory_rollout_with_agents_removed_but_environment_kept() {
         let mixed_contextual_message = ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![
@@ -602,6 +607,8 @@ mod tests {
             internal_chat_message_metadata_passthrough: None,
         };
         let skill_message = ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -613,6 +620,8 @@ mod tests {
             internal_chat_message_metadata_passthrough: None,
         };
         let subagent_message = ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -641,6 +650,8 @@ mod tests {
             parsed,
             vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {

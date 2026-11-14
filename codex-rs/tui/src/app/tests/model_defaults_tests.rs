@@ -1,7 +1,11 @@
 use super::*;
 use crate::collaboration_modes;
 use codex_app_server_client::AppServerClient;
+use codex_app_server_client::CloudOperation;
+use codex_app_server_client::CloudUserMessageReceipt;
 use codex_config::LoaderOverrides;
+use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
+use crossterm::event::KeyCode;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -136,9 +140,11 @@ async fn model_default_saves_report_server_outcomes_and_target_server_profile() 
             /*log_db*/ None,
             /*state_db*/ None,
             Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+            Default::default(),
         )
         .await?;
         let mut server = AppServerSession::new(
+            crate::backend_id::BackendId::new(),
             AppServerClient::InProcess(client),
             crate::app_server_session::ThreadParamsMode::Remote,
         );
@@ -163,6 +169,7 @@ async fn model_default_saves_report_server_outcomes_and_target_server_profile() 
         ] {
             Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
         }
+        let mut service_tier_error = None;
         let messages = std::iter::from_fn(|| events.try_recv().ok())
             .filter_map(|event| match event {
                 AppEvent::InsertHistoryCell(cell) => {
@@ -185,6 +192,10 @@ async fn model_default_saves_report_server_outcomes_and_target_server_profile() 
         }
         let persisted = std::fs::read_to_string(&profile_path)?;
         if outcome == "rejected" {
+            insta::assert_snapshot!(
+                "service_tier_default_save_error",
+                service_tier_error.expect("expected a service-tier save error")
+            );
             assert_eq!(persisted, "[broken");
             assert!(!messages.contains("Model changed"));
             assert!(!messages.contains("Service tier set"));

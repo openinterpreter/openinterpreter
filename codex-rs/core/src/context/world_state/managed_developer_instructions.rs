@@ -1,9 +1,14 @@
 use super::PreviousSectionState;
+use super::SectionTransition;
 use super::WorldStateHash;
 use super::WorldStateSection;
+use super::WorldStateUpdate;
 use crate::context::ContextualUserFragment;
 use codex_config::Sourced;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::ContentItemMetadata;
+use codex_protocol::models::input_text;
 use codex_utils_string::approx_bytes_for_tokens;
 use codex_utils_string::approx_tokens_from_byte_count;
 use serde::Deserialize;
@@ -22,16 +27,16 @@ pub(crate) struct ManagedDeveloperInstructions {
 }
 
 impl ContextualUserFragment for ManagedDeveloperInstructions {
+    fn content_metadata(&self) -> ContentItemMetadata {
+        ContentItemMetadata::developer_instructions(/*from_additional_requirements*/ true)
+    }
+
     fn content_kind(&self) -> ContentItemKind {
         ContentItemKind("managed_config.developer_instructions".to_string())
     }
 
     fn role(&self) -> &'static str {
         "developer"
-    }
-
-    fn requires_separate_message(&self) -> bool {
-        true
     }
 
     fn markers(&self) -> (&'static str, &'static str) {
@@ -45,8 +50,8 @@ impl ContextualUserFragment for ManagedDeveloperInstructions {
         )
     }
 
-    fn body(&self) -> String {
-        format!("\n{}\n", self.instructions)
+    fn body(&self) -> ContentItem {
+        input_text(format!("\n{}\n", self.instructions))
     }
 }
 
@@ -62,6 +67,8 @@ pub(crate) fn validate_managed_developer_instructions(
         instructions: format!("{REPLACEMENT_NOTICE}\n\n"),
     }
     .render()
+    .into_text()
+    .unwrap_or_default()
     .len();
     let rendered_bytes = requirement.value.len().saturating_add(overhead);
     if rendered_bytes > approx_bytes_for_tokens(MAX_MANAGED_DEVELOPER_INSTRUCTIONS_TOKENS) {
@@ -104,15 +111,6 @@ impl WorldStateSection for ManagedDeveloperInstructionsState {
     const ID: &'static str = "managed_developer_instructions";
     type Snapshot = ManagedDeveloperInstructionsSnapshot;
 
-    fn snapshot(&self) -> Self::Snapshot {
-        ManagedDeveloperInstructionsSnapshot {
-            instructions: self
-                .instructions
-                .as_ref()
-                .map(WorldStateHash::from_fragment),
-        }
-    }
-
     fn matches_legacy_fragment(role: &str, text: &str) -> bool {
         role == "developer" && ManagedDeveloperInstructions::matches_text(text)
     }
@@ -128,10 +126,15 @@ impl WorldStateSection for ManagedDeveloperInstructionsState {
     fn render_diff(
         &self,
         previous: PreviousSectionState<'_, Self::Snapshot>,
-    ) -> Option<Box<dyn ContextualUserFragment>> {
-        if matches!(previous, PreviousSectionState::Known(previous) if previous == &self.snapshot())
-        {
-            return None;
+    ) -> SectionTransition<Self::Snapshot> {
+        let current = ManagedDeveloperInstructionsSnapshot {
+            instructions: self
+                .instructions
+                .as_ref()
+                .map(WorldStateHash::from_fragment),
+        };
+        if matches!(previous, PreviousSectionState::Known(previous) if previous == &current) {
+            return (None, Vec::new());
         }
         let previous_had_instructions = match previous {
             PreviousSectionState::Absent => false,
@@ -146,9 +149,12 @@ impl WorldStateSection for ManagedDeveloperInstructionsState {
             (None, true) => ManagedDeveloperInstructions {
                 instructions: REMOVAL_NOTICE.to_string(),
             },
-            (None, false) => return None,
+            (None, false) => return (Some(current), Vec::new()),
         };
-        Some(Box::new(fragment))
+        (
+            Some(current),
+            vec![WorldStateUpdate::fragment(fragment).standalone()],
+        )
     }
 }
 

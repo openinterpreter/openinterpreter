@@ -11,10 +11,12 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use codex_protocol::ResponseItemId;
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::UserMessageAudioKind;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::protocol::UserMessageImageKind;
 use codex_rollout::CompactedItem;
@@ -46,6 +48,7 @@ struct InstructionBoundary {
     record_index: usize,
     message_id: Option<ResponseItemId>,
     input_source: RetainedInputSource,
+    is_communication: bool,
     alive: bool,
 }
 
@@ -85,7 +88,7 @@ impl RollbackPlan {
         // A rolled-back turn can still own the empty checkpoint that keeps cold resume from
         // replaying older history.
         if let Some(compacted) = self.compacted_items.get(&record_index) {
-            line.item = RolloutItem::Compacted(compacted.clone());
+            line.item = RolloutItem::Compacted(Box::new(compacted.clone()));
             return Ok(Some(line));
         }
         if boundary.is_some_and(|boundary| !self.boundary_alive[boundary]) {
@@ -106,6 +109,7 @@ pub(super) struct RollbackPlanner {
     pending_user_response: Option<PendingUserResponse>,
     pending_delivery_boundary: Option<usize>,
     turn_boundaries: HashMap<String, usize>,
+    turn_initial_boundaries: HashMap<String, usize>,
     call_boundaries: HashMap<(String, String), Option<usize>>,
     retained_fact_sources: Vec<RetainedFactSource>,
     compactions: Vec<CompactionFrame>,
@@ -124,6 +128,7 @@ impl RollbackPlanner {
             pending_user_response: None,
             pending_delivery_boundary: None,
             turn_boundaries: HashMap::new(),
+            turn_initial_boundaries: HashMap::new(),
             call_boundaries: HashMap::new(),
             retained_fact_sources: Vec::new(),
             compactions: Vec::new(),
@@ -156,15 +161,33 @@ impl RollbackPlanner {
         self.pending_delivery_boundary = None;
 
         match &line.item {
-            RolloutItem::SessionMeta(_) => self.record_boundaries[index] = None,
+            RolloutItem::DynamicToolsUpdated { .. } | RolloutItem::SessionMeta(_) => {
+                self.record_boundaries[index] = None
+            }
             RolloutItem::ResponseItem(response) => {
+                if matches!(&response.item, ResponseItem::Message { role, .. } if role == "assistant")
+                    || matches!(&response.item, ResponseItem::FunctionCall { .. })
+                {
+                    self.retained_fact_sources.push(RetainedFactSource {
+                        record_index: index,
+                        turn_id: response.turn_id().unwrap_or_default().to_owned(),
+                        acceptance_order: response
+                            .metadata
+                            .as_ref()
+                            .filter(|metadata| !metadata.inherited_user_message)
+                            .and_then(|metadata| metadata.user_input_order),
+                    });
+                }
                 if let Some(boundary) = paired_delivery_boundary {
                     self.record_boundaries[index] = Some(boundary);
                     self.boundaries[boundary].message_id = response.id().cloned();
+                    self.boundaries[boundary].input_source = response.metadata.as_ref().into();
                 } else if rollback::counts_as_boundary(&response.item) {
                     let boundary = self.start_boundary(index);
                     self.boundaries[boundary].message_id = response.id().cloned();
                     self.boundaries[boundary].input_source = response.metadata.as_ref().into();
+                    self.boundaries[boundary].is_communication =
+                        matches!(response.item, ResponseItem::AgentMessage { .. });
                     if let ResponseItem::Message { role, content, .. } = &response.item
                         && role == "user"
                     {
@@ -225,10 +248,12 @@ impl RollbackPlanner {
                 self.assign_targeted_record(index, explicit_event_turn_id(event));
             }
             RolloutItem::InterAgentCommunication(_) => {
-                self.start_boundary(index);
+                let boundary = self.start_boundary(index);
+                self.boundaries[boundary].is_communication = true;
             }
             RolloutItem::InterAgentCommunicationMetadata { .. } => {
                 let boundary = self.start_boundary(index);
+                self.boundaries[boundary].is_communication = true;
                 self.pending_delivery_boundary = Some(boundary);
             }
             RolloutItem::Compacted(item) => {
@@ -241,7 +266,7 @@ impl RollbackPlanner {
                     record_index: index,
                     boundary_depth: self.boundary_stack.len(),
                     owner,
-                    item: item.clone(),
+                    item: item.as_ref().clone(),
                 });
             }
             RolloutItem::TurnContext(_) => {
@@ -253,6 +278,11 @@ impl RollbackPlanner {
                 {
                     self.pending_turn_records.push(index);
                 }
+            }
+            RolloutItem::RetainedContext(
+                codex_rollout::RetainedContextEvent::AcceptedFileAudio { evidence },
+            ) => {
+                self.assign_targeted_record(index, Some(&evidence.turn_id));
             }
             RolloutItem::TokenUsageRecord(record) => {
                 self.assign_targeted_record(index, Some(record.turn_id.as_str()));
@@ -276,6 +306,54 @@ impl RollbackPlanner {
                     record_index: index,
                     turn_id: answer.turn_id.clone(),
                     acceptance_order: *acceptance_order,
+                });
+            }
+            RolloutItem::RetainedContext(
+                codex_rollout::RetainedContextEvent::DeliveredAssistantMessage {
+                    message,
+                    acceptance_order,
+                    ..
+                },
+            ) => {
+                // Nested calls have no response item; match them to instructions by acceptance order.
+                let ordered = self
+                    .boundary_stack
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|boundary| {
+                        self.boundaries[*boundary]
+                            .input_source
+                            .acceptance_order()
+                            .is_some_and(|order| order <= *acceptance_order)
+                    })
+                    .or_else(|| {
+                        // An unsequenced legacy instruction is safe only when it is the
+                        // sole boundary. A later unsequenced steer has ambiguous order.
+                        (self.boundary_stack.len() == 1)
+                            .then(|| self.boundary_stack[0])
+                            .filter(|boundary| {
+                                self.boundaries[*boundary]
+                                    .input_source
+                                    .acceptance_order()
+                                    .is_none()
+                            })
+                    });
+                // Older communication records have no order, but can still own the turn they started.
+                let communication = self
+                    .turn_initial_boundaries
+                    .get(&message.turn_id)
+                    .copied()
+                    .filter(|boundary| {
+                        let boundary = &self.boundaries[*boundary];
+                        boundary.is_communication
+                            && boundary.input_source.acceptance_order().is_none()
+                    });
+                self.record_boundaries[index] = ordered.max(communication);
+                self.retained_fact_sources.push(RetainedFactSource {
+                    record_index: index,
+                    turn_id: message.turn_id.clone(),
+                    acceptance_order: Some(*acceptance_order),
                 });
             }
             RolloutItem::SecurityRiskScore(_) => self.record_boundaries[index] = None,
@@ -324,6 +402,7 @@ impl RollbackPlanner {
             record_index: index,
             message_id: None,
             input_source: RetainedInputSource::Local(None),
+            is_communication: false,
             alive: true,
         });
         let had_prior_boundary = !self.boundary_stack.is_empty();
@@ -346,6 +425,9 @@ impl RollbackPlanner {
     fn bind_active_turn(&mut self, boundary: usize) {
         if let Some(turn_id) = self.active_turn_id.as_ref() {
             self.turn_boundaries.insert(turn_id.clone(), boundary);
+            self.turn_initial_boundaries
+                .entry(turn_id.clone())
+                .or_insert(boundary);
         }
     }
 
@@ -506,7 +588,7 @@ fn user_response_matches_event(content: &[ContentItem], event: &UserMessageEvent
                     file_ids.push(file_id.as_str());
                 }
             },
-            ContentItem::InputAudio { audio_url } => audio.push(audio_url.as_str()),
+            ContentItem::InputAudio { audio: reference } => audio.push(reference),
             ContentItem::OutputText { .. } => return false,
         }
     }
@@ -528,14 +610,82 @@ fn user_response_matches_event(content: &[ContentItem], event: &UserMessageEvent
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>()
-        && audio
-            == event
-                .audio
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
+        && {
+            if event.has_complete_audio_order() {
+                let mut actual = audio.into_iter();
+                let mut inline = event.audio.as_deref().unwrap_or_default().iter();
+                let mut file = event.audio_references.as_deref().unwrap_or_default().iter();
+                event.audio_order.iter().all(|kind| {
+                    let Some(actual) = actual.next() else {
+                        return false;
+                    };
+                    match kind {
+                        UserMessageAudioKind::Inline => matches!(
+                            (actual, inline.next()),
+                            (
+                                AudioReference::Inline { audio_url },
+                                Some(expected),
+                            ) if audio_url == expected
+                        ),
+                        UserMessageAudioKind::File => file.next().is_some_and(|expected| {
+                            matches!(actual, AudioReference::File { .. }) && actual == expected
+                        }),
+                    }
+                }) && actual.next().is_none()
+                    && inline.next().is_none()
+                    && file.next().is_none()
+            } else {
+                match &event.audio_references {
+                    Some(references) => audio.into_iter().eq(references),
+                    None => audio
+                        .into_iter()
+                        .map(|reference| match reference {
+                            AudioReference::Inline { audio_url } => Some(audio_url.as_str()),
+                            AudioReference::File { .. } => None,
+                        })
+                        .eq(event
+                            .audio
+                            .as_deref()
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|url| Some(url.as_str()))),
+                }
+            }
+        }
         && event.local_images.is_empty()
         && event.local_audio.is_empty()
+}
+
+#[cfg(test)]
+mod audio_match_tests {
+    use super::*;
+
+    #[test]
+    fn mixed_audio_matches_only_the_exact_ordered_references() {
+        let content = vec![
+            ContentItem::InputAudio {
+                audio: AudioReference::File {
+                    file_id: "file-1".to_string(),
+                },
+            },
+            ContentItem::InputAudio {
+                audio: AudioReference::Inline {
+                    audio_url: "data:audio/wav;base64,AA==".to_string(),
+                },
+            },
+        ];
+        let mut event: UserMessageEvent = serde_json::from_value(serde_json::json!({
+            "message": "",
+            "audio": ["data:audio/wav;base64,AA=="],
+            "audio_references": [{"file_id":"file-1"}],
+            "audio_order": ["file", "inline"]
+        }))
+        .expect("mixed audio fixture");
+        assert!(user_response_matches_event(&content, &event));
+
+        event.audio_references = Some(vec![AudioReference::File {
+            file_id: "different".to_string(),
+        }]);
+        assert!(!user_response_matches_event(&content, &event));
+    }
 }

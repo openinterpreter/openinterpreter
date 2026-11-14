@@ -35,7 +35,9 @@ pub(crate) enum CommandItem {
 pub(crate) struct CommandPopup {
     command_filter: String,
     commands: Vec<CommandItem>,
+    side_conversation_active: bool,
     state: ScrollState,
+    daybreak_command_description: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -45,6 +47,7 @@ pub(crate) struct CommandPopupFlags {
     pub(crate) plugins_command_enabled: bool,
     pub(crate) token_activity_command_enabled: bool,
     pub(crate) service_tier_commands_enabled: bool,
+    pub(crate) daybreak_command_description: Option<&'static str>,
     pub(crate) goal_command_enabled: bool,
     pub(crate) voice_command_enabled: bool,
     pub(crate) worktrees_enabled: bool,
@@ -60,6 +63,7 @@ impl From<CommandPopupFlags> for BuiltinCommandFlags {
             plugins_command_enabled: value.plugins_command_enabled,
             token_activity_command_enabled: value.token_activity_command_enabled,
             service_tier_commands_enabled: value.service_tier_commands_enabled,
+            daybreak_command_description: value.daybreak_command_description,
             goal_command_enabled: value.goal_command_enabled,
             voice_command_enabled: value.voice_command_enabled,
             worktrees_enabled: value.worktrees_enabled,
@@ -75,19 +79,27 @@ impl CommandPopup {
         service_tier_commands: Vec<ServiceTierCommand>,
     ) -> Self {
         // Keep built-in availability in sync with the composer.
-        let commands = commands_for_input(flags.into(), &service_tier_commands)
-            .into_iter()
-            .filter_map(|command| match command {
-                SlashCommandItem::Builtin(cmd) => (!cmd.command().starts_with("debug")
-                    && cmd != SlashCommand::Apps)
-                    .then_some(CommandItem::Builtin(cmd)),
-                SlashCommandItem::ServiceTier(command) => Some(CommandItem::ServiceTier(command)),
-            })
-            .collect();
+        let commands = commands_for_input(
+            BuiltinCommandFlags {
+                side_conversation_active: false,
+                ..flags.into()
+            },
+            &service_tier_commands,
+        )
+        .into_iter()
+        .filter_map(|command| match command {
+            SlashCommandItem::Builtin(cmd) => (!cmd.command().starts_with("debug")
+                && cmd != SlashCommand::Apps)
+                .then_some(CommandItem::Builtin(cmd)),
+            SlashCommandItem::ServiceTier(command) => Some(CommandItem::ServiceTier(command)),
+        })
+        .collect();
         Self {
             command_filter: String::new(),
             commands,
+            side_conversation_active: flags.side_conversation_active,
             state: ScrollState::new(),
+            daybreak_command_description: flags.daybreak_command_description,
         }
     }
 
@@ -152,6 +164,9 @@ impl CommandPopup {
                 if matches!(command, CommandItem::Builtin(cmd) if ALIAS_COMMANDS.contains(cmd)) {
                     continue;
                 }
+                if self.is_unavailable(command) {
+                    continue;
+                }
                 out.push((command.clone(), None));
             }
             return out;
@@ -191,10 +206,13 @@ impl CommandPopup {
 
         out.extend(exact);
         out.extend(prefix);
+        if self.side_conversation_active {
+            out.sort_by_key(|(item, _)| self.is_unavailable(item));
+        }
         out
     }
 
-    fn filtered_items(&self) -> Vec<CommandItem> {
+    pub(crate) fn filtered_items(&self) -> Vec<CommandItem> {
         self.filtered().into_iter().map(|(c, _)| c).collect()
     }
 
@@ -207,7 +225,14 @@ impl CommandPopup {
             .enumerate()
             .map(|(index, (item, indices))| {
                 let name = format!("/{}", item.command());
-                let description = item.description().to_string();
+                let description = if matches!(item, CommandItem::Builtin(SlashCommand::Daybreak)) {
+                    self.daybreak_command_description
+                        .unwrap_or(item.description())
+                } else {
+                    item.description()
+                }
+                .to_string();
+                let unavailable = self.is_unavailable(&item);
                 GenericDisplayRow {
                     category_tag: None,
                     name,
@@ -218,7 +243,6 @@ impl CommandPopup {
                     }],
                     selection_style: Some(selection_style()),
                     match_indices: indices.map(|v| v.into_iter().map(|i| i + 1).collect()),
-                    display_shortcut: None,
                     description: Some(description),
                     wrap_indent: None,
                     is_disabled: false,
@@ -231,14 +255,24 @@ impl CommandPopup {
     /// Move the selection cursor one step up.
     pub(crate) fn move_up(&mut self) {
         let len = self.filtered_items().len();
-        self.state.move_up_wrap(len);
+        for _ in 0..len {
+            self.state.move_up_wrap(len);
+            if self.selected_item().is_some() {
+                break;
+            }
+        }
         self.state.ensure_visible(len, MAX_POPUP_ROWS.min(len));
     }
 
     /// Move the selection cursor one step down.
     pub(crate) fn move_down(&mut self) {
         let matches_len = self.filtered_items().len();
-        self.state.move_down_wrap(matches_len);
+        for _ in 0..matches_len {
+            self.state.move_down_wrap(matches_len);
+            if self.selected_item().is_some() {
+                break;
+            }
+        }
         self.state
             .ensure_visible(matches_len, MAX_POPUP_ROWS.min(matches_len));
     }
@@ -249,6 +283,15 @@ impl CommandPopup {
         self.state
             .selected_idx
             .and_then(|idx| matches.get(idx).cloned())
+            .filter(|item| !self.is_unavailable(item))
+    }
+
+    fn is_unavailable(&self, item: &CommandItem) -> bool {
+        self.side_conversation_active
+            && match item {
+                CommandItem::Builtin(cmd) => !cmd.available_in_side_conversation(),
+                CommandItem::ServiceTier(_) => true,
+            }
     }
 }
 
@@ -287,6 +330,44 @@ impl WidgetRef for CommandPopup {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn unavailable_side_conversation_command_is_shown_only_when_searched() {
+        let mut popup = CommandPopup::new(
+            CommandPopupFlags {
+                side_conversation_active: true,
+                ..CommandPopupFlags::default()
+            },
+            Vec::new(),
+        );
+        popup.on_composer_text_change("/".to_string());
+        assert!(
+            !popup
+                .filtered_items()
+                .contains(&CommandItem::Builtin(SlashCommand::Archive))
+        );
+
+        popup.on_composer_text_change("/arch".to_string());
+        assert_eq!(
+            popup.filtered_items(),
+            vec![CommandItem::Builtin(SlashCommand::Archive)]
+        );
+        assert_eq!(popup.selected_item(), None);
+
+        let width = 76;
+        let area = Rect::new(
+            /*x*/ 0,
+            /*y*/ 0,
+            width,
+            popup.calculate_required_height(width),
+        );
+        let mut buf = Buffer::empty(area);
+        popup.render_ref(area, &mut buf);
+        insta::assert_snapshot!("side_conversation_unavailable_command", format!("{buf:?}"));
+        popup.on_composer_text_change("/a".to_string());
+        popup.move_up();
+        assert!(popup.selected_item().is_some());
+    }
 
     #[test]
     fn filter_includes_init_when_typing_prefix() {
@@ -485,26 +566,6 @@ mod tests {
         insta::assert_snapshot!("command_popup_voice", format!("{buf:?}"));
     }
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn default_command_popup_items_snapshot() {
-        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
-        popup.on_composer_text_change("/".to_string());
-
-        let commands = popup
-            .filtered_items()
-            .into_iter()
-            .map(|item| {
-                let command = item.command();
-                let description = item.description();
-                format!("/{command} - {description}")
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        insta::assert_snapshot!("command_popup_default_items", commands);
-    }
-
     #[test]
     fn prefix_filter_limits_matches_for_ac() {
         let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
@@ -608,6 +669,7 @@ mod tests {
                 plugins_command_enabled: false,
                 token_activity_command_enabled: false,
                 service_tier_commands_enabled: false,
+                daybreak_command_description: None,
                 goal_command_enabled: false,
                 voice_command_enabled: false,
                 worktrees_enabled: true,

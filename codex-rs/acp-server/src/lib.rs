@@ -12,7 +12,6 @@ use acp::Client;
 use acp::ConnectTo;
 use acp::ConnectionTo;
 use acp::Error;
-use acp::schema::AgentAuthCapabilities;
 use acp::schema::AgentCapabilities;
 use acp::schema::AuthEnvVar;
 use acp::schema::AuthMethod;
@@ -35,7 +34,6 @@ use acp::schema::ListSessionsRequest;
 use acp::schema::ListSessionsResponse;
 use acp::schema::LoadSessionRequest;
 use acp::schema::LoadSessionResponse;
-use acp::schema::LogoutCapabilities;
 use acp::schema::McpCapabilities;
 use acp::schema::NewSessionRequest;
 use acp::schema::NewSessionResponse;
@@ -86,8 +84,9 @@ use acp::schema::ToolKind;
 use agent_client_protocol as acp;
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_client::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY;
+use codex_app_server_client::EmbeddedNetworkPolicy;
 use codex_app_server_client::EnvironmentManager;
-use codex_app_server_client::ExecServerRuntimePaths;
+use codex_app_server_client::ExecServerRuntimeOptions;
 use codex_app_server_client::InProcessAppServerClient;
 use codex_app_server_client::InProcessAppServerRequestHandle;
 use codex_app_server_client::InProcessClientStartArgs;
@@ -113,6 +112,7 @@ use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
 use codex_app_server_protocol::ThreadResumeParams;
@@ -241,7 +241,10 @@ struct AppServerAcpAgent {
 
 impl AppServerAcpAgent {
     async fn start(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<Self> {
-        let config = Config::load_with_cli_overrides(Vec::new()).await?;
+        let mut config = Config::load_with_cli_overrides(Vec::new()).await?;
+        let embedded_network_policy =
+            EmbeddedNetworkPolicy::load(&LoaderOverrides::default()).await;
+        embedded_network_policy.activate(&mut config);
         let config_warnings = config
             .startup_warnings
             .iter()
@@ -252,7 +255,7 @@ impl AppServerAcpAgent {
                 range: None,
             })
             .collect();
-        let runtime_paths = ExecServerRuntimePaths::from_optional_paths(
+        let runtime_paths = ExecServerRuntimeOptions::from_optional_paths(
             arg0_paths.codex_self_exe.clone(),
             arg0_paths.codex_linux_sandbox_exe.clone(),
         )?;
@@ -266,12 +269,14 @@ impl AppServerAcpAgent {
         );
         let state_db = codex_core::init_state_db(&config).await;
         let mut client = InProcessAppServerClient::start(InProcessClientStartArgs {
+            required_human_approval: true,
             arg0_paths,
             config: Arc::new(config.clone()),
             cli_overrides: Vec::new(),
             loader_overrides: LoaderOverrides::default(),
             strict_config: false,
             cloud_config_bundle: CloudConfigBundleLoader::default(),
+            embedded_network_policy,
             feedback: CodexFeedback::new(),
             log_db: None,
             state_db,
@@ -473,8 +478,7 @@ impl AppServerAcpAgent {
         let mut agent_capabilities = AgentCapabilities::new()
             .prompt_capabilities(PromptCapabilities::new().embedded_context(true).image(true))
             .mcp_capabilities(McpCapabilities::new().http(false).sse(false))
-            .load_session(true)
-            .auth(AgentAuthCapabilities::new().logout(LogoutCapabilities::new()));
+            .load_session(true);
         agent_capabilities.session_capabilities = SessionCapabilities::new()
             .close(SessionCloseCapabilities::new())
             .list(SessionListCapabilities::new());
@@ -619,6 +623,11 @@ impl AppServerAcpAgent {
                 .request_typed(ClientRequest::ThreadList {
                     request_id: next_request_id(),
                     params: ThreadListParams {
+                        include_attached_threads: false,
+                        current_account_only: false,
+                        included_thread_ids: None,
+                        excluded_thread_ids: None,
+                        attached_to_thread_id: None,
                         cursor: request.cursor.clone(),
                         limit: Some(25),
                         sort_key: Some(ThreadSortKey::UpdatedAt),
@@ -890,6 +899,14 @@ impl AppServerAcpAgent {
                         .await?;
                 }
                 Some(AppServerEvent::Lagged { .. }) => {}
+                Some(AppServerEvent::ThreadStreamDisconnected(error)) => {
+                    if !error.will_retry && error.thread_id == thread_id {
+                        return Err(
+                            Error::internal_error().data("app-server thread stream disconnected")
+                        );
+                    }
+                }
+                Some(AppServerEvent::ThreadStreamReconnected(_)) => {}
                 Some(AppServerEvent::Disconnected { message }) => {
                     return Err(Error::internal_error().data(message));
                 }
@@ -1248,15 +1265,15 @@ fn send_completed_item_update(
     cx: &ConnectionTo<Client>,
     item: &codex_app_server_protocol::ThreadItem,
 ) -> Result<(), Error> {
-    match item {
-        codex_app_server_protocol::ThreadItem::AgentMessage { text, .. } => {
+    match &item.payload {
+        ThreadItemPayload::AgentMessage { text, .. } => {
             send_update(
                 session_id,
                 cx,
                 SessionUpdate::AgentMessageChunk(ContentChunk::new(text.clone().into())),
             )?;
         }
-        codex_app_server_protocol::ThreadItem::Reasoning {
+        ThreadItemPayload::Reasoning {
             summary, content, ..
         } => {
             let text = summary
@@ -1273,7 +1290,7 @@ fn send_completed_item_update(
                 )?;
             }
         }
-        item => {
+        _ => {
             if let Some((tool_call_id, title, kind)) = tool_call_from_item(item) {
                 send_update(
                     session_id,
@@ -1312,25 +1329,25 @@ fn stop_reason_from_turn(turn: Turn) -> StopReason {
 fn tool_call_from_item(
     item: &codex_app_server_protocol::ThreadItem,
 ) -> Option<(ToolCallId, String, ToolKind)> {
-    match item {
-        codex_app_server_protocol::ThreadItem::CommandExecution { id, command, .. } => Some((
+    match &item.payload {
+        ThreadItemPayload::CommandExecution { id, command, .. } => Some((
             ToolCallId::new(id.clone()),
             command.clone(),
             ToolKind::Execute,
         )),
-        codex_app_server_protocol::ThreadItem::FileChange { id, .. } => Some((
+        ThreadItemPayload::FileChange { id, .. } => Some((
             ToolCallId::new(id.clone()),
             "File change".to_string(),
             ToolKind::Edit,
         )),
-        codex_app_server_protocol::ThreadItem::McpToolCall {
+        ThreadItemPayload::McpToolCall {
             id, server, tool, ..
         } => Some((
             ToolCallId::new(id.clone()),
             format!("{server}/{tool}"),
             ToolKind::Other,
         )),
-        codex_app_server_protocol::ThreadItem::WebSearch(item) => Some((
+        ThreadItemPayload::WebSearch(item) => Some((
             ToolCallId::new(item.id.clone()),
             "Web search".to_string(),
             ToolKind::Fetch,
@@ -1346,31 +1363,34 @@ fn replay_thread_history(
 ) -> Result<(), Error> {
     for turn in turns {
         for item in turn.items {
-            match item {
-                codex_app_server_protocol::ThreadItem::UserMessage { content, .. } => {
+            match &item.payload {
+                ThreadItemPayload::UserMessage { content, .. } => {
                     for input in content {
                         if let UserInput::Text { text, .. } = input {
                             send_update(
                                 &session_id,
                                 cx,
-                                SessionUpdate::UserMessageChunk(ContentChunk::new(text.into())),
+                                SessionUpdate::UserMessageChunk(ContentChunk::new(
+                                    text.clone().into(),
+                                )),
                             )?;
                         }
                     }
                 }
-                codex_app_server_protocol::ThreadItem::AgentMessage { text, .. } => {
+                ThreadItemPayload::AgentMessage { text, .. } => {
                     send_update(
                         &session_id,
                         cx,
-                        SessionUpdate::AgentMessageChunk(ContentChunk::new(text.into())),
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(text.clone().into())),
                     )?;
                 }
-                codex_app_server_protocol::ThreadItem::Reasoning {
+                ThreadItemPayload::Reasoning {
                     summary, content, ..
                 } => {
                     let text = summary
-                        .into_iter()
-                        .chain(content)
+                        .iter()
+                        .chain(content.iter())
+                        .cloned()
                         .collect::<Vec<_>>()
                         .join("\n");
                     if !text.is_empty() {
@@ -1381,7 +1401,7 @@ fn replay_thread_history(
                         )?;
                     }
                 }
-                item => {
+                _ => {
                     if let Some((tool_call_id, title, kind)) = tool_call_from_item(&item) {
                         send_update(
                             &session_id,

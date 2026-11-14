@@ -1,11 +1,76 @@
 //! Utilities for truncating large chunks of output while preserving a prefix
 //! and suffix on UTF-8 boundaries.
 
+use std::ops::Range;
+
 const APPROX_BYTES_PER_TOKEN: usize = 4;
 
-/// Truncate a string to `max_bytes` using a character-count marker.
+/// Replaces one UTF-8-aligned range with a notice. Callers can apply the same
+/// edit to annotated text without losing the sources of the retained slices.
+pub struct TextTruncation {
+    pub removed: Range<usize>,
+    pub marker: String,
+}
+
+impl TextTruncation {
+    /// Applies this edit to the string it was planned from.
+    pub fn apply(&self, original: &str) -> String {
+        assemble_truncated_output(
+            &original[..self.removed.start],
+            &original[self.removed.end..],
+            &self.marker,
+        )
+    }
+}
+
+/// Plans the existing head/tail token truncation. The marker is outside the
+/// retained-text budget, just as it is in [`truncate_middle_with_token_budget`].
+pub fn plan_token_truncation(s: &str, max_tokens: usize) -> Option<TextTruncation> {
+    let max_bytes = approx_bytes_for_tokens(max_tokens);
+    if s.len() <= max_bytes {
+        return None;
+    }
+    let (left_budget, right_budget) = split_budget(max_bytes);
+    let removed = s.floor_char_boundary(left_budget)..s.ceil_char_boundary(s.len() - right_budget);
+    let removed_tokens = approx_tokens_from_byte_count(s.len() - max_bytes);
+    Some(TextTruncation {
+        removed,
+        marker: format!("…{removed_tokens} tokens truncated…"),
+    })
+}
+
+/// Retain at most `max_bytes` from a string's ends and add a character-count
+/// marker outside that budget.
+///
+/// Use [`truncate_middle_with_marker`] when the complete result must fit a hard
+/// byte limit.
 pub fn truncate_middle_chars(s: &str, max_bytes: usize) -> String {
-    truncate_with_byte_estimate(s, max_bytes, /*use_tokens*/ false)
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let (left_budget, right_budget) = split_budget(max_bytes);
+    let (removed_chars, left, right) = split_string(s, left_budget, right_budget);
+    assemble_truncated_output(left, right, &format!("…{removed_chars} chars truncated…"))
+}
+
+/// Truncate the middle of a UTF-8 string so the result, including `marker`, is
+/// at most `max_bytes` bytes.
+///
+/// Returns the original string when it already fits. If the marker itself does
+/// not fit, returns the longest original prefix that does.
+pub fn truncate_middle_with_marker(s: &str, max_bytes: usize, marker: &str) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+
+    let Some(content_budget) = max_bytes.checked_sub(marker.len()) else {
+        return s[..s.floor_char_boundary(max_bytes)].to_string();
+    };
+    let (left_budget, right_budget) = split_budget(content_budget);
+    let prefix_end = s.floor_char_boundary(left_budget);
+    let suffix_start = s.ceil_char_boundary(s.len().saturating_sub(right_budget));
+
+    assemble_truncated_output(&s[..prefix_end], &s[suffix_start..], marker)
 }
 
 /// Truncate the middle of a UTF-8 string to at most `max_tokens` approximate
@@ -13,19 +78,10 @@ pub fn truncate_middle_chars(s: &str, max_bytes: usize) -> String {
 /// truncated string and `Some(original_token_count)` if truncation occurred;
 /// otherwise returns the original string and `None`.
 pub fn truncate_middle_with_token_budget(s: &str, max_tokens: usize) -> (String, Option<u64>) {
-    if s.is_empty() {
-        return (String::new(), None);
-    }
-
-    if max_tokens > 0 && s.len() <= approx_bytes_for_tokens(max_tokens) {
+    let Some(truncation) = plan_token_truncation(s, max_tokens) else {
         return (s.to_string(), None);
-    }
-
-    let truncated = truncate_with_byte_estimate(
-        s,
-        approx_bytes_for_tokens(max_tokens),
-        /*use_tokens*/ true,
-    );
+    };
+    let truncated = truncation.apply(s);
     let total_tokens = u64::try_from(approx_token_count(s)).unwrap_or(u64::MAX);
 
     if truncated == s {
@@ -33,39 +89,6 @@ pub fn truncate_middle_with_token_budget(s: &str, max_tokens: usize) -> (String,
     } else {
         (truncated, Some(total_tokens))
     }
-}
-
-fn truncate_with_byte_estimate(s: &str, max_bytes: usize, use_tokens: bool) -> String {
-    if s.is_empty() {
-        return String::new();
-    }
-
-    let total_chars = s.chars().count();
-
-    if max_bytes == 0 {
-        return format_truncation_marker(
-            use_tokens,
-            removed_units(use_tokens, s.len(), total_chars),
-        );
-    }
-
-    if s.len() <= max_bytes {
-        return s.to_string();
-    }
-
-    let total_bytes = s.len();
-    let (left_budget, right_budget) = split_budget(max_bytes);
-    let (removed_chars, left, right) = split_string(s, left_budget, right_budget);
-    let marker = format_truncation_marker(
-        use_tokens,
-        removed_units(
-            use_tokens,
-            total_bytes.saturating_sub(max_bytes),
-            removed_chars,
-        ),
-    );
-
-    assemble_truncated_output(left, right, &marker)
 }
 
 pub fn approx_token_count(text: &str) -> usize {
@@ -126,22 +149,6 @@ fn split_string(s: &str, beginning_bytes: usize, end_bytes: usize) -> (usize, &s
 fn split_budget(budget: usize) -> (usize, usize) {
     let left = budget / 2;
     (left, budget - left)
-}
-
-fn format_truncation_marker(use_tokens: bool, removed_count: u64) -> String {
-    if use_tokens {
-        format!("…{removed_count} tokens truncated…")
-    } else {
-        format!("…{removed_count} chars truncated…")
-    }
-}
-
-fn removed_units(use_tokens: bool, removed_bytes: usize, removed_chars: usize) -> u64 {
-    if use_tokens {
-        approx_tokens_from_byte_count(removed_bytes)
-    } else {
-        u64::try_from(removed_chars).unwrap_or(u64::MAX)
-    }
 }
 
 fn assemble_truncated_output(prefix: &str, suffix: &str, marker: &str) -> String {
