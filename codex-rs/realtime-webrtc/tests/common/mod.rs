@@ -13,11 +13,11 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 pub const BUILD_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 pub const WAIT: Duration = Duration::from_secs(/*secs*/ 10);
@@ -27,6 +27,7 @@ const HELPER: &str = if cfg!(windows) {
 } else {
     "codex-voice-host"
 };
+static NEXT_PACKAGE_ID: AtomicU64 = AtomicU64::new(0);
 
 pub fn wait_for(mut ready: impl FnMut() -> bool) -> Result<()> {
     let deadline = Instant::now() + WAIT;
@@ -59,6 +60,22 @@ impl Drop for Package {
     }
 }
 
+fn new_package() -> Result<Package> {
+    // Bazel's writable test directory is independent of the host's TMPDIR.
+    let parent = std::env::var_os("TEST_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    loop {
+        let id = NEXT_PACKAGE_ID.fetch_add(1, Ordering::Relaxed);
+        let root = parent.join(format!("voice-actor-{}-{id}", std::process::id()));
+        match fs::create_dir(&root) {
+            Ok(()) => return Ok(Package(root)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error).context("voice fixture private package creation"),
+        }
+    }
+}
+
 // The child discovers its installation through current_exe, exactly as the public facade does.
 pub fn package(test: &str) -> Result<Option<PathBuf>> {
     let source = std::env::current_exe().context("voice fixture test executable lookup")?;
@@ -73,12 +90,7 @@ pub fn package(test: &str) -> Result<Option<PathBuf>> {
                 .to_owned(),
         ));
     }
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("voice fixture clock lookup")?
-        .as_nanos();
-    let package =
-        Package(std::env::temp_dir().join(format!("voice-actor-{}-{nonce}", std::process::id())));
+    let package = new_package()?;
     let root = &package.0;
     fs::create_dir_all(root.join("bin")).context("voice fixture package bin creation")?;
     fs::create_dir_all(root.join("codex-resources/voice/bin"))
@@ -124,6 +136,41 @@ pub fn package(test: &str) -> Result<Option<PathBuf>> {
         fs::read_to_string(root.join("fixture-error")).unwrap_or_default()
     );
     Ok(None)
+}
+
+#[test]
+fn concurrent_package_owners_do_not_share_or_remove_fixtures() -> Result<()> {
+    let workers = 8;
+    let start = std::sync::Barrier::new(workers);
+    thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let start = &start;
+                scope.spawn(move || -> Result<PathBuf> {
+                    start.wait();
+                    let package = new_package()?;
+                    fs::write(package.0.join("owner"), b"intact")?;
+                    thread::sleep(Duration::from_millis(/*millis*/ 10));
+                    ensure!(fs::read(package.0.join("owner"))? == b"intact");
+                    Ok(package.0.clone())
+                })
+            })
+            .collect();
+        let roots = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("fixture owner thread"))
+            .collect::<Result<Vec<_>>>()?;
+        let distinct: std::collections::HashSet<_> = roots.iter().collect();
+        ensure!(
+            distinct.len() == workers,
+            "fixture owners must have distinct roots"
+        );
+        ensure!(
+            roots.iter().all(|root| !root.exists()),
+            "fixtures must be cleaned up"
+        );
+        Ok(())
+    })
 }
 
 #[ctor::ctor]
