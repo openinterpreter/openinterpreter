@@ -332,7 +332,7 @@ pub(super) async fn run_main_inner(
         .clone()
         .filter(|_| app_server_target.uses_remote_workspace());
 
-    let local_runtime_paths = ExecServerRuntimePaths::from_optional_paths(
+    let local_runtime_paths = ExecServerRuntimeOptions::from_optional_paths(
         arg0_paths.codex_self_exe.clone(),
         arg0_paths.codex_linux_sandbox_exe.clone(),
     )?;
