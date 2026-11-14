@@ -7,8 +7,10 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::client::ModelClientSession;
+use crate::client::SamplingOptions;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
+use crate::client_common::ResponseStream;
 use crate::compact::AutoCompactionDisabled;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact_remote_v2::BackgroundCompactionCandidate;
@@ -21,15 +23,14 @@ use crate::cyber_access_program;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
 use crate::hook_runtime::drain_async_hook_results;
-use crate::hook_runtime::hooks_for_model_request;
 use crate::hook_runtime::inspect_pending_input;
 use crate::hook_runtime::legacy_notify_input_messages;
 use crate::hook_runtime::record_additional_contexts;
 use crate::hook_runtime::record_pending_input;
 use crate::hook_runtime::run_legacy_after_agent_hook;
-use crate::hook_runtime::run_model_request_hooks;
 use crate::hook_runtime::run_pending_session_start_hooks;
 use crate::hook_runtime::run_turn_stop_hooks;
+use crate::hook_runtime::sampling::SamplingRequest;
 use crate::mcp_skill_dependencies::maybe_prompt_and_install_mcp_dependencies;
 use crate::mentions::build_connector_slug_counts;
 use crate::mentions::collect_explicit_app_ids;
@@ -68,7 +69,6 @@ use crate::tools::router::ToolSuggestPresentation;
 use crate::tools::router::record_registration_metrics;
 use crate::tools::spec_plan::build_tool_router;
 use crate::turn_diff_tracker::TurnDiffTracker;
-use crate::turn_timing::record_turn_ttft_metric;
 use crate::util::error_or_panic;
 use codex_analytics::AppInvocation;
 use codex_analytics::CompactionPhase;
@@ -86,9 +86,7 @@ use codex_features::Feature;
 use codex_file_system::EnvironmentAccess;
 use codex_file_system::FindUpErrorPolicy;
 use codex_file_system::find_nearest_ancestor_with_markers;
-use codex_hooks::ModelRequestHookEvent::PostModelRequest;
-use codex_hooks::ModelRequestHookEvent::PreModelRequest;
-use codex_hooks::ModelRequestStatus;
+use codex_hooks::SamplingKind;
 use codex_login::CodexAuth;
 use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::ResponseItemId;
@@ -113,8 +111,6 @@ use codex_protocol::protocol::AgentReasoningSectionBreakEvent;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::HookEventName;
-use codex_protocol::protocol::HookExecutionMode;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::PlanDeltaEvent;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
@@ -1937,6 +1933,7 @@ async fn run_sampling_request(
     let mut initial_input = Some(input);
     let mut notify_messages = Vec::new();
     let mut executed_tool_calls_by_output = HashMap::new();
+    let mut sampling_request = SamplingRequest::new(SamplingKind::Sampling);
     loop {
         // Running code-mode cells can request review while this response is in flight.
         // Keep the latest received ID until response.created replaces it.
@@ -2012,6 +2009,7 @@ async fn run_sampling_request(
         };
         let mut draining_for_mailbox = false;
         let err = match try_run_sampling_request(
+            &mut sampling_request,
             tool_runtime.clone(),
             Arc::clone(&sess),
             sampling_step_context,
@@ -2043,11 +2041,8 @@ async fn run_sampling_request(
                     }
                     return Err(err);
                 }
-                CodexErrorDetails::SessionBudgetExceeded
-                | CodexErrorDetails::InferenceHookDenied { .. }
-                | CodexErrorDetails::Fatal(_) => {
-                    return Err(err);
-                }
+                CodexErrorDetails::Fatal(_) => return Err(err),
+                _ if crate::responses_retry::is_terminal_sampling_outcome(&err) => return Err(err),
                 _ => err,
             },
         };
@@ -2868,6 +2863,7 @@ async fn drain_in_flight(
     )
 )]
 async fn try_run_sampling_request(
+    sampling_request: &mut SamplingRequest,
     tool_runtime: ToolCallRuntime,
     sess: Arc<Session>,
     step_context: Arc<StepContext>,
@@ -2926,47 +2922,11 @@ async fn try_run_sampling_request(
     let effort = sess
         .reasoning_effort_for_request(&step_context.settings, super::RequestEffortUsage::Sampling)
         .await;
-    let hooks = hooks_for_model_request(&sess, &step_context);
-    let post_mode = hooks.execution_mode_for_event(HookEventName::PostModelRequest);
-    let defer_tool_dispatch = post_mode == Some(HookExecutionMode::Sync);
-    let finish_post_request = post_mode.map(|_| {
-        let (post_request, completed) = tokio::sync::oneshot::channel();
-        let (hook_done, wait_for_hook) = tokio::sync::oneshot::channel();
-        hooks.schedule_async_task({
-            let hooks = Arc::clone(&hooks);
-            let session = Arc::clone(&sess);
-            let step = Arc::clone(&step_context);
-            async move {
-                let event = completed.await.unwrap_or(PostModelRequest {
-                    status: ModelRequestStatus::Cancelled,
-                    error: None,
-                    token_usage: None,
-                });
-                run_model_request_hooks(&session, &step, &hooks, event).await;
-                let _ = hook_done.send(());
-            }
-        });
-        let cancellation_token = cancellation_token.clone();
-        async move |event| {
-            let _ = post_request.send(event);
-            if defer_tool_dispatch {
-                // Interrupt the wait, not the session-owned hook or final token accounting.
-                let _ = wait_for_hook.or_cancel(&cancellation_token).await;
-            }
-        }
-    });
-    if hooks
-        .execution_mode_for_event(HookEventName::PreModelRequest)
-        .is_some()
-    {
-        run_model_request_hooks(&sess, &step_context, &hooks, PreModelRequest).await;
-    }
     let sampling_timing_guard = turn_context.turn_timing_state.begin_sampling();
     let mut response_id_for_assessment = None;
     let mut answer_moderation: Option<codex_protocol::protocol::TargetedAnswerModeration> = None;
     let mut pending_assessment: Option<codex_api::GuardianAssessment> = None;
     let mut response_completed = false;
-    let mut request_token_usage: Option<codex_protocol::protocol::TokenUsage> = None;
     let mut includes_reasoning = step_context.settings.model_info.use_responses_lite;
     // Catalog policies can enable adaptive review independently of the legacy scorer flag.
     // Capture evidence whenever Guardian is available; the reviewer resolves the policy.
@@ -2982,37 +2942,33 @@ async fn try_run_sampling_request(
     let mut resampling = crate::guardian::ResponseResampling::new(&sess);
     let prompt = Arc::new(prompt);
     let mut stream_request = async |prompt: &Arc<Prompt>| {
-        client_session
-            .stream(
+        let send = client_session
+            .open_model_response(
                 prompt,
                 &step_context.settings.model_info,
                 &step_context.session_telemetry,
-                effort.clone(),
-                step_context.settings.reasoning_summary,
-                step_context.settings.service_tier.clone(),
+                SamplingOptions {
+                    reasoning_effort: effort.clone(),
+                    reasoning_summary: step_context.settings.reasoning_summary,
+                    service_tier: step_context.settings.service_tier.clone(),
+                },
                 responses_metadata,
                 &inference_trace,
             )
-            .instrument(trace_span!("stream_request"))
+            .instrument(trace_span!("stream_request"));
+        sampling_request
+            .open(
+                &sess,
+                &step_context,
+                &step_context.settings.model_info.slug,
+                &cancellation_token,
+                send,
+            )
             .await
     };
-    let stream = stream_request(&prompt)
+    let mut stream = stream_request(&prompt)
         .or_cancel(&cancellation_token)
-        .await?;
-    let mut stream = match stream {
-        Ok(stream) => stream,
-        Err(error) => {
-            if let Some(finish_post_request) = finish_post_request {
-                finish_post_request(PostModelRequest {
-                    status: ModelRequestStatus::Failed,
-                    error: Some(error.to_string()),
-                    token_usage: None,
-                })
-                .await;
-            }
-            return Err(error);
-        }
-    };
+        .await??;
     let can_interrupt = turn_context
         .config
         .features
@@ -3091,8 +3047,6 @@ async fn try_run_sampling_request(
             "codex.response.receive_wait_ms",
             receive_started.elapsed().as_secs_f64() * 1000.0,
         );
-        // Account for an already-received terminal error even if cancellation raced it.
-        // Cancellation still stops ordinary stream events before they can run tools.
         let event = match event {
             Ok(Ok(event)) => event,
             Ok(Err(_)) => {
@@ -3119,13 +3073,7 @@ async fn try_run_sampling_request(
             Err(_) => break Err(CodexErr::TurnAborted),
         };
 
-        if cancellation_token.is_cancelled()
-            && !matches!(event.as_ref(), Some(Err(err))
-                if matches!(err.details(), CodexErrorDetails::ResponseIncomplete(_)))
-        {
-            break Err(CodexErr::TurnAborted);
-        }
-
+        let event = ResponseStream::accept_for_turn(event, &cancellation_token);
         let event = match event.unwrap_or_else(|| {
             Err(CodexErr::Stream(
                 "stream closed before response.completed".into(),
@@ -3134,11 +3082,6 @@ async fn try_run_sampling_request(
             Ok(event) => event,
             Err(err) => {
                 if let CodexErrorDetails::ResponseIncomplete(incomplete) = err.details() {
-                    if let Some(usage) = &incomplete.token_usage {
-                        request_token_usage
-                            .get_or_insert_default()
-                            .add_assign(usage);
-                    }
                     sess.record_incomplete_response_usage(
                         &turn_context,
                         &step_context.settings,
@@ -3163,7 +3106,6 @@ async fn try_run_sampling_request(
             }
         };
 
-        record_turn_ttft_metric(&turn_context, &event).await;
         let Some(event) = resampling.filter(event, &step_context.tool_router) else {
             continue;
         };
@@ -3274,7 +3216,7 @@ async fn try_run_sampling_request(
                     step_context: Arc::clone(&step_context),
                     turn_store: Arc::clone(&turn_store),
                     tool_runtime,
-                    defer_tool_dispatch: defer_tool_dispatch || *draining_for_mailbox,
+                    defer_tool_dispatch: *draining_for_mailbox,
                     cancellation_token: cancellation_token.child_token(),
                 };
                 if *draining_for_mailbox {
@@ -3533,11 +3475,6 @@ async fn try_run_sampling_request(
                     .await;
                 }
                 response_completed = true;
-                if let Some(usage) = &token_usage {
-                    request_token_usage
-                        .get_or_insert_default()
-                        .add_assign(usage);
-                }
                 sess.services
                     .analytics_events_client
                     .track_code_mode_tool_call(
@@ -3758,21 +3695,6 @@ async fn try_run_sampling_request(
     drop(stream);
     drop(sampling_span);
     drop(sampling_timing_guard);
-    if let Some(finish_post_request) = finish_post_request {
-        let (status, error) = match (response_completed, &outcome) {
-            (true, _) => (ModelRequestStatus::Completed, None),
-            (false, Err(error)) if !matches!(error.details(), CodexErrorDetails::TurnAborted) => {
-                (ModelRequestStatus::Failed, Some(error.to_string()))
-            }
-            _ => (ModelRequestStatus::Cancelled, None),
-        };
-        finish_post_request(PostModelRequest {
-            status,
-            error,
-            token_usage: request_token_usage,
-        })
-        .await;
-    }
     flush_assistant_text_segments_all(
         &sess,
         &turn_context,

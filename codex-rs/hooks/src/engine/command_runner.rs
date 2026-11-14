@@ -123,7 +123,9 @@ impl CommandHookRuntime {
         event_input: Value,
         cwd: std::path::PathBuf,
         turn_id: Option<String>,
-        parse: fn(&ConfiguredHandler, HandlerRunResult, Option<String>) -> ParsedHandler<T>,
+        parse: impl Fn(&ConfiguredHandler, HandlerRunResult, Option<String>) -> ParsedHandler<T>
+        + Send
+        + 'static,
     ) {
         if self.result_sender.is_closed() {
             return;

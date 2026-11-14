@@ -10,6 +10,7 @@ use crate::Prompt;
 use crate::ResponseStream;
 use crate::client::ModelClientSession;
 use crate::client::ResponsesHttpExecutor;
+use crate::client::SamplingOptions;
 use crate::client_common::ResponseEvent;
 use crate::compact::CompactedHistoryMetadata;
 use crate::compact::CompactionAnalyticsAttempt;
@@ -40,6 +41,7 @@ use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
 use codex_analytics::CompactionReason;
 use codex_analytics::CompactionTrigger;
+use codex_async_utils::OrCancelExt;
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
 use codex_features::Feature;
@@ -97,7 +99,7 @@ const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES: u64 = 2;
 
 #[derive(Clone, Copy)]
 enum CompactionRequestKind<'a> {
-    Foreground,
+    Foreground(&'a CancellationToken),
     Background(&'a CancellationToken),
 }
 
@@ -289,8 +291,9 @@ struct RemoteCompactionV2Output {
 }
 
 async fn run_remote_compaction_request_v2(
-    sess: &Session,
-    step_context: &StepContext,
+    request: &mut crate::hook_runtime::sampling::SamplingRequest,
+    sess: &Arc<Session>,
+    step_context: &Arc<StepContext>,
     prompt: &Arc<Prompt>,
     responses_metadata: &CodexResponsesMetadata,
     transport: &mut CompactionRequestTransport<'_>,
@@ -308,14 +311,26 @@ async fn run_remote_compaction_request_v2(
             // Replay the routing token without letting this request change foreground routing.
             let turn_state = Arc::new(turn_state.clone().map(OnceLock::from).unwrap_or_default());
             let http_executor = ResponsesHttpExecutor::new(&sess.services.model_client);
+            let send = http_executor.stream_responses_http(
+                &turn_state,
+                auth_owner.clone(),
+                /*event_sender*/ None,
+                prompt,
+                &settings.model_info,
+                &step_context.session_telemetry,
+                SamplingOptions {
+                    reasoning_effort: effort,
+                    reasoning_summary: settings.reasoning_summary,
+                    service_tier: settings.service_tier.clone(),
+                },
+                responses_metadata,
+                &trace,
+                None,
+            );
             let stream = tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => return Err(CodexErr::TurnAborted),
-                stream = http_executor.stream_responses_http(
-                    &turn_state, auth_owner.clone(), /*event_sender*/ None, prompt, &settings.model_info, &step_context.session_telemetry, effort,
-                    settings.reasoning_summary, settings.service_tier.clone(), responses_metadata,
-                    &trace, None,
-                ) => stream?,
+                stream = request.open(sess, step_context, &settings.model_info.slug, &cancellation, send) => stream?,
             };
             return collect_compaction_output(
                 sess,
@@ -334,27 +349,38 @@ async fn run_remote_compaction_request_v2(
         .stream_max_retries()
         .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
     let mut retry_state = ResponsesStreamRetryState::default();
+    let cancellation = &step_context.turn_cancellation;
     loop {
-        let result = match client_session
-            .stream(
-                prompt,
-                &settings.model_info,
-                &turn_context.session_telemetry,
-                sess.reasoning_effort_for_request(settings, RequestEffortUsage::Compaction)
-                    .await,
-                settings.reasoning_summary,
-                step_context.settings.service_tier.clone(),
-                responses_metadata,
-                &InferenceTraceContext::disabled(),
+        let result = match request
+            .open(
+                sess,
+                step_context,
+                &settings.model_info.slug,
+                cancellation,
+                client_session.open_model_response(
+                    prompt,
+                    &settings.model_info,
+                    &turn_context.session_telemetry,
+                    SamplingOptions {
+                        reasoning_effort: sess
+                            .reasoning_effort_for_request(settings, RequestEffortUsage::Compaction)
+                            .await,
+                        reasoning_summary: settings.reasoning_summary,
+                        service_tier: step_context.settings.service_tier.clone(),
+                    },
+                    responses_metadata,
+                    &InferenceTraceContext::disabled(),
+                ),
             )
-            .await
+            .or_cancel(cancellation)
+            .await?
         {
             Ok(stream) => {
                 collect_compaction_output(
                     sess,
                     turn_context,
                     stream,
-                    CompactionRequestKind::Foreground,
+                    CompactionRequestKind::Foreground(cancellation),
                 )
                 .await
             }
@@ -396,7 +422,9 @@ async fn collect_compaction_output(
     let mut completed_token_usage = None;
     loop {
         let event = match request_kind {
-            CompactionRequestKind::Foreground => stream.next().await,
+            CompactionRequestKind::Foreground(cancellation) => {
+                stream.next_for_turn(cancellation).await
+            }
             CompactionRequestKind::Background(cancellation) => tokio::select! {
                 biased;
                 // Charge completed usage even when cancellation arrives at the same time.
@@ -417,7 +445,7 @@ async fn collect_compaction_output(
                             .await;
                     }
                 }
-                CompactionRequestKind::Foreground => {
+                CompactionRequestKind::Foreground(_) => {
                     sess.record_incomplete_response_usage(
                         turn_context,
                         &turn_context.initial_settings,
@@ -451,7 +479,7 @@ async fn collect_compaction_output(
                                 .await?;
                         }
                     }
-                    CompactionRequestKind::Foreground => {
+                    CompactionRequestKind::Foreground(_) => {
                         sess.record_observed_response_completed(
                             turn_context,
                             &response_id,
@@ -1384,8 +1412,10 @@ mod tests {
         assert_eq!(truncated, vec![newest]);
     }
 
+    #[test_case::test_case(false; "turn interrupt discards queued incomplete usage")]
+    #[test_case::test_case(true; "session shutdown preserves queued incomplete usage without foreground updates")]
     #[tokio::test]
-    async fn collect_background_incomplete_does_not_publish_foreground_usage() {
+    async fn collect_queued_incomplete_usage_on_cancellation(background: bool) {
         let usage = TokenUsage {
             input_tokens: 100,
             output_tokens: 20,
@@ -1416,14 +1446,25 @@ mod tests {
             &sess,
             &turn_context,
             stream,
-            CompactionRequestKind::Background(&cancellation),
+            if background {
+                CompactionRequestKind::Background(&cancellation)
+            } else {
+                CompactionRequestKind::Foreground(&cancellation)
+            },
         )
         .await;
 
-        assert!(matches!(result, Err(ref err)
-            if matches!(err.details(), CodexErrorDetails::ResponseIncomplete(_))));
         assert_eq!(sess.token_usage_info().await, None);
         assert!(rx.is_empty());
+        if !background {
+            assert!(
+                matches!(result, Err(ref err) if matches!(err.details(), CodexErrorDetails::TurnAborted))
+            );
+            assert!(accounting.reports.lock().unwrap().is_empty());
+            return;
+        }
+        assert!(matches!(result, Err(ref err)
+            if matches!(err.details(), CodexErrorDetails::ResponseIncomplete(_))));
         assert_eq!(
             *accounting.reports.lock().unwrap(),
             vec![AgentUsageReport {
@@ -1434,8 +1475,11 @@ mod tests {
         );
     }
 
+    #[test_case::test_case(true, false; "background bills a complete response even without a summary")]
+    #[test_case::test_case(false, true; "turn interrupt discards a queued complete response")]
+    #[test_case::test_case(true, true; "session shutdown bills a queued complete response even without a summary")]
     #[tokio::test]
-    async fn background_compaction_charges_usage_even_if_output_is_missing() {
+    async fn collect_queued_complete_response(background: bool, interrupted: bool) {
         let (mut sess, turn, _) = crate::session::tests::make_session_and_context_with_rx().await;
         let accounting = Arc::new(UsageRecorder {
             reports: Mutex::new(Vec::new()),
@@ -1453,14 +1497,29 @@ mod tests {
             reasoning_removals: None,
             end_turn: Some(true),
         })]);
+        let cancellation = CancellationToken::new();
+        if interrupted {
+            cancellation.cancel();
+        }
         let result = collect_compaction_output(
             &sess,
             &turn,
             stream,
-            CompactionRequestKind::Background(&CancellationToken::new()),
+            if background {
+                CompactionRequestKind::Background(&cancellation)
+            } else {
+                CompactionRequestKind::Foreground(&cancellation)
+            },
         )
         .await;
 
+        if !background {
+            assert!(
+                matches!(result, Err(error) if matches!(error.details(), CodexErrorDetails::TurnAborted))
+            );
+            assert!(accounting.reports.lock().unwrap().is_empty());
+            return;
+        }
         assert!(
             matches!(result, Err(error) if matches!(error.details(), CodexErrorDetails::Fatal(_)))
         );
@@ -1514,7 +1573,7 @@ mod tests {
             &sess,
             &turn_context,
             stream,
-            CompactionRequestKind::Foreground,
+            CompactionRequestKind::Foreground(&CancellationToken::new()),
         )
         .await
         .expect("compaction should be collected");

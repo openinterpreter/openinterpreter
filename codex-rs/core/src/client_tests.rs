@@ -1666,6 +1666,7 @@ async fn untraced_http_stream_releases_completed_output_before_response_ends() {
         InferenceTraceAttempt::disabled(),
         &test_model_client(SessionSource::Cli).state,
         /*last_response_tx*/ None,
+        super::ResponseDelivery::default(),
     );
 
     assert!(matches!(
@@ -1708,6 +1709,7 @@ async fn incomplete_response_traces_attempted_call_without_streaming_it() -> any
             attempt,
             &test_model_client(SessionSource::Cli).state,
             /*last_response_tx*/ None,
+            super::ResponseDelivery::default(),
         );
         assert!(matches!(stream.next().await, Some(Err(_))));
         assert!(stream.next().await.is_none());
@@ -1753,6 +1755,7 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
         attempt,
         &test_model_client(SessionSource::Cli).state,
         /*last_response_tx*/ None,
+        super::ResponseDelivery::default(),
     );
 
     let observed = stream
@@ -1811,6 +1814,7 @@ async fn response_stream_records_last_model_feedback_ids() {
         InferenceTraceAttempt::disabled(),
         &test_model_client(SessionSource::Cli).state,
         /*last_response_tx*/ None,
+        super::ResponseDelivery::default(),
     );
 
     while stream.next().await.is_some() {}
@@ -2035,6 +2039,7 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
         attempt,
         &test_model_client(SessionSource::Cli).state,
         /*last_response_tx*/ None,
+        super::ResponseDelivery::default(),
     );
 
     // Fill the mapper channel with non-terminal events, then yield one output
@@ -2654,19 +2659,20 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
         .await?;
     drop(tx_event);
     let (last_response_tx, last_response_rx) = tokio::sync::oneshot::channel();
-    let mut stream = super::map_response_stream(
-        codex_api::ResponseStream {
+    let mut stream = super::OpenedModelResponse {
+        stream: codex_api::ResponseStream {
             routing_affinity: None,
             rx_event,
             upstream_request_id: None,
             interrupt: None,
         },
-        test_session_telemetry(),
-        attempt,
-        &test_model_client(SessionSource::Cli).state,
-        vec![Box::new(ReplaceOutput)],
-        Some(last_response_tx),
-    );
+        telemetry: test_session_telemetry(),
+        trace: attempt,
+        client: Arc::clone(&test_model_client(SessionSource::Cli).state),
+        interceptors: vec![Box::new(ReplaceOutput)],
+        continuation: Some(last_response_tx),
+    }
+    .into_stream()?;
     let mut delivered = Vec::new();
     while let Some(event) = stream.next().await {
         if let ResponseEvent::OutputItemDone(item) = event? {

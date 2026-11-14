@@ -302,6 +302,7 @@ pub(crate) fn build_claude_code_responses_shaped_request(
         text: None,
         client_metadata: None,
         access_programs: None,
+        request_country: None,
     })
 }
 

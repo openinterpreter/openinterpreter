@@ -33,6 +33,7 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HookEventName;
+use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
@@ -49,6 +50,7 @@ use codex_protocol::user_input::UserInput;
 use codex_thread_store::InMemoryThreadStore;
 use core_test_support::TestTargetOs;
 use core_test_support::fs_wait;
+use core_test_support::hooks::mount_hook_mcp;
 use core_test_support::hooks::trust_discovered_hooks;
 use core_test_support::responses;
 use core_test_support::responses::ev_apply_patch_custom_tool_call;
@@ -4506,32 +4508,13 @@ async fn local_bundled_cleanup_hook_runs_without_saved_trust(
         }),
     };
     let server = start_mock_server().await;
-    wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/repl"))
-        .respond_with(move |request: &wiremock::Request| {
-            let request: Value = serde_json::from_slice(&request.body).expect("MCP request");
-            let result = match request["method"].as_str() {
-                Some("initialize") => serde_json::json!({
-                    "protocolVersion": request["params"]["protocolVersion"],
-                    "capabilities": { "tools": {} },
-                    "serverInfo": { "name": mcp_server_name, "version": "1.0.0" },
-                }),
-                Some("notifications/initialized") => return wiremock::ResponseTemplate::new(202),
-                Some("tools/list") => serde_json::json!({ "tools": [
-                    { "name": "turn_ended", "inputSchema": { "type": "object" } },
-                    { "name": "regular_stop", "inputSchema": { "type": "object" } },
-                ] }),
-                Some("tools/call") => hook_response.clone(),
-                method => panic!("unexpected MCP request: {method:?}"),
-            };
-            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": request["id"],
-                "result": result,
-            }))
-        })
-        .mount(&server)
-        .await;
+    mount_hook_mcp(
+        &server,
+        mcp_server_name,
+        &["turn_ended", "regular_stop"],
+        move |_| hook_response.clone(),
+    )
+    .await;
     let response = mount_sse_once(
         &server,
         sse(vec![
@@ -6145,33 +6128,18 @@ async fn model_request_hooks_report_failures_and_retries_but_cannot_veto() -> Re
         wait_for_hook_inputs(test.codex_home_path(), "PostModelRequest", /*count*/ 2).await?;
     assert_eq!(pre.len(), 2);
     assert_eq!(post.len(), 2);
+    let thread_id = test.session_configured.thread_id.to_string();
+    for hook in pre.iter().chain(&post) {
+        assert_eq!(hook["thread_id"], thread_id);
+        assert_eq!(hook["kind"], "sampling");
+    }
     assert_eq!(post[0]["status"], "failed");
     assert!(post[0]["error"].is_string());
-    assert_eq!(post[1]["status"], "completed");
-    assert_eq!(post[1]["error"], Value::Null);
+    assert_eq!(post[0]["response_id"], Value::Null);
     assert_eq!(post[0]["token_usage"], Value::Null);
-    assert_eq!(
-        post[1]["token_usage"],
-        json!({
-            "input_tokens": 42,
-            "cached_input_tokens": 0,
-            "cache_write_input_tokens": 0,
-            "output_tokens": 0,
-            "reasoning_output_tokens": 0,
-            "total_tokens": 42,
-        })
-    );
-    for (before, after) in pre.iter().zip(&post) {
-        let mut common = after.clone();
-        common["hook_event_name"] = json!("PreModelRequest");
-        let fields = common.as_object_mut().unwrap();
-        fields.remove("status");
-        fields.remove("error");
-        fields.remove("token_usage");
-        assert_eq!(before, &common);
-        assert!(before["session_id"].is_string());
-        assert!(before["cwd"].is_string());
-    }
+    assert_eq!(post[1]["status"], "completed");
+    assert_eq!(post[1]["response_id"], "successful-attempt");
+    assert_eq!(post[1]["token_usage"]["total_tokens"], 42);
     Ok(())
 }
 
@@ -6217,33 +6185,57 @@ async fn model_request_observer_reports_cancellation() -> Result<()> {
     Ok(())
 }
 
-#[test_case::test_case(Some(false), false; "sync finishes before dispatch")]
-#[test_case::test_case(Some(false), true; "resume after interrupt preserves aborted custom call and usage")]
-#[test_case::test_case(Some(true), false; "async dispatches before stream ends")]
-#[test_case::test_case(None, false; "no post hook dispatches before stream ends")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolDispatchCase {
+    Eager,
+    AsyncHook,
+    SyncHook,
+    InterruptedHook,
+}
+
+#[test_case::test_case(ToolDispatchCase::Eager; "default runs the tool before the response ends")]
+#[test_case::test_case(ToolDispatchCase::AsyncHook; "an observer does not hold the tool")]
+#[test_case::test_case(ToolDispatchCase::SyncHook; "streaming output and tools precede a synchronous hook")]
+#[test_case::test_case(ToolDispatchCase::InterruptedHook; "interrupt cancels the synchronous hook before billing")]
 #[tokio::test]
-async fn model_request_post_hook_orders_tool_dispatch(
-    hook_async: Option<bool>,
-    interrupt: bool,
-) -> Result<()> {
+async fn model_request_post_hook_orders_tool_dispatch(case: ToolDispatchCase) -> Result<()> {
     skip_if_no_network!(Ok(()));
-    let (finish_stream, gate) = oneshot::channel();
-    let call = if interrupt {
-        ev_apply_patch_custom_tool_call(
-            "call",
-            "*** Begin Patch\n*** Add File: should-not-exist\n+unexpected\n*** End Patch",
-        )
-    } else {
-        ev_function_call("call", "test_sync_tool", "{}")
+    use ToolDispatchCase::AsyncHook;
+    use ToolDispatchCase::Eager;
+    use ToolDispatchCase::InterruptedHook;
+    use ToolDispatchCase::SyncHook;
+    const MARKER: &str = "tool-dispatched";
+    const STREAMED: &str = "Still streaming.";
+
+    let hook_async = match case {
+        Eager => None,
+        AsyncHook => Some(true),
+        SyncHook | InterruptedHook => Some(false),
     };
+    let (finish_stream, gate) = oneshot::channel();
+    let mut completed = ev_completed_with_tokens("first", /*total_tokens*/ 42);
+    completed["response"]["usage"]["codex_rollout_budget_units"] = json!(1);
     let first = vec![
         StreamingSseChunk {
             gate: None,
-            body: sse(vec![ev_response_created("first"), call]),
+            body: sse(vec![
+                ev_response_created("first"),
+                ev_apply_patch_custom_tool_call(
+                    "call",
+                    &format!("*** Begin Patch\n*** Add File: {MARKER}\n+ran\n*** End Patch"),
+                ),
+                ev_message_item_added("progress", ""),
+                ev_output_text_delta(STREAMED),
+                ev_message_item_done("progress", STREAMED),
+                // Safety notifications pass through in either mode. Observing this one
+                // proves the reader consumed the preceding items while completion was held.
+                json!({"type":"response.metadata", "response_id":"first",
+                    "metadata":{"type":"safety_buffering","use_cases":["cyber"],"reasons":["policy-check"]}}),
+            ]),
         },
         StreamingSseChunk {
             gate: Some(gate),
-            body: sse_event(ev_completed_with_tokens("first", /*total_tokens*/ 42)),
+            body: sse_event(completed),
         },
     ];
     let second = vec![StreamingSseChunk {
@@ -6251,31 +6243,43 @@ async fn model_request_post_hook_orders_tool_dispatch(
         body: sse(vec![ev_response_created("second"), ev_completed("second")]),
     }];
     let (server, _) = start_streaming_sse_server(vec![first, second]).await;
-    let test = test_codex()
-        .with_model("test-gpt-5.1-codex")
+    let accounting = Arc::new(super::rollout_budget::HostAccounting::default());
+    // The first post-hook blocks on this connection until the test closes it.
+    let hook_gate = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = hook_gate.local_addr()?.port();
+    let mut builder = test_codex()
         .with_pre_build_hook(move |home| {
-            let order = home.join("order").display().to_string();
-            let tool = format!("echo tool >> '{order}'");
-            let mut hooks =
-                json!({"PreToolUse": [{"hooks": [{"type": "command", "command": tool}]}]});
             if let Some(hook_async) = hook_async {
-                let started = home.join("post-started");
-                let release = home.join("release-post");
                 let post = format!(
-                    "touch '{}'; while test ! -e '{}'; do sleep 0.02; done; echo post >> '{order}'",
-                    started.display(),
-                    release.display(),
+                    r#"python3 -c 'import json, socket, sys; json.load(sys.stdin).get("response_id") == "first" and socket.create_connection(("127.0.0.1", {port})).recv(1)'"#
                 );
-                hooks["PostModelRequest"] = json!([{"hooks": [{
+                let hooks = json!({"PostModelRequest": [{"hooks": [{
                     "type": "command", "command": post, "async": hook_async,
-                }]}]);
+                }]}]});
+                fs::write(home.join("hooks.json"), json!({"hooks": hooks}).to_string())
+                    .expect("write hook configuration");
             }
-            fs::write(home.join("hooks.json"), json!({"hooks": hooks}).to_string())
-                .expect("write hook configuration");
         })
-        .with_config(trust_discovered_hooks)
-        .build_with_streaming_server(&server)
-        .await?;
+        .with_config(move |config| {
+            if hook_async.is_some() {
+                trust_discovered_hooks(config);
+            }
+            if matches!(case, Eager | SyncHook) {
+                config.rollout_budget = Some(super::rollout_budget::rollout_budget());
+            }
+            // The builder changes cwd after loading config, so bind the write grant to that cwd.
+            config.workspace_roots = vec![config.cwd.clone()];
+            config.permissions.set_workspace_roots(config.workspace_roots.clone());
+            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
+            config.permissions.set_permission_profile(restrictive_workspace_write_profile())
+                .expect("allow the fixture's patch inside its temporary workspace");
+        });
+    if matches!(case, SyncHook | InterruptedHook) {
+        let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
+        extensions.thread_lifecycle_contributor(accounting.clone());
+        builder = builder.with_extensions(Arc::new(extensions.build()));
+    }
+    let test = builder.build_with_streaming_server(&server).await?;
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
             text: "use the tool".into(),
@@ -6283,61 +6287,71 @@ async fn model_request_post_hook_orders_tool_dispatch(
         }]))
         .await?;
 
-    let home = test.codex_home_path();
-    let order = home.join("order");
-    let sync_post = hook_async == Some(false);
-    if !sync_post {
-        // Dispatch must not depend on the terminal response event, which we still hold.
-        fs_wait::wait_for_path_exists(&order, Duration::from_secs(10)).await?;
-    }
+    let marker = test.workspace_path(MARKER);
+    let mut saw_delta = false;
+    wait_for_event(&test.codex, |event| {
+        saw_delta |= matches!(event, EventMsg::AgentMessageContentDelta(message) if message.delta == STREAMED);
+        matches!(event, EventMsg::SafetyBuffering(_))
+    }).await;
+    assert!(saw_delta);
+    fs_wait::wait_for_path_exists(&marker, Duration::from_secs(10)).await?;
     finish_stream.send(()).expect("release response stream");
-    let release = home.join("release-post");
-    if sync_post {
-        fs_wait::wait_for_path_exists(home.join("post-started"), Duration::from_secs(10)).await?;
-    }
-    if interrupt {
-        test.codex.submit(Op::Interrupt).await?;
-        wait_for_event(&test.codex, |event| matches!(event,
-            EventMsg::TokenCount(ev) if ev.info.as_ref().is_some_and(|info| info.total_token_usage.total_tokens == 42)
-        )).await;
-        wait_for_event(&test.codex, |event| {
-            matches!(event, EventMsg::TurnAborted(_))
-        })
-        .await;
-        assert!(
-            !order.exists(),
-            "interrupt must not dispatch the deferred tool"
-        );
-        fs::write(release, "")?;
-        assert!(!test.workspace_path("should-not-exist").exists());
-
-        let server = start_mock_server().await;
-        let requests = mount_sse_once(&server, responses::sse_completed("resumed")).await;
-        let resumed = test_codex().restart(&server, &test).await?;
-        let usage = resumed
-            .codex
-            .token_usage_info()
-            .await
-            .context("restored usage")?;
-        assert_eq!(usage.total_token_usage.total_tokens, 42);
-        resumed.submit_turn("continue after interrupt").await?;
-        let (output, _) = requests
-            .single_request()
-            .custom_tool_call_output_content_and_success("call")
-            .context("aborted custom tool output")?;
-        assert_eq!(output.as_deref(), Some("aborted before dispatch"));
+    let held_hook = if hook_async.is_some() {
+        Some(
+            timeout(Duration::from_secs(10), hook_gate.accept())
+                .await??
+                .0,
+        )
     } else {
-        fs::write(release, "")?;
-        wait_for_event(&test.codex, |event| {
-            matches!(event, EventMsg::TurnComplete(_))
+        None
+    };
+    if hook_async == Some(false) {
+        assert!(accounting.reports.lock().expect("usage reports").is_empty());
+    }
+    if case == InterruptedHook {
+        let started = wait_for_event_match(&test.codex, |event| match event {
+            EventMsg::HookStarted(started)
+                if started.run.event_name == HookEventName::PostModelRequest
+                    && started.run.handler_type
+                        == codex_protocol::protocol::HookHandlerType::Command =>
+            {
+                Some(started.clone())
+            }
+            _ => None,
         })
         .await;
-        let events = fs::read_to_string(order)?;
-        assert!(
-            events.starts_with(if sync_post { "post\ntool\n" } else { "tool\n" }),
-            "{events}"
+        test.codex.submit(Op::Interrupt).await?;
+        let mut stopped = None;
+        let mut aborted = false;
+        wait_for_event(&test.codex, |event| {
+            match event {
+                EventMsg::HookCompleted(completed) if completed.run.id == started.run.id => {
+                    stopped = Some(completed.clone());
+                }
+                EventMsg::TurnAborted(_) => aborted = true,
+                _ => {}
+            }
+            aborted && stopped.is_some()
+        })
+        .await;
+        let stopped = stopped.expect("post-hook must emit a terminal event after interruption");
+        assert_eq!(stopped.turn_id, started.turn_id);
+        assert_eq!(stopped.run.id, started.run.id);
+        assert_eq!(stopped.run.status, HookRunStatus::Stopped);
+        assert_eq!(
+            stopped.run.status_message.as_deref(),
+            Some("Hook cancelled because the turn was interrupted"),
         );
+        drop(held_hook);
+        assert!(accounting.reports.lock().expect("usage reports").is_empty());
+        return Ok(());
     }
+    drop(held_hook);
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    assert_eq!(fs::read_to_string(marker)?, "ran\n");
     Ok(())
 }
 

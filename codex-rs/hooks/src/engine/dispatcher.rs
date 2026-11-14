@@ -129,6 +129,34 @@ pub(crate) async fn execute_handlers_with_metadata<T: 'static>(
     metadata: Option<&Map<String, Value>>,
     parse: fn(&ConfiguredHandler, HandlerRunResult, Option<String>) -> ParsedHandler<T>,
 ) -> Vec<ParsedHandler<T>> {
+    execute_handlers_with_progress(
+        engine,
+        handlers,
+        input,
+        cwd,
+        turn_id,
+        metadata,
+        parse,
+        |_| {},
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_handlers_with_progress<T: 'static>(
+    engine: &ClaudeHooksEngine,
+    handlers: Vec<ConfiguredHandler>,
+    input: &Value,
+    cwd: &Path,
+    turn_id: Option<String>,
+    metadata: Option<&Map<String, Value>>,
+    parse: impl Fn(&ConfiguredHandler, HandlerRunResult, Option<String>) -> ParsedHandler<T>
+    + Copy
+    + Send
+    + Sync
+    + 'static,
+    mut on_completed: impl FnMut(&HookCompletedEvent) + Send,
+) -> Vec<ParsedHandler<T>> {
     let mut executor_handlers = Vec::new();
     let mut pending = FuturesUnordered::new();
     for (configured_order, handler) in handlers.into_iter().enumerate() {
@@ -169,6 +197,7 @@ pub(crate) async fn execute_handlers_with_metadata<T: 'static>(
         should_block |= parsed.completed.run.status == HookRunStatus::Blocked;
         parsed.completion_order = completion_order;
         completion_order += 1;
+        on_completed(&parsed.completed);
         completed.push((configured_order, parsed));
     }
     completed.sort_by_key(|(configured_order, _)| *configured_order);

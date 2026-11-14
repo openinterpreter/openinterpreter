@@ -124,7 +124,11 @@ async fn build_and_install_compaction(
             )),
         )
     } else {
+        let mut request = crate::hook_runtime::sampling::SamplingRequest::new(
+            codex_hooks::SamplingKind::ForegroundCompaction,
+        );
         let attempt = run_remote_compact_v2_attempt(
+            &mut request,
             sess,
             step_context,
             &compaction_trace,
@@ -137,7 +141,7 @@ async fn build_and_install_compaction(
             Ok(attempt) => (attempt, turn_context),
             Err(error) => {
                 let fallback_turn_context = &replacement_step_context.turn;
-                if !should_retry_with_current_model(&error) {
+                if !should_retry_with_current_model(&error, turn_context, fallback_turn_context) {
                     return Err(error);
                 }
                 sess.set_last_known_step_context(replacement_step_context)
@@ -150,6 +154,7 @@ async fn build_and_install_compaction(
                         fallback_turn_context.provider.info().name.as_str(),
                     );
                 let fallback_result = run_remote_compact_v2_attempt(
+                    &mut request,
                     sess,
                     replacement_step_context,
                     &fallback_compaction_trace,
@@ -168,6 +173,13 @@ async fn build_and_install_compaction(
                 );
                 match fallback_result {
                     Ok(attempt) => (attempt, fallback_turn_context),
+                    Err(fallback_error)
+                        if crate::responses_retry::is_terminal_sampling_outcome(
+                            &fallback_error,
+                        ) =>
+                    {
+                        return Err(fallback_error);
+                    }
                     Err(_) => return Err(error),
                 }
             }

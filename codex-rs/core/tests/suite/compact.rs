@@ -1277,6 +1277,146 @@ async fn reasoning_effort_override_remote_v2_compaction_resets_pinned_effort(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreground_compaction_only_installs_and_bills_after_its_post_hook() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let responses = ["seed", "interrupted", "accepted"].map(|id| {
+        sse(vec![
+            ev_assistant_message(id, id),
+            ev_completed_with_tokens(id, /*total_tokens*/ 42),
+        ])
+    });
+    let model = mount_sse_sequence(&server, responses.to_vec()).await;
+    let hook_server = start_mock_server().await;
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let held = Arc::new(tokio::sync::Notify::new());
+    let (release, gate) = std::sync::mpsc::channel();
+    let gate = std::sync::Mutex::new(gate);
+    core_test_support::hooks::mount_hook_mcp(&hook_server, "observer", &["pre", "post"], {
+        let calls = Arc::clone(&calls);
+        let held = Arc::clone(&held);
+        move |params| {
+            let input = &params["arguments"];
+            if input["kind"] == "foreground_compaction" {
+                calls
+                    .lock()
+                    .unwrap()
+                    .push((params["name"].clone(), input["response_id"].clone()));
+                if input["response_id"] == "interrupted" {
+                    held.notify_one();
+                    // Dropping the sender also releases the mock if an assertion fails.
+                    let _ = gate.lock().unwrap().recv();
+                }
+            }
+            json!({"content":[]})
+        }
+    })
+    .await;
+    let url = format!("{}/repl", hook_server.uri());
+    let provider = non_openai_model_provider(&server);
+    let accounting = Arc::new(super::rollout_budget::HostAccounting::default());
+    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
+    extensions.thread_lifecycle_contributor(accounting.clone());
+    let test = test_codex()
+        .with_pre_build_hook(move |home| {
+            let hook = |tool, input| {
+                json!([{ "hooks": [{
+                    "type": "mcp_tool",
+                    "server": "observer",
+                    "tool": tool,
+                    "input": input
+                }] }])
+            };
+            let config = json!({
+                "hooks": {
+                    "PreModelRequest": hook("pre", json!({ "kind": "${kind}" })),
+                    "PostModelRequest": hook("post", json!({
+                        "kind": "${kind}",
+                        "response_id": "${response_id}"
+                    }))
+                },
+                "mcp_servers": { "observer": {
+                    "url": url,
+                    "environment_id": super::rmcp_client::remote_aware_environment_id()
+                } }
+            });
+            fs::write(home.join("config.toml"), toml::to_string(&config).unwrap()).unwrap();
+        })
+        .with_config(move |config| {
+            config.model_provider = provider;
+            set_test_compact_prompt(config);
+            trust_discovered_hooks(config);
+        })
+        .with_extensions(Arc::new(extensions.build()))
+        .build_with_auto_env(&server)
+        .await?;
+    test.submit_turn("seed history").await?;
+    let charged_turns = || {
+        accounting
+            .reports
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.turn_id.clone())
+            .collect::<Vec<_>>()
+    };
+    let seed_charges = charged_turns();
+    assert_eq!(seed_charges.len(), 1);
+
+    test.codex.submit(Op::Compact).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(15), held.notified()).await?;
+    test.codex.flush_rollout().await?;
+    let history = test.codex.load_history(/*include_archived*/ false).await?;
+    assert!(
+        !history
+            .items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::Compacted(_)))
+    );
+    assert_eq!(charged_turns(), seed_charges);
+    test.codex.submit(Op::Interrupt).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnAborted(_))
+    })
+    .await;
+    release.send(())?;
+
+    let accepted_turn = test.codex.submit(Op::Compact).await?;
+    wait_for_event(
+        &test.codex,
+        |event| matches!(event, EventMsg::TurnComplete(done) if done.turn_id == accepted_turn),
+    )
+    .await;
+    test.codex.flush_rollout().await?;
+    let history = test.codex.load_history(/*include_archived*/ false).await?;
+    let checkpoints: Vec<_> = history
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::Compacted(checkpoint) => {
+                Some(checkpoint.compaction_response_id.as_deref())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(checkpoints, [Some("accepted")]);
+    let mut expected_charges = seed_charges;
+    expected_charges.push(accepted_turn);
+    assert_eq!(charged_turns(), expected_charges);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            (json!("pre"), Value::Null),
+            (json!("post"), json!("interrupted")),
+            (json!("pre"), Value::Null),
+            (json!("post"), json!("accepted")),
+        ]
+    );
+    assert_eq!(model.requests().len(), 3);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_compact_records_durable_and_local_token_usage() {
     skip_if_no_network!();
 

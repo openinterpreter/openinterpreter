@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::Prompt;
 use crate::client::ModelClientSession;
+use crate::client::SamplingOptions;
 use crate::client_common::ResponseEvent;
 use crate::compact_pending_input::is_retained_pending_mail;
 use crate::compact_remote_v2::retained_client_items;
@@ -37,6 +38,7 @@ use codex_analytics::CompactionStatus;
 use codex_analytics::CompactionStrategy;
 use codex_analytics::CompactionTrigger;
 use codex_analytics::now_unix_seconds;
+use codex_async_utils::OrCancelExt;
 use codex_context_fragments::AnnotatedContent;
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::truncate_annotated_text;
@@ -59,7 +61,6 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::user_input::UserInput;
 use codex_rollout_trace::InferenceTraceContext;
 use codex_utils_output_truncation::approx_token_count;
-use futures::prelude::*;
 use tracing::error;
 
 pub use codex_prompts::SUMMARIZATION_PROMPT;
@@ -277,6 +278,9 @@ async fn run_compact_task_inner_impl(
     compaction_metadata: CompactionTurnMetadata,
 ) -> CodexResult<String> {
     let turn_context = Arc::clone(&step_context.turn);
+    let mut request = crate::hook_runtime::sampling::SamplingRequest::new(
+        codex_hooks::SamplingKind::ForegroundCompaction,
+    );
     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
     sess.emit_turn_item_started(&turn_context, &compaction_item)
         .await;
@@ -339,8 +343,9 @@ async fn run_compact_task_inner_impl(
             .compaction_responses_metadata(&step_context, compaction_metadata)
             .await;
         let attempt_result = drain_to_completed(
+            &mut request,
             &sess,
-            turn_context.as_ref(),
+            &step_context,
             &mut client_session,
             &responses_metadata,
             &Arc::new(prompt),
@@ -855,35 +860,48 @@ struct CompactionResponse {
 }
 
 async fn drain_to_completed(
-    sess: &Session,
-    turn_context: &TurnContext,
+    request: &mut crate::hook_runtime::sampling::SamplingRequest,
+    sess: &Arc<Session>,
+    step_context: &Arc<StepContext>,
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
     prompt: &Arc<Prompt>,
     phase: CompactionPhase,
 ) -> CodexResult<CompactionResponse> {
+    let turn_context = step_context.turn.as_ref();
     let mut includes_reasoning = turn_context.model_info().use_responses_lite;
-    let mut stream = client_session
-        .stream(
-            prompt,
-            turn_context.model_info(),
-            &turn_context.session_telemetry,
-            sess.reasoning_effort_for_request(
-                &turn_context.initial_settings,
-                RequestEffortUsage::Compaction,
-            )
-            .await,
-            turn_context.reasoning_summary(),
-            turn_context.config.service_tier.clone(),
-            responses_metadata,
-            // Rollout tracing currently models remote compaction only; local compaction streams
-            // are left untraced until the reducer has a first-class local compaction lifecycle.
-            &InferenceTraceContext::disabled(),
+    let cancellation = &step_context.turn_cancellation;
+    let mut stream = request
+        .open(
+            sess,
+            step_context,
+            &turn_context.model_info().slug,
+            cancellation,
+            client_session.open_model_response(
+                prompt,
+                turn_context.model_info(),
+                &turn_context.session_telemetry,
+                SamplingOptions {
+                    reasoning_effort: sess
+                        .reasoning_effort_for_request(
+                            &turn_context.initial_settings,
+                            RequestEffortUsage::Compaction,
+                        )
+                        .await,
+                    reasoning_summary: turn_context.reasoning_summary(),
+                    service_tier: turn_context.config.service_tier.clone(),
+                },
+                responses_metadata,
+                // Rollout tracing currently models remote compaction only; local compaction streams
+                // are left untraced until the reducer has a first-class local compaction lifecycle.
+                &InferenceTraceContext::disabled(),
+            ),
         )
-        .await?;
+        .or_cancel(cancellation)
+        .await??;
     let mut output = Vec::new();
     loop {
-        let maybe_event = stream.next().await;
+        let maybe_event = stream.next_for_turn(cancellation).await;
         let Some(event) = maybe_event else {
             return Err(CodexErr::Stream(
                 "stream closed before response.completed".into(),

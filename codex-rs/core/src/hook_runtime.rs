@@ -1,4 +1,5 @@
 mod executor;
+pub(crate) mod sampling;
 
 pub(crate) use executor::prepare_executor_hook_sources;
 
@@ -1111,10 +1112,7 @@ fn compaction_trigger_label(value: CompactionTrigger) -> &'static str {
     }
 }
 
-pub(crate) fn hooks_for_model_request(
-    session: &Arc<Session>,
-    step: &StepContext,
-) -> Arc<codex_hooks::Hooks> {
+fn hooks_for_model_request(session: &Arc<Session>, step: &StepContext) -> Arc<codex_hooks::Hooks> {
     match step.turn.session_source {
         SessionSource::Internal(InternalSessionSource::MemoryConsolidation)
         | SessionSource::SubAgent(SubAgentSource::MemoryConsolidation) => Arc::new(
@@ -1130,25 +1128,14 @@ pub(crate) fn hooks_for_model_request(
     }
 }
 
-pub(crate) async fn run_model_request_hooks(
+async fn run_model_request_hooks(
     session: &Arc<Session>,
     step: &StepContext,
     hooks: &codex_hooks::Hooks,
-    event: codex_hooks::ModelRequestHookEvent,
+    request: codex_hooks::ModelRequestHookInput,
 ) {
-    let subagent = thread_spawn_subagent_hook_context(session, &step.turn);
-    let request = codex_hooks::ModelRequestHookInput {
-        session_id: session.session_id().to_string(),
-        turn_id: step.turn.sub_id.clone(),
-        cwd: tool_hook_cwd(&step.environments, &step.turn),
-        transcript_path: session.hook_transcript_path().await,
-        model: step.settings.model_info.slug.clone(),
-        event,
-        agent_id: subagent.as_ref().map(|context| context.agent_id.clone()),
-        agent_type: subagent.map(|context| context.agent_type),
-    };
     emit_hook_started_events(session, &step.turn, hooks.preview_model_request(&request)).await;
-    let events = hooks.run_model_request(request).await;
+    let events = hooks.run_model_request(request, |_| {}).await;
     emit_hook_completed_events(session, &step.turn, events).await;
 }
 

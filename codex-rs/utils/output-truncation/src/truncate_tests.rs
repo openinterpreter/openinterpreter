@@ -336,13 +336,6 @@ fn formatted_text_output_preserves_empty_leading_text_behavior() {
 
 #[test]
 fn formatted_mixed_output_budgets_text_and_audio_in_order() {
-    let audio = FunctionCallOutputContentItem::inline_audio("audio:one".to_owned());
-    let file_image = FunctionCallOutputContentItem::InputImage {
-        image: ImageReference::File {
-            file_id: "file_123".to_owned(),
-        },
-        detail: Some(DEFAULT_IMAGE_DETAIL),
-    };
     let items = vec![
         FunctionCallOutputContentItem::InputText {
             text: "abcd".to_string(),

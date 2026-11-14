@@ -19,6 +19,14 @@
         "null"
       ]
     },
+    "SamplingKind": {
+      "enum": [
+        "sampling",
+        "foreground_compaction",
+        "background_compaction"
+      ],
+      "type": "string"
+    },
     "TokenUsage": {
       "properties": {
         "cache_write_input_tokens": {
@@ -83,6 +91,14 @@
           ],
           "type": "string"
         },
+        "response_id": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/NullableString"
+            }
+          ],
+          "description": "The provider's identifier for the completed or incomplete response, if available."
+        },
         "status": {
           "$ref": "#/definitions/ModelRequestStatus"
         },
@@ -100,6 +116,7 @@
       "required": [
         "error",
         "hook_event_name",
+        "response_id",
         "status",
         "token_usage"
       ],
@@ -116,10 +133,17 @@
     "cwd": {
       "$ref": "#/definitions/AbsolutePathBuf"
     },
+    "kind": {
+      "$ref": "#/definitions/SamplingKind"
+    },
     "model": {
       "type": "string"
     },
     "session_id": {
+      "type": "string"
+    },
+    "thread_id": {
+      "description": "Identifies the issuing thread within its shared session.",
       "type": "string"
     },
     "transcript_path": {
@@ -131,8 +155,10 @@
   },
   "required": [
     "cwd",
+    "kind",
     "model",
     "session_id",
+    "thread_id",
     "transcript_path",
     "turn_id"
   ],

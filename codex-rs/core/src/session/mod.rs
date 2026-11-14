@@ -4696,6 +4696,7 @@ impl Session {
         Ok(Arc::new(StepContext {
             sampled_through_sequence: None,
             serving_assessment: None,
+            turn_cancellation: cancellation_token.clone(),
             preempt: turn_context
                 .config
                 .features

@@ -5,6 +5,56 @@ use codex_core::config::Config;
 use codex_features::Feature;
 use codex_hooks::HookListEntry;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use serde_json::json;
+
+/// Build the MCP reply for a loopback hook fixture; notifications have no body.
+pub fn hook_mcp_reply(
+    request: &serde_json::Value,
+    server: &str,
+    tools: &[&str],
+    call: impl FnOnce(&serde_json::Value) -> serde_json::Value,
+) -> Option<serde_json::Value> {
+    let method = request["method"].as_str().expect("MCP method");
+    let Some(id) = request.get("id") else {
+        assert!(
+            method.starts_with("notifications/"),
+            "missing ID for {method}"
+        );
+        return None;
+    };
+    let result = match method {
+        "initialize" => json!({
+            "protocolVersion": request["params"]["protocolVersion"],
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": server, "version": "1.0.0"},
+        }),
+        "tools/list" => {
+            json!({"tools":tools.iter().map(|name| json!({"name":name,"inputSchema":{"type":"object"}})).collect::<Vec<_>>()})
+        }
+        "tools/call" => call(&request["params"]),
+        method => panic!("unexpected MCP request: {method}"),
+    };
+    Some(json!({"jsonrpc":"2.0", "id":id, "result":result}))
+}
+
+pub async fn mount_hook_mcp(
+    server: &wiremock::MockServer,
+    name: &'static str,
+    tools: &'static [&'static str],
+    respond: impl Fn(&serde_json::Value) -> serde_json::Value + Send + Sync + 'static,
+) {
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/repl"))
+        .respond_with(move |req: &wiremock::Request| {
+            let request = serde_json::from_slice(&req.body).expect("MCP request");
+            match hook_mcp_reply(&request, name, tools, &respond) {
+                Some(reply) => wiremock::ResponseTemplate::new(200).set_body_json(reply),
+                None => wiremock::ResponseTemplate::new(202),
+            }
+        })
+        .mount(server)
+        .await;
+}
 
 pub fn trust_discovered_hooks(config: &mut Config) {
     config

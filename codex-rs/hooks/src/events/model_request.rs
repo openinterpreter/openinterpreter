@@ -24,19 +24,22 @@ pub enum ModelRequestHookEvent {
         status: ModelRequestStatus,
         #[schemars(with = "crate::schema::NullableString")]
         error: Option<String>,
-        #[schemars(required, schema_with = "token_usage_schema")]
+        #[schemars(required, schema_with = "nullable_schema::<TokenUsage>")]
         token_usage: Option<TokenUsage>,
+        /// The provider's identifier for the completed or incomplete response, if available.
+        #[schemars(with = "crate::schema::NullableString")]
+        response_id: Option<String>,
     },
 }
 
 // Hook schemas otherwise omit null from Option fields, but usage is always present on post.
-fn token_usage_schema(
+fn nullable_schema<T: JsonSchema>(
     generator: &mut schemars::r#gen::SchemaGenerator,
 ) -> schemars::schema::Schema {
     schemars::schema::SchemaObject {
         subschemas: Some(Box::new(schemars::schema::SubschemaValidation {
             any_of: Some(vec![
-                generator.subschema_for::<TokenUsage>(),
+                generator.subschema_for::<T>(),
                 generator.subschema_for::<()>(),
             ]),
             ..Default::default()
@@ -55,6 +58,44 @@ pub enum ModelRequestStatus {
 }
 
 impl ModelRequestHookEvent {
+    pub fn completed(response_id: &str, token_usage: Option<&TokenUsage>) -> Self {
+        Self::PostModelRequest {
+            status: ModelRequestStatus::Completed,
+            error: None,
+            token_usage: token_usage.cloned(),
+            response_id: Some(response_id.to_owned()),
+        }
+    }
+
+    pub fn failed(error: &codex_protocol::error::CodexErr) -> Self {
+        use codex_protocol::error::CodexErrorDetails;
+        let (response_id, token_usage) = match error.details() {
+            CodexErrorDetails::TurnAborted | CodexErrorDetails::Interrupted => {
+                return Self::cancelled();
+            }
+            CodexErrorDetails::ResponseIncomplete(incomplete) => (
+                incomplete.response_id.clone(),
+                incomplete.token_usage.clone(),
+            ),
+            _ => (None, None),
+        };
+        Self::PostModelRequest {
+            status: ModelRequestStatus::Failed,
+            error: Some(error.to_string()),
+            token_usage,
+            response_id,
+        }
+    }
+
+    pub fn cancelled() -> Self {
+        Self::PostModelRequest {
+            status: ModelRequestStatus::Cancelled,
+            error: None,
+            token_usage: None,
+            response_id: None,
+        }
+    }
+
     fn hook_event(&self) -> HookEventName {
         match self {
             Self::PreModelRequest => HookEventName::PreModelRequest,
@@ -63,10 +104,24 @@ impl ModelRequestHookEvent {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SamplingKind {
+    Sampling,
+    ForegroundCompaction,
+    BackgroundCompaction,
+}
+
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[schemars(rename = "model-request.command.input")]
 pub struct ModelRequestHookInput {
+    /// Names the hook lifecycle for this attempt, including asynchronous completions.
+    #[serde(skip)]
+    pub lifecycle_id: uuid::Uuid,
+    pub kind: SamplingKind,
     pub session_id: String,
+    /// Identifies the issuing thread within its shared session.
+    pub thread_id: String,
     pub turn_id: String,
     pub cwd: AbsolutePathBuf,
     #[schemars(with = "crate::schema::NullableString")]
@@ -80,6 +135,10 @@ pub struct ModelRequestHookInput {
     pub event: ModelRequestHookEvent,
 }
 
+fn identify_run(run: &mut HookRunSummary, lifecycle_id: uuid::Uuid) {
+    run.id = format!("{}:{lifecycle_id}", run.id);
+}
+
 pub(crate) fn preview(
     handlers: &[ConfiguredHandler],
     request: &ModelRequestHookInput,
@@ -90,13 +149,18 @@ pub(crate) fn preview(
         /*matcher_input*/ None,
     )
     .iter()
-    .map(dispatcher::running_summary)
+    .map(|handler| {
+        let mut run = dispatcher::running_summary(handler);
+        identify_run(&mut run, request.lifecycle_id);
+        run
+    })
     .collect()
 }
 
 pub(crate) async fn run(
     engine: &ClaudeHooksEngine,
     request: ModelRequestHookInput,
+    on_completed: impl FnMut(&HookCompletedEvent) + Send,
 ) -> Vec<HookCompletedEvent> {
     let matched = dispatcher::select_handlers(
         &engine.handlers,
@@ -109,20 +173,30 @@ pub(crate) async fn run(
     let input = match serde_json::to_value(&request) {
         Ok(input) => input,
         Err(error) => {
-            return common::serialization_failure_hook_events(
+            let mut events = common::serialization_failure_hook_events(
                 matched,
                 Some(request.turn_id),
                 error.to_string(),
             );
+            for event in &mut events {
+                identify_run(&mut event.run, request.lifecycle_id);
+            }
+            return events;
         }
     };
-    dispatcher::execute_handlers(
+    dispatcher::execute_handlers_with_progress(
         engine,
         matched,
         &input,
         request.cwd.as_path(),
         Some(request.turn_id),
-        parse_completed,
+        /*metadata*/ None,
+        move |handler, result, turn_id| {
+            let mut parsed = parse_completed(handler, result, turn_id);
+            identify_run(&mut parsed.completed.run, request.lifecycle_id);
+            parsed
+        },
+        on_completed,
     )
     .await
     .into_iter()

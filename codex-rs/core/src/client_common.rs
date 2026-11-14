@@ -1,4 +1,5 @@
 pub use codex_api::ResponseEvent;
+use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
@@ -135,6 +136,32 @@ pub struct ResponseStream {
     /// Signals the mapper task that the consumer stopped polling before the
     /// provider stream reached its own terminal event.
     pub(crate) consumer_dropped: CancellationToken,
+}
+
+impl ResponseStream {
+    /// A cancelled turn discards any queued event, including an incomplete response's usage.
+    pub(crate) fn accept_for_turn(
+        event: Option<Result<ResponseEvent>>,
+        cancellation: &CancellationToken,
+    ) -> Option<Result<ResponseEvent>> {
+        if cancellation.is_cancelled() {
+            Some(Err(CodexErr::TurnAborted))
+        } else {
+            event
+        }
+    }
+
+    pub(crate) async fn next_for_turn(
+        &mut self,
+        cancellation: &CancellationToken,
+    ) -> Option<Result<ResponseEvent>> {
+        let event = tokio::select! {
+            biased;
+            event = self.rx_event.recv() => event,
+            () = cancellation.cancelled() => return Some(Err(CodexErr::TurnAborted)),
+        };
+        Self::accept_for_turn(event, cancellation)
+    }
 }
 
 impl Stream for ResponseStream {

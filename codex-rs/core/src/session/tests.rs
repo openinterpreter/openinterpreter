@@ -306,6 +306,7 @@ impl StepContext {
         settings.service_tier = turn.config.service_tier.clone();
         Arc::new(Self {
             sampled_through_sequence: None,
+            turn_cancellation: tokio_util::sync::CancellationToken::new(),
             preempt: turn
                 .config
                 .features
