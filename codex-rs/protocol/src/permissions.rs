@@ -1386,44 +1386,50 @@ impl FileSystemSandboxPolicy {
                 // Without a home fact, denying only the workspace would weaken them.
                 return None;
             }
-            entries.extend(workspace_roots.iter().filter_map(|root| {
-                let path = if is_glob
-                    && root
-                        .infer_path_convention()
-                        .is_none_or(|convention| root.validate_glob_directory(convention).is_err())
-                {
-                    // An infallible materializer cannot return an unsafe glob.
-                    // Use the existing deny-root fallback for unresolvable rules.
-                    None
-                } else {
-                    subpath.map_or_else(
-                        || Some(root.clone()),
-                        |subpath| resolve_scoped_workspace_path(root, subpath),
-                    )
-                };
-                let (path, access) = match path {
-                    Some(path) if is_glob => (
-                        FileSystemPath::GlobPattern {
-                            pattern: path.inferred_native_path_string(),
-                        },
-                        entry.access,
-                    ),
-                    Some(path) => (FileSystemPath::Path { path }, entry.access),
-                    // An unresolved deny must still protect the entire workspace.
-                    // An unresolved read grant is not a deny: reject materialization
-                    // rather than manufacturing a new workspace-wide denial.
-                    None if entry.access == FileSystemAccessMode::Deny => (
-                        FileSystemPath::Path { path: root.clone() },
-                        FileSystemAccessMode::Deny,
-                    ),
-                    None => return None,
-                };
-                Some(FileSystemSandboxEntry {
-                    path,
-                    access,
-                    missing_path_behavior: entry.missing_path_behavior,
+            // Collect the whole expansion as an Option: silently skipping an
+            // unresolved grant would let approval widen a partially materialized
+            // policy instead of preserving its original restrictions.
+            let expanded = workspace_roots
+                .iter()
+                .map(|root| {
+                    let path = if is_glob
+                        && root.infer_path_convention().is_none_or(|convention| {
+                            root.validate_glob_directory(convention).is_err()
+                        }) {
+                        // An infallible materializer cannot return an unsafe glob.
+                        // Use the existing deny-root fallback for unresolvable rules.
+                        None
+                    } else {
+                        subpath.map_or_else(
+                            || Some(root.clone()),
+                            |subpath| resolve_scoped_workspace_path(root, subpath),
+                        )
+                    };
+                    let (path, access) = match path {
+                        Some(path) if is_glob => (
+                            FileSystemPath::GlobPattern {
+                                pattern: path.inferred_native_path_string(),
+                            },
+                            entry.access,
+                        ),
+                        Some(path) => (FileSystemPath::Path { path }, entry.access),
+                        // An unresolved deny must still protect the entire workspace.
+                        // An unresolved read grant is not a deny: reject materialization
+                        // rather than manufacturing a new workspace-wide denial.
+                        None if entry.access == FileSystemAccessMode::Deny => (
+                            FileSystemPath::Path { path: root.clone() },
+                            FileSystemAccessMode::Deny,
+                        ),
+                        None => return None,
+                    };
+                    Some(FileSystemSandboxEntry {
+                        path,
+                        access,
+                        missing_path_behavior: entry.missing_path_behavior,
+                    })
                 })
-            }));
+                .collect::<Option<Vec<_>>>()?;
+            entries.extend(expanded);
         }
         self.entries = entries;
         Some(self)
