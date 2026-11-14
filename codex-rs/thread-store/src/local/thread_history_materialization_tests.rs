@@ -458,7 +458,6 @@ async fn paginated_command_history_caps_aggregated_output() {
     create_paginated_thread(&store, thread_id).await;
     let output = format!("head\n{}\ntail", "x".repeat(128 * 1024));
     let command = CommandExecutionItem {
-        sandbox_type: None,
         model_context: None,
         id: "exec-1".to_string(),
         plugin_id: None,

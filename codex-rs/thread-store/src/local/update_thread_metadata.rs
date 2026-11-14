@@ -1311,6 +1311,7 @@ mod tests {
                 thread_id,
                 rollout_path: Some(path.clone()),
                 history: None,
+                history_revision: None,
                 include_archived: true,
                 metadata: test_thread_metadata(),
             })
@@ -1321,7 +1322,7 @@ mod tests {
         let (mut expected, _, _) = RolloutRecorder::load_rollout_items(&path).await?;
         let mut metadata = read_session_meta_line(&path).await?;
         metadata.meta.memory_mode = Some("disabled".into());
-        expected.push(RolloutItem::SessionMeta(metadata));
+        expected.push(RolloutItem::SessionMeta(Box::new(metadata)));
 
         let mut shutdown = Box::pin(store.shutdown_thread(thread_id));
         update_rollout_metadata(&store, thread_id, &path, &writer_lock, |meta| {

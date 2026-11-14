@@ -114,10 +114,12 @@ async fn ema_policy_overlays_native_and_agent_plugins_without_changing_endpoints
                 &root.join(mcp_path),
                 &mcp.replace("https://resource.example/mcp", endpoint),
             );
-            let declared = load_plugin_mcp_servers(&root, /*auth_mode*/ None).await;
+            let plugin_id = PluginId::parse(&format!("{name}@test")).expect("plugin id");
+            let declared = load_plugin_mcp_servers(&root, &plugin_id, /*auth_mode*/ None).await;
             let transport = declared["example"].transport.clone();
             let installed = load_plugin_mcp_servers_with_policy(
                 &root,
+                &plugin_id,
                 /*auth_mode*/ None,
                 Some(&policies),
             )

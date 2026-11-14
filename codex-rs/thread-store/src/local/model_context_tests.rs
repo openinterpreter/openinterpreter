@@ -289,7 +289,7 @@ async fn fork_version_stops_before_older_segments_once_resolved() {
         let head = RolloutLine {
             timestamp: "2025-01-03T13:02:01Z".to_string(),
             ordinal: Some(0),
-            item: RolloutItem::SessionMeta(source_meta.clone()),
+            item: RolloutItem::SessionMeta(Box::new(source_meta.clone())),
         };
         std::fs::write(
             &child_path,
@@ -313,7 +313,7 @@ async fn fork_version_stops_before_older_segments_once_resolved() {
         );
         let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
         let lineage = store
-            .resolve_rollout_lineage(child_id)
+            .resolve_rollout_lineage(child_id, /*initial_path*/ None)
             .await
             .expect("resolve source lineage");
         // No checkpoint exists. A full model-context read would reach this missing segment.
@@ -325,7 +325,7 @@ async fn fork_version_stops_before_older_segments_once_resolved() {
         source_meta.meta.multi_agent_version = stored_version.or(Some(MultiAgentVersion::V2));
         assert_eq!(
             serde_json::to_value(context).expect("serialize fork context"),
-            serde_json::to_value(vec![RolloutItem::SessionMeta(source_meta)])
+            serde_json::to_value(vec![RolloutItem::SessionMeta(Box::new(source_meta))])
                 .expect("serialize expected context")
         );
     }
@@ -365,7 +365,7 @@ async fn fork_version_respects_inherited_segment_cutoffs() {
     );
     let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
     let lineage = store
-        .resolve_rollout_lineage(child_id)
+        .resolve_rollout_lineage(child_id, /*initial_path*/ None)
         .await
         .expect("resolve source lineage");
     let mut source_meta = codex_rollout::read_session_meta_line(&child_path)
@@ -378,7 +378,7 @@ async fn fork_version_respects_inherited_segment_cutoffs() {
     source_meta.meta.multi_agent_version = Some(MultiAgentVersion::V2);
     assert_eq!(
         serde_json::to_value(context).expect("serialize fork context"),
-        serde_json::to_value(vec![RolloutItem::SessionMeta(source_meta)])
+        serde_json::to_value(vec![RolloutItem::SessionMeta(Box::new(source_meta))])
             .expect("serialize expected context")
     );
 }
@@ -819,6 +819,7 @@ fn turn_context(root: &Path, turn_id: &str) -> RolloutItem {
         turn_id: Some(turn_id.to_string()),
         root_turn_id: None,
         disabled_plugin_ids: None,
+        direct_only_tool_namespaces: None,
         cwd: serde_json::from_value(serde_json::json!(root)).expect("absolute cwd"),
         approval_policy: AskForApproval::Never,
         approvals_reviewer: None,

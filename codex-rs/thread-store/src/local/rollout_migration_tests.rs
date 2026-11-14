@@ -14,6 +14,7 @@ use codex_extension_items::image_generation::ImageGenerationFailure;
 use codex_extension_items::image_generation::ImageGenerationInputImage;
 use codex_extension_items::image_generation::ImageGenerationItem;
 use codex_protocol::AgentPath;
+use codex_protocol::ItemIdGenerator;
 use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary;
@@ -56,6 +57,10 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
+
+fn uuid_v7_item_id_generator_for_test() -> ItemIdGenerator {
+    Arc::new(|prefix| ResponseItemId::with_suffix(prefix, uuid::Uuid::now_v7()))
+}
 
 use super::LocalThreadStore;
 use super::MigrationLocks;
@@ -671,7 +676,7 @@ async fn migration_keeps_late_completions_in_their_original_turn() {
             user_message("old question"),
             started("current"),
             user_message("current question"),
-            exec_completion("old", "call-old"),
+            exec_completion("old", "call-old", "ok"),
             serde_json::from_value(json!({
                 "type": "event_msg",
                 "payload": {
@@ -1020,6 +1025,8 @@ async fn migration_coalesces_response_first_user_message_rollback_boundary() {
     let thread_id = ThreadId::new();
     let file_id = "file_123".to_string();
     let response = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![
@@ -2199,6 +2206,7 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
                 turn_id: Some("child-turn".to_string()),
                 root_turn_id: None,
                 disabled_plugin_ids: None,
+                direct_only_tool_namespaces: None,
                 cwd: serde_json::from_value(json!(home.path())).expect("absolute cwd"),
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: None,

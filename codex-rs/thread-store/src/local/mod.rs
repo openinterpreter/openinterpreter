@@ -154,6 +154,8 @@ pub struct LocalThreadStore {
     thread_history_db: Arc<OnceCell<sqlx::SqlitePool>>,
     thread_history_writer: Arc<Semaphore>,
     thread_data_cleanup: Option<Arc<ThreadDataCleanup>>,
+    #[cfg(test)]
+    startup_migration_retry_gate: Option<Arc<StartupMigrationRetryGate>>,
 }
 
 type ThreadDataCleanup = dyn Fn(Vec<ThreadId>) -> ThreadStoreFuture<'static, ()> + Send + Sync;
@@ -281,6 +283,8 @@ impl LocalThreadStore {
             thread_history_db: Arc::new(OnceCell::new()),
             thread_history_writer: Arc::new(Semaphore::new(1)),
             thread_data_cleanup: None,
+            #[cfg(test)]
+            startup_migration_retry_gate: None,
         }
     }
 
@@ -1145,6 +1149,7 @@ mod tests {
                 turn_id: Some("turn-1".to_string()),
                 root_turn_id: None,
                 disabled_plugin_ids: None,
+                direct_only_tool_namespaces: None,
                 cwd: serde_json::from_value(serde_json::json!(cwd)).expect("absolute cwd"),
                 approval_policy,
                 approvals_reviewer: None,
