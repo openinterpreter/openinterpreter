@@ -4,6 +4,7 @@ use super::MANAGED_PREFERENCES_APPLICATION_ID;
 use super::MANAGED_PREFERENCES_CONFIG_KEY;
 use super::MANAGED_PREFERENCES_REQUIREMENTS_KEY;
 use super::load_managed_preference_with;
+use super::synchronize_managed_preferences_with;
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use core_foundation::array::CFArray;
@@ -16,6 +17,15 @@ use core_foundation::string::CFString;
 use pretty_assertions::assert_eq;
 use std::cell::Cell;
 use std::io;
+
+#[test]
+fn managed_preference_refresh_succeeds_only_when_domain_sync_succeeds() {
+    assert!(synchronize_managed_preferences_with(|| true).is_ok());
+    let error = synchronize_managed_preferences_with(|| false)
+        .expect_err("failed preference refresh must not use cached administrator policy");
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    assert_eq!(error.to_string(), "Failed to refresh managed preferences");
+}
 
 #[test]
 fn unforced_preferences_are_ignored_without_reading() {

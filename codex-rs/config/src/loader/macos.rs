@@ -32,6 +32,24 @@ const MANAGED_PREFERENCES_REQUIREMENTS_KEY: &str = "requirements_toml_base64";
 unsafe extern "C" {
     fn CFPreferencesCopyAppValue(key: CFStringRef, application_id: CFStringRef) -> *mut c_void;
     fn CFPreferencesAppValueIsForced(key: CFStringRef, application_id: CFStringRef) -> Boolean;
+    fn CFPreferencesAppSynchronize(application_id: CFStringRef) -> Boolean;
+}
+
+/// Refresh the managed domain before reading its forced application requirements.
+/// A failed refresh must not silently use potentially stale cached policy.
+pub(super) fn synchronize_managed_preferences() -> io::Result<()> {
+    let application = CFString::new(MANAGED_PREFERENCES_APPLICATION_ID);
+    synchronize_managed_preferences_with(|| unsafe {
+        CFPreferencesAppSynchronize(application.as_concrete_TypeRef()) != 0
+    })
+}
+
+fn synchronize_managed_preferences_with(synchronize: impl FnOnce() -> bool) -> io::Result<()> {
+    if synchronize() {
+        Ok(())
+    } else {
+        Err(io::Error::other("Failed to refresh managed preferences"))
+    }
 }
 
 #[derive(Debug, Clone)]
