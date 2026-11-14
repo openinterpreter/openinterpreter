@@ -14,6 +14,7 @@ use codex_core::McpRefreshReason;
 use codex_login::LoginOnboardingEntrypoint;
 use codex_login::login_with_bedrock_access_keys;
 use codex_mcp::ema_auth_scope;
+use codex_model_provider::GatewayAuthManager;
 use codex_model_provider::is_supported_amazon_bedrock_region;
 use codex_otel::auth_storage::AuthStorageOriginator;
 use codex_rmcp_client::EnterpriseOAuthCredentialGuard;
@@ -114,6 +115,9 @@ pub(crate) struct AccountRequestProcessor {
     config_manager: ConfigManager,
     model_catalog: Arc<ModelCatalog>,
     active_login: Arc<Mutex<Option<ActiveLogin>>>,
+    pub(super) enterprise_login: Arc<enterprise_login::EnterpriseLoginState>,
+    gateway_login: Arc<std::sync::Mutex<Option<gateway_oauth::ActiveGatewayLogin>>>,
+    gateway_clients: Arc<std::sync::Mutex<HashMap<String, Arc<GatewayAuthManager>>>>,
     workspace_routing: Arc<Mutex<Option<workspace_routing::CachedWorkspaceRouting>>>,
     workspace_routing_fetches: Arc<Mutex<workspace_routing::WorkspaceRoutingFetches>>,
     workspace_routing_shutdown: CancellationToken,
@@ -128,6 +132,11 @@ impl AccountRequestProcessor {
         config_manager: ConfigManager,
         model_catalog: Arc<ModelCatalog>,
     ) -> Arc<Self> {
+        let enterprise_login = Arc::new(enterprise_login::EnterpriseLoginState::new(
+            Arc::clone(&auth_manager),
+            Arc::clone(&thread_manager),
+            config_manager.clone(),
+        ));
         let processor = Arc::new(Self {
             auth_manager,
             thread_manager,
@@ -136,6 +145,9 @@ impl AccountRequestProcessor {
             config_manager,
             model_catalog,
             active_login: Arc::new(Mutex::new(None)),
+            enterprise_login,
+            gateway_login: Arc::new(std::sync::Mutex::new(None)),
+            gateway_clients: Arc::new(std::sync::Mutex::new(HashMap::new())),
             workspace_routing: Arc::new(Mutex::new(None)),
             workspace_routing_fetches: Arc::new(Mutex::new(HashMap::new())),
             workspace_routing_shutdown: CancellationToken::new(),
@@ -1000,11 +1012,8 @@ impl AccountRequestProcessor {
             self.auth_manager.reload().await;
             let auth_changes = self.auth_manager.auth_change_state_receiver();
             let owner_generation = auth_changes.borrow().owner_generation;
-            self.config_manager.replace_cloud_config_bundle_loader(
-                self.auth_manager.clone(),
-                self.config.chatgpt_base_url.clone(),
-                self.config.http_client_factory(),
-            );
+            self.config_manager
+                .update_managed_config_loader(self.auth_manager.clone(), &self.config);
             self.config_manager
                 .sync_default_client_residency_requirement()
                 .await;
@@ -1048,7 +1057,7 @@ impl AccountRequestProcessor {
             clear_user_model_provider_if_bedrock(&self.config_manager, &config).await?;
         }
 
-        self.config_manager.clear_cloud_config_bundle_loader();
+        self.config_manager.clear_chatgpt_config_loader();
         *self.workspace_routing.lock().await = None;
 
         Self::maybe_refresh_plugin_caches_for_current_config(

@@ -180,6 +180,13 @@ impl AccountRequestProcessor {
             })?;
         Ok(Some(
             GetAccountResponse {
+                user_id: matches!(
+                    read.account_state.account.as_ref(),
+                    Some(ProviderAccount::Chatgpt { .. })
+                )
+                .then(|| self.auth_manager.auth_cached())
+                .flatten()
+                .and_then(|auth| auth.get_chatgpt_account_user_id()),
                 account: read.account_state.account.map(Account::from),
                 requires_openai_auth: read.account_state.requires_openai_auth,
                 workspace_routing: read.workspace_routing.map(|routing| {

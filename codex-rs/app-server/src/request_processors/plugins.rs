@@ -1151,9 +1151,10 @@ impl PluginRequestProcessor {
                 let onboarding_skill = if outcome.plugin.enabled
                     && let Some(path) = outcome.plugin.onboarding_skill.as_ref()
                 {
+                    let path = LegacyAppPathString::from_abs_path(path);
                     skills
                         .iter()
-                        .find(|skill| skill.enabled && skill.path.as_ref() == Some(path))
+                        .find(|skill| skill.enabled && skill.path.as_ref() == Some(&path))
                         .cloned()
                 } else {
                     None
@@ -2367,6 +2368,8 @@ fn remote_plugin_detail_to_info(
     apps: Vec<AppSummary>,
     plugin_policy: &PluginsConfigToml,
 ) -> PluginDetail {
+    let onboarding_available =
+        detail.summary.enabled && detail.summary.availability == PluginAvailability::Available;
     let summary = remote_plugin_summary_to_info(detail.summary, plugin_policy);
     let app_templates = detail
         .app_templates
@@ -2403,17 +2406,15 @@ fn remote_plugin_detail_to_info(
             enabled: skill.enabled,
         })
         .collect::<Vec<_>>();
-    let onboarding_skill = if detail.summary.enabled
-        && detail.summary.availability == PluginAvailability::Available
-        && let Some(name) = detail.onboarding_skill_name.as_ref()
-    {
-        skills
-            .iter()
-            .find(|skill| skill.enabled && &skill.name == name)
-            .cloned()
-    } else {
-        None
-    };
+    let onboarding_skill =
+        if onboarding_available && let Some(name) = detail.onboarding_skill_name.as_ref() {
+            skills
+                .iter()
+                .find(|skill| skill.enabled && &skill.name == name)
+                .cloned()
+        } else {
+            None
+        };
 
     PluginDetail {
         marketplace_name: detail.marketplace_name,

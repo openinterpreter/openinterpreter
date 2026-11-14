@@ -4,6 +4,7 @@ use super::thread_input::ensure_direct_input_allowed;
 use super::*;
 use codex_config::types::McpServerAuth;
 use codex_core::McpRefreshReason;
+use codex_extension_api::McpServerContributionContext;
 use codex_mcp::McpServerSource;
 use codex_mcp::McpServerStatusSnapshot;
 use codex_mcp::ReadResourceRequestParams;
@@ -157,7 +158,7 @@ impl McpRequestProcessor {
                 let mcp_config = self
                     .thread_manager
                     .mcp_manager()
-                    .runtime_config(&config)
+                    .runtime_config(McpServerContributionContext::global(&config))
                     .await;
                 let runtime_context = McpRuntimeContext::new(
                     self.thread_manager.environment_manager(),
@@ -403,7 +404,13 @@ impl McpRequestProcessor {
                     .map_err(|err| internal_error(format!("failed to reload config: {err}")))?;
                 (config, Some(thread))
             }
-            None => (self.load_latest_config(/*fallback_cwd*/ None).await?, None),
+            None => (
+                self.config_manager
+                    .load_latest_config(/*fallback_cwd*/ None)
+                    .await
+                    .map_err(|err| internal_error(format!("failed to reload config: {err}")))?,
+                None,
+            ),
         };
         let processor = self.clone();
         let task = async move {
@@ -471,7 +478,9 @@ impl McpRequestProcessor {
             let (mcp_config, runtime_context) = match thread.as_ref() {
                 Some(thread) => thread.runtime_mcp_config_and_context(&config).await,
                 None => (
-                    mcp_manager.runtime_config(&config).await,
+                    mcp_manager
+                        .runtime_config(McpServerContributionContext::global(&config))
+                        .await,
                     McpRuntimeContext::new(
                         self.thread_manager.environment_manager(),
                         config.cwd.to_path_buf(),
@@ -483,6 +492,11 @@ impl McpRequestProcessor {
                     .mcp_server_catalog
                     .resolve_server_key(name, /*environment_id*/ None)
             });
+            let mut effective_servers =
+                codex_mcp::effective_mcp_servers(&mcp_config, auth.as_ref());
+            if let Some(selected_server) = selected_server.as_ref() {
+                effective_servers.retain(|key, _| key == selected_server);
+            }
             let mut snapshot = collect_mcp_server_status_snapshot_with_detail(
                 &mcp_config,
                 auth.as_ref(),
@@ -492,7 +506,7 @@ impl McpRequestProcessor {
                 mcp_manager.codex_apps_tools_cache(),
                 mcp_manager.tool_catalog_cache(),
                 detail,
-                selected_server.as_ref(),
+                effective_servers,
             )
             .await;
             if mcp_config.xaa_enabled
@@ -551,7 +565,7 @@ impl McpRequestProcessor {
         let McpServerStatusSnapshot {
             mut server_infos,
             mut server_capabilities,
-            mut tool_list_meta,
+            tool_list_meta: _,
             mut tools_by_server,
             mut tools_errors,
             mut resources,
@@ -627,7 +641,6 @@ impl McpRequestProcessor {
                     }),
                 server_info: server_infos.remove(key),
                 server_capabilities: server_capabilities.remove(key),
-                tool_list_meta: tool_list_meta.remove(key).map(Arc::unwrap_or_clone),
                 tools: tools_by_server.remove(key).unwrap_or_default(),
                 tools_error: tools_errors.remove(key),
                 resources: resources.remove(key).unwrap_or_default(),
@@ -757,7 +770,9 @@ impl McpRequestProcessor {
 
         let config = self.load_global_config().await?;
         let mcp_manager = self.thread_manager.mcp_manager();
-        let mcp_config = mcp_manager.runtime_config(&config).await;
+        let mcp_config = mcp_manager
+            .runtime_config(McpServerContributionContext::global(&config))
+            .await;
         let codex_apps_tools_cache = mcp_manager.codex_apps_tools_cache();
         let tool_catalog_cache = mcp_manager.tool_catalog_cache();
         self.thread_manager

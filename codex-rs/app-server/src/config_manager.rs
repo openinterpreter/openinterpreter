@@ -321,6 +321,7 @@ impl ConfigManager {
             cwd.to_path_buf(),
             &layers,
             codex_home,
+            /*default_zsh_path*/ None,
         )
         .await?;
         self.apply_network_policy(&mut config);
@@ -350,6 +351,7 @@ impl ConfigManager {
             cwd.to_path_buf(),
             &refreshed_layers,
             AbsolutePathBuf::from_absolute_path(&self.codex_home)?,
+            /*default_zsh_path*/ None,
         )
         .await?;
         self.apply_network_policy(&mut config);
