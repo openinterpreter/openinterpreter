@@ -2,6 +2,7 @@
 
 mod common;
 
+use anyhow::Context;
 use anyhow::Result;
 use codex_realtime_webrtc::AudioControls;
 use codex_realtime_webrtc::AudioDeviceKind;
@@ -99,7 +100,8 @@ fn external_cancellation_interrupts_startup() -> Result<()> {
     let Some(root) = common::package("external_cancellation_interrupts_startup")? else {
         return Ok(());
     };
-    fs::write(root.join("hold-initialization"), [])?;
+    fs::write(root.join("hold-initialization"), [])
+        .context("voice fixture startup hold creation")?;
     let (abort, registration) = AbortHandle::new_pair();
     let (result, received) = std::sync::mpsc::sync_channel(/*bound*/ 1);
     let startup = thread::spawn(move || {
@@ -128,7 +130,8 @@ fn last_owner_drop_reaps_helper() -> Result<()> {
         return Ok(());
     };
     let (_abort, registration) = AbortHandle::new_pair();
-    let started = RealtimeWebrtcSession::start(registration, AudioDeviceSelection::default())?;
+    let started = RealtimeWebrtcSession::start(registration, AudioDeviceSelection::default())
+        .context("voice fixture final-owner session startup")?;
     drop(started);
     common::wait_for_helper_reaped(&root)
 }
@@ -163,7 +166,8 @@ fn runtime_failure_reaches_offer_caller_without_native_error_text() -> Result<()
     else {
         return Ok(());
     };
-    fs::write(root.join("fail-initialization"), [])?;
+    fs::write(root.join("fail-initialization"), [])
+        .context("voice fixture runtime-failure flag creation")?;
     let (_abort, registration) = AbortHandle::new_pair();
     let error =
         RealtimeWebrtcSession::start(registration, AudioDeviceSelection::default()).unwrap_err();
