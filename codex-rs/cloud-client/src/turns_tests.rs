@@ -593,10 +593,18 @@ async fn mutations_require_explicit_successful_grpc_status() {
             if expect_success {
                 result.unwrap();
             } else {
-                assert!(matches!(
-                    result,
-                    Err(MutationError::OutcomeUnknown(Error::InvalidResponse))
-                ));
+                // Tonic may reject a missing/contradictory final status before
+                // the client can inspect the trailer. Both paths must remain
+                // outcome-unknown, never an acknowledged mutation.
+                assert!(
+                    matches!(
+                        result,
+                        Err(MutationError::OutcomeUnknown(
+                            Error::InvalidResponse | Error::Rpc(_)
+                        ))
+                    ),
+                    "unexpected mutation outcome for {method}, initial_status={initial_status:?}, include_message={include_message}, expect_success={expect_success}"
+                );
             }
             fixture.requests.recv().await.unwrap();
             assert!(fixture.requests.try_recv().is_err());

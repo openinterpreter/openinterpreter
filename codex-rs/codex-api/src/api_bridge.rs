@@ -147,6 +147,9 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
                     && let Some(error) = value.get("error")
                 {
                     match error.get("code").and_then(Value::as_str) {
+                        Some("policy_capacity_unavailable") => {
+                            return CodexErr::new(CodexErrorDetails::PolicyCapacityUnavailable);
+                        }
                         Some("server_is_overloaded") => return CodexErr::ServerOverloaded,
                         Some("slow_down") => {
                             return CodexErr::new(CodexErrorDetails::RateLimitExceeded(
