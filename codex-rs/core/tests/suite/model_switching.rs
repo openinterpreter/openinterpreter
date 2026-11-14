@@ -18,6 +18,7 @@ use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::Settings;
 use codex_protocol::mcp::ClientMcpExtensions;
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::PermissionProfile;
@@ -391,8 +392,9 @@ async fn model_change_appends_model_instructions_developer_message() -> Result<(
 #[test_case(Some(Personality::Friendly); "friendly clears opt-out")]
 #[test_case(Some(Personality::Pragmatic); "pragmatic clears opt-out")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn model_change_with_legacy_personality_override_only_appends_model_instructions()
--> Result<()> {
+async fn model_change_with_legacy_personality_override_only_appends_model_instructions(
+    personality: Option<Personality>,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -402,8 +404,6 @@ async fn model_change_with_legacy_personality_override_only_appends_model_instru
     )
     .await;
 
-    let mut builder = test_codex().with_model("gpt-5.5");
-    let test = builder.build(&server).await?;
     let next_model = "exp-codex-personality";
     let mut builder = test_codex()
         .with_model_info_override(next_model, |model| {
@@ -1009,7 +1009,7 @@ async fn model_change_projects_media_without_changing_live_or_replayed_history(
         MediaHistorySource::Live => Arc::clone(&test.codex),
         MediaHistorySource::Resume => {
             test.thread_manager
-                .resume_thread_from_rollout(
+                .resume_legacy_thread_from_rollout(
                     test.config.clone(),
                     rollout_path,
                     test.thread_manager.auth_manager(),
@@ -1021,7 +1021,7 @@ async fn model_change_projects_media_without_changing_live_or_replayed_history(
         }
         MediaHistorySource::Fork => {
             test.thread_manager
-                .fork_thread(
+                .fork_legacy_thread(
                     ForkSnapshot::Interrupted,
                     codex_core::StartThreadOptions::new(test.config.clone()),
                     rollout_path,
