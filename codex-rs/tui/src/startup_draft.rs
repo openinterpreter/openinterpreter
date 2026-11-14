@@ -1,5 +1,6 @@
 //! Keep the first composer editable and bottom-anchored while startup work continues.
 //! Submit keys confirm one draft locally; session dispatch waits for the protected handoff.
+//! Presentation accepts client preferences and cwd; effective permissions remain unknown here.
 
 use std::future::Future;
 use std::io;
@@ -12,8 +13,6 @@ use tokio::time::Instant;
 
 use crossterm::SynchronizedUpdate;
 use ratatui::layout::Size;
-use ratatui::style::Modifier;
-use ratatui::style::Style;
 use ratatui::style::Stylize;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::unbounded_channel;
@@ -31,7 +30,6 @@ use crate::bottom_pane::ComposerDraftSnapshot;
 use crate::history_cell;
 use crate::history_cell::HistoryCell;
 use crate::keymap::RuntimeKeymap;
-use crate::legacy_core::config::Config;
 use crate::local_settings::LocalSettings;
 use crate::render::Insets;
 use crate::render::renderable::FlexRenderable;
@@ -61,6 +59,7 @@ pub(crate) struct StartupScreen {
     pub(crate) use_alt_screen: bool,
     pub(crate) transcript_mode: crate::transcript_mode::TranscriptMode,
     pub(crate) status_line_enabled: bool,
+    pub(crate) welcome_motion: crate::motion::MotionMode,
     pub(crate) keymap: RuntimeKeymap,
     pub(crate) disable_paste_burst: bool,
 }
@@ -124,7 +123,7 @@ impl StartupDraft {
     /// Adopt the initialized terminal and apply editing policy before the first composer paint.
     pub(crate) fn new(
         mut initialized_terminal: tui::InitializedTerminal,
-        terminal_restore_guard: TerminalRestoreGuard,
+        mut terminal_restore_guard: TerminalRestoreGuard,
         initial_screen: StartupDraftInitialScreen,
         session_action: StartupDraftSessionAction,
         screen: StartupScreen,
@@ -136,8 +135,11 @@ impl StartupDraft {
             initialized_terminal.enhanced_keys_supported,
             initialized_terminal.stderr_guard,
         );
+        terminal_restore_guard.events = Some(tui.event_broker.clone());
+        tui.terminal_app_over_ssh = initialized_terminal.terminal_app_over_ssh;
         tui.set_alt_screen_enabled(screen.use_alt_screen);
         let mut pump = StartupDraftPump::new(&tui, initial_screen, session_action);
+        pump.motion = screen.welcome_motion;
         pump.bottom_pane
             .set_status_line_enabled(screen.status_line_enabled);
         pump.bottom_pane.set_keymap_bindings(&screen.keymap);
@@ -177,6 +179,11 @@ impl StartupDraft {
         self.pump.apply_settings(settings, cwd);
     }
 
+    /// Compatibility for existing navigation paths that still carry resolved core config.
+    pub(crate) fn apply_config(&mut self, config: &Config) {
+        self.apply_settings(&LocalSettings::from(config), config.cwd.as_path());
+    }
+
     /// Lend the original terminal to an existing interactive startup screen.
     pub(crate) fn tui_mut(&mut self) -> &mut Tui {
         self.pump.key_chord_matcher.cancel();
@@ -196,8 +203,18 @@ impl StartupDraftPump {
         session_action: StartupDraftSessionAction,
     ) -> Self {
         let (app_event_tx, app_event_rx) = unbounded_channel();
+        let mut blossom = crate::empty_state_animation::EmptyStateAnimation::default();
+        if matches!(
+            session_action,
+            StartupDraftSessionAction::New | StartupDraftSessionAction::NewFromCommandCenter
+        ) {
+            blossom.start_fresh();
+        }
+        let header = startup_session_header(/*cwd*/ None);
         Self {
-            header: startup_session_header(/*config*/ None),
+            header,
+            blossom: std::cell::RefCell::new(blossom),
+            motion: crate::system_motion::mode(),
             bottom_pane: startup_draft_bottom_pane(
                 AppEventSender::new(app_event_tx),
                 tui.frame_requester(),
@@ -238,17 +255,19 @@ impl StartupDraftPump {
     }
 
     /// Refresh the session header and safe editor shortcuts without enabling modal editing.
-    pub(crate) fn apply_config(&mut self, config: &Config) {
+    pub(crate) fn apply_settings(&mut self, local_settings: &LocalSettings, cwd: &Path) {
         if self
             .configured_cwd
             .as_deref()
-            .is_some_and(|cwd| cwd != config.cwd.as_path())
+            .is_some_and(|previous_cwd| previous_cwd != cwd)
         {
             self.cancel_submission();
         }
-        self.configured_cwd = Some(config.cwd.to_path_buf());
-        let local_settings = crate::local_settings::LocalSettings::from(config);
-        self.header = startup_session_header(Some(config));
+        self.configured_cwd = Some(cwd.to_path_buf());
+        self.motion = crate::motion::MotionMode::from_animations_enabled(
+            local_settings.tui.animations && local_settings.tui.effects.welcome,
+        );
+        self.header = startup_session_header(Some(cwd));
         self.bottom_pane.set_status_line_enabled(
             local_settings
                 .tui
@@ -269,6 +288,11 @@ impl StartupDraftPump {
             self.key_chord_matcher.cancel();
             self.key_chords = keymap.chords;
         }
+    }
+
+    /// Keep existing loaded-config callers on the same client-owned preference path.
+    pub(crate) fn apply_config(&mut self, config: &Config) {
+        self.apply_settings(&LocalSettings::from(config), config.cwd.as_path());
     }
 
     /// Align the loading message and revoke confirmation when startup changes its destination.
@@ -425,8 +449,7 @@ impl StartupDraftPump {
         }
         self.bottom_pane.pre_draw_tick();
         let owned = tui.is_owned_screen();
-        let owned_layout =
-            layout::OwnedStartupLayout::new(&self.header, &self.bottom_pane, self.session_action);
+        let owned_layout = layout::OwnedStartupLayout::new(self);
         let renderable = if owned {
             RenderableItem::Borrowed(&owned_layout)
         } else {
@@ -437,7 +460,21 @@ impl StartupDraftPump {
         } else {
             renderable.desired_height(screen_size.width)
         };
-        tui.draw_with_resize_reflow(desired_height, screen_size, |frame| {
+        let hud = self
+            .key_chord_matcher
+            .visible_pending(&tui.frame_requester())
+            .and_then(|pending| {
+                pending.guide(&self.key_chords, |action| {
+                    let Some(key) = crate::keymap::dispatch_event(action) else {
+                        return false;
+                    };
+                    self.session_action != StartupDraftSessionAction::NewFromCommandCenter
+                        && self.bottom_pane.is_startup_submit_key(key)
+                        || !self.bottom_pane.is_startup_composer_action(key)
+                            && self.bottom_pane.is_safe_startup_editor_key(key)
+                })
+            });
+        tui.draw_with_resize_reflow(desired_height, screen_size, hud, |frame| {
             let area = frame.area();
             renderable.render(area, frame.buffer);
             if let Some((x, y)) = renderable.cursor_pos(area) {
@@ -445,27 +482,21 @@ impl StartupDraftPump {
                 frame.set_cursor_position((x, y));
             }
         })?;
+        if let Some(delay) = owned_layout.next_frame.get() {
+            tui.frame_requester().schedule_frame_in(delay);
+        }
         Ok(())
     }
 }
 
-fn startup_session_header(config: Option<&Config>) -> Box<dyn HistoryCell> {
-    let placeholder_style = Style::default().add_modifier(Modifier::DIM | Modifier::ITALIC);
-    let directory = config.map_or_else(
-        || PathBuf::from("loading"),
-        |config| config.cwd.to_path_buf(),
-    );
-    Box::new(
-        history_cell::SessionHeaderHistoryCell::new_with_style(
-            "loading".to_string(),
-            placeholder_style,
-            /*reasoning_effort*/ None,
-            /*show_fast_status*/ false,
-            directory,
-            CODEX_CLI_VERSION,
-        )
-        .with_yolo_mode(config.is_some_and(history_cell::is_yolo_mode)),
-    )
+fn startup_session_header(cwd: Option<&Path>) -> Box<dyn HistoryCell> {
+    // Execution permissions are unknown until the server initializes the thread.
+    Box::new(history_cell::SessionHeaderHistoryCell::new(
+        "loading".to_string(),
+        /*reasoning_effort*/ None,
+        cwd.map_or_else(|| PathBuf::from("loading"), Path::to_path_buf),
+        CODEX_CLI_VERSION,
+    ))
 }
 
 fn startup_draft_renderable<'a>(
