@@ -94,6 +94,10 @@ fn spawn_legacy_process(
     logs_base_dir: Option<&Path>,
 ) -> Result<LegacyProcessHandles> {
     let h_token = security.h_token;
+    // SAFETY: the legacy session retains ownership of this token for the
+    // duration of both spawn calls; the borrowed handle cannot outlive this
+    // function. Ownership is transferred separately on successful return.
+    let borrowed_token = unsafe { BorrowedHandle::borrow_raw(h_token) };
     let launch_desktop = match private_desktop_name {
         Some(name) => LaunchDesktop::open_private(name)?,
         None => LaunchDesktop::prepare_legacy(
@@ -107,7 +111,7 @@ fn spawn_legacy_process(
     };
     let (pi, job, output_join, writer_handle, hpc, conpty_owner, desktop) = if tty {
         let (pi, mut conpty) =
-            spawn_conpty_process_as_user(h_token, command, cwd, env_map, launch_desktop)?;
+            spawn_conpty_process_as_user(borrowed_token, command, cwd, env_map, launch_desktop)?;
         let job = conpty
             .job()
             .ok_or_else(|| anyhow::anyhow!("spawned ConPTY is missing its process job"))?;
@@ -121,7 +125,7 @@ fn spawn_legacy_process(
         (pi, job, output_join, writer_handle, hpc, Some(conpty), None)
     } else {
         let pipe_handles = spawn_process_with_pipes(
-            h_token,
+            borrowed_token,
             command,
             cwd,
             env_map,
