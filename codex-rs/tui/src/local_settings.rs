@@ -1,8 +1,9 @@
 //! Client-owned preferences and persistence paths, independent of active server settings.
 //!
-//! The resolved core config is a temporary input at local load/reload boundaries. Server thread
-//! responses must never refresh these values; live preference changes belong here. The remaining
-//! Config-based lifecycle adapters also use this conversion until their interfaces are migrated.
+//! The first frame reads preferences from bootstrap TOML without executable core config.
+//! Server thread responses must never refresh these values; live preference changes belong here.
+//! Legacy Config-based lifecycle adapters remain until their interfaces are migrated.
+//! Audio preferences exclude project layers so thread cwd cannot route local capture.
 //! Effective animations also respect the TUI host's launch-time accessibility preference.
 //! The selected transcript ownership and alternate-screen restrictions survive local reloads.
 
@@ -11,6 +12,8 @@ use crate::legacy_core::config::ConfigTomlLoadResult;
 use crate::legacy_core::config::TerminalResizeReflowConfig;
 use crate::legacy_core::config::TerminalResizeReflowMaxRows;
 use crate::transcript_mode::TranscriptMode;
+use codex_config::ConfigLayerStack;
+use codex_config::types::CopyOnSelect;
 use codex_config::types::History;
 use codex_config::types::Notice;
 use codex_config::types::Tui;
@@ -41,24 +44,20 @@ impl From<&Config> for LocalSettings {
 }
 
 impl LocalSettings {
+    pub(crate) fn workspace_enabled(&self, config: &Config) -> bool {
+        self.transcript_mode.is_owned()
+            && config
+                .features
+                .enabled(codex_features::Feature::TuiWorkspace)
+    }
+
     fn with_accessibility_preferences(
         config: &Config,
         system_motion: crate::motion::MotionMode,
         screen_reader_default: crate::motion::MotionMode,
     ) -> Self {
-        let animations = if screen_reader_default == crate::motion::MotionMode::Reduced {
-            // Consult the current layers so preferences edited after startup still win.
-            config
-                .config_layer_stack
-                .effective_config()
-                .get("tui")
-                .and_then(|tui| tui.get("animations"))
-                .is_some()
-                && config.animations
-        } else {
-            config.animations
-        };
-        Self {
+        let mut settings = Self {
+            audio: Ok(Default::default()),
             transcript_mode: TranscriptMode::resolve(
                 config.tui_fullscreen_transcript,
                 config.tui_alternate_screen != codex_config::types::AltScreenMode::Never,
@@ -66,7 +65,7 @@ impl LocalSettings {
             tui: Tui {
                 default_hosts: Default::default(),
                 notification_settings: config.tui_notifications.clone(),
-                animations: animations && system_motion == crate::motion::MotionMode::Animated,
+                animations: config.animations,
                 screen_reader_detection_done: None,
                 effects: config.tui_effects,
                 rendering: config.tui_rendering,
@@ -78,8 +77,15 @@ impl LocalSettings {
                 question_esc_back: config.tui_question_esc_back,
                 raw_output_mode: config.tui_raw_output_mode,
                 fullscreen_transcript: config.tui_fullscreen_transcript,
+                collapse_turn_details: config.tui_collapse_turn_details,
+                sidebar_width_percent: config.tui_sidebar_width_percent,
+                mouse_scroll_speed: config.tui_mouse_scroll_speed,
+                copy_on_select: config.tui_copy_on_select,
+                copy_on_select_clear_selection: config.tui_copy_on_select_clear_selection,
+                right_click_paste: config.tui_right_click_paste,
                 alternate_screen: config.tui_alternate_screen,
                 status_line: config.tui_status_line.clone(),
+                status_line_provider: config.tui_status_line_provider.clone(),
                 status_line_use_colors: config.tui_status_line_use_colors,
                 terminal_title: config.tui_terminal_title.clone(),
                 theme: config.tui_theme.clone(),
@@ -222,7 +228,59 @@ impl LocalSettings {
         let mut settings = Self::from(config);
         settings.transcript_mode = self.transcript_mode;
         settings.tui.alternate_screen = self.tui.alternate_screen;
+        // Generic reloads do not update these values in the live UI. The config panel updates
+        // both copies when the user changes one.
+        settings.tui.animations = self.tui.animations;
+        settings.tui.auto_recap = self.tui.auto_recap;
+        settings.tui.effects.starfield = self.tui.effects.starfield;
+        settings.tui.disable_paste_burst = self.tui.disable_paste_burst;
+        settings.tui.show_tooltips = self.tui.show_tooltips;
         settings
+    }
+
+    /// Copy on release unless a direct terminal is known to forward its default copy shortcut.
+    /// Multiplexers, unknown terminals and Ghostty without a recognized version default to copying.
+    pub(crate) fn copy_on_select(&self, terminal: &TerminalInfo) -> bool {
+        match self.tui.copy_on_select {
+            CopyOnSelect::Always => true,
+            CopyOnSelect::Never => false,
+            CopyOnSelect::Auto => {
+                terminal.multiplexer.is_some()
+                    || match terminal.name {
+                        // Since 1.2, both Ghostty's Cmd-C and Ctrl-Shift-C bindings are
+                        // "performable": they forward the key if Ghostty has no selection.
+                        TerminalName::Ghostty => !terminal
+                            .version
+                            .as_deref()
+                            .and_then(|version| semver::Version::parse(version).ok())
+                            .is_some_and(|version| {
+                                version
+                                    >= semver::Version::new(
+                                        /*major*/ 1, /*minor*/ 2, /*patch*/ 0,
+                                    )
+                            }),
+                        // Kitty's Cmd-C uses copy_or_noop. Its Ctrl-Shift-C consumes the key.
+                        TerminalName::Kitty => !cfg!(target_os = "macos"),
+                        // Windows Terminal's Copy action forwards its key when unselected,
+                        // including when the CLI runs in WSL.
+                        TerminalName::WindowsTerminal => false,
+                        // VS Code gates Copy on native selection. Only Windows' default
+                        // (plain Ctrl-C) is also forwarded by the legacy xterm.js encoder.
+                        TerminalName::VsCode => !cfg!(target_os = "windows"),
+                        TerminalName::AppleTerminal
+                        | TerminalName::Iterm2
+                        | TerminalName::WarpTerminal
+                        | TerminalName::WezTerm
+                        | TerminalName::Rex
+                        | TerminalName::Alacritty
+                        | TerminalName::Konsole
+                        | TerminalName::GnomeTerminal
+                        | TerminalName::Vte
+                        | TerminalName::Dumb
+                        | TerminalName::Unknown => true,
+                    }
+            }
+        }
     }
 
     pub(crate) fn terminal_resize_reflow(&self) -> TerminalResizeReflowConfig {

@@ -75,7 +75,41 @@ pub(crate) struct BacktrackState {
     pub(crate) nth_user_message: usize,
     /// True when the transcript overlay is showing a backtrack preview.
     pub(crate) overlay_preview_active: bool,
+    /// Consume held-key input after a fresh press acts on transcript select mode.
+    pub(crate) select_exit_key: Option<crate::key_hint::KeyBinding>,
+    /// Preserve the initiating key while a select-and-follow copy is pending.
+    pub(crate) pending_select_exit_key: Option<(u64, crate::key_hint::KeyBinding)>,
     origin: Option<browsing::BrowsingOrigin>,
+}
+
+impl BacktrackState {
+    pub(crate) fn observe_pending_select_exit_key(&mut self, event: KeyEvent) {
+        if event.kind == KeyEventKind::Release
+            && self.pending_select_exit_key.is_some_and(|(_, binding)| {
+                binding.parts() == crate::key_hint::KeyBinding::from_event(event).parts()
+            })
+        {
+            self.pending_select_exit_key = None;
+        }
+    }
+
+    pub(crate) fn finish_pending_select_exit_key(
+        &mut self,
+        completed_id: u64,
+        select_mode_closed: bool,
+    ) -> Option<crate::key_hint::KeyBinding> {
+        match self.pending_select_exit_key {
+            Some((id, key)) if id == completed_id => {
+                self.pending_select_exit_key = None;
+                select_mode_closed.then_some(key)
+            }
+            Some((id, _)) if id < completed_id => {
+                self.pending_select_exit_key = None;
+                None
+            }
+            _ => None,
+        }
+    }
 }
 
 /// A user-visible backtrack choice that can be reopened in the current thread.
@@ -357,6 +391,16 @@ impl App {
     /// source of truth for the active cell and its cache invalidation key, and because `App` owns
     /// overlay lifecycle and frame scheduling for animations.
     fn overlay_forward_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
+        let hud = self
+            .key_chord_matcher
+            .guide(&self.keymap.chords, &tui.frame_requester());
+        let select_exit_key = Self::transcript_select_exit_key(&event);
+        if matches!(
+            &event,
+            TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) | TuiEvent::FocusGained
+        ) {
+            self.chat_widget.refresh_terminal_program_status();
+        }
         let width = tui.terminal.last_known_screen_size.width.max(/*other*/ 1);
         let footer = self.prompt_navigation_footer(width.saturating_sub(/*rhs*/ 2));
         if let Some(Overlay::Transcript(overlay)) = &mut self.overlay {
@@ -372,6 +416,8 @@ impl App {
             ))
             && let Some(Overlay::Transcript(t)) = &mut self.overlay
         {
+            let was_select_mode = t.is_select_mode();
+            let pending_follow_before = t.pending_follow_id();
             tui.set_overlay_input(tui::OverlayInput::Transcript)?;
             t.motion = crate::motion::MotionMode::from_animations_enabled(
                 self.local_settings.tui.animations && self.local_settings.tui.effects.shimmer,
@@ -380,6 +426,9 @@ impl App {
             let chat_widget = &self.chat_widget;
             let detailed = t.is_detailed();
             let size = tui.prepare_draw_size()?;
+            t.sync_search_live_tail(size.width.max(/*other*/ 1), active_key, |width| {
+                chat_widget.active_cell_transcript_hyperlink_lines(width)
+            });
             t.sync_live_tail(size.width.max(/*other*/ 1), active_key, |width| {
                 if detailed {
                     chat_widget.active_cell_transcript_hyperlink_lines(width)
@@ -393,12 +442,13 @@ impl App {
                 }
             });
             // Refresh visible rows before selection captures this live revision.
-            let result =
-                if input { t.draw(tui) } else { Ok(()) }.and_then(|()| t.handle_event(tui, event));
+            let result = tui.with_shortcut_hud(hud, |tui| {
+                if input { t.draw(tui) } else { Ok(()) }.and_then(|()| t.handle_event(tui, event))
+            });
             if result.is_err() {
                 let _ = tui.set_overlay_input(tui::OverlayInput::Default);
             }
-            result?;
+            let completed_copy = result?;
             let close_overlay = t.is_done();
             let select_mode_closed = was_select_mode && (!t.is_select_mode() || close_overlay);
             let pending_follow_id = t.pending_follow_id();

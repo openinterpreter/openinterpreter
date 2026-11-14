@@ -283,6 +283,7 @@ pub(crate) async fn run_temporary_structured_turn(
     notifications: UnboundedReceiver<ServerNotification>,
     cancellation: CancellationToken,
 ) -> color_eyre::Result<String> {
+    let thread_id = params.thread_id.clone();
     let mut turn_id = None;
     let result = tokio::time::timeout(STRUCTURED_TURN_TIMEOUT, async {
         if cancellation.is_cancelled() {
@@ -290,14 +291,15 @@ pub(crate) async fn run_temporary_structured_turn(
         }
         // Wait for turn/start to return its ID before interrupting, even if cancellation
         // arrives during startup. Dropping that request could leave an orphaned turn.
-        let turn = start_structured_turn(
-            &request_handle,
-            thread_id.clone(),
-            prompt,
-            output_schema,
-            effort,
-        )
-        .await?;
+        let turn: TurnStartResponse = request_handle
+            .request_typed(ClientRequest::TurnStart {
+                request_id: RequestId::String(format!(
+                    "temporary-structured-turn-{}",
+                    Uuid::new_v4()
+                )),
+                params,
+            })
+            .await?;
 
         turn_id = Some(turn.turn.id.clone());
         tokio::select! {
@@ -312,7 +314,7 @@ pub(crate) async fn run_temporary_structured_turn(
 
     // Give interruption its own deadline so cancellation near the response timeout
     // still gets a chance to stop the hidden turn.
-    if cancellation.is_cancelled()
+    if (timed_out || cancellation.is_cancelled())
         && let Some(turn_id) = turn_id
     {
         let interrupt =
