@@ -26054,6 +26054,31 @@
         "title": "ThreadRealtimeClosedNotification",
         "type": "object"
       },
+      "ThreadRealtimeCoverage": {
+        "enum": [
+          "unsupported",
+          "pending",
+          "ready"
+        ],
+        "type": "string"
+      },
+      "ThreadRealtimeEntry": {
+        "properties": {
+          "item": {
+            "$ref": "#/definitions/v2/ThreadRealtimeItem"
+          },
+          "position": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "item",
+          "position"
+        ],
+        "type": "object"
+      },
       "ThreadRealtimeErrorNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "description": "EXPERIMENTAL - emitted when thread realtime encounters an error.",
@@ -26071,6 +26096,25 @@
         ],
         "title": "ThreadRealtimeErrorNotification",
         "type": "object"
+      },
+      "ThreadRealtimeFrameChannels": {
+        "description": "A frame holds one or more payloads, at most one per channel. They share one ID, observation time, and seal. V1 requires its only channel, `voice_transcript`.",
+        "properties": {
+          "voice_transcript": {
+            "$ref": "#/definitions/v2/ThreadRealtimeVoiceTranscript"
+          }
+        },
+        "required": [
+          "voice_transcript"
+        ],
+        "type": "object"
+      },
+      "ThreadRealtimeHandoffMode": {
+        "enum": [
+          "start",
+          "steer"
+        ],
+        "type": "string"
       },
       "ThreadRealtimeInitialItem": {
         "description": "EXPERIMENTAL - role-bearing text item included when a realtime V3 session starts.",
@@ -26105,6 +26149,26 @@
               "type"
             ],
             "title": "RealtimeSessionStartedThreadRealtimeItem",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "channels": {
+                "$ref": "#/definitions/v2/ThreadRealtimeFrameChannels"
+              },
+              "type": {
+                "enum": [
+                  "frame"
+                ],
+                "title": "FrameThreadRealtimeItemType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "channels",
+              "type"
+            ],
+            "title": "FrameThreadRealtimeItem",
             "type": "object"
           },
           {
@@ -26178,11 +26242,93 @@
             ],
             "title": "RealtimeSessionClosedThreadRealtimeItem",
             "type": "object"
+          },
+          {
+            "properties": {
+              "handoff_id": {
+                "type": "string"
+              },
+              "input": {
+                "type": "string"
+              },
+              "input_item_id": {
+                "type": "string"
+              },
+              "mode": {
+                "$ref": "#/definitions/v2/ThreadRealtimeHandoffMode"
+              },
+              "source_event_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "turn_id": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "turnInputAccepted"
+                ],
+                "title": "TurnInputAcceptedThreadRealtimeItemType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "handoff_id",
+              "input",
+              "input_item_id",
+              "mode",
+              "source_event_ids",
+              "turn_id",
+              "type"
+            ],
+            "title": "TurnInputAcceptedThreadRealtimeItem",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "input": {
+                "type": "string"
+              },
+              "input_item_id": {
+                "type": "string"
+              },
+              "source_event_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "type": {
+                "enum": [
+                  "sessionEndInputSaved"
+                ],
+                "title": "SessionEndInputSavedThreadRealtimeItemType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "input",
+              "input_item_id",
+              "source_event_ids",
+              "type"
+            ],
+            "title": "SessionEndInputSavedThreadRealtimeItem",
+            "type": "object"
           }
         ],
         "properties": {
           "id": {
             "type": "string"
+          },
+          "observedAtMs": {
+            "description": "Canonical observation time in Unix milliseconds for eligible voice calls.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "realtimeSessionId": {
             "type": "string"
@@ -26267,6 +26413,24 @@
         ],
         "title": "ThreadRealtimeItemTranscriptDeltaNotification",
         "type": "object"
+      },
+      "ThreadRealtimeOrder": {
+        "oneOf": [
+          {
+            "description": "Sort by canonical observation time, then committed position.",
+            "enum": [
+              "observedAt"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Sort by committed position, including events sealed after older snapshots.",
+            "enum": [
+              "position"
+            ],
+            "type": "string"
+          }
+        ]
       },
       "ThreadRealtimeOutputAudioDeltaNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",
@@ -26450,6 +26614,21 @@
           "assistant"
         ],
         "type": "string"
+      },
+      "ThreadRealtimeVoiceTranscript": {
+        "properties": {
+          "role": {
+            "$ref": "#/definitions/v2/ThreadRealtimeTranscriptRole"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "text"
+        ],
+        "type": "object"
       },
       "ThreadResumeInitialTurnsPageParams": {
         "properties": {
