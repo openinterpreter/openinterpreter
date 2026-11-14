@@ -291,10 +291,12 @@ mod job {
         let mut prompt = Prompt::default();
         prompt.input = match config.memories.version {
             MemoryVersion::V1 => vec![ResponseItem::Message {
-                id: Some(ResponseItemId::new("msg")),
+                id: Some(ResponseItemId::with_suffix("msg", "memory")),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText { text: input_text }],
                 phase: None,
+                encrypted_content: None,
+                status: None,
                 internal_chat_message_metadata_passthrough: None,
             }],
             MemoryVersion::V2 => crate::rollout_input::extraction_messages(&input_text),

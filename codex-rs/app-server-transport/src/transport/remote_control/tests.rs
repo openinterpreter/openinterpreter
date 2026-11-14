@@ -235,7 +235,7 @@ async fn plain_start_resolves_persisted_remote_control_preference() {
             server_name: test_server_name(),
         },
         Some(state_db),
-        auth::RemoteControlAuth::capture(remote_control_auth_manager()).0,
+        auth::RemoteControlAuth::capture(remote_control_auth_manager(), None).0,
         RemoteControlChannels {
             transport_event_tx,
             status_publisher: RemoteControlStatusPublisher::new(status_tx),
@@ -476,7 +476,7 @@ pub(super) fn remote_control_handle_with_current_enrollment(
         current_enrollment,
         pairing_persistence_key: watch::channel(None).0,
         pairing_persistence_key_required: false,
-        auth_manager: auth::RemoteControlAuth::capture(auth_manager).0,
+        auth_manager: auth::RemoteControlAuth::capture(auth_manager, None).0,
     }
 }
 

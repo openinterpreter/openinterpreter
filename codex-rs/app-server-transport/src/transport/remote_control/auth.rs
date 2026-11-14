@@ -20,6 +20,7 @@ use tracing::warn;
 pub(super) struct RemoteControlAuth {
     manager: Arc<AuthManager>,
     pub(super) owner: crate::ConnectionAuth,
+    runtime_auth: Option<(RuntimeAuthSlot, RuntimeAuthMode)>,
 }
 
 pub(super) struct RemoteControlRecovery {
@@ -28,14 +29,24 @@ pub(super) struct RemoteControlRecovery {
 }
 
 impl RemoteControlAuth {
-    pub(super) fn capture(manager: Arc<AuthManager>) -> (Self, bool) {
+    pub(super) fn capture(
+        manager: Arc<AuthManager>,
+        runtime_auth: Option<(RuntimeAuthSlot, RuntimeAuthMode)>,
+    ) -> (Self, bool) {
         loop {
             let owner = crate::ConnectionAuth::capture(&manager);
             let authenticated = manager
                 .auth_cached()
                 .is_some_and(|auth| auth.uses_codex_backend() && auth.get_account_id().is_some());
             if owner.is_current() {
-                return (Self { manager, owner }, authenticated);
+                return (
+                    Self {
+                        manager,
+                        owner,
+                        runtime_auth,
+                    },
+                    authenticated,
+                );
             }
         }
     }
@@ -134,7 +145,7 @@ pub(super) async fn load_remote_control_auth(
     auth: &RemoteControlAuth,
 ) -> io::Result<RemoteControlConnectionAuth> {
     auth.ensure_current()?;
-    let credentials = load_auth_manager(&auth.manager).await?;
+    let credentials = load_auth_manager(&auth.manager, auth.runtime_auth.clone()).await?;
     auth.ensure_current()?;
     Ok(credentials)
 }

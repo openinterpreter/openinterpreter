@@ -300,7 +300,7 @@ impl MemoryStartupContext {
 
         StageOneRequestContext {
             version: self.version,
-            model_info,
+            model_info: model_info.model.as_ref().clone(),
             session_telemetry: build_session_telemetry(
                 &self.auth_manager,
                 self.thread_id,
@@ -344,6 +344,7 @@ impl MemoryStartupContext {
             /*attestation_provider*/ None,
             config.http_client_factory(),
             config.workspace_routing_context(),
+            Vec::new(),
         );
 
         let mut client_session = model_client.new_session();
