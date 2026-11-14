@@ -190,8 +190,11 @@ impl AsyncQuestions {
                 };
                 if is_choice && usize::from(width) > indent {
                     let lines = render_markdown_for_viewport(label, width - indent as u16);
-                    row.wrapped_name =
-                        prefix_hyperlink_lines(lines, prefix.into(), " ".repeat(indent).into());
+                    row.wrapped_name = Some(prefix_hyperlink_lines(
+                        lines,
+                        prefix.into(),
+                        " ".repeat(indent).into(),
+                    ));
                 }
                 row
             })

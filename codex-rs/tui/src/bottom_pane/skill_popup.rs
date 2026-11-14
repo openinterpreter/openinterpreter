@@ -164,6 +164,7 @@ impl SkillPopup {
                 let mention = &self.mentions[idx];
                 let name = truncate_text(&mention.display_name, MENTION_NAME_TRUNCATE_LEN);
                 GenericDisplayRow {
+                    wrapped_name: None,
                     category_tag: mention.category_tag.clone(),
                     selection_style: Some(super::picker_style::selection_style()),
                     name,

@@ -173,7 +173,7 @@ impl PendingInputPreview {
             let mut hint = Line::from("    ");
             hint.spans.extend(edit_binding.spans());
             hint.spans.push(" edit last queued message".dim());
-            lines.push(hint);
+            lines.push(hint.into());
         }
 
         Box::new(HyperlinkRows::from(lines))

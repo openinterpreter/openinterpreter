@@ -1294,12 +1294,11 @@ impl McpServerElicitationOverlay {
             if y >= area.y + area.height {
                 break;
             }
-            let line = if answered {
-                Line::from(line.clone())
-            } else {
-                Line::from(line.clone()).fg(crate::style::accent_color())
-            };
-            Paragraph::new(line).render(
+            let mut line = line.clone();
+            if !answered {
+                line.line = line.line.fg(crate::style::accent_color());
+            }
+            line.render_fitted(
                 Rect {
                     x: area.x,
                     y,

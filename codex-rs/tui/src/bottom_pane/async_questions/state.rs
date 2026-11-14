@@ -11,6 +11,46 @@ use codex_utils_string::take_bytes_at_char_boundary;
 const MAX_RECOVERED_QUESTION_TITLE_BYTES: usize = 512;
 
 impl AsyncQuestions {
+    /// Recover unsent answers into the main composer when a turn ends.
+    pub(crate) fn take_pending_drafts(&mut self) -> Vec<String> {
+        self.save_current_draft();
+        let drafts = self
+            .state
+            .pending
+            .iter()
+            .filter_map(|question| {
+                let answer = question.draft.text_with_pending();
+                let answer = answer.trim();
+                if answer.is_empty() {
+                    return None;
+                }
+                let raw_title = question.question.title.as_str();
+                let truncated =
+                    take_bytes_at_char_boundary(raw_title, MAX_RECOVERED_QUESTION_TITLE_BYTES);
+                let title = sanitize_user_text(truncated.into());
+                let mut quoted = title
+                    .lines()
+                    .map(|line| {
+                        if line.is_empty() {
+                            ">".into()
+                        } else {
+                            format!("> {line}")
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if quoted.is_empty() {
+                    quoted.push("> ".into());
+                }
+                if truncated.len() < raw_title.len() {
+                    quoted.last_mut().expect("quoted title exists").push('…');
+                }
+                Some(format!("{}\n\n{answer}", quoted.join("\n")))
+            })
+            .collect();
+        self.clear_pending();
+        drafts
+    }
+
     pub(crate) fn append(&mut self, message_id: &str, questions: &[AsyncUserInputQuestion]) {
         if questions.is_empty() || !self.state.seen_ids.insert(message_id.to_string()) {
             return;

@@ -164,6 +164,20 @@ impl ChatComposer {
             /*bottom*/ 1,
             /*right*/ 1u16.saturating_add(options.textarea_right_reserve),
         ));
+        let thumbnail_height = options
+            .image_previews
+            .map_or(0, |images| {
+                images.height(textarea_rect.width, self.attachments.local_images.len())
+            })
+            .min(textarea_rect.height.saturating_sub(1));
+        let thumbnails = Rect {
+            x: textarea_rect.x,
+            y: textarea_rect.y,
+            width: textarea_rect.width,
+            height: thumbnail_height,
+        };
+        textarea_rect.y = textarea_rect.y.saturating_add(thumbnail_height);
+        textarea_rect.height = textarea_rect.height.saturating_sub(thumbnail_height);
         let remote_images_height = self
             .attachments
             .remote_image_lines()
@@ -185,6 +199,7 @@ impl ChatComposer {
             status,
             composer: composer_rect,
             remote_images: remote_images_rect,
+            thumbnails,
             textarea: textarea_rect,
             popup: popup_rect,
             footer: footer_rect,
@@ -238,6 +253,9 @@ impl ChatComposer {
             .unwrap_or(u16::MAX);
         let remote_images_separator = u16::from(remote_images_height > 0);
         self.draft.textarea.desired_height(inner_width)
+            + options.image_previews.map_or(0, |images| {
+                images.height(inner_width, self.attachments.local_images.len())
+            })
             + remote_images_height
             + remote_images_separator
             + self.status_surface_height(width, /*footer cap*/ 4, options)

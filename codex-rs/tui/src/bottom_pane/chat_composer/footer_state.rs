@@ -39,6 +39,7 @@ pub(super) struct ComposerLayout {
     pub(super) status: Rect,
     pub(super) composer: Rect,
     pub(super) remote_images: Rect,
+    pub(super) thumbnails: Rect,
     pub(super) textarea: Rect,
     pub(super) popup: Rect,
     pub(super) footer: Rect,
@@ -72,6 +73,14 @@ pub(crate) struct ComposerRenderOptions<'a> {
     pub(crate) unfocused: bool,
     pub(crate) command_popup_placement: CommandPopupPlacement,
     pub(crate) footer: Option<&'a TranscriptFooter>,
+    pub(crate) image_previews: Option<&'a crate::transcript_image::composer::ComposerImages>,
+    pub(crate) rendered_selection:
+        Option<&'a std::cell::RefCell<crate::rendered_selection::RenderedSelection>>,
+    pub(crate) working_tip: Option<&'a dyn crate::render::renderable::Renderable>,
+    pub(crate) composer_gap: Option<&'a crate::bottom_pane::composer_gap::ComposerGap>,
+    /// First row available for an overlaid popup above the input.
+    pub(crate) overlay_top: u16,
+    pub(crate) max_height: Option<u16>,
 }
 
 impl super::ChatComposer {
@@ -201,6 +210,7 @@ impl super::ChatComposer {
 }
 
 pub(super) struct FooterState {
+    pub(super) selection_revision: std::cell::Cell<(usize, bool)>,
     pub(super) quit_shortcut_expires_at: Option<Instant>,
     pub(super) quit_shortcut_key: KeyBinding,
     pub(super) esc_backtrack_hint: bool,
@@ -224,6 +234,7 @@ pub(super) struct FooterState {
     pub(super) show_warnings_key: Option<ShortcutHint>,
     pub(super) warning_notice_area: std::cell::Cell<Option<Rect>>,
     pub(super) find_transcript_key: Option<ShortcutHint>,
+    pub(super) focus_activity_key: Option<ShortcutHint>,
     pub(super) insert_newline_key: Option<ShortcutHint>,
     pub(super) queue_key: Option<ShortcutHint>,
     pub(super) toggle_shortcuts_key: Option<ShortcutHint>,

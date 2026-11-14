@@ -225,13 +225,7 @@ impl CommandPopup {
             .enumerate()
             .map(|(index, (item, indices))| {
                 let name = format!("/{}", item.command());
-                let description = if matches!(item, CommandItem::Builtin(SlashCommand::Daybreak)) {
-                    self.daybreak_command_description
-                        .unwrap_or(item.description())
-                } else {
-                    item.description()
-                }
-                .to_string();
+                let description = item.description().to_string();
                 let unavailable = self.is_unavailable(&item);
                 GenericDisplayRow {
                     category_tag: None,
@@ -242,6 +236,8 @@ impl CommandPopup {
                         "  ".into()
                     }],
                     selection_style: Some(selection_style()),
+                    display_shortcut: None,
+                    wrapped_name: None,
                     match_indices: indices.map(|v| v.into_iter().map(|i| i + 1).collect()),
                     description: Some(description),
                     wrap_indent: None,

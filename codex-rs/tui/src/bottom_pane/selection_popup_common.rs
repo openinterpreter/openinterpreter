@@ -67,6 +67,8 @@ fn full_hyperlink_row(
 #[derive(Default)]
 pub(crate) struct GenericDisplayRow {
     pub name: String,
+    /// Pre-wrapped styled option text, including semantic terminal hyperlinks.
+    pub wrapped_name: Option<Vec<crate::terminal_hyperlinks::HyperlinkLine>>,
     /// Optional full-width selection treatment; other rows use the shared text accent.
     pub selection_style: Option<Style>,
     pub name_prefix_spans: Vec<Span<'static>>,

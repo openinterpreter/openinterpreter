@@ -153,8 +153,10 @@ impl Renderable for HooksBrowserView {
                         Layout::vertical([Constraint::Length(list_height), Constraint::Fill(1)])
                             .areas(body);
                     render_line_rows(list, buf, rows, self.state);
-                    Paragraph::new(self.detail_lines(event, usize::from(content.width)))
-                        .render(details.inset(Insets::vh(/*v*/ 0, /*h*/ 2)), buf);
+                    crate::terminal_hyperlinks::HyperlinkRows::from(
+                        self.detail_lines(event, usize::from(content.width)),
+                    )
+                    .render(details.inset(Insets::vh(/*v*/ 0, /*h*/ 2)), buf);
                 }
             }
         }

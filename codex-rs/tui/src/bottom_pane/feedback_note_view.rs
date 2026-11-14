@@ -565,7 +565,7 @@ impl FeedbackNoteView {
                     ". Please avoid sharing tented information under NDA, or privileged, HR-related, or sensitive personal information.".dim(),
                 ]));
             }
-            FeedbackAudience::External => lines.push(Line::from(vec![
+            Some(FeedbackAudience::External) => lines.push(Line::from(vec![
                 "Your feedback can be used to improve ChatGPT. ".dim(),
                 "Learn more".fg(crate::style::accent_color()).underlined(),
                 ".".dim(),

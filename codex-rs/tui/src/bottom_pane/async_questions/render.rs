@@ -50,12 +50,18 @@ impl Renderable for AsyncQuestions {
         }
         let sections = self.layout_sections(content_area);
         Paragraph::new(self.progress_prefix_text().dim()).render(sections.progress_area, buf);
-        Paragraph::new(sections.question_lines.join("\n"))
-            .style(crate::style::accent_style())
-            .bold()
-            .render(sections.question_area, buf);
-
-        let option_rows = self.option_rows();
+        for (offset, line) in sections.question_lines.iter().enumerate() {
+            let y = sections.question_area.y.saturating_add(offset as u16);
+            if y >= sections.question_area.bottom() {
+                break;
+            }
+            let mut line = line.clone();
+            line.line = line.line.style(crate::style::accent_style()).bold();
+            line.render_fitted(
+                Rect::new(sections.question_area.x, y, sections.question_area.width, 1),
+                buf,
+            );
+        }
 
         if self.other_selected() {
             self.render_inline_options(sections.options_area, buf);

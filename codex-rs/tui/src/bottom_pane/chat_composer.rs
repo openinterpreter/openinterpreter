@@ -772,6 +772,7 @@ impl ChatComposer {
             history: ChatComposerHistory::new(),
             command_center_enabled: false,
             footer: Box::new(FooterState {
+                selection_revision: Default::default(),
                 quit_shortcut_expires_at: None,
                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 esc_backtrack_hint: false,
@@ -799,6 +800,8 @@ impl ChatComposer {
                     .primary_hint(KeymapContext::Global, "open_transcript"),
                 find_transcript_key: default_keymap
                     .primary_hint(KeymapContext::Global, "find_transcript"),
+                focus_activity_key: default_keymap
+                    .primary_hint(KeymapContext::Global, "focus_activity"),
                 insert_newline_key: footer_insert_newline_key(
                     &default_keymap.editor.insert_newline,
                     use_shift_enter_hint,
@@ -1100,6 +1103,8 @@ impl ChatComposer {
             keymap.primary_hint(KeymapContext::Global, "open_transcript");
         self.footer.find_transcript_key =
             keymap.primary_hint(KeymapContext::Global, "find_transcript");
+        self.footer.focus_activity_key =
+            keymap.primary_hint(KeymapContext::Global, "focus_activity");
         self.footer.insert_newline_key =
             match keymap.primary_hint(KeymapContext::Editor, "insert_newline") {
                 hint @ Some(ShortcutHint::Chord { .. }) => hint,
@@ -1267,6 +1272,11 @@ impl ChatComposer {
 
     pub(crate) fn record_local_user_message_history(&mut self, entry: HistoryEntry) {
         self.history.record_local_submission(entry);
+    }
+
+    /// Preserve replayed submissions separately so reconciliation can discard their seed later.
+    pub(crate) fn record_replayed_user_message_history(&mut self, entry: HistoryEntry) {
+        self.history.record_replayed_submission(entry);
     }
 
     pub fn handle_paste_image_path(&mut self, pasted: &str) -> bool {
@@ -4048,9 +4058,11 @@ impl ChatComposer {
                 edit_previous: Some(key_hint::plain(KeyCode::Esc).into()),
                 show_transcript: self.footer.show_transcript_key,
                 find_transcript: self.footer.find_transcript_key,
+                focus_activity: self.footer.focus_activity_key,
                 history_search: self.footer.history_search_key,
                 reasoning_down: self.footer.reasoning_down_key,
                 reasoning_up: self.footer.reasoning_up_key,
+                toggle_voice: self.footer.toggle_voice_key,
             },
             active_agent_label: self.footer.active_agent_label.clone(),
         }

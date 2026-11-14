@@ -204,6 +204,12 @@ pub(crate) struct KillBufferSnapshot {
     pub(in crate::bottom_pane) elements: Arc<Vec<TextElementSnapshot>>,
 }
 
+impl Default for TextArea {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TextArea {
     pub fn new() -> Self {
         let defaults = RuntimeKeymap::defaults();
@@ -234,6 +240,11 @@ impl TextArea {
             vim_search_keymap: defaults.vim_search,
             vim_text_object_keymap: defaults.vim_text_object,
         }
+    }
+
+    /// Clear the editor while retaining its configured keymap and input mode.
+    pub(crate) fn clear(&mut self) {
+        self.set_text_clearing_elements("");
     }
 
     /// Replace the editor and Vim keymaps used by subsequent text-editing input.

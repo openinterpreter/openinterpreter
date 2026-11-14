@@ -312,6 +312,25 @@ impl PasteBurst {
         }
     }
 
+    /// Emit a buffered paste or held first character after its idle timeout.
+    fn flush_pending(&mut self) -> FlushResult {
+        self.last_plain_char_time = None;
+        self.consecutive_plain_char_burst = 0;
+        if self.active {
+            self.active = false;
+            if let Some((ch, _)) = self.pending_first_char.take() {
+                self.buffer.insert(0, ch);
+            }
+            let text = std::mem::take(&mut self.buffer);
+            if !text.is_empty() {
+                return FlushResult::Paste(text);
+            }
+        }
+        self.pending_first_char
+            .take()
+            .map_or(FlushResult::None, |(ch, _)| FlushResult::Typed(ch))
+    }
+
     /// Accumulate a newline or tab into the burst instead of invoking a shortcut.
     /// A held first character is promoted into the buffer before the control character.
     ///
