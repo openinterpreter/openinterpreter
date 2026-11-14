@@ -196,6 +196,9 @@ def build_entry(model_id: str, metadata: dict, force_hide_ids: set[str]) -> dict
 
 
 def unique_suffix_aliases(model_ids: list[str]) -> dict[str, list[str]]:
+    # Lookups are case-insensitive and aliases share one index with canonical
+    # ids, so an alias must never shadow another model's own id.
+    canonical_keys = {model_id.lower() for model_id in model_ids}
     owners: defaultdict[str, set[str]] = defaultdict(set)
     for model_id in model_ids:
         parts = model_id.split("/")
@@ -204,7 +207,7 @@ def unique_suffix_aliases(model_ids: list[str]) -> dict[str, list[str]]:
 
     aliases: dict[str, list[str]] = {model_id: [] for model_id in model_ids}
     for alias, model_id_set in owners.items():
-        if len(model_id_set) != 1:
+        if len(model_id_set) != 1 or alias.lower() in canonical_keys:
             continue
         [owner] = list(model_id_set)
         aliases[owner].append(alias)
