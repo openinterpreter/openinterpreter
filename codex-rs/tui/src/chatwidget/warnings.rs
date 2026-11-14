@@ -51,6 +51,13 @@ fn fallback_model_metadata_warning_slug(message: &str) -> Option<&str> {
 }
 
 impl super::ChatWidget {
+    pub(crate) fn record_warning_activity(&mut self) {
+        if self.bottom_pane.warnings_active() {
+            self.bottom_pane
+                .record_composer_activity_at(std::time::Instant::now());
+        }
+    }
+
     pub(crate) fn open_warnings(&mut self, cells: &[Arc<dyn HistoryCell>]) {
         self.empty_state_animation.borrow_mut().pause_clock();
         self.bottom_pane

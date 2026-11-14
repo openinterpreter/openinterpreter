@@ -19,6 +19,13 @@ pub(crate) enum ClipboardPasteTarget {
 }
 
 impl ChatComposer {
+    /// Drop the draft's painted selection without changing its text or cursor.
+    pub(crate) fn clear_mouse_selection(&mut self) {
+        self.end_mouse_drag();
+        let cursor = self.draft.textarea.cursor();
+        self.draft.textarea.set_cursor(cursor);
+    }
+
     pub(crate) fn clipboard_paste_target(
         &self,
         shortcut: Option<KeyCode>,

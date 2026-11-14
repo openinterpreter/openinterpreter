@@ -1948,6 +1948,11 @@ impl BottomPane {
         self.composer.end_mouse_drag();
     }
 
+    pub(crate) fn clear_composer_selection(&mut self) {
+        self.composer.clear_mouse_selection();
+        self.request_redraw();
+    }
+
     pub(crate) fn copy_composer_selection(
         &mut self,
         event: &crate::tui::TuiEvent,

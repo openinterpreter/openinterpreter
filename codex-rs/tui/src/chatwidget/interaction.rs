@@ -23,6 +23,14 @@ impl ChatWidget {
         self.bottom_pane.end_composer_drag();
     }
 
+    pub(crate) fn clear_composer_selection(&mut self) {
+        self.bottom_pane.clear_composer_selection();
+    }
+
+    pub(crate) fn cancel_composer_primary(&mut self) {
+        self.bottom_pane.clear_composer_selection();
+    }
+
     pub(crate) fn copy_composer_selection(
         &mut self,
         event: &crate::tui::TuiEvent,
@@ -41,6 +49,10 @@ impl ChatWidget {
 
     pub(crate) fn set_agents_navigation_enabled(&mut self, enabled: bool) {
         self.bottom_pane.set_agents_navigation_enabled(enabled);
+    }
+
+    pub(crate) fn agents_navigation_key_available(&self) -> bool {
+        self.bottom_pane.agents_navigation_key_available()
     }
 
     pub(crate) fn keymap_contexts(&self) -> crate::keymap::KeymapContextSet {
