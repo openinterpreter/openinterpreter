@@ -47,12 +47,28 @@ pub(crate) struct KeymapContextSet(u32);
 const ACTIVITY_FOCUS: u32 = 1 << 13;
 const TRANSCRIPT_CLOSE: u32 = 1 << 15;
 const WARNINGS_FOCUS: u32 = 1 << 16;
+const VOICE_TOGGLE: u32 = 1 << 17;
+const RAW_KEY_CAPTURE: u32 = 1 << 18;
+const VOICE_TOGGLE_BLOCKED: u32 = 1 << 19;
+const TRANSCRIPT_ACTIONS: u32 = 1 << 20;
+const BACKEND_CYCLING: u32 = 1 << 21;
+const SIDE_PANE: u32 = 1 << 22;
+const MAIN_COMPOSER_FOCUS: u32 = 1 << 23;
+const PANE_DIRECTION: u32 = 1 << 24;
+const OPEN_PANE: u32 = 1 << 25;
+const FOCUSED_SIDE_PANE: u32 = 1 << 26;
+const SIDEBAR_CHOOSER: u32 = 1 << 27;
+const SIDEBAR_RESIZE: u32 = 1 << 28;
 
 const TRANSCRIPT_BROWSING: u32 = 1 << 14;
 
 impl KeymapContextSet {
     pub(crate) const fn new(context: KeymapContext) -> Self {
         Self(context_bit(context))
+    }
+
+    pub(crate) const fn with_backend_cycling(self) -> Self {
+        Self(self.0 | BACKEND_CYCLING)
     }
 
     /// Activity navigation combines list actions with global focus and Find.
@@ -76,6 +92,90 @@ impl KeymapContextSet {
         )
     }
 
+    pub(crate) const fn transcript() -> Self {
+        Self(
+            context_bit(KeymapContext::Pager)
+                | context_bit(KeymapContext::Global)
+                | TRANSCRIPT_ACTIONS,
+        )
+    }
+
+    pub(crate) const fn raw_key_capture() -> Self {
+        Self(RAW_KEY_CAPTURE)
+    }
+
+    /// An overlay only admits voice shortcuts when no active action owns their prefix.
+    pub(crate) fn with_voice_toggle(self, keymap: &RuntimeKeymap) -> Self {
+        let voice = KeymapActionId {
+            context: KeymapContext::Chat,
+            action: "toggle_voice",
+        };
+        let prefixes = keymap
+            .chat
+            .toggle_voice
+            .iter()
+            .map(|key| (*key, None))
+            .chain(
+                keymap
+                    .chords
+                    .bindings
+                    .iter()
+                    .filter(|binding| binding.action == voice)
+                    .map(|binding| (binding.chord.prefix, Some(binding.chord.completion))),
+            );
+        let native_chat =
+            self.contains(KeymapContext::Chat) && self.contains(KeymapContext::Global);
+        let conflicts = prefixes.into_iter().any(|(prefix, completion)| {
+            (!native_chat && !matches!(prefix.parts().0, KeyCode::F(_)))
+                || runtime_action_bindings(keymap).any(|binding| {
+                    binding.id != voice
+                        && self.contains_action(binding.id)
+                        && binding.bindings.iter().any(|key| {
+                            normalize_chord_binding(*key) == normalize_chord_binding(prefix)
+                        })
+                })
+                || keymap.chords.bindings.iter().any(|binding| {
+                    binding.action != voice
+                        && self.contains_action(binding.action)
+                        && binding.chord.prefix == normalize_chord_binding(prefix)
+                        && completion.is_none_or(|key| key == binding.chord.completion)
+                })
+        });
+        if self.0 & RAW_KEY_CAPTURE != 0 || conflicts {
+            Self(self.0 | VOICE_TOGGLE_BLOCKED)
+        } else {
+            Self(self.0 | VOICE_TOGGLE)
+        }
+    }
+
+    pub(crate) const fn with_pane_directions(self) -> Self {
+        Self(self.0 | PANE_DIRECTION)
+    }
+    pub(crate) const fn with_main_composer_focus(self) -> Self {
+        Self(self.0 | MAIN_COMPOSER_FOCUS)
+    }
+    pub(crate) const fn with_open_pane(self) -> Self {
+        Self(self.0 | OPEN_PANE)
+    }
+    pub(crate) const fn with_sidebar_resize(self) -> Self {
+        Self(self.0 | SIDEBAR_RESIZE)
+    }
+    pub(crate) const fn with_focused_side_pane(self) -> Self {
+        Self(self.0 | FOCUSED_SIDE_PANE)
+    }
+    pub(crate) const fn focused_sidebar_chooser() -> Self {
+        Self(SIDE_PANE | PANE_DIRECTION | MAIN_COMPOSER_FOCUS)
+    }
+    pub(crate) const fn with_sidebar_chooser(self) -> Self {
+        Self(self.0 | SIDEBAR_CHOOSER)
+    }
+    pub(crate) const fn with_side_pane(self) -> Self {
+        Self(self.0 | SIDE_PANE)
+    }
+    pub(crate) const fn with_focused_sidebar(self) -> Self {
+        Self(self.0 | SIDE_PANE)
+    }
+
     /// Warning pages admit navigation plus their own toggle and copy.
     pub(crate) const fn warnings() -> Self {
         Self(context_bit(KeymapContext::List) | context_bit(KeymapContext::Global) | WARNINGS_FOCUS)
@@ -87,16 +187,49 @@ impl KeymapContextSet {
 
     /// Whether this input path can dispatch the action, including focus-specific exclusions.
     pub(crate) fn contains_action(self, action: KeymapActionId) -> bool {
+        if action.context == KeymapContext::Global && action.action == "change_host" {
+            return self.0 & BACKEND_CYCLING != 0;
+        }
+        if action.is_side_pane() {
+            let required = match action.action {
+                "focus_pane_left" | "focus_pane_right" => PANE_DIRECTION,
+                "move_divider_left" | "move_divider_right" => FOCUSED_SIDE_PANE,
+                "toggle_pane_zoom" => OPEN_PANE,
+                "equalize_pane_widths"
+                | "minimize_pane_width"
+                | "maximize_pane_width"
+                | "resize_panes" => SIDEBAR_RESIZE,
+                "focus_main_composer" => MAIN_COMPOSER_FOCUS,
+                "focus_sidebar_content" | "focus_sidebar_tabs" => SIDE_PANE | SIDEBAR_CHOOSER,
+                _ => SIDE_PANE,
+            };
+            return self.0 & required != 0;
+        }
+        if action.context == KeymapContext::Chat && action.action == "open_presets" {
+            return self.contains(KeymapContext::Chat)
+                && self.contains(KeymapContext::Global)
+                && !self.contains(KeymapContext::List);
+        }
+        if action.context == KeymapContext::Chat && action.action == "toggle_voice" {
+            return self.0 & VOICE_TOGGLE_BLOCKED == 0
+                && (self.0 & VOICE_TOGGLE != 0 || self.contains(KeymapContext::Chat));
+        }
         self.contains(action.context)
             && (self.0 & ACTIVITY_FOCUS == 0
                 || action.context != KeymapContext::Global
-                || matches!(action.action, "focus_activity" | "find_transcript"))
+                || matches!(
+                    action.action,
+                    "focus_activity" | "find_transcript" | "select_transcript"
+                ))
             && (self.0 & TRANSCRIPT_CLOSE == 0
                 || action.context != KeymapContext::Pager
                 || action.action == "close_transcript")
             && (self.0 & TRANSCRIPT_BROWSING == 0
                 || action.context != KeymapContext::Global
-                || action.action == "open_transcript")
+                || matches!(action.action, "open_transcript" | "select_transcript"))
+            && (self.0 & TRANSCRIPT_ACTIONS == 0
+                || action.context != KeymapContext::Global
+                || matches!(action.action, "find_transcript" | "select_transcript"))
             && (!self.is_warnings()
                 || action.context != KeymapContext::List
                 || action.action != "accept")

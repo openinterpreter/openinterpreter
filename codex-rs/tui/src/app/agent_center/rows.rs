@@ -113,6 +113,10 @@ impl AgentsOverviewView {
                             /*max_width*/ None,
                         )
                     }
+                    AgentsOverviewGrouping::Directory => format_directory_display(
+                        &self.directory_group_keys[index],
+                        /*max_width*/ None,
+                    ),
                     AgentsOverviewGrouping::Status => task.group.label().to_owned(),
                     AgentsOverviewGrouping::Model => model_name(&task.thread).to_owned(),
                 };

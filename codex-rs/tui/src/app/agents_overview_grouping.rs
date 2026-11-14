@@ -48,6 +48,11 @@ pub(super) fn model_name(thread: &Thread) -> &str {
 }
 
 impl AgentsOverviewView {
+    /// The selectable task rows retain the displayed pin and filter ordering.
+    pub(in crate::app) fn selectable_indices(&self) -> Vec<usize> {
+        self.visible_indices()
+    }
+
     pub(super) fn is_pinned(&self, index: usize) -> bool {
         self.pinned_thread_ranks
             .as_ref()

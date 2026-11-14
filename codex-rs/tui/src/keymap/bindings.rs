@@ -103,14 +103,47 @@ pub(crate) struct KeymapActionId {
 }
 
 impl KeymapActionId {
+    pub(crate) fn is_side_pane(self) -> bool {
+        self.context == KeymapContext::Global
+            && matches!(
+                self.action,
+                "focus_main_composer"
+                    | "focus_sidebar_content"
+                    | "focus_sidebar_tabs"
+                    | "hide_pane"
+                    | "focus_pane_left"
+                    | "focus_pane_right"
+                    | "minimize_pane_width"
+                    | "maximize_pane_width"
+                    | "equalize_pane_widths"
+                    | "resize_panes"
+                    | "move_divider_left"
+                    | "move_divider_right"
+                    | "toggle_pane_zoom"
+            )
+    }
+
     /// Activity focus and Find remain active while transcript groups use list navigation.
     pub(super) fn overlaps(self, other: Self) -> bool {
+        if (self.is_side_pane()
+            && matches!(other.context, KeymapContext::List | KeymapContext::Pager))
+            || (other.is_side_pane()
+                && matches!(self.context, KeymapContext::List | KeymapContext::Pager))
+        {
+            return true;
+        }
         self.context.overlaps(other.context)
             || (self.context == KeymapContext::Global
-                && matches!(self.action, "focus_activity" | "find_transcript")
+                && matches!(
+                    self.action,
+                    "focus_activity" | "find_transcript" | "select_transcript"
+                )
                 && other.context == KeymapContext::List)
             || (other.context == KeymapContext::Global
-                && matches!(other.action, "focus_activity" | "find_transcript")
+                && matches!(
+                    other.action,
+                    "focus_activity" | "find_transcript" | "select_transcript"
+                )
                 && self.context == KeymapContext::List)
     }
 
@@ -425,11 +458,13 @@ define_runtime_action_bindings! {
         search,
         new_task,
         new_worktree,
+        fork,
         rename,
         stop,
         archive,
         delete,
         hide,
+        toggle_pin,
         toggle_grouping,
     ],
     "approval" => Approval, approval, approval [

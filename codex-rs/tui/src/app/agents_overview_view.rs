@@ -158,13 +158,13 @@ pub(super) fn directory_group_key(cwd: &Path, worktrees_enabled: bool) -> PathBu
         .unwrap_or_else(|| cwd.to_path_buf())
 }
 
-#[derive(Default)]
 pub(super) struct AgentsOverviewViewState {
     scroll: usize,
     page_height: usize,
     status_filter: usize,
     help: bool,
     pub(super) input: TextArea,
+    pub(super) key_chord_hint: Option<Vec<(String, String)>>,
     pub(super) vim_enabled: bool,
     pub(super) creating_worktree: bool,
     pub(super) refresh_failed: bool,
@@ -183,6 +183,35 @@ pub(super) struct AgentsOverviewViewState {
     pub(super) rename_target: Option<ThreadId>,
     // The picker can finish this retained view when it selects the already active session.
     pub(super) completion: Option<ViewCompletion>,
+}
+
+impl Default for AgentsOverviewViewState {
+    fn default() -> Self {
+        Self {
+            scroll: 0,
+            page_height: 0,
+            status_filter: 0,
+            help: false,
+            input: TextArea::new_single_line(),
+            key_chord_hint: None,
+            vim_enabled: false,
+            creating_worktree: false,
+            refresh_failed: false,
+            loading: false,
+            has_more: false,
+            show_more_selected: false,
+            connection_notice: None,
+            removal: None,
+            server_version_notice: None,
+            search: String::new(),
+            history: None,
+            browse_selection: None,
+            searching: false,
+            grouping: AgentsOverviewGrouping::default(),
+            rename_target: None,
+            completion: None,
+        }
+    }
 }
 
 impl AgentsOverviewViewState {

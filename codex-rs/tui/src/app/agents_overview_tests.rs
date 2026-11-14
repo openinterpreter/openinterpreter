@@ -1496,7 +1496,7 @@ async fn shared_overview_shows_only_root_sessions() {
         state.lock().unwrap().grouping,
         AgentsOverviewGrouping::Project
     );
-    action_view.handle_key_event(KeyCode::Char('f').into());
+    action_view.handle_key_event(KeyCode::Char('/').into());
     assert!(action_view.handle_paste("Repair authentication".into()));
     action_view.handle_key_event(KeyCode::Enter.into());
     assert!(
@@ -2272,7 +2272,7 @@ async fn cancelling_resume_picker_preserves_command_center_state() -> Result<()>
         app.chat_widget.show_bottom_pane_view(Box::new(view));
         for key in [
             KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
-            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE),
             KeyCode::Esc.into(),
         ] {
@@ -3154,7 +3154,7 @@ async fn command_center_refresh_failure_is_inline_and_clears_on_success() -> Res
     let mut app = make_test_app().await;
     let server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
     let mut view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
-    view.handle_key_event(KeyCode::Char('f').into());
+    view.handle_key_event(KeyCode::Char('/').into());
     view.handle_paste("Keep searching".into());
     app.chat_widget.show_bottom_pane_view(Box::new(view));
     let before = render_bottom_popup(&app.chat_widget, /*width*/ 48);
@@ -3167,7 +3167,7 @@ async fn command_center_refresh_failure_is_inline_and_clears_on_success() -> Res
         }),
     ] {
         let request_id = Uuid::new_v4();
-        app.agents_overview.request_id = Some(request_id);
+        app.agents_overview.active_refresh = Some((request_id, server.backend_id()));
         app.apply_agents_overview_thread_refresh(&server, request_id, result);
         assert!(
             app.agents_overview
@@ -3186,7 +3186,7 @@ async fn command_center_refresh_failure_is_inline_and_clears_on_success() -> Res
   Error loading tasks
     ");
     let request_id = Uuid::new_v4();
-    app.agents_overview.request_id = Some(request_id);
+    app.agents_overview.active_refresh = Some((request_id, server.backend_id()));
     app.apply_agents_overview_thread_refresh(
         &server,
         request_id,

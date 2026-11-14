@@ -144,6 +144,7 @@ impl App {
                 /*session_start_source*/ None,
                 remote_cwd.as_deref(),
                 selected_profile.as_ref(),
+                /*host_project_cwd*/ None,
             )),
         )
         .await;

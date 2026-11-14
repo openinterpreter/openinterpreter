@@ -335,6 +335,7 @@ pub(crate) struct PagerKeymap {
     pub(crate) close: Vec<KeyBinding>,
     pub(crate) close_transcript: Vec<KeyBinding>,
     pub(crate) find: Vec<KeyBinding>,
+    pub(crate) mark_markdown: Vec<KeyBinding>,
     chord_hints: Arc<RuntimeChordKeymap>,
 }
 
@@ -473,11 +474,13 @@ pub(crate) struct AgentsKeymap {
     pub(crate) search: Vec<KeyBinding>,
     pub(crate) new_task: Vec<KeyBinding>,
     pub(crate) new_worktree: Vec<KeyBinding>,
+    pub(crate) fork: Vec<KeyBinding>,
     pub(crate) rename: Vec<KeyBinding>,
     pub(crate) stop: Vec<KeyBinding>,
     pub(crate) archive: Vec<KeyBinding>,
     pub(crate) delete: Vec<KeyBinding>,
     pub(crate) hide: Vec<KeyBinding>,
+    pub(crate) toggle_pin: Vec<KeyBinding>,
     pub(crate) toggle_grouping: Vec<KeyBinding>,
     chord_hints: Arc<RuntimeChordKeymap>,
 }
@@ -1510,6 +1513,7 @@ impl RuntimeKeymap {
             close: resolve_local!(keymap, defaults, pager, close),
             close_transcript: resolve_local!(keymap, defaults, pager, close_transcript),
             find: resolve_local!(keymap, defaults, pager, find),
+            mark_markdown: resolve_local!(keymap, defaults, pager, mark_markdown),
             chord_hints: Arc::clone(&chords),
         };
 
@@ -1518,11 +1522,13 @@ impl RuntimeKeymap {
             search: resolve_local!(keymap, defaults, agents, search),
             new_task: resolve_local!(keymap, defaults, agents, new_task),
             new_worktree: resolve_local!(keymap, defaults, agents, new_worktree),
+            fork: resolve_local!(keymap, defaults, agents, fork),
             rename: resolve_local!(keymap, defaults, agents, rename),
             stop: resolve_local!(keymap, defaults, agents, stop),
             archive: resolve_local!(keymap, defaults, agents, archive),
             delete: resolve_local!(keymap, defaults, agents, delete),
             hide: resolve_local!(keymap, defaults, agents, hide),
+            toggle_pin: resolve_local!(keymap, defaults, agents, toggle_pin),
             toggle_grouping: resolve_local!(keymap, defaults, agents, toggle_grouping),
             chord_hints: Arc::clone(&chords),
         };
@@ -1530,13 +1536,14 @@ impl RuntimeKeymap {
         // New defaults yield to explicit bindings, including existing list shortcuts.
         for (configured, bindings, alias) in [
             (keymap.agents.resume.as_ref(), &mut agents.resume, "o"),
-            (keymap.agents.search.as_ref(), &mut agents.search, "f"),
+            (keymap.agents.search.as_ref(), &mut agents.search, "/"),
             (keymap.agents.new_task.as_ref(), &mut agents.new_task, "n"),
             (
                 keymap.agents.new_worktree.as_ref(),
                 &mut agents.new_worktree,
                 "w",
             ),
+            (keymap.agents.fork.as_ref(), &mut agents.fork, "f"),
             (keymap.agents.rename.as_ref(), &mut agents.rename, "r"),
             (keymap.agents.stop.as_ref(), &mut agents.stop, "x"),
             (keymap.agents.archive.as_ref(), &mut agents.archive, "a"),
@@ -1546,6 +1553,11 @@ impl RuntimeKeymap {
                 "backspace",
             ),
             (keymap.agents.hide.as_ref(), &mut agents.hide, "h"),
+            (
+                keymap.agents.toggle_pin.as_ref(),
+                &mut agents.toggle_pin,
+                "p",
+            ),
             (
                 keymap.agents.toggle_grouping.as_ref(),
                 &mut agents.toggle_grouping,
@@ -2078,6 +2090,7 @@ impl RuntimeKeymap {
                 close: default_bindings![plain(KeyCode::Char('q')), ctrl(KeyCode::Char('c'))],
                 close_transcript: default_bindings![ctrl(KeyCode::Char('t'))],
                 find: default_bindings![plain(KeyCode::F(3)), plain(KeyCode::Char('/'))],
+                mark_markdown: default_bindings![plain(KeyCode::Char('m'))],
                 chord_hints: Arc::default(),
             },
             list: ListKeymap {
@@ -2105,14 +2118,16 @@ impl RuntimeKeymap {
             },
             agents: AgentsKeymap {
                 resume: default_bindings![plain(KeyCode::Char('o'))],
-                search: default_bindings![plain(KeyCode::Char('f'))],
+                search: default_bindings![plain(KeyCode::F(3)), plain(KeyCode::Char('/'))],
                 new_task: default_bindings![plain(KeyCode::Char('n'))],
                 new_worktree: default_bindings![plain(KeyCode::Char('w'))],
+                fork: default_bindings![plain(KeyCode::Char('f'))],
                 rename: default_bindings![plain(KeyCode::Char('r'))],
                 stop: default_bindings![plain(KeyCode::Char('x'))],
                 archive: default_bindings![plain(KeyCode::Char('a'))],
                 delete: default_bindings![plain(KeyCode::Backspace)],
                 hide: default_bindings![plain(KeyCode::Char('h'))],
+                toggle_pin: default_bindings![plain(KeyCode::Char('p'))],
                 toggle_grouping: default_bindings![plain(KeyCode::Char('g'))],
                 chord_hints: Arc::default(),
             },

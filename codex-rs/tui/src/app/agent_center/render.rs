@@ -91,16 +91,15 @@ impl Renderable for AgentsOverviewView {
         let layout = self.center_layout(area);
         let state = self.state();
         if state.editing_metadata() && !layout.search.is_empty() {
-            let input = if state.rename_target.is_some() {
-                &state.input
-            } else {
-                &state.search
-            };
-            let prefix = if state.rename_target.is_some() {
-                "Rename › "
-            } else {
-                "Search › "
-            };
+            if state.rename_target.is_some() {
+                let mut input_area = layout.search;
+                let prefix_width = 9.min(input_area.width);
+                input_area.x += prefix_width;
+                input_area.width -= prefix_width;
+                return state.input.cursor_pos(input_area);
+            }
+            let input = &state.search;
+            let prefix = "Search › ";
             let available = usize::from(layout.search.width).saturating_sub(prefix.width() + 1);
             return Some((
                 layout.search.x
@@ -178,21 +177,26 @@ impl Renderable for AgentsOverviewView {
             buf,
         );
         if state.editing_metadata() {
-            let (label, input) = if state.rename_target.is_some() {
-                ("Rename › ", &state.input)
-            } else {
-                ("Search › ", &state.search)
-            };
-            let available = usize::from(layout.search.width).saturating_sub(label.width() + 1);
             buf.set_style(layout.search, crate::bottom_pane::active_tab_style());
-            line(
-                vec![
-                    label.cyan().bold(),
-                    visible_suffix(input, available).to_owned().into(),
-                ],
-                layout.search,
-                buf,
-            );
+            if state.rename_target.is_some() {
+                line("Rename › ".cyan().bold(), layout.search, buf);
+                let mut input_area = layout.search;
+                let prefix_width = 9.min(input_area.width);
+                input_area.x += prefix_width;
+                input_area.width -= prefix_width;
+                ratatui::widgets::WidgetRef::render_ref(&&state.input, input_area, buf);
+            } else {
+                let label = "Search › ";
+                let available = usize::from(layout.search.width).saturating_sub(label.width() + 1);
+                line(
+                    vec![
+                        label.cyan().bold(),
+                        visible_suffix(&state.search, available).to_owned().into(),
+                    ],
+                    layout.search,
+                    buf,
+                );
+            }
         }
         let notice = state
             .connection_notice

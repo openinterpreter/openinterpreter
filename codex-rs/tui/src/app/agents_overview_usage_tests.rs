@@ -83,7 +83,7 @@ async fn selected_usage_is_cached_and_account_changes_discard_old_results() -> R
         reasoning_output_tokens: 0,
     };
     app.agents_overview.threads.remove(&selected);
-    app.agents_overview.request_id = Some(request_id);
+    app.agents_overview.active_refresh = Some((request_id, app_server.backend_id()));
     app.track_agents_overview_notification(&ServerNotification::ThreadTokenUsageUpdated(
         ThreadTokenUsageUpdatedNotification {
             thread_id: selected.to_string(),
