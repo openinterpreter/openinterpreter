@@ -141,6 +141,9 @@ mod frozen_cloud_skills;
 #[path = "scenarios_guardian_sender_context.rs"]
 mod guardian_sender_context;
 
+#[path = "scenarios_guardian_async_elastic.rs"]
+mod guardian_async_elastic;
+
 #[path = "scenarios_guardian_heartbeat.rs"]
 mod guardian_heartbeat;
 
