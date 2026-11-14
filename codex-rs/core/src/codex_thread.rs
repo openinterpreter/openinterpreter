@@ -27,6 +27,7 @@ use codex_extension_api::ConversationHistorySnapshot;
 use codex_extension_api::ThreadIdleCause;
 use codex_features::Feature;
 use codex_history::RolloutItem;
+use codex_models_manager::ModelsManagerConfig;
 use codex_otel::SessionTelemetry;
 use codex_otel::current_span_w3c_trace_context;
 use codex_protocol::ThreadId;
@@ -44,6 +45,7 @@ use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ProfileWorkspaceRoot;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::CatalogModel;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
@@ -65,6 +67,8 @@ use codex_protocol::protocol::TurnEnvironmentRequests;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::protocol::W3cTraceContext;
+use codex_protocol::turn_input::InjectedResponseItem;
+use codex_protocol::turn_input::ItemRetention;
 use codex_protocol::turn_input::RecoverTurnRequest;
 use codex_protocol::turn_input::StartIfIdleSubmission;
 use codex_protocol::turn_input::SteerSubmission;
@@ -458,6 +462,13 @@ impl CodexThread {
         self.session
             .ensure_rollout_materialized(PersistContext::Standard)
             .await;
+    }
+
+    /// Checkpoint initialization without activating speculative persistence.
+    pub async fn checkpoint_preparation(&self) -> std::io::Result<()> {
+        self.session
+            .try_ensure_rollout_materialized(PersistContext::ThreadPreparation)
+            .await
     }
 
     #[doc(hidden)]
@@ -986,7 +997,18 @@ impl CodexThread {
 
     /// Record raw Responses API items without starting a new turn.
     pub async fn inject_response_items(&self, items: Vec<ResponseItem>) -> CodexResult<()> {
-        self.inject_response_items_for_turn(items).await?;
+        self.record_injected_items(items).await?;
+        self.session.flush_rollout().await?;
+        Ok(())
+    }
+
+    /// Inject Responses items with explicit, persisted retention policies.
+    pub async fn inject_response_items_with_retention(
+        &self,
+        items: Vec<impl Into<InjectedResponseItem>>,
+    ) -> CodexResult<()> {
+        self.record_injected_items(items).await?;
+        self.checkpoint_preparation().await?;
         self.session.flush_rollout().await?;
         Ok(())
     }
@@ -1013,36 +1035,44 @@ impl CodexThread {
         &self,
         items: Vec<ResponseItem>,
     ) -> CodexResult<()> {
+        self.record_injected_items(items).await
+    }
+
+    async fn record_injected_items(
+        &self,
+        items: Vec<impl Into<InjectedResponseItem>>,
+    ) -> CodexResult<()> {
         if items.is_empty() {
             return Err(CodexErr::InvalidRequest(
                 "items must not be empty".to_string(),
             ));
         }
-        items.iter().try_for_each(validate_injected_response_item)?;
-
-        let had_reference_context = self.session.reference_context_item().await.is_some();
-        let mut turn_context = if had_reference_context {
-            self.session.new_inject_items_context().await
-        } else {
-            self.session.new_default_turn().await
-        };
-        if self.session.reference_context_item().await.is_none() {
-            // Compaction can clear the reference while the recording context is built.
-            // Initial context must capture a step with a complete skills snapshot.
-            if had_reference_context {
-                turn_context = self.session.new_default_turn().await;
+        let items: Vec<InjectedResponseItem> = items.into_iter().map(Into::into).collect();
+        items
+            .iter()
+            .try_for_each(|item| validate_injected_response_item(&item.item))?;
+        let mut indexed_items = items.iter().enumerate();
+        while let Some((index, item)) = indexed_items.next() {
+            if item.retention != ItemRetention::Always {
+                continue;
             }
-            // This history-only API runs without run_turn, so it owns its initial step.
-            let step_context = self
-                .session
-                .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
-                .await?;
-            self.session
-                .record_context_updates_and_set_reference_context_item(step_context.as_ref())
-                .await?;
+            let needs_call = crate::tools::output_call_id(&item.item).is_some()
+                && !matches!(&item.item, ResponseItem::ToolSearchOutput { execution, .. } if execution == "server");
+            if (crate::tools::input_call_id(&item.item).is_some() || needs_call)
+                && !indexed_items.next().is_some_and(|(_, output)| {
+                    output.retention == ItemRetention::Always
+                        && crate::tools::is_matching_tool_output(&item.item, &output.item)
+                })
+            {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "items[{index}]: retained tool calls and outputs must be adjacent in the same request, call first, with both marked always"
+                )));
+            }
         }
+
+        let turn_context = self.session.history_injection_context().await?;
         self.session
-            .inject_client_response_items(items, turn_context.as_ref())
+            .inject_client_response_items(items, &turn_context)
             .await;
         Ok(())
     }
@@ -1132,6 +1162,15 @@ impl CodexThread {
         self.session.selected_model_info().await
     }
 
+    /// Look up a named model in the catalog selected for this thread's provider and credentials.
+    pub async fn model_info(&self, model: &str, config: &ModelsManagerConfig) -> CatalogModel {
+        self.session
+            .services
+            .models_manager
+            .get_model_info(model, config)
+            .await
+    }
+
     pub async fn config_snapshot(&self) -> ThreadConfigSnapshot {
         self.session.thread_config_snapshot().await
     }
@@ -1191,6 +1230,11 @@ impl CodexThread {
     /// The thread's MCP manager also owns its actor-scoped plugin and runtime auth state.
     pub fn mcp_manager(&self) -> Arc<crate::mcp::McpManager> {
         Arc::clone(&self.session.services.mcp_manager)
+    }
+
+    /// Coalesce MCP reprojection for the next regular turn without a background refresh.
+    pub fn reproject_mcp_on_next_turn(&self) {
+        self.session.reproject_mcp_on_next_turn();
     }
 
     pub async fn config(&self) -> Arc<crate::config::Config> {
