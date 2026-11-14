@@ -1499,8 +1499,11 @@ async fn run_ratatui_app(
         // and rebuild config. This avoids missing newly available cloud-managed policy due to login
         // status detection edge cases.
         if show_login_screen && !uses_remote_workspace {
-            cloud_config_bundle = cloud_config_bundle_loader_for_storage(
-                initial_config.auth_config(),
+            cloud_config_bundle = managed_config_bundle_loader_for_storage(
+                embedded_network_policy.bind_bootstrap_auth(
+                    app_server_target.auth_config_for_cloud_loader(initial_config.auth_config()),
+                ),
+                initial_config.config_layer_stack.requirements_toml(),
                 /*enable_codex_api_key_env*/ false,
             )
             .await?;
@@ -2009,7 +2012,8 @@ async fn run_ratatui_app(
     }
 
     set_default_client_residency_requirement(config.enforce_residency.value());
-    let should_show_trust_screen = should_show_trust_screen(&config);
+    let is_first_run = should_show_trust_screen(&config);
+    let should_show_trust_screen = is_first_run;
     #[cfg(target_os = "windows")]
     let should_prompt_windows_sandbox_nux_at_startup = trust_decision_was_made;
     #[cfg(not(target_os = "windows"))]
@@ -2095,6 +2099,37 @@ async fn run_ratatui_app(
         StartupHooksReviewOutcome::Continue => None,
         StartupHooksReviewOutcome::OpenHooksBrowser(data) => Some(data),
     };
+
+    let mut initial_backends = app::backend_sessions::InitialBackendSessions::singleton(app_server);
+    if cfg!(any(target_os = "macos", target_os = "linux"))
+        && config.features.enabled(Feature::TuiMultiBackend)
+        && cloud_preview_available
+        && !workload_identity_selected
+        && config
+            .config_layer_stack
+            .requirements_toml()
+            .config_server
+            .is_none()
+    {
+        // Add an optional Cloud backend only from the authorized embedded launch context.
+        let mut cloud_config = config.clone();
+        embedded_network_policy.bind_config(&mut cloud_config);
+        match Box::pin(cloud_backend::connect(&cloud_config)).await {
+            Ok(client) => initial_backends.register(
+                AppServerSession::new(
+                    backend_id::BackendId::new(),
+                    client,
+                    ThreadParamsMode::Cloud,
+                ),
+                AppServerTarget::Cloud,
+                cloud_config,
+                local_settings.clone(),
+            ),
+            Err(error) => tui.insert_history_lines(vec![ratatui::text::Line::from(format!(
+                "Could not add the Cloud connection. {error}"
+            ))]),
+        }
+    }
 
     // Keep the large event-loop future out of the enclosing startup futures so session
     // transitions have enough stack headroom to rebuild configuration and the chat widget.
@@ -2379,6 +2414,10 @@ fn should_show_login_screen(login_status: LoginStatus, requires_openai_auth: boo
     }
 
     login_status == LoginStatus::NotAuthenticated
+}
+
+fn should_show_trust_screen(config: &Config) -> bool {
+    config.active_project.trust_level.is_none()
 }
 
 fn should_show_provider_setup_wizard(
