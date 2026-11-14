@@ -792,6 +792,7 @@ impl Session {
             )]),
             self.additional_context_format(),
             &task.turn_context.session_telemetry,
+            &self.item_id_generator,
         );
         if !input.is_empty() {
             self.input_queue
@@ -1085,9 +1086,12 @@ async fn merge_additional_context_input(
     let format = session.additional_context_format();
     let additional_context_input = {
         let mut state = session.state.lock().await;
-        state
-            .additional_context
-            .merge(additional_context, format, &turn_context.session_telemetry)
+        state.additional_context.merge(
+            additional_context,
+            format,
+            &turn_context.session_telemetry,
+            &session.item_id_generator,
+        )
     };
     additional_context_input
         .into_iter()
@@ -1162,7 +1166,7 @@ async fn pending_turn_input(
                 ResponseItem::FunctionCallOutput { call_id: None, .. }
             ) =>
         {
-            let metadata = if let Some(messages) = sender_messages {
+            let mut metadata = if let Some(messages) = sender_messages {
                 Some(CodexHarnessMetadata {
                     user_input_order: Some(session.reserve_user_input_order().await),
                     sender_user_messages: Some(Box::new(bind_sender_messages_to_turn(
@@ -1173,6 +1177,12 @@ async fn pending_turn_input(
             } else {
                 None
             };
+            if retain
+                && session.enabled(Feature::RetainClientToolOutputs)
+                && matches!(item, ResponseItem::FunctionCallOutput { name: Some(_), .. })
+            {
+                metadata.get_or_insert_default().retain_across_windows = Some(true);
+            }
             TurnInput::FunctionCallOutput(ResponseItemEnvelope { item, metadata })
         }
         SubmittedTurnInput::ResponseItem(item)
