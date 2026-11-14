@@ -1023,11 +1023,11 @@ impl QueuedItemService {
                     continue;
                 }
             };
-            if !matches!(item.input, TurnInput::UserInput { .. }) {
+            let input @ TurnInput::UserInput { .. } = item.input else {
                 tracing::warn!(%queued_item_id, "discarding non-user queued input");
                 self.delete_locked(thread_id, queued_item_id).await?;
                 continue;
-            }
+            };
 
             if !self
                 .validate_admission_before_dispatch(thread_id, &input, &queued_item_id)
@@ -1311,7 +1311,7 @@ fn queued_admission_from_record(
         }
     };
     Ok(QueuedAdmission {
-        item: queued_item_from_record(QueuedUserSubmissionRecord {
+        item: QueuedItem::try_from(QueuedUserSubmissionRecord {
             id: record.id,
             thread_id: record.thread_id,
             payload: record.payload,
