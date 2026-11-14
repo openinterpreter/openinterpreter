@@ -4778,6 +4778,8 @@ impl Session {
         for mut recording in pending {
             let _ = recording.changed().await;
         }
+        let mut delivery = communication.delivery.as_ref();
+        let mut result_write = None;
         {
             let mut state = self.state.lock().await;
             state.current_time_reminder.note_recorded_items(&items);
@@ -4786,7 +4788,9 @@ impl Session {
                 model_info.truncation_policy.into(),
             );
         }
-        let result_write = communication.consumed(self.thread_id);
+        if let Some(delivery) = delivery.take() {
+            result_write = delivery.consumed(self.thread_id);
+        }
         let saved = self
             .persist_rollout_items(&[
                 RolloutItem::InterAgentCommunicationMetadata {
@@ -4996,6 +5000,7 @@ impl Session {
             state
                 .history
                 .set_world_state_baseline(world_state_baseline.clone());
+            let resume_metadata = self.compaction_resume_metadata(&state);
             let compacted_item = CompactedItem {
                 message: metadata.message,
                 replacement_history: Some(replacement_history),
@@ -5008,7 +5013,7 @@ impl Session {
                 window_id: Some(metadata.window_ids.window_id),
                 compaction_response_id: metadata.compaction_response_id,
                 latest_token_usage_record: state.latest_token_usage_record.clone(),
-                resume_metadata: Some(self.compaction_resume_metadata(&state)),
+                resume_metadata: Some(resume_metadata),
             };
             (compacted_item, world_state_baseline, started_item)
         };
