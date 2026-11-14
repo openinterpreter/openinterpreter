@@ -11,6 +11,20 @@ impl EmptyStateAnimation {
 }
 
 #[test]
+fn provisional_animation_handoff_retains_phase_without_elapsed_hidden_time() {
+    let mut provisional = EmptyStateAnimation::default();
+    provisional.start_fresh();
+    provisional.spin_elapsed = Duration::from_millis(700);
+    provisional.last_frame = Some(Instant::now() - Duration::from_secs(30));
+    let mut live = EmptyStateAnimation::default();
+    live.continue_from(&mut provisional);
+    assert!(live.is_eligible());
+    assert!(!provisional.is_eligible());
+    assert_eq!(live.spin_elapsed, Duration::from_millis(700));
+    assert!(live.last_frame.is_none());
+}
+
+#[test]
 fn loop_closes_and_light_themes_preserve_coverage() {
     let mut renderer = Renderer::default();
     let dark = Lighting::terminal(/*fg*/ (210, 221, 235), /*bg*/ (15, 20, 37));

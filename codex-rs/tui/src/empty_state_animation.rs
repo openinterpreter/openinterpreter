@@ -45,6 +45,16 @@ pub(crate) struct EmptyStateAnimation {
 }
 
 impl EmptyStateAnimation {
+    pub(crate) fn is_eligible(&self) -> bool {
+        self.eligible
+    }
+
+    /// Transfer the provisional animation's phase when its composer becomes the live session.
+    pub(crate) fn continue_from(&mut self, previous: &mut Self) {
+        *self = std::mem::take(previous);
+        self.pause_clock();
+    }
+
     pub(crate) fn start_fresh(&mut self) {
         self.eligible = true;
         self.spin_elapsed = Duration::ZERO;
