@@ -963,6 +963,8 @@ fn config_write_error(code: ConfigWriteErrorCode, message: impl Into<String>) ->
 #[cfg(test)]
 mod tests {
     use super::map_requirements_to_api;
+    use super::reload_user_config;
+    use crate::config_manager::ConfigManager;
     use codex_app_server_protocol::AllowDenyRequirement;
     use codex_app_server_protocol::AutoReviewRequirements;
     use codex_app_server_protocol::BrowserUseAccessApprovalLifetime;
@@ -990,6 +992,9 @@ mod tests {
     use codex_config::NewThreadModelDefaultsToml;
     use codex_config::WindowsRequirementsToml;
     use codex_config::types::FeedbackConfigToml;
+    use codex_config::types::ToolSuggestDisabledTool;
+    use codex_exec_server::EnvironmentManager;
+    use codex_login::CodexAuth;
     use codex_protocol::config_types::ForcedLoginMethod;
     use codex_protocol::openai_models::ReasoningEffort;
     use codex_utils_absolute_path::AbsolutePathBuf;
@@ -1067,16 +1072,6 @@ client_id = "mcp-client"
             vec![ToolSuggestDisabledTool::connector("calendar")]
         );
         Ok(())
-    }
-
-    fn map_test_requirements(
-        requirements: ConfigRequirementsToml,
-    ) -> codex_app_server_protocol::ConfigRequirements {
-        map_requirements_to_api(
-            Some(requirements),
-            vec![ForcedLoginMethod::Api, ForcedLoginMethod::Chatgpt],
-        )
-        .expect("requirements")
     }
 
     fn map_test_requirements(
@@ -1317,6 +1312,7 @@ client_id = "mcp-client"
                     codex_config::WindowsSandboxImplementationToml::Elevated,
                     codex_config::WindowsSandboxImplementationToml::Unelevated,
                 ]),
+                ..WindowsRequirementsToml::default()
             }),
             ..ConfigRequirementsToml::default()
         });

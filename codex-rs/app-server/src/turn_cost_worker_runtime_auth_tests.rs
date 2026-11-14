@@ -65,11 +65,11 @@ async fn turn_costs_register_with_requested_organization(openai_alias: bool) {
         )]));
         if openai_alias {
             worker.backend = TurnCostBackend::ModelProvider(
-                codex_model_provider::test_support::runtime_model_provider(
-                    info,
+                codex_model_provider::ProviderAuthContext {
                     credentials,
-                    (owner, mode),
-                ),
+                    runtime_auth: Some((owner, mode)),
+                }
+                .model_provider(info),
             );
         } else {
             let config = Arc::make_mut(&mut worker.config);

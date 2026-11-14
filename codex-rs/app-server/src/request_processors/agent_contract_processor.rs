@@ -1593,6 +1593,7 @@ mod tests {
         let admission = QueuedAdmission {
             item: QueuedItem {
                 id: "queue".to_string(),
+                responsesapi_client_metadata: None,
                 input: TurnInput::UserInput {
                     content: Vec::new(),
                     client_id: Some("admission".to_string()),
@@ -1626,6 +1627,7 @@ mod tests {
         let admission = QueuedAdmission {
             item: QueuedItem {
                 id: "queue".to_string(),
+                responsesapi_client_metadata: None,
                 input: TurnInput::UserInput {
                     content: Vec::new(),
                     client_id: Some("admission".to_string()),
