@@ -155,7 +155,7 @@ async fn read_only_tool_requests_preserve_host_policy_and_caller_metadata() -> a
                 .call_tool(
                     "write".to_string(),
                     Some(json!({"message": "hello"})),
-                    Some(caller_meta),
+                    move |_| Ok(Some(caller_meta.clone())),
                     /*timeout*/ None,
                 )
                 .await?;
