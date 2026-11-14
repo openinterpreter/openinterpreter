@@ -1088,10 +1088,10 @@ pub struct Config {
     /// When this program is invoked, arg0 will be set to `codex-linux-sandbox`.
     pub codex_linux_sandbox_exe: Option<PathBuf>,
 
-    /// Ignored compatibility field for clients that still pass the retired wrapper path.
+    /// Path to the execve wrapper for the opt-in zsh fork shell backend.
     pub main_execve_wrapper_exe: Option<PathBuf>,
 
-    /// Ignored compatibility field for clients that still pass a patched zsh path.
+    /// Path to the patched zsh executable for the opt-in fork shell backend.
     pub zsh_path: Option<PathBuf>,
 
     /// Value to use for `reasoning.effort` when making a request using the
@@ -2811,7 +2811,7 @@ pub struct ConfigOverrides {
     pub service_tier: Option<Option<String>>,
     pub codex_self_exe: Option<PathBuf>,
     pub codex_linux_sandbox_exe: Option<PathBuf>,
-    /// Ignored compatibility field for clients that still pass the retired wrapper path.
+    /// Optional patched execve wrapper for the zsh fork backend.
     pub main_execve_wrapper_exe: Option<PathBuf>,
     pub base_instructions: Option<String>,
     pub developer_instructions: Option<String>,
@@ -3566,8 +3566,8 @@ impl Config {
             service_tier: service_tier_override,
             codex_self_exe,
             codex_linux_sandbox_exe,
-            default_zsh_path: _,
-            main_execve_wrapper_exe: _,
+            default_zsh_path,
+            main_execve_wrapper_exe,
             base_instructions,
             developer_instructions,
             personality,
@@ -4785,8 +4785,8 @@ impl Config {
             mcp_launch_cwds: Arc::default(),
             codex_self_exe,
             codex_linux_sandbox_exe,
-            main_execve_wrapper_exe: None,
-            zsh_path: None,
+            main_execve_wrapper_exe,
+            zsh_path: default_zsh_path.map(AbsolutePathBuf::into_path_buf),
 
             hide_agent_reasoning: cfg.hide_agent_reasoning.unwrap_or(false),
             show_raw_agent_reasoning: cfg

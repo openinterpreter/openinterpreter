@@ -47,6 +47,16 @@ pub(crate) use executed_tool_calls::output_call_id;
 pub use multi_agent_tool::MULTI_AGENT_V2_NAMESPACE_DESCRIPTION;
 pub use router::ToolRouter;
 
+pub(crate) fn tool_user_shell_type(shell: &crate::shell::Shell) -> codex_tools::ToolUserShellType {
+    match shell.shell_type {
+        crate::shell::ShellType::Zsh => codex_tools::ToolUserShellType::Zsh,
+        crate::shell::ShellType::Bash => codex_tools::ToolUserShellType::Bash,
+        crate::shell::ShellType::PowerShell => codex_tools::ToolUserShellType::PowerShell,
+        crate::shell::ShellType::Sh => codex_tools::ToolUserShellType::Sh,
+        crate::shell::ShellType::Cmd => codex_tools::ToolUserShellType::Cmd,
+    }
+}
+
 /// Legacy boundaries such as hook payloads, telemetry tags, and Responses tool
 /// names still require a single flattened string. Keep comparisons and sorting
 /// on `ToolName` itself; use this only when crossing those boundaries.

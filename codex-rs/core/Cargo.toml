@@ -75,6 +75,7 @@ codex-agent-message-board-extension = { workspace = true }
 codex-terminal-detection = { workspace = true }
 codex-thread-store = { workspace = true }
 codex-tools = { workspace = true }
+codex-shell-escalation = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-audio = { workspace = true }
 codex-utils-cache = { workspace = true }

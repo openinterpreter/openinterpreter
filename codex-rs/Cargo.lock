@@ -3429,6 +3429,7 @@ dependencies = [
  "codex-runtime-agent-instance",
  "codex-sandboxing",
  "codex-shell-command",
+ "codex-shell-escalation",
  "codex-skills",
  "codex-skills-extension",
  "codex-state",
@@ -5457,6 +5458,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-shell-escalation"
+version = "0.0.62"
+dependencies = [
+ "anyhow",
+ "clap",
+ "codex-protocol",
+ "codex-utils-absolute-path",
+ "libc",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "codex-skills"
 version = "0.0.62"
 dependencies = [
@@ -5648,6 +5669,7 @@ dependencies = [
  "codex-features",
  "codex-file-system",
  "codex-protocol",
+ "codex-utils-absolute-path",
  "codex-utils-cargo-bin",
  "codex-utils-output-truncation",
  "codex-utils-path-uri",

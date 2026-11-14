@@ -1400,7 +1400,40 @@ impl UnifiedExecProcessManager {
         tty: bool,
         environment: &codex_exec_server::Environment,
     ) -> Result<UnifiedExecProcess, UnifiedExecError> {
+        self.open_session_with_lifecycle(
+            process_id,
+            request,
+            tool_ctx,
+            windows_sandbox_proxy_settings_mode,
+            network_policy_decider,
+            tty,
+            None,
+            environment,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn open_session_with_lifecycle(
+        &self,
+        process_id: i32,
+        request: &ExecRequest,
+        tool_ctx: Option<&ToolCtx>,
+        windows_sandbox_proxy_settings_mode: codex_sandboxing::WindowsSandboxProxySettingsMode,
+        network_policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
+        tty: bool,
+        mut spawn_lifecycle: Option<crate::unified_exec::SpawnLifecycleHandle>,
+        environment: &codex_exec_server::Environment,
+    ) -> Result<UnifiedExecProcess, UnifiedExecError> {
+        let inherited_fds = spawn_lifecycle
+            .as_ref()
+            .map_or_else(Vec::new, |lifecycle| lifecycle.inherited_fds());
         if environment.is_remote() || request.exec_server_shell_snapshot.is_some() {
+            if !inherited_fds.is_empty() {
+                return Err(UnifiedExecError::create_process(
+                    "exec-server does not support fork-inherited file descriptors".to_string(),
+                ));
+            }
             let backend = environment.get_exec_backend();
             let params = exec_server_params_for_request(
                 process_id,
@@ -1499,12 +1532,15 @@ impl UnifiedExecProcessManager {
             windows_sandbox,
             tty,
             stdin_open: tty,
-            inherited_fds: codex_utils_pty::ChildFds::Inherited(&[]),
+            inherited_fds: codex_utils_pty::ChildFds::Inherited(&inherited_fds),
         })
         .await;
         let spawned =
             spawn_result.map_err(|err| UnifiedExecError::create_process(err.to_string()))?;
-        UnifiedExecProcess::from_spawned(spawned, request.sandbox).await
+        if let Some(lifecycle) = spawn_lifecycle.as_mut() {
+            lifecycle.after_spawn();
+        }
+        UnifiedExecProcess::from_spawned(spawned, request.sandbox, spawn_lifecycle).await
     }
 
     #[tracing::instrument(
@@ -1541,7 +1577,16 @@ impl UnifiedExecProcessManager {
             policy: exec_env_policy_from_shell_policy(shell_environment_policy),
             local_policy_env,
         };
-        let shell_snapshot = shell_snapshot_request(prepared, context);
+        // The local fork backend keeps its own protected shell session and inherited
+        // descriptor; the executor snapshot path cannot carry that descriptor.
+        let shell_snapshot = if matches!(
+            prepared.shell_mode,
+            codex_tools::UnifiedExecShellMode::ZshFork(_)
+        ) {
+            None
+        } else {
+            shell_snapshot_request(prepared, context)
+        };
         let mut orchestrator = ToolOrchestrator::new();
         let mut runtime = UnifiedExecRuntime::new(self);
         let exec_approval_requirement = prepared

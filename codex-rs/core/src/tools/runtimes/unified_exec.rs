@@ -22,9 +22,12 @@ use crate::tools::handlers::unified_exec::preparation::PreparedExecCommand;
 use crate::tools::network_approval::NetworkApprovalSpec;
 use crate::tools::network_approval::remote_network_proxy_launch;
 use crate::tools::runtimes::RuntimePathPrepends;
+#[cfg(unix)]
+use crate::tools::runtimes::apply_zsh_fork_path_prepend;
 use crate::tools::runtimes::exec_env_for_sandbox_permissions;
 use crate::tools::runtimes::maybe_wrap_shell_lc_with_snapshot;
 use crate::tools::runtimes::prepare_powershell_command_for_windows_sandbox;
+use crate::tools::runtimes::zsh_fork;
 use crate::tools::sandboxing::Approvable;
 use crate::tools::sandboxing::ApprovalAction;
 use crate::tools::sandboxing::ExecApprovalRequirement;
@@ -38,6 +41,7 @@ use crate::tools::sandboxing::managed_network_for_sandbox_permissions;
 use crate::tools::sandboxing::sandbox_permissions_preserving_denied_reads;
 use crate::unified_exec::TerminalPermissions;
 use crate::unified_exec::TerminalSandboxSource;
+use crate::unified_exec::UnifiedExecError;
 use crate::unified_exec::UnifiedExecProcess;
 use crate::unified_exec::UnifiedExecProcessManager;
 use codex_core_plugins::PluginMetricsSidecar;
@@ -48,6 +52,7 @@ use codex_network_proxy::NetworkProxy;
 use codex_network_proxy::RemoteCredentialMasking;
 use codex_network_proxy::RemoteNetworkProxyConfig;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::SandboxErr;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::WarningEvent;
@@ -55,6 +60,7 @@ use codex_sandboxing::SandboxCommand;
 use codex_sandboxing::SandboxablePreference;
 use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use codex_shell_command::powershell::prefix_powershell_script_with_utf8;
+use codex_tools::UnifiedExecShellMode;
 use codex_utils_path_uri::PathUri;
 use std::collections::HashMap;
 use std::io;
@@ -441,6 +447,13 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
                     &mut runtime_path_prepends,
                 );
             }
+            if let UnifiedExecShellMode::ZshFork(fork) = &prepared.shell_mode {
+                apply_zsh_fork_path_prepend(
+                    &mut env,
+                    &mut runtime_path_prepends,
+                    fork.shell_zsh_path.as_path(),
+                );
+            }
             runtime_path_prepends
         };
         #[cfg(not(unix))]
@@ -640,6 +653,50 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
                 .await
         }
         .map_err(ToolError::Codex)?;
+        if let UnifiedExecShellMode::ZshFork(fork) = &prepared.shell_mode {
+            if executor_managed || environment_is_remote {
+                return Err(ToolError::Rejected(
+                    "zsh-fork requires a local process without an executor shell snapshot"
+                        .to_string(),
+                ));
+            }
+            let Some(spawn) =
+                zsh_fork::maybe_prepare_unified_exec(req, attempt, ctx, request, fork).await?
+            else {
+                return Err(ToolError::Rejected(
+                    "zsh-fork command does not match the configured patched shell".to_string(),
+                ));
+            };
+            let process = self
+                .manager
+                .open_session_with_lifecycle(
+                    req.process_id,
+                    &spawn.exec_request,
+                    Some(ctx),
+                    windows_sandbox_proxy_settings_mode,
+                    None,
+                    prepared.tty,
+                    Some(spawn.spawn_lifecycle),
+                    prepared.turn_environment.environment().as_ref(),
+                )
+                .await
+                .map_err(|err| match err {
+                    UnifiedExecError::SandboxDenied { output, .. } => {
+                        ToolError::Codex(CodexErr::Sandbox(SandboxErr::Denied {
+                            output: Box::new(output),
+                            network_policy_decision: None,
+                        }))
+                    }
+                    other => ToolError::Rejected(other.to_string()),
+                });
+            let mut process = with_launch_failure_events(process, prepared, ctx).await?;
+            process._shell_snapshot = shell_snapshot;
+            return Ok(UnifiedExecAttempt {
+                process,
+                metrics_sidecar,
+                permissions,
+            });
+        }
         let process = self
             .manager
             .open_session_with_exec_env(
@@ -840,6 +897,7 @@ mod tests {
         let cwd = AbsolutePathBuf::try_from(std::env::current_dir().unwrap())
             .expect("current dir is absolute");
         PreparedExecCommand {
+            shell_mode: UnifiedExecShellMode::Direct,
             resolved: ResolvedCommand {
                 command: vec!["zsh".to_string(), "-c".to_string(), "echo hi".to_string()],
                 shell: ShellInvocation {

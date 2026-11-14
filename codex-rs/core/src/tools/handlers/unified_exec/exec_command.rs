@@ -52,6 +52,7 @@ pub(crate) struct ExecCommandHandlerOptions {
     pub(crate) allow_tty: bool,
     pub(crate) exec_permission_approvals_enabled: bool,
     pub(crate) include_environment_id: bool,
+    pub(crate) include_shell_parameter: bool,
     pub(crate) include_windows_shell_guidance: bool,
 }
 
@@ -68,6 +69,7 @@ impl Default for ExecCommandHandler {
                 allow_tty: true,
                 exec_permission_approvals_enabled: false,
                 include_environment_id: false,
+                include_shell_parameter: true,
                 include_windows_shell_guidance: cfg!(windows),
             },
         }
@@ -114,6 +116,14 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
                 .properties
                 .get_or_insert_default()
                 .remove("tty");
+        }
+        if !self.options.include_shell_parameter
+            && let ToolSpec::Function(spec) = &mut spec
+        {
+            spec.parameters
+                .properties
+                .get_or_insert_default()
+                .remove("shell");
         }
         spec
     }

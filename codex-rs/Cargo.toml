@@ -46,6 +46,7 @@ members = [
     "config-schema",
     "context-fragments",
     "shell-command",
+    "shell-escalation",
     "skills",
     "core",
     "core-api",
@@ -307,6 +308,7 @@ codex-runtime-agent-instance = { path = "runtime-agent-instance" }
 codex-sandboxing = { path = "sandboxing" }
 codex-secrets = { path = "secrets" }
 codex-shell-command = { path = "shell-command" }
+codex-shell-escalation = { path = "shell-escalation" }
 codex-skills-extension = { path = "ext/skills" }
 codex-skills = { path = "skills" }
 codex-state = { path = "state" }

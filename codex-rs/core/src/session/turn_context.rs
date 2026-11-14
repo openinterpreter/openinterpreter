@@ -43,6 +43,7 @@ use codex_sandboxing::policy_transforms::effective_permission_profile;
 use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use codex_skills_extension::HostSkillsSnapshot;
 use codex_skills_extension::SkillLoadOutcome;
+use codex_tools::UnifiedExecShellMode;
 use codex_utils_path_uri::PathUri;
 use codex_utils_plugins::PluginIdentity;
 use futures::FutureExt;
@@ -394,6 +395,7 @@ pub struct TurnContext {
     // so owner-provided environment settings govern the remaining sandbox decisions.
     pub(crate) windows_sandbox_level: WindowsSandboxLevel,
     pub(crate) available_models: Vec<ModelPreset>,
+    pub(crate) unified_exec_shell_mode: UnifiedExecShellMode,
     pub(crate) final_output_json_schema: Option<Value>,
     pub(crate) prompt_cache_ttl: Option<crate::PromptCacheTtl>,
     pub(crate) turn_metadata_state: Arc<TurnMetadataState>,
@@ -474,6 +476,7 @@ impl TurnContext {
             originator: self.originator.clone(),
             initial_environments: self.initial_environments.clone(),
             available_models,
+            unified_exec_shell_mode: self.unified_exec_shell_mode.clone(),
             current_date: self.current_date.clone(),
             timezone: self.timezone.clone(),
             app_server_client_name: self.app_server_client_name.clone(),
@@ -1096,6 +1099,12 @@ impl Session {
         let session_telemetry_for_context = step_settings.telemetry(session_telemetry);
         let session_source = session_configuration.session_source.clone();
         let available_models = models_manager.try_list_models().unwrap_or_default();
+        let unified_exec_shell_mode = UnifiedExecShellMode::for_session(
+            per_turn_config.features.get(),
+            crate::tools::tool_user_shell_type(&self.user_shell()),
+            per_turn_config.zsh_path.as_ref(),
+            per_turn_config.main_execve_wrapper_exe.as_ref(),
+        );
 
         let mut per_turn_config = per_turn_config;
         let configured_token_budget = per_turn_config.token_budget.clone();
@@ -1187,6 +1196,7 @@ impl Session {
             network,
             windows_sandbox_level: session_configuration.windows_sandbox_level,
             available_models,
+            unified_exec_shell_mode,
             final_output_json_schema: None,
             prompt_cache_ttl: None,
             turn_metadata_state,

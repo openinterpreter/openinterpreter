@@ -94,6 +94,7 @@ use codex_tools::ToolExecutor;
 use codex_tools::ToolExposures;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
+use codex_tools::UnifiedExecShellMode;
 use codex_tools::can_request_original_image_detail;
 use codex_tools::collect_code_mode_exec_prompt_tool_definitions;
 use codex_tools::collect_request_plugin_install_entries;
@@ -1245,6 +1246,10 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
                         .enabled(Feature::UnifiedExecTty),
                     exec_permission_approvals_enabled: false,
                     include_environment_id,
+                    include_shell_parameter: unified_exec_should_include_shell_parameter(
+                        turn_context,
+                        context.environments,
+                    ),
                     include_windows_shell_guidance: should_include_windows_shell_guidance(
                         context.environments,
                     ),
@@ -1389,6 +1394,10 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
         allow_tty: features.enabled(Feature::UnifiedExecTty),
         exec_permission_approvals_enabled,
         include_environment_id,
+        include_shell_parameter: unified_exec_should_include_shell_parameter(
+            turn_context,
+            context.environments,
+        ),
         include_windows_shell_guidance: should_include_windows_shell_guidance(context.environments),
     };
     if features.enabled(Feature::UnifiedExec) {
@@ -1413,6 +1422,18 @@ fn should_include_windows_shell_guidance(environments: &TurnEnvironmentSnapshot)
         Some(platform_os) => platform_os == "windows",
         None => cfg!(windows),
     }
+}
+
+fn unified_exec_should_include_shell_parameter(
+    turn_context: &TurnContext,
+    environments: &TurnEnvironmentSnapshot,
+) -> bool {
+    !matches!(
+        &turn_context.unified_exec_shell_mode,
+        UnifiedExecShellMode::ZshFork(_)
+    ) || environments
+        .turn_environments()
+        .any(|environment| environment.environment.is_remote())
 }
 
 #[instrument(level = "trace", skip_all)]

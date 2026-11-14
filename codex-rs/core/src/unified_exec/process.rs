@@ -42,6 +42,21 @@ use crate::shell_snapshot::ShellSnapshotFile;
 const EARLY_EXIT_GRACE_PERIOD: Duration = Duration::from_millis(150);
 const REMOTE_OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(5);
 
+pub(crate) trait SpawnLifecycle: std::fmt::Debug + Send + Sync {
+    fn inherited_fds(&self) -> Vec<i32> {
+        Vec::new()
+    }
+
+    fn after_spawn(&mut self) {}
+}
+
+pub(crate) type SpawnLifecycleHandle = Box<dyn SpawnLifecycle>;
+
+#[derive(Debug, Default)]
+pub(crate) struct NoopSpawnLifecycle;
+
+impl SpawnLifecycle for NoopSpawnLifecycle {}
+
 /// Output pending model polling and the retained completion transcript.
 /// Append both under the same lock so cancellation cannot split an update.
 #[derive(Default)]
@@ -165,6 +180,8 @@ pub(crate) struct UnifiedExecProcess {
     sandbox_type: Option<SandboxType>,
     timed_out: AtomicBool,
     termination_requested: AtomicBool,
+    /// Keep the fork escalation server alive until the command exits.
+    _spawn_lifecycle: Option<SpawnLifecycleHandle>,
     // The shell may still need to replay this file after process startup returns.
     pub(crate) _shell_snapshot: Option<Arc<ShellSnapshotFile>>,
 }
@@ -211,6 +228,7 @@ impl UnifiedExecProcess {
             sandbox_type,
             timed_out: AtomicBool::new(false),
             termination_requested: AtomicBool::new(false),
+            _spawn_lifecycle: None,
             _shell_snapshot: None,
         }
     }
@@ -440,6 +458,7 @@ impl UnifiedExecProcess {
     pub(super) async fn from_spawned(
         spawned: SpawnedPty,
         sandbox_type: SandboxType,
+        spawn_lifecycle: Option<SpawnLifecycleHandle>,
     ) -> Result<Self, UnifiedExecError> {
         let SpawnedPty {
             session: process_handle,
@@ -452,6 +471,7 @@ impl UnifiedExecProcess {
             Some(sandbox_type),
             OutputDrainPolicy::BoundedAfterExit,
         );
+        managed._spawn_lifecycle = spawn_lifecycle;
         managed.output_task = Some(Self::spawn_local_output_task(
             stdout_rx,
             stderr_rx,

@@ -700,6 +700,7 @@ async fn execute_harness_command(
             .features()
             .enabled(codex_features::Feature::ExecPermissionApprovals),
         include_environment_id: false,
+        include_shell_parameter: true,
         include_windows_shell_guidance: false,
     });
     let output = handler

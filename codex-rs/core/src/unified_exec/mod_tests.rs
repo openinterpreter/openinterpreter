@@ -43,6 +43,17 @@ async fn test_session_and_turn() -> (Arc<Session>, Arc<TurnContext>) {
     (Arc::new(session), Arc::new(turn))
 }
 
+#[derive(Debug)]
+struct TestSpawnLifecycle {
+    inherited_fds: Vec<i32>,
+}
+
+impl SpawnLifecycle for TestSpawnLifecycle {
+    fn inherited_fds(&self) -> Vec<i32> {
+        self.inherited_fds.clone()
+    }
+}
+
 async fn exec_command(
     session: &Arc<Session>,
     turn: &Arc<TurnContext>,
@@ -114,14 +125,14 @@ async fn exec_command_with_tty(
 
     let process = Arc::new(
         manager
-            .open_session_with_prepared_exec_env(
+            .open_session_with_lifecycle(
                 process_id,
                 &request,
                 /*tool_ctx*/ None,
                 codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
                 /*network_policy_decider*/ None,
                 tty,
-                Box::new(NoopSpawnLifecycle),
+                Some(Box::new(NoopSpawnLifecycle)),
                 turn.initial_environments
                     .primary()
                     .expect("turn environment")
@@ -997,16 +1008,16 @@ async fn remote_exec_server_rejects_inherited_fd_launches() -> anyhow::Result<()
 
     let manager = UnifiedExecProcessManager::default();
     let err = manager
-        .open_session_with_prepared_exec_env(
+        .open_session_with_lifecycle(
             /*process_id*/ 1234,
             &request,
             /*tool_ctx*/ None,
             codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
             /*network_policy_decider*/ None,
             /*tty*/ true,
-            Box::new(TestSpawnLifecycle {
+            Some(Box::new(TestSpawnLifecycle {
                 inherited_fds: vec![42],
-            }),
+            })),
             turn.initial_environments
                 .primary()
                 .expect("turn environment")
@@ -1018,7 +1029,7 @@ async fn remote_exec_server_rejects_inherited_fd_launches() -> anyhow::Result<()
 
     assert_eq!(
         err.to_string(),
-        "Failed to create unified exec process: remote exec-server does not support inherited file descriptors"
+        "Failed to create unified exec process: exec-server does not support fork-inherited file descriptors"
     );
     Ok(())
 }

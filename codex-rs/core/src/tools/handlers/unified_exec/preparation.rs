@@ -30,6 +30,7 @@ use codex_sandboxing::SandboxType;
 use codex_sandboxing::SandboxablePreference;
 use codex_shell_command::is_dangerous_command::DangerousCommandPlatform;
 use codex_shell_command::shell_detect::detect_shell_type;
+use codex_tools::UnifiedExecShellMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
@@ -48,6 +49,7 @@ pub(crate) enum ExecCommandLifetime {
 pub(crate) struct PreparedExecCommand {
     pub(crate) turn_environment: TurnEnvironment,
     pub(crate) resolved: ResolvedCommand,
+    pub(crate) shell_mode: UnifiedExecShellMode,
     pub(crate) hook_command: String,
     pub(crate) cwd: PathUri,
     pub(crate) permissions: EffectiveAdditionalPermissions,
@@ -242,6 +244,26 @@ impl<'a> ParsedExecCommand<'a> {
         let resolved_command =
             get_command(&args, shell, turn_environment.config().allow_login_shell)
                 .map_err(FunctionCallError::RespondToModel)?;
+        let shell_mode = if turn_environment.environment().is_remote() || args.shell.is_some() {
+            UnifiedExecShellMode::Direct
+        } else {
+            let mode = UnifiedExecShellMode::for_session(
+                step.turn.config.features.get(),
+                crate::tools::tool_user_shell_type(&resolved_command.shell.shell),
+                step.turn.config.zsh_path.as_ref(),
+                step.turn.config.main_execve_wrapper_exe.as_ref(),
+            );
+            match &mode {
+                UnifiedExecShellMode::ZshFork(fork)
+                    if resolved_command.command.first().is_some_and(|command| {
+                        std::path::Path::new(command) == fork.shell_zsh_path.as_path()
+                    }) =>
+                {
+                    mode
+                }
+                _ => UnifiedExecShellMode::Direct,
+            }
+        };
         let completion_timeout = match lifetime {
             ExecCommandLifetime::Interactive => None,
             ExecCommandLifetime::OneShot => {
@@ -304,6 +326,7 @@ impl<'a> ParsedExecCommand<'a> {
         Ok(PreparedExecCommand {
             turn_environment: turn_environment.clone(),
             resolved: resolved_command,
+            shell_mode,
             hook_command: args.cmd,
             yield_time_ms: args.yield_time_ms,
             max_output_tokens: args.max_output_tokens,

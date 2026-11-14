@@ -306,6 +306,18 @@ fn set_features(turn: &mut TurnContext, features: &[Feature]) {
     }
 }
 
+fn zsh_fork_config_for_spec_plan_tests() -> codex_tools::ZshForkConfig {
+    let placeholder_exe = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        std::env::current_exe().expect("current exe path"),
+    )
+    .expect("current exe should be absolute");
+    // Schema planning never executes these placeholder paths.
+    codex_tools::ZshForkConfig {
+        shell_zsh_path: placeholder_exe.clone(),
+        main_execve_wrapper_exe: placeholder_exe,
+    }
+}
+
 fn update_config(turn: &mut TurnContext, update: impl FnOnce(&mut crate::config::Config)) {
     let mut config = (*turn.config).clone();
     update(&mut config);
