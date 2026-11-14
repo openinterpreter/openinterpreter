@@ -35,6 +35,7 @@ pub(super) fn preview_markdown(text: &str) -> String {
 
 #[derive(Clone, Default)]
 pub(super) struct AgentsOverviewDetails {
+    pub(super) latest_prompt: Option<String>,
     pub(super) lines: Vec<Line<'static>>,
     pub(super) usage_lines: Vec<Line<'static>>,
     pub(super) last_message: Option<(String, AbsolutePathBuf)>,
@@ -221,9 +222,18 @@ impl App {
             .filter(|message| !message.trim().is_empty())
             .map(|message| (message.clone(), source.cwd.clone()));
         AgentsOverviewDetails {
+            latest_prompt: ThreadId::from_string(&root.id)
+                .ok()
+                .and_then(|id| self.agents_overview.activity.get(&id))
+                .and_then(|activity| activity.latest_prompt.clone()),
             lines,
             usage_lines: ThreadId::from_string(&root.id)
                 .ok()
+                .filter(|id| {
+                    self.backend_registry
+                        .owner(*id)
+                        .is_none_or(|owner| self.app_server_backend_id == Some(owner))
+                })
                 .and_then(|id| self.agents_overview.usage.get(&id))
                 .map(super::agents_overview_usage::usage_lines)
                 .unwrap_or_default(),

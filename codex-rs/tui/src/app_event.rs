@@ -376,6 +376,117 @@ impl CapturedSideWork {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, IntoStaticStr)]
 pub(crate) enum AppEvent {
+    AccountEmailLoaded {
+        request_id: uuid::Uuid,
+        email: Option<String>,
+        workspace: Option<String>,
+    },
+    SecuritySetupLoaded {
+        request_id: uuid::Uuid,
+        identity: crate::security_setup::Identity,
+        notice: crate::security_setup::Notice,
+    },
+    ConfirmDaemonRestart,
+    RunDaemonRestart,
+    ShowMoreAgentsOverview,
+    RefreshViewedThread {
+        backend_id: crate::backend_id::BackendId,
+        thread_id: ThreadId,
+        revision: String,
+    },
+    ForkAgentsOverviewThread {
+        thread_id: ThreadId,
+    },
+    ForkAgentsOverviewThreadReady {
+        thread_id: ThreadId,
+    },
+    UpdateWarnings {
+        transcript: Arc<()>,
+        dismissed: Vec<crate::history_cell::WarningEntry>,
+        kept: Vec<crate::history_cell::WarningEntry>,
+    },
+    ParkSideCompanion {
+        pair: ThreadId,
+        thread_id: ThreadId,
+        stream: Option<CapturedSideStream>,
+        display: CapturedSideDisplay,
+    },
+    SideReplayFinished(ThreadId),
+    SidePanePressAfterReplay {
+        peer: ThreadId,
+        draft_cursor: Option<usize>,
+        thread_id: ThreadId,
+        area: ratatui::layout::Rect,
+        press: crossterm::event::MouseEvent,
+    },
+    ResetTranscriptForThreadSwitchPreservingScreen,
+    RestoreBackgroundTerminals(ThreadId),
+    BackgroundTerminalsLoaded {
+        request_id: Uuid,
+        terminals: Vec<codex_app_server_protocol::ThreadBackgroundTerminal>,
+    },
+    ScopedModelPicker {
+        backend: crate::backend_id::BackendId,
+        thread_id: Option<ThreadId>,
+        event: Box<AppEvent>,
+    },
+    ApplyModelSelection {
+        model: String,
+        effort: Option<ReasoningEffort>,
+    },
+    OpenQuickDialEditor {
+        target: crate::chatwidget::quick_dials::QuickDialEditorTarget,
+        dial: Option<codex_config::types::QuickDial>,
+    },
+    OpenQuickDialSavePicker(codex_config::types::QuickDial),
+    ConfirmQuickDial {
+        slot: u8,
+        dial: Option<codex_config::types::QuickDial>,
+    },
+    SaveQuickDial {
+        slot: u8,
+        dial: Option<codex_config::types::QuickDial>,
+    },
+    RecallQuickDial {
+        slot: u8,
+        thread_id: Option<ThreadId>,
+    },
+    OpenRealtimeSoundDevices,
+    OpenRealtimeVoices,
+    OpenRealtimeDevicePicker {
+        kind: codex_realtime_webrtc::AudioDeviceKind,
+    },
+    OpenRealtimeInputChannels {
+        device: codex_realtime_webrtc::AudioDevice,
+    },
+    RealtimeDevicesListed {
+        origin: Option<ThreadId>,
+        kind: codex_realtime_webrtc::AudioDeviceKind,
+        result: Result<Vec<codex_realtime_webrtc::AudioDevice>, String>,
+    },
+    PersistRealtimeDevice {
+        kind: codex_realtime_webrtc::AudioDeviceKind,
+        name: Option<String>,
+    },
+    PersistRealtimeInputChannel {
+        channel: Option<codex_config::config_toml::MicrophoneChannels>,
+    },
+    ToggleCloudServiceTier {
+        thread_id: ThreadId,
+        tier: String,
+    },
+    OpenFeedback,
+    PersistAgentsOverviewGrouping(codex_config::types::AgentsOverviewGrouping),
+    Provider(crate::app::provider::Event),
+    OpenConfigEditor(crate::config_panel::ConfigEditorHandoff),
+    TestConfigNotification,
+    SendConfigTestNotification {
+        generation: u64,
+    },
+    SaveConfigPreference(crate::config_panel::ConfigPreference),
+    ClearUiAndSubmitUserMessage {
+        text: String,
+    },
     OpenDaemonMenu,
     ConfirmDaemonUpdate(crate::update_action::DaemonUpdateSource),
     RunDaemonUpdate(crate::update_action::DaemonUpdateSource),
@@ -558,7 +669,10 @@ pub(crate) enum AppEvent {
         server_name: String,
         request_id: AppServerRequestId,
         attempt_id: Uuid,
-        result: Result<codex_app_server_protocol::UserVerificationProof, String>,
+        result: Result<
+            codex_app_server_protocol::UserVerificationProof,
+            crate::app_command::UserVerificationFailure,
+        >,
     },
 
     /// Interrupt, fork, and retry a safety-buffered turn with the server-selected model.
@@ -948,7 +1062,7 @@ pub(crate) enum AppEvent {
 
     /// Fetch workspace messages for the status-line headline item.
     RefreshStatusLineWorkspaceHeadline {
-        request_id: Uuid,
+        request_id: u64,
     },
 
     /// Commit settled asynchronous usage output after active-output barriers clear.

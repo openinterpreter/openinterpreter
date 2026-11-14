@@ -143,6 +143,40 @@ pub(super) fn startup_model(
 }
 
 impl App {
+    /// Preserve explicit local permission choices across session and backend transitions.
+    pub(super) fn remember_launch_permissions(&mut self) {
+        if self.app_server_target.thread_params_mode()
+            == crate::app_server_session::ThreadParamsMode::Remote
+        {
+            return;
+        }
+        let selected = crate::resume_permissions::ResumePermissions::from_overrides(
+            &self.config,
+            &self.harness_overrides,
+        );
+        if selected.approval_policy {
+            self.runtime_approval_policy_override = Some(RuntimeApprovalPolicyOverride::Explicit(
+                self.config.permissions.approval_policy.value().into(),
+            ));
+        }
+        if selected.approvals_reviewer {
+            self.runtime_approvals_reviewer_override = Some(self.config.approvals_reviewer);
+        }
+        if selected.profile {
+            let profile = RuntimePermissionProfileOverride::from_config(&self.config);
+            self.runtime_permission_profile_override =
+                (profile.active_permission_profile.is_some()
+                    || crate::app_server_session::turn_permissions_overrides(
+                        TurnPermissionsOverride::LegacySandbox(
+                            self.config.permissions.effective_permission_profile(),
+                        ),
+                        self.config.cwd.as_path(),
+                    )
+                    .is_ok())
+                .then_some(profile);
+        }
+    }
+
     /// Keep the provisional loading frame until queued history reaches the owned transcript.
     /// Visible startup decisions and the agent overview must still render immediately.
     pub(super) fn render_startup_frame(
@@ -157,8 +191,20 @@ impl App {
         self.chat_widget.pre_draw_tick();
         self.render_chat_widget_frame(tui, tui.terminal.last_known_screen_size)?;
         if self.chat_widget.has_active_modal() && self.startup_protected_input_boundary {
-            tui.discard_pending_input_before_interactive_screen()?;
-            self.startup_pending_protected_request = false;
+            self.discard_startup_modal_input(tui)?;
+        }
+        Ok(())
+    }
+
+    /// A timed-out drain retains the protected-input boundary for the next input event.
+    pub(super) fn discard_startup_modal_input(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        match tui.discard_pending_input_before_interactive_screen() {
+            Ok(()) => self.startup_pending_protected_request = false,
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                self.startup_pending_protected_request = true;
+                tracing::warn!(%error, "keeping startup modal input quarantined");
+            }
+            Err(error) => return Err(error.into()),
         }
         Ok(())
     }
@@ -940,6 +986,7 @@ See the Codex keymap documentation for supported actions and examples."
             composer_tips: Default::default(),
             native_history: Default::default(),
             transcript_view: Default::default(),
+            conversation_frame: crate::owned_transcript::ConversationFrame::default(),
             last_rendered_history_tail: None,
             last_thread_usage_status_cell: None,
             pending_thread_usage_history_refresh: false,
@@ -982,6 +1029,8 @@ See the Codex keymap documentation for supported actions and examples."
             pending_realtime_speech_replay: HashMap::new(),
             pending_realtime_transcript_replay: HashMap::new(),
             realtime_replay_order: VecDeque::new(),
+            background_voice: None,
+            background_voice_error: None,
             temporary_structured_requests: HashMap::new(),
             pending_thread_titles: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),

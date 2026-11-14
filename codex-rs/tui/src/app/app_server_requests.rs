@@ -73,11 +73,11 @@ impl BufferedServerRequest {
 
 #[derive(Debug, Default)]
 pub(super) struct PendingAppServerRequests {
-    exec_approvals: HashMap<(String, String), AppServerRequestId>,
-    file_change_approvals: HashMap<(String, String), AppServerRequestId>,
-    permissions_approvals: HashMap<(String, String), AppServerRequestId>,
-    user_inputs: HashMap<String, VecDeque<PendingUserInputRequest>>,
-    mcp_requests: HashMap<McpRequestKey, AppServerRequestId>,
+    exec_approvals: HashMap<(String, String), PendingServerRequest>,
+    file_change_approvals: HashMap<(String, String), PendingServerRequest>,
+    permissions_approvals: HashMap<(String, String), PendingServerRequest>,
+    user_inputs: HashMap<(String, String), VecDeque<PendingUserInputRequest>>,
+    mcp_requests: HashMap<McpRequestKey, PendingServerRequest>,
     pub(super) user_verification: super::user_verification_requests::UserVerificationRequests,
 }
 
@@ -95,15 +95,6 @@ impl PendingAppServerRequests {
         self.user_inputs.clear();
         self.mcp_requests.clear();
         self.user_verification.clear();
-    }
-
-    pub(super) fn cancel_thread_verification(&mut self, thread_id: &str) {
-        for (server_name, request_id) in self.user_verification.cancel_thread(thread_id) {
-            self.mcp_requests.remove(&McpRequestKey {
-                server_name,
-                request_id,
-            });
-        }
     }
 
     pub(super) fn cancel_thread_verification(&mut self, thread_id: &str) {
@@ -192,7 +183,8 @@ impl PendingAppServerRequests {
             }
             ServerRequest::McpServerElicitationRequest { request_id, params } => {
                 let thread_id = Self::canonical_thread_id(&params.thread_id);
-                self.user_verification.note_request(request_id, params);
+                self.user_verification
+                    .note_request(&thread_id, request_id, params);
                 self.mcp_requests.insert(
                     McpRequestKey {
                         thread_id,
@@ -267,25 +259,39 @@ impl PendingAppServerRequests {
                 request_id,
                 response,
             } => {
-                let (decision, content) = match response {
+                let (decision, content, meta) = match response {
                     crate::app_command::UserVerificationResponse::Accept { proof } => (
                         codex_app_server_protocol::McpServerElicitationAction::Accept,
                         Some(
                             serde_json::to_value(proof)
                                 .map_err(|_| "Invalid verification proof".to_string())?,
                         ),
+                        None,
                     ),
                     crate::app_command::UserVerificationResponse::Cancel => (
                         codex_app_server_protocol::McpServerElicitationAction::Cancel,
                         None,
+                        Some(serde_json::json!({"openai/userVerificationReason": "userCancelled"})),
                     ),
+                    crate::app_command::UserVerificationResponse::Failed { error } => {
+                        // Serialize only the closed protocol reason, never the display message.
+                        let error = serde_json::to_value(error)
+                            .map_err(|_| "Invalid verification error".to_string())?;
+                        (
+                            codex_app_server_protocol::McpServerElicitationAction::Cancel,
+                            None,
+                            Some(
+                                serde_json::json!({"openai/userVerificationReason": error["reason"]}),
+                            ),
+                        )
+                    }
                 };
                 AppCommand::ResolveElicitation {
                     server_name,
                     request_id,
                     decision,
                     content,
-                    meta: None,
+                    meta,
                 }
             }
             op => op,
@@ -296,7 +302,8 @@ impl PendingAppServerRequests {
             ..
         } = &op
         {
-            self.user_verification.remove(server_name, request_id);
+            self.user_verification
+                .remove(&thread_id, server_name, request_id);
         }
         let resolution = match &op {
             AppCommand::ExecApproval { id, decision, .. } => self
@@ -452,10 +459,13 @@ impl PendingAppServerRequests {
         }) {
             self.mcp_requests.remove(&key);
             self.user_verification
-                .remove(&key.server_name, &key.request_id);
-            return Some(ResolvedAppServerRequest::McpElicitation {
-                server_name: key.server_name,
-                request_id: key.request_id,
+                .remove(&key.thread_id, &key.server_name, &key.request_id);
+            return Some(ResolvedThreadAppServerRequest {
+                thread_id: key.thread_id,
+                request: ResolvedAppServerRequest::McpElicitation {
+                    server_name: key.server_name,
+                    request_id: key.request_id,
+                },
             });
         }
 
