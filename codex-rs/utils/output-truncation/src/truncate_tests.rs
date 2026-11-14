@@ -377,11 +377,16 @@ fn formatted_mixed_output_budgets_text_and_audio_in_order() {
         output,
         vec![
             FunctionCallOutputContentItem::InputText {
-                text: "Warning: truncated output (original token count: 4)\nTotal output lines: 3\n\nabcd…6 chars truncated…ijkl".to_string(),
+                text: "abcd".to_string(),
             },
             FunctionCallOutputContentItem::InputImage {
-                image: ImageReference::Inline { image_url: "img:one".to_string() },
+                image: ImageReference::Inline {
+                    image_url: "img:one".to_string()
+                },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
+            },
+            FunctionCallOutputContentItem::InputText {
+                text: "efgh".to_string(),
             },
             FunctionCallOutputContentItem::inline_audio("audio:one".to_string()),
             FunctionCallOutputContentItem::InputImage {
@@ -391,8 +396,13 @@ fn formatted_mixed_output_budgets_text_and_audio_in_order() {
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             },
             FunctionCallOutputContentItem::InputImage {
-                image: ImageReference::Inline { image_url: "img:two".to_string() },
+                image: ImageReference::Inline {
+                    image_url: "img:two".to_string()
+                },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
+            },
+            FunctionCallOutputContentItem::InputText {
+                text: "[omitted 1 text items ...]".to_string(),
             },
         ]
     );
