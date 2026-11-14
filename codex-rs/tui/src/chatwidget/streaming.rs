@@ -23,6 +23,14 @@ fn latest_summary_line(text: &str) -> Option<String> {
     })
 }
 
+/// Streaming may add one newline when a turn is committed; any other display
+/// difference must reflow the finalized history cell from the completed text.
+fn streamed_message_matches_completed(streamed: &str, completed: &str) -> bool {
+    streamed == completed
+        || streamed.strip_suffix('\n') == Some(completed)
+        || completed.strip_suffix('\n') == Some(streamed)
+}
+
 impl ChatWidget {
     pub(super) fn on_reasoning_item_started(&mut self, id: String) {
         if self.status_state.reasoning_resume_turn_id.take().is_some()
@@ -77,10 +85,6 @@ impl ChatWidget {
             }
             self.request_pending_usage_output_insertion_after_stream_shutdown();
         }
-    }
-
-    pub(super) fn flush_answer_stream_with_separator(&mut self) {
-        self.flush_answer_stream(/*completed_message*/ None);
     }
 
     pub(super) fn flush_answer_stream_with_separator(&mut self) {

@@ -52,9 +52,17 @@ impl ChatWidget {
         }
     }
 
-    pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) {
+    pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) -> KeyEventAction {
+        self.handle_key_event_with_activation_key(key_event, /*activation_key*/ None)
+    }
+
+    pub(crate) fn handle_key_event_with_activation_key(
+        &mut self,
+        key_event: KeyEvent,
+        activation_key: Option<crate::key_hint::KeyBinding>,
+    ) -> KeyEventAction {
         if self.handle_startup_submission_key(key_event) {
-            return;
+            return KeyEventAction::None;
         }
         if self.handle_question_key(key_event) {
             return KeyEventAction::None;
@@ -128,29 +136,6 @@ impl ChatWidget {
             return KeyEventAction::None;
         }
 
-        if self.shortcut_overlay_visible() && key_hint::plain(KeyCode::Esc).is_press(key_event) {
-            self.bottom_pane.handle_key_event(key_event);
-            return;
-        }
-
-        if (self.chat_keymap.interrupt_turn.is_pressed(key_event)
-            || key_hint::ctrl(KeyCode::Char('c')).is_press(key_event))
-            && self.bottom_pane.no_modal_or_popup_active()
-            && !self.should_handle_vim_insert_escape(key_event)
-            && self.pending_image_submission.is_some()
-        {
-            if self.is_cancellable_work_active() {
-                self.requeue_image_submission();
-                self.input_queue.recovered_queue = true;
-                if self.submit_op(AppCommand::interrupt()) {
-                    self.pause_active_goal_for_interrupt();
-                }
-            } else {
-                self.cancel_image_submission();
-            }
-            return;
-        }
-
         if self.handle_reasoning_shortcut(key_event) || self.handle_permission_shortcut(key_event) {
             self.bottom_pane.clear_quit_shortcut_hint();
             self.quit_shortcut_expires_at = None;
@@ -172,11 +157,11 @@ impl ChatWidget {
             && self.bottom_pane.no_modal_or_popup_active()
         {
             self.toggle_realtime_conversation();
-            return;
+            return KeyEventAction::None;
         }
 
         if self.handle_realtime_microphone_shortcut(key_event) {
-            return;
+            return KeyEventAction::None;
         }
 
         match key_event {
@@ -411,99 +396,6 @@ impl ChatWidget {
         self.add_to_history(history_cell::new_error_event(message));
         self.request_redraw();
         false
-    }
-
-    /// Copy the last response as Markdown with HTML for rich-text destinations.
-    pub(crate) fn copy_last_agent_markdown(&mut self) {
-        self.copy_last_agent_markdown_with(|text| {
-            crate::clipboard_copy::copy_to_clipboard(text, CopyFormat::Markdown)
-        });
-    }
-
-    /// Inner implementation with an injectable clipboard backend for testing.
-    pub(super) fn copy_last_agent_markdown_with(
-        &mut self,
-        copy_fn: impl FnOnce(&str) -> Result<crate::clipboard_copy::CopyOutcome, String>,
-    ) {
-        // The shortcut bypasses composer submission, which normally reveals local feedback.
-        self.app_event_tx.send(AppEvent::FollowTranscript);
-        match self.transcript.last_agent_markdown.clone() {
-            Some(markdown) if !markdown.is_empty() => {
-                match self.write_clipboard(&markdown, copy_fn) {
-                    Ok(status) => {
-                        self.add_to_history(history_cell::new_info_event(
-                            status.message("last message"),
-                            /*hint*/ None,
-                        ));
-                    }
-                    Err(error) => self.add_to_history(history_cell::new_error_event(format!(
-                        "Copy failed: {error}"
-                    ))),
-                }
-            }
-            _ => self.add_to_history(history_cell::new_error_event(
-                "No agent response to copy".into(),
-            )),
-        }
-        self.request_redraw();
-    }
-
-    /// Report a transcript copy without adding history and return its outcome to the viewport.
-    pub(crate) fn copy_transcript_selection(
-        &mut self,
-        text: &str,
-    ) -> Result<crate::clipboard_copy::CopyStatus, String> {
-        self.copy_transcript_selection_with(text, |text| {
-            crate::clipboard_copy::copy_to_clipboard(text, CopyFormat::PlainText)
-        })
-    }
-
-    /// The owned viewport renders its own copy feedback above the composer.
-    pub(super) fn copy_transcript_selection_with(
-        &mut self,
-        text: &str,
-        copy_fn: impl FnOnce(&str) -> Result<crate::clipboard_copy::CopyOutcome, String>,
-    ) -> Result<crate::clipboard_copy::CopyStatus, String> {
-        let result = self.write_clipboard(text, copy_fn);
-        let line = match &result {
-            Ok(status) => Line::from(status.message("selection").dim()),
-            Err(error) => Line::from(format!("Copy failed: {error}").red()),
-        };
-        self.bottom_pane
-            .show_footer_flash(line, Duration::from_secs(/*secs*/ 3));
-        result
-    }
-
-    pub(crate) fn copy_selection(&mut self, text: Arc<str>, label: String, format: CopyFormat) {
-        self.copy_selection_with(&text, &label, |text| {
-            crate::clipboard_copy::copy_to_clipboard(text, format)
-        });
-    }
-
-    pub(super) fn copy_selection_with(
-        &mut self,
-        text: &str,
-        label: &str,
-        copy_fn: impl FnOnce(&str) -> Result<crate::clipboard_copy::CopyOutcome, String>,
-    ) {
-        match self.write_clipboard(text, copy_fn) {
-            Ok(status) => self.add_info_message(status.message(label), /*hint*/ None),
-            Err(error) => self.add_error_message(format!("Copy failed: {error}")),
-        }
-        self.request_redraw();
-    }
-
-    fn write_clipboard(
-        &mut self,
-        text: &str,
-        copy_fn: impl FnOnce(&str) -> Result<crate::clipboard_copy::CopyOutcome, String>,
-    ) -> Result<crate::clipboard_copy::CopyStatus, String> {
-        Ok(copy_fn(text)?.store(&mut self.clipboard_lease))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn last_agent_markdown_text(&self) -> Option<&str> {
-        self.transcript.last_agent_markdown.as_deref()
     }
 
     pub(super) fn show_rename_prompt(&mut self) {

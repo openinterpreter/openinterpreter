@@ -1,5 +1,6 @@
 //! Theme-derived styling for the configurable footer statusline.
 
+use ratatui::buffer::CellWidth;
 use ratatui::style::Color;
 use ratatui::style::Style;
 use ratatui::style::Styled;
@@ -10,6 +11,10 @@ use super::status_line_setup::StatusLineItem;
 use crate::render::highlight::foreground_style_for_scopes;
 use crate::style::readable_color_on;
 use crate::style::secondary_text_style;
+use crate::terminal_hyperlinks::HyperlinkLine;
+use crate::terminal_hyperlinks::TerminalHyperlink;
+use crate::terminal_palette::StdoutColorLevel;
+use crate::terminal_palette::effective_stdout_color_level;
 use crate::thread_color::thread_color;
 use codex_protocol::ThreadId;
 
@@ -106,13 +111,33 @@ pub(crate) fn status_line_from_segments<I>(
     segments: I,
     use_theme_colors: bool,
     thread_id: Option<ThreadId>,
-) -> Option<Line<'static>>
+    pull_request_url: Option<&str>,
+) -> Option<HyperlinkLine>
 where
     I: IntoIterator<Item = (StatusLineItem, String)>,
 {
-    status_line_from_segments_with_resolver(segments, use_theme_colors, thread_id, |accent| {
-        foreground_style_for_scopes(accent.scopes())
-    })
+    let segments: Vec<_> = segments.into_iter().collect();
+    let mut line = status_line_from_segments_with_resolver(
+        segments.clone(),
+        use_theme_colors,
+        thread_id,
+        |accent| foreground_style_for_scopes(accent.scopes()),
+    )?;
+    if let Some(url) = pull_request_url {
+        for (index, (item, _)) in segments.iter().enumerate() {
+            if *item == StatusLineItem::PullRequestNumber {
+                let span_index = index * 2;
+                let start = line.line.spans[..span_index]
+                    .iter()
+                    .map(Span::width)
+                    .sum::<usize>();
+                let end = start + line.line.spans[span_index].width();
+                line.hyperlinks
+                    .push(TerminalHyperlink::web(start..end, url.to_owned()));
+            }
+        }
+    }
+    Some(line)
 }
 
 fn status_line_from_segments_with_resolver<I, F>(
@@ -125,10 +150,11 @@ where
     I: IntoIterator<Item = (StatusLineItem, String)>,
     F: Fn(StatusLineAccent) -> Option<Style>,
 {
-    let mut spans = Vec::new();
+    let mut line = HyperlinkLine::default();
     for (item, text) in segments {
-        if !spans.is_empty() {
-            spans.push(STATUS_LINE_SEPARATOR.set_style(secondary_text_style()));
+        if !line.line.spans.is_empty() {
+            line.line
+                .push_span(STATUS_LINE_SEPARATOR.set_style(secondary_text_style()));
         }
         let style = if use_theme_colors
             && matches!(
@@ -148,14 +174,6 @@ where
             secondary_text_style()
         };
         let style = if use_theme_colors {
-            style.fg(readable_color_on(
-                style.fg.unwrap_or(Color::Reset),
-                /*background*/ None,
-            ))
-        } else {
-            style
-        };
-        let style = if use_theme_colors {
             let foreground = style.fg.unwrap_or(Color::Reset);
             if effective_stdout_color_level() == StdoutColorLevel::Ansi16
                 && matches!(foreground, Color::Rgb(..) | Color::Indexed(16..))
@@ -167,11 +185,12 @@ where
         } else {
             style
         };
-        if item == StatusLineItem::PullRequestNumber {
-            line.push_span(Span::styled(text, style.underlined()), pull_request_url);
+        let style = if item == StatusLineItem::PullRequestNumber {
+            style.underlined()
         } else {
-            line.line.push_span(Span::styled(text, style));
-        }
+            style
+        };
+        line.line.push_span(Span::styled(text, style));
     }
 
     (!line.line.spans.is_empty()).then_some(line)

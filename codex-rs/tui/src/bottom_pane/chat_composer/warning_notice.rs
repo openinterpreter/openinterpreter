@@ -3,6 +3,20 @@
 //! Only the count and warning label receive an amber accent; surrounding hints stay muted.
 
 use super::*;
+use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
+
+/// Keep passive hints clear of a right-aligned warning chip.
+pub(super) fn before_warning(footer: Rect, warning: Option<Rect>) -> Rect {
+    let Some(warning) = warning else {
+        return footer;
+    };
+    Rect::new(
+        footer.x,
+        footer.y,
+        warning.x.saturating_sub(footer.x).min(footer.width),
+        footer.height,
+    )
+}
 
 impl ChatComposer {
     pub(crate) fn warning_notice_contains(&self, position: ratatui::layout::Position) -> bool {
