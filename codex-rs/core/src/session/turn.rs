@@ -23,6 +23,7 @@ use crate::cyber_access_program;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
 use crate::hook_runtime::drain_async_hook_results;
+use crate::hook_runtime::hooks_for_model_request;
 use crate::hook_runtime::inspect_pending_input;
 use crate::hook_runtime::legacy_notify_input_messages;
 use crate::hook_runtime::record_additional_contexts;
@@ -111,6 +112,8 @@ use codex_protocol::protocol::AgentReasoningSectionBreakEvent;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::HookEventName;
+use codex_protocol::protocol::HookExecutionMode;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::PlanDeltaEvent;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
@@ -2922,6 +2925,12 @@ async fn try_run_sampling_request(
     let effort = sess
         .reasoning_effort_for_request(&step_context.settings, super::RequestEffortUsage::Sampling)
         .await;
+    // The stream's terminal event is held until synchronous post-model hooks finish,
+    // but tool calls may arrive earlier. Retain the pre-dispatch gate so an
+    // interruption while that hook runs cannot execute an already-buffered tool.
+    let defer_tool_dispatch = hooks_for_model_request(&sess, &step_context)
+        .execution_mode_for_event(HookEventName::PostModelRequest)
+        == Some(HookExecutionMode::Sync);
     let sampling_timing_guard = turn_context.turn_timing_state.begin_sampling();
     let mut response_id_for_assessment = None;
     let mut answer_moderation: Option<codex_protocol::protocol::TargetedAnswerModeration> = None;
@@ -3216,7 +3225,7 @@ async fn try_run_sampling_request(
                     step_context: Arc::clone(&step_context),
                     turn_store: Arc::clone(&turn_store),
                     tool_runtime,
-                    defer_tool_dispatch: *draining_for_mailbox,
+                    defer_tool_dispatch: defer_tool_dispatch || *draining_for_mailbox,
                     cancellation_token: cancellation_token.child_token(),
                 };
                 if *draining_for_mailbox {

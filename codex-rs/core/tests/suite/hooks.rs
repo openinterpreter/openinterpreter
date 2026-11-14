@@ -6195,8 +6195,8 @@ enum ToolDispatchCase {
 
 #[test_case::test_case(ToolDispatchCase::Eager; "default runs the tool before the response ends")]
 #[test_case::test_case(ToolDispatchCase::AsyncHook; "an observer does not hold the tool")]
-#[test_case::test_case(ToolDispatchCase::SyncHook; "streaming output and tools precede a synchronous hook")]
-#[test_case::test_case(ToolDispatchCase::InterruptedHook; "interrupt cancels the synchronous hook before billing")]
+#[test_case::test_case(ToolDispatchCase::SyncHook; "streaming output precedes the hook but tools wait")]
+#[test_case::test_case(ToolDispatchCase::InterruptedHook; "interrupt cancels the hook and deferred tool before billing")]
 #[tokio::test]
 async fn model_request_post_hook_orders_tool_dispatch(case: ToolDispatchCase) -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -6294,7 +6294,14 @@ async fn model_request_post_hook_orders_tool_dispatch(case: ToolDispatchCase) ->
         matches!(event, EventMsg::SafetyBuffering(_))
     }).await;
     assert!(saw_delta);
-    fs_wait::wait_for_path_exists(&marker, Duration::from_secs(10)).await?;
+    if matches!(case, Eager | AsyncHook) {
+        fs_wait::wait_for_path_exists(&marker, Duration::from_secs(10)).await?;
+    } else {
+        assert!(
+            !marker.exists(),
+            "synchronous post-hook must gate tool dispatch"
+        );
+    }
     finish_stream.send(()).expect("release response stream");
     let held_hook = if hook_async.is_some() {
         Some(
@@ -6307,6 +6314,10 @@ async fn model_request_post_hook_orders_tool_dispatch(case: ToolDispatchCase) ->
     };
     if hook_async == Some(false) {
         assert!(accounting.reports.lock().expect("usage reports").is_empty());
+        assert!(
+            !marker.exists(),
+            "tool must wait for the synchronous post-hook"
+        );
     }
     if case == InterruptedHook {
         let started = wait_for_event_match(&test.codex, |event| match event {
@@ -6344,6 +6355,7 @@ async fn model_request_post_hook_orders_tool_dispatch(case: ToolDispatchCase) ->
         );
         drop(held_hook);
         assert!(accounting.reports.lock().expect("usage reports").is_empty());
+        assert!(!marker.exists(), "interrupted deferred tool must not run");
         return Ok(());
     }
     drop(held_hook);
