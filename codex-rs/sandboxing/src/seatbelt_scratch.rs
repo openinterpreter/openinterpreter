@@ -3,7 +3,6 @@
 
 use super::SeatbeltAccessRoot;
 use super::SeatbeltPreparationError;
-use super::protected_metadata_names_for_writable_root;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
@@ -25,8 +24,10 @@ pub(super) fn scratch_access_roots(
     read_only.extend(unreadable.iter().cloned());
     for root in writable_roots {
         read_only.extend(root.read_only_subpaths.iter().cloned());
+        // The same resolved root metadata exclusions must constrain the
+        // implicit scratch grants, including when the project lives in /tmp.
         read_only.extend(
-            protected_metadata_names_for_writable_root(policy, root, cwd)
+            root.protected_metadata_names
                 .iter()
                 .map(|name| root.root.join(name)),
         );

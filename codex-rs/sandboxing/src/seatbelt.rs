@@ -832,18 +832,25 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
         extra_allow_unix_sockets,
     } = args;
 
-    let unreadable_roots =
-        file_system_sandbox_policy.get_unreadable_roots_with_cwd(sandbox_policy_cwd);
-    let mut writable_roots = file_system_sandbox_policy
-        .get_writable_roots_with_cwd_preserving_mutable_paths(sandbox_policy_cwd);
-    let include_platform_defaults = file_system_sandbox_policy.include_platform_defaults();
-    let scratch_reads = if include_platform_defaults && profile == MacosSeatbeltProfile::Process {
+    // Resolve once with mutable roots preserved: Seatbelt binds these logical
+    // paths at launch, while the resolver retains their metadata carveouts.
+    let mut resolved_filesystem_permissions = file_system_sandbox_policy
+        .resolve_for_enforcement(
+            sandbox_policy_cwd,
+            FileSystemPolicyProjection::PreserveMutableRoots,
+        )
+        .map_err(|error| SeatbeltPreparationError::FileSystem(error.to_string()))?;
+    let scratch_reads = if resolved_filesystem_permissions.include_platform_defaults
+        && profile == MacosSeatbeltProfile::Process
+    {
         let (reads, writes) = scratch::scratch_access_roots(
             file_system_sandbox_policy,
             sandbox_policy_cwd,
-            &writable_roots,
+            &resolved_filesystem_permissions.writable_roots,
         )?;
-        writable_roots.extend(writes);
+        resolved_filesystem_permissions
+            .writable_roots
+            .extend(writes);
         reads
     } else {
         Vec::new()
