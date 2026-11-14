@@ -9658,17 +9658,11 @@ async fn owned_stream_reflows_at_allocated_width_without_reporting_activity() ->
         let mut draw = |app: &mut App, width| -> Result<String> {
             let screen = tui.terminal.last_known_screen_size;
             app.handle_draw_pre_render(&mut tui, screen)?;
-            let frames = tui.frame_requester();
-            let mut painted = Default::default();
-            tui.draw(screen.height, |frame| {
-                let area = Rect {
-                    width,
-                    ..frame.area()
-                };
-                let prepared = app.prepare_conversation(frame.area(), Some(area), &frames);
-                painted = app.paint_conversation(frame, &prepared);
-            })?;
-            app.finish_conversation(&mut tui, painted)?;
+            app.conversation_frame.set_caller_inset(Rect {
+                width,
+                ..screen.into()
+            });
+            app.render_owned_transcript(&mut tui, screen)?;
             Ok(super::owned_transcript::tests::buffer_text(
                 tui.terminal.previous_buffer(),
             ))

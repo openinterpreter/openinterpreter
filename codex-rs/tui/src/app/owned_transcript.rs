@@ -6,6 +6,7 @@
 use super::side_pane;
 use super::sidebar;
 use super::sidebar::PaneFocus;
+use super::turn_tips::TipSurface;
 use super::*;
 use crate::history_cell::HistoryRenderMode;
 use crate::keymap::KeymapContext;
@@ -29,6 +30,11 @@ pub(super) struct ConversationFrame {
 }
 
 impl ConversationFrame {
+    #[cfg(test)]
+    pub(super) fn set_caller_inset(&mut self, inset: Rect) {
+        self.inset = Some(inset);
+    }
+
     fn begin_layout(&mut self) -> Option<Rect> {
         // Only a caller's inset survives a draw. A sidebar or tab strip must be
         // recalculated from its current model and screen dimensions.
@@ -244,6 +250,10 @@ impl App {
             .history_wrap_width(main.width)
             .min(main.width);
         let composer_hint = self.composer_hint(transcript_width);
+        // A tip is chosen before the draw but only counted once its dedicated row
+        // was actually painted. In particular, a clipped completion tip must not
+        // consume the cadence or become transcript source text.
+        let turn_tip = self.turn_tip(transcript_width, Instant::now(), &frames);
         let mut prompt_footer = self.prompt_navigation_footer(main.width.saturating_sub(/*rhs*/ 2));
         let pane = self.sidebars.get(&parent);
         let side_companions = &mut self.side_companions;
@@ -291,21 +301,31 @@ impl App {
         let mut rendered_cursor = None;
         let mut footer_height_changed = false;
         let mut feedback_tick = None;
+        let mut tip_was_painted = false;
         tui.draw_with_shortcut_hud(screen_size.height, hud, |frame| {
+            chat_widget.rendered_selection.borrow_mut().areas.clear();
             ratatui::widgets::Clear.render(
                 Rect::new(main.x, main.y, main.width, available),
                 frame.buffer,
             );
-            view.render(
-                Rect::new(
-                    main.x,
-                    main.y,
-                    transcript_width,
-                    available.saturating_sub(/*rhs*/ 1),
-                ),
+            let transcript_area = Rect::new(
+                main.x,
+                main.y,
+                transcript_width,
+                available.saturating_sub(/*rhs*/ 1),
+            );
+            let completion_tip = turn_tip
+                .as_ref()
+                .and_then(|(surface, tip)| (*surface == TipSurface::Completion).then_some(tip));
+            let tip_area = view.render_with_turn_tip_space(
+                transcript_area,
                 frame.buffer,
                 &self.transcript_cells,
+                completion_tip,
             );
+            if let (Some(tip), Some(area)) = (completion_tip, tip_area) {
+                tip.render(area, frame.buffer);
+            }
             let follow_area =
                 (available > 0 && chat_widget.no_modal_or_popup_active()).then(|| {
                     Rect::new(
@@ -317,6 +337,21 @@ impl App {
                 });
             feedback_tick =
                 view.render_composer_gap(follow_area, composer_hint.as_ref(), frame.buffer);
+            // Working tips sit adjacent to the composer. They never replace
+            // history and yield to a visible follow/copy affordance.
+            if let (Some((TipSurface::Working, tip)), Some(area)) = (turn_tip.as_ref(), follow_area)
+                && composer_hint.is_none()
+            {
+                tip.render(area, frame.buffer);
+            }
+            if let Some((_, tip)) = turn_tip.as_ref()
+                && let Some(area) = tip.rendered.get()
+            {
+                let mut selection = chat_widget.rendered_selection.borrow_mut();
+                selection.register(area, /*invalidate*/ false);
+                selection.render(frame.buffer);
+                tip_was_painted = true;
+            }
             // Rendering resolves whether new activity is still hidden. Paint that result in
             // this frame so a revision change cannot flash a stale activity hint.
             let mut footer =
@@ -476,6 +511,9 @@ impl App {
                 frame.cursor_position = None;
             }
         })?;
+        if tip_was_painted && let Some((surface, _)) = turn_tip.as_ref() {
+            self.turn_tips.acknowledge(*surface);
+        }
         if footer_height_changed {
             tui.frame_requester().schedule_frame();
         }
