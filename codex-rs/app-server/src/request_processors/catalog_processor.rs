@@ -190,8 +190,9 @@ impl CatalogRequestProcessor {
         &self,
         params: InterpreterProviderListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
         Ok(Some(
-            crate::interpreter_catalog::provider_list(&self.config, params).into(),
+            crate::interpreter_catalog::provider_list(&config, params).into(),
         ))
     }
 
@@ -211,17 +212,57 @@ impl CatalogRequestProcessor {
         &self,
         params: InterpreterModelListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
+        let inspect_local = params
+            .model_provider
+            .as_deref()
+            .unwrap_or(&config.model_provider_id)
+            == codex_model_provider_info::LOCAL_OSS_PROVIDER_ID;
         let response = self
-            .list_models(ModelListParams {
-                cursor: None,
-                limit: None,
-                include_hidden: params.include_hidden,
-                model_provider: params.model_provider,
-            })
+            .list_models_using_config(
+                ModelListParams {
+                    cursor: None,
+                    limit: None,
+                    include_hidden: params.include_hidden,
+                    model_provider: params.model_provider,
+                },
+                &config,
+            )
             .await?;
+        let mut local_downloads = Vec::new();
+        if inspect_local {
+            for spec in codex_llamacpp::LOCAL_MODEL_SPECS {
+                local_downloads.push(InterpreterLocalModelDownload {
+                    model: spec.id.to_string(),
+                    size_label: spec.size_label.to_string(),
+                    downloaded: codex_llamacpp::local_model_cached(spec.id)
+                        .await
+                        .map_err(internal_error)?,
+                });
+            }
+        }
         Ok(Some(
             InterpreterModelListResponse {
                 data: response.data,
+                local_downloads,
+            }
+            .into(),
+        ))
+    }
+
+    pub(crate) async fn interpreter_model_acquire(
+        &self,
+        params: InterpreterModelAcquireParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let spec = codex_llamacpp::local_model_spec(&params.model)
+            .ok_or_else(|| invalid_params(format!("unsupported Local model `{}`", params.model)))?;
+        codex_llamacpp::download_local_model(&params.model)
+            .await
+            .map_err(invalid_params)?;
+        Ok(Some(
+            InterpreterModelAcquireResponse {
+                model: spec.id.to_string(),
+                size_bytes: spec.expected_bytes,
             }
             .into(),
         ))
@@ -231,6 +272,18 @@ impl CatalogRequestProcessor {
         &self,
         params: InterpreterModelSetParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        // The app-server does not run the TUI/exec OSS startup path. Prepare the
+        // selected local engine before persisting its model so a failed launch
+        // never leaves the active configuration pointing at an unreachable port.
+        if params.profile.is_none() {
+            let mut config = self.load_latest_config(/*fallback_cwd*/ None).await?;
+            if config.model_provider_id == codex_model_provider_info::LOCAL_OSS_PROVIDER_ID {
+                config.model = Some(params.model.clone());
+                codex_llamacpp::ensure_oss_ready(&config)
+                    .await
+                    .map_err(invalid_params)?;
+            }
+        }
         let mut edits = vec![config_replace_edit(
             scoped_config_key(params.profile.as_deref(), "model"),
             serde_json::json!(params.model),
@@ -251,8 +304,63 @@ impl CatalogRequestProcessor {
         &self,
         params: InterpreterHarnessListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
         Ok(Some(
-            crate::interpreter_catalog::harness_list(&self.config, params).into(),
+            crate::interpreter_catalog::harness_list(&config, params).into(),
+        ))
+    }
+
+    pub(crate) async fn interpreter_harness_arguments_inspect(
+        &self,
+        params: InterpreterHarnessArgumentsInspectParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
+        if !config.model_providers.contains_key(&params.provider_id) {
+            return Err(invalid_params(format!(
+                "unknown provider `{}`",
+                params.provider_id
+            )));
+        }
+        let selected = params
+            .harness
+            .as_deref()
+            .unwrap_or(config.harness.as_deref().unwrap_or(""))
+            .to_string();
+        let available = crate::interpreter_catalog::harness_list(
+            &config,
+            InterpreterHarnessListParams {
+                provider_id: params.provider_id.clone(),
+                model: Some(params.model.clone()),
+            },
+        );
+        if !available
+            .data
+            .iter()
+            .any(|entry| entry.id.as_deref().unwrap_or("") == selected)
+        {
+            return Err(invalid_params(format!(
+                "unsupported harness `{selected}` for this provider"
+            )));
+        }
+        let mut arguments = serde_json::json!({"guidance": config.harness_guidance});
+        if params.provider_id == codex_model_provider_info::LOCAL_OSS_PROVIDER_ID {
+            let spec = codex_llamacpp::local_model_spec(&params.model).ok_or_else(|| {
+                invalid_params(format!("unsupported Local model `{}`", params.model))
+            })?;
+            arguments["contextWindow"] = serde_json::json!(spec.context_window);
+            arguments["serverPort"] =
+                serde_json::json!(codex_model_provider_info::DEFAULT_LOCAL_PORT);
+            arguments["modelBytes"] = serde_json::json!(spec.expected_bytes);
+            arguments["modelSha256"] = serde_json::json!(spec.sha256);
+        }
+        Ok(Some(
+            InterpreterHarnessArgumentsInspectResponse {
+                provider_id: params.provider_id,
+                model: params.model,
+                harness: selected,
+                arguments,
+            }
+            .into(),
         ))
     }
 
@@ -333,6 +441,15 @@ impl CatalogRequestProcessor {
         &self,
         params: ModelListParams,
     ) -> Result<ModelListResponse, JSONRPCErrorError> {
+        self.list_models_using_config(params, self.config.as_ref())
+            .await
+    }
+
+    async fn list_models_using_config(
+        &self,
+        params: ModelListParams,
+        config: &Config,
+    ) -> Result<ModelListResponse, JSONRPCErrorError> {
         let ModelListParams {
             limit,
             cursor,
@@ -343,11 +460,11 @@ impl CatalogRequestProcessor {
         let models = match model_provider {
             Some(provider_id) => {
                 crate::models::supported_models_for_provider(
-                    self.config.as_ref(),
+                    config,
                     self.auth_manager.clone(),
                     provider_id.as_str(),
                     include_hidden,
-                    self.config.http_client_factory(),
+                    config.http_client_factory(),
                 )
                 .await
             }

@@ -1188,6 +1188,11 @@ client_request_definitions! {
         serialization: None,
         response: v2::InterpreterModelListResponse,
     },
+    InterpreterModelAcquire => "interpreter/model/acquire" {
+        params: v2::InterpreterModelAcquireParams,
+        serialization: None,
+        response: v2::InterpreterModelAcquireResponse,
+    },
     InterpreterModelSet => "interpreter/model/set" {
         params: v2::InterpreterModelSetParams,
         serialization: global("config"),
@@ -1197,6 +1202,11 @@ client_request_definitions! {
         params: v2::InterpreterHarnessListParams,
         serialization: global_shared_read("config"),
         response: v2::InterpreterHarnessListResponse,
+    },
+    InterpreterHarnessArgumentsInspect => "interpreter/harness/arguments/inspect" {
+        params: v2::InterpreterHarnessArgumentsInspectParams,
+        serialization: global_shared_read("config"),
+        response: v2::InterpreterHarnessArgumentsInspectResponse,
     },
     InterpreterHarnessSet => "interpreter/harness/set" {
         params: v2::InterpreterHarnessSetParams,

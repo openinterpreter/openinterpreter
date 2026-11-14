@@ -24,6 +24,7 @@ members = [
     "feedback",
     "features",
     "install-context",
+    "llamacpp",
     "codex-backend-openapi-models",
     "chat-wire-compat",
     "code-mode",
@@ -246,6 +247,7 @@ codex-history = { path = "history" }
 codex-keyring-store = { path = "keyring-store" }
 codex-linux-sandbox = { path = "linux-sandbox" }
 codex-lmstudio = { path = "lmstudio" }
+codex-llamacpp = { path = "llamacpp" }
 codex-login = { path = "login" }
 codex-mermaid = { path = "mermaid" }
 codex-message-history = { path = "message-history" }

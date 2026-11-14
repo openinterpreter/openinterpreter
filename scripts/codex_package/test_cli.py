@@ -1,13 +1,72 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
+import struct
 from pathlib import Path
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from codex_package.cli import parse_package_version
+from codex_package.cli import main
+
+
+class LlamaServerPackageInputTest(unittest.TestCase):
+    def test_wrong_server_cpu_rejects_before_build(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "llama-server"
+            header = bytearray(64)
+            header[:6] = b"\x7fELF\x02\x01"
+            struct.pack_into("<H", header, 18, 183)  # aarch64, not x86_64
+            binary.write_bytes(header)
+            binary.chmod(0o755)
+            args = argparse.Namespace(
+                variant="open-interpreter",
+                target="x86_64-unknown-linux-gnu",
+                llama_server_bin=binary,
+                llama_server_sha256=hashlib.sha256(header).hexdigest(),
+            )
+            with patch("codex_package.cli.parse_args", return_value=args), patch(
+                "codex_package.cli.build_source_binaries"
+            ) as build:
+                with self.assertRaisesRegex(RuntimeError, "architecture does not match"):
+                    main()
+                build.assert_not_called()
+
+    def test_open_interpreter_requires_server_before_build(self) -> None:
+        args = argparse.Namespace(
+            variant="open-interpreter",
+            target="x86_64-unknown-linux-gnu",
+            llama_server_bin=None,
+        )
+        with patch("codex_package.cli.parse_args", return_value=args), patch(
+            "codex_package.cli.build_source_binaries"
+        ) as build:
+            with self.assertRaisesRegex(RuntimeError, "require --llama-server-bin"):
+                main()
+            build.assert_not_called()
+
+    def test_wrong_pinned_digest_rejects_before_build(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "llama-server"
+            binary.write_bytes(b"actual executable")
+            binary.chmod(0o755)
+            args = argparse.Namespace(
+                variant="open-interpreter",
+                target="x86_64-unknown-linux-gnu",
+                llama_server_bin=binary,
+                llama_server_sha256=hashlib.sha256(b"different executable").hexdigest(),
+            )
+            with patch("codex_package.cli.parse_args", return_value=args), patch(
+                "codex_package.cli.build_source_binaries"
+            ) as build:
+                with self.assertRaisesRegex(RuntimeError, "does not match the pinned digest"):
+                    main()
+                build.assert_not_called()
 
 
 class PackageVersionTest(unittest.TestCase):

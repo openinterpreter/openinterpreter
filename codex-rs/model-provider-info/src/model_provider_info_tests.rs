@@ -28,6 +28,20 @@ fn native_openai_provider_precedes_catalog_entry_and_keeps_native_auth() {
 }
 
 #[test]
+fn local_provider_uses_loopback_chat_and_current_local_harness() {
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+    let local = providers
+        .get(LOCAL_OSS_PROVIDER_ID)
+        .expect("local provider");
+    assert_eq!(local.base_url.as_deref(), Some("http://127.0.0.1:17654/v1"));
+    assert_eq!(local.wire_api, WireApi::Chat);
+    assert_eq!(
+        default_harness_for_provider_model(LOCAL_OSS_PROVIDER_ID, local, None),
+        Some("local")
+    );
+}
+
+#[test]
 fn kimi_and_moonshot_providers_default_to_current_kimi_code_harness() {
     for (provider_id, name, base_url, model) in [
         (

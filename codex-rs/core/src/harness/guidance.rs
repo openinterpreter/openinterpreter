@@ -9,6 +9,7 @@ pub(crate) fn guidance_for_harness(harness: &Harness) -> Option<&'static str> {
         | Harness::DeepSeekTui
         | Harness::KimiCode
         | Harness::LittleCoder
+        | Harness::Local
         | Harness::MiniSweAgent
         | Harness::Minimal
         | Harness::OpenCode

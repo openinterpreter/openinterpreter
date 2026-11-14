@@ -533,10 +533,23 @@ impl TurnRequestProcessor {
                 })?;
         self.ensure_direct_input_allowed(&request_id, thread.as_ref())
             .await?;
+        let thread_config = thread.config().await;
         self.config_manager
-            .check_thread_model_provider(thread.config().await.as_ref())
+            .check_thread_model_provider(thread_config.as_ref())
             .await
             .map_err(|error| config_load_error(&error))?;
+        // A thread can use Local via a profile or a thread override without
+        // going through interpreter/model/set. Start the selected engine at
+        // turn admission rather than assuming the configuration UI did so.
+        if thread_config.model_provider_id == codex_model_provider_info::LOCAL_OSS_PROVIDER_ID {
+            let mut local_config = thread_config.as_ref().clone();
+            if let Some(model) = params.model.as_ref() {
+                local_config.model = Some(model.clone());
+            }
+            codex_llamacpp::ensure_oss_ready(&local_config)
+                .await
+                .map_err(invalid_params)?;
+        }
         if let Some(tool_output) = &params.tool_output {
             if !params.input.is_empty() {
                 return Err(invalid_request(
