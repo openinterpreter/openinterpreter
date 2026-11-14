@@ -169,7 +169,7 @@ fn turn_started_emits_turn_started_event() {
 #[test]
 fn command_execution_started_and_completed_translate_to_thread_events() {
     let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
-    let command_item = ThreadItem::CommandExecution {
+    let command_item = ThreadItemPayload::CommandExecution {
         model_context: None,
         id: "cmd-1".to_string(),
         command: "ls".to_string(),
@@ -217,7 +217,6 @@ fn command_execution_started_and_completed_translate_to_thread_events() {
             "turn-1".to_string(),
             ThreadItemPayload::CommandExecution {
                 model_context: None,
-                sandbox_type: None,
                 id: "cmd-1".to_string(),
                 command: "ls".to_string(),
                 cwd: test_path_buf("/tmp/project").abs().into(),
@@ -445,14 +444,15 @@ fn web_search_page_actions_and_results_survive_json_output() {
             let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
             let collected = processor.collect_thread_events(ServerNotification::ItemCompleted(
                 ItemCompletedNotification {
-                    item: ThreadItem::WebSearch(ApiWebSearchItem {
+                    item: ThreadItem::untimed(ThreadItemPayload::WebSearch(ApiWebSearchItem {
                         id: "search-1".to_string(),
                         query: url.to_string(),
                         action: Some(action.clone()),
                         results: results.clone(),
-                    }),
+                    })),
                     thread_id: "thread-1".to_string(),
                     turn_id: "turn-1".to_string(),
+                    content_token_count: None,
                     completed_at_ms: 0,
                 },
             ));
@@ -1453,7 +1453,6 @@ fn turn_completion_reconciles_started_items_from_turn_items() {
             "turn-1".to_string(),
             ThreadItemPayload::CommandExecution {
                 model_context: None,
-                sandbox_type: None,
                 id: "cmd-1".to_string(),
                 command: "ls".to_string(),
                 cwd: test_path_buf("/tmp/project").abs().into(),
@@ -1497,7 +1496,6 @@ fn turn_completion_reconciles_started_items_from_turn_items() {
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: vec![ThreadItem::untimed(ThreadItemPayload::CommandExecution {
                     model_context: None,
-                    sandbox_type: None,
                     id: "cmd-1".to_string(),
                     command: "ls".to_string(),
                     cwd: test_path_buf("/tmp/project").abs().into(),
