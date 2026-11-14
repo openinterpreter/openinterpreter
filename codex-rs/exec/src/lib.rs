@@ -1108,7 +1108,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
 
     // Handle resume subcommand through existing `thread/list` + `thread/resume`
     // APIs so exec no longer reaches into rollout storage directly.
-    let mut daybreak_enabled = config.daybreak_enabled;
+    let mut daybreak_enabled = config.daybreak_enabled && !config.ephemeral;
     let (history_mode, fallback_session_configured) = if let Some(ExecCommand::Resume(args)) =
         command.as_ref()
     {
