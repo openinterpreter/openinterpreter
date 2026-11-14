@@ -1062,7 +1062,8 @@ pub async fn run_main_with_transport_options(
             )
             .then_some(plugin_startup_config),
         });
-        processor.remote_control_processor.daemon_settings_file = daemon_settings_file;
+        processor.remote_control_processor.daemon_settings_file =
+            daemon_settings_file.map(Into::into);
         let processor = Arc::new(processor);
         let mut thread_created_rx = processor.thread_created_receiver();
         let mut running_turn_count_rx = processor.subscribe_running_assistant_turn_count();

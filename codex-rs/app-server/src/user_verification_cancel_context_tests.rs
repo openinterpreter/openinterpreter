@@ -86,6 +86,7 @@ async fn user_verification_cancel_remains_effective_until_proof_enqueue_and_clea
                 credential_id: "AQ".into(),
                 signature: "Ag".into(),
             },
+            biometric_type: None,
         };
         let error = internal_error("canceled proof");
         let expected_error = error.clone();

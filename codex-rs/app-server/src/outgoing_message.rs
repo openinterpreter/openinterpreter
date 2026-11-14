@@ -65,6 +65,7 @@ pub(crate) struct ConnectionRequestId {
 #[derive(Clone)]
 pub(crate) struct RequestContext {
     request_id: ConnectionRequestId,
+    is_process_request: bool,
     pub(crate) cancellation: tokio_util::sync::CancellationToken,
     cancellation_scope: RequestCancellationScope,
     span: Span,
@@ -75,6 +76,7 @@ pub(crate) struct RequestContext {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RequestCancellationScope {
     Unavailable,
+    ThreadSample,
     UserVerification,
 }
 
@@ -87,8 +89,10 @@ impl RequestContext {
     ) -> Self {
         Self {
             request_id,
+            is_process_request: method.starts_with("process/"),
             cancellation: tokio_util::sync::CancellationToken::new(),
             cancellation_scope: match method {
+                "thread/sample" => RequestCancellationScope::ThreadSample,
                 "userVerification/status"
                 | "userVerification/enroll"
                 | "userVerification/delete"
@@ -298,6 +302,17 @@ impl OutgoingMessageSender {
         let contexts = self.request_contexts.lock().await;
         if let Some(context) = contexts.get(request_id)
             && context.cancellation_scope == RequestCancellationScope::UserVerification
+        {
+            context.cancellation.cancel();
+        }
+    }
+
+    /// Cancel only the matching sample request on the same connection; other RPCs retain
+    /// their own cancellation policy even when a client supplies their request ID.
+    pub(crate) async fn cancel_thread_sample_request(&self, request_id: &ConnectionRequestId) {
+        let contexts = self.request_contexts.lock().await;
+        if let Some(context) = contexts.get(request_id)
+            && context.cancellation_scope == RequestCancellationScope::ThreadSample
         {
             context.cancellation.cancel();
         }

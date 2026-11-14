@@ -209,6 +209,7 @@ pub(crate) struct InitializedConnectionSessionState {
 impl ConnectionSessionState {
     pub(crate) fn new(origin: crate::transport::ConnectionOrigin) -> Self {
         Self {
+            disconnect: CancellationToken::new(),
             origin,
             rpc_gate: Arc::new(ConnectionRpcGate::new()),
             mcp_event_streams: McpEventStreams::default(),
@@ -279,6 +280,7 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) startup_warnings_tx: mpsc::UnboundedSender<String>,
     pub(crate) session_source: SessionSource,
     pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) runtime_auth_slot: Option<RuntimeAuthSlot>,
     pub(crate) user_verification: Arc<crate::user_verification::Service>,
     pub(crate) installation_id: String,
     pub(crate) code_mode_session_provider: Option<Arc<dyn CodeModeSessionProvider>>,
@@ -308,6 +310,7 @@ impl MessageProcessor {
             startup_warnings_tx,
             session_source,
             auth_manager,
+            runtime_auth_slot,
             user_verification,
             installation_id,
             code_mode_session_provider,
@@ -379,7 +382,7 @@ impl MessageProcessor {
             let startup = codex_core::build_startup_models(
                 config.as_ref(),
                 auth_manager.clone(),
-                installation_id,
+                installation_id.clone(),
                 Arc::new(ModelCatalogSettings::disk(config.codex_home.to_path_buf())),
             );
             let manager = ThreadManager::new(
@@ -432,8 +435,18 @@ impl MessageProcessor {
             Arc::clone(&thread_manager),
         ));
         let models_refresh_worker = crate::models_refresh_worker::spawn(&model_catalog);
+        let runtime_auth = runtime_auth_slot.map(|slot| {
+            let manager = Arc::clone(slot.get_or_init(|| {
+                Arc::new(codex_runtime_agent_instance::RuntimeAuthManager::for_codex(
+                    Arc::clone(&auth_manager),
+                    &config.chatgpt_base_url,
+                    &installation_id,
+                ))
+            }));
+            (manager, config.runtime_auth_mode)
+        });
         let turn_cost_worker =
-            TurnCostWorker::spawn(Arc::clone(&config), Arc::clone(&auth_manager));
+            TurnCostWorker::spawn(Arc::clone(&config), Arc::clone(&auth_manager), runtime_auth);
         thread_manager
             .plugins_manager()
             .set_analytics_events_client(analytics_events_client.clone());
@@ -508,18 +521,15 @@ impl MessageProcessor {
         );
         let git_processor = GitRequestProcessor::new();
         let initialize_processor = InitializeRequestProcessor::new(
+            gateway_login_control,
             outgoing.clone(),
             analytics_events_client.clone(),
             Arc::clone(&config),
-            config_warnings.clone(),
             rpc_transport,
             Arc::clone(&user_verification),
         );
-        let marketplace_processor = MarketplaceRequestProcessor::new(
-            Arc::clone(&config),
-            config_manager.clone(),
-            Arc::clone(&thread_manager),
-        );
+        let marketplace_processor =
+            MarketplaceRequestProcessor::new(config_manager.clone(), Arc::clone(&thread_manager));
         let mcp_processor = McpRequestProcessor::new(
             auth_manager.clone(),
             Arc::clone(&thread_manager),

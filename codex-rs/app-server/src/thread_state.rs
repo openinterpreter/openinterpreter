@@ -126,6 +126,8 @@ impl TurnSummary {
 pub(crate) struct ThreadState {
     goal_resume_lock: Arc<Mutex<()>>,
     pub(crate) pending_interrupts: PendingInterruptQueue,
+    /// Keep network prompts alive until Core resolves or withdraws them.
+    pub(crate) network_approvals: HashMap<String, PendingNetworkApproval>,
     pub(crate) turn_summary: TurnSummary,
     pub(crate) last_terminal_turn_id: Option<String>,
     /// Lets an internal runtime replacement wait until the old listener has processed Core's
@@ -218,24 +220,6 @@ impl ThreadState {
     /// Returns the same turn ID as `active_turn_snapshot` without cloning its items.
     pub(crate) fn active_turn_id(&self) -> Option<&str> {
         self.current_turn_history.active_turn_id()
-    }
-
-    pub(crate) fn active_turn_snapshot_with_items_view(
-        &self,
-        items_view: TurnItemsView,
-    ) -> Option<Turn> {
-        self.current_turn_history
-            .active_turn_snapshot_with_items_view(items_view)
-    }
-
-    pub(crate) fn active_turn_metadata_snapshot(&self) -> Option<ThreadHistoryTurnMetadata> {
-        self.current_turn_history.active_turn_metadata_snapshot()
-    }
-
-    pub(crate) fn register_shutdown_drain_waiter(&mut self) -> oneshot::Receiver<()> {
-        let (completion_tx, completion_rx) = oneshot::channel();
-        self.shutdown_drain_waiter = Some(completion_tx);
-        completion_rx
     }
 
     pub(crate) fn active_turn_snapshot_with_items_view(

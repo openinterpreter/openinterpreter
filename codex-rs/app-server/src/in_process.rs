@@ -220,7 +220,10 @@ enum InProcessClientMessage {
 
 enum ProcessorCommand {
     Request(Box<ClientRequest>, tokio_util::sync::CancellationToken),
-    Notification(ClientNotification),
+    Notification {
+        notification: ClientNotification,
+        processed_tx: Option<oneshot::Sender<()>>,
+    },
 }
 
 #[derive(Clone)]
