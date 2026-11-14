@@ -7,6 +7,7 @@ use codex_protocol::models::local_image_label_text;
 
 use crate::bottom_pane::ComposerDraftSnapshot;
 use crate::bottom_pane::KillBufferSnapshot;
+use crate::bottom_pane::ShellPrefixHandling;
 
 use super::user_messages::remap_colliding_paste_placeholders;
 use super::*;

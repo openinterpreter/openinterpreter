@@ -3,6 +3,7 @@
 //! checks the previous model when it applies the final selection.
 
 use super::*;
+use crate::history_cell::ForkedThreadHistoryCell;
 use crate::style::accent_color;
 use codex_app_server_protocol::ThreadItemPayload;
 

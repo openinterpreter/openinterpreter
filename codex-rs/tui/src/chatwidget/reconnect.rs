@@ -2,6 +2,7 @@
 //! Unavailable threads retain uncertain prompts in recovered queues before clearing activity.
 
 use super::realtime::RealtimeConversationPhase;
+use super::realtime::RealtimeFailureCause;
 use super::*;
 use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::RestrictedInputMode;
