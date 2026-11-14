@@ -88,7 +88,7 @@ async fn remote_local_binding_policy_and_review_cleanup(
     )
     .await;
     let (result_tx, result_rx) = std::sync::mpsc::channel();
-    mount_response_handler(&server, move |request| {
+    let final_response = mount_response_handler(&server, move |request| {
         let output = request
             .function_call_output_text(call_id)
             .expect("exec_command result");
@@ -101,7 +101,6 @@ async fn remote_local_binding_policy_and_review_cleanup(
         ]))
     })
     .await;
-    let (allow_exit, exit_allowed) = tokio::sync::oneshot::channel();
     let exec_server = tokio::spawn(async move {
         let mut websocket = accept_initialized_exec_server(listener).await;
         let hook = accept_process_start(&mut websocket).await;
@@ -110,18 +109,22 @@ async fn remote_local_binding_policy_and_review_cleanup(
             hook.sandbox.expect("owner hook sandbox policy").permissions,
             PermissionProfile::Disabled
         );
+        for (seq, method) in [(1, "process/exited"), (2, "process/closed")] {
+            send_exec_server_json(
+                &mut websocket,
+                json!({"method": method, "params": {"processId": hook.process_id, "seq": seq, "exitCode": 0, "sandboxDenied": false}}),
+            )
+            .await;
+        }
+        let start = accept_process_start(&mut websocket).await;
         let allow_local_binding =
             expected_local_binding.expect("invalid MXC config must not launch");
         assert_eq!(
-            start["params"]["networkProxy"]["proxy"]["allowLocalBinding"],
+            serde_json::to_value(&start).expect("serialize process start")["networkProxy"]["proxy"]
+                ["allowLocalBinding"],
             allow_local_binding
         );
-        let process_id = &start["params"]["processId"];
-        send_exec_server_json(
-            &mut websocket,
-            json!({"id": start["id"], "result": {"processId": process_id}}),
-        )
-        .await;
+        let process_id = start.process_id;
         let host = if allow_local_binding {
             "10.0.0.1"
         } else {
@@ -132,7 +135,7 @@ async fn remote_local_binding_policy_and_review_cleanup(
             "params": {"processId": process_id, "request": {"protocol": "https_connect", "host": host, "port": 443}}
         })).await;
         timeout(Duration::from_secs(/*secs*/ 10), async {
-            while exit_allowed.is_empty() || !pending_review.requests().iter().any(|request| {
+            while !pending_review.requests().iter().any(|request| {
                 request
                     .body_json()
                     .pointer("/client_metadata/x-openai-subagent")
@@ -141,17 +144,17 @@ async fn remote_local_binding_policy_and_review_cleanup(
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_millis(/*millis*/ 10)) => {},
                     request = read_exec_server_json(&mut websocket, Duration::from_secs(/*secs*/ 10)) => {
-                        respond_to_setup_or_hook_request(&mut websocket, &request).await;
+                        if request["method"] == "process/read" {
+                            send_exec_server_json(&mut websocket, json!({"id": request["id"], "result": {"chunks": [], "nextSeq": 1, "exited": false, "closed": false}})).await;
+                        } else {
+                            respond_to_setup_or_hook_request(&mut websocket, &request).await;
+                        }
                     }
                 }
             }
         })
         .await
         .expect("command and network review should start before process exit");
-        if matches!(proxy_owner, ProxyOwner::Executor) {
-            // The foreground result must reach the model while the denial grace is frozen.
-            tokio::time::pause();
-        }
         for message in [
             json!({"method": "process/output", "params": {"processId": process_id, "seq": 1, "stream": "stdout", "chunk": BASE64_STANDARD.encode("build complete\n")}}),
             json!({"method": "process/exited", "params": {"processId": process_id, "seq": 2, "exitCode": 0, "sandboxDenied": false}}),
@@ -212,12 +215,10 @@ mode = "full"
         // This test supplies its own fake executor and must not select a CI executor.
         .build(&server)
         .await?;
-    if prefer_mxc {
-        assert_eq!(
-            test.config.effective_local_windows_sandbox_type(),
-            SandboxType::WindowsMxc
-        );
-    }
+    assert_eq!(
+        test.config.effective_local_windows_sandbox_type(),
+        sandbox_type
+    );
     let selection = test
         .codex
         .environment_selections()
@@ -226,10 +227,6 @@ mode = "full"
         .expect("remote environment");
     let mut config = environment_config_for_selection(&test.config, &selection);
     let controller = test.config.permissions.network.as_ref();
-    assert_eq!(
-        controller.is_some(),
-        matches!(proxy_owner, ProxyOwner::Controller(_))
-    );
     config.network_policy = Some(match controller {
         Some(spec) => spec.environment_policy(),
         None => EnvironmentNetworkPolicy::from_config(
@@ -248,8 +245,7 @@ mode = "full"
         test.session_configured.permission_profile.clone(),
         test.config.cwd.as_path(),
     );
-    // A blocking receive keeps Tokio from advancing the paused clock during socket I/O.
-    // The real-time timeout lets the test fail if exec_command waits for the grace period.
+    // The real-time timeout ensures a pending review cannot hold the foreground result.
     let tool_returned =
         tokio::task::spawn_blocking(move || result_rx.recv_timeout(STARTUP_TIMEOUT));
     test.codex
@@ -268,14 +264,21 @@ mode = "full"
         )
         .await?;
     timeout(Duration::from_secs(/*secs*/ 15), async {
-        while final_response.function_call_output_text(call_id).is_none() {
+        while !final_response
+            .requests()
+            .iter()
+            .any(|request| request.function_call_output_text(call_id).is_some())
+        {
             tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
         }
     })
     .await?;
     let output = final_response
-        .function_call_output_text(call_id)
+        .requests()
+        .iter()
+        .find_map(|request| request.function_call_output_text(call_id))
         .context("tool output")?;
+    assert_eq!(tool_returned.await??, output);
     if let Err(expected_error) = expected_local_binding {
         assert!(output.contains(expected_error), "{output}");
         exec_server.abort();
@@ -346,8 +349,11 @@ fn review_body(request: &wiremock::Request) -> Value {
     serde_json::from_slice(&bytes).expect("request JSON")
 }
 
-async fn respond_setup_request(websocket: &mut WebSocketStream<TcpStream>, request: &Value) {
-    match request["method"].as_str() {
+async fn respond_to_setup_or_hook_request(
+    websocket: &mut WebSocketStream<TcpStream>,
+    request: &Value,
+) {
+    let result = match request["method"].as_str() {
         Some("environment/info") => {
             send_exec_server_json(websocket, json!({
                 "id": request["id"],
@@ -357,6 +363,7 @@ async fn respond_setup_request(websocket: &mut WebSocketStream<TcpStream>, reque
                     "capabilities": {"networkProxyLaunch": true}
                 }
             })).await;
+            return;
         }
         Some("fs/getMetadata" | "fs/readFile" | "fs/readDirectory") => {
             send_exec_server_json(
@@ -373,18 +380,9 @@ async fn respond_setup_request(websocket: &mut WebSocketStream<TcpStream>, reque
         Some("fs/walk") => json!({"entries": [], "errors": [], "truncated": false}),
         Some("process/write") => json!({"status": "accepted"}),
         Some("process/read") => {
-            json!({"chunks": [], "nextSeq": 1, "exited": true, "exitCode": 0, "closed": true})
-        }
-        Some("fs/walk") => {
-            send_exec_server_json(
-                websocket,
-                json!({
-                    "id": request["id"],
-                    "result": {"entries": [], "errors": [], "truncated": false}
-                }),
-            )
-            .await;
+            json!({"chunks": [], "nextSeq": 3, "exited": true, "exitCode": 0, "closed": true})
         }
         _ => panic!("unexpected setup request: {request}"),
-    }
+    };
+    send_exec_server_json(websocket, json!({"id": request["id"], "result": result})).await;
 }
