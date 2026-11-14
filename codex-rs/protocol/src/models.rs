@@ -3882,6 +3882,7 @@ mod tests {
                 },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             })
+            .as_slice()
         );
 
         Ok(())
