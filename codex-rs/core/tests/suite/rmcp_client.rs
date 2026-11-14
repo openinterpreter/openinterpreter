@@ -96,6 +96,7 @@ use codex_protocol::protocol::TurnSettingsUpdate;
 use codex_protocol::protocol::TurnSettingsUpdateOutcome;
 use codex_protocol::request_user_input::RequestUserInputAnswer;
 use codex_protocol::request_user_input::RequestUserInputResponse;
+use codex_protocol::turn_input::CyberAccessProgram;
 use codex_protocol::turn_input::TurnInput;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -1072,6 +1073,7 @@ async fn future_environment_mcp_policy_applies_on_the_next_turn() -> anyhow::Res
     wait_for_mcp_server(&fixture.codex, "environment_policy").await?;
     let selection = fixture.codex.environment_selections().await.remove(0);
     let mut config = EnvironmentConfig {
+        environment_hooks: Default::default(),
         allow_login_shell: fixture.config.permissions.allow_login_shell,
         workspace_roots: selection.workspace_roots.clone(),
         permission_profile: PermissionProfileSnapshot::legacy(
