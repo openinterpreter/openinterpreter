@@ -349,7 +349,7 @@ impl McpServerContributor<Config> for PluginContributor {
                     if (!plugins_config.allows_plugin(&root.selected_root.id)
                         || context
                             .disabled_plugin_ids()
-                            .contains(&root.selected_root.id))
+                            .is_some_and(|ids| ids.contains(&root.selected_root.id)))
                         && discovery.error.is_none()
                         && !matches!(
                             self.ownership_for_root(
@@ -396,7 +396,9 @@ impl McpServerContributor<Config> for PluginContributor {
             } else {
                 for selected_root in selected_roots {
                     if !plugins_config.allows_plugin(&selected_root.id)
-                        || context.disabled_plugin_ids().contains(&selected_root.id)
+                        || context
+                            .disabled_plugin_ids()
+                            .is_some_and(|ids| ids.contains(&selected_root.id))
                     {
                         if !matches!(
                             self.ownership_for_root(

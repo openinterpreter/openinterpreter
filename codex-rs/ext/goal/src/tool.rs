@@ -23,7 +23,6 @@ use crate::analytics::GoalEventAttribution;
 use crate::api::GoalService;
 use crate::events::GoalEventEmitter;
 use crate::metrics::GoalMetrics;
-use crate::runtime::GoalRuntimeHandle;
 use crate::spec::CREATE_GOAL_TOOL_NAME;
 use crate::spec::GET_GOAL_TOOL_NAME;
 use crate::spec::UPDATE_GOAL_TOOL_NAME;
@@ -105,7 +104,7 @@ impl GoalToolExecutor {
     }
 
     pub(crate) fn create(
-        runtime: &GoalRuntimeHandle,
+        thread_id: ThreadId,
         thread_manager: Weak<ThreadManager>,
         state_db: Arc<codex_state::StateRuntime>,
         goal_service: Arc<GoalService>,
@@ -116,7 +115,7 @@ impl GoalToolExecutor {
         max_goal_token_budget: Option<i64>,
     ) -> Self {
         Self {
-            kind: GoalToolKind::Create,
+            kind: GoalToolKind::Create(thread_manager),
             execution_allowed: true,
             thread_id,
             state_db,

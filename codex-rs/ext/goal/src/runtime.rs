@@ -505,8 +505,7 @@ impl GoalRuntimeHandle {
             .map(|options| options.as_ref().clone())
             .unwrap_or_default();
         let prompt_goal = self.goal_for_prompt(&goal).await?;
-        let item =
-            continuation_steering_item(&prompt_goal, thread.config().await.update_plan_enabled);
+        let request = continuation_request(&prompt_goal, thread.config().await.update_plan_enabled);
 
         match thread
             .start_turn_if_idle(request.on_start(TurnStartOptions {

@@ -619,6 +619,7 @@ where
             ),
             GoalToolExecutor::create(
                 runtime.thread_id(),
+                self.thread_manager.clone(),
                 Arc::clone(&self.state_dbs),
                 Arc::clone(&self.goal_service),
                 runtime.accounting_state(),

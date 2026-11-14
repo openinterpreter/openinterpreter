@@ -43,7 +43,6 @@ fn cloud_catalog_query(
         thread_id: input.thread_store.level_id().to_string(),
         turn_id: turn_id.map(str::to_owned),
         mcp_resources: input.session_store.get::<McpResourceClient>(),
-        snapshots: Vec::new(),
     }
 }
 
