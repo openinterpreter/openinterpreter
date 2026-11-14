@@ -4845,6 +4845,10 @@
           "maxLength": 2000,
           "type": "string"
         },
+        "context_window_as_tool_output": {
+          "description": "Render the context window and its hints as an agent.thread_hint tool output.",
+          "type": "boolean"
+        },
         "enabled": {
           "type": "boolean"
         },
