@@ -1433,7 +1433,7 @@ fn unified_exec_should_include_shell_parameter(
         UnifiedExecShellMode::ZshFork(_)
     ) || environments
         .turn_environments()
-        .any(|environment| environment.environment.is_remote())
+        .any(|environment| environment.environment().is_remote())
 }
 
 #[instrument(level = "trace", skip_all)]

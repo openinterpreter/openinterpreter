@@ -457,6 +457,7 @@ impl TurnContext {
             trace_id: current_span_trace_id(),
             realtime_active: self.realtime_active,
             code_mode_available: self.code_mode_available,
+            unified_exec_shell_mode: self.unified_exec_shell_mode.clone(),
             overridden_direct_only_tool_namespaces: None,
             configured_token_budget: config.token_budget.clone(),
             use_model_token_budget_defaults: config.features.enabled(Feature::TokenBudget)

@@ -7,6 +7,7 @@ use crate::sandboxing::SandboxPermissions;
 use crate::tools::approvals::ApprovalAction;
 use crate::tools::approvals::ApprovalContext;
 use crate::tools::runtimes::exec_env_for_sandbox_permissions;
+use crate::tools::sandboxing::ExecApprovalRequirement;
 use crate::tools::sandboxing::SandboxAttempt;
 use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
@@ -22,11 +23,11 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::GuardianCommandSource;
 use codex_protocol::protocol::NetworkPolicyRuleAction;
 use codex_protocol::protocol::ReviewDecision;
 use codex_sandboxing::SandboxCommand;
 use codex_sandboxing::SandboxManager;
+use codex_sandboxing::SandboxSelection;
 use codex_sandboxing::SandboxTransformRequest;
 use codex_sandboxing::SandboxType;
 use codex_sandboxing::SandboxablePreference;
@@ -54,7 +55,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
-use uuid::Uuid;
 
 pub(crate) struct PreparedUnifiedExecZshFork {
     pub(crate) exec_request: ExecRequest,
@@ -80,6 +80,17 @@ fn approval_sandbox_permissions(
         SandboxPermissions::UseDefault
     } else {
         sandbox_permissions
+    }
+}
+
+fn intercepted_exec_approval_requirement(require_human: bool) -> ExecApprovalRequirement {
+    if require_human {
+        ExecApprovalRequirement::NeedsHumanApproval { reason: None }
+    } else {
+        ExecApprovalRequirement::NeedsApproval {
+            reason: None,
+            proposed_execpolicy_amendment: None,
+        }
     }
 }
 
@@ -155,7 +166,6 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
             .selection
             .environment_id
             .clone(),
-        source: GuardianCommandSource::UnifiedExec,
         tool_name: ctx.tool_name.clone(),
         approval_policy: ctx.step_context.settings.approval_policy(),
         permission_profile: exec_request.permission_profile.clone(),
@@ -190,7 +200,6 @@ struct CoreShellActionProvider {
     review_context: GuardianReviewContext,
     call_id: String,
     environment_id: String,
-    source: GuardianCommandSource,
     tool_name: ToolName,
     approval_policy: AskForApproval,
     permission_profile: PermissionProfile,
@@ -272,22 +281,24 @@ impl CoreShellActionProvider {
         workdir: &AbsolutePathBuf,
         stopwatch: &Stopwatch,
         additional_permissions: Option<AdditionalPermissionProfile>,
+        require_human: bool,
     ) -> anyhow::Result<ReviewDecision> {
         let command = join_program_and_argv(program, argv);
-        let action = ApprovalAction::Execve {
+        let action = ApprovalAction::ExecCommand {
             id: self.call_id.clone(),
-            approval_id: Uuid::new_v4().to_string(),
             environment_id: self.environment_id.clone(),
-            source: self.source,
-            program: program.clone(),
-            argv: argv.to_vec(),
+            hook_command: command.join(" "),
             command,
-            cwd: workdir.clone(),
+            cwd: PathUri::from_abs_path(workdir),
+            sandbox_permissions: self.sandbox_permissions,
             additional_permissions,
+            justification: None,
+            tty: false,
+            proposed_execpolicy_amendment: None,
         };
         match stopwatch
             .pause_for(async {
-                let (turn_context, step_inputs, strict_auto_review) = self
+                let (turn_context, step_inputs, environments, strict_auto_review) = self
                     .session
                     .active_turn_context_and_strict_auto_review()
                     .await
@@ -298,10 +309,11 @@ impl CoreShellActionProvider {
                         )
                     })?;
                 let approval_ctx = ApprovalContext {
+                    exec_requirement: Some(intercepted_exec_approval_requirement(require_human)),
                     review_context: GuardianReviewContext::from_resolved_settings(
                         Arc::clone(&turn_context),
                         &step_inputs.settings,
-                        self.review_context.environments(),
+                        &environments,
                     ),
                     // The running process can outlive its launching tool or code-mode cell.
                     cancellation_token: None,
@@ -312,13 +324,20 @@ impl CoreShellActionProvider {
                     retry_reason: None,
                     network_approval_context: None,
                 };
-                self.session.request_approval(action, approval_ctx).await
+                Ok::<_, ToolError>(
+                    self.session
+                        .request_approval(action, approval_ctx)
+                        .await
+                        .result,
+                )
             })
             .await
         {
-            Ok(decision) => Ok(decision),
-            Err(ToolError::Rejected(rejection)) => Ok(ReviewDecision::denied(rejection)),
-            Err(ToolError::Codex(err)) => Err(err.into()),
+            Ok(Ok(decision)) => Ok(decision),
+            Ok(Err(ToolError::Rejected(rejection))) | Err(ToolError::Rejected(rejection)) => {
+                Ok(ReviewDecision::denied(rejection))
+            }
+            Ok(Err(ToolError::Codex(err))) | Err(ToolError::Codex(err)) => Err(err.into()),
         }
     }
 
@@ -338,14 +357,21 @@ impl CoreShellActionProvider {
             Decision::Forbidden => {
                 EscalationDecision::deny(Some("Execution forbidden by policy".to_string()))
             }
-            Decision::Prompt => {
+            Decision::Prompt | Decision::PromptUser => {
                 if execve_prompt_is_rejected_by_policy(self.approval_policy, &decision_source)
                     .is_some()
                 {
                     EscalationDecision::deny(Some("Execution forbidden by policy".to_string()))
                 } else {
                     let decision = self
-                        .prompt(program, argv, workdir, &self.stopwatch, prompt_permissions)
+                        .prompt(
+                            program,
+                            argv,
+                            workdir,
+                            &self.stopwatch,
+                            prompt_permissions,
+                            decision == Decision::PromptUser,
+                        )
                         .await?;
                     match decision {
                         ReviewDecision::Approved
@@ -723,7 +749,8 @@ impl CoreShellCommandExecutor {
                     env,
                     permission_profile: &self.permission_profile,
                     additional_permissions: None,
-                })?
+                })
+                .await?
             }
             EscalationExecution::Permissions(
                 EscalationPermissions::AdditionalPermissionProfile(permission_profile),
@@ -735,7 +762,8 @@ impl CoreShellCommandExecutor {
                     env,
                     permission_profile: &self.permission_profile,
                     additional_permissions: Some(permission_profile),
-                })?
+                })
+                .await?
             }
             EscalationExecution::Permissions(EscalationPermissions::ResolvedPermissionProfile(
                 permissions,
@@ -747,7 +775,8 @@ impl CoreShellCommandExecutor {
                     env,
                     permission_profile: &permissions.permission_profile,
                     additional_permissions: None,
-                })?
+                })
+                .await?
             }
         };
 
@@ -755,7 +784,7 @@ impl CoreShellCommandExecutor {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn prepare_sandboxed_exec(
+    async fn prepare_sandboxed_exec(
         &self,
         params: PrepareSandboxedExecParams<'_>,
     ) -> anyhow::Result<PreparedExec> {
@@ -790,23 +819,28 @@ impl CoreShellCommandExecutor {
             expiration: ExecExpiration::DefaultTimeout,
             capture_policy: ExecCapturePolicy::ShellTool,
         };
-        let exec_request = sandbox_manager.transform(SandboxTransformRequest {
-            command,
-            permissions: permission_profile,
-            sandbox,
-            enforce_managed_network: self.network.is_some(),
-            environment_id: self.network_environment_id.as_deref(),
-            network: self.network.as_ref(),
-            sandbox_policy_cwd: &sandbox_policy_cwd,
-            sandbox_exe: self.codex_linux_sandbox_exe.as_deref(),
-            use_legacy_landlock: self.use_legacy_landlock,
-            windows_sandbox_level: self.windows_sandbox_level,
-        })?;
+        let exec_request = sandbox_manager
+            .transform(SandboxTransformRequest {
+                command,
+                permissions: permission_profile,
+                workspace_roots: None,
+                runtime_readable_paths: &[],
+                selection: SandboxSelection::Explicit(sandbox),
+                enforce_managed_network: self.network.is_some(),
+                environment_id: self.network_environment_id.as_deref(),
+                network: self.network.as_ref(),
+                sandbox_policy_cwd: &sandbox_policy_cwd,
+                sandbox_exe: self.codex_linux_sandbox_exe.as_deref(),
+                use_legacy_landlock: self.use_legacy_landlock,
+                windows_sandbox_level: self.windows_sandbox_level,
+            })?
+            .into_command_request();
         let mut exec_request = crate::sandboxing::ExecRequest::from_sandbox_exec_request(
             exec_request,
             options,
             self.windows_sandbox_workspace_roots.clone(),
-        )?;
+        )
+        .await?;
         if let Some(network) = exec_request.network.as_ref() {
             network
                 .apply_to_env_for_optional_environment(
