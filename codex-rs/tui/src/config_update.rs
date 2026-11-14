@@ -474,9 +474,9 @@ pub(crate) async fn read_effective_config_with_layers(
 pub(crate) async fn read_effective_config_if_supported(
     request_handle: AppServerRequestHandle,
     cwd: &Path,
-) -> Result<Option<codex_app_server_protocol::Config>> {
-    match read_effective_config(request_handle, cwd.display().to_string()).await {
-        Ok(response) => Ok(Some(response.config)),
+) -> Result<Option<EffectiveConfig>> {
+    match read_effective_config_with_layers(&request_handle, cwd.display().to_string()).await {
+        Ok(response) => Ok(Some(response)),
         Err(err)
             if matches!(
                 err.downcast_ref::<TypedRequestError>(),

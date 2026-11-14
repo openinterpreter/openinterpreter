@@ -57,7 +57,7 @@ impl App {
         .await?;
         config
             .as_ref()
-            .map(configured_voice)
+            .map(|effective| configured_voice(&effective.config))
             .transpose()
             .map(Option::flatten)
     }
@@ -90,7 +90,7 @@ impl App {
                 let effective = crate::config_update::read_effective_config_if_supported(
                     app_server.request_handle(), &self.chat_widget.config_ref().cwd,
                 ).await.and_then(|config| match config.as_ref() {
-                    Some(config) => configured_voice(config),
+                    Some(effective) => configured_voice(&effective.config),
                     None if response.status == codex_app_server_protocol::WriteStatus::OkOverridden => Err(color_eyre::eyre::eyre!("the saved voice is overridden, but this server cannot read effective settings")),
                     None => Ok(Some(voice)),
                 });
