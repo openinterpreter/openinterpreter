@@ -1409,7 +1409,10 @@ impl FileSystemSandboxPolicy {
                         entry.access,
                     ),
                     Some(path) => (FileSystemPath::Path { path }, entry.access),
-                    None if !entry.access.can_write() => (
+                    // An unresolved deny must still protect the entire workspace.
+                    // An unresolved read grant is not a deny: reject materialization
+                    // rather than manufacturing a new workspace-wide denial.
+                    None if entry.access == FileSystemAccessMode::Deny => (
                         FileSystemPath::Path { path: root.clone() },
                         FileSystemAccessMode::Deny,
                     ),

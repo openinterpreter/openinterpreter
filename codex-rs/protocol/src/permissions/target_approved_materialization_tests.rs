@@ -191,6 +191,19 @@ fn linux_root_metadata_writes_inherit_the_root_without_reopening_other_paths() {
 }
 
 #[test]
+fn approved_command_does_not_materialize_unresolvable_read_grants_as_denials() {
+    let cwd = uri("file:///C:/run");
+    let workspace_root = uri("file:///C:/work");
+    let context = context(&cwd, std::slice::from_ref(&workspace_root));
+    let mut policy = FileSystemSandboxPolicy::read_only();
+    policy.entries.push(entry(workspace(r"D:\vault"), Read));
+
+    // D:\vault cannot be scoped to a C: workspace root. Decline approval
+    // instead of silently replacing the malformed read with a C: denial.
+    assert_eq!(policy.for_approved_command(&context), policy);
+}
+
+#[test]
 fn approved_command_discards_other_volume_grants_before_materialization() {
     let cwd = uri("file:///C:/run");
     let workspace_root = uri("file:///C:/work");
