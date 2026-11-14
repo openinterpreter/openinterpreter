@@ -51,9 +51,13 @@ pub trait AuthProvider: Send + Sync {
     /// Async providers should override this rather than resolving credentials for telemetry.
     fn auth_header_telemetry(&self) -> Result<AuthHeaderTelemetry, AuthError> {
         let headers = self.to_auth_headers()?;
-        let name = headers
-            .contains_key(http::header::AUTHORIZATION)
-            .then_some("authorization");
+        let name = if headers.contains_key(http::header::AUTHORIZATION) {
+            Some("authorization")
+        } else if headers.contains_key("x-api-key") {
+            Some("x-api-key")
+        } else {
+            None
+        };
         Ok(AuthHeaderTelemetry {
             attached: name.is_some(),
             name,
@@ -123,17 +127,43 @@ pub struct AuthHeaderTelemetry {
 }
 
 pub fn auth_header_telemetry(auth: &dyn AuthProvider) -> AuthHeaderTelemetry {
-    let mut headers = HeaderMap::new();
-    auth.add_auth_headers(&mut headers);
-    let name = if headers.contains_key(http::header::AUTHORIZATION) {
-        Some("authorization")
-    } else if headers.contains_key("x-api-key") {
-        Some("x-api-key")
-    } else {
-        None
-    };
-    AuthHeaderTelemetry {
-        attached: name.is_some(),
-        name,
+    // Telemetry must not treat partially written headers from a failed auth
+    // provider as attached credentials. Async providers describe the eventual
+    // header without resolving credentials here.
+    auth.auth_header_telemetry().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct PartialFailure;
+
+    impl AuthProvider for PartialFailure {
+        fn add_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), AuthError> {
+            headers.insert(
+                http::header::AUTHORIZATION,
+                "Bearer partial".parse().unwrap(),
+            );
+            Err(AuthError::Build("unavailable".to_string()))
+        }
+    }
+
+    struct ApiKey;
+
+    impl AuthProvider for ApiKey {
+        fn add_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), AuthError> {
+            headers.insert("x-api-key", "key".parse().unwrap());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn telemetry_does_not_count_partial_auth_on_error() {
+        assert_eq!(
+            auth_header_telemetry(&PartialFailure),
+            AuthHeaderTelemetry::default()
+        );
+        assert_eq!(auth_header_telemetry(&ApiKey).name, Some("x-api-key"));
     }
 }
