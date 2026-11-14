@@ -4,6 +4,56 @@
 use crate::style::secondary_text_style;
 use ratatui::style::Styled;
 use ratatui::text::Line;
+
+/// Show only the directions that have more rows available to scroll into view.
+pub(crate) fn scroll_keys(
+    offset: usize,
+    max_offset: usize,
+    up: Option<String>,
+    down: Option<String>,
+) -> Option<String> {
+    match (
+        up.filter(|_| offset > 0),
+        down.filter(|_| offset < max_offset),
+    ) {
+        (Some(up), Some(down)) => Some(format!("{up}/{down}")),
+        (up, down) => up.or(down),
+    }
+}
+
+/// Measured text and clickable positions share a single layout decision.
+pub(crate) struct HintLine {
+    pub(crate) line: Line<'static>,
+    pub(crate) items: Vec<std::ops::Range<u16>>,
+}
+
+impl HintLine {
+    pub(crate) fn new(hints: impl IntoIterator<Item = Line<'static>>, width: u16) -> Self {
+        let mut hints = hints.into_iter().peekable();
+        let mut line = Line::default();
+        let mut items = Vec::new();
+        let mut end = 0;
+        while let Some(hint) = hints.next() {
+            let start = end + if items.is_empty() { 0 } else { 3 };
+            let next = start + hint.width();
+            let overflow_space = if hints.peek().is_some() { 2 } else { 0 };
+            if next + overflow_space > usize::from(width) {
+                if width > 0 {
+                    let marker = if items.is_empty() { "…" } else { " …" };
+                    line.push_span(marker.set_style(secondary_text_style()));
+                }
+                break;
+            }
+            if !items.is_empty() {
+                line.push_span(" · ".set_style(secondary_text_style()));
+            }
+            line.extend(hint.spans);
+            items.push(start as u16..next as u16);
+            end = next;
+        }
+        Self { line, items }
+    }
+}
 /// A complete hint uses the same styled content for measurement and rendering.
 pub(crate) fn shortcut(keys: &str, label: &str) -> Line<'static> {
     let mut spans = crate::key_hint::key_label_spans(keys);

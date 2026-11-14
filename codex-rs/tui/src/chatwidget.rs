@@ -193,6 +193,9 @@ fn normalize_thread_name(name: &str) -> Option<String> {
 }
 
 use crate::app_event::AppEvent;
+use crate::app_event::CapturedSideDisplay;
+use crate::app_event::CapturedSideStream;
+use crate::app_event::CapturedSideWork;
 use crate::app_event::ExitMode;
 use crate::app_event::PermissionProfileSelection;
 use crate::app_event::RateLimitRefreshOrigin;
@@ -261,6 +264,7 @@ use crate::tui::FrameRequester;
 mod activity_groups;
 mod activity_presentation;
 mod clipboard;
+pub(crate) use clipboard::ClipboardPasteContext;
 mod command_lifecycle;
 mod config_panel;
 mod connector_mentions;
@@ -1331,6 +1335,15 @@ impl ChatWidget {
         self.add_boxed_history(Box::new(cell));
     }
 
+    /// Capture the composer edit target before an asynchronous clipboard read.
+    /// The bottom pane rejects modal input and owns target validation on delivery.
+    pub(crate) fn clipboard_paste_target(
+        &self,
+        shortcut: Option<KeyCode>,
+    ) -> Option<crate::bottom_pane::ClipboardPasteTarget> {
+        self.bottom_pane.clipboard_paste_target(shortcut)
+    }
+
     fn add_boxed_history(&mut self, cell: Box<dyn HistoryCell>) {
         let Err(cell) = self.absorb_activity_detail(cell) else {
             return;
@@ -1348,22 +1361,21 @@ impl ChatWidget {
     ) -> Option<Box<dyn HistoryCell>> {
         // Keep the placeholder session header as the active cell until real session info arrives,
         // so we can merge headers instead of committing a duplicate box to history.
-        if !self.is_session_configured()
-            && active
-                .as_any()
-                .is::<history_cell::SessionHeaderHistoryCell>()
-        {
-            return None;
-        }
+        let keep_placeholder_header_active =
+            !self.is_session_configured()
+                && self.transcript.active_cell.as_ref().is_some_and(|cell| {
+                    cell.as_any().is::<history_cell::SessionHeaderHistoryCell>()
+                });
         let history_width = self
             .last_rendered_width
             .get()
             .map(|width| self.history_wrap_width(width))
             .unwrap_or(u16::MAX);
 
-        if !cell
-            .display_lines_for_mode(history_width, self.history_render_mode())
-            .is_empty()
+        if !keep_placeholder_header_active
+            && !cell
+                .display_lines_for_mode(history_width, self.history_render_mode())
+                .is_empty()
         {
             // Only break exec grouping if the cell renders visible lines.
             if !self.has_active_stream_tail() {
@@ -1473,8 +1485,7 @@ impl ChatWidget {
                 );
                 self.on_user_message_display(display);
             }
-        } else if !already_rendered
-            && !self.review.is_review_mode
+        } else if !self.review.is_review_mode
             && self.last_rendered_user_message_display.as_ref() != Some(&display)
         {
             self.on_user_message_display(display);

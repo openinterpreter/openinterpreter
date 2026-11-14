@@ -26,6 +26,12 @@ const WINDOWS_APP_TOOLTIP: &str = "Use the **desktop app**. Install it from http
 const MACOS_APP_TOOLTIP: &str =
     "Use the **desktop app**. Run `codex app` to open it. It installs automatically if needed.";
 const LINUX_APP_TOOLTIP: &str = "Use the **desktop app**. Install it from https://learn.chatgpt.com/docs/linux/linux-app and run `chatgpt`.";
+const FAST_TOOLTIP: &str =
+    "*New* Use **/fast** to enable our fastest inference with increased plan usage.";
+const OTHER_TOOLTIP: &str = "*New* Build faster with the **Desktop app**. Run 'codex app' or visit https://chatgpt.com/codex?app-landing-page=true";
+const OTHER_TOOLTIP_NON_MAC: &str = "*New* Build faster with Codex.";
+const FREE_GO_TOOLTIP: &str =
+    "*New* For a limited time, Codex is included in your plan for free – let’s build together.";
 
 const RAW_TOOLTIPS: &str = include_str!("../assets/tooltips.txt");
 
@@ -163,11 +169,25 @@ fn app_tooltip() -> Option<&'static str> {
     }
 }
 
-fn pick_tooltip<R: Rng + ?Sized>(rng: &mut R, keymap: &TuiKeymap) -> Option<String> {
-    // Resolve current settings for each new tip; never replace an invalid or unbound keymap
-    // with defaults, or cache shortcut text across /keymap edits.
-    let keymap = RuntimeKeymap::from_config(keymap).ok();
-    resolved_tooltips(keymap.as_ref()).choose(rng)
+fn paid_app_tooltip() -> Option<&'static str> {
+    if IS_MACOS || IS_WINDOWS {
+        Some(MACOS_APP_TOOLTIP)
+    } else {
+        linux_app_tooltip(LinuxDesktopSession::current())
+    }
+}
+
+/// Paid accounts get the existing app/Fast promotion policy, but never a Fast
+/// promotion while Fast mode is already enabled.
+fn pick_paid_tooltip<R: Rng + ?Sized>(
+    rng: &mut R,
+    fast_mode_enabled: bool,
+) -> Option<&'static str> {
+    if fast_mode_enabled || rng.random_bool(0.5) {
+        paid_app_tooltip()
+    } else {
+        Some(FAST_TOOLTIP)
+    }
 }
 
 fn pick_tooltip<R: Rng + ?Sized>(rng: &mut R, keymap: &TuiKeymap) -> Option<String> {
@@ -199,9 +219,15 @@ pub(crate) fn resolved_tooltips(
         .filter_map(move |tip| render_tooltip(tip, keymap))
 }
 
+/// Return the same local templates used by the startup tip picker, allowing
+/// callers to apply their own feature or account filters before rendering.
+pub(crate) fn tooltip_templates() -> impl Iterator<Item = &'static str> {
+    ALL_TOOLTIPS.iter().copied()
+}
+
 /// Substitute `{key:context.action}` with the current primary shortcut in a Markdown code span.
 /// Skip the tip if a placeholder is invalid or its action has no binding.
-fn render_tooltip(mut template: &str, keymap: Option<&RuntimeKeymap>) -> Option<String> {
+pub(crate) fn render_tooltip(mut template: &str, keymap: Option<&RuntimeKeymap>) -> Option<String> {
     let mut rendered = String::new();
     while let Some((prefix, rest)) = template.split_once("{key:") {
         let (action, suffix) = rest.split_once('}')?;

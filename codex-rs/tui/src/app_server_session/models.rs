@@ -33,25 +33,7 @@ impl AppServerSession {
             RequestId::String(format!("model-list-{request_id}")),
         );
         tokio::spawn(async move {
-            let result = request_handle
-                .request_typed::<ModelListResponse>(ClientRequest::ModelList {
-                    request_id: RequestId::String(format!("model-list-{request_id}")),
-                    params: ModelListParams {
-                        cursor: None,
-                        limit: None,
-                        include_hidden: Some(true),
-                        model_provider: None,
-                    },
-                })
-                .await
-                .map(|response| {
-                    response
-                        .data
-                        .into_iter()
-                        .map(model_preset_from_api_model)
-                        .collect()
-                })
-                .map_err(|err| err.to_string());
+            let result = models.await.map_err(|err| err.to_string());
             app_event_tx.send(AppEvent::ModelsLoaded { request_id, result });
         });
     }

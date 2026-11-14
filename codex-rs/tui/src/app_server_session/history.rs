@@ -372,6 +372,7 @@ impl AppServerSession {
         let page = self
             .thread_turns_page(thread_id, turn_cursor, INITIAL_HISTORY_TURN_LIMIT)
             .await?;
+        let next_turn_cursor = page.next_cursor;
         thread.turns = page.data.into_iter().rev().collect();
         let mut state = ThreadHistoryPagination {
             history_mode: ThreadHistoryMode::Paginated,

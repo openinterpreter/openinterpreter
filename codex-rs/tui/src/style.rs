@@ -28,6 +28,26 @@ pub(crate) const CHATGPT_BLUE_200: (u8, u8, u8) = (99, 168, 248);
 /// Shared accent for picker selection backgrounds and transcript foreground emphasis.
 pub(crate) const UI_ACCENT: (u8, u8, u8) = CHATGPT_BLUE_200;
 
+/// The result marker inherits the row fill, including reverse-video selection.
+pub(crate) fn task_marker(unread: bool, row: Style) -> ratatui::text::Span<'static> {
+    let (symbol, rgb, ansi) = if unread {
+        ("●", (0x3b, 0x82, 0xf6), Color::Blue)
+    } else {
+        ("○", (128, 128, 128), Color::DarkGray)
+    };
+    let color = match effective_stdout_color_level() {
+        StdoutColorLevel::Ansi16 => ansi,
+        StdoutColorLevel::Ansi256 => best_color(rgb),
+        StdoutColorLevel::TrueColor | StdoutColorLevel::Unknown => rgb_color(rgb),
+    };
+    let style = if row.add_modifier.contains(Modifier::REVERSED) {
+        row.bg(color)
+    } else {
+        row.fg(color)
+    };
+    ratatui::text::Span::styled(symbol, style)
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum StatusTone {
     Success,
@@ -61,6 +81,20 @@ const TABLE_SEPARATOR_FG_ALPHA: f32 = 0.20;
 
 pub fn user_message_style() -> Style {
     user_message_style_for(default_bg())
+}
+
+/// Blend the floating shortcut HUD slightly away from the background.
+const SHORTCUT_HUD_TINT: f32 = 0.052;
+
+pub(crate) fn shortcut_hud_style() -> Style {
+    default_bg().map_or_else(Style::default, |bg| {
+        let shade = if is_light(bg) { 0 } else { 255 };
+        Style::default().bg(best_color(blend(
+            (shade, shade, shade),
+            bg,
+            SHORTCUT_HUD_TINT,
+        )))
+    })
 }
 
 /// Submitted prompts use a lighter fill than the editable composer in either theme.
@@ -154,8 +188,34 @@ pub(crate) fn secondary_text_style() -> Style {
         .not_bold()
 }
 
+/// Quiet backgrounds keep focusable controls legible but unobtrusive.
+pub(crate) fn quiet_workspace_style() -> Style {
+    let base = Style::default().not_bold().not_reversed().not_underlined();
+    let Some(bg) = default_bg() else {
+        return base.fg(Color::Reset).bg(Color::Reset).dim();
+    };
+    let fill = best_color(blend(user_message_bg_rgb(bg), bg, 0.40));
+    let foreground = default_fg().map_or(Color::Reset, |fg| best_color(blend(fg, bg, 0.66)));
+    base.bg(fill).fg(readable_color_on(foreground, Some(fill)))
+}
+
 pub(crate) fn selection_style() -> Style {
     contrast::selection_style(default_bg(), effective_stdout_color_level())
+}
+
+/// Strengthen a hovered control's fill without discarding readable foreground.
+pub(crate) fn hover_style(style: Style) -> Style {
+    let (Some(terminal_bg), Some(surface)) = (default_bg(), background_rgb(style.bg)) else {
+        return style.underlined();
+    };
+    let fill = best_color(shade_rgb(shade_rgb(surface, terminal_bg), terminal_bg));
+    if fill == Color::Reset || Some(fill) == style.bg {
+        return style.underlined();
+    }
+    style.bg(fill).fg(readable_color_on(
+        style.fg.unwrap_or(Color::Reset),
+        Some(fill),
+    ))
 }
 
 /// Resolve emphasis on the shaded prompt surface, including its quantized background.

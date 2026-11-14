@@ -40,7 +40,7 @@ use logical::logical_lines;
 use ratatui::text::Line;
 
 /// One cell's logical text and its width-dependent display rows.
-pub(super) struct TextLayout {
+pub(crate) struct TextLayout {
     logical: Vec<LogicalLine>,
     text: String,
     rows: Vec<TextRow>,

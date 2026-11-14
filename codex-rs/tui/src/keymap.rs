@@ -52,6 +52,7 @@ mod voice_tests;
 #[path = "keymap/global_find_tests.rs"]
 mod global_find_tests;
 
+pub(crate) use bindings::KeymapActionId;
 pub(crate) use bindings::KeymapContext;
 pub(crate) use bindings::bindings_for_action;
 pub(crate) use bindings::configured_binding_for_action;
@@ -60,6 +61,7 @@ pub(crate) use bindings::keymap_action_ids;
 use bindings::runtime_action_bindings;
 #[cfg(test)]
 pub(crate) use chords::CHORD_REVEAL_DELAY;
+pub(crate) use chords::KEY_CHORD_TIMEOUT;
 pub(crate) use chords::KeyChordMatch;
 pub(crate) use chords::KeyChordMatcher;
 pub(crate) use chords::KeymapContextSet;
