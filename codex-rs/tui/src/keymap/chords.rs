@@ -26,6 +26,7 @@ use crossterm::event::KeyModifiers;
 use std::time::Duration;
 use tokio::time::Instant;
 
+pub(crate) const CHORD_REVEAL_DELAY: Duration = Duration::from_millis(/*millis*/ 350);
 pub(crate) const KEY_CHORD_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 1);
 
 const FIRST_DISPATCH_FUNCTION_KEY: u8 = codex_config::types::MAX_FUNCTION_KEY + 1;
@@ -59,6 +60,8 @@ const OPEN_PANE: u32 = 1 << 25;
 const FOCUSED_SIDE_PANE: u32 = 1 << 26;
 const SIDEBAR_CHOOSER: u32 = 1 << 27;
 const SIDEBAR_RESIZE: u32 = 1 << 28;
+const FOCUSED_SIDEBAR: u32 = 1 << 29;
+const TRANSCRIPT_SELECT: u32 = 1 << 30;
 
 const TRANSCRIPT_BROWSING: u32 = 1 << 14;
 
@@ -98,6 +101,11 @@ impl KeymapContextSet {
                 | context_bit(KeymapContext::Global)
                 | TRANSCRIPT_ACTIONS,
         )
+    }
+
+    /// Keep the transcript-selection action available while the pager owns input.
+    pub(crate) const fn with_transcript_select(self) -> Self {
+        Self(self.0 | TRANSCRIPT_SELECT)
     }
 
     pub(crate) const fn raw_key_capture() -> Self {
@@ -165,6 +173,8 @@ impl KeymapContextSet {
     }
     pub(crate) const fn focused_sidebar_chooser() -> Self {
         Self(SIDE_PANE | PANE_DIRECTION | MAIN_COMPOSER_FOCUS)
+            .with_focused_sidebar()
+            .with(KeymapContext::List)
     }
     pub(crate) const fn with_sidebar_chooser(self) -> Self {
         Self(self.0 | SIDEBAR_CHOOSER)
@@ -173,7 +183,7 @@ impl KeymapContextSet {
         Self(self.0 | SIDE_PANE)
     }
     pub(crate) const fn with_focused_sidebar(self) -> Self {
-        Self(self.0 | SIDE_PANE)
+        Self(self.0 | FOCUSED_SIDEBAR)
     }
 
     /// Warning pages admit navigation plus their own toggle and copy.
@@ -187,6 +197,9 @@ impl KeymapContextSet {
 
     /// Whether this input path can dispatch the action, including focus-specific exclusions.
     pub(crate) fn contains_action(self, action: KeymapActionId) -> bool {
+        if action.context == KeymapContext::Pager && action.action == "mark_markdown" {
+            return self.0 & TRANSCRIPT_SELECT != 0;
+        }
         if action.context == KeymapContext::Global && action.action == "change_host" {
             return self.0 & BACKEND_CYCLING != 0;
         }
@@ -195,6 +208,7 @@ impl KeymapContextSet {
                 "focus_pane_left" | "focus_pane_right" => PANE_DIRECTION,
                 "move_divider_left" | "move_divider_right" => FOCUSED_SIDE_PANE,
                 "toggle_pane_zoom" => OPEN_PANE,
+                "sidebar_up" | "sidebar_down" => FOCUSED_SIDEBAR,
                 "equalize_pane_widths"
                 | "minimize_pane_width"
                 | "maximize_pane_width"
@@ -527,9 +541,10 @@ pub(crate) enum KeyChordMatch {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct PendingChord {
-    started_at: Instant,
-    prefix: KeyBinding,
+pub(crate) struct PendingChord {
+    pub(crate) started_at: Instant,
+    persistent: bool,
+    pub(crate) prefix: KeyBinding,
     contexts: KeymapContextSet,
 }
 
@@ -600,6 +615,41 @@ impl KeyChordMatcher {
         self.pending.is_some()
     }
 
+    /// Only workspace leaders use the passive overlay; other chords retain footer hints.
+    pub(crate) fn workspace_leader(&self) -> Option<PendingChord> {
+        self.pending
+            .filter(|pending| pending.persistent && pending.contexts.0 & PANE_DIRECTION != 0)
+    }
+
+    /// The shortcut guide appears after a brief delay and expires with its chord.
+    pub(crate) fn visible_pending(
+        &self,
+        frames: &crate::tui::FrameRequester,
+    ) -> Option<PendingChord> {
+        let pending = self.pending?;
+        let elapsed = pending.started_at.elapsed();
+        if elapsed < CHORD_REVEAL_DELAY {
+            frames.schedule_frame_in(CHORD_REVEAL_DELAY - elapsed);
+            return None;
+        }
+        if !pending.persistent {
+            let remaining = KEY_CHORD_TIMEOUT.checked_sub(elapsed)?;
+            if remaining.is_zero() {
+                return None;
+            }
+            frames.schedule_frame_in(remaining);
+        }
+        Some(pending)
+    }
+
+    pub(crate) fn guide(
+        &self,
+        keymap: &RuntimeChordKeymap,
+        frames: &crate::tui::FrameRequester,
+    ) -> Option<crate::bottom_pane::ShortcutHud> {
+        self.visible_pending(frames)?.guide(keymap, |_| true)
+    }
+
     /// Derive one presentation for the pending chord from the matcher that owns it.
     pub(crate) fn pending_hint_items(
         &self,
@@ -665,7 +715,8 @@ impl KeyChordMatcher {
 
     pub(crate) fn expire(&mut self, contexts: KeymapContextSet) -> bool {
         if self.pending.is_some_and(|pending| {
-            pending.contexts != contexts || pending.started_at.elapsed() >= KEY_CHORD_TIMEOUT
+            pending.contexts != contexts
+                || (!pending.persistent && pending.started_at.elapsed() >= KEY_CHORD_TIMEOUT)
         }) {
             self.pending = None;
             return true;
@@ -728,6 +779,7 @@ impl KeyChordMatcher {
             });
             self.pending = Some(PendingChord {
                 started_at: Instant::now(),
+                persistent,
                 prefix,
                 contexts,
             });
