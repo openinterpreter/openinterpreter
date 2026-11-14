@@ -345,13 +345,18 @@ mod tests {
         .expect("status line");
 
         assert_eq!(
-            line.spans[0].style.fg,
+            line.line.spans[0].style.fg,
             Some(readable_color_on(
                 Color::Rgb(228, 11, 11),
                 /*background*/ None
             ))
         );
-        assert!(!line.spans[0].style.add_modifier.contains(Modifier::DIM));
+        assert!(
+            !line.line.spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::DIM)
+        );
     }
 
     #[test]
@@ -460,7 +465,7 @@ mod tests {
                 /*x*/ 0, /*y*/ 0, /*width*/ 42, /*height*/ 1,
             );
             let mut buffer = Buffer::empty(area);
-            line.render(area, &mut buffer);
+            line.line.render(area, &mut buffer);
             insta::assert_snapshot!(format!("{buffer:?}"));
         });
     }
