@@ -82,10 +82,11 @@ impl GuardianApprovalReviewer {
         let requirements = config.config_layer_stack.requirements();
         let mut policy = guardian_config.as_ref().map_or_else(
             || {
-                codex_config::GuardianPolicyLoader::new(Some(
-                    &codex_features::FeatureToml::Enabled(true),
-                ))
-                .resolve(model.as_deref(), requirements)
+                codex_config::GuardianPolicyLoader::new(
+                    Some(&codex_features::FeatureToml::Enabled(true)),
+                    requirements,
+                )
+                .resolve(model.as_deref())
             },
             |config| config.policy_for_model(model.as_deref(), requirements),
         );
@@ -97,7 +98,7 @@ impl GuardianApprovalReviewer {
             .requirements()
             .constrain_guardian_policy(
                 &mut policy,
-                model.as_ref().map(|model| model.slug.as_str()),
+                model.as_ref().map_or("", |model| model.slug.as_str()),
             );
         let mode = policy.review_mode(input.category);
         if mode != GuardianReviewMode::Adaptive {
@@ -392,7 +393,7 @@ async fn constrained_live_policy(
             store
                 .get::<codex_protocol::openai_models::ModelInfo>()
                 .as_ref()
-                .map(|model| model.slug.as_str()),
+                .map_or("", |model| model.slug.as_str()),
         );
     permitted
 }

@@ -662,7 +662,7 @@ fn output_images(output: &FunctionCallOutputPayload) -> impl Iterator<Item = &Im
         })
 }
 
-async fn image_url(
+async fn load_input_image(
     path: &AbsolutePathBuf,
     environment: &ToolEnvironment<'_>,
 ) -> Result<LoadedInputImage, FunctionCallError> {

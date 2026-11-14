@@ -133,20 +133,20 @@ fn should_classify_tool(
 fn legacy_loader(
     scope: Option<&GuardianV2ReviewScopeConfigToml>,
 ) -> codex_config::GuardianPolicyLoader {
-    codex_config::GuardianPolicyLoader::new(Some(&codex_features::FeatureToml::Config(
-        codex_features::GuardianV2ConfigToml {
-            enabled: Some(true),
-            review_scope: scope.cloned(),
-            ..Default::default()
-        },
-    )))
+    codex_config::GuardianPolicyLoader::new(
+        Some(&codex_features::FeatureToml::Config(
+            codex_features::GuardianV2ConfigToml {
+                enabled: Some(true),
+                review_scope: scope.cloned(),
+                ..Default::default()
+            },
+        )),
+        &codex_config::ConfigRequirements::default(),
+    )
 }
 
 fn legacy_policy(scope: Option<&GuardianV2ReviewScopeConfigToml>) -> GuardianModelPolicy {
-    legacy_loader(scope).resolve(
-        /*model*/ None,
-        &codex_config::ConfigRequirements::default(),
-    )
+    legacy_loader(scope).resolve(/*model*/ None)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

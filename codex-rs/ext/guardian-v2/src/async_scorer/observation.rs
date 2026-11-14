@@ -250,7 +250,9 @@ impl GuardianV2Extension {
             .requirements()
             .constrain_guardian_policy(
                 &mut permitted,
-                parent_model.as_ref().map(|model| model.slug.as_str()),
+                parent_model
+                    .as_ref()
+                    .map_or("", |model| model.slug.as_str()),
             );
         if !scores_tool(&permitted, input.tool_name, input.payload, scope) {
             score_progress.invalidate(tool_call_index);
