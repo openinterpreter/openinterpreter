@@ -2379,6 +2379,7 @@ impl App {
                 ThreadTitleDestination::Automatic,
                 &user_message,
                 /*expected_name*/ None,
+                /*expected_name*/ None,
             );
         }
         if !had_active_modal

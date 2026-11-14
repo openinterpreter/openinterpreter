@@ -109,6 +109,7 @@ async fn cloud_conversations_skip_tui_generated_titles() {
         thread_id,
         ThreadTitleDestination::Automatic,
         "Fix the login timeout",
+        /*expected_name*/ None,
     );
 
     assert!(app.pending_thread_titles.is_empty());
@@ -118,10 +119,11 @@ async fn cloud_conversations_skip_tui_generated_titles() {
 #[tokio::test]
 async fn automatic_thread_title_respects_origin_metadata_after_switching() -> color_eyre::Result<()>
 {
-    for (switch_threads, manual_name) in [
-        (true, None),
-        (true, Some("Manual title")),
-        (false, Some("Manual title")),
+    for (switch_threads, initial_name, manual_name) in [
+        (true, None, None),
+        (true, None, Some("Manual title")),
+        (false, None, Some("Manual title")),
+        (false, Some("Fork title"), None),
     ] {
         let mut app = make_test_app().await;
         let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
@@ -141,7 +143,13 @@ async fn automatic_thread_title_respects_origin_metadata_after_switching() -> co
         );
 
         let mut tui = crate::tui::test_support::make_test_tui()?;
-        let automatic = app_server.automatic_thread_name_writer(thread_id);
+        if let Some(initial_name) = initial_name {
+            app_server
+                .thread_set_name(thread_id, initial_name.to_string())
+                .await?;
+        }
+        let automatic =
+            app_server.automatic_thread_name_writer(thread_id, initial_name.map(str::to_string));
         if switch_threads {
             let second = app_server.start_thread(&app.config).await?;
             let second_id = second.session.thread_id;

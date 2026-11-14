@@ -437,6 +437,7 @@ pub(crate) struct AutomaticThreadName {
     session: AppServerSession,
     thread_id: ThreadId,
     gate: Arc<Semaphore>,
+    expected_name: Option<String>,
 }
 
 impl AutomaticThreadName {
@@ -447,7 +448,7 @@ impl AutomaticThreadName {
         let Some(Ok(thread)) = cancellation.run_until_cancelled(read).await else {
             return;
         };
-        if thread.name.is_some() {
+        if thread.name != self.expected_name {
             return;
         }
         let Ok(_permit) = self.gate.acquire().await else {
@@ -1969,6 +1970,7 @@ impl AppServerSession {
     pub(crate) fn automatic_thread_name_writer(
         &mut self,
         thread_id: ThreadId,
+        expected_name: Option<String>,
     ) -> AutomaticThreadName {
         self.automatic_name_writes
             .retain(|_, gate| Arc::strong_count(gate) > 1);
@@ -1981,6 +1983,7 @@ impl AppServerSession {
             session,
             thread_id,
             gate: Arc::clone(gate),
+            expected_name,
         }
     }
 

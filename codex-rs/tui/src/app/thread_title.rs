@@ -82,7 +82,15 @@ impl App {
         thread_id: ThreadId,
         destination: ThreadTitleDestination,
         source_text: &str,
+        expected_name: Option<String>,
     ) {
+        if app_server.thread_params_mode().settings_owner() == ThreadSettingsOwner::Server {
+            if let ThreadTitleDestination::RenameSuggestion { request_id } = destination {
+                self.chat_widget
+                    .apply_thread_name_suggestion(thread_id, request_id, /*suggestion*/ None);
+            }
+            return;
+        }
         let std::collections::hash_map::Entry::Vacant(entry) =
             self.pending_thread_titles.entry((thread_id, destination))
         else {
@@ -90,6 +98,15 @@ impl App {
         };
         let cancellation = entry.insert(CancellationToken::new()).clone();
         self.sync_thread_title_progress();
+        let (prompt, fallback_title) = match destination {
+            ThreadTitleDestination::Automatic => (
+                thread_title_prompt(source_text),
+                fallback_thread_title(source_text),
+            ),
+            ThreadTitleDestination::RenameSuggestion { .. } => {
+                (recent_conversation_thread_title_prompt(source_text), None)
+            }
+        };
         let request_handle = app_server.request_handle();
         let model = if self.chat_widget.config_ref().model_provider_id == "openai"
             && self.chat_widget.has_chatgpt_account()
@@ -128,6 +145,7 @@ impl App {
                 thread_id,
                 destination,
                 prompt,
+                expected_name,
                 fallback_title,
                 effort,
                 result,
@@ -143,6 +161,7 @@ impl App {
         thread_id: ThreadId,
         destination: ThreadTitleDestination,
         prompt: String,
+        expected_name: Option<String>,
         fallback_title: Option<String>,
         effort: Option<ReasoningEffort>,
         result: Result<String, String>,
@@ -157,8 +176,12 @@ impl App {
             }
             return;
         }
-        let temporary_thread_id_text = match result {
-            Ok(thread_id) => thread_id,
+        let save_name = (destination == ThreadTitleDestination::Automatic)
+            .then(|| app_server.automatic_thread_name_writer(thread_id, expected_name));
+        let temporary_thread_id = match result
+            .and_then(|id| ThreadId::from_string(&id).map_err(|error| error.to_string()))
+        {
+            Ok(id) => id,
             Err(error) => {
                 tracing::debug!(%error, "failed to start title-generation thread");
                 self.finish_thread_title_generation(thread_id, destination);
@@ -267,6 +290,7 @@ impl App {
             thread_id,
             ThreadTitleDestination::RenameSuggestion { request_id },
             &conversation,
+            /*expected_name*/ None,
         );
     }
 }
