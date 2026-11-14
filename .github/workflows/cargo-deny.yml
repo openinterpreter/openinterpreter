@@ -32,6 +32,29 @@ jobs:
           rust-version: 1.99.1
           manifest-path: ./codex-rs/Cargo.toml
 
+      - name: Capture failed policy check for exact-source diagnosis
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/cargo-deny-diagnostic.txt"
+          if command -v cargo-deny >/dev/null 2>&1; then
+            (cargo deny check --format json > "$report" 2>&1) || true
+            test -s "$report"
+          else
+            printf '%s\n' 'cargo-deny executable unavailable after action' > "$report"
+          fi
+          test "$(wc -c < "$report")" -le 1048576
+
+      - name: Upload failed policy check for review
+        if: failure()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: cargo-deny-diagnostic-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cargo-deny-diagnostic.txt
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
