@@ -42,8 +42,40 @@ impl ChatComposer {
 
     /// Classify an explicit paste before integrating text shared with the buffered key path.
     pub fn handle_paste(&mut self, pasted: String) -> bool {
+        self.flush_pending_paste_burst();
         self.note_sparkle_paste(&pasted);
         self.apply_paste(pasted)
+    }
+
+    pub(crate) fn flush_pending_paste_burst(&mut self) {
+        if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
+            self.apply_paste(pasted);
+        }
+    }
+
+    pub(in crate::bottom_pane) fn paste_handoff_deadline(&self) -> Option<Instant> {
+        if self.draft.disable_paste_burst {
+            return None;
+        }
+        self.draft.paste_burst.handoff_deadline()
+    }
+
+    pub(in crate::bottom_pane) fn has_paste_window(&self, now: Instant) -> bool {
+        !self.draft.disable_paste_burst
+            && self
+                .draft
+                .paste_burst
+                .newline_should_insert_instead_of_submit(now)
+    }
+
+    /// Display buffered keys while preserving their trailing paste window.
+    pub(in crate::bottom_pane) fn flush_handoff_paste(&mut self, now: Instant) -> bool {
+        let deadline = self.paste_handoff_deadline();
+        let flushed = self.handle_paste_burst_flush(now);
+        if flushed && let Some(deadline) = deadline.filter(|deadline| *deadline >= now) {
+            self.draft.paste_burst.preserve_window_until(deadline);
+        }
+        flushed
     }
 
     /// Enable or disable paste-burst handling.
