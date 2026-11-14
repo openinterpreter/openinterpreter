@@ -1112,7 +1112,10 @@ fn compaction_trigger_label(value: CompactionTrigger) -> &'static str {
     }
 }
 
-fn hooks_for_model_request(session: &Arc<Session>, step: &StepContext) -> Arc<codex_hooks::Hooks> {
+pub(crate) fn hooks_for_model_request(
+    session: &Arc<Session>,
+    step: &StepContext,
+) -> Arc<codex_hooks::Hooks> {
     match step.turn.session_source {
         SessionSource::Internal(InternalSessionSource::MemoryConsolidation)
         | SessionSource::SubAgent(SubAgentSource::MemoryConsolidation) => Arc::new(
