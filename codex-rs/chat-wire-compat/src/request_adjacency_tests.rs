@@ -31,6 +31,8 @@ fn request_with_input(input: Vec<ResponseItem>) -> ResponsesApiRequest {
 fn function_call(call_id: &str) -> ResponseItem {
     ResponseItem::FunctionCall {
         id: None,
+        status: None,
+        encrypted_content: None,
         name: "Bash".to_string(),
         namespace: None,
         arguments: json!({ "command": "pwd" }).to_string(),
