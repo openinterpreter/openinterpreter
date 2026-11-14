@@ -493,16 +493,7 @@ pub(crate) enum ResumeModelSettings {
 }
 
 impl ThreadParamsMode {
-    fn workspace_roots_from_config(self, config: &Config) -> Option<Vec<AbsolutePathBuf>> {
-        match self {
-            Self::Embedded => Some(config.workspace_roots.clone()),
-            // Client config paths belong to the client host. Let the server resolve its
-            // defaults or restore the saved roots, then adopt the roots in its response.
-            Self::Remote => None,
-        }
-    }
-
-    fn model_provider_from_config(self, config: &Config) -> Option<String> {
+    pub(crate) fn settings_owner(self) -> ThreadSettingsOwner {
         match self {
             Self::Embedded | Self::Remote => ThreadSettingsOwner::Client,
             Self::Cloud => ThreadSettingsOwner::Server,

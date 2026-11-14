@@ -18,7 +18,6 @@ use crate::temporary_structured_request::TemporaryThreadKind;
 use crate::temporary_structured_request::run_temporary_structured_turn;
 use crate::temporary_structured_request::start_temporary_thread;
 use crate::temporary_structured_request::unsubscribe_temporary_thread;
-use codex_app_server_protocol::ThreadSource;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnStatus;
 use codex_context_fragments::ContextualUserFragment;
@@ -232,7 +231,7 @@ impl App {
             config.cwd.display().to_string()
         };
         let options = TemporaryStructuredThreadOptions {
-            thread_source: ThreadSource::Feature("system".to_string()),
+            kind: TemporaryThreadKind::Recap,
             model,
             model_provider: config.model_provider_id.clone(),
             cwd,

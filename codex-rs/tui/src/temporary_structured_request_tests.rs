@@ -83,7 +83,7 @@ async fn managed_workspace_default_respects_read_only_availability() -> color_ey
             .build()
             .await?;
         let options = TemporaryStructuredThreadOptions {
-            thread_source: ThreadSource::Feature("thread_title".to_string()),
+            kind: TemporaryThreadKind::Title,
             model: "gpt-5.2".to_string(),
             model_provider: config.model_provider_id.clone(),
             cwd: config.cwd.to_string_lossy().into_owned(),
@@ -91,7 +91,6 @@ async fn managed_workspace_default_respects_read_only_availability() -> color_ey
                 .permissions
                 .active_permission_profile()
                 .map(|profile| profile.id),
-            mcp_server_names: Vec::new(),
         };
         let client = crate::start_embedded_app_server(
             Default::default(),
@@ -165,7 +164,7 @@ async fn preserves_custom_permissions_and_disables_required_mcp_servers() -> col
     let response = start_temporary_thread(
         &app_server.request_handle(),
         TemporaryStructuredThreadOptions {
-            thread_source: ThreadSource::Feature("thread_title".to_string()),
+            kind: TemporaryThreadKind::Recap,
             model: "gpt-5.2".to_string(),
             model_provider: config.model_provider_id.clone(),
             cwd: config.cwd.display().to_string(),
@@ -185,7 +184,7 @@ async fn preserves_custom_permissions_and_disables_required_mcp_servers() -> col
             Some("title-restricted".to_string()),
             config.model_provider_id,
             true,
-            Some(ThreadSource::Feature("thread_title".to_string())),
+            Some(ThreadSource::Feature("system".to_string())),
         )
     );
 
