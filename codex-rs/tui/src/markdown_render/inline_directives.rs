@@ -156,7 +156,7 @@ impl<'a> InlineDirectives<'a> {
     ) -> impl Iterator<Item = (Event<'s>, Range<usize>)> {
         let mut directives = self.directives.iter().peekable();
         events.flat_map(move |(event, range)| {
-            while citations
+            while directives
                 .next_if(|(span, _)| span.end <= range.start)
                 .is_some()
             {}

@@ -104,7 +104,14 @@ impl Color {
                     .or(palette.theme.settings.accent),
             ),
             Self::Status(role) => terminal_color(
-                highlight::foreground_color_for_scopes(palette.highlighter(), role.scopes()),
+                role.scopes().iter().find_map(|name| {
+                    let scope = Scope::new(name).ok()?;
+                    palette
+                        .highlighter()
+                        .style_mod_for_stack(&[scope])
+                        .foreground
+                        .and_then(highlight::convert_syntect_color)
+                }),
                 role.fallback_color(),
             ),
             Self::Rgb(rgb) => terminal_palette::best_color(rgb.0),
