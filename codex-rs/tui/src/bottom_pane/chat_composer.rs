@@ -1073,14 +1073,9 @@ impl ChatComposer {
         self.app_event_tx = app_event_tx;
     }
 
-    pub fn set_voice_command_enabled(&mut self, enabled: bool) {
-        self.voice_command_enabled = enabled;
-    }
-
-    /// Refresh the event destination when a retained editor survives reconnection.
-    #[allow(dead_code, reason = "Used by later layers of the TUI refresh stack.")]
-    pub(crate) fn set_app_event_sender(&mut self, app_event_tx: AppEventSender) {
-        self.app_event_tx = app_event_tx;
+    /// Override passive footer hints; `None` restores the configured default.
+    pub(crate) fn set_footer_hint_override(&mut self, items: Option<Vec<(String, String)>>) {
+        self.footer.hint_override = items;
     }
 
     /// Replace composer, editor, and footer-hint key bindings from one runtime snapshot.
@@ -1878,7 +1873,6 @@ impl ChatComposer {
         self.current_text_elements()
     }
 
-    #[cfg(test)]
     pub(crate) fn local_image_paths(&self) -> Vec<PathBuf> {
         self.attachments.local_image_paths()
     }

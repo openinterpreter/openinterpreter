@@ -66,12 +66,16 @@ pub(super) struct HistorySearchSession {
     /// Active and completed Vim commands suspended during temporary draft replacement.
     original_vim_state: VimPersistentState,
     /// Footer-owned query text typed or pasted while Ctrl+R search is active.
-    query: String,
+    pub(super) query: String,
     /// User-visible search status used to choose footer hints and composer preview behavior.
     status: HistorySearchStatus,
 }
 
 impl HistorySearchSession {
+    fn preview_draft(&self) -> &ComposerDraft {
+        self.preview_draft.as_ref().unwrap_or(&self.original_draft)
+    }
+
     /// Renders newlines and tabs as visible markers for the footer and cursor placement.
     /// Matching continues to use the original query.
     fn display_query(&self) -> String {

@@ -137,8 +137,10 @@ impl AsyncQuestions {
         if text.is_empty() {
             return;
         }
-        let reply =
-            AnsweredQuestion::new(&answer.question_id, &answer.question.title, text).render();
+        let reply = AnsweredQuestion::new(&answer.question_id, &answer.question.title, text)
+            .render()
+            .into_text()
+            .unwrap_or_default();
         if reply.chars().count() > codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS {
             self.composer.show_footer_flash(
                 "Answer too long; shorten it before sending".into(),
@@ -146,42 +148,6 @@ impl AsyncQuestions {
             );
         } else {
             self.submission = Some(QuestionSubmission::Submit(reply));
-        }
-    }
-
-    pub(crate) fn resolve_answers(&mut self, question_ids: &[String]) {
-        // History can arrive before live questions or before restoring local drafts.
-        self.state.answered_ids.extend(question_ids.iter().cloned());
-        // Older desktop replies identify the whole source message instead of one question.
-        let answered = |question: &PendingQuestion| {
-            question_ids.contains(&question.question_id)
-                || question_ids.contains(&question.message_id)
-        };
-        if !self.state.pending.iter().any(answered) {
-            return;
-        }
-        let current_answered = self.current_answer().is_some_and(answered);
-        if current_answered {
-            self.composer.flush_pending_input();
-        }
-        let current_idx = self
-            .state
-            .pending
-            .iter()
-            .take(self.state.current_idx)
-            .filter(|question| !answered(question))
-            .count();
-        self.state.pending.retain(|question| !answered(question));
-        self.state.current_idx = if current_idx < self.state.pending.len() {
-            current_idx
-        } else {
-            0
-        };
-        self.expanded &= !self.state.pending.is_empty();
-        self.visible_options.set((0, 0));
-        if current_answered {
-            self.restore_current_draft();
-            self.composer.reset_vim_mode();
         }
     }
 

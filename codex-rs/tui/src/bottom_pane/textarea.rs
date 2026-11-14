@@ -201,6 +201,7 @@ enum KillBufferKind {
 pub(crate) struct KillBufferSnapshot {
     text: String,
     kind: KillBufferKind,
+    pub(in crate::bottom_pane) elements: Arc<Vec<TextElementSnapshot>>,
 }
 
 impl TextArea {
@@ -461,14 +462,9 @@ impl TextArea {
         &self.text
     }
 
-    pub fn insert_str(&mut self, text: &str) {
-        let replaced_selection = !text.is_empty() && self.delete_mouse_selection();
-        self.record_vim_inserted_text(text);
-        if self.is_vim_replace_mode() && !replaced_selection {
-            self.replace_vim_text(text);
-        } else {
-            self.insert_str_at(self.cursor_pos, text);
-        }
+    /// Changes on a leading insertion, not when deletion exposes existing text.
+    pub(super) fn prefix_insertion_revision(&self) -> u64 {
+        self.prefix_insertion_revision
     }
 
     pub fn insert_str_at(&mut self, pos: usize, text: &str) {
@@ -1797,17 +1793,6 @@ impl TextArea {
         self.elements.sort_by_key(|e| e.range.start);
 
         true
-    }
-
-    pub fn insert_element(&mut self, text: &str) -> u64 {
-        self.delete_mouse_selection();
-        let start = self.clamp_pos_for_insertion(self.cursor_pos);
-        self.insert_str_at(start, text);
-        let end = start + text.len();
-        let id = self.add_element(start..end);
-        // Place cursor at end of inserted element
-        self.set_cursor(end);
-        id
     }
 
     fn add_element(&mut self, range: Range<usize>) -> u64 {

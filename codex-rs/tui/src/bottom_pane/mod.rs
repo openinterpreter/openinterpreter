@@ -304,6 +304,8 @@ pub(crate) struct BottomPane {
 
     /// Stack of views displayed instead of the composer (e.g. popups/modals).
     view_stack: Vec<Box<dyn BottomPaneView>>,
+    pub(crate) key_chord_reset_requested: bool,
+    pub(crate) view_transition_key_guard: Option<ActivationKeyGuard>,
     warnings_view: Option<warnings_view::WarningsView>,
     pub(crate) questions: Option<Box<AsyncQuestions>>,
     delayed_approval_requests: VecDeque<DelayedApprovalRequest>,
@@ -402,6 +404,8 @@ impl BottomPane {
         Self {
             composer,
             view_stack: Vec::new(),
+            key_chord_reset_requested: false,
+            view_transition_key_guard: None,
             warnings_view: None,
             questions: None,
             delayed_approval_requests: VecDeque::new(),
