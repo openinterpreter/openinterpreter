@@ -93,6 +93,18 @@ impl Serialize for RealtimeSpeechText {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum CloudSubmissionIntent {
+    /// Use the known turn for explicit operations such as guarded safety retries.
+    UseKnownTurn,
+    /// Allow the server to start or steer the current turn on ordinary Enter.
+    StartOrSteer,
+    /// A message leaving a local queue starts a fresh turn.
+    StartIfIdle,
+    /// Answers admit through Cloud and can steer while a turn is running.
+    QuestionAnswer { during_turn: bool },
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) enum AppCommand {

@@ -243,10 +243,13 @@ enum ForkConfigSource {
     Session,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ForkConfigSource {
-    Local,
-    Session,
+/// Result of a side-conversation fork, including a separately verified context boundary.
+pub(crate) struct SidebarFork {
+    pub(crate) thread: AppServerStartedThread,
+    pub(crate) boundary: Result<(), String>,
+    pub(crate) inherited_profile: bool,
+    pub(crate) storage: SideChatStorage,
+    pub(crate) legacy: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -930,31 +933,25 @@ impl AppServerSession {
         fallback: EmptyCatalogFallback,
     ) -> Result<AppServerBootstrap> {
         let started_at = Instant::now();
+        let model_request_id = self.next_request_id();
+        let model_request_handle = self.request_handle();
+        let thread_params_mode = self.thread_params_mode;
         let models = match self.prefetched_model_list.take() {
             Some(models) => Either::Left(models),
-            None => Either::Right(self.request_model_list()),
+            None => Either::Right(async move {
+                models::list(thread_params_mode, model_request_handle, model_request_id)
+                    .await
+                    .map_err(|err| {
+                        bootstrap_request_error("model/list failed during TUI bootstrap", err)
+                    })
+            }),
         };
         let requirements_request_id = self.next_request_id();
         let (mut available_models, requirements, collaboration_modes) = tokio::try_join!(
             models,
             async {
-                self.client
-                    .request_typed::<ModelListResponse>(ClientRequest::ModelList {
-                        request_id: model_request_id,
-                        params: ModelListParams {
-                            cursor: None,
-                            limit: None,
-                            include_hidden: Some(true),
-                            model_provider: None,
-                        },
-                    })
-                    .await
-                    .map_err(|err| {
-                        bootstrap_request_error("model/list failed during TUI bootstrap", err)
-                    })
-            },
-            async {
-                self.client
+                match self
+                    .request_handle
                     .request_typed::<ConfigRequirementsReadResponse>(
                         ClientRequest::ConfigRequirementsRead {
                             request_id: requirements_request_id,
@@ -2545,6 +2542,9 @@ fn config_request_overrides_from_config(
         "web_search",
         Some(config.web_search_mode.value().to_string()),
     );
+    drop(insert);
+    let origins = config.config_layer_stack.origins();
+    let effective = config.config_layer_stack.effective_config();
     let is_launch = |key: &str| {
         origins.get(key).is_some_and(|origin| {
             matches!(
@@ -2963,12 +2963,14 @@ async fn started_thread_from_start_response(
 async fn started_thread_from_resume_response(
     response: ThreadResumeResponse,
     local_settings: &LocalSettings,
+    config: &Config,
     thread_params_mode: ThreadParamsMode,
 ) -> Result<AppServerStartedThread> {
     let blocks_direct_input = thread_blocks_direct_input(&response.thread);
     let session = thread_session_state_from_thread_resume_response(
         &response,
         local_settings,
+        config,
         thread_params_mode,
     )
     .await
@@ -3018,7 +3020,7 @@ async fn thread_session_state_from_thread_start_response(
     );
     let mut session = thread_session_state_from_thread_response(
         &response.thread.id,
-        crate::windows_sandbox::host_from_environments(response.thread.environments.as_deref()),
+        response.thread.environments.as_deref(),
         response.thread.forked_from_id.clone(),
         response.thread.name.clone(),
         response.thread.path.clone(),
@@ -3046,7 +3048,8 @@ async fn thread_session_state_from_thread_start_response(
 async fn thread_session_state_from_thread_resume_response(
     response: &ThreadResumeResponse,
     local_settings: &LocalSettings,
-    _thread_params_mode: ThreadParamsMode,
+    config: &Config,
+    thread_params_mode: ThreadParamsMode,
 ) -> Result<ThreadSessionState, String> {
     let permission_profile = if matches!(thread_params_mode, ThreadParamsMode::Embedded)
         && response.active_permission_profile.is_none()
@@ -3065,7 +3068,7 @@ async fn thread_session_state_from_thread_resume_response(
     };
     let mut session = thread_session_state_from_thread_response(
         &response.thread.id,
-        crate::windows_sandbox::host_from_environments(response.thread.environments.as_deref()),
+        response.thread.environments.as_deref(),
         response.thread.forked_from_id.clone(),
         response.thread.name.clone(),
         response.thread.path.clone(),
@@ -3101,7 +3104,7 @@ async fn thread_session_state_from_thread_fork_response(
     );
     let mut session = thread_session_state_from_thread_response(
         &response.thread.id,
-        crate::windows_sandbox::host_from_environments(response.thread.environments.as_deref()),
+        response.thread.environments.as_deref(),
         response.thread.forked_from_id.clone(),
         response.thread.name.clone(),
         response.thread.path.clone(),
@@ -3154,7 +3157,7 @@ fn display_permission_profile_from_thread_response(
 )]
 async fn thread_session_state_from_thread_response(
     thread_id: &str,
-    windows_sandbox_host: crate::app::WindowsSandboxHost,
+    environments: Option<&[codex_app_server_protocol::ThreadEnvironment]>,
     forked_from_id: Option<String>,
     thread_name: Option<String>,
     rollout_path: Option<PathBuf>,
@@ -3185,7 +3188,12 @@ async fn thread_session_state_from_thread_response(
     let (log_id, entry_count) = codex_message_history::history_metadata(&history_config).await;
     Ok(ThreadSessionState {
         read_only_history: false,
-        windows_sandbox_host,
+        thread_settings_confirmed: true,
+        daybreak_enabled: false,
+        windows_sandbox_host: crate::windows_sandbox::host_from_environments(environments),
+        primary_environment_cwd: crate::session_state::primary_environment_cwd(
+            environments.unwrap_or_default(),
+        ),
         thread_id,
         forked_from_id,
         fork_parent_title: None,
@@ -5248,6 +5256,7 @@ mod tests {
         let started = started_thread_from_resume_response(
             response.clone(),
             &LocalSettings::from(&config),
+            &config,
             ThreadParamsMode::Remote,
         )
         .await
@@ -5302,6 +5311,7 @@ mod tests {
         let started = started_thread_from_resume_response(
             response.clone(),
             &LocalSettings::from(&embedded_config),
+            &embedded_config,
             ThreadParamsMode::Embedded,
         )
         .await
@@ -5314,6 +5324,7 @@ mod tests {
         let started = started_thread_from_resume_response(
             empty_roots_response,
             &LocalSettings::from(&config),
+            &config,
             ThreadParamsMode::Remote,
         )
         .await
@@ -5446,7 +5457,7 @@ mod tests {
 
         let session = thread_session_state_from_thread_response(
             &thread_id.to_string(),
-            crate::app::WindowsSandboxHost::Local,
+            None,
             /*forked_from_id*/ None,
             Some("restore".to_string()),
             /*rollout_path*/ None,
@@ -5482,7 +5493,7 @@ mod tests {
 
         let session = thread_session_state_from_thread_response(
             &thread_id.to_string(),
-            crate::app::WindowsSandboxHost::Local,
+            None,
             Some(forked_from_id.to_string()),
             Some("restore".to_string()),
             /*rollout_path*/ None,

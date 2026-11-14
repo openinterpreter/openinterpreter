@@ -11,7 +11,18 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+use crate::chatwidget::ConfiguredPetLoadGeneration;
+
+/// Global voice controls apply to the active call owner, including parked widgets.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum VoiceControl {
+    Toggle,
+    Stop,
+    Mute,
+}
 
 pub(crate) struct SecretReportPasscode(String);
 
@@ -1313,9 +1324,6 @@ pub(crate) enum AppEvent {
         thread_id: ThreadId,
         message: String,
     },
-
-    /// Move visible completed voice captions into history in one app event.
-    CommitRealtimeTranscriptHistory,
 
     /// Finish buffering initial resume replay after all replay events have been queued.
     EndInitialHistoryReplayBuffer,
