@@ -196,6 +196,7 @@ impl PendingAppServerRequests {
                 None
             }
             ServerRequest::DynamicToolCall { .. } => None,
+            ServerRequest::CurrentTimeRead { .. } => None,
             ServerRequest::ChatgptAuthTokensRefresh { .. } => None,
             ServerRequest::AttestationGenerate { request_id, .. } => {
                 Some(UnsupportedAppServerRequest {
@@ -523,6 +524,7 @@ impl PendingAppServerRequests {
             }
             ServerRequest::ChatgptAuthTokensRefresh { .. } => None,
             ServerRequest::DynamicToolCall { .. }
+            | ServerRequest::CurrentTimeRead { .. }
             | ServerRequest::AttestationGenerate { .. }
             | ServerRequest::ApplyPatchApproval { .. }
             | ServerRequest::ExecCommandApproval { .. } => None,

@@ -4,6 +4,7 @@
 use super::App;
 use super::ThreadBufferedEvent;
 use super::app_server_event_targets::ServerNotificationThreadTarget;
+use super::app_server_event_targets::canonical_time_read_thread_id;
 use super::app_server_event_targets::server_notification_thread_target;
 use super::app_server_event_targets::server_request_thread_id;
 use super::app_server_requests::BufferedServerRequest;
@@ -648,6 +649,43 @@ impl App {
                 &buffered_request,
             )
             .await;
+            return;
+        }
+        if let ServerRequest::CurrentTimeRead { params, .. } = request {
+            // Reply only on the connection which emitted this exact thread-scoped request.
+            // A malformed or conflicting identity must not be acknowledged with a time value.
+            let valid_thread = canonical_time_read_thread_id(&params.thread_id)
+                .filter(|thread_id| !self.abandoned_side_threads.contains(thread_id))
+                .filter(|thread_id| {
+                    self.backend_registry
+                        .observe(app_server_client.backend_id(), *thread_id)
+                });
+            let seconds = valid_thread.and_then(|_| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+            });
+            let result = if let Some(current_time_at) = seconds {
+                let response =
+                    codex_app_server_protocol::CurrentTimeReadResponse { current_time_at };
+                buffered_request
+                    .reply
+                    .resolve(serde_json::to_value(response).expect("time response serializes"))
+                    .await
+            } else {
+                buffered_request
+                    .reply
+                    .reject(JSONRPCErrorError {
+                        code: -32000,
+                        message: "time read requires a valid thread and clock".to_string(),
+                        data: None,
+                    })
+                    .await
+            };
+            if let Err(error) = result {
+                tracing::warn!(%error, "current time reply was not confirmed");
+            }
             return;
         }
         if let ServerRequest::DynamicToolCall { request_id, params } = &request {

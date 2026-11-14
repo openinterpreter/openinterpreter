@@ -4,6 +4,12 @@ use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_protocol::ThreadId;
 
+pub(super) fn canonical_time_read_thread_id(value: &str) -> Option<ThreadId> {
+    ThreadId::from_string(value)
+        .ok()
+        .filter(|thread_id| thread_id.to_string() == value)
+}
+
 pub(super) fn server_request_thread_id(request: &ServerRequest) -> Option<ThreadId> {
     match request {
         ServerRequest::CommandExecutionRequestApproval { params, .. } => {
@@ -23,6 +29,9 @@ pub(super) fn server_request_thread_id(request: &ServerRequest) -> Option<Thread
         }
         ServerRequest::DynamicToolCall { params, .. } => {
             ThreadId::from_string(&params.thread_id).ok()
+        }
+        ServerRequest::CurrentTimeRead { params, .. } => {
+            canonical_time_read_thread_id(&params.thread_id)
         }
         ServerRequest::ChatgptAuthTokensRefresh { .. }
         | ServerRequest::AttestationGenerate { .. }
@@ -237,24 +246,52 @@ pub(super) fn server_notification_thread_target(
 #[cfg(test)]
 mod tests {
     use super::ServerNotificationThreadTarget;
+    use super::canonical_time_read_thread_id;
     use super::server_notification_thread_target;
+    use super::server_request_thread_id;
     use crate::test_support::PathBufExt;
     use crate::test_support::test_path_buf;
+    use codex_app_server_protocol::CurrentTimeReadParams;
     use codex_app_server_protocol::GuardianWarningNotification;
     use codex_app_server_protocol::McpServerStartupState;
     use codex_app_server_protocol::McpServerStatusUpdatedNotification;
+    use codex_app_server_protocol::RequestId;
     use codex_app_server_protocol::ServerNotification;
+    use codex_app_server_protocol::ServerRequest;
     use codex_app_server_protocol::ThreadAttachmentOperation;
     use codex_app_server_protocol::ThreadAttachmentUpdatedNotification;
     use codex_app_server_protocol::ThreadSettings;
     use codex_app_server_protocol::ThreadSettingsUpdatedNotification;
     use codex_app_server_protocol::WarningNotification;
+
     use codex_protocol::ThreadId;
     use codex_protocol::config_types::CollaborationMode;
     use codex_protocol::config_types::ModeKind;
     use codex_protocol::config_types::Settings;
     use codex_protocol::openai_models::ReasoningEffort;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn time_read_requires_exact_canonical_thread_identity() {
+        let thread_id = ThreadId::new();
+        let request = |value: String| ServerRequest::CurrentTimeRead {
+            request_id: RequestId::Integer(11),
+            params: CurrentTimeReadParams { thread_id: value },
+        };
+        assert_eq!(
+            server_request_thread_id(&request(thread_id.to_string())),
+            Some(thread_id)
+        );
+        assert_eq!(canonical_time_read_thread_id("not-a-thread"), None);
+        assert_eq!(
+            server_request_thread_id(&request("not-a-thread".into())),
+            None
+        );
+        assert_eq!(
+            server_request_thread_id(&request(thread_id.to_string().to_uppercase())),
+            None
+        );
+    }
 
     fn test_thread_settings() -> ThreadSettings {
         ThreadSettings {
