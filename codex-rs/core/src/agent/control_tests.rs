@@ -1014,6 +1014,7 @@ async fn subscribe_status_errors_for_missing_thread() {
 async fn subscribe_status_updates_on_shutdown() {
     let harness = AgentControlHarness::new().await;
     let (thread_id, thread) = harness.start_thread().await;
+    assert!(!thread.has_shutdown_status());
     let mut status_rx = harness
         .control
         .subscribe_status(thread_id)
@@ -1024,6 +1025,7 @@ async fn subscribe_status_updates_on_shutdown() {
         .await
         .expect("shutdown should submit");
     thread.wait_until_terminated().await;
+    assert!(thread.has_shutdown_status());
 
     // The update arrives before the first poll, without replacing the initial snapshot.
     let initial = status_rx

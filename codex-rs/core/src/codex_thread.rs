@@ -925,6 +925,12 @@ impl CodexThread {
         self.io.agent_status().await
     }
 
+    /// Observes the same lifecycle status channel used by `agent_status` without
+    /// suspending while a listener decides whether this runtime is closing.
+    pub fn has_shutdown_status(&self) -> bool {
+        matches!(*self.io.agent_status.borrow(), AgentStatus::Shutdown)
+    }
+
     /// Content-free active-turn identity for owner-bound receipt correlation.
     pub async fn active_turn_id(&self) -> Option<String> {
         self.session.active_turn_id().await
