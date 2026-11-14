@@ -61,7 +61,7 @@ impl AppServerSession {
             tracing::warn!("Failed to page read-only thread history; trying summary pages");
             let request_id = self.next_request_id();
             let page: ThreadTurnsListResponse = self
-                .client
+                .request_handle
                 .request_typed(ClientRequest::ThreadTurnsList {
                     request_id,
                     params: ThreadTurnsListParams {
@@ -198,9 +198,13 @@ impl AppServerSession {
                 HistoryHydrationScope::Initial,
             )
             .await?;
-        let mut started =
-            started_thread_from_resume_response(response, local_settings, ThreadParamsMode::Cloud)
-                .await?;
+        let mut started = started_thread_from_resume_response(
+            response,
+            local_settings,
+            &config,
+            ThreadParamsMode::Cloud,
+        )
+        .await?;
         scoped.commit_prepared_resume().await.map_err(|err| {
             bootstrap_request_error("thread/resume failed during TUI bootstrap", err)
         })?;
@@ -330,6 +334,7 @@ impl AppServerSession {
         let mut started = started_thread_from_resume_response(
             response,
             local_settings,
+            &config,
             self.thread_params_mode(),
         )
         .await?;

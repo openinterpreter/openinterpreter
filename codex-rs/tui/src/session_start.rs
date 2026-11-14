@@ -99,7 +99,8 @@ pub(crate) async fn complete_session_start(
         UnarchiveChoice::Cancel => {
             return Ok(match app_server_target {
                 crate::AppServerTarget::LocalDaemon { .. }
-                | crate::AppServerTarget::Remote { .. } => SessionStartOutcome::CommandCenter,
+                | crate::AppServerTarget::Remote { .. }
+                | crate::AppServerTarget::Cloud => SessionStartOutcome::CommandCenter,
                 crate::AppServerTarget::Embedded => SessionStartOutcome::Exit,
             });
         }

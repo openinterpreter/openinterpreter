@@ -172,7 +172,7 @@ impl AppServerSession {
     ) -> std::result::Result<ThreadRevertResponse, codex_app_server_client::TypedRequestError> {
         let request_id = self.next_request_id();
         let response: ThreadRevertResponse = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::ThreadRevert {
                 request_id,
                 params: ThreadRevertParams {
@@ -441,7 +441,7 @@ impl AppServerSession {
         }
         // A failed Cloud turn may have only an error and no items.
         if self.thread_params_mode() == super::ThreadParamsMode::Cloud
-            && scope == HistoryHydrationScope::FullTranscript
+            && scope == HistoryHydrationScope::Complete
         {
             while let Some(cursor) = state.next_turn_cursor.take() {
                 let page = self

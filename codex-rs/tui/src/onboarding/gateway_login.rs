@@ -30,8 +30,11 @@ pub(crate) async fn authenticate_gateway(
     server: &mut AppServerSession,
     config: &Config,
 ) -> Result<()> {
-    let (login_status, account) = get_login_status(server).await?;
-    let primary_login = should_show_login_screen(login_status, account.requires_openai_auth);
+    let (login_status, account) = get_login_status(server, config).await?;
+    let primary_login = should_show_login_screen(
+        login_status,
+        account.is_some_and(|account| account.requires_openai_auth),
+    );
     // Some gateways require both credentials. The primary login must finish first.
     for login in [Login::Primary, Login::GatewayOAuth] {
         match login {

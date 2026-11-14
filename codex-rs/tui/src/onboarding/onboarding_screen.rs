@@ -192,6 +192,9 @@ impl OnboardingScreen {
                     app_server_request_handle,
                     auth_config,
                     bedrock_setup_enabled,
+                    gcp_setup_enabled,
+                    gateway_setup_enabled,
+                    gateway: None,
                     animations_enabled: local_settings.tui.animations
                         && local_settings.tui.effects.shimmer,
                     animations_suppressed: std::cell::Cell::new(false),

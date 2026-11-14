@@ -887,7 +887,7 @@ impl AppServerSession {
     }
 
     pub(crate) fn server_codex_home(&self) -> Option<&str> {
-        let AppServerClient::Remote(client) = &self.client else {
+        let Some(AppServerClient::Remote(client)) = &self.connection_owner else {
             return None;
         };
         client.codex_home()
@@ -2068,7 +2068,6 @@ impl AppServerSession {
             .request_typed(ClientRequest::ThreadGoalClear {
                 request_id,
                 params: ThreadGoalClearParams {
-                    origin: Some(codex_app_server_protocol::ThreadGoalMutationOrigin::User),
                     thread_id: thread_id.to_string(),
                     expected_goal_id: None,
                     expected_status: None,
