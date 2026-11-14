@@ -342,6 +342,8 @@ async fn start_embedded_app_server(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AppServerTarget {
     Embedded,
+    /// Optional cloud backend, scoped to the original launch network policy.
+    Cloud,
     LocalDaemon {
         endpoint: RemoteAppServerEndpoint,
         allow_embedded_fallback: bool,

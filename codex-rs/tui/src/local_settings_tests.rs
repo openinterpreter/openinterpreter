@@ -198,6 +198,7 @@ async fn strict_local_settings_load_preserves_resolved_preferences_and_legacy_wa
                 mermaid: false,
                 math: false,
                 tables: false,
+                lists: false,
             };
             expected.show_tooltips = false;
             expected.show_server_version_notice = false;

@@ -297,41 +297,6 @@ impl ChatWidget {
         }
     }
 
-    /// Preserve pending calls and timers, returning the revisions before and after hydration.
-    pub(crate) fn prepend_active_computer_history(
-        &mut self,
-        older: &dyn HistoryCell,
-        turns: &[Turn],
-    ) -> Option<(u64, u64)> {
-        let previous_revision = self.transcript.active_cell_revision;
-        let active = self.transcript.active_cell.as_mut().and_then(|cell| {
-            cell.as_any_mut()
-                .downcast_mut::<history_cell::ComputerActivityCell>()
-        })?;
-        let older = crate::thread_transcript::older_computer_group(older, active, turns)?;
-        active.prepend(older);
-        self.bump_active_cell_revision();
-        Some((previous_revision, self.transcript.active_cell_revision))
-    }
-
-    /// Reuse only adjacent computer calls; all other active cells form a transcript boundary.
-    fn update_computer_activity(
-        &mut self,
-        update: impl FnOnce(&mut history_cell::ComputerActivityCell),
-    ) {
-        if let Some(cell) = self.transcript.active_cell.as_mut().and_then(|cell| {
-            cell.as_any_mut()
-                .downcast_mut::<history_cell::ComputerActivityCell>()
-        }) {
-            update(cell);
-        } else {
-            self.flush_active_cell();
-            let mut cell = history_cell::ComputerActivityCell::default();
-            update(&mut cell);
-            self.transcript.active_cell = Some(Box::new(cell));
-        }
-    }
-
     pub(crate) fn handle_queued_item_started_now(&mut self, item: ThreadItemPayload) {
         match item {
             item @ ThreadItemPayload::CommandExecution { .. } => {

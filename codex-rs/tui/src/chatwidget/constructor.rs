@@ -104,6 +104,7 @@ impl ChatWidget {
         let config_panel_tui = local_settings.tui.clone();
         let mut widget = Self {
             empty_state_animation: Default::default(),
+            daybreak_enabled: false,
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
             codex_op_target,
@@ -171,6 +172,7 @@ impl ChatWidget {
             codex_rate_limit_reached_type: None,
             codex_spend_control_reached: None,
             rate_limit_warnings: RateLimitWarningState::default(),
+            clock_format: crate::clock_format::ClockFormat::system(),
             usage_notice_state: usage_notice::UsageNoticeState::default(),
             backend_banner_state: backend_banners::BackendBannerState::default(),
             security_setup_request_id: uuid::Uuid::new_v4(),
@@ -199,6 +201,7 @@ impl ChatWidget {
             last_unified_wait: None,
             unified_exec_wait_streak: None,
             turn_lifecycle: TurnLifecycleState::new(prevent_idle_sleep),
+            safety_recourse: None,
             realtime_conversation: RealtimeConversationUiState::default(),
             realtime_conversation_available_for_thread: false,
             safety_buffering: SafetyBufferingState::default(),
@@ -294,6 +297,7 @@ impl ChatWidget {
             status_line_git_summary_lookup_complete: false,
             status_line_workspace_headline: None,
             status_line_workspace_headline_pending_request_id: None,
+            next_status_line_workspace_headline_request_id: 0,
             status_line_workspace_headline_last_requested_at: None,
             status_line_workspace_messages_disabled: false,
             thread_usage: thread_usage::ThreadUsageState::default(),

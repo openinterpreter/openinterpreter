@@ -64,7 +64,11 @@ pub(super) enum ShellEscapePolicy {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum UserMessageSource {
     Prompt,
+    /// Enter submits directly, bypassing model-command interpretation.
+    DirectEnter,
     QuestionAnswer,
+    /// Resume the original turn after a safety interstitial.
+    SafetyRecourse,
 }
 
 /// Preserve a sent-but-unacknowledged input until a matching server receipt arrives.

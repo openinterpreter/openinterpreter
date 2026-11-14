@@ -411,7 +411,7 @@ impl HistoryCell for SessionHeaderHistoryCell {
             Line::from(vec!["     model: ".dim(), model.into(), "   /model".dim()]),
             Line::from(vec![
                 "     ".into(),
-                self.format_directory(Some(width.saturating_sub(/*rhs*/ 5)))
+                self.format_directory(Some(usize::from(width.saturating_sub(/*rhs*/ 5))))
                     .dim(),
             ]),
         ];
@@ -423,7 +423,7 @@ impl HistoryCell for SessionHeaderHistoryCell {
         }
         lines
             .into_iter()
-            .map(|line| truncate_line_with_ellipsis_if_overflow(line, width))
+            .map(|line| truncate_line_with_ellipsis_if_overflow(line, usize::from(width)))
             .collect()
     }
 

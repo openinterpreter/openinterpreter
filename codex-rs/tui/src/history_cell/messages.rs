@@ -222,7 +222,10 @@ impl HistoryCell for UserHistoryCell {
                 "  ".into(),
                 "  ".into(),
             ));
-            if !wrapped_message.is_empty() {
+            if wrapped_message
+                .as_ref()
+                .is_some_and(|lines| !lines.is_empty())
+            {
                 lines.push(HyperlinkLine::new(Line::from("").style(style)));
             }
         }
@@ -509,6 +512,7 @@ pub(crate) struct AgentMarkdownCell {
     inline_visualization_context: Option<crate::inline_visualization::InlineVisualizationContext>,
     rendered_lines: Option<MarkdownRenderCache>,
     spoken_artifacts: bool,
+    question_titles: Vec<std::ops::Range<usize>>,
 }
 
 impl AgentMarkdownCell {
@@ -562,7 +566,25 @@ impl AgentMarkdownCell {
             inline_visualization_context,
             rendered_lines,
             spoken_artifacts: false,
+            question_titles: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_phase(
+        mut self,
+        phase: Option<codex_protocol::models::MessagePhase>,
+    ) -> Self {
+        self.phase = phase;
+        self
+    }
+
+    pub(crate) fn with_questions(
+        mut self,
+        questions: &[codex_protocol::items::AsyncUserInputQuestion],
+    ) -> Self {
+        self.question_titles =
+            super::async_questions::title_ranges(&self.markdown_source, questions);
+        self
     }
 
     pub(crate) fn new_spoken(markdown_source: String, cwd: &Path) -> Self {
@@ -616,25 +638,29 @@ impl AgentMarkdownCell {
 
             // Re-render markdown from source at the current width. Reserve 2 columns for the "• " /
             // " " prefix prepended below.
-            let lines = crate::markdown::render_markdown_agent_with_list_spacing(
-                &self.markdown_source,
-                Some(wrap_width),
-                Some(self.cwd.as_path()),
-                self.inline_visualization_context.as_ref(),
-                list_spacing,
-            );
-            let lines = if self.spoken_artifacts {
-                let mut lines = lines;
-                super::spoken_artifacts::annotate_spoken_artifacts(&mut lines, &self.cwd);
-                lines
-            } else {
-                lines
+            let markdown = |source: &str| {
+                crate::markdown::render_markdown_agent_with_list_spacing(
+                    source,
+                    Some(wrap_width),
+                    Some(self.cwd.as_path()),
+                    self.inline_visualization_context.as_ref(),
+                    list_spacing,
+                )
             };
-            normalize_whitespace_only_hyperlink_lines(prefix_hyperlink_lines(
-                lines,
-                "• ".dim(),
-                "  ".into(),
-            ))
+            let lines = if self.question_titles.is_empty() {
+                let mut lines = markdown(&self.markdown_source);
+                if self.spoken_artifacts {
+                    super::spoken_artifacts::annotate_spoken_artifacts(&mut lines, &self.cwd);
+                }
+                prefix_hyperlink_lines(lines, "• ".dim(), "  ".into())
+            } else {
+                super::async_questions::render(
+                    &self.markdown_source,
+                    &self.question_titles,
+                    markdown,
+                )
+            };
+            normalize_whitespace_only_hyperlink_lines(lines)
         };
 
         if let Some(rendered_lines) = &self.rendered_lines {
