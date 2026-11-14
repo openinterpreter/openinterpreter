@@ -7,6 +7,7 @@ use anyhow::anyhow;
 use anyhow::bail;
 use clap::ArgGroup;
 use clap::builder::TypedValueParser;
+use codex_config::ConfigLayerSource;
 use codex_config::types::AppToolApproval;
 use codex_config::types::McpServerAuth;
 use codex_config::types::McpServerConfig;
@@ -23,6 +24,7 @@ use codex_core::plugins_manager_for_config;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::HttpClient;
 use codex_exec_server::RouteAwareHttpClient;
+use codex_extension_api::McpServerContributionContext;
 use codex_login::AuthManager;
 use codex_mcp::McpOAuthLoginSupport;
 use codex_mcp::McpRuntimeContext;
@@ -701,7 +703,9 @@ async fn run_list(config: &Config, list_args: ListArgs) -> Result<()> {
         AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true).await?;
     let auth = auth_manager.auth().await;
     let mcp_servers = mcp_manager.configured_servers(config).await;
-    let runtime_config = mcp_manager.runtime_config(config).await;
+    let runtime_config = mcp_manager
+        .runtime_config(McpServerContributionContext::global(config))
+        .await;
     let effective_mcp_servers = codex_mcp::effective_mcp_servers(&runtime_config, auth.as_ref());
 
     let mut entries: Vec<_> = mcp_servers.iter().collect();
@@ -1140,11 +1144,27 @@ async fn run_get(config: &Config, get_args: GetArgs) -> Result<()> {
         };
         println!("  default_tools_approval_mode: {approval_mode}");
     }
-    println!(
-        "  remove: {} mcp remove {}",
-        codex_product_info::Product::current().command_name(),
-        get_args.name
-    );
+    if let Some(layer) = config.config_layer_stack.get_active_user_layer()
+        && let ConfigLayerSource::User {
+            file,
+            profile: Some(_),
+        } = &layer.name
+        && !layer.is_disabled()
+        && layer
+            .config
+            .get("mcp_servers")
+            .and_then(|servers| servers.get(&get_args.name))
+            .is_some()
+    {
+        println!("  profile settings: {}", file.as_path().display());
+        println!("  removal scope: `mcp remove` only edits the global config.");
+    } else {
+        println!(
+            "  remove: {} mcp remove {}",
+            codex_product_info::Product::current().command_name(),
+            get_args.name
+        );
+    }
 
     Ok(())
 }
