@@ -108,9 +108,11 @@ pub(crate) fn thread_extensions(
     let mut skill_providers = codex_skills_extension::SkillProviders::new()
         .with_executor_provider(executor_skill_provider)
         .with_host_provider(Arc::new(codex_skills_extension::HostSkillProvider::new()));
-    if let Some(provider) = cloud_skill_provider {
-        skill_providers = skill_providers.with_cloud_provider(provider);
-    }
+    // Host snapshots replace, rather than duplicate, the live MCP catalog.
+    skill_providers = skill_providers.with_cloud_provider(
+        cloud_skill_provider
+            .unwrap_or_else(|| Arc::new(codex_skills_extension::OrchestratorSkillProvider::new())),
+    );
     codex_skills_extension::install_with_providers_and_metrics(
         &mut builder,
         skill_providers,

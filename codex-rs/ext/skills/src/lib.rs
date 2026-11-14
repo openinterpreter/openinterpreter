@@ -48,6 +48,7 @@ pub use invocation::detect_implicit_skill_invocation;
 pub use provider::ExecutorSkillProvider;
 pub use provider::FrozenCloudSkillProvider;
 pub use provider::HostSkillProvider;
+pub use provider::OrchestratorSkillProvider;
 pub use provider::SkillProvider;
 pub use required::EnvironmentSkillRequirements;
 pub use required::validate_required_skills;

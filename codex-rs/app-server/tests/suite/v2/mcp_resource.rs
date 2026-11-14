@@ -417,9 +417,8 @@ async fn local_executor_does_not_expose_cloud_skills() -> Result<()> {
 #[test_case(""; "default_off")]
 #[test_case("[cloud.skills]\nenabled = false"; "explicitly_disabled")]
 #[test_case("[orchestrator.skills]\nenabled = true"; "legacy_setting_ignored")]
-#[test_case("[cloud.skills]\nenabled = true"; "enabled_without_provider")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn missing_cloud_provider_does_not_expose_skills_namespace(extra_config: &str) -> Result<()> {
+async fn disabled_cloud_skills_do_not_expose_skills_namespace(extra_config: &str) -> Result<()> {
     let responses_server = responses::start_mock_server().await;
     let (apps_server_url, apps_server_calls, apps_server_handle) =
         start_resource_apps_mcp_server().await?;
@@ -490,6 +489,86 @@ async fn missing_cloud_provider_does_not_expose_skills_namespace(extra_config: &
         apps_server_calls.snapshot()
     );
 
+    apps_server_handle.abort();
+    let _ = apps_server_handle.await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enabled_cloud_skills_discover_and_read_live_mcp_without_a_snapshot() -> Result<()> {
+    let responses_server = responses::start_mock_server().await;
+    let (apps_server_url, apps_server_calls, apps_server_handle) =
+        start_resource_apps_mcp_server().await?;
+    let (_codex_home, mut mcp) = start_resource_test_app_server(
+        &apps_server_url,
+        &responses_server.uri(),
+        ResourceTestEnvironment::Auto,
+    )
+    .await?;
+    let ThreadStartResponse { thread, .. } = mcp
+        .start_thread(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            environments: Some(Vec::new()),
+            ..Default::default()
+        })
+        .await?;
+    let response_mock = responses::mount_sse_sequence(
+        &responses_server,
+        vec![
+            responses::sse(vec![
+                responses::ev_response_created("live-cloud-skill-read"),
+                responses::ev_function_call_with_namespace(
+                    "live-cloud-read",
+                    "skills",
+                    "read",
+                    &json!({"package": SKILL_RESOURCE_URI}).to_string(),
+                ),
+                responses::ev_completed("live-cloud-skill-read"),
+            ]),
+            responses::sse(vec![
+                responses::ev_response_created("live-cloud-skill-done"),
+                responses::ev_assistant_message("live-cloud-answer", "Done"),
+                responses::ev_completed("live-cloud-skill-done"),
+            ]),
+        ],
+    )
+    .await;
+    let start_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id,
+            input: vec![UserInput::Text {
+                text: format!("Use ${SKILL_NAME}"),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let _: TurnStartResponse = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(start_id)).await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].tool_by_name("skills", "read").is_some());
+    assert!(requests[0].tool_by_name("skills", "list").is_some());
+    assert!(
+        requests[0]
+            .message_input_texts("developer")
+            .iter()
+            .any(|text| text.contains(SKILL_NAME))
+    );
+    let output = requests[1]
+        .function_call_output_text("live-cloud-read")
+        .ok_or_else(|| anyhow::anyhow!("live cloud skill read output missing"))?;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output)?,
+        json!({"resource": SKILL_MAIN_PROMPT_URI, "contents": SKILL_CONTENTS, "next_cursor": null})
+    );
+    assert!(apps_server_calls.snapshot().list_resources >= 2);
+    assert!(apps_server_calls.snapshot().main_prompt_reads >= 1);
     apps_server_handle.abort();
     let _ = apps_server_handle.await;
     Ok(())
