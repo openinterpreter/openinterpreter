@@ -424,6 +424,8 @@ async fn file_image_passes_through_request_and_rollout() -> anyhow::Result<()> {
     assert_eq!(
         strip_response_item_id(strip_metadata(actual)),
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![

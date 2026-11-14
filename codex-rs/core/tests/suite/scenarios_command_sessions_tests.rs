@@ -1,6 +1,7 @@
 //! End-to-end command lifecycle with a snapshot of its complete model-visible history.
 
 use super::*;
+use codex_history::RolloutItem;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use core_test_support::responses;

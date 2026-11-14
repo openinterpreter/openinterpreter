@@ -1745,7 +1745,6 @@ async fn model_catalog_url_supplies_conversation_model_and_instructions() -> Res
     model.visibility = ModelVisibility::List;
     model.supported_in_api = true;
     model.support_verbosity = false;
-    model.used_fallback_model_metadata = false;
     model
         .model_messages
         .as_mut()

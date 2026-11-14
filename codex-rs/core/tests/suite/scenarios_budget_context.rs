@@ -5,6 +5,7 @@ use super::super::rollout_budget::HostAccounting;
 use super::super::rollout_budget::rollout_budget;
 use super::*;
 use codex_core::AgentRef;
+use codex_exec_server::CreateDirectoryOptions;
 use codex_extension_api::ContextContributor;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::PreviousWorldStateSection;

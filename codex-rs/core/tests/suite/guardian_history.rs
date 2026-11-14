@@ -528,6 +528,7 @@ async fn guardian_history_survives_compaction_and_eviction_but_not_legacy_rollba
                 .resume_thread_with_history(
                     test.config.clone(),
                     InitialHistory::Resumed(ResumedHistory {
+                        history_revision: None,
                         conversation_id: thread_id,
                         history: Arc::new(model_context.items),
                         rollout_path: None,

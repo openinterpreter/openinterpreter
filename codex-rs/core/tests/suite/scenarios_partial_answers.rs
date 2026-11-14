@@ -2,6 +2,7 @@
 
 use super::super::guardian_retained_context::ForkTestLifecycle;
 use super::*;
+use codex_core::config::TokenBudgetConfig;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::protocol::ThreadHistoryMode;
 use core_test_support::ThreadIdle;

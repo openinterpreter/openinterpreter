@@ -50,7 +50,7 @@ impl AttachmentStore for TestAudioDurationStore {
     fn is_resolvable<'a>(
         &'a self,
         file_id: &'a str,
-    ) -> codex_attachment_store::IsResolvableFuture<'a> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             file_id != "file_tool_audio" || !self.tool_file_expired.load(Ordering::SeqCst)
         })

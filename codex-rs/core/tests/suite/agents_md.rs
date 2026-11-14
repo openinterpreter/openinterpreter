@@ -29,6 +29,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::TurnEnvironmentRequest;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::request_user_input::RequestUserInputAnswer;
@@ -286,6 +287,7 @@ pub(super) async fn persisted_resume_history(
                     .items,
             ),
             rollout_path: stored.rollout_path,
+            history_revision: None,
         }),
     ))
 }
@@ -1572,7 +1574,7 @@ async fn fork_preserves_thread_instructions(
     let fork = match source {
         InstructionForkSource::LiveRollout => {
             test.thread_manager
-                .fork_thread(ForkSnapshot::Interrupted, options, rollout_path)
+                .fork_legacy_thread(ForkSnapshot::Interrupted, options, rollout_path)
                 .await?
         }
         InstructionForkSource::OfflineHistory => {
@@ -1587,6 +1589,7 @@ async fn fork_preserves_thread_instructions(
                 conversation_id: parent_id,
                 history: Arc::new(stored.items),
                 rollout_path: None,
+                history_revision: None,
             });
             test.thread_manager
                 .fork_thread_from_history(ForkSnapshot::Interrupted, options, history)

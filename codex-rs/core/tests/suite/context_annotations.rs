@@ -4,6 +4,7 @@ use codex_core::config::CurrentTimeReminderConfig;
 use codex_core::config::RolloutBudgetConfig;
 use codex_core::config::TokenBudgetConfig;
 use codex_features::Feature;
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::ImageReference;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::AdditionalContextEntry;

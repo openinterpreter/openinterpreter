@@ -7,6 +7,7 @@ use codex_extension_api::PreviousWorldStateSection;
 use codex_extension_api::RenderedWorldStateFragment;
 use codex_extension_api::WorldStateContributionInput;
 use codex_extension_api::WorldStateSectionContribution;
+use codex_history::RolloutItem;
 use codex_protocol::models::input_text;
 use pretty_assertions::assert_eq;
 use std::sync::Mutex;
