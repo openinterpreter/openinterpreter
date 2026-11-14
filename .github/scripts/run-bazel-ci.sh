@@ -349,7 +349,8 @@ if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
 fi
 
 bazel_console_log="$(mktemp)"
-trap 'rm -f "$bazel_console_log"' EXIT
+target_pattern_file=""
+trap 'rm -f "$bazel_console_log"; if [[ -n "$target_pattern_file" ]]; then rm -f "$target_pattern_file"; fi' EXIT
 
 bazel_run_args=(
   "${bazel_args[@]}"
@@ -359,6 +360,21 @@ if [[ "${bazel_args[0]}" == "test" ]]; then
 fi
 if (( ${#post_config_bazel_args[@]} > 0 )); then
   bazel_run_args+=("${post_config_bazel_args[@]}")
+fi
+if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
+  target_arg_bytes=0
+  for target in "${bazel_targets[@]}"; do
+    target_arg_bytes=$((target_arg_bytes + ${#target} + 1))
+  done
+  if (( target_arg_bytes > 8000 )); then
+    # Windows CreateProcess has a finite command line. Bazel accepts the same
+    # ordered patterns from a file; retain exclusions and avoid dropping tests.
+    : "${RUNNER_TEMP:?Windows runner temp directory is required}"
+    target_pattern_file="$(mktemp "$(cygpath -u "$RUNNER_TEMP")/bazel-targets.XXXXXX")"
+    printf '%s\n' "${bazel_targets[@]}" > "$target_pattern_file"
+    bazel_run_args+=("--target_pattern_file=$(cygpath -m "$target_pattern_file")")
+    bazel_targets=()
+  fi
 fi
 set +e
 # Work around Bazel 9 remote repo contents cache / overlay materialization
