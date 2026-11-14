@@ -74,6 +74,7 @@ use core_test_support::skip_if_sandbox;
 use core_test_support::skip_if_wine_exec;
 use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::start_streaming_sse_server;
+use core_test_support::test_codex::local_requests;
 use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
@@ -150,11 +151,13 @@ async fn guardian_session_inherits_parent_http_fallback(
     auth: CodexAuth,
     provider_name: &str,
     base_path: &str,
+    free_guardian: bool,
     expected_guardian_path: &str,
     response_id_present: bool,
 ) -> Result<()> {
     let credits_enabled =
         auth.uses_codex_backend() && provider_name == "OpenAI" && base_path == "/backend-api/codex";
+    let requests_parent_credits = credits_enabled;
     skip_if_no_network!(Ok(()));
 
     let configured_policy = "Use the task-configured Guardian policy.";
@@ -499,10 +502,13 @@ for (const phase of ["before", "after"]) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[test_case(false; "legacy_transcript")]
-#[test_case(true; "thread_owned_transcript")]
+#[test_case(false, false; "legacy_transcript_without_parent_checkpoint")]
+#[test_case(false, true; "legacy_transcript_with_parent_checkpoint")]
+#[test_case(true, false; "thread_owned_transcript_without_parent_checkpoint")]
+#[test_case(true, true; "thread_owned_transcript_with_parent_checkpoint")]
 async fn guardian_review_compacts_with_summary_despite_parent_token_budget(
     thread_owned: bool,
+    with_parent_checkpoint: bool,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_wine_exec!(
@@ -820,13 +826,19 @@ async fn guardian_requests_record_only_their_own_tool_calls(thread_owned: bool) 
 #[test_case(CodexAuth::create_dummy_chatgpt_auth_for_testing(), false, "codex-auto-review"; "chatgpt_without_free_guardian")]
 async fn guardian_session_prewarms_and_is_reused_for_first_review(
     auth: CodexAuth,
-    base_path: &str,
+    free_guardian: bool,
     expected_model: &str,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let uses_codex_backend = auth.uses_codex_backend();
     let credits_enabled = uses_codex_backend;
+    let requests_parent_credits = credits_enabled;
+    let base_path = if uses_codex_backend {
+        "/backend-api/codex"
+    } else {
+        "/v1"
+    };
     let bundled_models = codex_models_manager::bundled_models_response()?.models;
     let catalog_auto_review = bundled_models
         .iter()
@@ -890,6 +902,13 @@ async fn guardian_session_prewarms_and_is_reused_for_first_review(
     let backend_base_url = format!("{}{base_path}", server.uri());
     let mut builder = test_codex()
         .with_auth(auth)
+        .with_pre_build_hook(move |home| {
+            fs::write(
+                home.join("config.toml"),
+                format!("[features.guardianv2]\nfree_guardian = {free_guardian}\n"),
+            )
+            .expect("Guardian feature configuration should be written");
+        })
         .with_config(move |config| {
             config.model_provider.base_url = Some(backend_base_url);
             let rules_dir = config.codex_home.join("rules");
