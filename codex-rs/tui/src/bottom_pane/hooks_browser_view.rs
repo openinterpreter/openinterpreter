@@ -433,7 +433,11 @@ impl HooksBrowserView {
                 } else {
                     "  "
                 };
-                let mut line = Line::from(format!("{prefix}{row}"));
+                let mut line = Line::from(vec![
+                    format!("{prefix}[{marker}] ").into(),
+                    format!("{:>index_width$}", idx + 1).dim(),
+                    format!("  {title}{trust_suffix}").into(),
+                ]);
                 line = truncate_line_with_ellipsis_if_overflow(line, width);
                 let needs_review = hook_needs_review(hook);
                 if self.state.selected_idx == Some(idx) {

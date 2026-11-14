@@ -179,10 +179,10 @@ impl AsyncQuestions {
                 };
                 let number = index + 1;
                 let prefix = format!("{prefix} {number}. ");
-                GenericDisplayRow {
+                let indent = prefix.width();
+                let is_choice = index < self.options().len();
+                let mut row = GenericDisplayRow {
                     // Other stays an inline editor with foreground-only focus.
-                    selection_style: (index < self.options().len())
-                        .then(super::picker_style::selection_style),
                     name: format!("{prefix}{label}"),
                     wrap_indent: Some(indent),
                     selection_style: is_choice.then(super::picker_style::selection_style),
@@ -202,7 +202,7 @@ impl AsyncQuestions {
         if !self.has_options() {
             return 0;
         }
-        let rows = self.option_rows();
+        let rows = self.option_rows(width);
         if self.other_selected() {
             let prefix = self.other_prefix_width(width);
             measure_rows_height(

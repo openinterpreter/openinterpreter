@@ -20,6 +20,7 @@ use std::time::Instant;
 
 use crate::app_event::AppEvent;
 use crate::app_event::FeedbackCategory;
+use crate::app_event::FeedbackDestination;
 use crate::app_event::SecretReportPasscode;
 use crate::app_event_sender::AppEventSender;
 use crate::key_hint;
@@ -86,7 +87,8 @@ impl FeedbackNoteView {
             turn_id,
             app_event_tx,
             include_logs,
-            feedback_audience,
+            upload_audience,
+            can_save,
             false,
         )
     }
@@ -104,7 +106,8 @@ impl FeedbackNoteView {
             turn_id,
             app_event_tx,
             include_logs,
-            feedback_audience,
+            Some(feedback_audience),
+            false,
             true,
         );
         if let Some(reason) = reason {
@@ -119,7 +122,8 @@ impl FeedbackNoteView {
         turn_id: Option<String>,
         app_event_tx: AppEventSender,
         include_logs: bool,
-        feedback_audience: FeedbackAudience,
+        upload_audience: Option<FeedbackAudience>,
+        can_save: bool,
         requires_passcode: bool,
     ) -> Self {
         Self {
@@ -171,7 +175,7 @@ impl FeedbackNoteView {
                 }
                 KeyCode::Enter if key_event.modifiers == KeyModifiers::NONE => {
                     if (12..=128).contains(&self.passcode_input.len()) {
-                        self.submit();
+                        self.submit(FeedbackDestination::OpenAi);
                     } else {
                         self.passcode_error = true;
                     }
@@ -227,11 +231,11 @@ impl FeedbackNoteView {
                 if self.paste_burst.direct_insert_newline_should_insert(now) {
                     self.paste_burst.extend_window(now);
                     self.textarea.insert_str("\n");
-                } else if modifiers == KeyModifiers::NONE {
+                } else if modifiers == KeyModifiers::NONE && self.upload_audience.is_some() {
                     if self.requires_passcode {
                         self.entering_passcode = true;
                     } else {
-                        self.submit();
+                        self.submit(FeedbackDestination::OpenAi);
                     }
                 } else {
                     self.textarea.input(key_event);
