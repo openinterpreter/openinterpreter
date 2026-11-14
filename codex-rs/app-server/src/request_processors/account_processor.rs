@@ -5,6 +5,7 @@ use super::config_processor::map_error as map_config_error;
 use super::*;
 use crate::auth_mode::auth_mode_to_api;
 use crate::external_auth::ExternalAuthBridge;
+use crate::model_catalog::ModelCatalog;
 use crate::outgoing_message::AccountNotification;
 use chrono::DateTime;
 use codex_app_server_protocol::DesktopOnboardingEntrypoint;
@@ -27,6 +28,9 @@ mod rate_limit_resets;
 mod security_setup;
 mod workspace_routing;
 mod workspace_switching;
+pub(crate) use enterprise_login::EnterpriseLoginCompletion;
+pub(crate) use enterprise_login::EnterpriseLoginTarget;
+pub(crate) use gcp_setup::handle_gcp_setup;
 
 // Duration before a browser ChatGPT login attempt is abandoned.
 const LOGIN_CHATGPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -122,6 +126,7 @@ impl AccountRequestProcessor {
         outgoing: Arc<OutgoingMessageSender>,
         config: Arc<Config>,
         config_manager: ConfigManager,
+        model_catalog: Arc<ModelCatalog>,
     ) -> Arc<Self> {
         let processor = Arc::new(Self {
             auth_manager,

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use codex_app_server_protocol::Model;
 use codex_app_server_protocol::ModelServiceTier;
 use codex_app_server_protocol::ModelUpgradeInfo;

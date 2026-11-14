@@ -17,6 +17,8 @@ use codex_goal_extension::GoalSetRequest;
 use codex_goal_extension::GoalTokenBudgetUpdate;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::WriterLockCoordinator;
 
@@ -26,6 +28,18 @@ mod user_context;
 enum GoalAccess {
     Read,
     Mutate,
+}
+
+fn thread_settings_applied_item(
+    thread_id: ThreadId,
+    settings: ThreadSettingsSnapshot,
+) -> RolloutItem {
+    RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
+        ThreadSettingsAppliedEvent {
+            thread_id: Some(thread_id),
+            thread_settings: settings,
+        },
+    ))
 }
 
 #[derive(Clone)]

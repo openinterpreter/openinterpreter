@@ -4,6 +4,7 @@ use codex_app_server_protocol::JSONRPCErrorError;
 use codex_extension_api::TurnStartAdmission;
 use std::sync::Arc;
 use std::sync::Mutex;
+use tokio::sync::OwnedMutexGuard;
 use tokio::sync::watch;
 
 use crate::error_code::server_draining_error;
@@ -11,6 +12,7 @@ use crate::error_code::server_draining_error;
 #[derive(Debug, Default)]
 struct AdmissionState {
     closed: bool,
+    paused: bool,
     active: usize,
 }
 
@@ -18,6 +20,7 @@ struct AdmissionState {
 pub(crate) struct TurnAdmission {
     state: Arc<Mutex<AdmissionState>>,
     active_tx: watch::Sender<usize>,
+    pause_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Default for TurnAdmission {
@@ -25,13 +28,57 @@ impl Default for TurnAdmission {
         Self {
             state: Arc::new(Mutex::new(AdmissionState::default())),
             active_tx: watch::channel(0).0,
+            pause_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }
 
 pub(crate) struct TurnPermit(TurnAdmission);
 
+/// Exclusive account transition: reject new turns until all earlier admits
+/// finish, and retain that fence through the configuration/login handoff.
+pub(crate) struct TurnAdmissionPause {
+    admission: TurnAdmission,
+    _gate: OwnedMutexGuard<()>,
+}
+
+impl Drop for TurnAdmissionPause {
+    fn drop(&mut self) {
+        self.admission
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .paused = false;
+    }
+}
+
 impl TurnAdmission {
+    pub(crate) async fn pause(&self) -> Result<TurnAdmissionPause, JSONRPCErrorError> {
+        let gate = Arc::clone(&self.pause_gate).lock_owned().await;
+        let mut active = self.subscribe_active();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.closed {
+                return Err(server_draining_error());
+            }
+            state.paused = true;
+        }
+        let pause = TurnAdmissionPause {
+            admission: self.clone(),
+            _gate: gate,
+        };
+        while *active.borrow_and_update() != 0 {
+            active
+                .changed()
+                .await
+                .map_err(|_| server_draining_error())?;
+        }
+        Ok(pause)
+    }
+
     pub(crate) fn begin_drain(&self) {
         self.state
             .lock()
@@ -54,7 +101,7 @@ impl TurnAdmission {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.closed {
+        if state.closed || state.paused {
             return None;
         }
         state.active += 1;

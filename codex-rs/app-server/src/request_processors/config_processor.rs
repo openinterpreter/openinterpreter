@@ -481,7 +481,7 @@ async fn reload_user_config_inner(config_manager: &ConfigManager, thread_manager
     }
 }
 
-fn map_requirements_to_api(
+pub(crate) fn map_requirements_to_api(
     requirements: Option<ConfigRequirementsToml>,
     allowed_login_methods: Vec<ForcedLoginMethod>,
 ) -> Option<ConfigRequirements> {
@@ -617,7 +617,7 @@ fn map_requirements_to_api(
         enforce_residency: requirements
             .enforce_residency
             .map(map_residency_requirement_to_api),
-        network: network.map(map_network_requirements_to_api),
+        network: requirements.network.map(map_network_requirements_to_api),
         auto_review: requirements
             .auto_review
             .map(|auto_review| AutoReviewRequirements {
