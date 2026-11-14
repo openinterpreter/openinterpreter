@@ -100,6 +100,8 @@ pub(super) struct ThreadEventStore {
     pub(super) attachment_prefix: Option<usize>,
     pub(super) pending_interactive_replay: PendingInteractiveReplayState,
     pub(super) active_turn_id: Option<String>,
+    // Keep the active turn's start through bounded replay-buffer eviction.
+    pub(super) evicted_active_turn: Option<Box<Turn>>,
     // Retain the active item even if its start falls out of the bounded replay buffer.
     pub(super) active_reasoning_item: Option<codex_app_server_protocol::ItemStartedNotification>,
     // Lifecycle identity must survive bounded replay-buffer eviction.
@@ -150,6 +152,7 @@ impl ThreadEventStore {
             attachment_prefix: None,
             pending_interactive_replay: PendingInteractiveReplayState::default(),
             active_turn_id: None,
+            evicted_active_turn: None,
             active_reasoning_item: None,
             latest_turn_id: None,
             pending_interrupt_turn_id: None,
@@ -193,6 +196,7 @@ impl ThreadEventStore {
     }
 
     pub(super) fn set_turns(&mut self, turns: Vec<Turn>) {
+        self.evicted_active_turn = None;
         if self.active_reasoning_item.as_ref().is_some_and(|started| {
             turns.iter().any(|turn| {
                 (turn.id == started.turn_id && turn.status != TurnStatus::InProgress)

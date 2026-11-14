@@ -984,6 +984,7 @@ See the Codex keymap documentation for supported actions and examples."
             routed_key_activation: None,
             transcript_cells: Vec::new(),
             composer_tips: Default::default(),
+            turn_tips: Default::default(),
             native_history: Default::default(),
             transcript_view: Default::default(),
             conversation_frame: crate::owned_transcript::ConversationFrame::default(),
