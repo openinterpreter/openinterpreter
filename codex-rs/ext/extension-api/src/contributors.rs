@@ -266,15 +266,6 @@ pub trait TurnLifecycleContributor: Send + Sync {
         })
     }
 
-    /// Refreshes catalogs before a step; returns true when MCP needs rebuilding.
-    /// Called under the same per-thread catalog lock as explicit refresh and step preparation.
-    fn refresh_catalog_for_step<'a>(
-        &'a self,
-        _input: CatalogRefreshInput<'a>,
-    ) -> ExtensionFuture<'a, bool> {
-        Box::pin(async { false })
-    }
-
     /// Publishes cloud catalogs after explicit invalidation, without requiring a turn.
     /// Core marks MCP dirty after publication. Accepted complete or partial catalogs
     /// replace the previous result; failed or superseded discovery returns an error.
