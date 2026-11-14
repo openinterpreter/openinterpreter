@@ -23,17 +23,9 @@ impl ExtensionMetrics for RecordingMetrics {
         &self,
         name: &str,
         value: i64,
-        _boundaries: &[f64],
+        boundaries: &[f64],
         tags: &[(&str, &str)],
     ) {
-        self.histogram(name, value, tags);
-    }
-
-    fn counter(&self, name: &str, _inc: i64, _tags: &[(&str, &str)]) {
-        panic!("unexpected counter: {name}");
-    }
-
-    fn histogram(&self, name: &str, value: i64, tags: &[(&str, &str)]) {
         self.samples
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

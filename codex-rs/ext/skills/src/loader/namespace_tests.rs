@@ -12,9 +12,6 @@ use codex_protocol::protocol::SkillScope;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
-use std::collections::HashSet;
-use std::fs;
-use std::path::Path;
 use tempfile::TempDir;
 
 #[cfg(unix)]

@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 50
     env:
       EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
-      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
