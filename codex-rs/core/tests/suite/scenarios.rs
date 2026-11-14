@@ -1,11 +1,5 @@
 //! Multi-turn Astra scenarios snapshot the model-visible request history of shipped features.
 
-#[path = "scenarios_turn_input_agent_message.rs"]
-mod turn_input_agent_message;
-
-#[path = "scenarios_multi_environment_mcp.rs"]
-mod multi_environment_mcp;
-
 use super::image_rollout::RecordingFileAttachmentStore;
 use super::permissions_messages::PermissionPathScenario;
 use codex_attachment_store::AttachmentStoreErrorKind;
@@ -22,21 +16,29 @@ use std::time::Duration;
 use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_analytics::CompactionTrigger;
+use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
 use codex_config::types::McpServerConfig;
 use codex_context_fragments::AnsweredQuestion;
 use codex_context_fragments::ContextualUserFragment;
+use codex_core::ForkSnapshot;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInput;
 use codex_core::TurnInputRequest;
+use codex_core::compact::AutoCompactionDisabled;
 use codex_core::config::Config;
+use codex_core::config::TokenBudgetConfig;
+use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ExtensionRegistry;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_features::Feature;
+use codex_history::RolloutItem;
+use codex_image_generation_extension::install as install_image_generation_extension;
 use codex_login::CodexAuth;
 use codex_models_manager::bundled_models_response;
 use codex_protocol::capabilities::CapabilityRootLocation;
@@ -47,10 +49,13 @@ use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::AgentMessageDelivery;
 use codex_protocol::items::TurnItem;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::PermissionProfileSnapshot;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ToolMessage;
 use codex_protocol::openai_models::ToolMode;
 use codex_protocol::permissions::NetworkSandboxPolicy;
@@ -58,6 +63,7 @@ use codex_protocol::protocol::AdditionalContextEntry;
 use codex_protocol::protocol::AdditionalContextKind;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnEnvironmentSelection;
@@ -79,6 +85,7 @@ use core_test_support::context_snapshot::SnapshotEntry;
 use core_test_support::exec_server::ExecServerProcess;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_custom_tool_call;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_message_item_added;
@@ -98,6 +105,7 @@ use core_test_support::test_codex::TestEnv;
 use core_test_support::test_codex::environment_config_for_selection;
 use core_test_support::test_codex::executor_path_uri;
 use core_test_support::test_codex::test_codex;
+use core_test_support::test_codex::test_env;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_match;
 use core_test_support::wait_for_mcp_server;
@@ -273,9 +281,11 @@ fn skills_extensions() -> Arc<ExtensionRegistry<Config>> {
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
     install(&mut extensions, |config: &Config| SkillsExtensionConfig {
         include_instructions: config.include_skill_instructions,
+        catalog_deltas_enabled: config.features.enabled(Feature::SkillCatalogDeltas),
+        omit_descriptions: false,
         max_context_tokens: config.skill_max_context_tokens,
         bundled_skills_enabled: config.bundled_skills_enabled(),
-        orchestrator_skills_enabled: config.orchestrator_skills_enabled,
+        cloud_skill_enabled: config.cloud_skill_enabled,
         shadow_selection_enabled: config.features.enabled(Feature::SkillSearch),
     });
     Arc::new(extensions.build())
@@ -381,7 +391,6 @@ fn configure_scenario_catalog(config: &mut Config) {
     )
     .expect("fixture config layers");
     config.model_catalog = Some(bundled_models_response().expect("bundled model catalog"));
-    config.orchestrator_skills_enabled = false;
 }
 
 fn configure_catalog_plugin_scenario(config: &mut Config) {
@@ -732,6 +741,7 @@ async fn unavailable_images_are_rechecked_without_rewriting_history() -> Result<
     let server = start_mock_server().await;
     let image_store = Arc::new(RecordingFileAttachmentStore {
         resolve_barrier: Some(Arc::new(tokio::sync::Barrier::new(/*n*/ 3))),
+        available_by_default: true,
         ..Default::default()
     });
     let test = test_codex()
@@ -1410,9 +1420,11 @@ async fn astra_omits_disabled_executor_skills_from_model_context() -> Result<()>
         SkillProviders::new().with_executor_provider(Arc::new(provider)),
         |config: &Config| SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
+            catalog_deltas_enabled: config.features.enabled(Feature::SkillCatalogDeltas),
+            omit_descriptions: false,
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: false,
-            orchestrator_skills_enabled: false,
+            cloud_skill_enabled: false,
             shadow_selection_enabled: false,
         },
     );
@@ -2485,12 +2497,6 @@ fn compaction_chunk(
     }
 }
 
-fn compaction_output(value: &str) -> serde_json::Value {
-    json!({"type": "response.output_item.done", "item": {
-        "type": "compaction", "encrypted_content": value
-    }})
-}
-
 async fn async_compaction_test(
     builder: TestCodexBuilder,
     responses_uri: &str,
@@ -2536,6 +2542,7 @@ async fn async_compaction_image_checks_do_not_block_turn_completion() -> Result<
     let barrier = Arc::new(tokio::sync::Barrier::new(/*n*/ 2));
     let image_store = Arc::new(RecordingFileAttachmentStore {
         resolve_barrier: Some(Arc::clone(&barrier)),
+        available_by_default: true,
         ..Default::default()
     });
     let (release_sampling, sampling_gate) = oneshot::channel();

@@ -56,16 +56,22 @@ use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::TurnSettingsUpdate;
 use codex_protocol::protocol::TurnSettingsUpdateOutcome;
+use codex_protocol::request_permissions::PermissionGrantScope;
+use codex_protocol::request_permissions::RequestPermissionProfile;
+use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::user_input::UserInput;
 use codex_skills_extension::ExecutorSkillProvider;
 use codex_skills_extension::HostSkillProvider;
 use codex_skills_extension::HostSkillsLoadInput;
+use codex_skills_extension::OrchestratorSkillProvider;
 use codex_skills_extension::SkillProvider;
 use codex_skills_extension::SkillProviderSource;
 use codex_skills_extension::SkillProviders;
@@ -124,7 +130,12 @@ use toml::toml;
 use tracing::Level;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_test::internal::MockWriter;
+use wiremock::Mock;
 use wiremock::MockServer;
+use wiremock::Request;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::method;
+use wiremock::matchers::path_regex;
 
 #[path = "skills_extension/cloud_skill_tests.rs"]
 mod cloud_skill_tests;
@@ -157,45 +168,6 @@ impl SkillProvider for PausedCatalogSkillProvider {
             if self.first_discovery.swap(/*val*/ false, Ordering::SeqCst) {
                 self.started
                     .send(query.turn_id.clone().expect("turn discovery"))
-                    .expect("discovery receiver");
-                self.resume
-                    .acquire()
-                    .await
-                    .expect("resume discovery")
-                    .forget();
-            }
-            self.inner.list(query).await
-        })
-    }
-
-    fn read<'a>(
-        &'a self,
-        request: SkillReadRequest<'a>,
-    ) -> SkillProviderFuture<'a, SkillReadResult> {
-        self.inner.read(request)
-    }
-
-    fn search(&self, request: SkillSearchRequest) -> SkillProviderFuture<'_, SkillSearchResult> {
-        self.inner.search(request)
-    }
-}
-
-struct PausedCatalogSkillProvider {
-    inner: CatalogSkillProvider,
-    first_discovery: AtomicBool,
-    started: tokio::sync::mpsc::UnboundedSender<String>,
-    resume: tokio::sync::Semaphore,
-}
-
-impl SkillProvider for PausedCatalogSkillProvider {
-    fn list(&self, query: SkillListQuery) -> SkillProviderFuture<'_, SkillCatalog> {
-        Box::pin(async move {
-            if query.host_snapshot.is_none() {
-                return Ok(SkillCatalog::default());
-            }
-            if self.first_discovery.swap(/*val*/ false, Ordering::SeqCst) {
-                self.started
-                    .send(query.turn_id.clone())
                     .expect("discovery receiver");
                 self.resume
                     .acquire()
@@ -1643,13 +1615,18 @@ text({ names: result.skills.map(skill => skill.name), warnings: result.warnings,
     let mut extensions = ExtensionRegistryBuilder::new();
     install_with_providers(
         &mut extensions,
-        SkillProviders::new()
-            .with_orchestrator_provider(Arc::new(OrchestratorSkillProvider::new())),
+        SkillProviders::new().with_provider(SkillProviderSource::new(
+            SkillSourceKind::Custom("orchestrator".to_string()),
+            "orchestrator",
+            Arc::new(OrchestratorSkillProvider::new()),
+        )),
         |config: &Config| SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
+            catalog_deltas_enabled: config.features.enabled(Feature::SkillCatalogDeltas),
+            omit_descriptions: false,
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: false,
-            orchestrator_skills_enabled: true,
+            cloud_skill_enabled: false,
             shadow_selection_enabled: false,
         },
     );
@@ -1662,7 +1639,6 @@ text({ names: result.skills.map(skill => skill.name), warnings: result.warnings,
         })
         .with_config(|config| {
             config.include_skill_instructions = true;
-            config.orchestrator_skills_enabled = true;
             config
                 .features
                 .enable(Feature::CodeMode)
@@ -2026,13 +2002,18 @@ async fn production_turn_reuses_orchestrator_skills_until_mcp_invalidation() -> 
     let mut extensions = ExtensionRegistryBuilder::new();
     install_with_providers(
         &mut extensions,
-        SkillProviders::new()
-            .with_orchestrator_provider(Arc::new(OrchestratorSkillProvider::new())),
+        SkillProviders::new().with_provider(SkillProviderSource::new(
+            SkillSourceKind::Custom("orchestrator".to_string()),
+            "orchestrator",
+            Arc::new(OrchestratorSkillProvider::new()),
+        )),
         |config: &Config| SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
+            catalog_deltas_enabled: config.features.enabled(Feature::SkillCatalogDeltas),
+            omit_descriptions: false,
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: false,
-            orchestrator_skills_enabled: true,
+            cloud_skill_enabled: false,
             shadow_selection_enabled: false,
         },
     );
@@ -2045,7 +2026,6 @@ async fn production_turn_reuses_orchestrator_skills_until_mcp_invalidation() -> 
         })
         .with_config(|config| {
             config.include_skill_instructions = true;
-            config.orchestrator_skills_enabled = true;
             config
                 .features
                 .enable(Feature::SkipHostSkillDiscovery)
@@ -3415,6 +3395,7 @@ async fn assert_catalog_model_switch(max_context_tokens: Option<usize>) -> Resul
             })
             .collect(),
         warnings: Vec::new(),
+        is_partial: false,
     };
     let (started, mut discovery) = tokio::sync::mpsc::unbounded_channel();
     let provider = Arc::new(PausedCatalogSkillProvider {
@@ -3431,9 +3412,11 @@ async fn assert_catalog_model_switch(max_context_tokens: Option<usize>) -> Resul
         SkillProviders::new().with_host_provider(provider.clone()),
         |config: &Config| SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
+            catalog_deltas_enabled: config.features.enabled(Feature::SkillCatalogDeltas),
+            omit_descriptions: false,
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: false,
-            orchestrator_skills_enabled: false,
+            cloud_skill_enabled: false,
             shadow_selection_enabled: false,
         },
     );

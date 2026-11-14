@@ -1,6 +1,7 @@
 use anyhow::Context;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_attachment_store::AttachmentMetadata;
 use codex_attachment_store::AttachmentStore;
 use codex_attachment_store::AttachmentStoreError;
 use codex_attachment_store::AttachmentStoreErrorKind;
@@ -65,6 +66,10 @@ const UPLOADED_FILE_ID: &str = "file_uploaded_image";
 #[derive(Default)]
 pub(super) struct RecordingFileAttachmentStore {
     pub(super) uploads: Mutex<Vec<UploadRequest>>,
+    pub(super) resolves: Mutex<HashMap<String, usize>>,
+    pub(super) resolve_errors: Mutex<HashMap<String, AttachmentStoreErrorKind>>,
+    pub(super) resolve_barrier: Option<Arc<tokio::sync::Barrier>>,
+    pub(super) available_by_default: bool,
 }
 
 impl AttachmentStore for RecordingFileAttachmentStore {
@@ -80,10 +85,34 @@ impl AttachmentStore for RecordingFileAttachmentStore {
     fn resolve<'a>(&'a self, request: ResolveRequest<'a>) -> ResolveFuture<'a> {
         let file_id = request.file_id;
         Box::pin(async move {
-            Err(AttachmentStoreError::new(
-                AttachmentStoreErrorKind::NotFound,
-                format!("attachment `{file_id}` was not found"),
-            ))
+            *self
+                .resolves
+                .lock()
+                .expect("resolves lock")
+                .entry(file_id.to_string())
+                .or_default() += 1;
+            if let Some(barrier) = &self.resolve_barrier {
+                barrier.wait().await;
+            }
+            if let Some(kind) = self
+                .resolve_errors
+                .lock()
+                .expect("resolve errors lock")
+                .get(file_id)
+            {
+                return Err(AttachmentStoreError::new(
+                    *kind,
+                    format!("attachment `{file_id}` could not be resolved"),
+                ));
+            }
+            if self.available_by_default {
+                Ok(AttachmentMetadata::default())
+            } else {
+                Err(AttachmentStoreError::new(
+                    AttachmentStoreErrorKind::NotFound,
+                    format!("attachment `{file_id}` was not found"),
+                ))
+            }
         })
     }
 }
