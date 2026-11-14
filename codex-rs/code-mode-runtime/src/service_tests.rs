@@ -340,7 +340,6 @@ async fn tool_start_acknowledgement_reports_termination_before_invocation() {
         .execute(
             execute_request("await new Promise(() => {});"),
             delegate.clone(),
-            /*preempt*/ None,
         )
         .await
         .unwrap();

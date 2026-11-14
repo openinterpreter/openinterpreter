@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use codex_code_mode_protocol::CodeModeOutputTruncation;
 use codex_code_mode_protocol::ExecuteRequest;
+use codex_code_mode_protocol::FunctionCallOutputContentItem as OutputItem;
 use codex_code_mode_protocol::host::BOUNDED_OUTPUT_MAX_IMAGE_BYTES;
 use pretty_assertions::assert_eq;
 use serde_json::Value as JsonValue;
