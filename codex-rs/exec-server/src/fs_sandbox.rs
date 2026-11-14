@@ -24,8 +24,6 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
 use crate::ExecServerRuntimeOptions;
-#[cfg(test)]
-use crate::ExecServerRuntimeOptions as ExecServerRuntimePaths;
 use crate::FileSystemSandboxContext;
 use crate::fs_helper::CODEX_FS_HELPER_ARG1;
 use crate::fs_helper::FsHelperPayload;
@@ -579,7 +577,7 @@ mod tests {
     fn sandbox_exec_request_uses_filesystem_root_and_preserves_policy_cwd() {
         let codex_self_exe = std::env::current_exe().expect("current exe");
         let runtime_paths =
-            ExecServerRuntimePaths::new(codex_self_exe.clone(), Some(codex_self_exe))
+            ExecServerRuntimeOptions::new(codex_self_exe.clone(), Some(codex_self_exe))
                 .expect("runtime paths");
         let runner = FileSystemSandboxRunner::new(runtime_paths);
         let selected = tempfile::tempdir().expect("selected directory");
@@ -617,7 +615,7 @@ mod tests {
     fn sandbox_exec_request_binds_windows_relative_globs_to_policy_cwd() {
         let codex_self_exe = std::env::current_exe().expect("current exe");
         let runtime_paths =
-            ExecServerRuntimePaths::new(codex_self_exe, /*codex_linux_sandbox_exe*/ None)
+            ExecServerRuntimeOptions::new(codex_self_exe, /*codex_linux_sandbox_exe*/ None)
                 .expect("runtime paths");
         let runner = FileSystemSandboxRunner::new(runtime_paths);
         let selected = tempfile::tempdir().expect("selected directory");
