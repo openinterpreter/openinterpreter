@@ -2,6 +2,7 @@
 
 use super::*;
 use codex_app_server_protocol::ImageReference;
+use codex_utils_path_uri::LegacyAppPathString;
 
 impl ChatWidget {
     pub(crate) fn set_task_mentions_enabled(&mut self, enabled: bool) {

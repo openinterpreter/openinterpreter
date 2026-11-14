@@ -675,6 +675,8 @@ pub enum TuiEvent {
 pub(crate) enum OverlayInput {
     #[default]
     Default,
+    /// Let the terminal select text while the inline question editor owns input.
+    QuestionEditor,
     Transcript,
     StaticPager,
     Usage,
@@ -684,10 +686,18 @@ impl OverlayInput {
     fn captures_mouse(self, owned_screen: bool) -> bool {
         match self {
             Self::Default => owned_screen,
-            Self::StaticPager => false,
+            Self::StaticPager | Self::QuestionEditor => false,
             Self::Transcript | Self::Usage => true,
         }
     }
+}
+
+/// Inline views describe their capture preference separately from overlay ownership.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MouseCapture {
+    #[default]
+    Inherit,
+    Disabled,
 }
 
 pub struct Tui {
@@ -876,6 +886,22 @@ impl Tui {
             )
         } else {
             self.overlay_input = input;
+            Ok(())
+        }
+    }
+
+    /// Never replace a pager's input ownership while reconciling inline question input.
+    /// The app calls this on draw after the question's expanded state changes.
+    pub(crate) fn set_question_mouse_capture(&mut self, capture: MouseCapture) -> Result<()> {
+        if matches!(
+            self.overlay_input,
+            OverlayInput::Default | OverlayInput::QuestionEditor
+        ) {
+            self.set_overlay_input(match capture {
+                MouseCapture::Disabled => OverlayInput::QuestionEditor,
+                MouseCapture::Inherit => OverlayInput::Default,
+            })
+        } else {
             Ok(())
         }
     }
