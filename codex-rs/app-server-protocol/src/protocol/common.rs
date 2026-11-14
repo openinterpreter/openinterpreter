@@ -2147,6 +2147,7 @@ server_notification_definitions! {
     SkillsChanged => "skills/changed" (v2::SkillsChangedNotification),
     ThreadNameUpdated => "thread/name/updated" (v2::ThreadNameUpdatedNotification),
     ThreadAttachmentUpdated => "thread/attachment/updated" (v2::ThreadAttachmentUpdatedNotification),
+    ThreadSectionChanged => "thread/section/changed" (v2::ThreadSectionChangedNotification),
     ThreadGoalUpdated => "thread/goal/updated" (v2::ThreadGoalUpdatedNotification),
     #[experimental("thread/prediction/updated")]
     ThreadPredictionUpdated => "thread/prediction/updated" (v2::ThreadPredictionUpdatedNotification),
@@ -2478,6 +2479,28 @@ mod tests {
                 trace: None,
             })
             .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn thread_section_changed_notification_preserves_the_wire_contract() -> Result<()> {
+        let notification =
+            ServerNotification::ThreadSectionChanged(v2::ThreadSectionChangedNotification {
+                thread_id: "thread-1".to_string(),
+                section_id: None,
+            });
+        let wire = serde_json::to_value(&notification)?;
+        assert_eq!(
+            wire,
+            json!({
+                "method": "thread/section/changed",
+                "params": { "threadId": "thread-1", "sectionId": null }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ServerNotification>(wire)?,
+            notification
         );
         Ok(())
     }
