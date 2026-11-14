@@ -257,3 +257,38 @@ fn format_duration_ms(duration_ms: u64) -> String {
 fn pluralize(count: u64, singular: &'static str, plural: &'static str) -> &'static str {
     if count == 1 { singular } else { plural }
 }
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+    use codex_app_server_protocol::TurnItemsView;
+    use codex_app_server_protocol::TurnStatus;
+
+    #[test]
+    fn untimed_boundary_can_be_labeled_once_when_history_arrives() {
+        let mut turn = Turn {
+            id: "turn-1".to_string(),
+            root_turn_id: None,
+            items_view: TurnItemsView::Summary,
+            items: Vec::new(),
+            status: TurnStatus::Completed,
+            error: None,
+            started_at: None,
+            completed_at: None,
+            duration_ms: None,
+        };
+        let mut rendered = HashMap::new();
+        let boundary = FinalMessageSeparator::from_turn_once(&turn, &mut rendered, None, None)
+            .expect("full-screen transcript must retain an untimed boundary");
+        assert!(!boundary.has_timing());
+        assert_eq!(rendered.get(&turn.id), Some(&false));
+        assert!(FinalMessageSeparator::from_turn_once(&turn, &mut rendered, None, None).is_none());
+
+        turn.duration_ms = Some(3_723_000);
+        let label = FinalMessageSeparator::from_turn_once(&turn, &mut rendered, None, None)
+            .expect("historical timing should label the formerly untimed turn");
+        assert!(label.has_timing());
+        assert_eq!(rendered.get(&turn.id), Some(&true));
+        assert!(FinalMessageSeparator::from_turn_once(&turn, &mut rendered, None, None).is_none());
+    }
+}
