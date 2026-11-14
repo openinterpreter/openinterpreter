@@ -995,6 +995,7 @@ mod tests {
             prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: None,
         };
 
@@ -1097,6 +1098,7 @@ mod tests {
             prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: None,
         };
 
@@ -1170,6 +1172,7 @@ mod tests {
             prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: None,
         };
 
@@ -1234,6 +1237,7 @@ mod tests {
             prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: None,
         };
 
@@ -1383,6 +1387,7 @@ mod tests {
             prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: None,
         };
 
@@ -1503,6 +1508,7 @@ mod tests {
             prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: None,
         };
 
@@ -1617,6 +1623,7 @@ mod tests {
             prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: None,
         };
 
@@ -1678,6 +1685,7 @@ mod tests {
             prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: None,
         };
 
@@ -1734,6 +1742,7 @@ mod tests {
             prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: Some(TextControls {
                 verbosity: None,
                 format: Some(TextFormat {
