@@ -419,6 +419,7 @@ pub(crate) enum AppEvent {
         thread_id: ThreadId,
         destination: ThreadTitleDestination,
         prompt: String,
+        expected_name: Option<String>,
         fallback_title: Option<String>,
         effort: Option<ReasoningEffort>,
         result: Result<String, String>,
@@ -906,13 +907,13 @@ pub(crate) enum AppEvent {
     /// Fetch backend-estimated usage for the currently visible enterprise thread.
     RefreshThreadUsage {
         thread_id: ThreadId,
-        request_id: u64,
+        request_id: Uuid,
     },
 
     /// Result of fetching backend-estimated usage for a specific thread.
     ThreadUsageLoaded {
         thread_id: ThreadId,
-        request_id: u64,
+        request_id: Uuid,
         result: Result<ThreadUsageOutcome, String>,
     },
 
@@ -925,7 +926,7 @@ pub(crate) enum AppEvent {
 
     /// Fetch workspace messages for the status-line headline item.
     RefreshStatusLineWorkspaceHeadline {
-        request_id: u64,
+        request_id: Uuid,
     },
 
     /// Commit settled asynchronous usage output after active-output barriers clear.
@@ -1816,7 +1817,7 @@ pub(crate) enum AppEvent {
     },
     /// Async update of the workspace notification headline for status line rendering.
     StatusLineWorkspaceHeadlineUpdated {
-        request_id: u64,
+        request_id: Uuid,
         result: Result<crate::workspace_messages::WorkspaceHeadlineFetchResult, String>,
     },
     /// Apply a user-confirmed status-line item ordering/selection.

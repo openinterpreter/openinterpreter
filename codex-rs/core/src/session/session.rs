@@ -268,17 +268,6 @@ impl SessionConfiguration {
             .set_legacy_permission_profile(permission_profile)
     }
 
-    pub(super) fn sandbox_policy(
-        &self,
-        environments: &[TurnEnvironmentSelection],
-    ) -> SandboxPolicy {
-        let permission_profile = self.materialized_permission_profile(environments);
-        codex_sandboxing::compatibility_sandbox_policy_for_permission_profile(
-            &permission_profile,
-            self.cwd(),
-        )
-    }
-
     pub(super) fn file_system_sandbox_policy(
         &self,
         environments: &[TurnEnvironmentSelection],
@@ -1070,6 +1059,10 @@ impl Session {
                     SessionId::from(thread_id)
                 }
             });
+        let inherited_items = agent_control
+            .runtime()
+            .retained_items_for_fresh_child(&initial_history, &session_source)
+            .await;
         let has_provided_agent_control =
             matches!(&agent_control, AgentControlInit::Provided { .. });
         let (agent_control, local_agent_runtime): (Arc<dyn AgentControl>, _) = match agent_control {
@@ -1114,6 +1107,7 @@ impl Session {
         thread_extension_init.insert(codex_extension_api::ThreadOriginator(
             session_configuration.originator.clone(),
         ));
+        thread_extension_init.insert(Arc::clone(&models_manager));
         // Publish the already resolved model before extensions make startup decisions.
         // Turn construction refreshes this attachment when the selected model changes.
         thread_extension_init.insert(Arc::unwrap_or_clone(model_info.model));
@@ -1383,10 +1377,10 @@ impl Session {
                     .approval_policy
                     .value()
                     .to_string(),
-                sandbox_policy: format!(
-                    "{:?}",
-                    session_configuration.sandbox_policy(environment_selections)
-                ),
+                permissions_profile: session_configuration
+                    .materialized_permission_profile(environment_selections)
+                    .legacy_sandbox_policy_label(session_configuration.cwd())
+                    .to_string(),
             };
             let mut post_session_configured_events = Vec::<Event>::new();
 
@@ -2191,6 +2185,7 @@ impl Session {
 
             // record_initial_history can emit events. We record only after the SessionConfiguredEvent is emitted.
             Box::pin(sess.record_initial_history(initial_history)).await;
+            Box::pin(sess.record_inherited_items(inherited_items)).await?;
             if restore_child_window {
                 sess.state.lock().await.restore_auto_compact_window(
                     /*window_number*/ 0,

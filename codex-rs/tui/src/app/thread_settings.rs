@@ -292,6 +292,10 @@ pub(super) fn apply_thread_settings_to_session(
         settings.cwd.as_path(),
     );
     session.active_permission_profile = settings.active_permission_profile.clone().map(Into::into);
+    if let Some(environments) = &settings.environments {
+        session.primary_environment_cwd =
+            crate::session_state::primary_environment_cwd(environments);
+    }
     session.set_cwd_retargeting_implicit_runtime_workspace_root(settings.cwd.clone());
     let mut collaboration_mode = settings.collaboration_mode.clone();
     collaboration_mode
@@ -300,6 +304,7 @@ pub(super) fn apply_thread_settings_to_session(
         .clone_from(&settings.model);
     collaboration_mode.settings.reasoning_effort = settings.effort.clone();
     session.collaboration_mode = Some(Box::new(collaboration_mode));
+    session.thread_settings_confirmed = true;
 }
 
 fn thread_settings_update_has_changes(params: &ThreadSettingsUpdateParams) -> bool {

@@ -101,7 +101,6 @@ use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::MultiAgentVersion;
-use codex_protocol::protocol::NetworkAccess;
 use codex_protocol::protocol::RealtimeVoice;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol_test_support::ContentItemTestExt;
@@ -667,6 +666,9 @@ async fn load_config_resolves_code_mode_config() -> std::io::Result<()> {
     let codex_home = tempdir()?;
     let config_toml: ConfigToml = toml::from_str(
         r#"
+[code_mode]
+heartbeat_interval_s = 30
+
 [features.code_mode]
 enabled = true
 default_exec_yield_time_ms = 10000
@@ -700,6 +702,7 @@ disable_in_process_fallback = true
         vec!["mcp__history".to_string(), "mcp__notes".to_string()]
     );
     assert!(config.code_mode.disable_in_process_fallback);
+    assert_eq!(config.code_mode.heartbeat_interval_s, 30);
     assert!(config.features.enabled(Feature::CodeMode));
     assert!(config.features.enabled(Feature::CodeModeHost));
     Ok(())
@@ -2714,7 +2717,7 @@ async fn permissions_profiles_network_disabled_by_default_does_not_start_proxy()
 }
 
 #[tokio::test]
-async fn default_permissions_profile_populates_runtime_sandbox_policy() -> std::io::Result<()> {
+async fn default_permissions_profile_populates_runtime_permissions() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let cwd = TempDir::new()?;
     std::fs::create_dir_all(cwd.path().join("docs"))?;
@@ -2788,15 +2791,6 @@ async fn default_permissions_profile_populates_runtime_sandbox_policy() -> std::
                 missing_path_behavior: None,
             },
         ]),
-    );
-    assert_eq!(
-        &config.legacy_sandbox_policy(),
-        &SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![],
-            network_access: false,
-            exclude_tmpdir_env_var: true,
-            exclude_slash_tmp: true,
-        }
     );
     assert!(
         !config
@@ -2900,10 +2894,6 @@ async fn permission_profile_override_populates_runtime_permissions() -> std::io:
         permission_profile
     );
     assert_eq!(config.permissions.active_permission_profile(), None);
-    assert_eq!(
-        &config.legacy_sandbox_policy(),
-        &SandboxPolicy::DangerFullAccess
-    );
     Ok(())
 }
 
@@ -3004,9 +2994,11 @@ extends = ":workspace"
             extends: Some(BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string()),
         })
     );
-    assert_eq!(
-        config.legacy_sandbox_policy(),
-        SandboxPolicy::new_workspace_write_policy()
+    assert!(
+        config
+            .permissions
+            .file_system_sandbox_policy()
+            .can_write_local_path_with_cwd(cwd.path(), cwd.path())
     );
     Ok(())
 }
@@ -3230,12 +3222,6 @@ async fn permission_profile_override_preserves_managed_unrestricted_filesystem()
         config.permissions.effective_permission_profile(),
         permission_profile
     );
-    assert_eq!(
-        &config.legacy_sandbox_policy(),
-        &SandboxPolicy::ExternalSandbox {
-            network_access: NetworkAccess::Restricted,
-        }
-    );
     Ok(())
 }
 
@@ -3253,16 +3239,16 @@ async fn managed_unrestricted_permission_profile_still_enables_network_requireme
         ConfigToml::default(),
         ConfigOverrides {
             cwd: Some(cwd.path().to_path_buf()),
-            permission_profile: Some(permission_profile),
+            permission_profile: Some(permission_profile.clone()),
             ..Default::default()
         },
         codex_home.abs(),
     )
     .await?;
+
     assert_eq!(
-        &config.legacy_sandbox_policy(),
-        &SandboxPolicy::DangerFullAccess,
-        "the legacy projection is intentionally lossy for managed unrestricted profiles"
+        config.permissions.effective_permission_profile(),
+        permission_profile
     );
 
     let layers = config
@@ -3291,8 +3277,7 @@ async fn managed_unrestricted_permission_profile_still_enables_network_requireme
 }
 
 #[tokio::test]
-async fn permission_profile_override_keeps_memories_root_out_of_legacy_projection()
--> std::io::Result<()> {
+async fn permission_profile_override_keeps_memories_root_read_only() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let cwd = TempDir::new()?;
     let permission_profile = PermissionProfile::from_runtime_permissions(
@@ -3332,15 +3317,6 @@ async fn permission_profile_override_keeps_memories_root_out_of_legacy_projectio
             .permissions
             .file_system_sandbox_policy()
             .can_write_local_path_with_cwd(memories_root.as_path(), cwd.path())
-    );
-    assert_eq!(
-        &config.legacy_sandbox_policy(),
-        &SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![],
-            network_access: false,
-            exclude_tmpdir_env_var: true,
-            exclude_slash_tmp: true,
-        }
     );
     Ok(())
 }
@@ -4087,20 +4063,24 @@ async fn implicit_builtin_workspace_profile_preserves_sandbox_workspace_write_se
         "implicit :workspace cannot be faithfully re-selected when it includes \
          legacy sandbox_workspace_write settings"
     );
-    match config.legacy_sandbox_policy() {
-        SandboxPolicy::WorkspaceWrite {
-            writable_roots,
-            network_access,
-            exclude_tmpdir_env_var,
-            exclude_slash_tmp,
-        } => {
-            assert!(writable_roots.contains(&extra_root));
-            assert!(network_access);
-            assert!(exclude_tmpdir_env_var);
-            assert!(!exclude_slash_tmp);
-        }
-        sandbox_policy => panic!("expected workspace-write projection, got {sandbox_policy:?}"),
-    }
+    assert_eq!(
+        policy
+            .entries
+            .into_iter()
+            .filter(|entry| matches!(
+                &entry.path,
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Tmpdir | FileSystemSpecialPath::SlashTmp
+                }
+            ))
+            .collect::<Vec<_>>(),
+        vec![FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::SlashTmp
+            },
+            FileSystemAccessMode::Write,
+        )]
+    );
     Ok(())
 }
 
@@ -4356,15 +4336,6 @@ async fn permissions_profiles_allow_direct_write_roots_outside_workspace_root()
             .file_system_sandbox_policy()
             .can_write_local_path_with_cwd(external_write_path.as_path(), cwd.path())
     );
-    assert_eq!(
-        &config.legacy_sandbox_policy(),
-        &SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![external_write_path],
-            network_access: false,
-            exclude_tmpdir_env_var: true,
-            exclude_slash_tmp: true,
-        }
-    );
     Ok(())
 }
 
@@ -4472,12 +4443,6 @@ async fn permissions_profiles_allow_unknown_special_paths() -> std::io::Result<(
             missing_path_behavior: None,
         }]),
     );
-    assert_eq!(
-        &config.legacy_sandbox_policy(),
-        &SandboxPolicy::ReadOnly {
-            network_access: false,
-        }
-    );
     assert!(
         config.startup_warnings.iter().any(|warning| warning.contains(
             "Configured filesystem path `:future_special_path` is not recognized by this version of Codex and will be ignored."
@@ -4543,12 +4508,6 @@ async fn permissions_profiles_allow_missing_filesystem_with_warning() -> std::io
     assert_eq!(
         config.permissions.file_system_sandbox_policy(),
         FileSystemSandboxPolicy::restricted(Vec::new())
-    );
-    assert_eq!(
-        &config.legacy_sandbox_policy(),
-        &SandboxPolicy::ReadOnly {
-            network_access: false,
-        }
     );
     assert!(
         config.startup_warnings.iter().any(|warning| warning.contains(
@@ -4681,7 +4640,6 @@ async fn permissions_profiles_allow_network_enablement() -> std::io::Result<()> 
         config.permissions.network_sandbox_policy().is_enabled(),
         "expected network sandbox policy to be enabled",
     );
-    assert!(config.legacy_sandbox_policy().has_full_network_access());
     Ok(())
 }
 
@@ -5256,7 +5214,10 @@ exclude_slash_tmp = true
         )
         .await?;
 
-        let sandbox_policy = config.legacy_sandbox_policy();
+        let sandbox_policy = config
+            .permissions
+            .effective_permission_profile()
+            .to_legacy_sandbox_policy(cwd.path())?;
         let file_system_policy = config.permissions.file_system_sandbox_policy();
         let network_policy = config.permissions.network_sandbox_policy();
 
@@ -6159,6 +6120,90 @@ async fn rebuild_with_session_layers_refreshes_plugin_derived_mcp_config() -> an
 }
 
 #[tokio::test]
+async fn mcp_launch_cwds_follow_the_runtime_feature() -> anyhow::Result<()> {
+    let codex_home = TempDir::new()?;
+    let plugin_root = codex_home.path().join("plugins/cache/test/sample/local");
+    std::fs::create_dir_all(plugin_root.join(".codex-plugin"))?;
+    std::fs::write(
+        plugin_root.join(".codex-plugin/plugin.json"),
+        r#"{"name":"sample"}"#,
+    )?;
+    std::fs::write(
+        plugin_root.join(".mcp.json"),
+        r#"{"mcpServers":{"sample":{"command":"sample","enabled":false},"other":{"command":"other"}}}"#,
+    )?;
+    let user_config = toml::toml! {
+        [features]
+        plugins = true
+        mcp_connection_sharing = true
+
+        [plugins."sample@test"]
+        enabled = true
+
+        [mcp_servers.node_repl]
+        command = "test-repl"
+
+        [mcp_servers.artifact_session]
+        command = "test-repl"
+
+        [mcp_servers.other_repl]
+        command = "custom-repl"
+    };
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        toml::to_string(&user_config)?,
+    )?;
+
+    let mut config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await?;
+    config.mcp_launch_cwds = Arc::new(McpLaunchCwds {
+        plugins: HashMap::from([(
+            "sample@test".to_string(),
+            HashMap::from([("sample".to_string(), config.codex_home.clone())]),
+        )]),
+        configured: ["node_repl", "artifact_session", "other_repl"]
+            .into_iter()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    ("test-repl".to_string(), config.codex_home.clone()),
+                )
+            })
+            .collect(),
+    });
+    let plugins_manager =
+        plugins_manager_for_config(&config, auth_manager_from_optional_auth(/*auth*/ None));
+    assert!(!config.features.enabled(Feature::McpSharedReplCwd));
+    for enabled in [false, true, false] {
+        let mut incoming = config.clone();
+        incoming
+            .features
+            .set_enabled(Feature::McpSharedReplCwd, enabled)?;
+        config = config.resolve_runtime_refresh(&incoming, RuntimeConfigRefresh::User)?;
+        let mcp_config = config.to_mcp_config(&plugins_manager).await;
+        let configured_servers = mcp_config.mcp_server_catalog.configured_servers();
+        for (name, command) in [
+            ("sample", "sample"),
+            ("node_repl", "test-repl"),
+            ("artifact_session", "test-repl"),
+        ] {
+            let mut expected = stdio_mcp(command);
+            expected.enabled = name != "sample";
+            let McpServerTransportConfig::Stdio { cwd, .. } = &mut expected.transport else {
+                unreachable!();
+            };
+            *cwd = enabled.then(|| LegacyAppPathString::from_abs_path(&config.codex_home));
+            assert_eq!(configured_servers[name], expected);
+        }
+        assert_eq!(configured_servers["other"], stdio_mcp("other"));
+        assert_eq!(configured_servers["other_repl"], stdio_mcp("custom-repl"));
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn to_mcp_config_omits_plugin_id_when_user_server_shadows_plugin_mcp() -> anyhow::Result<()> {
     let codex_home = TempDir::new()?;
     let plugin_root = codex_home
@@ -6421,25 +6466,27 @@ async fn add_dir_override_extends_workspace_writable_roots() -> std::io::Result<
 
     let expected_backend = backend.abs();
     if cfg!(target_os = "windows") {
-        match &config.legacy_sandbox_policy() {
-            SandboxPolicy::ReadOnly { .. } => {}
-            other => panic!("expected read-only policy on Windows, got {other:?}"),
-        }
+        assert_eq!(
+            config.permissions.permission_profile(),
+            &PermissionProfile::read_only()
+        );
     } else {
-        match &config.legacy_sandbox_policy() {
-            SandboxPolicy::WorkspaceWrite { writable_roots, .. } => {
-                assert_eq!(
-                    writable_roots
-                        .iter()
-                        .filter(|root| **root == expected_backend)
-                        .count(),
-                    1,
-                    "expected single writable root entry for {}",
-                    expected_backend.display()
-                );
-            }
-            other => panic!("expected workspace-write policy, got {other:?}"),
-        }
+        assert!(
+            config
+                .permissions
+                .file_system_sandbox_policy()
+                .can_write_local_path_with_cwd(expected_backend.as_path(), config.cwd.as_path())
+        );
+        let writable_roots = config.permissions.user_visible_workspace_roots();
+        assert_eq!(
+            writable_roots
+                .iter()
+                .filter(|root| **root == expected_backend)
+                .count(),
+            1,
+            "expected single writable root entry for {}",
+            expected_backend.display()
+        );
     }
 
     Ok(())
@@ -6561,10 +6608,10 @@ async fn workspace_write_includes_configured_writable_root_once_without_memories
     .await?;
 
     if cfg!(target_os = "windows") {
-        match &config.legacy_sandbox_policy() {
-            SandboxPolicy::ReadOnly { .. } => {}
-            other => panic!("expected read-only policy on Windows, got {other:?}"),
-        }
+        assert_eq!(
+            config.permissions.permission_profile(),
+            &PermissionProfile::read_only()
+        );
     } else {
         assert!(
             !memories_root.exists(),
@@ -6572,21 +6619,23 @@ async fn workspace_write_includes_configured_writable_root_once_without_memories
             memories_root.display()
         );
         let expected_memories_root = memories_root.abs();
-        match &config.legacy_sandbox_policy() {
-            SandboxPolicy::WorkspaceWrite { writable_roots, .. } => {
-                assert!(!writable_roots.contains(&expected_memories_root));
-                assert_eq!(
-                    writable_roots
-                        .iter()
-                        .filter(|root| **root == writable_root)
-                        .count(),
-                    1,
-                    "expected single writable root entry for {}",
-                    writable_root.display()
-                );
-            }
-            other => panic!("expected workspace-write policy, got {other:?}"),
-        }
+        assert!(
+            config
+                .permissions
+                .file_system_sandbox_policy()
+                .can_write_local_path_with_cwd(writable_root.as_path(), config.cwd.as_path())
+        );
+        let writable_roots = config.permissions.user_visible_workspace_roots();
+        assert!(!writable_roots.contains(&expected_memories_root));
+        assert_eq!(
+            writable_roots
+                .iter()
+                .filter(|root| **root == writable_root)
+                .count(),
+            1,
+            "expected single writable root entry for {}",
+            writable_root.display()
+        );
     }
 
     Ok(())
@@ -6636,17 +6685,13 @@ async fn memory_tool_makes_memories_root_readable_without_creating_or_widening_w
     );
 
     if cfg!(target_os = "windows") {
-        match &config.legacy_sandbox_policy() {
-            SandboxPolicy::ReadOnly { .. } => {}
-            other => panic!("expected read-only policy on Windows, got {other:?}"),
-        }
+        assert_eq!(
+            config.permissions.permission_profile(),
+            &PermissionProfile::read_only()
+        );
     } else {
-        match &config.legacy_sandbox_policy() {
-            SandboxPolicy::WorkspaceWrite { writable_roots, .. } => {
-                assert!(!writable_roots.contains(&memories_root_abs));
-            }
-            other => panic!("expected workspace-write policy, got {other:?}"),
-        }
+        let writable_roots = config.permissions.user_visible_workspace_roots();
+        assert!(!writable_roots.contains(&memories_root_abs));
     }
 
     Ok(())
@@ -9016,8 +9061,10 @@ async fn load_config_uses_auto_review_guardian_policy_config(
     Ok(())
 }
 
+#[test_case::test_case("sync")]
+#[test_case::test_case("async")]
 #[tokio::test]
-async fn sync_elastic_budget_is_opt_in_and_validated() {
+async fn elastic_budget_is_opt_in_and_validated(target: &str) {
     let excessive_minimum = codex_guardian_context::DEFAULT_MAX_INPUT_TOKENS + 1;
     let minimum_mismatch = format!(
         r#"[features.guardianv2.sync_elastic_sections.root_conversation_messages]
@@ -9036,6 +9083,7 @@ max_total_section_tokens = 0
 min_total_section_tokens = 1
 max_section_entry_tokens = 0
 "#,
+        "",
         maximum_below_minimum,
         minimum_mismatch.as_str(),
         r#"[features.guardianv2.sync_elastic_sections.root_messages]
@@ -9046,10 +9094,11 @@ min_total_section_tokens = 1
 max_section_entry_tokens = 1
 "#,
     ] {
+        let sections = sections.replace("sync_", &format!("{target}_"));
         for enabled in [false, true] {
             let result = Config::load_from_base_config_with_overrides(
                 toml::from_str(&format!(
-                    "[features.guardianv2]\nenabled = false\nsync_elastic_budgeting = {enabled}\n{sections}"
+                    "[features.guardianv2]\nenabled = false\n{target}_elastic_budgeting = {enabled}\n{sections}"
                 ))
                 .unwrap(),
                 ConfigOverrides {
@@ -9062,6 +9111,17 @@ max_section_entry_tokens = 1
             assert_eq!(result.is_err(), enabled);
         }
     }
+}
+
+#[tokio::test]
+async fn async_elastic_opt_in_preserves_fixed_capture() {
+    let mut config = super::test_config().await;
+    config.guardian_async_elastic_budget =
+        Some(core_test_support::guardian::elastic_budget_config());
+    assert_eq!(
+        config.guardian_context_budgeting(),
+        codex_guardian_context::ContextBudgeting::Fixed,
+    );
 }
 
 #[tokio::test]
@@ -11638,24 +11698,14 @@ async fn test_untrusted_project_gets_unless_trusted_approval_policy() -> anyhow:
         "Expected UnlessTrusted approval policy for untrusted project"
     );
 
-    // Verify that untrusted projects still get WorkspaceWrite sandbox (or ReadOnly on Windows)
-    if cfg!(target_os = "windows") {
-        assert!(
-            matches!(
-                &config.legacy_sandbox_policy(),
-                SandboxPolicy::ReadOnly { .. }
-            ),
-            "Expected ReadOnly on Windows"
-        );
-    } else {
-        assert!(
-            matches!(
-                &config.legacy_sandbox_policy(),
-                SandboxPolicy::WorkspaceWrite { .. }
-            ),
-            "Expected WorkspaceWrite sandbox for untrusted project"
-        );
-    }
+    assert_eq!(
+        config.permissions.permission_profile(),
+        &if cfg!(target_os = "windows") {
+            PermissionProfile::read_only()
+        } else {
+            PermissionProfile::workspace_write()
+        }
+    );
 
     Ok(())
 }
@@ -11707,8 +11757,8 @@ async fn requirements_disallowing_default_sandbox_falls_back_to_required_default
         .build()
         .await?;
     assert_eq!(
-        config.legacy_sandbox_policy(),
-        SandboxPolicy::new_read_only_policy()
+        config.permissions.effective_permission_profile(),
+        PermissionProfile::read_only()
     );
     Ok(())
 }
@@ -11733,8 +11783,8 @@ async fn explicit_sandbox_mode_falls_back_when_disallowed_by_requirements() -> s
         .build()
         .await?;
     assert_eq!(
-        config.legacy_sandbox_policy(),
-        SandboxPolicy::new_read_only_policy()
+        config.permissions.effective_permission_profile(),
+        PermissionProfile::read_only()
     );
     Ok(())
 }
@@ -12011,8 +12061,6 @@ async fn permission_profile_override_falls_back_when_disallowed_by_requirements(
         .build()
         .await?;
 
-    let expected_sandbox_policy = SandboxPolicy::new_read_only_policy();
-    assert_eq!(config.legacy_sandbox_policy(), expected_sandbox_policy);
     assert_eq!(
         config.permissions.effective_permission_profile(),
         PermissionProfile::read_only()
@@ -12147,10 +12195,6 @@ async fn permission_profile_override_preserves_split_write_roots() -> std::io::R
             .file_system_sandbox_policy()
             .can_write_local_path_with_cwd(outside_root.as_path(), config.cwd.as_path())
     );
-    assert!(matches!(
-        &config.legacy_sandbox_policy(),
-        SandboxPolicy::WorkspaceWrite { .. }
-    ));
     assert_eq!(
         config.permissions.network_sandbox_policy(),
         NetworkSandboxPolicy::Restricted

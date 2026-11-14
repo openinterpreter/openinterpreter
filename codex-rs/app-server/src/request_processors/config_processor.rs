@@ -74,6 +74,7 @@ const SUPPORTED_EXPERIMENTAL_FEATURE_ENABLEMENT: &[&str] = &[
     "mcp_2026_07_28",
     "mcp_connection_sharing",
     "mcp_lazy_stdio_startup",
+    "mcp_shared_repl_cwd",
     "memories",
     "mentions_v2",
     "remote_control",
@@ -236,6 +237,25 @@ impl ConfigRequestProcessor {
             .invalidate_if_current_provider(&response.provider.id)
             .await;
         Ok(response)
+    }
+
+    pub(crate) fn model_provider_default_set(
+        &self,
+        params: codex_app_server_protocol::ModelProviderDefaultSetParams,
+    ) -> futures::future::BoxFuture<'_, Result<ClientResponsePayload, JSONRPCErrorError>> {
+        // Keep provider config resolution off the shared request dispatcher stack.
+        Box::pin(async move {
+            let result = self
+                .config_manager
+                .model_provider_default_set(params)
+                .await
+                .map_err(map_error);
+            let response = self.handle_config_mutation_result(result).await?;
+            if response.status == codex_app_server_protocol::WriteStatus::Ok {
+                self.model_catalog.invalidate().await;
+            }
+            Ok(ClientResponsePayload::ModelProviderDefaultSet(response))
+        })
     }
 
     pub(crate) async fn model_provider_capabilities_read(

@@ -297,7 +297,7 @@ pub(crate) async fn run_codex_thread_one_shot(
             let _ = tx_bridge.send(event).await;
             if should_shutdown {
                 let _ = ops_tx
-                    .send(Submission {
+                    .send(Box::new(Submission {
                         id: "shutdown".to_string(),
                         op: Op::Shutdown {},
                         turn_extension_init: None,
@@ -306,7 +306,7 @@ pub(crate) async fn run_codex_thread_one_shot(
                         root_turn_id: None,
                         residency_guard: None,
                         message_delivery: None,
-                    })
+                    }))
                     .await;
                 child_cancel.cancel();
                 break;
@@ -407,7 +407,7 @@ async fn forward_event_or_shutdown(
 /// Forward ops from a caller to a sub-agent, respecting cancellation.
 async fn forward_ops(
     io: Arc<SessionIo>,
-    rx_ops: Receiver<Submission>,
+    rx_ops: Receiver<Box<Submission>>,
     cancel_token_ops: CancellationToken,
 ) {
     loop {

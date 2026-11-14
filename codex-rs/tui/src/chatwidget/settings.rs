@@ -552,6 +552,10 @@ impl ChatWidget {
     fn apply_thread_settings(&mut self, mut settings: ThreadSettings) {
         self.invalidate_permission_discovery();
         let cwd_changed = self.config.cwd != settings.cwd;
+        if let Some(environments) = &settings.environments {
+            self.primary_environment_cwd =
+                crate::session_state::primary_environment_cwd(environments);
+        }
         self.apply_thread_settings_cwd(settings.cwd.clone());
         self.config.model_provider_id = settings.model_provider.clone();
         self.set_daybreak_enabled(self.daybreak_enabled);
@@ -599,6 +603,7 @@ impl ChatWidget {
         }
         settings.collaboration_mode.settings.model = settings.model;
         settings.collaboration_mode.settings.reasoning_effort = settings.effort;
+        self.thread_settings_confirmed = true;
         self.set_effective_collaboration_mode(settings.collaboration_mode);
         self.refresh_effective_service_tier();
         self.refresh_status_surfaces();

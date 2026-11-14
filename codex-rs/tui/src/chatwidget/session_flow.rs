@@ -77,6 +77,7 @@ impl ChatWidget {
             || self.config.cwd.as_path() != session.cwd.as_path();
         self.thread_id = Some(session.thread_id);
         self.read_only_history = session.read_only_history;
+        self.thread_settings_confirmed = session.thread_settings_confirmed;
         self.sync_context_window_visibility();
         #[cfg(target_os = "windows")]
         if self.windows_sandbox_local_server
@@ -119,6 +120,8 @@ impl ChatWidget {
         self.update_collaboration_mode_indicator();
         self.forked_from = session.forked_from_id;
         self.current_rollout_path = session.rollout_path.clone();
+        self.primary_environment_cwd
+            .clone_from(&session.primary_environment_cwd);
         self.current_cwd = Some(session.cwd.to_path_buf());
         self.config.cwd = session.cwd.clone();
         self.config.model_provider_id = session.model_provider_id.clone();

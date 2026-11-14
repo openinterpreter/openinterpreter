@@ -209,9 +209,8 @@ fn collect_resume_override_mismatches(
             }
         };
         if !sandbox_matches {
-            let active_sandbox = config_snapshot.sandbox_policy();
             mismatch_details.push(format!(
-                "sandbox requested={requested_sandbox:?} active={active_sandbox:?}"
+                "sandbox requested={requested_sandbox:?} active={active_sandbox_label}"
             ));
         }
     }
@@ -5538,10 +5537,8 @@ impl ThreadRequestProcessor {
                     .items()
                     .any(|item| matches!(item, ResponseItem::AdditionalTools { .. }))
                 && let Some(model) = options.config.model.as_deref()
-                && self
-                    .thread_manager
-                    .get_models_manager()
-                    .get_model_info(model, &options.config.to_models_manager_config())
+                && parent
+                    .model_info(model, &options.config.to_models_manager_config())
                     .await
                     .use_responses_lite
             {

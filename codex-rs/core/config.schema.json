@@ -630,6 +630,18 @@
       },
       "type": "object"
     },
+    "CodeModeToml": {
+      "additionalProperties": false,
+      "properties": {
+        "heartbeat_interval_s": {
+          "description": "Idle seconds between gRPC stream heartbeats. Zero (the default) disables them.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "ComputerUseConfigToml": {
       "additionalProperties": false,
       "properties": {
@@ -939,6 +951,9 @@
             "fast_mode": {
               "type": "boolean"
             },
+            "file_backed_tool_audio": {
+              "type": "boolean"
+            },
             "gateway_setup_wizard": {
               "type": "boolean"
             },
@@ -1080,6 +1095,9 @@
             "mcp_oauth_refresh_coordination": {
               "type": "boolean"
             },
+            "mcp_shared_repl_cwd": {
+              "type": "boolean"
+            },
             "mcp_tool_list_changed": {
               "type": "boolean"
             },
@@ -1216,6 +1234,9 @@
               "$ref": "#/definitions/FeatureToml_for_RuntimeAgentInstancesConfigToml"
             },
             "runtime_metrics": {
+              "type": "boolean"
+            },
+            "safe_image_decoder": {
               "type": "boolean"
             },
             "search_tool": {
@@ -2072,6 +2093,17 @@
           ],
           "description": "Deprecated and ignored; asynchronous classification always uses conversations."
         },
+        "async_elastic_budgeting": {
+          "description": "Enable elastic allocation for asynchronous Guardian requests. Defaults to false.",
+          "type": "boolean"
+        },
+        "async_elastic_sections": {
+          "additionalProperties": {
+            "$ref": "#/definitions/GuardianElasticSectionConfigToml"
+          },
+          "description": "Section limits validated when asynchronous elastic budgeting is enabled.",
+          "type": "object"
+        },
         "classifier_instructions": {
           "type": "string"
         },
@@ -2529,6 +2561,11 @@
     "MarketplaceConfig": {
       "additionalProperties": false,
       "properties": {
+        "auto_update": {
+          "default": false,
+          "description": "Check for updates to installed Git plugins from this marketplace when plugins are listed.",
+          "type": "boolean"
+        },
         "last_revision": {
           "default": null,
           "description": "Git revision Codex last successfully activated for this marketplace.",
@@ -5201,6 +5238,7 @@
               "half_page_up": null,
               "jump_bottom": null,
               "jump_top": null,
+              "mark_markdown": null,
               "page_down": null,
               "page_up": null,
               "scroll_down": null,
@@ -6290,6 +6328,7 @@
             "half_page_up": null,
             "jump_bottom": null,
             "jump_top": null,
+            "mark_markdown": null,
             "page_down": null,
             "page_up": null,
             "scroll_down": null,
@@ -6550,6 +6589,14 @@
             }
           ],
           "description": "Jump to the beginning."
+        },
+        "mark_markdown": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Mark Markdown structure under the caret in transcript selection mode."
         },
         "page_down": {
           "allOf": [
@@ -7464,6 +7511,14 @@
       ],
       "description": "Cloud-owned feature settings."
     },
+    "code_mode": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/CodeModeToml"
+        }
+      ],
+      "description": "Code Mode session settings."
+    },
     "compact_prompt": {
       "description": "Compact prompt used for history compaction.",
       "type": "string"
@@ -7751,6 +7806,9 @@
         "fast_mode": {
           "type": "boolean"
         },
+        "file_backed_tool_audio": {
+          "type": "boolean"
+        },
         "gateway_setup_wizard": {
           "type": "boolean"
         },
@@ -7892,6 +7950,9 @@
         "mcp_oauth_refresh_coordination": {
           "type": "boolean"
         },
+        "mcp_shared_repl_cwd": {
+          "type": "boolean"
+        },
         "mcp_tool_list_changed": {
           "type": "boolean"
         },
@@ -8028,6 +8089,9 @@
           "$ref": "#/definitions/FeatureToml_for_RuntimeAgentInstancesConfigToml"
         },
         "runtime_metrics": {
+          "type": "boolean"
+        },
+        "safe_image_decoder": {
           "type": "boolean"
         },
         "search_tool": {

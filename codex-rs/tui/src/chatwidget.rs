@@ -400,6 +400,7 @@ use self::status_state::TerminalTitleStatusKind;
 mod status_controls;
 mod status_surface_commands;
 mod status_surfaces;
+pub(crate) mod statusline_state;
 use self::status_surface_commands::StatusSurfaceOverrides;
 mod streaming;
 use self::status_surfaces::CachedProjectRootName;
@@ -553,6 +554,7 @@ pub(crate) struct ChatWidget {
     has_codex_backend_auth: bool,
     model_catalog: Arc<ModelCatalog>,
     model_popup_request_id: Option<uuid::Uuid>,
+    /// Cloud settings accepted for future turns. Serving model metadata comes from the session.
     pub(crate) cloud_picker_selection:
         Option<crate::app_server_session::user_message_submission::CloudModelSelection>,
     /// An app event has been queued to open the permissions picker, but no view exists yet.
@@ -685,6 +687,7 @@ pub(crate) struct ChatWidget {
     blocks_direct_input: bool,
     external_writer_view: bool,
     read_only_history: bool,
+    thread_settings_confirmed: bool,
     provider_error: Option<codex_app_server_protocol::ModelProviderError>,
     /// Covers both queued and executing forks so repeated shortcuts cannot queue another one.
     pub(crate) fork_in_progress: bool,
@@ -737,6 +740,7 @@ pub(crate) struct ChatWidget {
     current_rollout_path: Option<PathBuf>,
     // Current working directory (if known)
     current_cwd: Option<PathBuf>,
+    primary_environment_cwd: Option<crate::session_state::EnvironmentCwd>,
     // App-server-backed command runner for status-line workspace metadata lookups.
     workspace_command_runner: Option<WorkspaceCommandRunner>,
     // Instruction source files loaded for the current session, supplied by app-server.
@@ -786,9 +790,7 @@ pub(crate) struct ChatWidget {
     // Cached workspace notification headline for the status line.
     status_line_workspace_headline: Option<String>,
     // Request ID for the async workspace headline fetch currently in flight.
-    status_line_workspace_headline_pending_request_id: Option<u64>,
-    // Request ID to assign to the next workspace headline fetch.
-    next_status_line_workspace_headline_request_id: u64,
+    status_line_workspace_headline_pending_request_id: Option<uuid::Uuid>,
     // Last time a workspace headline fetch was requested.
     status_line_workspace_headline_last_requested_at: Option<Instant>,
     // Set after the backend reports the workspace-message feature gate is disabled.
@@ -945,20 +947,8 @@ fn request_permissions_from_params(
 
 fn token_usage_info_from_app_server(token_usage: ThreadTokenUsage) -> TokenUsageInfo {
     TokenUsageInfo {
-        total_token_usage: TokenUsage {
-            total_tokens: token_usage.total.total_tokens,
-            input_tokens: token_usage.total.input_tokens,
-            cached_input_tokens: token_usage.total.cached_input_tokens,
-            output_tokens: token_usage.total.output_tokens,
-            reasoning_output_tokens: token_usage.total.reasoning_output_tokens,
-        },
-        last_token_usage: TokenUsage {
-            total_tokens: token_usage.last.total_tokens,
-            input_tokens: token_usage.last.input_tokens,
-            cached_input_tokens: token_usage.last.cached_input_tokens,
-            output_tokens: token_usage.last.output_tokens,
-            reasoning_output_tokens: token_usage.last.reasoning_output_tokens,
-        },
+        total_token_usage: token_usage.total.into(),
+        last_token_usage: token_usage.last.into(),
         model_context_window: token_usage.model_context_window,
     }
 }
@@ -1948,6 +1938,10 @@ impl ChatWidget {
 
     pub(crate) fn is_external_writer_view(&self) -> bool {
         self.external_writer_view
+    }
+
+    pub(crate) fn is_read_only_view(&self) -> bool {
+        self.is_external_writer_view()
     }
 
     fn refresh_skills_for_current_cwd(&mut self, force_reload: bool) {

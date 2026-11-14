@@ -54,7 +54,7 @@ impl App {
                 Box::new(StartupDraftPump::new(
                     tui,
                     StartupDraftInitialScreen::Composer,
-                    StartupDraftSessionAction::NewFromCommandCenter,
+                    StartupDraftSessionAction::NewWhileRunning,
                 ))
             });
         let mut display_config = self.chat_widget.config_ref().clone();

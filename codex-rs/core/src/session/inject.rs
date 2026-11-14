@@ -1,13 +1,14 @@
 use super::TurnInput as PendingTurnInput;
 use super::session::Session;
 use super::turn_context::TurnContext;
-use codex_analytics::ImagePreparationMetadata;
 use codex_features::Feature;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// File-backed audio must use typed turn input so its attachment is prepared
 /// before the item enters the model-visible history. Reject the entire batch
@@ -22,6 +23,45 @@ pub(crate) fn validate_injected_response_item(item: &ResponseItem) -> CodexResul
 }
 
 impl Session {
+    /// History injection can precede the first turn. Capture full initial context
+    /// only when the thread has no reference context, including after compaction.
+    pub(crate) async fn history_injection_context(
+        self: &Arc<Self>,
+    ) -> CodexResult<Arc<TurnContext>> {
+        if self.reference_context_item().await.is_some() {
+            let turn = self.new_inject_items_context().await;
+            // Compaction can clear the baseline while we build this context.
+            // Rebuilding initial context requires a full skills snapshot.
+            if self.reference_context_item().await.is_some() {
+                return Ok(turn);
+            }
+        }
+        let turn = self.new_default_turn().await;
+        if self.reference_context_item().await.is_none() {
+            let step = self
+                .capture_step_context(Arc::clone(&turn), &CancellationToken::new())
+                .await?;
+            self.record_context_updates_and_set_reference_context_item(step.as_ref())
+                .await?;
+        }
+        Ok(turn)
+    }
+
+    pub(crate) async fn record_inherited_items(
+        self: &Arc<Self>,
+        items: Vec<ResponseItemEnvelope>,
+    ) -> CodexResult<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let turn = self.history_injection_context().await?;
+        // The parent already prepared the images and their dimension notices.
+        self.record_prepared_conversation_items(&turn, turn.model_info(), items, Vec::new())
+            .await;
+        self.flush_rollout().await?;
+        Ok(())
+    }
+
     /// Returns the input if there is no active turn to inject into.
     #[expect(
         clippy::await_holding_invalid_type,
@@ -79,19 +119,19 @@ impl Session {
         Ok(())
     }
 
-    /// Preserves trusted client provenance while items wait for an active turn.
+    /// Applies client developer-message retention before queueing or recording items.
     #[expect(
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
     )]
     pub(crate) async fn inject_client_response_items(
         &self,
-        items: Vec<ResponseItem>,
+        items: Vec<impl Into<ResponseItemEnvelope>>,
         turn_context: &TurnContext,
     ) {
         let items = items
             .into_iter()
-            .map(ResponseItemEnvelope::new)
+            .map(Into::into)
             .map(|item| self.annotate_client_response_item(item))
             .collect::<Vec<_>>();
         let mut active = self.active_turn.lock().await;
@@ -120,29 +160,29 @@ impl Session {
         if self.enabled(Feature::RetainClientDeveloperMessages)
             && matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "developer")
         {
-            envelope.metadata.get_or_insert_default().client_authored = true;
+            envelope
+                .metadata
+                .get_or_insert_default()
+                .retain_across_windows
+                .get_or_insert(true);
         }
         envelope
     }
 
+    #[tracing::instrument(
+        name = "record_conversation_items",
+        level = "trace",
+        skip_all,
+        fields(item_count = items.len())
+    )]
     pub(crate) async fn record_annotated_conversation_items(
         &self,
         turn_context: &TurnContext,
         model_info: &ModelInfo,
         items: Vec<ResponseItemEnvelope>,
     ) {
-        if items.iter().all(|item| item.metadata.is_none()) {
-            let items = items
-                .into_iter()
-                .map(ResponseItemEnvelope::into_item)
-                .collect::<Vec<_>>();
-            self.record_conversation_items(turn_context, model_info, &items)
-                .await;
-            return;
-        }
-
         let (annotated_items, image_preparations) = self
-            .prepare_annotated_conversation_items_for_history(turn_context, model_info, items)
+            .prepare_conversation_items_for_history(turn_context, model_info, items)
             .await;
         self.record_prepared_conversation_items(
             turn_context,
@@ -151,33 +191,6 @@ impl Session {
             image_preparations,
         )
         .await;
-    }
-
-    pub(crate) async fn prepare_annotated_conversation_items_for_history(
-        &self,
-        turn_context: &TurnContext,
-        model_info: &ModelInfo,
-        items: Vec<ResponseItemEnvelope>,
-    ) -> (Vec<ResponseItemEnvelope>, Vec<ImagePreparationMetadata>) {
-        let mut annotated_items = Vec::with_capacity(items.len());
-        let mut image_preparations = Vec::new();
-        for envelope in items {
-            let (prepared_items, prepared_images) = self
-                .prepare_conversation_items_for_history(
-                    turn_context,
-                    model_info,
-                    std::slice::from_ref(&envelope.item),
-                )
-                .await;
-            image_preparations.extend(prepared_images);
-
-            let mut metadata = envelope.metadata;
-            annotated_items.extend(prepared_items.into_iter().map(|item| ResponseItemEnvelope {
-                item,
-                metadata: metadata.take(),
-            }));
-        }
-        (annotated_items, image_preparations)
     }
 
     /// Injects items into active work, or records them without starting a turn.

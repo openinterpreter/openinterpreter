@@ -35,6 +35,7 @@ use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::protocol::EventMsg;
 use codex_rollout::state_db;
@@ -327,7 +328,7 @@ pub(crate) struct AnyToolResult {
 }
 
 impl AnyToolResult {
-    pub(crate) fn into_response(self) -> ResponseItemEnvelope {
+    pub(crate) fn into_response(self, file_backed_tool_audio: bool) -> ResponseItemEnvelope {
         let Self {
             call_id,
             payload,
@@ -335,12 +336,19 @@ impl AnyToolResult {
             ..
         } = self;
         let history_truncation_token_limit = result.fallback_token_limit_override();
+        let item = result.to_response_item(&call_id, &payload).into();
+        let producer_bounded_tool_audio = file_backed_tool_audio
+            && result.output_budget_applied()
+            && matches!(&item, ResponseItem::FunctionCallOutput { output, .. }
+                 | ResponseItem::CustomToolCallOutput { output, .. } if output.contains_audio());
         ResponseItemEnvelope {
-            item: result.to_response_item(&call_id, &payload).into(),
-            metadata: history_truncation_token_limit.map(|limit| CodexHarnessMetadata {
-                history_truncation_token_limit: Some(limit),
-                ..Default::default()
-            }),
+            item,
+            metadata: (producer_bounded_tool_audio || history_truncation_token_limit.is_some())
+                .then_some(CodexHarnessMetadata {
+                    producer_bounded_tool_audio,
+                    history_truncation_token_limit,
+                    ..Default::default()
+                }),
         }
     }
 
@@ -847,40 +855,43 @@ impl ToolRegistry {
             return Err(err);
         }
 
-        let fail_before_execution = async |invocation: &ToolInvocation, err: FunctionCallError| {
-            let log_payload = tool_log_payload(&invocation.payload, &invocation.source);
-            otel.tool_result_with_tags(
-                &tool_name,
-                &call_id_owned,
-                log_payload.as_ref(),
-                Duration::ZERO,
-                /*success*/ false,
-                &err.to_string(),
-                &tool_result_tags,
-                &extra_trace_fields,
-            );
-            if tool.is_builtin_control_tool() {
-                let mut analytics = ControlToolCallGuard::new(invocation);
-                analytics.finish(ControlToolCallStatus::Failed);
-            }
-            dispatch_trace.record_failed(&err);
-            notify_tool_finish_if_unclaimed(
-                invocation,
-                call_state.as_deref(),
-                ToolCallOutcome::Failed {
-                    handler_executed: false,
-                },
-            )
-            .await;
-            err
-        };
+        let fail_before_execution =
+            async |dispatch_trace: ToolDispatchTrace,
+                   invocation: &ToolInvocation,
+                   err: FunctionCallError| {
+                let log_payload = tool_log_payload(&invocation.payload, &invocation.source);
+                otel.tool_result_with_tags(
+                    &tool_name,
+                    &call_id_owned,
+                    log_payload.as_ref(),
+                    Duration::ZERO,
+                    /*success*/ false,
+                    &err.to_string(),
+                    &tool_result_tags,
+                    &extra_trace_fields,
+                );
+                if tool.is_builtin_control_tool() {
+                    let mut analytics = ControlToolCallGuard::new(invocation);
+                    analytics.finish(ControlToolCallStatus::Failed);
+                }
+                dispatch_trace.record_failed(&err);
+                notify_tool_finish_if_unclaimed(
+                    invocation,
+                    call_state.as_deref(),
+                    ToolCallOutcome::Failed {
+                        handler_executed: false,
+                    },
+                )
+                .await;
+                err
+            };
         let environments = match tool.live_environment_resolver() {
             Some(resolve) => resolve(&invocation).await,
             None => tool.environments_for_input(&invocation),
         };
         invocation.environments = match environments {
             Ok(environments) => environments,
-            Err(err) => return Err(fail_before_execution(&invocation, err).await),
+            Err(err) => return Err(fail_before_execution(dispatch_trace, &invocation, err).await),
         };
         match apply_pre_tool_use(tool.as_ref(), &mut invocation).await {
             Ok(()) => {}
@@ -900,7 +911,7 @@ impl ToolRegistry {
                 return Err(err);
             }
             Err(PreToolUseError::Failed(err)) => {
-                return Err(fail_before_execution(&invocation, err).await);
+                return Err(fail_before_execution(dispatch_trace, &invocation, err).await);
             }
             Err(PreToolUseError::Cancelled(err)) => return Err(err),
         }
@@ -918,7 +929,7 @@ impl ToolRegistry {
         if registered_tool.native_review == NativeReview::Required
             && let Err(err) = super::review_native_tool_call(&invocation).await
         {
-            return Err(fail_before_execution(&invocation, err).await);
+            return Err(fail_before_execution(dispatch_trace, &invocation, err).await);
         }
 
         let invocation_guard = reservation.activate(&invocation);
