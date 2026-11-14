@@ -5,6 +5,41 @@
 use super::*;
 use std::collections::BTreeMap;
 
+/// A Windows-mounted WSL home cannot safely host the managed daemon's Unix state.
+pub fn uses_wsl_drvfs(codex_home: &std::path::Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+
+        if !codex_utils_path::is_wsl() && std::env::var_os("WSL_INTEROP").is_none() {
+            return false;
+        }
+        let Some(directory) = codex_home
+            .ancestors()
+            .find_map(|path| std::fs::File::open(path).ok())
+        else {
+            return false;
+        };
+        let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
+        if unsafe { libc::fstatfs(directory.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
+            return false;
+        }
+        unsafe { stats.assume_init() }.f_type == 0x0102_1997
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = codex_home;
+        false
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Cannot use the shared background server: {reason}.\n{FAILURE_HINT}")]
+pub(super) struct CompatibilityError {
+    pub reason: String,
+    pub restart_features: Option<BTreeMap<String, bool>>,
+}
+
 const SERVER_FEATURES: [Feature; 4] = [
     Feature::ApiKeyModelDiscovery,
     Feature::CodeModeHost,

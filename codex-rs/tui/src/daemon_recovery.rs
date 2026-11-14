@@ -31,19 +31,20 @@ pub(super) async fn check(
     startup: &mut StartupDraft,
     target: &AppServerTarget,
     config: &Config,
-    cli_kv_overrides: &[(String, toml::Value)],
+    _cli_kv_overrides: &[(String, toml::Value)],
     mut managed_daemon: bool,
 ) -> io::Result<Option<String>> {
     let issue = match startup
-        .run_until(daemon_startup::compatibility_warning(
-            target,
-            config,
-            cli_kv_overrides,
-        ))
+        .run_until(daemon_startup::compatibility_warning(target, config))
         .await?
     {
-        Ok(warning) => return Ok(warning),
-        Err(issue) => issue,
+        None => return Ok(None),
+        // The current readback does not bind an override to a restartable mismatch.
+        // Never offer a daemon restart without such evidence.
+        Some(reason) => CompatibilityError {
+            reason,
+            restart_features: None,
+        },
     };
     if !(io::stdin().is_terminal() && io::stdout().is_terminal()) {
         return Err(io::Error::other(issue));
@@ -116,21 +117,22 @@ pub(super) async fn check(
         (Some(1), Some(features)) if managed_daemon => {
             tui.with_restored(crate::tui::TerminalHandoff::Restore, || async {
                 crossterm::terminal::disable_raw_mode()?;
-                codex_app_server_daemon::restart_with_features(features)
-                    .await
-                    .map_err(|err| {
-                        io::Error::other(format!("{err:#}\n{}", daemon_startup::FAILURE_HINT))
-                    })
+                codex_app_server_daemon::run(codex_app_server_daemon::LifecycleCommand::Restart {
+                    feature_overrides: features.clone(),
+                })
+                .await
+                .map_err(|err| {
+                    io::Error::other(format!("{err:#}\n{}", daemon_startup::FAILURE_HINT))
+                })
             })
             .await?;
-            startup
-                .run_until(daemon_startup::compatibility_warning(
-                    target,
-                    config,
-                    cli_kv_overrides,
-                ))
+            match startup
+                .run_until(daemon_startup::compatibility_warning(target, config))
                 .await?
-                .map_err(io::Error::other)
+            {
+                None => Ok(None),
+                Some(reason) => Err(io::Error::other(reason)),
+            }
         }
         (Some(_) | None, _) => Err(io::Error::other(issue)),
     }

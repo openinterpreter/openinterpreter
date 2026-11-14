@@ -769,7 +769,10 @@ impl App {
                         app_server,
                         &mut resume_config,
                         target_thread.cwd.as_path(),
-                        Some(&target_thread),
+                        crate::onboarding::DirectoryTrustOptions {
+                            resumed_thread: Some(&target_thread),
+                            ..Default::default()
+                        },
                         /*startup_draft*/ None,
                     )
                     .await
@@ -1168,7 +1171,7 @@ impl App {
                 app_server,
                 &mut config,
                 &trust_cwd,
-                /*resumed_thread*/ None,
+                crate::onboarding::DirectoryTrustOptions::default(),
                 startup_draft.as_deref_mut(),
             )
             .await

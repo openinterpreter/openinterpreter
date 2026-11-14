@@ -44,6 +44,7 @@ pub(crate) struct TrustDirectoryWidget {
 pub(crate) enum TrustCancelAction {
     Quit,
     AgentsOverview,
+    CurrentTask,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +92,7 @@ impl WidgetRef for &TrustDirectoryWidget {
                 match self.cancel {
                     TrustCancelAction::Quit => "Quit",
                     TrustCancelAction::AgentsOverview => "Back to Agent Command Center",
+                    TrustCancelAction::CurrentTask => "Keep current directory",
                 },
                 TrustDirectorySelection::Quit,
             ),
@@ -130,6 +132,7 @@ impl WidgetRef for &TrustDirectoryWidget {
                 match self.cancel {
                     TrustCancelAction::Quit => " quit",
                     TrustCancelAction::AgentsOverview => " back",
+                    TrustCancelAction::CurrentTask => " cancel",
                 }
                 .dim(),
             ]))

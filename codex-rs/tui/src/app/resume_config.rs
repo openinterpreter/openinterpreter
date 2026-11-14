@@ -194,7 +194,10 @@ impl App {
             app_server,
             &mut resume_config.0,
             &trust_cwd,
-            resumed_thread.as_ref(),
+            crate::onboarding::DirectoryTrustOptions {
+                resumed_thread: resumed_thread.as_ref(),
+                ..Default::default()
+            },
             /*startup_draft*/ None,
         )
         .await?;
@@ -208,12 +211,42 @@ impl App {
         app_server: &mut AppServerSession,
         config: &mut Config,
         cwd: &Path,
-        resumed_thread: Option<&codex_app_server_protocol::Thread>,
+        options: crate::onboarding::DirectoryTrustOptions<'_>,
+        startup_draft: Option<&mut StartupDraftPump>,
+    ) -> std::result::Result<(), AppRunControl> {
+        let target = self.app_server_target.clone();
+        let local_settings = self.local_settings.clone();
+        self.confirm_directory_trust_for_target(
+            tui,
+            app_server,
+            &target,
+            &local_settings,
+            config,
+            cwd,
+            options,
+            startup_draft,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Destination trust requires an explicit backend and settings"
+    )]
+    pub(super) async fn confirm_directory_trust_for_target(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        target: &AppServerTarget,
+        _local_settings: &crate::local_settings::LocalSettings,
+        config: &mut Config,
+        cwd: &Path,
+        options: crate::onboarding::DirectoryTrustOptions<'_>,
         mut startup_draft: Option<&mut StartupDraftPump>,
     ) -> std::result::Result<(), AppRunControl> {
         // Keep the existing explicit remote --cd gate, including retries after cancellation.
         // Other remote destinations await authoritative trust-root metadata.
-        let cwd = if self.app_server_target.uses_remote_workspace() {
+        let cwd = if target.uses_remote_workspace() {
             let Some(cwd) = app_server.remote_cwd_override() else {
                 return Ok(());
             };
@@ -225,9 +258,9 @@ impl App {
             tui,
             app_server,
             config,
-            &self.app_server_target,
+            target,
             cwd,
-            resumed_thread,
+            options,
             startup_draft.as_deref_mut(),
         )
         .await
@@ -236,7 +269,10 @@ impl App {
             AppRunControl::Continue
         })?;
         if result.should_exit {
-            if matches!(self.app_server_target, AppServerTarget::Embedded) {
+            if options.cancel == Some(crate::onboarding::TrustCancelAction::CurrentTask) {
+                return Err(AppRunControl::Continue);
+            }
+            if matches!(target, AppServerTarget::Embedded) {
                 return Err(AppRunControl::Exit(ExitReason::UserRequested));
             }
             if self
@@ -248,11 +284,14 @@ impl App {
             }
             return Err(AppRunControl::Continue);
         }
-        if result.directory_trust_persisted && !app_server.uses_remote_workspace() {
+        if !app_server.uses_remote_workspace()
+            && (result.directory_trust_persisted
+                || options.cancel == Some(crate::onboarding::TrustCancelAction::CurrentTask))
+        {
             *config = StartupDraftPump::run_with_optional_draft(
                 startup_draft.as_deref_mut(),
                 tui,
-                self.rebuild_config_for_cwd(config.cwd.to_path_buf()),
+                self.rebuild_config_for_cwd_from(config, config.cwd.to_path_buf()),
             )
             .await
             .map_err(|error| {
@@ -261,7 +300,10 @@ impl App {
                 ));
                 AppRunControl::Continue
             })?;
-            if resumed_thread.is_none() {
+            if result.directory_trust_persisted
+                && options.resumed_thread.is_none()
+                && options.cancel != Some(crate::onboarding::TrustCancelAction::CurrentTask)
+            {
                 let load_hooks = load_startup_hooks_review_entry(
                     app_server.request_handle(),
                     config.cwd.to_path_buf(),

@@ -64,6 +64,7 @@ use uuid::Uuid;
 
 #[path = "directory_trust.rs"]
 mod directory_trust;
+pub(crate) use directory_trust::DirectoryTrustOptions;
 pub(crate) use directory_trust::check_directory_trust;
 
 #[allow(clippy::large_enum_variant)]
@@ -669,7 +670,7 @@ pub(crate) async fn run_onboarding_app(
     run_onboarding_screen(screen, request_handle, app_server, tui).await
 }
 
-async fn run_onboarding_screen(
+pub(super) async fn run_onboarding_screen(
     mut onboarding_screen: OnboardingScreen,
     app_server_request_handle: Option<AppServerRequestHandle>,
     mut app_server: Option<&mut AppServerSession>,
