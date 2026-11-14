@@ -730,6 +730,13 @@ impl CodexThread {
         self.session.set_thread_memory_mode(mode).await
     }
 
+    /// Atomically appends untrusted context to the named active turn only.
+    pub async fn inject_untrusted_context_for_turn(&self, turn_id: &str, key: &str, value: String) {
+        self.session
+            .inject_untrusted_context_for_turn(turn_id, key, value)
+            .await;
+    }
+
     /// Injects model-visible items into the currently active turn.
     ///
     /// This is the thread-level bridge to `Session::inject_if_running` for

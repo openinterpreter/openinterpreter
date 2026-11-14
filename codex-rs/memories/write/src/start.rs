@@ -9,7 +9,6 @@ use codex_core::CodexThread;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_features::Feature;
-use codex_login::AuthManager;
 use codex_protocol::MemoryVersion;
 use codex_protocol::ThreadId;
 use codex_protocol::models::PermissionProfile;
@@ -45,11 +44,11 @@ pub fn start_memories_startup_task(
         let mut pipeline_config = config.as_ref().clone();
         pipeline_config.memories.version = version;
         let config = Arc::new(pipeline_config);
-        let auth_manager = Arc::clone(&auth_manager);
+        let auth = Arc::new(thread_manager.provider_auth_context(config.as_ref()));
         let parent_permission_profile = parent_permission_profile.clone();
         let context = Arc::new(MemoryStartupContext::new(
             Arc::clone(&thread_manager),
-            Arc::clone(&auth_manager),
+            auth,
             thread_id,
             Arc::clone(&thread),
             config.as_ref(),

@@ -1118,7 +1118,7 @@ impl ThreadManager {
         self.state.model_catalog.for_config(
             config,
             config.model_catalog.as_ref(),
-            self.catalog_auth_context(config),
+            self.provider_auth_context(config),
             /*same_owner*/ true,
         )
     }
@@ -1130,14 +1130,15 @@ impl ThreadManager {
         factory: &dyn ModelCatalogFactory,
     ) -> SharedModelsManager {
         factory.build(
-            self.catalog_auth_context(config)
+            self.provider_auth_context(config)
                 .model_provider(config.model_provider.clone()),
             config.model_catalog.clone(),
             config.features.enabled(Feature::ApiKeyModelDiscovery),
         )
     }
 
-    fn catalog_auth_context(&self, config: &Config) -> ProviderAuthContext {
+    /// Resolves the same credential and runtime identity used by this manager for model calls.
+    pub fn provider_auth_context(&self, config: &Config) -> ProviderAuthContext {
         let credentials = self.auth_manager();
         let runtime = crate::runtime_auth::runtime_for_config(
             &self.state.runtime_auth,

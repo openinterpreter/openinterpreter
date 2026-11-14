@@ -20,6 +20,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
 use codex_rollout::INTERACTIVE_SESSION_SOURCES;
 use codex_rollout::RolloutItem;
+use codex_rollout::RolloutRecorder;
 use codex_secrets::redact_secrets;
 use futures::StreamExt;
 use std::path::Path;

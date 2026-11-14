@@ -189,7 +189,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for GoalToolExecutor {
             match self.kind {
                 GoalToolKind::Get => self.handle_get(invocation).await,
                 GoalToolKind::Create(thread_manager) => {
-                    self.handle_create(invocation, thread_manager).await
+                    self.handle_create(invocation, &thread_manager).await
                 }
                 GoalToolKind::Update => self.handle_update(invocation).await,
             }
