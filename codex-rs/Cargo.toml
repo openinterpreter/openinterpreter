@@ -451,7 +451,7 @@ libc = "0.2.182"
 libsqlite3-sys = { version = "0.39.1", default-features = false }
 linkify = "0.11"
 log = "0.4"
-lru = "0.16.3"
+lru = "0.18.5"
 maplit = "1.0.2"
 memchr = "2.7.6"
 mime_guess = "2.0.5"
