@@ -2455,6 +2455,10 @@ fn should_show_bedrock_setup_wizard(
     app_server_target: &AppServerTarget,
 ) -> bool {
     matches!(app_server_target, AppServerTarget::Embedded)
+        && !config
+            .config_layer_stack
+            .origins()
+            .contains_key("model_provider")
         && config
             .config_layer_stack
             .required_model_provider()
