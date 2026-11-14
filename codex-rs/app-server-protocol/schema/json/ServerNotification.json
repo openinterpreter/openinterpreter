@@ -6636,6 +6636,26 @@
       },
       "type": "object"
     },
+    "ThreadSectionChangedNotification": {
+      "description": "Broadcast after a successful move into, within, or out of a section.",
+      "properties": {
+        "sectionId": {
+          "description": "Destination section, or `null` when the thread was removed from its section.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sectionId",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "ThreadSettings": {
       "properties": {
         "activePermissionProfile": {
@@ -7890,6 +7910,26 @@
         "params"
       ],
       "title": "Thread/attachment/updatedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "thread/section/changed"
+          ],
+          "title": "Thread/section/changedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadSectionChangedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Thread/section/changedNotification",
       "type": "object"
     },
     {
