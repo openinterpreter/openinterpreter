@@ -314,60 +314,12 @@ impl App {
 
     pub(super) fn bind_backend_workspace(
         &mut self,
-        tui: &mut tui::Tui,
-        app_server: &mut AppServerSession,
-        app_event_rx: &mut mpsc::UnboundedReceiver<AppEvent>,
-        connected: Reconnected,
-        client_version: &str,
-    ) -> Result<()> {
-        let Reconnected {
-            mut session,
-            bootstrap,
-            thread,
-        } = connected;
-        let selected = self
-            .chat_widget
-            .selected_index_for_present_view(agents_overview::AGENTS_OVERVIEW_VIEW_ID)
-            .and_then(|index| self.agents_overview.visible_thread_ids.get(index).copied());
-        let displayed = self.current_displayed_thread_id();
-        let mut input = self.chat_widget.capture_thread_input_state();
-        if let Some(input) = input.as_mut() {
-            input.recovered_queue = true;
-        }
-        self.store_active_thread_receiver().await;
-        // Old request handles stay attached to the dead connection. Rotating the event channel
-        // prevents their late completions from submitting follow-up operations on the new one.
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.app_event_tx = AppEventSender::new(tx);
-        *app_event_rx = rx;
-        {
-            let mut state = self
-                .agents_overview
-                .view_state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.connection_notice = None;
-            if state.creating_worktree {
-                state.creating_worktree = false;
-                self.pending_managed_worktree_creation = false;
-            }
-        }
-        self.agent_navigation.picker_refresh = None;
-        self.last_subagent_backfill_attempt = None;
-        self.rate_limit_refresh_state.invalidate_recovery();
-        session.inherit_task_tool_capabilities(app_server);
-        *app_server = session;
-        #[cfg(any(target_os = "windows", test))]
-        let interrupted_windows_setup = self.windows_sandbox.pending_setup.take().is_some();
-        #[cfg(any(target_os = "windows", test))]
-        {
-            if interrupted_windows_setup {
-                self.windows_sandbox.setup_started_at = None;
-                self.chat_widget.clear_windows_sandbox_setup_status();
-                self.chat_widget.windows_sandbox_elevated_setup_complete = false;
-            }
-        }
+        app_server: &AppServerSession,
+        search_dir: PathBuf,
+    ) {
         self.chat_widget.snapshot_local_images = self.app_server_target.uses_remote_workspace();
+        self.chat_widget.thread_settings_owner = app_server.thread_params_mode().settings_owner();
+        self.chat_widget.pending_cloud_turn_settings = app_server.pending_cloud_turn_settings();
         self.chat_widget.set_local_worktree_operations(
             !crate::uses_remote_workspace_or_environment(
                 &self.app_server_target,
@@ -377,9 +329,6 @@ impl App {
         self.chat_widget.windows_sandbox_local_server =
             !self.app_server_target.uses_remote_workspace()
                 && app_server.app_server_platform_os() == Some("windows");
-        self.chat_widget.windows_sandbox_host = WindowsSandboxHost::Unknown;
-        self.chat_widget.cyber_policy_notice = Default::default();
-        self.chat_widget.requires_openai_auth = bootstrap.requires_openai_auth;
         self.chat_widget.remote_connection =
             crate::status::remote_connection::remote_connection_status_value(
                 &self.app_server_target,

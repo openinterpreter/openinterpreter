@@ -191,6 +191,7 @@ impl PendingAppServerRequests {
                 None
             }
             ServerRequest::McpServerElicitationRequest { request_id, params } => {
+                let thread_id = Self::canonical_thread_id(&params.thread_id);
                 self.user_verification.note_request(request_id, params);
                 self.mcp_requests.insert(
                     McpRequestKey {

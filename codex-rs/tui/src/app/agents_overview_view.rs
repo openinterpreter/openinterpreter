@@ -224,6 +224,10 @@ impl AgentsOverviewView {
             .iter()
             .map(|row| AgentsOverviewProjectGroup::for_thread(&row.thread, worktrees_enabled))
             .collect();
+        let directory_group_keys = rows
+            .iter()
+            .map(|row| directory_group_key(row.thread.cwd.as_path(), worktrees_enabled))
+            .collect();
         let center_shortcut_keys = crate::keymap::keymap_action_ids()
             .filter(|action| matches!(action.context, KeymapContext::List | KeymapContext::Agents))
             .flat_map(|action| {
@@ -477,10 +481,6 @@ impl AgentsOverviewView {
             Line::default(),
             Line::from("Project".dim()),
             Line::from(row.thread.cwd.display().to_string()),
-            Line::from(vec![
-                "Model: ".dim(),
-                model_name(&row.thread).to_string().into(),
-            ]),
         ];
         lines.extend(row.details.usage_lines.clone());
         if let Some(branch) = row
@@ -493,6 +493,16 @@ impl AgentsOverviewView {
             lines.push("Branch".dim().into());
             lines.push(branch.clone().into());
         }
+        // Preserve hyperlink destinations while wrapping rows or clipping them to the pane.
+        let wrap = |lines: Vec<HyperlinkLine>| {
+            lines
+                .into_iter()
+                .flat_map(|line| {
+                    let wrapped = crate::wrapping::word_wrap_lines([line.line.clone()], width);
+                    remap_wrapped_line(&line, wrapped)
+                })
+                .collect::<Vec<_>>()
+        };
         let preview = super::agents_overview_details::preview_markdown(&row.thread.preview);
         let prompt_start = crate::wrapping::word_wrap_lines(lines.clone(), width).len();
         lines.extend([Line::default(), Line::from("Prompt".dim())]);
