@@ -1325,6 +1325,7 @@ mod tests {
     use super::ProcessId;
     use super::ProcessSandboxType;
     use super::ShellInfo;
+    use super::WireExecParams;
     use super::WireFsOpenParams;
     use super::WireFsReadFileParams;
     use codex_file_system::FileSystemSandboxContext;
