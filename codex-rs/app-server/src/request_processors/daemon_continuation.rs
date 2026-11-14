@@ -130,6 +130,9 @@ impl ThreadRequestProcessor {
             Ok(TurnInputSubmission::NotSubmitted { reason }) => {
                 tracing::debug!(%thread_id, ?reason, "recovery continuation was not started");
             }
+            Ok(TurnInputSubmission::Accepted) => {
+                tracing::debug!(%thread_id, "recovery continuation accepted by native delivery");
+            }
             Ok(TurnInputSubmission::Steered { .. }) => unreachable!("continuation cannot steer"),
             Err(err) => tracing::warn!(%thread_id, %err, "recovery continuation failed"),
         }

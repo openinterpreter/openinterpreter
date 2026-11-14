@@ -5767,7 +5767,7 @@ impl ThreadRequestProcessor {
                 .await
                 .map_err(|err| config_load_error(&err))?;
             StartThreadOptions {
-                client_mcp_extensions,
+                client_mcp_extensions: client_mcp_extensions.clone(),
                 ..StartThreadOptions::new(config)
             }
         };

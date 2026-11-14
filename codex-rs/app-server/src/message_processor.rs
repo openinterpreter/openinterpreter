@@ -520,14 +520,6 @@ impl MessageProcessor {
             state_db.clone(),
         );
         let git_processor = GitRequestProcessor::new();
-        let initialize_processor = InitializeRequestProcessor::new(
-            gateway_login_control,
-            outgoing.clone(),
-            analytics_events_client.clone(),
-            Arc::clone(&config),
-            rpc_transport,
-            Arc::clone(&user_verification),
-        );
         let marketplace_processor =
             MarketplaceRequestProcessor::new(config_manager.clone(), Arc::clone(&thread_manager));
         let mcp_processor = McpRequestProcessor::new(
