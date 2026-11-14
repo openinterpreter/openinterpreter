@@ -154,7 +154,7 @@ impl<'a> InlineDirectives<'a> {
         events: impl Iterator<Item = (Event<'s>, Range<usize>)>,
         cwd: Option<&'s Path>,
     ) -> impl Iterator<Item = (Event<'s>, Range<usize>)> {
-        let mut citations = self.citations.iter().peekable();
+        let mut directives = self.directives.iter().peekable();
         events.flat_map(move |(event, range)| {
             while citations
                 .next_if(|(span, _)| span.end <= range.start)
