@@ -4228,7 +4228,7 @@ mod tests {
 
     #[test]
     fn cua_identity_is_limited_to_node_repl_js() {
-        let item = ThreadItemPayload::McpToolCall {
+        let mut item = ThreadItemPayload::McpToolCall {
             id: "item".to_string(),
             server: "codex_apps".to_string(),
             tool: "js".to_string(),
