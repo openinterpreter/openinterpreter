@@ -37,13 +37,24 @@ use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::AgentMessageDelivery;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ImageReference;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::models::PermissionProfileSnapshot;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ToolMessage;
 use codex_protocol::openai_models::ToolMode;
+use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol::protocol::AdditionalContextEntry;
+use codex_protocol::protocol::AdditionalContextKind;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnEnvironmentSelection;
+use codex_protocol::protocol::TurnEnvironmentSelections;
+use codex_protocol::protocol::TurnSettingsUpdate;
+use codex_protocol::protocol::TurnSettingsUpdateOutcome;
+use codex_protocol::request_user_input::RequestUserInputAnswer;
+use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_protocol::user_input::UserInput;
 use codex_skills_extension::ExecutorSkillProvider;
 use codex_skills_extension::SkillProviders;
@@ -54,6 +65,7 @@ use codex_utils_path_uri::PathUri;
 use core_test_support::context_snapshot;
 use core_test_support::context_snapshot::ContextSnapshotOptions;
 use core_test_support::context_snapshot::SnapshotEntry;
+use core_test_support::exec_server::ExecServerProcess;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_custom_tool_call;
@@ -1070,6 +1082,172 @@ async fn astra_asks_an_async_question_and_receives_the_answer_while_working() ->
             &ContextSnapshotOptions::default().rewrite_known_segments(),
         )
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn astra_switches_environments_for_the_rest_of_the_active_turn() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_function_call_with_namespace(
+                    "pause-for-switch",
+                    "functions",
+                    "request_user_input",
+                    &json!({"questions": [{
+                        "id": "continue", "header": "Continue", "question": "Continue in the other workspace?",
+                        "options": [
+                            {"label": "Yes", "description": "Continue working."},
+                            {"label": "No", "description": "Stop working."}
+                        ]
+                    }]}).to_string(),
+                ),
+                ev_completed("first-step"),
+            ]),
+            sse(vec![
+                ev_assistant_message("active-turn", "I continued in the other workspace."),
+                ev_completed("second-step"),
+            ]),
+            sse(vec![
+                ev_assistant_message("next-turn", "I am back in the original workspace."),
+                ev_completed("next-turn"),
+            ]),
+        ],
+    )
+    .await;
+    let test = test_codex()
+        .with_model("gpt-6-astra")
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(|config| {
+            configure_scenario_catalog(config);
+            config.workspace_roots = vec![config.cwd.clone()];
+            config
+                .features
+                .enable(Feature::DefaultModeRequestUserInput)
+                .expect("enable request_user_input");
+            config
+                .features
+                .enable(Feature::PerEnvironmentContext)
+                .expect("enable per-environment context");
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let executor = ExecServerProcess::start().await?;
+    let first_workspace = TempDir::new()?;
+    test.thread_manager
+        .environment_manager()
+        .upsert_environment(
+            "environment-a".to_string(),
+            executor.websocket_url.clone(),
+            /*connect_timeout*/ None,
+        )?;
+    let mut first = test.executor_environment().selection().clone();
+    first.environment_id = "environment-a".to_string();
+    first.cwd = PathUri::from_host_native_path(first_workspace.path())?;
+    first.workspace_roots = vec![first.cwd.clone()];
+    let mut first_config = environment_config_for_selection(&test.config, &first);
+    first_config.permission_profile =
+        PermissionProfileSnapshot::legacy(PermissionProfile::read_only());
+    first.config = EnvironmentConfigState::Ready(first_config);
+
+    let mut original = test.executor_environment().selection().clone();
+    let mut original_config = environment_config_for_selection(&test.config, &original);
+    original_config.permission_profile =
+        PermissionProfileSnapshot::legacy(PermissionProfile::workspace_write_with(
+            &[],
+            NetworkSandboxPolicy::Enabled,
+            /*exclude_tmpdir_env_var*/ true,
+            /*exclude_slash_tmp*/ true,
+        ));
+    original.config = EnvironmentConfigState::Ready(original_config);
+    let mut other = original.clone();
+    other.cwd = original.cwd.join("other-workspace")?;
+    other.workspace_roots = vec![other.cwd.clone()];
+    let mut other_config = environment_config_for_selection(&test.config, &other);
+    other_config.permission_profile =
+        PermissionProfileSnapshot::legacy(PermissionProfile::read_only());
+    other.config = EnvironmentConfigState::Ready(other_config);
+    test.fs()
+        .create_directory(
+            &other.cwd,
+            CreateDirectoryOptions {
+                recursive: false,
+                follow_symlinks: true,
+            },
+            /*sandbox*/ None,
+        )
+        .await?;
+
+    test.codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![text(
+                "Ask before continuing in the other workspace.",
+            )])
+            .with_thread_settings(ThreadSettingsOverrides {
+                environments: Some(
+                    TurnEnvironmentSelections::new(
+                        test.config.cwd.clone(),
+                        vec![first.clone(), original],
+                    )
+                    .into_requests(),
+                ),
+                ..Default::default()
+            }),
+        )
+        .await?;
+    let request = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::RequestUserInput(request) => Some(request.clone()),
+        _ => None,
+    })
+    .await;
+    let (reply, outcome) = oneshot::channel();
+    test.codex
+        .submit(Op::TurnSettings {
+            turn_id: request.turn_id.clone(),
+            update: TurnSettingsUpdate {
+                environments: Some(vec![first.into_request(), other.into_request()]),
+                ..Default::default()
+            },
+            reply,
+        })
+        .await?;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(/*secs*/ 10), outcome).await??,
+        TurnSettingsUpdateOutcome::Applied
+    );
+    test.codex
+        .submit(Op::UserInputAnswer {
+            id: request.turn_id,
+            response: RequestUserInputResponse {
+                answers: HashMap::from([(
+                    "continue".to_string(),
+                    RequestUserInputAnswer {
+                        answers: vec!["Yes".to_string()],
+                    },
+                )]),
+            },
+        })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    test.submit_text_turn("Which workspace are you using now?")
+        .await?;
+
+    let requests = mock.requests();
+    let snapshot = context_snapshot::format_request_history_snapshot(
+        "Astra sees two environments with different permissions. Only the second environment's workspace and permissions change for the next step; the original defaults return on the next turn.",
+        &requests,
+        &ContextSnapshotOptions::default(),
+    )
+    .replace(r#"<environment id="local""#, r#"<environment id="environment-b""#)
+    .replace(r#"<environment id="remote""#, r#"<environment id="environment-b""#);
+    insta::assert_snapshot!("astra_active_environment_selection", snapshot);
     Ok(())
 }
 
