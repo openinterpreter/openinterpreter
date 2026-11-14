@@ -17839,10 +17839,21 @@
       ]
     },
     "ReviewDelivery": {
-      "enum": [
-        "inline"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "inline"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Run review on a separate legacy child thread. Deprecated in favor of starting a thread.",
+          "enum": [
+            "detached"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "ReviewStartParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
@@ -17857,7 +17868,7 @@
             }
           ],
           "default": null,
-          "description": "Reviews run inline on the supplied thread. Omit this field or pass `inline`. To review on a separate thread, start a thread first and use its id."
+          "description": "Reviews run inline by default. `detached` is retained for legacy clients; new clients should start a separate thread and review it inline."
         },
         "target": {
           "$ref": "#/definitions/ReviewTarget"

@@ -4674,6 +4674,7 @@ class ResponsesApiWebSearchAction(
 
 class ReviewDelivery(Enum):
     inline = "inline"
+    detached = "detached"
 
 
 class UncommittedChangesReviewTarget(BaseModel):
@@ -6545,12 +6546,23 @@ class ThreadRealtimeClosedNotification(BaseModel):
     thread_id: Annotated[str, Field(alias="threadId")]
 
 
+class ThreadRealtimeCoverage(Enum):
+    unsupported = "unsupported"
+    pending = "pending"
+    ready = "ready"
+
+
 class ThreadRealtimeErrorNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
     message: str
     thread_id: Annotated[str, Field(alias="threadId")]
+
+
+class ThreadRealtimeHandoffMode(Enum):
+    start = "start"
+    steer = "steer"
 
 
 class ThreadRealtimeInitialItem(BaseModel):
@@ -6566,6 +6578,13 @@ class RealtimeSessionStartedThreadRealtimeItem(BaseModel):
         populate_by_name=True,
     )
     id: str
+    observed_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="observedAtMs",
+            description="Canonical observation time in Unix milliseconds for eligible voice calls.",
+        ),
+    ] = None
     realtime_session_id: Annotated[str, Field(alias="realtimeSessionId")]
     type: Annotated[
         Literal["realtimeSessionStarted"],
@@ -6578,12 +6597,64 @@ class BemItemPromotedThreadRealtimeItem(BaseModel):
         populate_by_name=True,
     )
     id: str
+    observed_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="observedAtMs",
+            description="Canonical observation time in Unix milliseconds for eligible voice calls.",
+        ),
+    ] = None
     realtime_session_id: Annotated[str, Field(alias="realtimeSessionId")]
     item_id: str
     presentation: ThreadRealtimeBemItemPresentation
     turn_id: str
     type: Annotated[
         Literal["bemItemPromoted"], Field(title="BemItemPromotedThreadRealtimeItemType")
+    ]
+
+
+class TurnInputAcceptedThreadRealtimeItem(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: str
+    observed_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="observedAtMs",
+            description="Canonical observation time in Unix milliseconds for eligible voice calls.",
+        ),
+    ] = None
+    realtime_session_id: Annotated[str, Field(alias="realtimeSessionId")]
+    handoff_id: str
+    input: str
+    input_item_id: str
+    mode: ThreadRealtimeHandoffMode
+    source_event_ids: list[str]
+    turn_id: str
+    type: Annotated[
+        Literal["turnInputAccepted"], Field(title="TurnInputAcceptedThreadRealtimeItemType")
+    ]
+
+
+class SessionEndInputSavedThreadRealtimeItem(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: str
+    observed_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="observedAtMs",
+            description="Canonical observation time in Unix milliseconds for eligible voice calls.",
+        ),
+    ] = None
+    realtime_session_id: Annotated[str, Field(alias="realtimeSessionId")]
+    input: str
+    input_item_id: str
+    source_event_ids: list[str]
+    type: Annotated[
+        Literal["sessionEndInputSaved"], Field(title="SessionEndInputSavedThreadRealtimeItemType")
     ]
 
 
@@ -6602,6 +6673,11 @@ class ThreadRealtimeItemTranscriptDeltaNotification(BaseModel):
     delta: str
     item_id: Annotated[str, Field(alias="itemId")]
     thread_id: Annotated[str, Field(alias="threadId")]
+
+
+class ThreadRealtimeOrder(Enum):
+    observed_at = "observedAt"
+    position = "position"
 
 
 class ThreadRealtimeOutputAudioDeltaNotification(BaseModel):
@@ -6706,6 +6782,14 @@ class ThreadRealtimeTranscriptDoneNotification(BaseModel):
 class ThreadRealtimeTranscriptRole(Enum):
     user = "user"
     assistant = "assistant"
+
+
+class ThreadRealtimeVoiceTranscript(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    role: ThreadRealtimeTranscriptRole
+    text: str
 
 
 class ThreadResumeParams(BaseModel):
@@ -10215,7 +10299,7 @@ class ReviewStartParams(BaseModel):
     delivery: Annotated[
         ReviewDelivery | None,
         Field(
-            description="Reviews run inline on the supplied thread. Omit this field or pass `inline`. To review on a separate thread, start a thread first and use its id."
+            description="Reviews run inline by default. `detached` is retained for legacy clients; new clients should start a separate thread and review it inline."
         ),
     ] = None
     target: ReviewTarget
@@ -11420,11 +11504,42 @@ class ThreadReadStateChangedNotification(BaseModel):
     thread_id: Annotated[str, Field(alias="threadId")]
 
 
+class ThreadRealtimeFrameChannels(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    voice_transcript: ThreadRealtimeVoiceTranscript
+
+
+class FrameThreadRealtimeItem(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: str
+    observed_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="observedAtMs",
+            description="Canonical observation time in Unix milliseconds for eligible voice calls.",
+        ),
+    ] = None
+    realtime_session_id: Annotated[str, Field(alias="realtimeSessionId")]
+    channels: ThreadRealtimeFrameChannels
+    type: Annotated[Literal["frame"], Field(title="FrameThreadRealtimeItemType")]
+
+
 class TranscriptSegmentThreadRealtimeItem(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
     id: str
+    observed_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="observedAtMs",
+            description="Canonical observation time in Unix milliseconds for eligible voice calls.",
+        ),
+    ] = None
     realtime_session_id: Annotated[str, Field(alias="realtimeSessionId")]
     role: ThreadRealtimeTranscriptRole
     text: str
@@ -11438,6 +11553,13 @@ class RealtimeSessionClosedThreadRealtimeItem(BaseModel):
         populate_by_name=True,
     )
     id: str
+    observed_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="observedAtMs",
+            description="Canonical observation time in Unix milliseconds for eligible voice calls.",
+        ),
+    ] = None
     realtime_session_id: Annotated[str, Field(alias="realtimeSessionId")]
     outcome: ThreadRealtimeSessionOutcome
     type: Annotated[
@@ -11448,16 +11570,22 @@ class RealtimeSessionClosedThreadRealtimeItem(BaseModel):
 class ThreadRealtimeItem(
     RootModel[
         RealtimeSessionStartedThreadRealtimeItem
+        | FrameThreadRealtimeItem
         | TranscriptSegmentThreadRealtimeItem
         | BemItemPromotedThreadRealtimeItem
         | RealtimeSessionClosedThreadRealtimeItem
+        | TurnInputAcceptedThreadRealtimeItem
+        | SessionEndInputSavedThreadRealtimeItem
     ]
 ):
     root: Annotated[
         RealtimeSessionStartedThreadRealtimeItem
+        | FrameThreadRealtimeItem
         | TranscriptSegmentThreadRealtimeItem
         | BemItemPromotedThreadRealtimeItem
-        | RealtimeSessionClosedThreadRealtimeItem,
+        | RealtimeSessionClosedThreadRealtimeItem
+        | TurnInputAcceptedThreadRealtimeItem
+        | SessionEndInputSavedThreadRealtimeItem,
         Field(
             description="EXPERIMENTAL - a thread-scoped realtime item in the canonical timeline."
         ),
@@ -13025,6 +13153,14 @@ class ThreadItemsListResponse(BaseModel):
             description="Opaque cursor to pass to the next call to continue after the last item. if None, there are no more items to return.",
         ),
     ] = None
+
+
+class ThreadRealtimeEntry(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    item: ThreadRealtimeItem
+    position: Annotated[int, Field(ge=0)]
 
 
 class ItemThreadTimelineEntry(BaseModel):
