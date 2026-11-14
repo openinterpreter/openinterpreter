@@ -61,6 +61,8 @@ use crate::rmcp_client::prepare_regular_mcp_tools_for_model;
 use crate::runtime::McpPublicationGate;
 use crate::runtime::McpRuntimeInput;
 use crate::runtime::McpStartupPolicy;
+use crate::sandbox_metadata;
+use crate::sandbox_metadata::SandboxState;
 use crate::server::McpServerConnectionIdentity;
 use crate::server::McpServerMetadata;
 use crate::tools::ToolFilter;
@@ -232,6 +234,13 @@ impl McpServerConnection {
         self.startup_trigger
             .as_ref()
             .is_some_and(|startup_trigger| !*startup_trigger.borrow())
+    }
+
+    fn is_dormant_and_private(&self) -> bool {
+        self.startup_is_dormant()
+            && !self.client.cancel_token.is_cancelled()
+            && self.client.connection_slot.is_none()
+            && self.legacy_fallback.is_none()
     }
 }
 
@@ -1463,6 +1472,27 @@ impl McpConnectionSet {
         Ok(server_key)
     }
 
+    /// A private, configured local helper whose startup gate is still closed has no process.
+    pub(crate) fn is_dormant_private_stdio(&self, key: &McpServerKey) -> bool {
+        let view = &self.servers[key];
+        if !view.connection.is_dormant_and_private()
+            || view.protocol_mode != McpProtocolMode::Legacy
+        {
+            return false;
+        }
+        self.config
+            .as_ref()
+            .and_then(|config| config.mcp_server_catalog.server(key))
+            .is_some_and(|server| {
+                matches!(server.source(), McpServerSource::Config)
+                    && server.config().is_local_environment()
+                    && matches!(
+                        server.config().transport,
+                        McpServerTransportConfig::Stdio { .. }
+                    )
+            })
+    }
+
     /// Validates an exact client target before startup or execution.
     pub(crate) fn validate_tool_call(&self, server: &McpServerKey, tool: &str) -> Result<()> {
         let view = self
@@ -1512,9 +1542,39 @@ impl McpConnectionSet {
             }
             (server_timeout, requested_timeout) => server_timeout.or(requested_timeout),
         };
-        // Direct callers cannot supply host-owned entitlement metadata, even for unlisted tools.
-        if let Some(serde_json::Value::Object(meta)) = meta.as_mut() {
-            meta.remove(ENTITLEMENT_CONTEXT_KEY);
+        // Direct callers cannot set host-owned authority, even for unlisted tools.
+        if let Some(serde_json::Value::Object(metadata)) = meta.as_mut() {
+            metadata.remove(ENTITLEMENT_CONTEXT_KEY);
+            metadata.remove(sandbox_metadata::MCP_SANDBOX_STATE_CAPABILITY);
+            metadata.remove(sandbox_metadata::MCP_SANDBOX_STATE_META_CAPABILITY);
+            metadata.remove(sandbox_metadata::MCP_SANDBOX_LAUNCHER_META_KEY);
+        }
+        let environment_id = &view.metadata.environment_id;
+        let permission_profile = self
+            .config
+            .as_ref()
+            .and_then(|config| config.permission_profile_for_server(server_key));
+        if client.server_supports_sandbox_state_meta_capability
+            && let Some(config) = self.config.as_ref()
+            && let Some(permission_profile) = permission_profile
+            && let Some(sandbox_cwd) = config.environment_cwds.get(environment_id)
+        {
+            sandbox_metadata::augment_metadata(
+                &mut meta,
+                SandboxState {
+                    permission_profile: permission_profile.clone(),
+                    codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
+                    sandbox_cwd: sandbox_cwd.clone(),
+                    use_legacy_landlock: config.use_legacy_landlock,
+                    use_mxc: config
+                        .environment_use_mxc
+                        .get(environment_id)
+                        .copied()
+                        .unwrap_or(false),
+                },
+                sandbox_metadata::sandbox_codex_executable(config, server_key, environment_id)
+                    .await,
+            )?;
         }
         let result: rmcp::model::CallToolResult = client
             .call_tool(
@@ -1522,10 +1582,8 @@ impl McpConnectionSet {
                 arguments,
                 self.network_policy_meta_for_call(
                     &client,
-                    self.config
-                        .as_ref()
-                        .and_then(|config| config.permission_profile_for_server(server_key)),
-                    &view.metadata.environment_id,
+                    permission_profile,
+                    environment_id,
                     meta,
                 ),
                 effective_timeout,

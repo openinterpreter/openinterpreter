@@ -14,7 +14,6 @@ use crate::mitm_hook::MitmHooksByHost;
 use crate::mitm_hook::evaluate_mitm_hooks;
 use crate::network_policy::NetworkPolicyAuditObserver;
 use crate::policy::Host;
-use crate::policy::is_loopback_host;
 use crate::policy::is_non_public_ip;
 use crate::policy::normalize_host;
 use crate::policy::unscoped_ip_literal;
@@ -922,18 +921,7 @@ impl NetworkProxyState {
             // request. Explicit local/loopback literals are allowed only when explicitly
             // allowlisted; hostnames that resolve to local/private IPs are blocked even if
             // allowlisted.
-            let local_literal = {
-                let host_no_scope = unscoped_ip_literal(host_str).unwrap_or(host_str);
-                if is_loopback_host(&host) {
-                    true
-                } else if let Ok(ip) = host_no_scope.parse::<IpAddr>() {
-                    is_non_public_ip(ip)
-                } else {
-                    false
-                }
-            };
-
-            if local_literal {
+            if crate::policy::is_local_literal(host_str) {
                 if !is_explicit_local_allowlisted(&allowed_domains, &host) {
                     return Ok(HostBlockDecision::Blocked(HostBlockReason::NotAllowedLocal));
                 }
@@ -1909,7 +1897,13 @@ mod tests {
 
         assert_eq!(
             state
-                .host_blocked("api.openai.com", /*port*/ 80)
+                .host_blocked_with_lookup(
+                    "api.openai.com",
+                    /*port*/ 80,
+                    /*allow_local_binding*/ None,
+                    HostAuthorization::RequireAllowlist,
+                    |_host, port| async move { Ok(vec![SocketAddr::from(([8, 8, 8, 8], port))]) },
+                )
                 .await
                 .unwrap(),
             HostBlockDecision::Allowed
@@ -1926,14 +1920,26 @@ mod tests {
 
         assert_eq!(
             state
-                .host_blocked("example.com", /*port*/ 80)
+                .host_blocked_with_lookup(
+                    "example.com",
+                    /*port*/ 80,
+                    /*allow_local_binding*/ None,
+                    HostAuthorization::RequireAllowlist,
+                    |_host, port| async move { Ok(vec![SocketAddr::from(([8, 8, 8, 8], port))]) },
+                )
                 .await
                 .unwrap(),
             HostBlockDecision::Allowed
         );
         assert_eq!(
             state
-                .host_blocked("api.openai.com", /*port*/ 443)
+                .host_blocked_with_lookup(
+                    "api.openai.com",
+                    /*port*/ 443,
+                    /*allow_local_binding*/ None,
+                    HostAuthorization::RequireAllowlist,
+                    |_host, port| async move { Ok(vec![SocketAddr::from(([8, 8, 8, 8], port))]) },
+                )
                 .await
                 .unwrap(),
             HostBlockDecision::Allowed

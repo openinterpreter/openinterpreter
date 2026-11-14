@@ -213,7 +213,7 @@ impl TranscriptView {
                     if accepting && self.search.is_reading() {
                         self.accept_search_into_select_mode(cells);
                     } else if cancelling {
-                        self.restore_select_search_origin();
+                        self.restore_select_search_origin(cells);
                     }
                     return Some(ViewAction::Changed);
                 }
@@ -270,16 +270,24 @@ impl TranscriptView {
                 | MouseEventKind::Drag(MouseButton::Left)
                 | MouseEventKind::Up(MouseButton::Left)
         );
-        let before = self
-            .selection
-            .as_ref()
-            .map(|selection| (selection.start, selection.end, selection.unit()));
+        let before = self.selection.as_ref().map(|selection| {
+            (
+                selection.start,
+                selection.end,
+                selection.unit(),
+                selection.has_table_scope(),
+            )
+        });
         let action =
             self.handle_mouse_with_mode(event, cells, MouseMode::Selection(patch_approval));
-        let after = self
-            .selection
-            .as_ref()
-            .map(|selection| (selection.start, selection.end, selection.unit()));
+        let after = self.selection.as_ref().map(|selection| {
+            (
+                selection.start,
+                selection.end,
+                selection.unit(),
+                selection.has_table_scope(),
+            )
+        });
         if endpoint_changed && before != after {
             if self.has_selection_range() {
                 self.disclosure.resume_after_approval = None;
@@ -380,6 +388,8 @@ impl TranscriptView {
                 return self.pointer_down(event, cells, mode);
             }
             MouseEventKind::Drag(MouseButton::Left) if dragging => {
+                // A drag ends the click sequence even when the next press is at the same spot.
+                self.last_click = None;
                 self.extend_selection(event.column, event.row);
             }
             MouseEventKind::Up(MouseButton::Left) if dragging => {
@@ -541,13 +551,18 @@ impl TranscriptView {
         }
         let clicks =
             crate::text_selection::click_count(&mut self.last_click, event.column, event.row);
-        if clicks >= 2
-            && visible
-                .layout
-                .position_at(visible.row, event.column.saturating_sub(self.area.x))
-                == visible.layout.position_at(visible.row, u16::MAX)
-        {
-            return None;
+        if clicks >= 2 {
+            let column = event.column.saturating_sub(self.area.x);
+            let layout = &visible.layout;
+            let offset = layout.position_at(visible.row, column);
+            let at_row_end = offset == layout.position_at(visible.row, u16::MAX);
+            let can_select_from_padding = at_row_end
+                && clicks == 3
+                && !self.is_select_mode()
+                && layout.table_cell_at(visible.row, column, offset).is_some();
+            if at_row_end && !can_select_from_padding {
+                return None;
+            }
         }
         let link = (mode == MouseMode::Interactive && clicks == 1 && event.modifiers.is_empty())
             .then(|| self.link_at(event.column, event.row))
