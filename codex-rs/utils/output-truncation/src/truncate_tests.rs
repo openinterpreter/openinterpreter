@@ -356,9 +356,7 @@ fn formatted_mixed_output_budgets_text_and_audio_in_order() {
         FunctionCallOutputContentItem::InputText {
             text: "efgh".to_string(),
         },
-        FunctionCallOutputContentItem::InputAudio {
-            audio_url: "audio:one".to_string(),
-        },
+        FunctionCallOutputContentItem::inline_audio("audio:one".to_string()),
         FunctionCallOutputContentItem::InputImage {
             image: ImageReference::File {
                 file_id: "file_123".to_string(),
@@ -392,9 +390,7 @@ fn formatted_mixed_output_budgets_text_and_audio_in_order() {
                 image: ImageReference::Inline { image_url: "img:one".to_string() },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             },
-            FunctionCallOutputContentItem::InputAudio {
-                audio_url: "audio:one".to_string(),
-            },
+            FunctionCallOutputContentItem::inline_audio("audio:one".to_string()),
             FunctionCallOutputContentItem::InputImage {
                 image: ImageReference::File {
                     file_id: "file_123".to_string(),
