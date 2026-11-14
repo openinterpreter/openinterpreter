@@ -104,6 +104,8 @@ pub enum Feature {
     ApiKeyModelDiscovery,
     /// Permit API-key providers to use supported cyber access programs.
     ApiKeyCyberAccessPrograms,
+    /// Enable Daybreak controls and automatic access-program selection in CLI clients.
+    CliDaybreak,
     /// Deprecated no-op; use `tui.fullscreen_transcript` instead.
     TranscriptV2,
     // Stable.
@@ -1569,6 +1571,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "api_key_cyber_access_programs",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::CliDaybreak,
+        key: "cli_daybreak",
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::EnableRequestCompression,

@@ -645,6 +645,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         codex_self_exe: arg0_paths.codex_self_exe.clone(),
         codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe.clone(),
         main_execve_wrapper_exe: None,
+        default_zsh_path: None,
         base_instructions: None,
         developer_instructions: None,
         personality: None,
@@ -1347,6 +1348,8 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         collaboration_mode: None,
                         multi_agent_mode: None,
                         cyber_access_program,
+                        parent_turn_id: None,
+                        root_turn_id: None,
                     },
                 },
                 "turn/start",
@@ -2377,6 +2380,31 @@ async fn handle_server_request(
                 ),
             )
             .await
+        }
+        ServerRequest::CurrentTimeRead { request_id, .. } => {
+            let current_time_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|err| err.to_string())
+                .and_then(|elapsed| {
+                    i64::try_from(elapsed.as_secs()).map_err(|err| err.to_string())
+                });
+            match current_time_at {
+                Ok(current_time_at) => {
+                    let response =
+                        codex_app_server_protocol::CurrentTimeReadResponse { current_time_at };
+                    match serde_json::to_value(response) {
+                        Ok(value) => {
+                            resolve_server_request(client, request_id, value, "currentTime/read")
+                                .await
+                        }
+                        Err(err) => {
+                            reject_server_request(client, request_id, &method, err.to_string())
+                                .await
+                        }
+                    }
+                }
+                Err(err) => reject_server_request(client, request_id, &method, err).await,
+            }
         }
     };
 
