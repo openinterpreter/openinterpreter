@@ -312,7 +312,7 @@ impl CoreShellActionProvider {
                     exec_requirement: Some(intercepted_exec_approval_requirement(require_human)),
                     review_context: GuardianReviewContext::from_resolved_settings(
                         Arc::clone(&turn_context),
-                        &step_inputs.settings,
+                        &step_inputs,
                         &environments,
                     ),
                     // The running process can outlive its launching tool or code-mode cell.

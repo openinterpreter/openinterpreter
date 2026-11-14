@@ -477,7 +477,6 @@ impl TurnContext {
             originator: self.originator.clone(),
             initial_environments: self.initial_environments.clone(),
             available_models,
-            unified_exec_shell_mode: self.unified_exec_shell_mode.clone(),
             current_date: self.current_date.clone(),
             timezone: self.timezone.clone(),
             app_server_client_name: self.app_server_client_name.clone(),
@@ -890,6 +889,7 @@ impl TurnContext {
             trace_id: self.trace_id.clone(),
             realtime_active: self.realtime_active,
             code_mode_available: self.code_mode_available,
+            unified_exec_shell_mode: self.unified_exec_shell_mode.clone(),
             config: Arc::new(config),
             overridden_direct_only_tool_namespaces: self
                 .overridden_direct_only_tool_namespaces
