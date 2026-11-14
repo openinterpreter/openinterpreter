@@ -352,9 +352,6 @@ impl ChatWidget {
         self.input_queue.rejected_steers_queue.push_back(message);
         self.input_queue.rejected_steer_sources.push_back(source);
         self.input_queue
-            .rejected_steer_sources
-            .push_back(pending_steer.source);
-        self.input_queue
             .rejected_steer_history_records
             .push_back(history);
         self.refresh_pending_input_preview();

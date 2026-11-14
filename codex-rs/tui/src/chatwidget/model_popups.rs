@@ -424,6 +424,7 @@ impl ChatWidget {
             .and_then(|effort| self.ultra_reasoning_concurrency_warning(effort));
         let thread_id = self.thread_id();
         let sparkle_thread = self.sparkle_thread_for_picker_action(&model_for_action);
+        let scoped = self.scope_model_picker_event();
         vec![Box::new(move |tx| {
             if model_for_action == LUNA_RESERVE_MODEL {
                 // Reserve is temporary: update the active task without persisting a model default.
@@ -434,27 +435,29 @@ impl ChatWidget {
                     }));
                 }
             } else if effort_for_action == Some(ReasoningEffortConfig::Ultra) {
-                tx.send(
+                tx.send(scoped(
                     AstraModelPickerAction::ApplyAdvancedReasoning {
                         effort: ReasoningEffortConfig::Ultra,
                     }
                     .into_picker_event(sparkle_thread, model_for_action.clone()),
-                );
+                ));
             } else if should_prompt_plan_mode_scope {
                 tx.send(scoped(AppEvent::OpenPlanReasoningScopePrompt {
                     model: model_for_action.clone(),
                     effort: effort_for_action.clone(),
                 }));
             } else {
-                tx.send(
+                tx.send(scoped(
                     AstraModelPickerAction::UpdateModel
                         .into_picker_event(sparkle_thread, model_for_action.clone()),
-                );
-                tx.send(AppEvent::UpdateReasoningEffort(effort_for_action.clone()));
-                tx.send(AppEvent::PersistModelSelection {
+                ));
+                tx.send(scoped(AppEvent::UpdateReasoningEffort(
+                    effort_for_action.clone(),
+                )));
+                tx.send(scoped(AppEvent::PersistModelSelection {
                     model: model_for_action.clone(),
                     effort: effort_for_action.clone(),
-                });
+                }));
             }
             if let Some(warning) = warning.clone() {
                 tx.send(scoped(AppEvent::InsertHistoryCell(Box::new(

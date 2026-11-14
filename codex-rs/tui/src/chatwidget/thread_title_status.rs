@@ -5,6 +5,7 @@
 
 use super::ChatWidget;
 use super::status_surfaces::TERMINAL_TITLE_SPINNER_FRAMES;
+use crate::bottom_pane::StatusLineItem;
 use std::time::Instant;
 
 impl ChatWidget {

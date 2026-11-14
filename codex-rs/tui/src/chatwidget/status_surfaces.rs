@@ -1270,7 +1270,7 @@ fn matches_window_label(window: &RateLimitWindowDisplay, label: &str) -> bool {
         == Some(label)
 }
 
-fn permissions_display(config: &Config) -> String {
+pub(super) fn permissions_display(config: &Config) -> String {
     let active_permission_profile = config.permissions.active_permission_profile();
     if let Some(active_permission_profile) = active_permission_profile.as_ref()
         && !active_permission_profile.id.starts_with(':')

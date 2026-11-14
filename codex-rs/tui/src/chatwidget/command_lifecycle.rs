@@ -449,11 +449,7 @@ impl ChatWidget {
             None => ExecEndTarget::NewCell,
         };
 
-        let output = if is_unified_exec_interaction {
-            CommandOutput::new(exit_code, String::new())
-        } else {
-            CommandOutput::new(exit_code, aggregated_output)
-        };
+        let output = CommandOutput::from_execution(status, exit_code, source, aggregated_output);
 
         match end_target {
             ExecEndTarget::ActiveTracked => {

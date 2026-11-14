@@ -1,7 +1,10 @@
 //! Deduplicate incoming diagnostics and project them into the warning footer and viewer.
 
 use crate::history_cell::HistoryCell;
+use crate::history_cell::WarningEntry;
+use crate::history_cell::WarningId;
 use crate::tui::TuiEvent;
+use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
