@@ -88,8 +88,9 @@ async fn remote_file_system_sends_path_and_sandbox_cwd_uris_without_native_conve
     }
 
     let captured_params = captured_params.await.expect("captured params");
-    let expected_params = paths
-        .into_iter()
+    let mut expected_params = paths
+        .iter()
+        .cloned()
         .map(|path| FsReadFileParams {
             path,
             follow_symlinks: None,

@@ -18,6 +18,7 @@ use tokio_util::task::AbortOnDropHandle;
 use super::*;
 use crate::EnvironmentConnectionState;
 use crate::ExecServerRuntimeOptions;
+use crate::ExecServerRuntimeOptions as ExecServerRuntimePaths;
 use crate::NoiseChannelIdentity;
 use crate::ProcessId;
 use crate::noise_relay::stream_handler::NoiseOutboundMessage;
@@ -26,8 +27,31 @@ use crate::noise_relay::stream_handler::NoiseStreamHandler;
 use crate::relay::HarnessKeyValidator;
 use crate::relay::run_multiplexed_environment;
 use crate::server::ConnectionProcessor;
+use codex_config::ScopedSkillsConfig;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
+
+mod location_fixtures {
+    use crate::discover_v2::capability_locations::CapabilityLocationRequest;
+    use codex_utils_path_uri::PathUri;
+    use std::path::Path;
+
+    pub(super) fn write(root: &Path, relative: &str, contents: &str) -> std::io::Result<()> {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().expect("fixture parent"))?;
+        std::fs::write(path, contents)
+    }
+
+    pub(super) fn request(root: &Path) -> std::io::Result<CapabilityLocationRequest> {
+        let root = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(root)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        Ok(CapabilityLocationRequest {
+            codex_home: PathUri::from_abs_path(&root.join("codex")),
+            user_home: None,
+            system_skills_root: None,
+        })
+    }
+}
 
 // These tests exercise real sockets, not keepalive deadlines. The shared unit-test
 // Pong timeout is only 100 ms and can expire during Noise handshakes under load.
@@ -394,8 +418,11 @@ async fn registration_snapshot_changes_only_after_same_key_replacement_is_instal
     };
     let new = Executor::start_with_identity(validator.clone(), old.target.identity.clone()).await?;
     let (client, registry) = old.client()?;
-    let environment =
-        crate::Environment::remote_with_client(client.clone(), /*local_runtime_paths*/ None);
+    let environment = crate::Environment::remote_with_client(
+        client.clone(),
+        /*local_runtime_paths*/ None,
+        ScopedSkillsConfig::default(),
+    );
     assert_eq!(environment.cached_executor_registration_id(), None);
     let original = client.get().await?;
     assert_eq!(
@@ -437,8 +464,11 @@ async fn registration_renewal_recovers_the_session_and_running_process() -> Resu
     )
     .await?;
     let (client, registry) = old.client()?;
-    let environment =
-        crate::Environment::remote_with_client(client.clone(), /*local_runtime_paths*/ None);
+    let environment = crate::Environment::remote_with_client(
+        client.clone(),
+        /*local_runtime_paths*/ None,
+        ScopedSkillsConfig::default(),
+    );
     let original = client.get().await?;
     let session_id = original.session_id();
     let process =
@@ -523,8 +553,11 @@ async fn same_key_replacement_cannot_resume_a_missing_session() -> Result<()> {
     let replacement =
         Executor::start_with_identity(Validator::default(), old.target.identity.clone()).await?;
     let (client, registry) = old.client()?;
-    let environment =
-        crate::Environment::remote_with_client(client.clone(), /*local_runtime_paths*/ None);
+    let environment = crate::Environment::remote_with_client(
+        client.clone(),
+        /*local_runtime_paths*/ None,
+        ScopedSkillsConfig::default(),
+    );
     let original = client.get().await?;
     let process = original
         .register_session(&ProcessId::from("old-process"))
@@ -561,8 +594,11 @@ async fn stale_refresh_lookup_does_not_retire_a_renewed_session() -> Result<()> 
     )
     .await?;
     let (client, registry) = old.client()?;
-    let environment =
-        crate::Environment::remote_with_client(client.clone(), /*local_runtime_paths*/ None);
+    let environment = crate::Environment::remote_with_client(
+        client.clone(),
+        /*local_runtime_paths*/ None,
+        ScopedSkillsConfig::default(),
+    );
     let original = client.get().await?;
     let release = registry.block_next_lookup();
     let refreshing = client.refresh_connection();

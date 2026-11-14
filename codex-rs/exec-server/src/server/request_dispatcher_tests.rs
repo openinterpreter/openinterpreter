@@ -32,6 +32,7 @@ use super::RequestDispatchMode;
 use super::RequestDispatcher;
 use super::RequestTaskResult;
 use crate::ExecServerRuntimeOptions;
+use crate::ExecServerRuntimeOptions as ExecServerRuntimePaths;
 use crate::connection::JsonRpcConnectionEvent;
 use crate::discover_v2::capability_manager::CapabilityManager;
 use crate::rpc::RpcNotificationSender;
@@ -388,6 +389,7 @@ fn request_telemetry_fixture(router: RpcRouter<ExecServerHandler>) -> RequestTel
     let requests = notifications.request_sender();
     let handler = Arc::new(ExecServerHandler::new(
         SessionRegistry::new(telemetry.clone()),
+        CapabilityManager::new(crate::LocalFileSystem::default()),
         notifications,
         ExecServerRuntimePaths::new(
             std::env::current_exe().expect("current executable"),

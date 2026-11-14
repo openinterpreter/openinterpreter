@@ -24,6 +24,8 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
 use crate::ExecServerRuntimeOptions;
+#[cfg(test)]
+use crate::ExecServerRuntimeOptions as ExecServerRuntimePaths;
 use crate::FileSystemSandboxContext;
 use crate::fs_helper::CODEX_FS_HELPER_ARG1;
 use crate::fs_helper::FsHelperPayload;

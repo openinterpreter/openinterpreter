@@ -29,7 +29,6 @@ use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 #[cfg(unix)]
 use tempfile::tempdir;
-#[cfg(windows)]
 use test_case::test_case;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -41,6 +40,7 @@ use super::prepare_exec_request_with_telemetry;
 use crate::CODEX_ARG0_EXEC_HELPER_ARG1;
 use crate::ExecParams;
 use crate::ExecServerRuntimeOptions;
+use crate::ExecServerRuntimeOptions as ExecServerRuntimePaths;
 #[cfg(any(unix, windows))]
 use crate::FileSystemSandboxContext;
 use crate::ProcessId;
