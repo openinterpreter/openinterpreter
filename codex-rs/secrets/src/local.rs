@@ -507,6 +507,22 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
+    fn scrypt_secret_ciphertext_round_trips_and_rejects_wrong_passphrase() -> Result<()> {
+        let passphrase = SecretString::from("nonproduction-scrypt-test-passphrase".to_owned());
+        let wrong_passphrase = SecretString::from("different-nonproduction-passphrase".to_owned());
+        let plaintext = b"nonproduction-secret-value";
+        let ciphertext = encrypt_with_passphrase(plaintext, &passphrase)?;
+        assert!(ciphertext.starts_with(b"age-encryption.org/v1\n"));
+        assert_ne!(ciphertext, plaintext);
+        assert_eq!(
+            decrypt_with_passphrase(&ciphertext, &passphrase)?,
+            plaintext
+        );
+        assert!(decrypt_with_passphrase(&ciphertext, &wrong_passphrase).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn load_file_rejects_newer_schema_versions() -> Result<()> {
         let _cache_lock = SECRETS_CACHE_TEST_LOCK
             .lock()
