@@ -66,13 +66,10 @@ impl App {
             tracing::debug!(
                 "ConsolidateAgentMessage: replacing cells [{start}..{end}] with AgentMarkdownCell"
             );
-            let consolidated: Arc<dyn HistoryCell> = Arc::new(
-                history_cell::AgentMarkdownCell::new_with_inline_visualizations(
-                    source,
-                    &cwd,
-                    inline_visualization_context,
-                ),
-            );
+            // The event handler constructed the source-backed cell with its original cwd,
+            // inline visualization context, copy source, phase, and interruption metadata.
+            // Reconstructing it here would discard those identities during transcript reflow.
+            let consolidated: Arc<dyn HistoryCell> = Arc::new(source);
             self.native_history
                 .consolidate(&self.transcript_cells[start..end], &consolidated);
             if tui.is_owned_screen() {

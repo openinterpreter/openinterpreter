@@ -662,11 +662,6 @@ impl App {
         let missing_passcode = report_passcode.is_none();
         let retry_reason = reason.clone();
         let retry_turn_id = turn_id.clone();
-        let rollout_path = if include_logs {
-            self.chat_widget.rollout_path()
-        } else {
-            None
-        };
         let params = build_feedback_upload_params(
             origin_thread_id,
             self.chat_widget.rollout_path(),
@@ -680,10 +675,10 @@ impl App {
         let codex_home = app_server.codex_home_path(&self.config.codex_home);
         let feedback = self.feedback.clone();
         tokio::spawn(async move {
-            let result = fetch_feedback_upload(request_handle, params)
-                .await
-                .map(|response| response.thread_id)
-                .map_err(|err| err.to_string());
+            let result =
+                deliver_feedback(request_handle, codex_home, params, feedback, destination)
+                    .await
+                    .map_err(|err| format!("{err:#}"));
             if app_server_requests_feedback_passcode(missing_passcode, &result) {
                 app_event_tx.send(AppEvent::FeedbackPasscodeRequired {
                     origin_thread_id,
@@ -1348,9 +1343,9 @@ pub(super) async fn write_hook_enabled(
         .wrap_err("config/batchWrite failed while updating hook enablement in TUI")
 }
 
-fn app_server_requests_feedback_passcode(
+fn app_server_requests_feedback_passcode<T>(
     missing_passcode: bool,
-    result: &Result<String, String>,
+    result: &Result<T, String>,
 ) -> bool {
     missing_passcode
         && result
