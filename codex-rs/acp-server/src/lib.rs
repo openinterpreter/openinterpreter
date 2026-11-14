@@ -12,7 +12,6 @@ use acp::Client;
 use acp::ConnectTo;
 use acp::ConnectionTo;
 use acp::Error;
-use acp::schema::AgentAuthCapabilities;
 use acp::schema::AgentCapabilities;
 use acp::schema::AuthEnvVar;
 use acp::schema::AuthMethod;
@@ -35,7 +34,6 @@ use acp::schema::ListSessionsRequest;
 use acp::schema::ListSessionsResponse;
 use acp::schema::LoadSessionRequest;
 use acp::schema::LoadSessionResponse;
-use acp::schema::LogoutCapabilities;
 use acp::schema::McpCapabilities;
 use acp::schema::NewSessionRequest;
 use acp::schema::NewSessionResponse;
@@ -473,8 +471,7 @@ impl AppServerAcpAgent {
         let mut agent_capabilities = AgentCapabilities::new()
             .prompt_capabilities(PromptCapabilities::new().embedded_context(true).image(true))
             .mcp_capabilities(McpCapabilities::new().http(false).sse(false))
-            .load_session(true)
-            .auth(AgentAuthCapabilities::new().logout(LogoutCapabilities::new()));
+            .load_session(true);
         agent_capabilities.session_capabilities = SessionCapabilities::new()
             .close(SessionCloseCapabilities::new())
             .list(SessionListCapabilities::new());

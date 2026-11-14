@@ -361,7 +361,7 @@ mcp_test_support = { path = "mcp-server/tests/common" }
 mxc-sdk = { git = "https://github.com/microsoft/mxc", rev = "b21120168d70befe12356411423266bfef168446" }
 age = "0.12.1"
 allocative = "0.3.3"
-agent-client-protocol = { version = "=0.12.1", features = ["unstable"] }
+agent-client-protocol = { version = "=0.13.0", features = ["unstable"] }
 ansi-to-tui = "8.0.1"
 anyhow = "1"
 arboard = { version = "3", features = ["wayland-data-control"] }
