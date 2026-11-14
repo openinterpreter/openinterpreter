@@ -29,6 +29,28 @@ pub(super) struct ConversationFrame {
 }
 
 impl ConversationFrame {
+    fn begin_layout(&mut self) -> Option<Rect> {
+        // Only a caller's inset survives a draw. A sidebar or tab strip must be
+        // recalculated from its current model and screen dimensions.
+        if self.sidebar.is_some() || self.chat_strip.is_some() {
+            *self = Self::default();
+        }
+        self.inset
+    }
+
+    fn record_layout(
+        &mut self,
+        caller_inset: Option<Rect>,
+        main: Rect,
+        screen: Rect,
+        sidebar: Option<sidebar::SidebarLayout>,
+        chat_strip: Option<Rect>,
+    ) {
+        self.inset = caller_inset.or_else(|| (!main.is_empty() && main != screen).then_some(main));
+        self.sidebar = sidebar;
+        self.chat_strip = chat_strip;
+    }
+
     pub(super) fn has_caller_inset(&self) -> bool {
         self.inset.is_some() && self.sidebar.is_none() && self.chat_strip.is_none()
     }
@@ -60,6 +82,44 @@ impl ConversationFrame {
 
     pub(super) fn divider_area(&self) -> Option<Rect> {
         self.sidebar.as_ref()?.divider_area()
+    }
+}
+
+#[cfg(test)]
+mod conversation_frame_tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_inset_does_not_become_a_caller_inset_on_next_draw() {
+        let screen = Rect::new(0, 0, 160, 40);
+        let main = Rect::new(0, 0, 100, 40);
+        let side = Rect::new(101, 0, 59, 40);
+        let mut frame = ConversationFrame::default();
+        frame.record_layout(
+            None,
+            main,
+            screen,
+            Some(sidebar::SidebarLayout::Chooser {
+                main,
+                sidebar: side,
+                focus: PaneFocus::Sidebar,
+            }),
+            None,
+        );
+        assert_eq!(frame.chooser_area(), Some(side));
+        assert_eq!(
+            frame.sidebar_tab_strip(),
+            Some(side_pane::tab_and_body(side)[0])
+        );
+        assert_eq!(frame.divider_area(), Some(Rect::new(100, 0, 1, 40)));
+        assert!(!frame.has_caller_inset());
+        assert_eq!(frame.begin_layout(), None);
+        assert_eq!(frame.chooser_area(), None);
+
+        let caller = Rect::new(10, 2, 110, 25);
+        frame.record_layout(Some(caller), caller, screen, None, None);
+        assert!(frame.has_caller_inset());
+        assert_eq!(frame.begin_layout(), Some(caller));
     }
 }
 
@@ -114,10 +174,9 @@ impl App {
         screen_size: Size,
     ) -> Result<Rect> {
         let screen: Rect = screen_size.into();
+        let caller_inset = self.conversation_frame.begin_layout();
         // Keep the last painted input regions in the frame, not in the sidebar's
         // asynchronously mutable model. The same settled split paints both panes.
-        self.conversation_frame.sidebar = None;
-        self.conversation_frame.chat_strip = None;
         let layout = sidebar::paint_layout(self, tui, screen);
         let displayed = self.current_displayed_thread_id();
         let chat = match displayed.and_then(|id| self.side_pair_key(id)) {
@@ -128,14 +187,20 @@ impl App {
         let (main, strip) = match &layout {
             Some(sidebar::SidebarLayout::Chat(panes)) => (panes.focused, Some(panes.tab_strip)),
             Some(sidebar::SidebarLayout::Chooser { main, .. }) => (*main, None),
-            None if chat == TabState::Active && self.side_retention_enabled(tui) => {
+            None if chat == TabState::Active
+                && caller_inset.is_none()
+                && self.side_retention_enabled(tui) =>
+            {
                 let [strip, body] = side_pane::tab_and_body(screen);
                 (body, Some(strip))
             }
-            None => (screen, None),
+            None => (
+                caller_inset.map_or(screen, |inset| inset.intersection(screen)),
+                None,
+            ),
         };
-        self.conversation_frame.sidebar = layout;
-        self.conversation_frame.chat_strip = strip;
+        self.conversation_frame
+            .record_layout(caller_inset, main, screen, layout, strip);
         let parent = self.sidebar_parent();
         self.conversation_frame.sidebar_input = self
             .sidebars
@@ -152,6 +217,10 @@ impl App {
         let highlighted_divider =
             self.pane_resize.is_some() || tui.link_hover.shape == tui::PointerShape::Resize;
         let hovered_target = self.hovered_sidebar_target(tui.link_hover.position());
+        let mut hud = self.workspace_hud(tui, screen);
+        if let Some(hud) = &mut hud {
+            hud.viewport = caller_inset;
+        }
         let frames = tui.frame_requester();
         self.chat_widget.sync_warnings(&self.transcript_cells);
         let motion = MotionMode::from_animations_enabled(
@@ -222,7 +291,7 @@ impl App {
         let mut rendered_cursor = None;
         let mut footer_height_changed = false;
         let mut feedback_tick = None;
-        tui.draw(screen_size.height, |frame| {
+        tui.draw_with_shortcut_hud(screen_size.height, hud, |frame| {
             ratatui::widgets::Clear.render(
                 Rect::new(main.x, main.y, main.width, available),
                 frame.buffer,
