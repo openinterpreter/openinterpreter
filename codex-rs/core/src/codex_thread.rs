@@ -1281,6 +1281,14 @@ impl CodexThread {
         self.session.get_config().await
     }
 
+    /// Refresh an idle session's startup warmup, including after an eager socket closes.
+    /// The session refuses to replace a live turn or an in-flight warmup.
+    pub async fn prewarm(&self) {
+        self.session
+            .schedule_startup_prewarm(crate::session::startup_prewarm::PrewarmInput::Base)
+            .await;
+    }
+
     /// Replace the host-provided dynamic tool catalog, persisting before live publication.
     pub async fn replace_dynamic_tools(
         &self,
