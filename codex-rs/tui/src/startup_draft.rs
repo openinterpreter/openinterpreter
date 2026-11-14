@@ -30,6 +30,7 @@ use crate::bottom_pane::ComposerDraftSnapshot;
 use crate::history_cell;
 use crate::history_cell::HistoryCell;
 use crate::keymap::RuntimeKeymap;
+use crate::legacy_core::config::Config;
 use crate::local_settings::LocalSettings;
 use crate::render::Insets;
 use crate::render::renderable::FlexRenderable;

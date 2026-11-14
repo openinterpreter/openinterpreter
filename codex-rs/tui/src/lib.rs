@@ -2407,6 +2407,28 @@ fn should_show_provider_setup_wizard(
             .is_login_method_allowed(ForcedLoginMethod::Api)
 }
 
+/// The Bedrock setup belongs to fresh embedded onboarding only; a pinned provider or an
+/// already-running daemon must not be switched behind the user's existing session.
+fn should_show_bedrock_setup_wizard(
+    login_status: LoginStatus,
+    requires_openai_auth: bool,
+    config: &Config,
+    app_server_target: &AppServerTarget,
+) -> bool {
+    matches!(app_server_target, AppServerTarget::Embedded)
+        && config
+            .config_layer_stack
+            .required_model_provider()
+            .is_none()
+        && should_show_provider_setup_wizard(
+            login_status,
+            requires_openai_auth,
+            config,
+            app_server_target,
+            Feature::BedrockSetupWizard,
+        )
+}
+
 mod daemon_recovery;
 mod daemon_startup;
 mod daemon_telemetry;

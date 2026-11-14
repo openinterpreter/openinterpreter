@@ -303,8 +303,18 @@ pub(super) async fn run_main_inner(
     let startup_presentation::StartupPresentation {
         bootstrap_config,
         config_cwd,
-        screen,
+        mut screen,
+        local_settings,
     } = presentation;
+    screen.use_alt_screen = determine_alt_screen_mode(
+        cli.no_alt_screen,
+        local_settings.tui.alternate_screen,
+        initialized_terminal.terminal_app_over_ssh,
+    );
+    screen.transcript_mode = crate::transcript_mode::TranscriptMode::resolve(
+        screen.transcript_mode.is_owned(),
+        screen.use_alt_screen,
+    );
     let mut startup_draft = startup_draft::StartupDraft::new(
         initialized_terminal,
         terminal_restore_guard,
@@ -327,6 +337,7 @@ pub(super) async fn run_main_inner(
         workload_identity_selected,
         std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),
     )?;
+    let cloud_preview_available = app_server_target.uses_embedded_network_policy();
     let remote_cwd_override = cli
         .cwd
         .clone()
