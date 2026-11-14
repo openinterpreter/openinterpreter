@@ -1305,7 +1305,7 @@ async fn run_ratatui_app(
                 UpdatePromptOutcome::Continue => {}
                 UpdatePromptOutcome::RunUpdate(action) => {
                     terminal_restore_guard.restore()?;
-                    launch_telemetry.record("update_requested");
+                    launch_telemetry.record(&app_server_target, /*connected*/ false);
                     return Ok(AppExitInfo {
                         token_usage: crate::token_usage::TokenUsage::default(),
                         thread_id: None,
@@ -1356,12 +1356,13 @@ async fn run_ratatui_app(
     launch_telemetry.record(&app_server_target, matches!(&startup_app_server, Ok(Ok(_))));
     let app_server_session = match startup_app_server {
         Ok(Ok(app_server)) => {
-            tui.terminal_size_tags = launch_telemetry.record(match &app_server_target {
+            let connection = match &app_server_target {
                 AppServerTarget::Embedded => "in_process",
                 AppServerTarget::LocalDaemon { .. } => "local_daemon",
                 AppServerTarget::Remote { .. } => "remote",
                 AppServerTarget::Cloud => "cloud",
-            });
+            };
+            tui.terminal_size_tags = vec![("app_server_connection", connection)];
             AppServerSession::new(
                 backend_id,
                 app_server,
@@ -1581,7 +1582,13 @@ async fn run_ratatui_app(
             let Some(startup_app_server) = app_server.as_mut() else {
                 unreachable!("app server should be initialized for --fork <id>");
             };
-            match lookup_session_target_with_app_server(startup_app_server, &config, id_str).await?
+            match lookup_session_target_with_app_server(
+                resume_picker::SessionPickerAction::Fork,
+                startup_app_server,
+                &config,
+                id_str,
+            )
+            .await?
             {
                 Some(target_session) => resume_picker::SessionSelection::Fork(target_session),
                 None => {
@@ -1603,10 +1610,7 @@ async fn run_ratatui_app(
                 .run_until(
                     &mut tui,
                     lookup_latest_session_target_with_app_server(
-                        uses_remote_workspace_or_environment(
-                            &app_server_target,
-                            &environment_manager,
-                        ),
+                        resume_picker::SessionPickerAction::Fork,
                         active_app_server,
                         &config,
                         filter_cwd,
@@ -1662,7 +1666,14 @@ async fn run_ratatui_app(
         let Some(startup_app_server) = app_server.as_mut() else {
             unreachable!("app server should be initialized for --resume <id>");
         };
-        match lookup_session_target_with_app_server(startup_app_server, &config, id_str).await? {
+        match lookup_session_target_with_app_server(
+            resume_picker::SessionPickerAction::Resume,
+            startup_app_server,
+            &config,
+            id_str,
+        )
+        .await?
+        {
             Some(target_session) => resume_picker::SessionSelection::Resume(target_session),
             None => {
                 shutdown_app_server_if_present(app_server.take()).await;
@@ -1683,7 +1694,7 @@ async fn run_ratatui_app(
             .run_until(
                 &mut tui,
                 lookup_latest_session_target_with_app_server(
-                    uses_remote_workspace_or_environment(&app_server_target, &environment_manager),
+                    resume_picker::SessionPickerAction::Resume,
                     active_app_server,
                     &config,
                     filter_cwd,
@@ -1834,14 +1845,8 @@ async fn run_ratatui_app(
                 &mut tui,
                 connect(
                     &mut app_server_target,
-                    arg0_paths.clone(),
-                    config.clone(),
-                    cli_kv_overrides.clone(),
-                    loader_overrides.clone(),
-                    strict_config,
-                    cloud_config_bundle.clone(),
-                    feedback.clone(),
-                    log_db.clone(),
+                    &config,
+                    &cloud_config_bundle,
                     &mut state_db,
                 ),
             )
@@ -1930,10 +1935,15 @@ async fn run_ratatui_app(
                     log_db.clone(),
                     &mut state_db,
                     environment_manager.clone(),
+                    embedded_network_policy.clone(),
                 )
                 .await?;
-                app_server = AppServerSession::new(client, app_server_target.thread_params_mode())
-                    .with_local_codex_home(&config.codex_home);
+                app_server = AppServerSession::new(
+                    backend_id,
+                    client,
+                    app_server_target.thread_params_mode(),
+                )
+                .with_local_codex_home(&config.codex_home);
             }
             #[cfg(target_os = "windows")]
             {
