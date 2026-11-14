@@ -170,7 +170,7 @@ async fn replacement_uses_server_defaults_and_preserves_explicit_launch_settings
         app.start_fresh_session(
             &mut tui,
             &mut server,
-            /*session_start_source*/ None,
+            crate::app::session_lifecycle::FreshSessionStart::NewConversation,
             /*initial_user_message*/ None,
             /*new_thread_name*/ None,
         )
@@ -470,7 +470,7 @@ async fn replacement_failure_keeps_current_task_and_restores_input() -> Result<(
         app.start_fresh_session(
             &mut tui,
             &mut server,
-            /*session_start_source*/ None,
+            crate::app::session_lifecycle::FreshSessionStart::NewConversation,
             Some("keep this request".into()),
             /*new_thread_name*/ None,
         )
@@ -1084,7 +1084,7 @@ async fn replacement_preserves_remote_launch_paths_and_older_servers() -> Result
         app.start_fresh_session(
             &mut tui,
             &mut server,
-            /*session_start_source*/ None,
+            crate::app::session_lifecycle::FreshSessionStart::NewConversation,
             /*initial_user_message*/ None,
             /*new_thread_name*/ None,
         )
