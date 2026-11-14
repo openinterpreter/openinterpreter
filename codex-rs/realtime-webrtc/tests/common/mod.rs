@@ -39,7 +39,10 @@ pub fn wait_for(mut ready: impl FnMut() -> bool) -> Result<()> {
 
 #[cfg(unix)]
 pub fn wait_for_helper_reaped(root: &std::path::Path) -> Result<()> {
-    let pid: libc::pid_t = fs::read_to_string(root.join("helper-pid"))?.parse()?;
+    let pid: libc::pid_t = fs::read_to_string(root.join("helper-pid"))
+        .context("voice fixture did not expose its helper PID")?
+        .parse()
+        .context("voice fixture helper PID is invalid")?;
     wait_for(|| {
         // SAFETY: Signal zero checks process existence without delivering a signal.
         let result = unsafe {
@@ -58,7 +61,7 @@ impl Drop for Package {
 
 // The child discovers its installation through current_exe, exactly as the public facade does.
 pub fn package(test: &str) -> Result<Option<PathBuf>> {
-    let source = std::env::current_exe()?;
+    let source = std::env::current_exe().context("voice fixture test executable lookup")?;
     if source.file_name().is_some_and(|name| name == APP) {
         codex_build_info::BuildInfo::initialize(BUILD_COMMIT);
         return Ok(Some(
@@ -70,34 +73,49 @@ pub fn package(test: &str) -> Result<Option<PathBuf>> {
                 .to_owned(),
         ));
     }
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("voice fixture clock lookup")?
+        .as_nanos();
     let package =
         Package(std::env::temp_dir().join(format!("voice-actor-{}-{nonce}", std::process::id())));
     let root = &package.0;
-    fs::create_dir_all(root.join("bin"))?;
-    fs::create_dir_all(root.join("codex-resources/voice/bin"))?;
-    fs::write(root.join("codex-package.json"), "{}")?;
-    codex_utils_cargo_bin::copy_executable(&source, &root.join("bin").join(APP))?;
+    fs::create_dir_all(root.join("bin")).context("voice fixture package bin creation")?;
+    fs::create_dir_all(root.join("codex-resources/voice/bin"))
+        .context("voice fixture helper bin creation")?;
+    fs::write(root.join("codex-package.json"), "{}").context("voice fixture manifest creation")?;
+    codex_utils_cargo_bin::copy_executable(&source, &root.join("bin").join(APP))
+        .context("voice fixture packaged test executable copy")?;
     codex_utils_cargo_bin::copy_executable(
         &source,
         &root.join("codex-resources/voice/bin").join(HELPER),
-    )?;
+    )
+    .context("voice fixture helper executable copy")?;
     let mut child = Command::new(root.join("bin").join(APP))
         .args(["--exact", test, "--nocapture"])
         .current_dir(root)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .context("voice fixture packaged test process spawn")?;
     let deadline = Instant::now() + WAIT * 3;
-    while child.try_wait()?.is_none() {
+    while child
+        .try_wait()
+        .context("voice fixture packaged test process wait")?
+        .is_none()
+    {
         if Instant::now() >= deadline {
-            child.kill()?;
-            child.wait()?;
+            child
+                .kill()
+                .context("voice fixture timed-out test termination")?;
+            child.wait().context("voice fixture timed-out test reap")?;
             anyhow::bail!("packaged test timed out");
         }
         thread::sleep(Duration::from_millis(/*millis*/ 10));
     }
-    let output = child.wait_with_output()?;
+    let output = child
+        .wait_with_output()
+        .context("voice fixture packaged test output collection")?;
     ensure!(
         output.status.success(),
         "packaged test failed: {}\n{}\nfixture: {}",
