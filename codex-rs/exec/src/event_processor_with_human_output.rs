@@ -105,7 +105,7 @@ impl EventProcessorWithHumanOutput {
 
     fn render_item_completed(&mut self, item: ThreadItemPayload) {
         match item {
-            ThreadItem::AgentMessage { text, .. } => {
+            ThreadItemPayload::AgentMessage { text, .. } => {
                 let command_name = Product::current().command_name();
                 eprintln!(
                     "{}\n{}",

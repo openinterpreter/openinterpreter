@@ -521,8 +521,10 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     )
     .await;
     let bootstrap_config_toml = &bootstrap_config.config_toml;
-    let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
-        bootstrap_auth_config(&codex_home, &bootstrap_config)?,
+    let cloud_config_bundle = managed_config_bundle_loader_for_storage(
+        embedded_network_policy
+            .bind_bootstrap_auth(bootstrap_auth_config(&codex_home, &bootstrap_config)?),
+        bootstrap_config.config_layer_stack.requirements_toml(),
         /*enable_codex_api_key_env*/ false,
     )
     .await?;
@@ -1106,7 +1108,8 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
 
     // Handle resume subcommand through existing `thread/list` + `thread/resume`
     // APIs so exec no longer reaches into rollout storage directly.
-    let (primary_thread_id, fallback_session_configured) = if let Some(ExecCommand::Resume(args)) =
+    let mut daybreak_enabled = config.daybreak_enabled;
+    let (history_mode, fallback_session_configured) = if let Some(ExecCommand::Resume(args)) =
         command.as_ref()
     {
         if let Some(thread_id) =
