@@ -12610,6 +12610,30 @@ mod tests {
     }
 
     #[test]
+    fn restored_non_shell_draft_keeps_literal_bang_prefix() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ false,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ false,
+        );
+        composer.set_text_content_with_shell_prefix(
+            "!not a shell command".to_string(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            ShellPrefixHandling::Literal,
+        );
+
+        assert!(!composer.draft.is_bash_mode);
+        assert_eq!(composer.draft.textarea.text(), "!not a shell command");
+        assert_eq!(composer.current_text(), "!not a shell command");
+    }
+
+    #[test]
     fn apply_external_edit_can_leave_bash_mode() {
         let (tx, _rx) = unbounded_channel::<AppEvent>();
         let sender = AppEventSender::new(tx);
