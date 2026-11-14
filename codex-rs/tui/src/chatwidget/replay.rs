@@ -370,12 +370,12 @@ impl ChatWidget {
                         self.reasoning_buffer.clear();
                         self.reasoning_summary_parts.clear();
                     }
-                    let reasoning_parts = summary.into_iter().chain(
+                    let reasoning_parts = summary.iter().cloned().chain(
                         self.config
                             .show_raw_agent_reasoning
-                            .then_some(content)
+                            .then_some(&content)
                             .into_iter()
-                            .flatten(),
+                            .flat_map(|parts| parts.iter().cloned()),
                     );
                     for (index, delta) in reasoning_parts.enumerate() {
                         if index > 0 {

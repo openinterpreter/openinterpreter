@@ -591,6 +591,7 @@ pub(crate) struct App {
 
     pub(crate) transcript_cells: Vec<Arc<dyn HistoryCell>>,
     composer_tips: composer_hints::ComposerTips,
+    turn_tips: turn_tips::TurnTips,
     native_history: native_history::NativeHistory,
     pub(crate) transcript_view: crate::transcript_view::TranscriptView,
     conversation_frame: owned_transcript::ConversationFrame,
