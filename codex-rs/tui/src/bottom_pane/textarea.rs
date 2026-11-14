@@ -1375,18 +1375,6 @@ impl TextArea {
         self.register_elements.event = None;
     }
 
-    pub(crate) fn take_kill_buffer_snapshot(&mut self) -> KillBufferSnapshot {
-        KillBufferSnapshot {
-            text: std::mem::take(&mut self.kill_buffer),
-            kind: self.kill_buffer_kind,
-        }
-    }
-
-    pub(crate) fn restore_kill_buffer_snapshot(&mut self, snapshot: KillBufferSnapshot) {
-        self.kill_buffer = snapshot.text;
-        self.kill_buffer_kind = snapshot.kind;
-    }
-
     fn kill_range(&mut self, range: Range<usize>) {
         self.kill_range_with_kind(range, KillBufferKind::Characterwise);
     }

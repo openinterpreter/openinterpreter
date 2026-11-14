@@ -339,6 +339,7 @@ use super::effort_status_line::EFFORT_STATUS_LINE_FRAME_TICK;
 use super::effort_status_line::EffortStatusLineTransition;
 use super::file_search_popup::FileSearchPopup;
 use super::footer::CollaborationModeIndicator;
+use super::footer::FooterKeyHints;
 use super::footer::FooterMode;
 use super::footer::FooterProps;
 use super::footer::GoalStatusIndicator;
@@ -420,6 +421,7 @@ pub(crate) use self::footer_state::ComposerRenderOptions;
 use self::footer_state::FooterState;
 pub(crate) use self::footer_state::TranscriptFooter;
 use self::history_search::HistorySearchSession;
+pub(crate) use self::mouse::ClipboardPasteTarget;
 use self::popup_state::ActivePopup;
 use self::popup_state::DismissedToken;
 use self::popup_state::PopupState;
@@ -432,7 +434,6 @@ use crate::app_event::ConnectorsSnapshot;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::LocalImageAttachment;
 use crate::bottom_pane::MentionBinding;
-use crate::bottom_pane::textarea::KillBufferSnapshot;
 use crate::bottom_pane::textarea::TextArea;
 use crate::clipboard_paste::normalize_pasted_path;
 use crate::clipboard_paste::pasted_image_format;
@@ -1413,11 +1414,11 @@ impl ChatComposer {
     }
 
     pub(crate) fn take_kill_buffer_snapshot(&mut self) -> KillBufferSnapshot {
-        self.draft.textarea.take_kill_buffer_snapshot()
+        vim_register::take_snapshot(self)
     }
 
     pub(crate) fn restore_kill_buffer_snapshot(&mut self, snapshot: KillBufferSnapshot) {
-        self.draft.textarea.restore_kill_buffer_snapshot(snapshot);
+        vim_register::restore_snapshot(self, snapshot);
     }
 
     /// Restore draft history transferred from the startup composer.

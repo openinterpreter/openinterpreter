@@ -57,6 +57,37 @@ impl KeymapActionDescriptor {
     }
 }
 
+const fn action(
+    context: &'static str,
+    context_label: &'static str,
+    action: &'static str,
+    description: &'static str,
+) -> KeymapActionDescriptor {
+    KeymapActionDescriptor {
+        context,
+        context_label,
+        action,
+        description,
+        required_feature: None,
+    }
+}
+
+const fn gated_action(
+    context: &'static str,
+    context_label: &'static str,
+    action: &'static str,
+    description: &'static str,
+    required_feature: KeymapActionFeature,
+) -> KeymapActionDescriptor {
+    KeymapActionDescriptor {
+        context,
+        context_label,
+        action,
+        description,
+        required_feature: Some(required_feature),
+    }
+}
+
 #[rustfmt::skip]
 pub(super) const KEYMAP_ACTIONS: &[KeymapActionDescriptor] = &[
     action("global", "Global", "open_agents", "Open the shared agent-session overview."),

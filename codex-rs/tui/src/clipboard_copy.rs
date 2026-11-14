@@ -21,11 +21,12 @@
 
 mod primary;
 mod tmux;
-mod worker;
+pub(crate) mod worker;
 mod wsl;
 
 use base64::Engine;
 use std::io::Write;
+use std::sync::Arc;
 use tmux::copy as tmux_clipboard_copy;
 
 /// Maximum raw bytes sent through tmux or directly encoded into OSC 52.
@@ -81,43 +82,6 @@ impl CopyStatus {
     }
 }
 
-/// A native clipboard write or an unacknowledged request to the user's terminal.
-pub(crate) enum CopyOutcome {
-    Copied(Option<ClipboardLease>),
-    Requested,
-}
-
-impl CopyOutcome {
-    /// Replace native ownership only when a backend supplies a new lease.
-    pub(crate) fn store(self, lease: &mut Option<ClipboardLease>) -> CopyStatus {
-        match self {
-            Self::Copied(next_lease) => {
-                if let Some(next_lease) = next_lease {
-                    *lease = Some(next_lease);
-                }
-                CopyStatus::Confirmed
-            }
-            Self::Requested => CopyStatus::Unconfirmed,
-        }
-    }
-}
-
-/// Whether a clipboard backend confirmed the write or only sent a request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CopyStatus {
-    Confirmed,
-    Unconfirmed,
-}
-
-impl CopyStatus {
-    pub(crate) fn message(self, label: &str) -> String {
-        match self {
-            Self::Confirmed => format!("Copied {label} to clipboard"),
-            Self::Unconfirmed => "Copy unconfirmed; /export saves chat".to_string(),
-        }
-    }
-}
-
 /// Copy text to the system clipboard.
 ///
 /// Try native copying, then independently attempt terminal forwarding in tmux or
@@ -129,15 +93,59 @@ impl CopyStatus {
 /// existing native lease unless the backend supplies a replacement.
 ///
 /// OSC 52 is supported by kitty, WezTerm, iTerm2, Ghostty, and others.
-pub(crate) fn copy_to_clipboard(text: &str, format: CopyFormat) -> Result<CopyOutcome, String> {
+pub(crate) fn copy_to_clipboard(
+    text: &str,
+    format: CopyFormat,
+    begin_delivery: impl FnOnce() -> Result<(), String>,
+    prepare_osc52: impl Fn(&str) -> Result<(), String>,
+) -> Result<CopyOutcome, String> {
+    if text.is_empty() {
+        return Err("nothing to copy: the selected content is empty".to_string());
+    }
+    // Native clipboard construction is read-only and may block on WSL. The worker's
+    // deadline gate must run after setup but before any clipboard or terminal write.
+    #[cfg(not(target_os = "android"))]
+    let native = if is_wsl_session() {
+        #[cfg(target_os = "linux")]
+        {
+            wsl::native_clipboard()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            arboard::Clipboard::new().map_err(|error| error.to_string())
+        }
+    } else {
+        arboard::Clipboard::new().map_err(|error| error.to_string())
+    };
+    begin_delivery()?;
     copy_to_clipboard_with(
         text,
         format,
-        environment,
+        CopyEnvironment {
+            herdr_session: std::env::var_os("HERDR_SESSION").is_some(),
+            ssh_session: is_ssh_session(),
+            forwarded_x11: std::env::var_os("DISPLAY").is_some() && is_ssh_session(),
+            wsl_session: is_wsl_session(),
+            tmux_session: is_tmux_session(),
+        },
         tmux_clipboard_copy,
-        osc52,
-        native_copy,
-        |text| wsl::copy(text, wsl_deadline),
+        prepare_osc52,
+        |text, html| {
+            #[cfg(not(target_os = "android"))]
+            {
+                arboard_copy(native?, text, html)
+            }
+            #[cfg(target_os = "android")]
+            {
+                arboard_copy(text, html)
+            }
+        },
+        |text| {
+            wsl::copy(
+                text,
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
+            )
+        },
     )
 }
 
@@ -217,6 +225,9 @@ fn copy_to_clipboard_with(
     let html = match format {
         CopyFormat::PlainText => None,
         CopyFormat::Markdown => Some(crate::clipboard_html::render_markdown(text)),
+        CopyFormat::MarkdownSelection(source) => {
+            Some(crate::clipboard_html::render_markdown(source.as_ref()))
+        }
     };
     let native_result = arboard_copy_fn(text, html.as_deref()).or_else(|native_error| {
         if environment.wsl_session {

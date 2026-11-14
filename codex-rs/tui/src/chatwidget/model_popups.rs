@@ -14,6 +14,8 @@ const MODEL_PROVIDER_SELECTION_VIEW_ID: &str = "model-provider-selection";
 const HARNESS_SELECTION_VIEW_ID: &str = "harness-selection";
 pub(super) const MODEL_SELECTION_VIEW_ID: &str = "model-selection";
 pub(super) const ALL_MODELS_SELECTION_VIEW_ID: &str = "all-models-selection";
+pub(super) const MODEL_LOADING_VIEW_ID: &str = MODEL_PROVIDER_SELECTION_VIEW_ID;
+pub(super) const MODEL_OPTIONS_VIEW_ID: &str = "model-options";
 
 impl ChatWidget {
     /// Open a popup to choose a quick auto model. Selecting "All models"

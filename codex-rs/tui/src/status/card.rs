@@ -756,19 +756,12 @@ fn status_approval_label(
 
 impl StatusHistoryCell {
     fn content_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(Line::from(vec![
-            Span::from(format!("{}>_ ", FieldFormatter::INDENT)).dim(),
-            Span::from(Product::current().display_name()).bold(),
-            Span::from(" ").dim(),
-            Span::from(format!("(v{CODEX_CLI_VERSION})")).dim(),
-        ]));
-
         let available_inner_width = usize::from(width.saturating_sub(4));
         if available_inner_width == 0 {
             return Vec::new();
         }
         let mut lines = Vec::new();
+        let available_width = available_inner_width;
 
         let account_value = self.account.as_ref().map(|account| match account {
             StatusAccountDisplay::ChatGpt { email, plan, .. } => match (email, plan) {
@@ -839,25 +832,6 @@ impl StatusHistoryCell {
         let formatter = FieldFormatter::from_labels(labels.iter().map(String::as_str));
         let value_width = formatter.value_width(available_width);
 
-        let note_first_line = Line::from(vec![
-            Span::from("Visit ").fg(accent_color()),
-            CHATGPT_USAGE_URL.fg(accent_color()).underlined(),
-            Span::from(" for up-to-date").fg(accent_color()),
-        ]);
-        let note_second_line = Line::from(vec![
-            Span::from("information on rate limits and credits").fg(accent_color()),
-        ]);
-        let note_lines = adaptive_wrap_lines(
-            [note_first_line, note_second_line],
-            RtOptions::new(available_inner_width),
-        );
-        lines.push(Line::from(Vec::<Span<'static>>::new()));
-        // The ChatGPT usage page only applies to providers backed by OpenAI auth;
-        // providers like Bedrock manage limits and billing elsewhere.
-        if self.show_chatgpt_usage_link {
-            lines.extend(note_lines);
-            lines.push(Line::from(Vec::<Span<'static>>::new()));
-        }
         if let Some(remote_connection) = self.remote_connection.as_ref() {
             let value = if remote_connection.is_local_daemon {
                 Line::from("Local background server")

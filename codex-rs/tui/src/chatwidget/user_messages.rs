@@ -67,6 +67,13 @@ pub(super) enum UserMessageSource {
     QuestionAnswer,
 }
 
+/// Preserve a sent-but-unacknowledged input until a matching server receipt arrives.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum MessageDelivery {
+    Unsent,
+    Unconfirmed(Option<String>),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct QueuedUserMessage {
     pub(super) user_message: UserMessage,

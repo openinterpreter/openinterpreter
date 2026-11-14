@@ -272,8 +272,8 @@ pub(crate) use chat_composer::InputResult;
 pub(crate) use chat_composer::KillBufferSnapshot;
 pub(crate) use chat_composer::QueuedInputAction;
 pub(crate) use chat_composer::RestrictedInputMode;
+pub(crate) use chat_composer::ShellPrefixHandling;
 pub(crate) use chat_composer_history::HistoryEntry;
-pub(crate) use textarea::KillBufferSnapshot;
 
 use crate::status_indicator_widget::StatusDetailsCapitalization;
 use crate::status_indicator_widget::StatusIndicatorWidget;
@@ -2245,6 +2245,16 @@ impl BottomPane {
     /// Commit accepted typing before snapshotting the target of an asynchronous paste.
     pub(crate) fn prepare_composer_clipboard_paste(&mut self) {
         self.composer.flush_pending_paste_burst();
+    }
+
+    pub(crate) fn clipboard_paste_target(
+        &self,
+        shortcut: Option<KeyCode>,
+    ) -> Option<ClipboardPasteTarget> {
+        if self.has_active_view() || (shortcut.is_none() && !self.no_modal_or_popup_active()) {
+            return None;
+        }
+        self.composer.clipboard_paste_target(shortcut)
     }
 
     pub(crate) fn is_in_paste_burst(&self) -> bool {

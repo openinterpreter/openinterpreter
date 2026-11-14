@@ -47,6 +47,13 @@ pub(crate) enum Overlay {
     Analytics(Box<crate::analytics::AnalyticsView>),
 }
 
+/// A single explicit action on a static overlay, separate from pager navigation.
+pub(crate) struct PagerAction {
+    pub(crate) key: KeyBinding,
+    pub(crate) label: &'static str,
+    pub(crate) run: Box<dyn FnOnce() + Send>,
+}
+
 impl Overlay {
     pub(crate) fn new_transcript(
         cells: Vec<Arc<dyn HistoryCell>>,

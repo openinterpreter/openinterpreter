@@ -7,6 +7,8 @@ mod paragraph;
 mod source;
 
 pub(crate) use paragraph::HyperlinkParagraph;
+pub(crate) use paragraph::HyperlinkRows;
+pub(crate) use paragraph::HyperlinkText;
 pub(crate) use source::LineWrapPolicy;
 pub(crate) use source::LogicalLineSource;
 
@@ -189,7 +191,10 @@ impl HyperlinkLine {
 
     /// The transcript expands tabs after wrapping. Keep their source columns until then.
     pub(crate) fn source_width(&self) -> usize {
-        self.line.iter().map(source_span_width).sum()
+        self.line
+            .iter()
+            .map(|span| display_width(span.content.as_ref()))
+            .sum()
     }
 
     pub(crate) fn push_span(&mut self, span: Span<'static>, destination: Option<&str>) {
@@ -228,6 +233,24 @@ impl HyperlinkLine {
         }
         self
     }
+}
+
+/// Remap hyperlink columns from a clipped source segment into a rendered row.
+pub(crate) fn project_hyperlink_columns(
+    hyperlinks: &[TerminalHyperlink],
+    source: Range<usize>,
+    prefix: usize,
+) -> Vec<TerminalHyperlink> {
+    hyperlinks
+        .iter()
+        .filter_map(|hyperlink| {
+            let start = hyperlink.columns.start.max(source.start);
+            let end = hyperlink.columns.end.min(source.end);
+            (start < end).then(|| {
+                hyperlink.with_columns(prefix + start - source.start..prefix + end - source.start)
+            })
+        })
+        .collect()
 }
 
 impl From<Line<'static>> for HyperlinkLine {

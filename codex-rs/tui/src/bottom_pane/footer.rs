@@ -855,6 +855,12 @@ impl FooterMode {
     }
 }
 
+/// A passive hint row may be shared with contextual status only when the
+/// composer has not claimed the footer for an interactive instruction.
+pub(crate) fn shows_passive_footer_line(props: &FooterProps) -> bool {
+    props.mode.shows_passive_line(props.is_task_running)
+}
+
 pub(crate) fn footer_line_width(
     props: &FooterProps,
     collaboration_mode_indicator: Option<CollaborationModeIndicator>,
