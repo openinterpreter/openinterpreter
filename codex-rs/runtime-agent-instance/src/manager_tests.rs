@@ -549,7 +549,6 @@ async fn request_auth_replaces_stale_headers_and_signs_each_attempt() {
             let provider = selected.clone().into_auth_provider(mode);
             assert!(
                 codex_api::auth_header_telemetry(provider.as_ref())
-                    .unwrap()
                     .attached
             );
             let mut previous_assertion = None;

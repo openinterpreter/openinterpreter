@@ -55,6 +55,10 @@ impl ChatWidget {
         self.bottom_pane.agents_navigation_key_available()
     }
 
+    pub(crate) fn composer_is_vim_enabled(&self) -> bool {
+        self.bottom_pane.composer_is_vim_enabled()
+    }
+
     pub(crate) fn keymap_contexts(&self) -> crate::keymap::KeymapContextSet {
         let contexts = self.bottom_pane.keymap_contexts();
         if self.visible_new_backend_control().is_some() {
