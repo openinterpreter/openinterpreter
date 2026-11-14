@@ -951,17 +951,9 @@ impl App {
     }
 
     pub(super) fn reset_for_thread_switch(&mut self, tui: &mut tui::Tui) -> Result<()> {
-        if tui.is_alt_screen_active() {
-            tui.leave_alt_screen()?;
-        }
         self.reset_transcript_state_after_clear();
         tui.clear_pending_history_lines();
-        if tui.is_owned_screen() {
-            tui.terminal.clear()?;
-        } else {
-            Self::clear_terminal_for_thread_switch(&mut tui.terminal)?;
-        }
-        Ok(())
+        Ok(tui.clear_for_thread_switch()?)
     }
 
     pub(super) async fn reset_thread_event_state(&mut self) {

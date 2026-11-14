@@ -208,55 +208,49 @@ impl App {
         self.chat_widget.set_footer_hint_override(items);
     }
 
-    pub(super) fn active_keymap_contexts(&self) -> crate::keymap::KeymapContextSet {
-        use crate::keymap::KeymapContext;
-        use crate::keymap::KeymapContextSet;
+    fn focused_sidebar_chooser(&self, tui: &tui::Tui) -> bool {
+        self.conversation_focus_available(tui)
+            && self.chooser_focus() == Some(super::sidebar::PaneFocus::Sidebar)
+            && self.sidebar_chooser_available()
+    }
 
-        if let Some(overlay) = &self.overlay {
-            let context = if matches!(overlay, Overlay::Transcript(view) if view.is_search_active())
-            {
-                KeymapContext::Editor
-            } else {
-                KeymapContext::Pager
-            };
-            let contexts = KeymapContextSet::new(context);
-            return if self.backtrack.overlay_preview_active && context == KeymapContext::Pager {
-                KeymapContextSet::browsing()
-            } else {
-                contexts
-            };
+    fn key_chord_contexts(&self, tui: &tui::Tui) -> crate::keymap::KeymapContextSet {
+        let contexts = self.active_keymap_contexts();
+        if !self.conversation_focus_available(tui) {
+            return contexts;
         }
-        if self.transcript_view.is_search_active() && self.chat_widget.no_modal_or_popup_active() {
-            return KeymapContextSet::new(KeymapContext::Editor);
-        }
-        if self.transcript_view.is_activity_focused() && self.chat_widget.no_modal_or_popup_active()
-        {
-            return KeymapContextSet::activity();
-        }
-        if self.backtrack.overlay_preview_active && self.chat_widget.no_modal_or_popup_active() {
-            return KeymapContextSet::browsing();
-        }
-        let voice_available = self.chat_widget.realtime_microphone_shortcut_available();
-        let contexts = self.chat_widget.keymap_contexts();
-        if self.chat_widget.no_modal_or_popup_active() {
-            let contexts = contexts
-                .with(KeymapContext::Global)
-                .with(KeymapContext::Chat);
-            let contexts = if self.transcript_view.is_detailed() {
-                contexts.with_transcript_close()
+        if self.focused_sidebar_chooser(tui) {
+            let contexts = crate::keymap::KeymapContextSet::focused_sidebar_chooser();
+            return if self.can_nudge_side_width(tui) {
+                contexts.with_sidebar_resize().with_focused_side_pane()
             } else {
                 contexts
             };
-            if voice_available {
-                contexts.with(KeymapContext::Voice)
-            } else {
-                contexts
-            }
+        }
+        let mut contexts = contexts.with_pane_directions();
+        if self.sidebar_has_focus() && self.sidebar_chooser_available() {
+            contexts = contexts.with_focused_sidebar();
+        }
+        if self.open_pane_focus().is_some() {
+            contexts = contexts.with_open_pane();
+        }
+        if self.can_resize_sidebar(tui) {
+            contexts = contexts.with_sidebar_resize();
+        }
+        if self.can_nudge_side_width(tui) {
+            contexts = contexts.with_focused_side_pane();
+        }
+        if self.main_composer_shortcut_available() {
+            contexts = contexts.with_main_composer_focus();
+        }
+        if self.switchable_side_child().is_some() {
+            contexts.with_side_pane()
+        } else if self.sidebar_chooser_available() {
+            contexts.with_sidebar_chooser()
         } else {
             contexts
         }
     }
-
     pub(super) fn active_keymap_contexts(&self) -> crate::keymap::KeymapContextSet {
         use crate::keymap::KeymapContext;
         use crate::keymap::KeymapContextSet;
