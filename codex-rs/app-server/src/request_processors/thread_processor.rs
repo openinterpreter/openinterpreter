@@ -54,6 +54,7 @@ use std::ops::ControlFlow;
 
 pub(super) const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 pub(super) const THREAD_LIST_MAX_LIMIT: usize = 100;
+const THREAD_LIST_MAX_FILTER_IDS: usize = 100;
 const PAGINATED_FULL_HISTORY_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; use `excludeTurns: true`, then page with `thread/turns/list` and `thread/items/list`.";
 const PAGINATED_THREAD_READ_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; omit `includeTurns` or set it to `false`, then page with `thread/turns/list` and `thread/items/list`.";
 
@@ -103,6 +104,7 @@ struct ThreadListFilters {
     search_term: Option<String>,
     use_state_db_only: bool,
     relation_filter: Option<StoreThreadRelationFilter>,
+    included_thread_ids: Option<Vec<ThreadId>>,
     excluded_thread_ids: HashSet<ThreadId>,
 }
 
@@ -2801,6 +2803,7 @@ impl ThreadRequestProcessor {
             current_account_only,
             cursor,
             limit,
+            included_thread_ids,
             excluded_thread_ids,
             sort_key,
             sort_direction,
@@ -2817,19 +2820,11 @@ impl ThreadRequestProcessor {
             ancestor_thread_id,
             attached_to_thread_id,
         } = params;
-        let excluded_thread_ids = excluded_thread_ids.unwrap_or_default();
-        if excluded_thread_ids.len() > THREAD_LIST_MAX_EXCLUDED_IDS {
-            return Err(invalid_params(format!(
-                "excludedThreadIds accepts at most {THREAD_LIST_MAX_EXCLUDED_IDS} entries"
-            )));
-        }
-        let excluded_thread_ids = excluded_thread_ids
-            .iter()
-            .map(|id| {
-                ThreadId::from_string(id)
-                    .map_err(|err| invalid_params(format!("invalid excluded thread id: {err}")))
-            })
-            .collect::<Result<HashSet<_>, _>>()?;
+        let included_thread_ids = included_thread_ids
+            .map(|ids| parse_thread_list_ids(ids, "included"))
+            .transpose()?;
+        let excluded_thread_ids =
+            parse_thread_list_ids(excluded_thread_ids.unwrap_or_default(), "excluded")?;
         if originators
             .as_ref()
             .is_some_and(|values| !values.is_empty())
@@ -2942,6 +2937,7 @@ impl ThreadRequestProcessor {
                     search_term,
                     use_state_db_only,
                     relation_filter,
+                    included_thread_ids,
                     excluded_thread_ids,
                 },
             )
@@ -6174,6 +6170,7 @@ impl ThreadRequestProcessor {
             search_term,
             use_state_db_only,
             relation_filter,
+            included_thread_ids,
             excluded_thread_ids,
         } = filters;
         let mut cursor_obj = cursor;
@@ -6212,6 +6209,7 @@ impl ThreadRequestProcessor {
                 .thread_store
                 .list_threads(StoreListThreadsParams {
                     page_size,
+                    included_thread_ids: included_thread_ids.clone(),
                     cursor: cursor_obj.clone(),
                     sort_key,
                     sort_direction: store_sort_direction,
@@ -6285,6 +6283,21 @@ impl ThreadRequestProcessor {
 
         Ok((items, next_cursor))
     }
+}
+
+fn parse_thread_list_ids<C: FromIterator<ThreadId>>(
+    ids: Vec<String>,
+    kind: &str,
+) -> Result<C, JSONRPCErrorError> {
+    if ids.len() > THREAD_LIST_MAX_FILTER_IDS {
+        return Err(invalid_params(format!(
+            "{kind}ThreadIds accepts at most {THREAD_LIST_MAX_FILTER_IDS} entries"
+        )));
+    }
+    ids.into_iter()
+        .map(ThreadId::try_from)
+        .collect::<Result<_, _>>()
+        .map_err(|err| invalid_params(format!("invalid {kind} thread id: {err}")))
 }
 
 const THREAD_TURNS_DEFAULT_LIMIT: usize = 25;

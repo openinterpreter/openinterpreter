@@ -193,6 +193,162 @@ async fn thread_start_defaults_to_legacy_without_history_list_support() -> Resul
 }
 
 #[tokio::test]
+async fn attached_threads_require_store_owned_persistence() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let store_id = Uuid::new_v4().to_string();
+    create_config_toml_with_thread_store(codex_home.path(), "http://127.0.0.1:1", &store_id)?;
+    let _in_memory_store = InMemoryThreadStoreId { store_id };
+    let client = start_in_process_server_with_capabilities(
+        codex_home.path(),
+        Some(InitializeCapabilities {
+            experimental_api: true,
+            ..Default::default()
+        }),
+    )
+    .await?;
+    // The store, not the experiment gate, must reject it without writing to local storage.
+    for request in [
+        ClientRequest::ThreadFork {
+            request_id: RequestId::Integer(1),
+            params: codex_app_server_protocol::ThreadForkParams {
+                thread_id: Uuid::new_v4().to_string(),
+                attach_to_source: true,
+                ..Default::default()
+            },
+        },
+        ClientRequest::ThreadList {
+            request_id: RequestId::Integer(2),
+            params: serde_json::from_value(serde_json::json!({
+                "attachedToThreadId": Uuid::new_v4().to_string()
+            }))?,
+        },
+    ] {
+        let error = client
+            .request(request)
+            .await?
+            .expect_err("attached threads require local storage");
+        assert_eq!(error.code, -32601);
+        assert!(
+            error.message.contains("attached threads"),
+            "{}",
+            error.message
+        );
+    }
+    client.shutdown().await?;
+    assert_no_local_persistence_artifacts(codex_home.path())?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_list_repeated_cursor_returns_internal_error() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let store_id = Uuid::new_v4().to_string();
+    create_config_toml_with_thread_store(codex_home.path(), "http://127.0.0.1:1", &store_id)?;
+    let thread_store = InMemoryThreadStore::for_id(store_id.clone());
+    let _in_memory_store = InMemoryThreadStoreId { store_id };
+    thread_store
+        .repeat_list_threads_cursor_for_testing("repeated-cursor")
+        .await;
+    let client = start_in_process_server(codex_home.path()).await?;
+
+    let error = client
+        .request(ClientRequest::ThreadList {
+            request_id: RequestId::Integer(1),
+            params: ThreadListParams {
+                include_attached_threads: false,
+                current_account_only: false,
+                included_thread_ids: None,
+                excluded_thread_ids: None,
+                attached_to_thread_id: None,
+                originators: None,
+                cursor: None,
+                limit: Some(1),
+                sort_key: None,
+                sort_direction: None,
+                model_providers: Some(Vec::new()),
+                source_kinds: None,
+                archived: None,
+                section_id: None,
+                project_id: None,
+                cwd: None,
+                use_state_db_only: false,
+                search_term: None,
+                parent_thread_id: None,
+                ancestor_thread_id: None,
+            },
+        })
+        .await?
+        .expect_err("a repeated refill cursor must fail thread/list");
+    assert_eq!(error.code, -32603);
+    assert_eq!(error.message, "thread listing returned a repeated cursor");
+
+    let thread_id = ThreadId::new();
+    thread_store
+        .create_thread(StoreCreateThreadParams {
+            attached_thread: false,
+            creator_user_id: None,
+            creator_account_id: None,
+            session_id: thread_id.into(),
+            thread_id,
+            extra_config: None,
+            forked_from_id: None,
+            parent_thread_id: None,
+            source: SessionSource::Cli,
+            thread_source: None,
+            originator: "test_originator".to_string(),
+            base_instructions: BaseInstructions::default(),
+            dynamic_tools: Vec::new(),
+            selected_capability_roots: Vec::new(),
+            multi_agent_version: None,
+            history_mode: Default::default(),
+            history_base: None,
+            subagent_history_start_ordinal: None,
+            initial_window_id: ContextWindowId::new_uuid_v7(),
+            runtime_workspace_roots: None,
+            metadata: ThreadPersistenceMetadata {
+                cwd: Some(codex_home.path().to_path_buf()),
+                model_provider: "mock_provider".to_string(),
+                memory_mode: ThreadMemoryMode::Enabled,
+            },
+        })
+        .await?;
+
+    let error = client
+        .request(ClientRequest::ThreadList {
+            request_id: RequestId::Integer(2),
+            params: ThreadListParams {
+                include_attached_threads: false,
+                current_account_only: false,
+                included_thread_ids: None,
+                excluded_thread_ids: None,
+                attached_to_thread_id: None,
+                originators: None,
+                cursor: Some("repeated-cursor".to_string()),
+                limit: Some(1),
+                sort_key: None,
+                sort_direction: None,
+                model_providers: Some(Vec::new()),
+                source_kinds: None,
+                archived: None,
+                section_id: None,
+                project_id: None,
+                cwd: None,
+                use_state_db_only: false,
+                search_term: None,
+                parent_thread_id: None,
+                ancestor_thread_id: None,
+            },
+        })
+        .await?
+        .expect_err("a repeated full-page cursor must fail thread/list");
+    assert_eq!(error.code, -32603);
+    assert_eq!(error.message, "thread listing returned a repeated cursor");
+
+    client.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_attachment_operations_without_sqlite_return_method_not_found() -> Result<()> {
     let codex_home = TempDir::new()?;
     let store_id = Uuid::new_v4().to_string();
@@ -349,6 +505,7 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
             params: ThreadListParams {
                 include_attached_threads: false,
                 current_account_only: false,
+                included_thread_ids: None,
                 excluded_thread_ids: None,
                 attached_to_thread_id: None,
                 originators: None,
