@@ -2707,6 +2707,27 @@ async fn copy_shortcut_submits_markdown_and_reports_completion_once() {
     chat.finish_clipboard(&completion, /*composer_visible*/ true);
     assert!(drain_insert_history(&mut rx).is_empty());
     chat.show_copy_result(
+        "first selection",
+        Ok(crate::clipboard_copy::CopyStatus::Pending(2)),
+    );
+    drain_insert_history(&mut rx);
+    chat.show_copy_result(
+        "new selection",
+        Ok(crate::clipboard_copy::CopyStatus::Pending(3)),
+    );
+    drain_insert_history(&mut rx);
+    chat.finish_clipboard(
+        &(2, Ok(crate::clipboard_copy::CopyStatus::Confirmed)),
+        /*composer_visible*/ true,
+    );
+    assert!(drain_insert_history(&mut rx).is_empty());
+    chat.finish_clipboard(
+        &(3, Ok(crate::clipboard_copy::CopyStatus::Confirmed)),
+        /*composer_visible*/ true,
+    );
+    let latest = lines_to_single_string(&drain_insert_history(&mut rx)[0]);
+    assert!(latest.contains("Copied new selection to clipboard"));
+    chat.show_copy_result(
         "last message",
         Ok(crate::clipboard_copy::CopyStatus::Unconfirmed),
     );

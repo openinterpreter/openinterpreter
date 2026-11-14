@@ -82,7 +82,7 @@ pub(crate) async fn load_session_transcript(
             /*item_cursor*/ None,
             /*config*/ None,
             /*local_settings*/ None,
-            HistoryHydrationScope::FullTranscript,
+            HistoryHydrationScope::Complete,
         )
         .await
         .map_err(std::io::Error::other)?;

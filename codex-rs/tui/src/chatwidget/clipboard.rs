@@ -90,6 +90,24 @@ impl ChatWidget {
             .show_footer_flash(line, Duration::from_secs(/*secs*/ 3));
     }
 
+    /// Keep an asynchronous clipboard completion with the message that submitted it.
+    /// A newer copy supersedes an older pending receipt without attributing its result
+    /// to the wrong selection or conversation.
+    pub(crate) fn show_copy_result(&mut self, label: &str, result: CopyResult) {
+        self.pending_clipboard = None;
+        match result {
+            Ok(crate::clipboard_copy::CopyStatus::Pending(id)) => {
+                self.pending_clipboard = Some(PendingCopy::Message(id, label.to_owned()));
+                self.add_info_message(
+                    crate::clipboard_copy::CopyStatus::Pending(id).message(label),
+                    /*hint*/ None,
+                );
+            }
+            Ok(status) => self.add_info_message(status.message(label), /*hint*/ None),
+            Err(error) => self.add_error_message(format!("Copy failed: {error}")),
+        }
+    }
+
     pub(crate) fn finish_clipboard(
         &mut self,
         completion: &(u64, CopyResult),

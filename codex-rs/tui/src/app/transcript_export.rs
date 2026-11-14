@@ -55,10 +55,7 @@ impl App {
         let markdown = render_markdown_transcript(&cells)?;
         match destination {
             TranscriptExportDestination::Clipboard => {
-                let result = tui.copy_transcript_selection(
-                    &markdown,
-                    crate::clipboard_copy::CopyFormat::PlainText,
-                );
+                let result = tui.copy_transcript_selection(&markdown);
                 self.chat_widget.show_copy_result("conversation", result);
             }
             TranscriptExportDestination::File(path) => {
