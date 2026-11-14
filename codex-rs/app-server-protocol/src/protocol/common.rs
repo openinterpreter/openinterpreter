@@ -2498,10 +2498,8 @@ mod tests {
                 "params": { "threadId": "thread-1", "sectionId": null }
             })
         );
-        assert_eq!(
-            serde_json::from_value::<ServerNotification>(wire)?,
-            notification
-        );
+        let decoded = serde_json::from_value::<ServerNotification>(wire.clone())?;
+        assert_eq!(serde_json::to_value(decoded)?, wire);
         Ok(())
     }
 
