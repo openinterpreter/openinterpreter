@@ -372,11 +372,10 @@ impl App {
             self.local_settings.tui.notification_settings.condition,
         );
         if let Some(draft) = draft {
-            if responsive_cloud_switch {
-                self.chat_widget.restore_cloud_switch_draft(draft);
-            } else {
-                self.chat_widget.restore_startup_draft(draft);
-            }
+            // The responsive Cloud handoff edits the live composer and deliberately
+            // captures no stale draft; other handoffs merge their captured draft
+            // with any input entered while the destination was being prepared.
+            self.chat_widget.restore_startup_draft(draft);
             if let Some(thread_id) = displayed_thread
                 && !outgoing_has_queue
                 && self.current_displayed_thread_id() == Some(destination_thread)

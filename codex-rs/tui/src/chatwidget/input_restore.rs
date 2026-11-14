@@ -13,6 +13,10 @@ use super::user_messages::remap_colliding_paste_placeholders;
 use super::*;
 
 impl ChatWidget {
+    pub(crate) fn composer_draft_snapshot(&self) -> ComposerDraftSnapshot {
+        self.bottom_pane.composer_draft_snapshot()
+    }
+
     pub(crate) fn take_kill_buffer_snapshot(&mut self) -> KillBufferSnapshot {
         self.bottom_pane.take_kill_buffer_snapshot()
     }

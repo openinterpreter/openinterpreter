@@ -514,6 +514,8 @@ pub struct TuiListKeymap {
 pub struct TuiAgentsKeymap {
     /// Open the session resume picker.
     pub resume: Option<KeybindingsSpec>,
+    /// Fork the selected task into a new agent session.
+    pub fork: Option<KeybindingsSpec>,
     /// Search the available agent tasks.
     pub search: Option<KeybindingsSpec>,
     /// Open a new session in the selected checkout.
@@ -530,6 +532,8 @@ pub struct TuiAgentsKeymap {
     pub delete: Option<KeybindingsSpec>,
     /// Hide the selected task until explicitly resumed or the TUI restarts.
     pub hide: Option<KeybindingsSpec>,
+    /// Pin or unpin the selected task in the overview.
+    pub toggle_pin: Option<KeybindingsSpec>,
     /// Toggle grouping tasks by status or project.
     pub toggle_grouping: Option<KeybindingsSpec>,
 }
