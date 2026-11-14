@@ -95,7 +95,7 @@ pub use agent::types::SpawnAgentForkMode;
 pub use agent::types::SpawnAgentOptions;
 pub use rollout_budget::RolloutBudgetReminder;
 mod agent_communication;
-pub(crate) use agent_communication::PendingAgentMessage;
+pub use agent_communication::PendingAgentMessage;
 mod agent_message_board;
 pub use agent_message_board::install_agent_message_board;
 mod attestation;

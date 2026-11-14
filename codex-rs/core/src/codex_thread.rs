@@ -1281,6 +1281,40 @@ impl CodexThread {
         self.session.get_config().await
     }
 
+    /// Replace the host-provided dynamic tool catalog, persisting before live publication.
+    pub async fn replace_dynamic_tools(
+        &self,
+        tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
+    ) -> CodexResult<()> {
+        self.session.replace_dynamic_tools(tools).await
+    }
+
+    /// Bind child preparation to an active V2 tool call on this exact runtime.
+    pub fn tool_invocation(
+        &self,
+        turn_id: &str,
+        call_id: &str,
+    ) -> CodexResult<crate::agent::host::ToolInvocationContext> {
+        crate::agent::host::tool_invocation(self, turn_id, call_id)
+    }
+
+    pub async fn prepare_child(
+        &self,
+        invocation: &crate::agent::host::ToolInvocationContext,
+    ) -> Result<crate::agent::host::PreparedChildContext, crate::thread_spawn::ThreadSpawnError>
+    {
+        crate::agent::host::prepare(self, invocation).await
+    }
+
+    pub async fn create_child(
+        &self,
+        invocation: &crate::agent::host::ToolInvocationContext,
+        request: crate::thread_spawn::ThreadCreateRequest,
+        reservation: crate::agent::host::HostThreadSpawnReservation,
+    ) -> Result<crate::thread_spawn::ThreadSpawnResult, crate::thread_spawn::ThreadSpawnError> {
+        crate::agent::host::create(self, invocation, request, reservation).await
+    }
+
     /// List the thread's current hook declarations, including its selected, ready environments.
     pub fn list_hooks(&self) -> codex_hooks::HookListOutcome {
         let environments = self.session.services.turn_environments.snapshot_now();

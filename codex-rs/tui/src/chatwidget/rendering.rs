@@ -271,6 +271,9 @@ impl ChatWidget {
                     unfocused: false,
                     command_popup_placement,
                     footer,
+                    image_previews: self.composer_images.as_ref(),
+                    rendered_selection: Some(&self.rendered_selection),
+                    ..Default::default()
                 })
         }
     }
