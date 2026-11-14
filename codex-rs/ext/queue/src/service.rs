@@ -963,14 +963,26 @@ impl QueuedItemService {
             )
             .await?;
         match submission {
-            StartIfIdleSubmission::Started { turn_id } if admission_claimed => {
+            StartIfIdleSubmission::Started {
+                turn_id,
+                root_turn_id,
+            } if admission_claimed => {
                 self.mark_admission_started(thread_id, &queued_item_id, &turn_id)
                     .await?;
-                return Ok(StartIfIdleSubmission::Started { turn_id });
+                return Ok(StartIfIdleSubmission::Started {
+                    turn_id,
+                    root_turn_id,
+                });
             }
-            StartIfIdleSubmission::Started { turn_id } => {
+            StartIfIdleSubmission::Started {
+                turn_id,
+                root_turn_id,
+            } => {
                 self.delete_locked(thread_id, queued_item_id).await?;
-                return Ok(StartIfIdleSubmission::Started { turn_id });
+                return Ok(StartIfIdleSubmission::Started {
+                    turn_id,
+                    root_turn_id,
+                });
             }
             StartIfIdleSubmission::NotSubmitted { reason } if admission_claimed => {
                 self.reset_admission_pending(thread_id, &queued_item_id)
@@ -1042,7 +1054,7 @@ impl QueuedItemService {
                 ))
                 .await
             {
-                Ok(StartIfIdleSubmission::Started { turn_id }) if admission_claimed => {
+                Ok(StartIfIdleSubmission::Started { turn_id, .. }) if admission_claimed => {
                     self.mark_admission_started(thread_id, &queued_item_id, &turn_id)
                         .await?;
                     return Ok(());

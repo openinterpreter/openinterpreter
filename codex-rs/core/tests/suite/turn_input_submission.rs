@@ -559,6 +559,7 @@ async fn continue_turn_if_idle_starts_new_turn_with_internal_input() {
     responses::mount_sse_once(&server, responses::sse_completed("original")).await;
     let TurnInputSubmission::Started {
         turn_id: previous_turn_id,
+        ..
     } = test
         .codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
@@ -595,7 +596,7 @@ async fn continue_turn_if_idle_starts_new_turn_with_internal_input() {
         )
         .await
         .unwrap();
-    let TurnInputSubmission::Started { turn_id } = submission else {
+    let TurnInputSubmission::Started { turn_id, .. } = submission else {
         panic!("continuation did not start")
     };
     wait_for_event(&test.codex, |event| {
@@ -1063,7 +1064,7 @@ async fn sampling_is_ready_for_daemon_recovery(
         builder = builder.with_exec_server_url(&remote.websocket_url);
     }
     let test = builder.build_with_streaming_server(&server).await?;
-    let StartIfIdleSubmission::Started { turn_id } = test
+    let StartIfIdleSubmission::Started { turn_id, .. } = test
         .codex
         .start_turn_if_idle(TurnInputRequest::user_input(input))
         .await?
@@ -1135,7 +1136,7 @@ async fn daemon_recovery_includes_local_environment_that_finished_starting() -> 
             ),
         )
         .await?;
-    let StartIfIdleSubmission::Started { turn_id } = started else {
+    let StartIfIdleSubmission::Started { turn_id, .. } = started else {
         anyhow::bail!("turn should start");
     };
 

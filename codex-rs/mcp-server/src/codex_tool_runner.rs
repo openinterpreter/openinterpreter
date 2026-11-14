@@ -106,7 +106,7 @@ pub async fn run_codex_tool_session(
         .start_turn_if_idle(prompt_request(initial_prompt))
         .await
     {
-        Ok(StartIfIdleSubmission::Started { turn_id }) => turn_id,
+        Ok(StartIfIdleSubmission::Started { turn_id, .. }) => turn_id,
         Ok(StartIfIdleSubmission::NotSubmitted { reason }) => {
             tracing::error!("Failed to submit initial prompt: {reason:?}");
             let result = create_call_tool_result_with_thread_id(
@@ -142,9 +142,10 @@ pub async fn run_codex_tool_session_reply(
     active_turns: Arc<ActiveTurnRegistry>,
 ) {
     let turn_id = match thread.start_or_steer_turn(prompt_request(prompt)).await {
-        Ok(TurnInputSubmission::Started { turn_id } | TurnInputSubmission::Steered { turn_id }) => {
-            turn_id
-        }
+        Ok(
+            TurnInputSubmission::Started { turn_id, .. }
+            | TurnInputSubmission::Steered { turn_id, .. },
+        ) => turn_id,
         Ok(TurnInputSubmission::NotSubmitted { reason }) => {
             tracing::error!("Failed to submit user input: {reason:?}");
             let result = create_call_tool_result_with_thread_id(

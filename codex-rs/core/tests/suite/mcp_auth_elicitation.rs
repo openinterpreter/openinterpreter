@@ -274,7 +274,7 @@ approvals_reviewer = "user"
             text_elements: Vec::new(),
         }]))
         .await?;
-    let TurnInputSubmission::Started { turn_id } = submitted else {
+    let TurnInputSubmission::Started { turn_id, .. } = submitted else {
         anyhow::bail!("expected a new turn, got {submitted:?}");
     };
 

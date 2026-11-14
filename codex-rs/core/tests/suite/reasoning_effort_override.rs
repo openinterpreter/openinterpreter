@@ -261,7 +261,7 @@ async fn reasoning_effort_override_recovery_reuses_trusted_tail_update() -> anyh
             text_elements: Vec::new(),
         }]))
         .await?;
-    let TurnInputSubmission::Started { turn_id } = submission else {
+    let TurnInputSubmission::Started { turn_id, .. } = submission else {
         panic!("expected a new turn");
     };
     wait_for_event(&test.codex, |event| {
@@ -300,17 +300,17 @@ async fn reasoning_effort_override_recovery_reuses_trusted_tail_update() -> anyh
         .codex
         .restore_thread_settings(thread_settings)
         .await?;
-    assert_eq!(
-        resumed
-            .codex
-            .recover_turn_if_idle(RecoverTurnRequest {
-                turn_id: turn_id.clone(),
-                thread_settings: Default::default(),
-                trace: None,
-                cyber_access_program: None,
-            })
-            .await?,
-        StartIfIdleSubmission::Started { turn_id },
+    let recovered = resumed
+        .codex
+        .recover_turn_if_idle(RecoverTurnRequest {
+            turn_id: turn_id.clone(),
+            thread_settings: Default::default(),
+            trace: None,
+            cyber_access_program: None,
+        })
+        .await?;
+    assert!(
+        matches!(recovered, StartIfIdleSubmission::Started { turn_id: recovered_turn_id, .. } if recovered_turn_id == turn_id)
     );
     wait_for_event(&resumed.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))
