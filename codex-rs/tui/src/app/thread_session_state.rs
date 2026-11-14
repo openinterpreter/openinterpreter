@@ -83,12 +83,17 @@ impl App {
                 // `thread/read` does not include all thread settings, so do not carry
                 // thread-scoped state from the currently active session.
                 session.collaboration_mode = None;
+                session.thread_settings_confirmed = false;
+                session.primary_environment_cwd = None;
                 session.daybreak_enabled = false;
             }
             session
         } else {
             ThreadSessionState {
                 read_only_history: true,
+                thread_settings_confirmed: false,
+                daybreak_enabled: false,
+                primary_environment_cwd: None,
                 windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
                 thread_id,
                 forked_from_id: None,
@@ -113,6 +118,10 @@ impl App {
                 rollout_path: thread.path.clone(),
             }
         };
+        if let Some(environments) = &thread.environments {
+            session.primary_environment_cwd =
+                crate::session_state::primary_environment_cwd(environments);
+        }
         session.windows_sandbox_host =
             crate::windows_sandbox::host_from_environments(thread.environments.as_deref());
         session.thread_id = thread_id;
@@ -175,6 +184,9 @@ mod tests {
     fn test_thread_session(thread_id: ThreadId, cwd: PathBuf) -> ThreadSessionState {
         ThreadSessionState {
             read_only_history: false,
+            thread_settings_confirmed: true,
+            daybreak_enabled: false,
+            primary_environment_cwd: None,
             windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
             thread_id,
             forked_from_id: None,

@@ -317,41 +317,22 @@ impl App {
             .filter(|id| !closed_agents.contains(id))
             .collect();
         ids.extend(open_agents);
-        let descendants = ids.iter().copied().filter(|id| *id != thread_id);
-        for tracked_id in std::iter::once(thread_id).chain(descendants) {
-            let request = ClientRequest::ThreadBackgroundTerminalsList {
-                request_id: app_server.next_request_id(),
-                params: ThreadBackgroundTerminalsListParams {
-                    thread_id: tracked_id.to_string(),
-                    cursor: None,
-                    limit: Some(1),
+        if self
+            .confirm_directory_trust(
+                tui,
+                app_server,
+                &mut config,
+                cwd.as_path(),
+                crate::onboarding::DirectoryTrustOptions {
+                    cancel: Some(crate::onboarding::TrustCancelAction::CurrentTask),
+                    ..Default::default()
                 },
-            };
-            let handle = app_server.request_handle();
-            let result = handle.request_typed::<ListResponse>(request).await;
-            if let Some(message) = super::managed_worktree_creation::background_terminals_blocker(
-                result,
-                &self.app_server_target,
-            ) {
-                return self.working_directory_error(message);
-            }
-            if self
-                .confirm_directory_trust(
-                    tui,
-                    app_server,
-                    &mut config,
-                    cwd.as_path(),
-                    crate::onboarding::DirectoryTrustOptions {
-                        cancel: Some(crate::onboarding::TrustCancelAction::CurrentTask),
-                        ..Default::default()
-                    },
-                    /*startup_draft*/ None,
-                )
-                .await
-                .is_err()
-            {
-                return;
-            }
+                /*startup_draft*/ None,
+            )
+            .await
+            .is_err()
+        {
+            return;
         }
         if let Some((_, checkout, crate::app_event::ManagedWorktreeMode::Fork, _)) =
             managed_worktree.as_ref()
@@ -488,7 +469,7 @@ impl App {
                 .iter()
                 .filter_map(|(id, agent)| (!agent.is_closed).then_some(*id)),
         );
-        tracked_ids = std::iter::once(thread_id)
+        let tracked_ids: Vec<_> = std::iter::once(thread_id)
             .chain(ids.iter().copied().filter(|id| *id != thread_id))
             .collect();
         for id in &tracked_ids {

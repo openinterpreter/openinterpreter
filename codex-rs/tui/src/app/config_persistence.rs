@@ -1918,6 +1918,9 @@ enabled = false
         app.chat_widget
             .handle_thread_session(crate::session_state::ThreadSessionState {
                 read_only_history: false,
+                thread_settings_confirmed: true,
+                daybreak_enabled: false,
+                primary_environment_cwd: None,
                 windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
                 thread_id: ThreadId::new(),
                 forked_from_id: None,

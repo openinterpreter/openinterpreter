@@ -505,14 +505,18 @@ impl App {
         self.abandoned_side_threads.insert(thread_id);
         self.pending_app_server_requests
             .cancel_thread_verification(&thread_id.to_string());
-        let turn_id = self
-            .active_turn_id_for_thread(thread_id)
-            .await
-            .unwrap_or_default();
-        let request_handle = app_server.request_handle();
-        let interrupt_request_id = app_server.next_request_id();
-        let retry_interrupt_request_id = app_server.next_request_id();
-        let unsubscribe_request_id = app_server.next_request_id();
+        let turn_id = self.active_turn_id_for_thread(thread_id).await;
+        let attachment = self
+            .thread_event_channels
+            .get(&thread_id)
+            .map(ThreadEventChannel::attachment);
+        let mut view = app_server.request_view();
+
+        let saved_parent = self
+            .side_threads
+            .get(&thread_id)
+            .filter(|side| side.storage == SideChatStorage::Attached)
+            .map(|side| side.parent_thread_id);
 
         self.discard_thread_local_state(thread_id).await;
 

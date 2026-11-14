@@ -1316,6 +1316,7 @@ impl App {
         }
         archived_thread::update_archived_thread(self, thread_id, &notification);
         let mut confirmed_profile = None;
+        let mut permission_change_confirmed = false;
         if let ServerNotification::ThreadSettingsUpdated(notification) = &notification {
             self.apply_thread_settings_to_cached_session(thread_id, &notification.thread_settings)
                 .await;
@@ -1346,6 +1347,7 @@ impl App {
                         .requested_permission_profiles
                         .remove(&thread_id)
                 });
+                permission_change_confirmed = confirmed_profile.is_some();
             }
         }
         let inferred_session = if let ServerNotification::ThreadStarted(started) = &notification

@@ -366,6 +366,20 @@ pub(super) fn thread_title_prompt(user_message: &str) -> String {
     format!("{prefix}{user_message}")
 }
 
+pub(super) fn user_message_text(content: &[UserInput]) -> Option<String> {
+    let text = content
+        .iter()
+        .filter_map(|item| match item {
+            UserInput::Text { text, .. } => {
+                Some(crate::user_prompt::extract_prompt_request_with_offset(text).0)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!text.trim().is_empty()).then_some(text)
+}
+
 /// Format recent substantive messages chronologically without trusting their markup.
 pub(super) fn recent_conversation_messages<'a, I>(items: I) -> Option<String>
 where

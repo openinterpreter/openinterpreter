@@ -742,6 +742,9 @@ mod tests {
     fn test_thread_session(thread_id: ThreadId, cwd: PathBuf) -> ThreadSessionState {
         ThreadSessionState {
             read_only_history: false,
+            thread_settings_confirmed: true,
+            daybreak_enabled: false,
+            primary_environment_cwd: None,
             windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
             thread_id,
             forked_from_id: None,
